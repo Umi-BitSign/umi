@@ -1,0 +1,592 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage[hidelinks]{hyperref}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{bitsign MVP --- Technical Specification} \\ \large v1.2 draft}
+\author{Technical team}
+\date{22 August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent Implementation specification for the bitsign MVP. It defines the client,
+service, inference, contribution, privacy, and release requirements. Numbers marked
+\textbf{[default]} are launch defaults, server-configurable without a client release.
+Requirement keywords: \textbf{must} / \textbf{should} / \textbf{may}.
+\end{abstract}
+
+\setcounter{tocdepth}{2}
+\tableofcontents
+
+\section{System Overview}
+
+\begin{center}
+\code{iOS app -> Cloudflare Worker (front door) -> API service (managed container)}\\
+\code{API service -> R2 (video) / D1 (state) / KV (sessions, config) / Queues (async)}\\
+\code{API service -> inference service (CPU or GPU container runtime)}
+\end{center}
+
+Components:
+
+\begin{enumerate}[nosep]
+  \item \textbf{iOS app} (SwiftUI, iOS 17+): capture, review, upload, transcript
+        display, and contribution flows. TestFlight only.
+  \item \textbf{Front door}: Cloudflare Worker. TLS termination,
+        session verification, rate limiting, request-id assignment, scheduled
+        jobs, and routing to managed containers.
+  \item \textbf{API service}: Axum in a managed container. All business logic.
+        Stateless; state in D1/KV/R2.
+  \item \textbf{Inference service}: Axum with one deployment per runtime class:
+        \code{cpu} and \code{gpu}. Reachable only from the API service through an
+        authenticated private route; not exposed through the front door.
+  \item \textbf{Shared domain library}: types, ids,
+        error taxonomy, consensus scoring (pure functions, property-tested).
+\end{enumerate}
+
+All ids are ULIDs (26-char Crockford base32). All timestamps are UTC RFC 3339. All
+API bodies are JSON with \code{snake\_case} keys.
+
+\section{Accounts, Auth, and Devices}
+
+\subsection{Sign-in and attestation}
+
+Sign in with Apple only. Flow:
+
+\begin{enumerate}[nosep]
+  \item \code{GET /v1/auth/challenge} $\to$ \{\code{challenge}\}: 32 random bytes,
+        stored in KV with a 10-minute TTL, single-use.
+  \item Client obtains an Apple identity token; generates (first run) an App Attest
+        key and produces an attestation over
+        \code{SHA256(challenge $\|$ apple\_identity\_token)}.
+  \item \code{POST /v1/auth/apple} \{\code{identity\_token},
+        \code{attestation\_object}, \code{key\_id}, \code{challenge}\}. Server
+        verifies: the challenge exists and is unused; the identity token's
+        signature (Apple JWKS, cached in KV with rotation handling), issuer,
+        audience (our bundle id), and expiry; the attestation object against
+        Apple's App Attest root, binding \code{key\_id} to this device. On success:
+        upsert account keyed on the stable Apple \code{sub}, register the device,
+        mint a session.
+\end{enumerate}
+
+\textbf{Session token}: opaque 32-byte random value, stored in KV as
+\code{sess:\{token\} $\to$ \{account\_id, device\_id, expires\}}, TTL 30 days
+\textbf{[default]}. To bound KV write amplification, the TTL is refreshed only when
+less than 15 days remain. Client sends \code{Authorization: Bearer}. Revocation is
+KV deletion. No JWTs.
+
+Accounts have exactly one active attested device at MVP; signing in on a new device
+supersedes the old one (old sessions revoked). Requests from builds that cannot
+attest are rejected with \code{attestation\_required}; simulator/CI bypass exists
+only behind a server-side allowlist of team account ids. Per-request App Attest
+\emph{assertions} are out of scope for MVP.
+
+The client stores the session token in the Keychain
+(\code{kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly}). On \code{unauthorized},
+the app silently re-runs the challenge + Sign-in-with-Apple flow (Apple credential
+state permitting) before surfacing a sign-in screen.
+
+\textbf{Deletion/recreation.} A deleted account's Apple \code{sub} may sign up
+again and receives a fresh account. The new account does not restore deleted
+content, history, or device registrations.
+
+\subsection{Roles}
+
+\code{accounts.role} $\in$ \{\code{user}, \code{internal}, \code{admin}\}.
+Models scoped to internal evaluation (\S\ref{sec:models}) are servable only to
+\code{internal} and \code{admin}. Authorized pilot testers are provisioned as
+\code{internal}.
+
+\section{Media Pipeline}
+
+\subsection{Clip constraints}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Property & Constraint \\
+\midrule
+Container / codec & MP4, H.264 or HEVC, single video track; audio track ignored \\
+Duration & 1.0--6.5\,s (client hard-stops at 6.0\,s) \\
+Resolution & $\leq$ 1280$\times$720, $\geq$ 480$\times$360 \\
+Frame rate & 24--60\,fps \\
+Size & $\leq$ 12\,MB \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The server \textbf{must} validate container, codec, duration, dimensions, and size
+by demuxing (not by trusting metadata), and \textbf{must} reject violations with
+\code{invalid\_media} and no partial processing. A versioned malformed/adversarial
+fixture set runs in CI; every fixture must be rejected without panic, hang, or
+residual object.
+
+\subsection{Upload protocol}
+
+\begin{enumerate}[nosep]
+  \item \code{POST /v1/uploads} \{\code{purpose}: \code{communicate} $|$
+        \code{task\_submission}, \code{content\_length}, \code{sha256}\} $\to$
+        \{\code{upload\_id}, \code{put\_url}, \code{expires}\}. Presigned R2 PUT,
+        10-minute expiry, signed \code{content-length} header.
+  \item Client PUTs the clip, then references \code{upload\_id} in the follow-up
+        call. Before any use, the server verifies object existence and that the
+        object's actual size and SHA-256 match the declaration; mismatch $\to$
+        \code{invalid\_media} and immediate object deletion.
+  \item Communicate and Contribute use separate storage buckets. The former is
+        ephemeral and the latter is durable. \code{purpose} selects the bucket at
+        presign time; an upload can never move between them.
+\end{enumerate}
+
+\textbf{Ephemerality mechanism} (Communicate): (a) inline delete after successful
+inference; (b) an hourly Worker job deletes any ephemeral communication object
+older than 24\,h and marks its \code{uploads} row \code{deleted}; (c) a bucket
+lifecycle rule at the minimum granularity R2 supports (age $\geq$ 1 day) as the
+final backstop. The guarantee that is tested and stated publicly is (a)+(b); the
+lifecycle rule is defense in depth, not the mechanism.
+
+\section{Inference}
+\label{sec:infer}
+
+\subsection{API}
+
+\code{POST /v1/infer} \{\code{upload\_id}, \code{mode}: \code{continuous} $|$
+\code{bounded}, \code{idempotency\_key}\} $\to$ synchronous response:
+
+\begin{quote}\small
+\code{\{ request\_id, transcript, confidence: 0..1, model: \{id, version,
+capability\_label, release\_scope\}, timings: \{queue\_ms, inference\_ms\} \}}
+\end{quote}
+
+Rules: the idempotency record is written before dispatch, so a retried request
+cannot duplicate processing. Server wall-clock timeout 30\,s $\to$
+\code{inference\_timeout}; the client \textbf{must} use a request timeout of 35\,s.
+After a transport failure, the client retries with the same idempotency key to
+recover the original outcome. One in-flight inference per account
+(\code{conflict} otherwise). The API service resolves \code{mode} $\to$ active
+model through the registry and routes to the recorded runtime. Transcripts are
+returned and never stored server-side (\S\ref{sec:schema}).
+
+Precise semantics an implementer must not invent:
+
+\begin{itemize}[nosep]
+  \item \textbf{Idempotent replay}: same \code{idempotency\_key} while the
+        original is in flight $\to$ \code{conflict}; after completion $\to$ the
+        original response verbatim (success or error), cached in KV for 24\,h.
+  \item \textbf{\code{queue\_ms}} is time spent waiting for an inference
+        concurrency slot (\S\ref{sec:inferservice}); \code{inference\_ms} is model
+        execution only.
+  \item \textbf{Upload reuse}: a \code{stored} upload may be retried with a new
+        idempotency key after a failed inference; it becomes \code{consumed}
+        (comm object deleted inline) only on success. The hourly sweep remains
+        the failure backstop.
+  \item \textbf{Cold starts}: if the routed runtime reports not-ready
+        (\S\ref{sec:inferservice}), the API returns \code{model\_warming} with
+        \code{retry\_after\_ms}; the client shows a warming state and retries
+        automatically up to 3 times. Warming is expected with scale-to-zero GPU
+        and is not an error condition in telemetry.
+\end{itemize}
+
+\subsection{Model registry and serving policy}
+\label{sec:models}
+
+D1 table \code{models}: \{\code{id}, \code{mode}, \code{version},
+\code{release\_scope}: \code{internal\_evaluation} $|$ \code{approved\_pilot},
+\code{runtime}: \code{cpu} $|$ \code{gpu}, \code{endpoint}, \code{weights\_sha256},
+\code{capability\_label}: \code{technical\_prototype} $|$ \code{bounded\_vocabulary}
+$|$ \code{short\_clip\_preview}, \code{active}\}. Exactly one active row per
+\code{mode} (partial unique index). The API \textbf{must} refuse to serve a
+model scoped to \code{internal\_evaluation} to a non-internal account
+(\code{model\_unavailable}), regardless of registry state. This rule is enforced
+in the request path and covered by CI.
+
+Launch registry: \code{continuous/v0} is a 2B-class video-language model with a
+task-specific adapter, \code{release\_scope=internal\_evaluation}, runtime selected
+by CPU benchmark outcome, and label \code{technical\_prototype}.
+\code{bounded/v0} is a keypoint classifier
+(fingerspelling + top-50 signs \textbf{[default]}) trained on consented captures,
+\code{release\_scope=approved\_pilot}, \code{runtime=cpu}; it ships when every
+class has $\geq$ 20 accepted clips \textbf{[default]}.
+
+\subsection{Inference service interface}
+
+\label{sec:inferservice}
+\code{POST /internal/infer} \{\code{object\_key}, \code{model\_id}\} (authenticated
+by shared bearer secret) $\to$ \{\code{transcript}, \code{confidence},
+\code{inference\_ms}\}. The service loads the model named by its manifest at boot
+and fails fast on a weights-hash mismatch. Limits: max decoded frames 400, max
+output 120 tokens, max wall 25\,s, max concurrency 2 \textbf{[default]} with a
+bounded wait queue of 4 \textbf{[default]} (max slot wait 10\,s, then
+\code{overloaded}); typed errors; never fabricated output --- undecodable media or
+an unloaded model is an error, not a placeholder string.
+
+Readiness: \code{GET /internal/ready} returns \code{ready} only when weights are
+loaded and a self-test inference on a bundled 1\,s fixture clip has succeeded since
+boot. The API's pre-dispatch check uses this endpoint (cached 5\,s) to produce
+\code{model\_warming}; demo pre-warm automation polls it to completion.
+
+\section{Contribute Pipeline}
+\label{sec:contribute}
+
+\subsection{Consent}
+
+First entry into Contribute presents the study consent (purpose: model training and
+evaluation; retention; access roles; withdrawal and deletion; explicit statement
+that Communicate clips are never used). Consent is versioned:
+\code{consents(account\_id, version, granted\_at, withdrawn\_at)}. Tasks are issued
+only to accounts whose consent version is current; a bumped version re-prompts.
+Withdrawal stops issuance immediately and triggers \S\ref{sec:deletion} handling
+for contributed material if requested.
+
+\subsection{Scripts and tasks}
+
+\code{scripts}: \{\code{id}, \code{ciphertext} (AES-256-GCM; key held as a
+container secret, distinct from session material), \code{sha256} (of plaintext),
+\code{class}: \code{fingerspell} $|$ \code{sign} $|$ \code{phrase}, \code{active}\}.
+Script plaintext appears in exactly one API response type (Task~A issuance) and is
+never logged.
+
+\textbf{Issuance policy.} \code{GET /v1/tasks/next} returns, in priority order: an
+open Task~B review if one is assigned (reviews gate pipeline latency), else a new
+Task~B assignment if the account qualifies, else a new Task~A. At most one open
+item of \emph{each} type per account. Scripts and aliases are admin-seeded
+(\S\ref{sec:admin}); the launch set is the fingerspelling alphabet, digits, and
+the approved top-50 sign curriculum.
+
+\textbf{Task A (meaning $\to$ sign).} Issues \{\code{task\_id},
+\code{script\_text}, \code{class}, \code{expires}\} (24\,h expiry).
+An account is never issued the same script twice (unique
+\code{(script\_id, account\_id)}). Submission:
+\code{POST /v1/tasks/\{id\}/submit} \{\code{upload\_id}\} --- server records
+\code{video\_sha256} and enqueues review assignment.
+
+\textbf{Task B (sign $\to$ meaning).} The assignment job selects $k=3$
+\textbf{[default]} reviewers: consented, not the contributor, not the contributor's
+device, and not sharing the contributor's network neighborhood --- checked via
+\code{net\_hash} = HMAC(salt, /24 or /48 prefix) stored on submissions and reviews
+and purged after 30 days \textbf{[default]}; the raw address is never stored.
+Selection is weighted toward higher reviewer accuracy. Reviewers receive
+\{\code{review\_id}, presigned GET (1\,h)\} --- never the script. Reviews expire
+and reassign after 24\,h. Reviewers discover work by polling \code{GET
+/v1/tasks/next} (which returns either task type); there are no push notifications
+at MVP.
+
+\subsection{Consensus scoring}
+\label{sec:consensus}
+
+Pure, deterministic, versioned function (\code{scoring\_v1}), stamped on every
+result. Normalization: Unicode NFKC, lowercase, strip punctuation, collapse
+whitespace.
+
+Per-review match score against the script's \emph{reference set}
+$R = \{\text{script}\} \cup \{\text{accepted references}\}$ --- seeded with the
+script itself, so scoring works before any reference exists:
+\[
+m_i \;=\; \max_{r \in R} \; \max\!\bigl(0,\; 1 - \mathrm{WER}(\text{recon}_i,\, r)\bigr)
+\]
+For \code{fingerspell} and \code{sign} classes, $m_i \in \{0,1\}$ by exact
+normalized match against $R$ extended by the script's alias table. Consensus
+$C = \mathrm{median}(m_1, \ldots, m_k)$.
+
+Outcomes \textbf{[defaults]}: $C \geq 0.85$ \code{accepted}; $0.70 \leq C < 0.85$
+\code{variant} (admin secondary review); $C < 0.70$ \code{flagged} (no contributor
+acceptance pending investigation; clip retained as edge data unless invalid).
+
+\textbf{Reference-set growth}: an accepted clip's reconstructions with
+$m_i \geq 0.85$ are candidates for $R$; admission requires normalized edit distance
+$\geq 0.15$ from every existing member (no near-duplicates), cap $|R| \leq 5$
+\textbf{[default]} excluding the script. Growth applies to \emph{future} scoring
+only; completed results are never rescored.
+
+\textbf{Quorum and timing}: consensus runs when all $k$ reviews are submitted, or
+at the 24\,h review deadline with at least 2 submissions ($C$ = median of what
+exists). Fewer than 2 at deadline $\to$ expired reviews reassign to fresh
+reviewers; after 3 \textbf{[default]} reassignment cycles the task is escalated to
+the admin queue rather than expiring against the contributor, whose submission
+remains pending until an eventual decision.
+
+\textbf{Anchor tasks}: 5\% \textbf{[default]} of issued reviews reference clips
+with known-correct reconstructions, indistinguishable client-side. Anchor outcomes
+update \code{reviewer\_stats.accuracy} (EWMA, $\alpha = 0.2$); accuracy $< 0.6$
+\textbf{[default]} sets \code{hold}; held accounts receive no new contribution
+assignments pending admin review. Cold start: the launch anchor set is team-recorded
+clips against known scripts; thereafter, \code{accepted} clips with unanimous
+$m_i \geq 0.85$ are eligible for promotion to anchors (admin action), which is also
+how the anchor pool grows with the corpus.
+
+\subsection{Admin surface}
+\label{sec:admin}
+
+\code{role=admin} only; served by the same API, exercised via CLI/HTTP at MVP (no
+admin UI): \code{GET /v1/admin/queue} (variants, flags, escalated tasks, held
+accounts) $\cdot$ \code{POST /v1/admin/decisions} \{\code{task\_id},
+\code{outcome}\} $\cdot$ \code{POST /v1/admin/holds/\{account\_id\}/release}
+$\cdot$ \code{POST /v1/admin/scripts} (seed/retire scripts and aliases) $\cdot$
+\code{POST /v1/admin/anchors/\{task\_id\}/promote} $\cdot$
+\code{GET /v1/admin/metrics} (queue depths, consensus latency, reviewer-accuracy
+distribution). Every admin action writes an audit row.
+
+\section{Deletion and Withdrawal}
+\label{sec:deletion}
+
+\code{DELETE /v1/me} returns a one-time status token and queues a deletion job
+(target: minutes; completion within 30 days \textbf{[default]}): revoke sessions; delete R2
+objects in both buckets belonging to the account plus derived artifacts; delete
+account PII and device rows; remove the account's reconstructions from reference
+sets; void in-flight consensus involving the deleted material; purge
+\code{net\_hash} values.
+\code{GET /v1/me/deletion?token=...} reports status without authentication (the
+account may already be gone). The job emits a minimal completion record containing
+the job id and timestamps, with no account identifier or contributed content.
+
+\section{iOS Application}
+
+\subsection{Screens and required behavior}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}P{3.2cm}Y@{}}
+\toprule
+Screen & Must-behavior \\
+\midrule
+Onboarding & Capability-label explanation, ``aid, not interpreter replacement''
+framing, camera/mic permission priming. Blocks until Sign in with Apple + attestation
+complete. \\
+Communicate & Camera preview with framing guide (face + torso + both hands); record
+button with 6\,s hard stop and countdown ring; clip review (play, retry, discard,
+send); rolling transcript list --- \textbf{in-memory only, cleared on app
+termination; nothing is persisted on device or server} --- each entry showing text,
+capability-label badge, speak button, thumbs up/down + optional correction
+(submitted as consented feedback); reply view: mic button $\to$ on-device
+\code{SFSpeechRecognizer} $\to$ large-type text. Upload and inference progress are
+visually distinct; every error state names a recovery action and preserves the
+recorded clip for retry. \\
+Contribute & Consent flow (scrollable, versioned, decline path exits cleanly); task
+list (class, expiry); Task A capture reusing the Communicate capture
+component; Task B player + reconstruction field; submissions queue offline and
+retry with exponential backoff. \\
+Settings & App/model versions and capability label, consent status + withdrawal,
+account deletion (typed confirmation, then status link), notices. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Capture component}
+
+\code{AVCaptureSession} at 1280$\times$720, 30\,fps, front camera; HEVC when the
+device encoder supports it, else H.264; segments 2--6\,s; writes to an app-container
+temp file deleted after successful upload or discard; clips never enter the photo
+library; a recording indicator is always visible while capturing.
+
+\subsection{Accessibility (release-gating)}
+
+VoiceOver labels and logical focus order on every screen; Dynamic Type through
+\code{accessibility5}; contrast $\geq$ WCAG AA; every audio cue has a visual
+equivalent; the speak button is optional, never required to read a result.
+
+\section{Front Door and Cross-Cutting Requirements}
+\label{sec:frontdoor}
+
+\begin{itemize}[nosep]
+  \item \textbf{Request ids}: the Worker assigns a ULID \code{request\_id}, echoed
+        in every response and log line.
+  \item \textbf{Rate limits} (per session token, with a per-IP backstop):
+        reads 120/min, mutations 30/min, burst 2$\times$ \textbf{[default]};
+        \code{429} with \code{Retry-After}.
+  \item \textbf{Error envelope}: non-200 responses are
+        \code{\{error: \{code, message, request\_id\}\}} with codes:
+        \code{unauthorized}, \code{attestation\_required}, \code{consent\_required},
+        \code{invalid\_media}, \code{media\_too\_long}, \code{model\_unavailable},
+        \code{model\_warming},
+        \code{inference\_timeout}, \code{rate\_limited}, \code{overloaded},
+        \code{not\_found}, \code{conflict}, \code{internal}.
+        Codes are a stable API; clients switch on code, never on message.
+  \item \textbf{Telemetry}: logs and metrics carry request id, account id, sizes,
+        timings, status, error code. They \textbf{must never} carry video bytes,
+        frames, transcripts, reconstructions, script text, Apple identifiers, or
+        raw client addresses (\code{net\_hash} only, and only where
+        \S\ref{sec:contribute} requires it).
+  \item \textbf{Secrets}: no static secret ships in the app; server secrets live in
+        Worker and container secret bindings; the script-encryption key, the
+        \code{net\_hash} salt, and the inference-service bearer are distinct
+        secrets, rotatable independently.
+  \item \textbf{Config}: every \textbf{[default]}-marked value lives in KV under
+        \code{cfg:*}, hot-reloaded by the API service on a 60\,s cycle; config
+        reads never block the request path.
+  \item \textbf{Cron} (Worker scheduled events): hourly comm-bucket sweep
+        (\S3.2); daily expiry of stale tasks/reviews; daily \code{net\_hash} purge;
+        daily deletion-job retry.
+\end{itemize}
+
+\section{Operations}
+
+\begin{itemize}[nosep]
+  \item \textbf{Environments}: \code{staging} and \code{prod}, fully isolated ---
+        separate Worker deployments, D1 databases, KV namespaces, R2 buckets,
+        inference deployments, and secrets. TestFlight builds point at \code{prod};
+        \code{staging} uses fixtures and shortened scheduled-job intervals.
+        Environment is baked into the build; no runtime switcher exists in the app.
+  \item \textbf{Migrations}: D1 schema changes are numbered and applied through
+        the deployment tool. CI fails if a model or type change lands without a
+        migration.
+  \item \textbf{Health}: \code{GET /healthz} is shallow (process up, config
+        loaded) and public. \code{GET /readyz} is deep (D1, KV, R2 reachable;
+        active models' readiness per \S\ref{sec:inferservice}) and restricted; the
+        pre-warm script polls \code{/readyz} until green.
+  \item \textbf{CI gates}: \code{cargo fmt --check}, \code{clippy -D warnings},
+        unit + property tests, the malformed-media fixture suite, and a
+        staging deploy smoke test (\code{/readyz} green + one fixture inference)
+        before any prod deploy.
+  \item \textbf{Deploys}: Worker + containers via \code{wrangler deploy};
+        Cloud Run via \code{gcloud run deploy} pinned to the image digest recorded
+        in the model registry row it serves. Rollback = redeploy previous digest +
+        registry flip; each operation must be executable as a single command.
+\end{itemize}
+
+\section{Data Model (D1)}
+\label{sec:schema}
+
+Tables (PK first; FKs by name; all with \code{created\_at}):
+
+\begin{itemize}[nosep]
+  \item \code{accounts(id, apple\_sub UNIQUE, role, status \{active, hold,
+        deleted\})}
+  \item \code{devices(id, account\_id, attest\_key\_id, superseded\_at NULL)}
+  \item \code{consents(account\_id, version, granted\_at, withdrawn\_at NULL)}
+  \item \code{uploads(id, account\_id, purpose \{communicate, task\_submission\},
+        bucket, object\_key, declared\_sha256, verified\_bytes NULL, status
+        \{pending, stored, consumed, deleted\})}
+  \item \code{inferences(id, account\_id, upload\_id, model\_id, status,
+        error\_code NULL, inference\_ms)} --- deliberately no transcript column;
+        transcripts are returned and never stored.
+  \item \code{scripts(id, ciphertext, sha256, class, active)}
+  \item \code{script\_aliases(script\_id, normalized\_alias)}
+  \item \code{script\_references(script\_id, text, source\_review\_id, rank)} ---
+        $\leq$ 5 rows per script, enforced on insert.
+  \item \code{tasks(id, script\_id, account\_id, type, status \{issued, submitted,
+        expired\}, upload\_id NULL, video\_sha256 NULL, net\_hash NULL,
+        expires\_at)} --- UNIQUE \code{(script\_id, account\_id)}.
+  \item \code{reviews(id, task\_id, reviewer\_account\_id, status \{issued,
+        submitted, expired\}, reconstruction NULL, match\_score NULL,
+        is\_anchor, net\_hash NULL, expires\_at)}
+  \item \code{consensus\_results(task\_id PK, scoring\_version, score, outcome
+        \{accepted, variant, flagged\}, decided\_at)}
+  \item \code{reviewer\_stats(account\_id PK, accuracy\_ewma, reviews\_completed,
+        anchors\_seen)}
+  \item \code{models(id, mode, version, release\_scope, runtime, endpoint,
+        weights\_sha256, capability\_label, active)} --- partial UNIQUE
+        \code{(mode) WHERE active}.
+  \item \code{deletion\_jobs(id, account\_id, status, status\_token,
+        completed\_at NULL)}
+\end{itemize}
+
+\code{net\_hash} columns are purged (set NULL) by the daily cron after 30 days
+\textbf{[default]}.
+
+\section{Non-Functional Requirements}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Metric & Target & Measured as \\
+\midrule
+End-to-end translate & p95 $\leq$ 12\,s warm & tap Translate $\to$ rendered text \\
+Upload leg & p95 $\leq$ 5\,s on LTE profile & PUT complete \\
+Inference leg & p95 $\leq$ 6\,s warm & \code{inference\_ms} \\
+API availability & best effort; pre-warm before demos & \code{/healthz} probes \\
+Crash-free flow & 20 consecutive scripted runs & UI test suite \\
+Reliability suite & $\geq$ 95/100 warm successes & 10 fixed clips $\times$ 10 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Cold starts are acceptable at MVP; any scheduled demo or session is preceded by a
+pre-warm operation (one inference per active model).
+
+\section{Acceptance Tests}
+\label{sec:accept}
+
+Demo gates:
+
+\begin{enumerate}[nosep]
+  \item \textbf{D1}: TestFlight build installable by an authorized tester on a
+        physical iPhone.
+  \item \textbf{D2}: \code{/healthz} public at a documented URL; a valid
+        \code{/v1/infer} request returns a transcript from the declared model.
+  \item \textbf{D3}: recorded session: signing captured in the TestFlight build
+        returns an inference result originating from the live backend.
+\end{enumerate}
+
+Engineering gates (must pass before D3 is recorded):
+
+\begin{enumerate}[nosep]
+  \item Malformed-media fixtures: 100\% rejected, zero panics, zero residual R2
+        objects.
+  \item Idempotency: concurrent retries cause at most one inference execution and
+        return the original outcome after completion.
+  \item Consensus properties: deterministic, reviewer-order-invariant,
+        version-stamped; reference-set growth never changes a completed result.
+  \item Attestation: replayed or expired challenges rejected; unattested build
+        rejected with \code{attestation\_required}.
+  \item Serving policy: a model scoped to \code{internal\_evaluation} requested by
+        a \code{role=user} account $\to$ \code{model\_unavailable}, under every
+        registry state.
+  \item Ephemerality: successful inference deletes the comm object inline; a
+        deliberately failed inference's object is gone after the next hourly
+        sweep; \code{uploads.status} transitions verified.
+  \item Deletion: seeded account with clips in both buckets and reviews $\to$
+        \code{DELETE /v1/me} $\to$ verified purge of every layer (device temp
+        files, R2, D1 PII, dead presigned URLs); the status endpoint reports
+        completion.
+  \item Warming path: cold GPU runtime $\to$ \code{model\_warming} with
+        \code{retry\_after\_ms}; subsequent retry succeeds; \code{/readyz}
+        reflects both states.
+  \item Consensus quorum: deadline with 2 of 3 submissions scores on the median
+        of 2; deadline with 1 reassigns; 3 reassignment cycles escalate to the
+        admin queue with the contributor's submission still pending.
+  \item Reliability + latency suite per the NFR table, recorded with device,
+        network profile, and percentile method.
+  \item Accessibility audit checklist on all four screens.
+\end{enumerate}
+
+\section{Build Plan}
+
+Order of work (each step ends in a runnable state):
+
+\begin{enumerate}[nosep]
+  \item Shared domain library: ids, error taxonomy, consensus scoring, and
+        property tests (pure; no I/O).
+  \item API service skeleton: \code{/healthz}, challenge + auth + attestation,
+        and sessions; deploy and document the D2 endpoint.
+  \item Upload protocol + buckets + hourly sweep cron; malformed-fixture CI.
+  \item Inference service with the video-language prototype behind the registry;
+        CPU latency benchmark $\to$ GPU go/no-go; \code{/v1/infer} end-to-end.
+  \item iOS: auth + Communicate path against the live backend $\to$ TestFlight
+        (D1).
+  \item Contribute: consent, scripts (fingerspell + top-50 set), Task A/B,
+        consensus worker, anchors, and \code{net\_hash} checks.
+  \item Deletion job and accessibility audit.
+  \item Reliability suite, pre-warm automation, and recorded D3 demo.
+\end{enumerate}
+
+\section{Out of Scope (MVP)}
+
+Streaming inference; reverse sign generation; avatars; multilingual routing;
+Android; web; App Store public release; per-request App Attest assertions; push
+notifications; distributed-ledger integration; enterprise features; natural-voice
+cloning; production HA. External community pilots are outside this MVP.
+
+\end{document}

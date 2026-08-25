@@ -1,0 +1,569 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{needspace}
+\usepackage{parskip}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage[hidelinks]{hyperref}
+
+\hypersetup{
+  pdftitle={bitsign MVP: Community Pilot Plan and Capability Gates},
+  pdfauthor={},
+  pdfsubject={Capability labels, release gates, and closed pilot protocol}
+}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{bitsign MVP} \\ \large Community Pilot Plan and Capability Gates}
+\author{}
+\date{Draft v0.8, 22 August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent This brief is for prospective pilot participants, Deaf ASL advisers, and
+accessibility partners. For an ASL signer who prefers signing to typing, bitsign tests
+whether one short signed check-in message can become useful English text for an event
+staff member. The signer reviews the result and controls whether to share it; the
+staff member replies through the participant's usual communication method.
+
+The MVP combines an iPhone app with a versioned inference service. Before a closed
+pilot, the build receives one of three public capability labels that state what it has
+and has not demonstrated. Community review, ASL-fluent evaluation, model-provenance
+review, accessibility checks, and end-to-end reliability tests are release criteria.
+If the build earns a pilot-eligible label, the MVP ends with a continue, constrain,
+change, or stop decision based on aggregate pilot results. Otherwise, technical review
+ends with a change or stop decision without recruiting a user pilot.
+\end{abstract}
+
+\setcounter{tocdepth}{1}
+\tableofcontents
+
+\section{Scope and Governance}
+
+This plan governs external use: what the build must demonstrate, who reviews the
+evidence, when Deaf community participants may use it, and how the closed pilot runs
+and terminates. Engineering and internal testing may proceed while community and
+model-readiness work is underway. External recruitment begins only after every
+release gate passes and the build earns a pilot-eligible capability label.
+
+Two boundaries apply throughout:
+
+\begin{itemize}[nosep]
+  \item \textbf{Internal testing vs.\ external use.} Internal testing is gated by
+        the engineering checks in R3--R5. Community readiness, model readiness, the
+        capability label, and the pilot protocol additionally gate recruitment and
+        external use. Internal technical readiness does not authorize recruitment.
+  \item \textbf{Communication clips vs.\ research clips.} Communication clips are
+        ephemeral and never train anything. Any research collection uses a separate
+        informed-consent protocol with its own purpose, retention, access,
+        withdrawal, and deletion rules. Pilot task flows do not collect training
+        data, and pilot clips remain excluded from training and the frozen
+        evaluation.
+\end{itemize}
+
+\section{Product Hypothesis}
+
+\subsection{Primary user and use case}
+
+The initial pilot simulates the one-way message step in an in-person community-event
+check-in. A Deaf or hard-of-hearing ASL signer records one short everyday message for
+an event staff member who reads English but does not understand ASL. Pilot tasks
+cover arrival or registration status, schedule or location questions, and simple
+non-urgent access or logistics requests. A public scope list fixes the allowed intent
+classes, examples, and exclusions before evaluation. The signer can retry or discard
+the output. The staff member replies through the participant's usual communication
+method. (The build includes an on-device speech-to-text reply view; pilot tasks do
+not use or measure it, and reverse \emph{sign generation} is outside the MVP
+entirely.)
+
+The product is an optional communication aid. Professional interpreters, qualified
+translators, and established accessibility services remain the appropriate choice for
+high-consequence or complex communication.
+
+\subsection{Decisions this MVP supports}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}P{2.8cm}YY@{}}
+\toprule
+Decision & Evidence & Gate \\
+\midrule
+Does the model preserve meaning? & New clips from signers whose work was not used to
+tune or select the model, reviewed independently by two Deaf ASL-fluent reviewers. &
+The model earns a capability label in Section~\ref{sec:model}. \\
+Does the complete system work? & A physical iPhone, live inference service, fixed
+reliability suite, and measured warm and cold latency. & The system clears the release
+gates in Section~\ref{sec:release}. \\
+Is the bounded use case useful? & A closed pilot with predefined tasks, participant
+feedback, observed corrections, and explicit stop conditions. & The pilot produces a
+continue, constrain, change, or stop decision. \\
+Can users trust the interaction? & Clear limitations, clip review, deletion behavior,
+accessible status, and participant control over feedback. & The trust and data checks
+pass before pilot recruitment. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A working integration establishes technical feasibility. Product validation requires
+a capability that participants can understand and choose to use.
+
+\section{Experience and Scope}
+
+\subsection{Core flow}
+
+\begin{center}
+\code{record -> review -> translate -> read or listen -> rate or discard}
+\end{center}
+
+The signer records a 2 to 6 second ASL clip and reviews it before upload.
+The service returns English text with the active capability label. Optional on-device
+speech can read the result aloud. The signer can retry, discard the result, or mark it
+as accurate, partly accurate, wrong, or unsafe.
+
+For this release, \emph{live} means a short capture and response cycle. Rolling video
+buffers and streaming inference require separate evaluation.
+
+\subsection{Required product surface}
+
+\begin{itemize}[nosep]
+  \item A short introduction covering the target use case, experimental status, clip
+        handling, and capability label.
+  \item A framing guide that keeps the face, upper body, and both hands visible.
+  \item Camera capture, clip review, reshoot, upload progress, cancel, and clear error
+        states.
+  \item Returned English text, optional on-device speech, retry, discard, and simple
+        result feedback.
+  \item A settings screen showing app and model versions plus a data-deletion contact.
+  \item VoiceOver labels, Dynamic Type, sufficient contrast, and visual equivalents
+        for every status communicated by sound.
+\end{itemize}
+
+Outside a consented study, categorical feedback remains on the device for the current
+session and is discarded with the result. It is not linked or published. The pilot may
+retain only the rating, an opaque participant code, task number, and app and model
+versions for 90 days after the final session. The code key is stored separately;
+withdrawal deletes linked feedback before aggregate publication, and only aggregate
+feedback is published. Retaining a correction, clip, or linked result requires a
+separate per-clip opt-in protocol that states its purpose, retention, access,
+withdrawal, and deletion rules.
+
+\subsection{Capability boundary}
+
+The pilot covers ASL-to-English output from short clips only within the frozen
+check-in scope list. It excludes medical, legal, financial, emergency, and other
+high-consequence communication. It also excludes unrestricted continuous translation,
+reverse sign generation, public App Store release, Android, and enterprise
+administration. Research data collection is excluded from pilot task flows and pilot
+sessions. Any later research study uses a separate informed-consent protocol and
+recruits separately from the pilot.
+
+\section{Public Commitments}
+
+The product follows five commitments:
+
+\begin{enumerate}[nosep]
+  \item Deaf ASL signers help define the use case, evaluation rubric, pilot
+        tasks, and stop conditions before the pilot begins.
+  \item Public claims match the measured capability label. A successful demonstration
+        clip cannot substitute for the full evaluation.
+  \item Translation quality is judged primarily by ASL-fluent human review. Text
+        overlap metrics remain secondary diagnostic measures.
+  \item Outside a separately consented study, communication clips are used only to
+        return the requested result. They never enter model training or the frozen
+        model evaluation. Any research collection uses a separate opt-in protocol
+        with its own stated purpose, retention, access, withdrawal, and deletion
+        rules.
+  \item bitsign is presented as an optional aid and never as a substitute for a
+        qualified interpreter or a person's right to sign-language access.
+\end{enumerate}
+
+These commitments follow public guidance from
+\href{https://gallaudet.edu/linguistics/position-statements/asl-and-ai-tools/}{Gallaudet University}
+on Deaf involvement in ASL automation and from the
+\href{https://wfdeaf.org/resources/consultation-on-good-practices-of-support-systems-enabling-community-inclusion-of-persons-with-disabilities/}{World Federation of the Deaf}
+on community feedback and the role of professional interpreters.
+
+\section{Model and Capability Gate}
+\label{sec:model}
+
+A capability label is a public statement, shown in the app and report, that limits
+what the current build claims it can do. It is earned from the frozen evaluation, not
+from a selected demonstration.
+
+\subsection{Model provenance and deployment eligibility}
+
+Every candidate model must have a documented source, version, training-data
+provenance to the extent disclosed, and authorization for the intended pilot use.
+The review is completed before external evaluation or participant recruitment. A
+candidate with incomplete or incompatible deployment terms is excluded from the
+pilot. Its benchmark results may inform internal research but cannot support a public
+capability claim.
+
+\subsection{Evaluation summary}
+
+Every candidate is tested on frozen clips sampled from the public scope list and from
+at least five locally recruited signers whose clips were not used to tune or select
+it. Two Deaf ASL-fluent reviewers who did not contribute evaluation clips independently
+compare each output with the source signing and a frozen reference. Human meaning
+scores and a separate count of serious errors determine the label; text-overlap scores
+are diagnostic only.
+
+A serious error reverses or materially changes who did what, polarity, time,
+quantity, or safety meaning. Results are checked both in aggregate and across signers
+so a large performance gap cannot hide behind an average. Appendix~\ref{app:evaluation}
+defines the frozen sets, review rubric, and reporting rules.
+
+\subsection{Capability labels}
+
+The thresholds are provisional. The R1 reviewers confirm them and resolve every
+material concern before seeing candidate results.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}P{3.0cm}YY@{}}
+\toprule
+Label & Public claim & Pass bar \\
+\midrule
+Short-clip translation preview & Experimental translation of short ASL messages in
+the listed community-event check-in domain. & At least 85\% of clips preserve most or
+all meaning, every signer reaches at least 80\%, and no more than 2\% contain a serious
+error. \\
+Bounded vocabulary & Translation is limited to the phrases or isolated signs listed
+in the app. & At least 90\% correct first-choice results across 125 trials, every
+signer reaches at least 80\%, and no more than two trials contain a serious confusion.
+\\
+Technical prototype & The mobile and inference connection works, but translation
+quality is unproven. & No user pilot begins. Technical review produces a change or stop
+decision. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The public report gives raw aggregate counts and signer-stratified findings only when
+the grouping preserves participant anonymity. The restricted evaluation record keeps
+the full evidence needed to audit the decision.
+
+\section{Technology at a Glance}
+
+\begin{center}
+\code{iOS client -> authenticated Rust API -> versioned model runtime}
+\end{center}
+
+The iOS app captures and reviews a short clip. The Rust service validates the input,
+invokes the declared model, and returns text with request, model, preprocessing, and
+capability identifiers. The service rejects missing models and invalid media instead
+of returning placeholder output.
+
+The first release uses direct uploads and ephemeral processing. Routine communication
+clips never enter training or model-evaluation pipelines. They are deleted after
+successful inference and within 24 hours after cancellation, timeout, or failure.
+Study clips follow their consented protocol and remain excluded from training and the
+frozen model evaluation.
+
+Tester access is individual and revocable, transport is encrypted, and no shared
+secret is embedded in the app. The service limits inputs, processing time, concurrent
+work, and output length. It returns a predictable error for invalid media or overload.
+
+The app uses SwiftUI and AVFoundation on iOS 17 or later. It stops recording after six
+seconds, allows review before upload, distinguishes upload from inference progress,
+and preserves the user's place through permission, network, media, and service errors.
+Performance reports separate upload and model time while enforcing the end-to-end
+submit-to-result gate. Appendix~\ref{app:technical} gives the detailed privacy,
+security, accessibility, and performance tests.
+
+\section{Release Gates}
+\label{sec:release}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}P{1.3cm}P{3.4cm}Y@{}}
+\toprule
+Gate & Outcome & Required result \\
+\midrule
+R1 & Community readiness & At least three Deaf ASL signers approve the use case,
+scope list, rating rubric, pilot tasks, public claims, and stop conditions. Every
+material concern is resolved or the gate remains closed. \\
+R2 & Model readiness & Evaluation consent, model provenance, and deployment
+eligibility are recorded, the frozen evaluation is complete, and the model receives
+one capability label. \\
+R3 & End-to-end system & A TestFlight build on a physical iPhone sends a valid test clip to
+the live service and displays the declared model's result. \\
+R4 & System performance & The scripted app flow completes without a crash in 20
+consecutive runs. At least 95 of 100 warm end-to-end attempts across 10 fixed test
+clips succeed, and p95 from tapping Translate to rendered text is at most 12 seconds.
+Invalid inputs return stable, documented errors. \\
+R5 & Trust, security, and accessibility & Access, transport, resource bounds, output
+bounds, and clip deletion pass their release tests. VoiceOver and Dynamic Type checks
+pass, limitations are visible, and research consent is separate from communication
+use. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The closed pilot requires either the short-clip translation preview or bounded
+vocabulary label and all five release gates. The technical prototype label permits
+technical review only and produces a change or stop decision.
+
+\section{Closed Pilot}
+
+Recruit 8 to 12 Deaf or hard-of-hearing ASL signers for a structured usability study.
+Each participant uses the build in three predefined, low-stakes tasks that match the
+capability label. At least two English-reading staff partners who do not know ASL are
+assigned as evenly as the sample permits. Partners do not see the task prompt,
+intended message, or reference translation. The participant's usual communication
+method remains available throughout each session.
+
+Measure:
+
+\begin{itemize}[nosep]
+  \item task completion without facilitator rescue;
+  \item semantic adequacy, serious errors, retries, corrections, and abandonment;
+  \item end-to-end time from recording start to a usable result;
+  \item perceived usefulness compared with the participant's current method;
+  \item understanding of the capability boundary and willingness to use the tool
+        again in the target setting; and
+  \item privacy, dignity, or trust concerns raised during the session.
+\end{itemize}
+
+A task is complete when the staff partner identifies the intended message without a
+facilitator hint. A rescue occurs when the facilitator explains the model output or
+redirects the interaction. Abandonment means the participant switches away before
+obtaining a readable result. Serious errors use the definition in
+Section~\ref{sec:model}.
+
+Two Deaf ASL-fluent reviewers who are not pilot participants score every returned
+output against the source clip and the task's predeclared intended message. The
+primary serious-error count uses the first returned output for each task; retry
+outputs are reported separately. The report gives raw participant, task, and output
+counts alongside percentages and ranges showing statistical uncertainty. The pilot
+protocol names reviewer access and the clip-deletion schedule; its clips remain
+excluded from training and the frozen model evaluation.
+
+The task-completion bar is at least 70\% without facilitator rescue. The reuse bar is
+at least 75\% of participants choosing the build again in the target setting. The
+safety bars require no serious error in a first returned output and no severe privacy
+incident.
+
+Any serious error pauses new sessions for adjudication. Sessions resume only after
+the cause and mitigation are recorded and the affected release gates pass again.
+A change to the model, prompt, preprocessing, scope list, output behavior, user flow,
+or data handling starts a fresh evaluable cohort of 8 to 12 participants. An
+instrumentation-only change may continue the cohort only when the R1 reviewers record
+that it cannot affect the participant experience, model output, or privacy behavior.
+Results from different evaluable versions are not pooled.
+
+A severe privacy incident means unauthorized access to a clip or linked identity, or
+retention beyond the documented window. New sessions pause immediately after such an
+incident, a loss of deletion control, or evidence that participants misunderstand the
+tool as a replacement for professional interpreting. The pilot resumes only after the
+cause is corrected and the affected gates pass again; an issue that cannot be
+corrected produces a stop decision.
+
+A material pattern exists when one of the three task types completes at least 20
+percentage points below the overall rate, or the same intent or capture-condition
+failure affects at least three participants and the R1 reviewers confirm the pattern.
+The scope cannot be narrowed by signer identity.
+
+\Needspace{0.34\textheight}
+The rules are applied from top to bottom; the first matching row is the decision:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}P{2.2cm}YY@{}}
+\toprule
+Decision & Evidence & Next step \\
+\midrule
+Stop & The reuse bar fails, or a safety, privacy, or scope problem cannot be corrected.
+& End work on this use case and publish the reason in aggregate. \\
+Change & Stop does not apply, and the task-completion, safety, or release bar fails. &
+Revise the model or interaction and rerun the gates before another pilot. \\
+Constrain & Both value bars and all gates pass, but a material pattern is confined to
+a listed intent, task, or capture condition. & Narrow the public claim and repeat the
+affected gates. \\
+Continue & Both value bars and all gates pass with no material pattern. & Begin the
+next bounded product iteration. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The sample supports product discovery and a next-step decision. It cannot establish
+broad demand or safe use outside the target setting.
+
+\section{Roadmap}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}P{3.0cm}YY@{}}
+\toprule
+Phase & Output & Decision \\
+\midrule
+1. Community definition & Target setting, scope list, user flow, review rubric, pilot
+tasks, and stop conditions. & Proceed when R1 passes. \\
+2. Model proof & Provenance and deployment-eligibility record, frozen evaluation,
+runtime benchmark, and capability label. & Continue with a qualifying label, change
+the model, or stop. \\
+3. Vertical slice & Accessible TestFlight build connected to the live Rust inference
+service. & Proceed when R3 through R5 pass. \\
+4. Closed pilot & Aggregate task, quality, timing, usefulness, and trust results. &
+Continue, constrain, change, or stop. \\
+5. Public report & Capability label, evaluation method, aggregate results, known
+limitations, and next-step decision. & Expand only the parts supported by evidence. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Community definition, reviewer recruitment, model-provenance review, and frozen
+evaluation may run in parallel with engineering and internal testing, but they must
+finish before pilot recruitment. Work beyond the pilot depends on its result. New
+platforms, continuous video, reverse sign generation, and research data collection
+remain outside the MVP pilot and require their own evaluation.
+
+\section{Stop Conditions}
+
+Recruitment or active sessions pause when documented R1 review is incomplete, a model
+falls below its quality gate, a serious error awaits adjudication, or an aggregate
+score hides a material gap across signers. Work also pauses when model deployment
+eligibility or study consent is missing, deletion or access control fails, or a
+release gate for reliability, security, accessibility, or latency no longer passes.
+
+Work resumes only after the cause, fix, and repeated gate result are recorded. The use
+case stops if usefulness fails or a safety, privacy, or scope problem cannot be
+corrected.
+
+\section{Reporting Boundary}
+
+The public report includes the high-level architecture, evaluation method,
+denominators, aggregate results, ranges showing statistical uncertainty, release-gate
+status, limitations, and the next-step decision. Public build and model labels trace
+to exact restricted release records.
+
+Restricted evidence includes private service addresses, access and rate-limit
+settings, capacity details, raw logs, request identifiers, evaluation manifests,
+clips, reference translations, participant identities, per-signer records, detailed
+operating metrics, and incident records. Public results are grouped or withheld when
+a small cell could identify a participant.
+
+\section{Public References}
+
+This plan uses the following public sources as of 21 August 2026:
+
+\begin{itemize}[nosep]
+  \item \href{https://gallaudet.edu/linguistics/position-statements/asl-and-ai-tools/}{Gallaudet University position on ASL and AI tools};
+  \item \href{https://wfdeaf.org/resources/consultation-on-good-practices-of-support-systems-enabling-community-inclusion-of-persons-with-disabilities/}{World Federation of the Deaf guidance on technology and interpreting};
+  \item \href{https://aclanthology.org/2025.findings-emnlp.997/}{signer-independent evaluation in sign-language translation};
+  \item \href{https://aclanthology.org/2026.lrec-1.749/}{limitations of automatic translation metrics};
+  \item \href{https://developer.apple.com/accessibility/}{Apple accessibility guidance}.
+\end{itemize}
+
+\appendix
+\small
+\setlength{\parskip}{2pt plus 1pt minus 1pt}
+
+\section{Evaluation Details}
+\label{app:evaluation}
+
+\subsection{Collection and separation}
+
+Before any evaluation clip is collected, each signer receives a written protocol that
+states the purpose, retention period, access roles, withdrawal and deletion process,
+and publication status. Collection begins only after signed informed consent.
+
+Each short-clip translation candidate is tested on at least 50 clips, balanced across
+the intent classes in the public scope list and at least five locally recruited
+signers. Their clips are created after candidate selection and withheld from all local
+training, tuning, prompt selection, and model selection. For third-party weights, the
+record checks disclosed provenance and says ``no known overlap'' when complete
+exclusion cannot be verified.
+
+The set and public scope list are frozen before outputs are generated and cannot be
+used for later tuning. The evaluation is sentence-disjoint from local development
+material and includes varied signing styles, camera distances, lighting, backgrounds,
+and skin tones. This small sample does not establish demographic fairness.
+
+\subsection{Review and reporting}
+
+Reference translations, text-normalization rules, and rubric anchors are frozen
+before candidate outputs are viewed. Two Deaf ASL-fluent reviewers who did not
+contribute evaluation clips independently score each output against its source clip
+and frozen reference. They do not see model identity or each other's ratings. Disputed
+ratings are adjudicated before results are summarized. The report gives
+pre-adjudication reviewer consistency and the number of ratings changed.
+
+The four-point meaning rubric is:
+
+\begin{enumerate}[nosep]
+  \item intended meaning is absent or wrong;
+  \item some meaning remains, but a material omission or error is present;
+  \item meaning is mostly preserved without a serious error; and
+  \item meaning is preserved.
+\end{enumerate}
+
+Serious errors are counted separately. Literal output, WER, BLEU, and chrF are
+secondary diagnostics and cannot determine release status. The report gives raw
+counts, statistical uncertainty intervals, and results by signer and capture
+condition. The evaluation manifest records the exact model, preprocessing, prompt,
+decoding settings, hardware, and input set.
+
+For the bounded-vocabulary label, the supported list is frozen before testing. The
+balanced set contains 25 items with one example from each of five locally recruited
+signers, for 125 trials. Accuracy is macro-averaged across items and signers. The label
+requires at least 90\% overall accuracy, at least 80\% for every signer, and no more
+than two serious confusions.
+
+\section{Technical Release Tests}
+\label{app:technical}
+
+\subsection{Runtime and data handling}
+
+Short clips upload directly to the service and use ephemeral processing. Durable clip
+storage, background jobs, or extra platform services are added only when measured
+payload size or request duration requires them. A GPU runtime is used when the model
+requires it; a CPU deployment must clear the same release gates.
+
+Routine clips are deleted after successful inference and within 24 hours after
+cancellation, timeout, or failure. Deletion tests cover on-device temporary files,
+API storage, runtime caches, queues, provider logs, and crash analytics, or record that
+a layer retains no clip material.
+
+Inference telemetry uses opaque request identifiers and may record model version,
+input size, timing, status, and coarse failure code. It excludes video, raw frames,
+returned text, credentials, and participant identity. Separate security audit records
+contain tester account, event time, authentication outcome, and source IP for up to 30
+days. Access is limited to named incident responders, and audit records are linked to
+inference telemetry only for a documented security investigation.
+
+\subsection{Security and resilience}
+
+Tester access is individual and revocable, transport is encrypted, and the app
+contains no shared static secret. The service enforces fixed limits on media bytes,
+duration, decoded frames, generated tokens, wall time, and concurrency. Output is
+bounded plain text, and overload returns a stable error.
+
+A versioned malformed and adversarial media fixture set runs under a fixed timeout.
+Every fixture must be rejected with no process panic, hang, unexpected server error,
+or residual media artifact.
+
+\subsection{Performance and accessibility}
+
+The scripted app flow must complete without a crash in 20 consecutive runs. The warm
+performance suite runs ten end-to-end attempts for each of ten fixed test clips. A
+successful attempt returns schema-valid, non-placeholder output from the declared
+model within 12 seconds. At least 95 of 100 attempts must succeed, and p95 from tapping
+Translate to rendered text must be at most 12 seconds.
+
+The release record fixes the device, network profile, timeout, warm-state definition,
+and percentile method, and reports both warm and cold behavior. Until a cold-start
+threshold is validated, each pilot session verifies ready capacity before the first
+participant task.
+
+Accessibility checks cover VoiceOver labels and reading order, Dynamic Type, contrast,
+and visual equivalents for every status communicated by sound. Consent for research
+collection remains separate from ordinary communication use.
+
+\end{document}
