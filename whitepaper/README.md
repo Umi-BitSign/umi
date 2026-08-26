@@ -18,6 +18,12 @@ after responses close. Miner answers remain sealed until that same reveal.
 Deterministic text metrics, single-use challenges, signed records, and
 reproducible audit bundles minimize the trust placed in any publisher or validator.
 
+ASL-to-English is UMI's first protocol scope. UMI's broader objective is
+verifiable, bidirectional translation between people and machines: interpreting
+human language, motion, gesture, expression, and context as machine-usable
+representations, and rendering machine state or intent in forms people can
+understand and act on.
+
 When activated, UMI translation weights use one emission-bearing mechanism by
 design. This gives the network one reproducible ranking after the task, data supply,
 and adversarial controls pass calibration. The chain supports multiple mechanisms.
@@ -107,6 +113,7 @@ requirements throughout this whitepaper.
 |---|---|
 | Language pair | ASL (`ase`) to English (`en`) |
 | Primary task | Raw video to English text |
+| Long-term objective | Verifiable bidirectional translation across human and machine interaction modes |
 | On-chain mechanisms | One by design, MechId 0 |
 | Later mechanisms | Governed extension only; no launch emission reserved |
 | Emission-bearing metric | Deterministic CER or WER against a sealed reference set |
@@ -192,7 +199,7 @@ Version 0.1 covers:
 - public score recomputation after ground-truth reveal;
 - consent, provenance, retention, and audit requirements.
 
-The following remain outside the launch protocol:
+UMI's long-term scope is broader. The following remain outside version 0.1:
 
 - English-to-sign generation and avatars;
 - speech recognition and speech synthesis;
@@ -2384,7 +2391,14 @@ because the chain can accept it.
 
 ## 16. Extension rules
 
-Version 0.1 reserves no emission for a future task. An extension must provide benchmark evidence, a threat analysis, and a migration plan.
+UMI's long-term objective is a general, verifiable translation layer between human
+interaction and machine systems. Future mechanisms may interpret human language,
+motion, gesture, expression, and multimodal context as machine-usable state or
+intent. Other mechanisms may render machine state, intent, or output as accessible
+text, speech, signed motion, haptics, or another human-facing form.
+
+Version 0.1 reserves no emission for a future task. An extension must identify a
+consumer and provide benchmark evidence, a threat analysis, and a migration plan.
 
 Subtensor supports independent mechanisms with separate weights, Yuma runs, bond
 pools, and emission shares. The live `MaxMechanismCount` is authoritative at an
@@ -2402,7 +2416,8 @@ Potential extension mechanisms are:
 
 | Extension | Independent value test | Activation blocker |
 |---|---|---|
-| Motion perception | A reusable structured motion representation improves translation or another measured consumer | Independent pose ground truth and non-circular scoring |
+| Human-to-machine interaction translation | Human language, motion, gesture, expression, or multimodal context produces structured state or intent used by a measured machine consumer | Consented task-specific ground truth, safety boundaries, and non-circular scoring |
+| Machine-to-human interaction translation | Machine state, intent, or output is rendered in a human-facing form with measured fidelity and comprehension | Target-user evaluation, privacy and safety controls, and reproducible scoring |
 | Model artifact tournament | Public checkpoints improve held-out ASL translation quality | Reproducible packaging, isolated evaluation, and plagiarism controls |
 | Corpus production | New consented data improves a later held-out model or benchmark | Personhood, provenance, deduplication, delayed utility, and collusion controls |
 | Human adjudication | Blind judgments resolve cases deterministic references cannot cover | Reviewer privacy, anchor accuracy, Sybil resistance, and aggregate-only reporting |
