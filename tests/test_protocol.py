@@ -218,6 +218,13 @@ def test_response_plaintext_rejects_more_than_128_normalized_tokens() -> None:
         ResponsePlaintext.model_validate(data)
 
 
+def test_ground_truth_rejects_references_without_scoring_units() -> None:
+    data = ground_truth_data()
+    data["items"][0]["references"] = ["!!!", "???", "..."]
+    with pytest.raises(ValidationError, match="canonical scoring unit"):
+        GroundTruthPayload.model_validate(data)
+
+
 def test_response_plaintext_rejects_resource_heavy_single_token() -> None:
     data = response_plaintext_data()
     data["hypothesis"] = "a" * 513

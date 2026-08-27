@@ -92,6 +92,8 @@ def normalized_grapheme_count(value: str) -> int:
 
 def _validate_reference(value: str) -> str:
     _validate_nonempty_text(value)
+    if not normalize_text(value):
+        raise ValueError("reference must contain at least one canonical scoring unit")
     if len(value.encode("utf-8")) > 4096:
         raise ValueError("reference exceeds 4096 UTF-8 bytes")
     if normalized_token_count(value) > 128:
@@ -110,6 +112,16 @@ ReferenceText = Annotated[str, AfterValidator(_validate_reference)]
 
 class StrictProtocolModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    @model_validator(mode="after")
+    def validate_canonical_json_domain(self) -> Self:
+        """Ensure every accepted protocol model has an RFC 8785 representation."""
+
+        try:
+            rfc8785.dumps(self.model_dump(mode="json", by_alias=True))
+        except rfc8785.CanonicalizationError as error:
+            raise ValueError("protocol model is outside the RFC 8785 JSON domain") from error
+        return self
 
 
 class Video(StrictProtocolModel):

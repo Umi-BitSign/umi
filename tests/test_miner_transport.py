@@ -245,6 +245,29 @@ async def test_validator_timeout_caps_the_entire_slow_response() -> None:
     assert outcome.envelope is None
 
 
+@pytest.mark.asyncio
+async def test_validator_counts_duplicate_response_header_lines() -> None:
+    validator_wallet = dev_wallet("//Alice")
+    miner_runtime = runtime(allowed_wallet=validator_wallet)
+    duplicate_headers = [(b"x-duplicate", b"a" * 100) for _ in range(200)]
+    duplicate_headers.append((b"x-umi-signature", b"0x" + b"00" * 64))
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers=duplicate_headers, content=b"{}")
+
+    outcome = await query_miner(
+        challenge_request(),
+        wallet=validator_wallet,
+        miner_url="https://miner.test",
+        miner_hotkey=miner_runtime.hotkey_ss58,
+        limits=Limits(),
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+    )
+    assert outcome.failure_code == "resource_limit"
+    assert outcome.envelope is None
+
+
 def test_runtime_fails_before_serving_when_hotkey_cannot_sign(monkeypatch) -> None:
     def fail_signing(*_args, **_kwargs):
         raise FileNotFoundError("missing hotkey")

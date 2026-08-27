@@ -253,6 +253,8 @@ def _validated_references(references: Sequence[str]) -> tuple[str, ...]:
         raise ValueError("a clip must have between 3 and 5 committed references")
     if any(not isinstance(reference, str) for reference in committed):
         raise TypeError("every reference must be str")
+    if any(not normalize_text(reference) for reference in committed):
+        raise ValueError("every reference must contain a canonical scoring unit")
     return committed
 
 

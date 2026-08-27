@@ -28,6 +28,7 @@ class HttpVideoFetcher:
     allowed_hosts: frozenset[str]
     maximum_clip_size_bytes: int
     timeout_seconds: float
+    maximum_http_header_bytes: int = 16 * 1024
     allowed_ports: frozenset[int] = frozenset()
     allow_http_for_tests: bool = False
     transport: httpx.AsyncBaseTransport | None = None
@@ -37,6 +38,8 @@ class HttpVideoFetcher:
             raise ValueError("at least one allowed video hostname is required")
         if self.maximum_clip_size_bytes <= 0:
             raise ValueError("maximum_clip_size_bytes must be positive")
+        if self.maximum_http_header_bytes <= 0:
+            raise ValueError("maximum_http_header_bytes must be positive")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if any(isinstance(port, bool) or not 1 <= port <= 65535 for port in self.allowed_ports):
@@ -89,6 +92,8 @@ class HttpVideoFetcher:
             ):
                 if response.status_code != 200:
                     raise VideoFetchError(f"video fetch returned HTTP {response.status_code}")
+                if _raw_header_size(response.headers) > self.maximum_http_header_bytes:
+                    raise VideoFetchError("video response headers exceed the byte ceiling")
                 content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
                 if content_type != descriptor.media_type:
                     raise VideoFetchError("video Content-Type does not match the request")
@@ -118,3 +123,7 @@ class HttpVideoFetcher:
         if hashlib.sha256(body).hexdigest() != descriptor.sha256:
             raise VideoFetchError("video SHA-256 does not match the request")
         return bytes(body)
+
+
+def _raw_header_size(headers: httpx.Headers) -> int:
+    return sum(len(name) + len(value) + 4 for name, value in headers.raw)

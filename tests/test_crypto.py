@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from py_ecc.bls.point_compression import compress_G2, decompress_G2
+from py_ecc.optimized_bls12_381 import Z2, curve_order, eq, multiply
 
 bt = pytest.importorskip("bittensor")
 
@@ -185,6 +187,39 @@ def test_parser_rejects_trailer_only_fake_timelock() -> None:
             base64url_encode(fabricated),
             reveal_round=reveal_round,
         )
+
+
+def test_parser_rejects_noncanonical_infinity_and_wrong_subgroup_g2_elements() -> None:
+    reveal_round = bt.timelock.current_round() + 100
+    sealed = seal_response(b"answer", reveal_round=reveal_round)
+    mode = sealed.portable_bytes[0] & 0b11
+    prefix_length = {0: 1, 1: 2, 2: 4}[mode]
+
+    def reject(group_bytes: bytes) -> None:
+        forged = bytearray(sealed.portable_bytes)
+        forged[prefix_length : prefix_length + 96] = group_bytes
+        with pytest.raises(ValueError, match="compressed group data"):
+            parse_sealed_response(
+                base64url_encode(bytes(forged)),
+                reveal_round=reveal_round,
+            )
+
+    reject(b"\xff" * 96)
+    infinity = compress_G2(Z2)
+    reject(infinity[0].to_bytes(48, "big") + infinity[1].to_bytes(48, "big"))
+
+    outside_subgroup = None
+    for candidate in range(1, 1_000):
+        compressed = ((1 << 383) | candidate, candidate + 1)
+        try:
+            point = decompress_G2(compressed)
+        except ValueError:
+            continue
+        if not eq(multiply(point, curve_order), Z2):
+            outside_subgroup = compressed
+            break
+    assert outside_subgroup is not None
+    reject(outside_subgroup[0].to_bytes(48, "big") + outside_subgroup[1].to_bytes(48, "big"))
 
 
 def test_decrypt_revalidates_record_before_calling_bittensor(monkeypatch) -> None:

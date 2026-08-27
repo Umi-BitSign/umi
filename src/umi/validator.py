@@ -90,10 +90,7 @@ def _validate_miner_url(miner_url: str) -> str:
 
 
 def _header_size(headers: httpx.Headers) -> int:
-    return sum(
-        len(name.encode("ascii")) + len(value.encode("latin-1")) + 4
-        for name, value in headers.items()
-    )
+    return sum(len(name) + len(value) + 4 for name, value in headers.raw)
 
 
 def _auth_record(headers: httpx.Headers) -> dict[str, str]:

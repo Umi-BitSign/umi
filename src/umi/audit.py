@@ -165,7 +165,9 @@ class EvidenceStore:
         temporary.replace(path)
         return path
 
-    def load_manifest(self) -> dict[str, Any]:
+    def load_manifest_with_bytes(self) -> tuple[dict[str, Any], bytes]:
+        """Load and decode one bounded, no-follow manifest snapshot."""
+
         data = _read_bounded_regular_file(
             self.root / "manifest.json",
             self.maximum_manifest_bytes,
@@ -178,4 +180,8 @@ class EvidenceStore:
             raise ValueError("component manifest is not RFC 8785 canonical JSON")
         if not isinstance(decoded, dict):
             raise ValueError("component manifest must be a JSON object")
+        return decoded, data
+
+    def load_manifest(self) -> dict[str, Any]:
+        decoded, _ = self.load_manifest_with_bytes()
         return decoded

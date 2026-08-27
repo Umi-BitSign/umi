@@ -12,6 +12,7 @@ dependencies = [
   "bittensor==11.1.0",
   "fastapi>=0.141,<1",
   "httpx>=0.28,<1",
+  "py-ecc==8.0.0",
   "pydantic>=2.13,<3",
   "regex>=2026.7,<2027",
   "rfc8785>=0.1.4,<1",
@@ -29,6 +30,7 @@ dev = [
 [project.scripts]
 umi-demo = "umi.demo:main"
 umi-miner = "umi.miner:main"
+umi-protocol = "umi.tools:main"
 umi-validator = "umi.validator:main"
 
 [tool.hatch.build.targets.wheel]

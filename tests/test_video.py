@@ -65,6 +65,31 @@ async def test_video_hash_mismatch_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_video_rejects_oversized_response_headers_before_body() -> None:
+    body = b"video"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers=[
+                (b"content-type", b"video/mp4"),
+                (b"x-bloat", b"a" * 128),
+            ],
+            content=body,
+        )
+
+    bounded = HttpVideoFetcher(
+        allowed_hosts=frozenset({"objects.example"}),
+        maximum_clip_size_bytes=32,
+        maximum_http_header_bytes=64,
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(VideoFetchError, match="headers exceed"):
+        await bounded.fetch(descriptor(body))
+
+
+@pytest.mark.asyncio
 async def test_video_declared_or_streamed_oversize_aborts() -> None:
     body = b"1234"
 

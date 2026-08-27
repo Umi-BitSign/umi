@@ -426,7 +426,13 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         allowed_hosts=frozenset(args.video_host),
         allowed_ports=frozenset(args.video_port or (443,)),
         maximum_clip_size_bytes=limits.maximum_clip_size_bytes,
+        maximum_http_header_bytes=limits.maximum_http_header_bytes,
         timeout_seconds=limits.video_fetch_timeout_seconds,
+    )
+    authenticator = (
+        RequestAuthenticator.sqlite(hotkey_ss58, args.nonce_db)
+        if args.nonce_db is not None
+        else RequestAuthenticator.in_memory(hotkey_ss58)
     )
     return MinerRuntime(
         wallet=wallet,
@@ -438,7 +444,7 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         ),
         video_fetcher=fetcher,
         allowed_validator_hotkeys=frozenset(args.validator_hotkey),
-        authenticator=RequestAuthenticator.in_memory(hotkey_ss58),
+        authenticator=authenticator,
         limits=limits,
         model_revision=args.model_revision,
         inference_semaphore=asyncio.Semaphore(limits.maximum_inference_concurrency),
@@ -462,6 +468,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-revision")
     parser.add_argument("--inference-timeout", type=float, default=120.0)
     parser.add_argument("--max-inference-concurrency", type=int, default=1)
+    parser.add_argument(
+        "--nonce-db",
+        help="SQLite nonce database shared by same-host miner processes",
+    )
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--log-level", default="INFO")

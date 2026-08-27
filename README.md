@@ -15,11 +15,16 @@ protocol extension.
 - [Plain-text protocol source](whitepaper/README.md)
 - [bitsign product MVP](roadmap/bitsign-mvp/README.md)
 
-## Initial subnet implementation
+## Current status
 
-This repository now contains the first executable protocol slice:
+SN78 is active on mainnet, but UMI translation weights are not. The repository is
+ready for implementation review, miner integration, component tests, and offline
+shadow rehearsal. It is not ready for weight activation.
+
+There are two executable paths:
 
 ```text
+component test
 validator hotkey
   -> canonical btauth/1 request
   -> POST /v1/translate
@@ -28,23 +33,54 @@ validator hotkey
   -> Quicknet reveal
   -> exact CER/WER
   -> content-addressed local replay bundle
+
+offline shadow rehearsal
+canonical window evidence
+  -> policy and runtime-pin verification
+  -> pool quorum and deterministic selection
+  -> assignment, request, and sealed-response roots
+  -> canary, spent-state, rolling-score, and weight projection
+  -> bounded seven-stage audit bundle
+  -> no chain write
 ```
 
-It targets the current `bittensor` v11 HTTP model. It does not use the removed
+Both paths target the `bittensor` v11 HTTP model. They do not use the removed
 Axon/Dendrite/Synapse classes.
 
-This slice is intentionally labeled `component_test_no_weight`. It contains no
-weight-setting or extrinsic-submission code, never emits `calibration_no_weight`,
-and cannot count as protocol conformance or activation evidence. The whitepaper's
-publisher quorum, chain anchors, deterministic selection, canaries, spent state,
-media-profile decoding, rolling eligibility, and activation gates remain to be
-implemented. This component also lacks a finalized receipt-block proof, so it
-enforces the Quicknet response-close boundary but does not claim to enforce the
-request's earlier `deadline_block` boundary.
+Implemented and adversarially tested offline primitives include canonical policy
+hashing, runtime and imported-module pins, bounded media decoding, strict portable
+timelock parsing, publisher pool certificates, post-close selection, three
+pre-reveal anchor sets, copy-bound authentication evidence, canaries, spent-state
+replay, rolling eligibility, exact weight projection, audit-bundle verification,
+and unsigned chain-call/evidence helpers.
+
+The remaining activation work is deliberately fail-closed:
+
+- no active scoring policy can be constructed; `translation_weights_active` is
+  fixed to `false` in the shipped schema;
+- the offline shadow runner has no finalized chain collector, storage-proof
+  verifier, real response timelocks, ground-truth decryption, or weight submission;
+- resource accounting and preflight exist as tested primitives but are not wired
+  through the shadow runner's HTTP stages;
+- publisher-fault roots advance across empty windows, but nonempty strikes are
+  disabled until a finalized-chain-bound objective classifier exists;
+- shadow rolling and registry state starts at version genesis and is not a
+  persistent multi-window validator state machine;
+- the external publisher, miner-utility, metric-validity, challenge-supply,
+  economics, and soak gates in the whitepaper have not passed.
+
+`component_test_no_weight` and `shadow_rehearsal_no_weight` are local engineering
+results. Neither is `calibration_no_weight`, protocol conformance, or activation
+evidence. The component validator also lacks a finalized receipt-block proof, so
+it checks the Quicknet response-close boundary without claiming the request's
+earlier block deadline.
 
 ## Install
 
-Python 3.10 through 3.14 is supported.
+Python 3.10 through 3.14 is supported. FFmpeg and FFprobe are required for policy
+construction, shadow rehearsal, media inspection, and the full test suite. Install
+the `ffmpeg` package with your operating-system package manager first, for example
+`brew install ffmpeg` on macOS or `sudo apt-get install ffmpeg` on Ubuntu.
 
 ```bash
 python3 -m venv .venv
@@ -75,9 +111,48 @@ thread pool. Python cannot terminate a hung worker thread, so a synchronous back
 must implement its own cancellation and the operator must restart a process whose
 backend does not return.
 
-The component miner uses an in-memory `btauth/1` nonce store and starts one Uvicorn
-worker. Run one miner process per serving hotkey. Replicated or multi-worker
-deployment requires a shared atomic nonce store, which this slice does not provide.
+The miner defaults to an in-memory `btauth/1` nonce store. Pass
+`--nonce-db /var/lib/umi/nonces.sqlite3` for a transactional SQLite store shared by
+processes on one host. Run one serving hotkey per database. A multi-host deployment
+still needs an external atomic replay store, which this repository does not ship.
+
+## Run an offline shadow rehearsal
+
+The shadow input is one exact RFC 8785 `umi-shadow-rehearsal/1` object. Its strict
+schema is `ShadowRehearsalEvidence` in `src/umi/shadow.py`. It contains the inactive
+policy, three publisher pools, the availability quorum, a verified Quicknet pulse,
+public and revealed batch material, a miner panel, validator-signed request
+transcripts, and miner-signed rehearsal responses.
+
+Run and independently verify it with:
+
+```bash
+umi-protocol run-shadow-rehearsal \
+  --input window.json \
+  --output shadow-runs/window-0
+
+umi-protocol verify-rehearsal-bundle \
+  --bundle shadow-runs/window-0
+```
+
+The command refuses noncanonical input, mismatched local dependency bytes,
+import-shadowed modules, active policies, and a nonempty output directory. It
+prints false values for translation-weight activation, protocol conformance, and
+activation evidence.
+
+A portable static fixture is intentionally not checked in because the local
+rehearsal policy binds the exact UMI source tree, Python runtime, installed package
+bytes, and FFmpeg binaries. The complete executable fixture constructor and
+adversarial cases are in `tests/test_shadow.py`. To exercise that path on a new
+checkout, run:
+
+```bash
+pytest -q tests/test_shadow.py
+```
+
+Other read-only protocol tools are discoverable with `umi-protocol --help`. They
+hash inactive policies, inspect media, verify public batches and publisher-capacity
+signatures, and verify rehearsal bundles. None signs or broadcasts a chain call.
 
 ## Run a component test
 
@@ -181,7 +256,6 @@ umi-validator replay --bundle component-runs/run-001
 ## Verify
 
 ```bash
-ruff check src tests neurons
-ruff format --check src tests neurons
-pytest
+make check
+python -m pip wheel . --no-deps --wheel-dir dist
 ```

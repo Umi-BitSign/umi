@@ -14,6 +14,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from py_ecc.bls.point_compression import compress_G2, decompress_G2
+from py_ecc.optimized_bls12_381 import Z2, curve_order, eq, multiply
+
 _BASE64URL_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 _DIGEST_HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SIGNATURE_RE = re.compile(r"0x[0-9a-f]{128}\Z")
@@ -252,8 +255,7 @@ def _validate_portable_layout(portable: bytes, expected_round: int) -> None:
     encrypted = portable[prefix_length:-8]
     if len(encrypted) < 244:
         raise ValueError("portable timelock ciphertext is shorter than its canonical framing")
-    if not any(encrypted[:96]):
-        raise ValueError("portable timelock compressed group data is invalid")
+    _validate_tiny_bls381_group(encrypted[:96])
 
     cursor = 96
 
@@ -299,6 +301,27 @@ def _validate_portable_layout(portable: bytes, expected_round: int) -> None:
         raise ValueError("portable timelock has an unsupported cipher marker")
     if cursor != len(encrypted):
         raise ValueError("portable timelock ciphertext has trailing bytes")
+
+
+def _validate_tiny_bls381_group(encoded: bytes) -> None:
+    """Validate canonical compressed G2 encoding, curve membership, and subgroup."""
+
+    if len(encoded) != 96:
+        raise ValueError("portable timelock compressed group data has the wrong length")
+    compressed = (
+        int.from_bytes(encoded[:48], "big"),
+        int.from_bytes(encoded[48:], "big"),
+    )
+    try:
+        point = decompress_G2(compressed)
+        if eq(point, Z2):
+            raise ValueError("point at infinity is not a valid timelock ciphertext element")
+        if not eq(multiply(point, curve_order), Z2):
+            raise ValueError("timelock ciphertext element is outside the prime-order subgroup")
+        if compress_G2(point) != compressed:
+            raise ValueError("timelock ciphertext element is not canonically compressed")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("portable timelock compressed group data is invalid") from error
 
 
 def _encode_portable(portable: bytes) -> str:

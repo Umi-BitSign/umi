@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -64,6 +65,25 @@ class RequestAuthenticator:
         return cls(
             self_hotkey_ss58=self_hotkey_ss58,
             nonce_store=bt.http_auth.InMemoryNonceStore(retention=retention),
+            max_age_seconds=max_age_seconds,
+            allowed_skew_seconds=allowed_skew_seconds,
+        )
+
+    @classmethod
+    def sqlite(
+        cls,
+        self_hotkey_ss58: str,
+        path: str | Path,
+        *,
+        max_age_seconds: float = 10.0,
+        allowed_skew_seconds: float = 2.0,
+    ) -> RequestAuthenticator:
+        from .nonce import SQLiteNonceStore
+
+        retention = max(60.0, max_age_seconds + allowed_skew_seconds)
+        return cls(
+            self_hotkey_ss58=self_hotkey_ss58,
+            nonce_store=SQLiteNonceStore(path, retention_seconds=retention),
             max_age_seconds=max_age_seconds,
             allowed_skew_seconds=allowed_skew_seconds,
         )

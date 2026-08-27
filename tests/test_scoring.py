@@ -72,10 +72,12 @@ class MetricTests(unittest.TestCase):
         self.assertIsInstance(score, Fraction)
         self.assertEqual(score, Fraction(1, 1))
 
-    def test_empty_reference_is_safe_and_clamped(self) -> None:
-        self.assertEqual(score_wer("", ("", "", "")), Fraction(1, 1))
-        self.assertEqual(score_wer("extra", ("", "", "")), Fraction(0, 1))
-        self.assertEqual(score_cer("extra", ("", "", "")), Fraction(0, 1))
+    def test_empty_or_punctuation_only_references_are_rejected(self) -> None:
+        for references in (("", "", ""), ("!!!", "???", "...")):
+            with self.assertRaisesRegex(ValueError, "canonical scoring unit"):
+                score_wer("", references)
+            with self.assertRaisesRegex(ValueError, "canonical scoring unit"):
+                score_cer("", references)
 
     def test_wer_keeps_internal_apostrophe_as_token_content(self) -> None:
         references = ("don't stop", "do not stop", "dont stop")
