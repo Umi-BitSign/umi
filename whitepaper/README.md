@@ -8,6 +8,13 @@ Status: SN78 active on mainnet; UMI translation weights inactive; undergoing pub
 
 This document supersedes earlier UMI mechanism and whitepaper drafts.
 
+Publication files: [typeset PDF](UMI-Whitepaper.pdf), [LaTeX entry
+point](main.tex), and [generated LaTeX body](specification.tex).
+
+This file is the plain-text protocol source. With Pandoc 3, XeLaTeX, and
+`latexmk` installed, run `make -C whitepaper` from the repository root to rebuild
+the LaTeX body and PDF.
+
 ## Abstract
 
 This whitepaper defines UMI, a Bittensor subnet that measures and rewards systems for
@@ -752,8 +759,11 @@ in Section 8.2. It changes only the plaintext schema and required reveal round.
   transmission. The validator reads at most
   `maximum_response_bodies_per_assignment`; later bodies are neither parsed nor
   retained beyond one bounded excess-attempt receipt.
-- An `ok` hypothesis over 128 normalized tokens scores zero. A valid `error`
-  response scores zero and remains an authenticated miner response.
+- An `ok` hypothesis over `maximum_hypothesis_utf8_bytes`,
+  `maximum_hypothesis_tokens`, or `maximum_hypothesis_graphemes` scores zero. The
+  grapheme count uses Section 9.1 normalization, removes whitespace, and then uses
+  the policy-pinned segmentation. A valid `error` response scores zero and remains
+  an authenticated miner response.
 - `model_revision` is optional and carries zero score weight.
 - The encrypted plaintext and signed envelope MUST name the issuing validator's
   hotkey. A signed response is admissible evidence only in that validator's bundle;
@@ -815,7 +825,8 @@ and high-consequence material is ineligible in version 0.1.
 - A clip MUST have from three through five accepted English references.
 - Each accepted reference's raw UTF-8 encoding MUST fit
   `maximum_reference_utf8_bytes`, and its canonical normalization in Section 9.1
-  MUST fit `maximum_reference_tokens`.
+  MUST fit both `maximum_reference_tokens` and `maximum_reference_graphemes`. The
+  grapheme count excludes whitespace after normalization.
 - References MUST be fixed before the batch commitment.
 - At least three independent ASL-fluent reviewers, including at least two Deaf
   reviewers, MUST first view the clip without the original prompt and submit a
@@ -2324,8 +2335,8 @@ a published activation block.
 | Utility exponent | 2 |
 | Minimum accepted references | 3 |
 | Maximum accepted references | 5 |
-| Maximum reference length (`maximum_reference_utf8_bytes`, `maximum_reference_tokens`) | 4 KiB UTF-8 and 128 normalized tokens |
-| Maximum hypothesis length | 128 tokens |
+| Maximum reference length (`maximum_reference_utf8_bytes`, `maximum_reference_tokens`, `maximum_reference_graphemes`) | 4 KiB UTF-8, 128 normalized tokens, and 512 normalized graphemes excluding whitespace |
+| Maximum hypothesis length (`maximum_hypothesis_utf8_bytes`, `maximum_hypothesis_tokens`, `maximum_hypothesis_graphemes`) | 4 KiB UTF-8, 128 normalized tokens, and 512 normalized graphemes excluding whitespace |
 | Maximum signed request body (`maximum_request_body_bytes`) | 64 KiB |
 | Maximum signed response envelope body (`maximum_response_body_bytes`) | 64 KiB |
 | Maximum HTTP headers per message (`maximum_http_header_bytes`) | 16 KiB |

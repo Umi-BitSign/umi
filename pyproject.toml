@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "umi-subnet"
+version = "0.1.0"
+description = "Trust-minimized translation protocol for Bittensor SN78"
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+dependencies = [
+  "bittensor==11.1.0",
+  "fastapi>=0.141,<1",
+  "httpx>=0.28,<1",
+  "pydantic>=2.13,<3",
+  "regex>=2026.7,<2027",
+  "rfc8785>=0.1.4,<1",
+  "typing-extensions>=4.15,<5",
+  "uvicorn>=0.52,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.1,<10",
+  "pytest-asyncio>=1.4,<2",
+  "ruff>=0.16,<1",
+]
+
+[project.scripts]
+umi-demo = "umi.demo:main"
+umi-miner = "umi.miner:main"
+umi-validator = "umi.validator:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/umi"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

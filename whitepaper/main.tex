@@ -1,0 +1,177 @@
+\documentclass[10pt,oneside]{scrartcl}
+
+\usepackage[a4paper,top=24mm,bottom=27mm,left=23mm,right=23mm,headsep=8mm]{geometry}
+\usepackage{fontspec}
+\defaultfontfeatures{Ligatures=TeX,Scale=MatchLowercase}
+\setmainfont{texgyrepagella-regular.otf}[
+  BoldFont=texgyrepagella-bold.otf,
+  ItalicFont=texgyrepagella-italic.otf,
+  BoldItalicFont=texgyrepagella-bolditalic.otf
+]
+\setsansfont{texgyreheros-regular.otf}[
+  BoldFont=texgyreheros-bold.otf,
+  ItalicFont=texgyreheros-italic.otf,
+  BoldItalicFont=texgyreheros-bolditalic.otf
+]
+\setmonofont{texgyrecursor-regular.otf}[
+  BoldFont=texgyrecursor-bold.otf,
+  ItalicFont=texgyrecursor-italic.otf,
+  BoldItalicFont=texgyrecursor-bolditalic.otf,
+  Scale=0.86
+]
+
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,array,calc}
+\usepackage{ragged2e}
+\usepackage{enumitem}
+\usepackage{fvextra}
+\usepackage[most]{tcolorbox}
+\usepackage{xcolor}
+\usepackage{xurl}
+\usepackage[hypertexnames=false]{hyperref}
+\usepackage{bookmark}
+\usepackage{scrlayer-scrpage}
+\usepackage{etoolbox}
+\usepackage{needspace}
+\usepackage{caption}
+
+\definecolor{UMIInk}{HTML}{172033}
+\definecolor{UMINavy}{HTML}{172A46}
+\definecolor{UMIBlue}{HTML}{315B8A}
+\definecolor{UMITeal}{HTML}{198C8C}
+\definecolor{UMIMist}{HTML}{EDF3F7}
+\definecolor{UMILine}{HTML}{C9D5DF}
+\definecolor{UMIMuted}{HTML}{536273}
+\definecolor{UMICode}{HTML}{F4F7F9}
+
+\hypersetup{
+  unicode=true,
+  pdftitle={UMI: A Trust-Minimized ASL-to-English Translation Subnet},
+  pdfauthor={UMI},
+  pdfsubject={Public whitepaper and conformance specification, protocol version 0.1},
+  pdfkeywords={UMI, Bittensor, SN78, ASL, translation, subnet},
+  colorlinks=true,
+  linkcolor=UMIBlue,
+  citecolor=UMIBlue,
+  urlcolor=UMITeal,
+  pdfborder={0 0 0}
+}
+
+\KOMAoptions{parskip=half-,numbers=noenddot,headsepline=0.35pt}
+\setcounter{secnumdepth}{2}
+\setcounter{tocdepth}{2}
+\addtokomafont{section}{\sffamily\bfseries\color{UMINavy}}
+\addtokomafont{subsection}{\sffamily\bfseries\color{UMIBlue}}
+\addtokomafont{subsubsection}{\sffamily\bfseries\color{UMIBlue}}
+\RedeclareSectionCommand[beforeskip=2.2ex plus .6ex minus .2ex,afterskip=.9ex]{section}
+\RedeclareSectionCommand[beforeskip=1.8ex plus .4ex minus .2ex,afterskip=.6ex]{subsection}
+
+\clearpairofpagestyles
+\ihead{\sffamily\footnotesize\color{UMIMuted} UMI PROTOCOL}
+\ohead{\sffamily\footnotesize\color{UMIMuted} VERSION 0.1}
+\cfoot{\sffamily\footnotesize\color{UMIMuted}\pagemark}
+\pagestyle{scrheadings}
+
+\setlist[itemize]{leftmargin=1.45em,itemsep=.24em,topsep=.45em}
+\setlist[enumerate]{leftmargin=1.65em,itemsep=.3em,topsep=.45em}
+\setlength{\emergencystretch}{3em}
+\setlength{\LTpre}{.65em}
+\setlength{\LTpost}{.8em}
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.17}
+\AtBeginEnvironment{longtable}{\small}
+
+\DefineVerbatimEnvironment{UMICodeBlock}{Verbatim}{
+  fontsize=\footnotesize,
+  breaklines=true,
+  breakanywhere=true,
+  breakanywheresymbolpre={},
+  breakanywheresymbolpost={},
+  breaksymbolleft={},
+  frame=single,
+  framesep=3mm,
+  rulecolor=\color{UMILine},
+  fillcolor=UMICode,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  baselinestretch=1.02
+}
+
+\newcommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\newcounter{none}
+\newcommand{\umiStatus}{SN78 active on mainnet; UMI translation weights inactive; undergoing public calibration}
+
+\renewenvironment{abstract}{%
+  \begin{tcolorbox}[
+    enhanced,
+    breakable,
+    colback=UMIMist,
+    colframe=UMILine,
+    boxrule=.45pt,
+    arc=1.5mm,
+    left=5mm,
+    right=5mm,
+    top=4mm,
+    bottom=4mm,
+    before skip=0pt,
+    after skip=1.5em,
+    title={Abstract},
+    coltitle=UMINavy,
+    fonttitle=\sffamily\bfseries
+  ]
+}{\end{tcolorbox}}
+
+\begin{document}
+
+\begin{titlepage}
+  \thispagestyle{empty}
+  \vspace*{18mm}
+
+  {\sffamily\bfseries\fontsize{58}{58}\selectfont\color{UMINavy} UMI\par}
+  \vspace{5mm}
+  {\color{UMITeal}\rule{52mm}{2.2pt}\par}
+  \vspace{15mm}
+
+  {\sffamily\bfseries\fontsize{26}{32}\selectfont\color{UMIInk}
+    A Trust-Minimized ASL-to-English\\[2mm]
+    Translation Subnet\par}
+
+  \vspace{9mm}
+  {\sffamily\large\color{UMIMuted}
+    Public whitepaper and conformance specification\par}
+
+  \vfill
+
+  \begin{tcolorbox}[
+    colback=UMIMist,
+    colframe=UMILine,
+    boxrule=.45pt,
+    arc=1.5mm,
+    left=5mm,
+    right=5mm,
+    top=4mm,
+    bottom=4mm
+  ]
+    \sffamily
+    \begin{tabular}{@{}>{\bfseries\color{UMINavy}}p{34mm}p{105mm}@{}}
+      Protocol version & 0.1 \\
+      Network & Bittensor mainnet, subnet 78 \\
+      Status & \umiStatus \\
+      Publication date & August 2026
+    \end{tabular}
+  \end{tcolorbox}
+
+  \vspace{9mm}
+  {\small\color{UMIMuted}
+    This edition supersedes earlier UMI mechanism and whitepaper drafts.\par}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\input{specification.tex}
+
+\end{document}
