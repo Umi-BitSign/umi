@@ -471,7 +471,7 @@ def test_candidate_root_seed_and_selection_are_permutation_invariant() -> None:
     ).digest()
     assert root == expected_root
 
-    signature = bytes(range(96))
+    signature = bytes(range(48))
     seed = selection_seed(signature, root)
     assert seed == hashlib.sha256(b"umi-select-v2\0" + signature + root).digest()
     selections = {
@@ -479,6 +479,10 @@ def test_candidate_root_seed_and_selection_are_permutation_invariant() -> None:
         for order in itertools.permutations(candidates)
     }
     assert len(selections) == 1
+
+    for invalid_signature in (b"", bytes(47), bytes(49)):
+        with pytest.raises(ValueError, match="exactly 48 bytes"):
+            selection_seed(invalid_signature, root)
 
 
 def test_batch_selection_skips_duplicate_groups_and_requires_enough_distinct_groups() -> None:

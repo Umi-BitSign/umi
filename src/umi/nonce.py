@@ -17,7 +17,8 @@ class SQLiteNonceStore:
         self.path = Path(path).expanduser().absolute()
         if retention_seconds <= 0:
             raise ValueError("nonce retention must be positive")
-        self.retention_ns = int(retention_seconds * 1_000_000_000)
+        self.retention = float(retention_seconds)
+        self.retention_ns = int(self.retention * 1_000_000_000)
         self._initialize_lock = threading.Lock()
         self._initialized = False
         self._initialize()

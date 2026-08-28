@@ -4,7 +4,7 @@ Canonical public whitepaper and conformance specification
 
 Protocol version: 0.1
 
-Status: SN78 active on mainnet; UMI translation weights inactive; undergoing public calibration
+Status: SN78 active on mainnet; UMI translation weights inactive; calibration profile published; public calibration pending
 
 This document supersedes earlier UMI mechanism and whitepaper drafts.
 
@@ -468,6 +468,7 @@ Every scored request MUST bind the following versions:
 | Validator resource-capacity schema | `umi-validator-capacity/1` |
 | Spent-registry schema | `umi-spent-registry/1` |
 | Publisher-fault schema | `umi-publisher-fault/1` |
+| Activation-drill schema | `umi-activation-drill/1` |
 | Assignment-set schema | `umi-assignment-set/1` |
 | Request-set schema | `umi-request-set/1` |
 | Response-set schema | `umi-response-set/1` |
@@ -881,7 +882,8 @@ C = max(1, ceil(N * f_canary))
 
 At the version 0.1 values, `N = 12` and `f_canary = 0.10`, so a batch contains 12
 emission-bearing clips plus two canaries. One canary uses CER and one uses WER;
-the WER canary uses short utterance when the low bit of
+the WER canary uses short utterance when the least-significant bit of the final
+digest byte of
 `SHA256("umi-canary-stratum-v1\0" || window_id ||
 base64url_decode(batch_id))` is zero and continuous otherwise. Each canary pairs a
 real eligible clip with a committed reference set from a different reserved script
@@ -913,6 +915,10 @@ against its mismatched reference set is evidence that sealed reference text may
 have left the intended channel. A hit voids the affected selection window, appears
 with full evidence in the audit bundle, and triggers the incident procedure. A hit
 alone does not identify the leaking party or exclude a publisher or miner.
+When translation weights are active, a hit also pauses new UMI weight submissions
+until the public incident procedure resolves the affected delivery and reveal path.
+Repeated hits remain unattributed incidents; they do not create publisher strikes
+without deterministic evidence that identifies a publisher fault.
 
 Canaries can detect leakage by infrastructure or by a party that does not know the
 canary assignment. They cannot detect a publisher selectively leaking its own live
@@ -1291,8 +1297,11 @@ score never affects selection. Exploration confers evaluation, not weight: a
 hotkey earns weight only after meeting the observation minimum in Section 9.5.
 Registration cost raises the cost of hotkey churn aimed at exploration positions.
 
-Because the rank binds the validator hotkey, validators hold overlapping but
-non-identical miner samples. Let `w_v` and `w_u` be two validators' normalized
+The validator-bound rank changes panel membership only when the candidate-miner
+count exceeds `target_count`. In that case, validators normally hold overlapping
+but non-identical samples. When every candidate fits in the panel, every validator
+selects the full candidate set and this sampling rule provides no cross-validator
+diversity. Let `w_v` and `w_u` be two validators' normalized
 pre-quantization vectors over the full UID set, and let `k` equal the live
 `MinAllowedWeights`:
 
@@ -1305,7 +1314,8 @@ During the ten-tempo shadow trial, every tempo MUST have median pairwise `TV` at
 most 0.10, maximum pairwise `TV` at most 0.20, and `top_k_overlap` at least 0.80
 for every validator pair. Ties in `top_k` resolve by decoded miner account. Failure
 requires a larger panel, longer rolling window, or another declared sampling
-change before UMI weight activation.
+change before UMI weight activation. A zero distance caused by full-panel coverage
+measures agreement, but it is not evidence of distinct sampling.
 
 ### 8.4 Serve and respond
 
@@ -1646,7 +1656,8 @@ Batches enter this state only as complete valid two-batch selection windows. Eve
 issued assignment in a retained batch counts toward the observation minimum,
 including a missing or invalid response. If expiration leaves no eligible miners,
 the validator follows the skip rule in Section 9.6. These transitions are local to
-the validator because panels differ, but an auditor reproduces them exactly from
+the validator because requests and prior queues are validator-bound and panels may
+differ, but an auditor reproduces them exactly from
 that validator's ordered request anchors and prior bundles.
 
 ### 9.6 Utility and weights
@@ -1666,8 +1677,8 @@ floor set above the field's real accuracy distribution would starve the subnet o
 positive utilities regardless of demand. At publication, no protocol-comparable
 distribution has yet demonstrated that current models clear `0.10`. UMI
 translation-weight activation therefore requires published shadow accuracy
-distributions from SN78 showing at least twice the live
-`MinAllowedWeights` in miners sustaining positive utility across the full
+distributions from SN78 showing at least `2 * M_gate` miners sustaining positive
+utility across the full
 ten-tempo gate (Section 14). No validator may submit UMI translation weights before
 that gate and the offline metric-validity gate pass.
 
@@ -1731,14 +1742,18 @@ published bundle. Five controls reduce it:
    cannot exhibit conforming responses for challenges it never issued. The anchors
    do not prove network delivery or a validator's local receipt time; those remain
    explicit residual assertions.
-5. **Distinct sampling.** Batch selection is common, while miner selection is
-   seeded per validator hotkey. Conforming validators therefore hold overlapping
-   but non-identical response evidence; a vector copied wholesale from a peer is
-   detectable against the copier's declared panel.
+5. **Conditional distinct sampling.** Batch selection is common, while miner
+   ranking is seeded per validator hotkey. When the candidate set exceeds the
+   panel size, conforming validators normally hold overlapping but non-identical
+   response evidence, and a vector copied wholesale from a peer can disagree with
+   the copier's declared panel. When every candidate fits in the panel, membership
+   is identical and this control contributes no detection power.
 
-The chain cannot slash a free rider. These controls make free riding detectable
-and publicly attributable from bundles alone, and a validator publishing
-non-conforming evidence fails the conformance requirements of Section 17.
+The chain cannot slash a free rider. The validator-bound signed requests and
+responses in control 4 remain the primary evidence in both panel regimes: a
+validator cannot present a peer's responses as its own conforming work. A validator
+publishing non-conforming evidence fails the conformance requirements of Section
+17.
 
 **Source-conditioned shadow monitoring.** Each validator `v` computes this effect
 separately for every publisher and every publisher control group. Let `s` denote
@@ -1756,8 +1771,53 @@ D_v(i, s) = 0.15 * D_v(i, s, fingerspelling)
 The aggregate is reported only when each side of every stratum comparison meets
 the declared minimum. The validator publishes the component means, sample counts,
 aggregate effect, and a policy-pinned signer-cluster bootstrap interval. Because
-validators draw distinct miner samples, each claim is explicitly local to `v` and
-must be reproducible from that validator's bundle.
+requests and histories are validator-bound and panels can differ, each claim is
+explicitly local to `v` and must be reproducible from that validator's bundle.
+
+The source-monitor bootstrap uses the policy-pinned `umi-source-bootstrap/1`
+profile. Rows on each side of each stratum are grouped by the bundle's opaque
+signer-cohort ID. Every replicate independently resamples, with replacement, the
+same number of signer clusters present on that side and includes every row from a
+selected cluster. Selecting a cluster more than once repeats all of its rows. For
+publisher sources, `source_id32` is the publisher account; for control-group
+sources, it is the control-group ID. The deterministic seed is:
+
+```text
+source_bootstrap_seed = SHA256(
+  "umi-source-bootstrap-seed-v1\0" ||
+  window_id ||
+  validator_AccountId32 ||
+  source_kind_byte ||
+  source_id32 ||
+  miner_root32 ||
+  scoring_policy_hash
+)
+```
+
+`source_kind_byte` is `0x00` for a publisher and `0x01` for a control group. For
+this seed, `window_id` is the selection window at which the rolling source monitor
+is evaluated. For
+zero-based replicate `b`, side byte `z` (`0x00` for the source and `0x01` for the
+outside set), zero-based stratum index `k` in Section 7.2 table order, draw index
+`d`, and sorted signer-cluster count `m`, the selected cluster index is:
+
+```text
+U64BE_prefix(SHA256(
+  "umi-source-bootstrap-draw-v1\0" ||
+  source_bootstrap_seed ||
+  U32BE(b) || z || U8(k) || U32BE(d)
+)) mod m
+```
+
+`U64BE_prefix` interprets the first eight digest bytes as an unsigned big-endian
+integer, and `U8(k)` is the single unsigned byte for `k`.
+The profile pins the replicate count and confidence level. Each replicate computes
+all three component effects and their weighted aggregate with exact rationals. Sort
+the aggregate effects in ascending order. For confidence `c` and `B` replicates,
+the one-sided lower endpoint is the value at one-based rank
+`max(1, ceil((1 - c) * B))`. Missing cluster IDs, a missing stratum component, or
+any use of a different resampling rule makes the telemetry non-reproducible and
+fails the activation gate.
 
 An interval whose lower bound exceeds the alert threshold triggers a public alert
 and a common follow-up test on future sealed data. It never changes a clip score,
@@ -1881,6 +1941,10 @@ window cadence, and the timelocked queue has room. The effective
 exceed one `window_stride_blocks` interval under the launch policy. The validator exposes
 the pinned block and every value in health telemetry. Hard-coded epoch position or
 block timing is forbidden.
+
+Weight-active startup additionally requires both the eligible candidate-miner
+count and `miner_panel_size` to be at least the live `MinAllowedWeights`. This is a
+runtime safety floor. Section 14 applies the stricter `2 * M_gate` activation test.
 
 ### 10.3 Weight submission
 
@@ -2147,7 +2211,7 @@ resolved.
 | Synthetic fallback | Production scoring fails closed on missing video, model, reference, or decoder |
 | Missing corpus score | No corpus mechanism and no uniform fallback weights |
 | Weight copying | Fresh rankings plus native timelock concealment through chain application |
-| Validator free-riding on audit bundles | Release after applied reveal; pre-reveal set anchors; validator-bound responses; per-validator sampling |
+| Validator free-riding on audit bundles | Release after applied reveal; pre-reveal set anchors; validator-bound responses; conditional per-validator sampling when the panel is truncated |
 | Selection grinding | Post-close drand selection round; pool and miner snapshot fixed before the round exists |
 | Pool equivocation | One finalized per-publisher pool anchor and canonical manifest hashing |
 | Local pool omission | Whole-window fail-closed behavior; no validator-local candidate removal |
@@ -2221,6 +2285,121 @@ unattempted, or capacity-failed member remains in the denominator:
 valid_window_rate = valid_scheduled_windows / all_scheduled_windows_in_soak
 ```
 
+Let `M_gate` be the greatest finalized `MinAllowedWeights` value in every logical
+Section 10.2 chain snapshot required for each scheduled soak window and at the
+finalized proposed activation block:
+
+```text
+M_gate = max(MinAllowedWeights_b for every required soak and activation snapshot b)
+```
+
+`MinAllowedWeights` remains a live chain input, not an owner-selected scoring-policy
+constant. A value that makes the miner count, panel size, rolling coverage, or
+positive-utility gates fail keeps activation closed. It cannot be bypassed by
+choosing a more favorable snapshot.
+
+Activation drills use one public `umi-activation-drill/1` report per drill. Its
+logical schema is:
+
+```json
+{
+  "schema": "umi-activation-drill/1",
+  "drill_id": "late-response",
+  "scoring_policy_hash": "hex-encoded-sha256",
+  "activation_equivalence_digest": "hex-encoded-sha256",
+  "fixture_manifest_sha256": "hex-encoded-sha256",
+  "execution_environment_sha256": "hex-encoded-sha256",
+  "expected": {
+    "outcome_code": "assignment_zero",
+    "reason_codes": ["late"]
+  },
+  "observed": {
+    "outcome_code": "assignment_zero",
+    "reason_codes": ["late"]
+  },
+  "evidence_bundle_sha256": "hex-encoded-sha256",
+  "replayers": [
+    {
+      "administrator": "ss58-independent-replayer",
+      "implementation_sha256": "hex-encoded-sha256",
+      "result_sha256": "hex-encoded-sha256",
+      "scheme": "sr25519",
+      "signature": "0x..."
+    }
+  ]
+}
+```
+
+The fixture, environment, and expected tuple MUST be published before execution.
+The environment hash binds the exact runtime or reproducible chain-fork snapshot,
+mutation driver, policy, and dependency pins. A drill passes only when its observed
+tuple exactly matches the table below, its referenced audit, incident, event, and
+storage evidence verifies, and at least two independently administered replayers
+using independently implemented drivers sign the same `result_sha256`. Replayer
+implementations derive that value as:
+
+```text
+result_sha256 = SHA256(
+  "umi-activation-drill-result-v1\0" ||
+  RFC8785(report_without_replayers)
+)
+```
+
+For each replayer, let `replayer_attestation` be the RFC 8785 object containing its
+`administrator`, `implementation_sha256`, `result_sha256`, and `scheme` fields.
+Its signature follows Section 6.3 over:
+
+```text
+SHA256(
+  "umi-activation-drill-replayer-v1\0" ||
+  result_sha256 ||
+  RFC8785(replayer_attestation)
+)
+```
+
+`result_sha256` is decoded to its raw 32 bytes in the signature formula. A missing
+field, extra or missing reason code, unverifiable evidence object or signature, or
+replay disagreement fails the drill.
+
+| Drill ID | Required pass outcome | Canonical reason codes |
+|---|---|---|
+| `ground-truth-sealing` | Pre-reveal decryption is rejected; the declared round opens exactly the committed plaintext | none |
+| `late-response` | The affected assignment remains in the denominator with score zero | `late` |
+| `early-reveal` | The complete selection window is void | `ground_truth_early_reveal` |
+| `mirror-loss` | Retrieval continues from a certified mirror without changing the candidate pool | none |
+| `certificate-breach` | The affected validator skips the complete window and publishes an incident bundle | `certificate_breach` |
+| `one-validator-loss` | The launch-minimum certificate with the remaining three valid signers still verifies | none |
+| `availability-equivocation` | Conflicting quorum certificates make the window void | `availability_equivocation` |
+| `malformed-pool` | The malformed anchored pool contributes no candidate | `malformed_pool` |
+| `anchor-replacement` | The retained closing-block proof remains authoritative and a later replacement is ignored | none |
+| `assignment-anchor` | The affected validator skips before issuance | `assignment_anchor_invalid` |
+| `request-anchor` | The affected validator skips the window | `request_anchor_invalid` |
+| `response-anchor` | The affected validator skips the window | `response_anchor_invalid` |
+| `response-copy` | A response bound to another validator scores zero for the copied assignment | `response_validator_binding_mismatch` |
+| `spent-replay` | A prior spent hit is ineligible, or a script hit learned after reveal makes the selected window void | `spent_replay` |
+| `publisher-fault-replay` | Independent replay produces the same fault root, strike count, and cooldown state | none |
+| `canary-hit` | The window is void, new active-policy submissions pause, and the hit appears in the incident bundle | `canary_hit` |
+| `publisher-alert` | The exact source-conditioned interval produces public shadow telemetry and no score mutation | `publisher_divergence_alert` |
+| `UID-reassignment` | The pending weight result terminates as failed | `uid_reassignment` |
+| `accepted-but-unapplied-weight` | The accepted commit terminates as failed after exact-key removal | `accepted_but_unapplied_weight` |
+| `duplicate-weight-commit` | The duplicate event makes the submission fail and pauses ordinary commits | `duplicate_weight_commit` |
+| `epoch-pull-forward` | The early or differently keyed submission is rejected as the window result | `weight_epoch_pull_forward` |
+| `epoch-deferral` | The late or differently keyed submission is rejected as the window result | `weight_epoch_deferral` |
+| `reveal-period-mutation` | The entry remains tracked through removal, terminates as failed, and new submissions pause | `reveal_period_mutation` |
+| `stale-row` | Ordinary commits remain paused until the prior row is inactive or a controlled recovery applies | `previous_row_still_active` |
+| `legacy-row-cutover` | Activation remains closed while any legacy entry is unresolved or legacy row remains active | `legacy_weight_state_active` |
+| `drand-profile-mismatch` | Startup fails closed before a window is processed | `drand_profile_mismatch` |
+| `MEV-Shield-expiry` | Expired transport is not reported as successful inner-call execution | `mev_shield_expired` |
+| `runtime-upgrade` | An incompatible spec, metadata, interface, or fixture change fails startup pending a new policy | `runtime_upgrade_incompatible` |
+
+Published calibration results for batch size, deadlines, quality floor, strata,
+and miner sampling pass only when they bind the tested candidate policy and show
+that its chosen values satisfy the metric-validity, positive-utility, vector,
+valid-window, and resource gates below. An inconclusive report does not pass. The
+public incident and window-void procedure MUST map every canonical condition to an
+assignment or window outcome, reason code, publication deadline, submission pause
+and resume rule, responsible role, and reactivation criterion.
+
 - one mechanism confirmed on the live chain;
 - current HTTP authentication and weight interfaces implemented;
 - commit-reveal weights enabled, version 4 still live, and the complete epoch-
@@ -2243,7 +2422,10 @@ valid_window_rate = valid_scheduled_windows / all_scheduled_windows_in_soak
 - effective activity cutoff no longer than one window stride;
 - immunity period longer than the full configured weight-concealment interval;
 - at least four independently administered validators with live permits;
-- at least three active miners from two independent implementations;
+- at least `max(3, 2 * M_gate)` active miners from at least two independent
+  implementations, a policy-pinned panel size of at least `2 * M_gate`, and enough
+  retained rolling assignments for at least `2 * M_gate` miners to satisfy every
+  observation minimum;
 - exactly three active challenge-publisher hotkeys across exactly three
   independently administered control groups at launch, with all common control
   relationships disclosed, every hotkey meeting the locked-collateral requirement,
@@ -2279,24 +2461,17 @@ valid_window_rate = valid_scheduled_windows / all_scheduled_windows_in_soak
 - no synthetic, placeholder, answer-bearing ID, or unrevealed-reference fallback in production code;
 - 100% of scored clips carrying eligible consent and provenance records;
 - 100% of scored scripts and clips passing the spent-registry check;
-- successful ground-truth sealing, late-response, early-reveal, mirror-loss,
-  certificate-breach, one-validator-loss, availability-equivocation, malformed-pool,
-  anchor-replacement, assignment-anchor, request-anchor, response-anchor,
-  response-copy, spent-replay,
-  publisher-fault-replay, canary-hit, publisher-alert, UID-reassignment,
-  accepted-but-unapplied-weight, duplicate-weight-commit, epoch-pull-forward,
-  epoch-deferral, reveal-period-mutation, stale-row, legacy-row-cutover,
-  drand-profile-mismatch,
-  MEV-Shield-expiry, and
-  runtime-upgrade drills;
-- published calibration results for batch size, deadlines, quality floor, strata, and miner sampling;
+- valid public `umi-activation-drill/1` reports for every drill in the table above;
+- published calibration results for batch size, deadlines, quality floor, strata,
+  and miner sampling that satisfy the binding and pass criteria above;
 - published shadow accuracy distributions meeting the positive-utility requirement of Section 9.6;
 - valid `umi-publisher-capacity/1` statements from all three independent groups,
   covering at least `challenge_supply_runway_days` at the proposed cadence, all
   delivered and reserved script groups, and the loss of any one group;
 - public validator economics reports meeting `validator_cost_coverage` for every
   validator in the registered soak set under the common conservative case;
-- a public incident and window-void procedure.
+- a public incident and window-void procedure containing every required mapping
+  and resume criterion above.
 
 The first ten activated UMI tempos form a mainnet probation window. Every validator
 update in that period MUST end with a finalized matching
@@ -2372,6 +2547,8 @@ a published activation block.
 | Publisher and control-group monitoring window | 12 valid batches |
 | Source divergence alert threshold | 0.15 lower confidence bound |
 | Divergence minimum sample | 6 clips per side and stratum |
+| Source-monitor bootstrap profile | `umi-source-bootstrap/1`; 10,000 signer-cluster replicates per validator, miner root, source, and window |
+| Source-monitor confidence level | 0.95 one-sided lower endpoint by the Section 9.8 nearest-rank rule |
 | Publisher minimum locked collateral (`M_alpha`) | set at shadow calibration start |
 | Challenge-supply runway (`challenge_supply_runway_days`) | 90 days at the proposed activated cadence |
 | Validator direct-cost coverage (`validator_cost_coverage`) | at least 1.25 |
@@ -2399,6 +2576,12 @@ schedule, score age, and publisher cooldown in blocks and wall-clock time. The s
 tests those exact values. Evidence that calls for any change produces a new shadow
 policy and restarts the soak. A faster cadence does not become eligible merely
 because the chain can accept it.
+
+The initial 60-second issue allowance and 60-second response window are calibration
+candidates, not demonstrated operating margins. They can enter the qualifying soak
+only when every scheduled window supplies the exact deadline and resource evidence
+required by Sections 6.1 and 14. A deadline miss, inadequate headroom, or failed
+utilization gate requires a revised shadow policy and a restarted soak.
 
 ## 16. Extension rules
 

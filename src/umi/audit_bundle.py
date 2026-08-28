@@ -13,8 +13,9 @@ from typing_extensions import Self
 from .audit import EvidenceStore, ObjectRef
 from .protocol import PROTOCOL_VERSION, StrictProtocolModel, canonical_json_bytes
 
-AUDIT_BUNDLE_SCHEMA = "umi-shadow-rehearsal-bundle/1"
+AUDIT_BUNDLE_SCHEMA = "umi-shadow-rehearsal-bundle/2"
 SHADOW_TERMINAL = "shadow_rehearsal_no_weight"
+SHADOW_INCIDENT_TERMINAL = "shadow_rehearsal_window_void"
 STAGE_IDS = (
     "pool_and_selection",
     "assignment",
@@ -87,7 +88,7 @@ class AuditBundleManifest(StrictProtocolModel):
         "weight_build",
         "commit_and_terminal_state",
     ]
-    terminal_classification: Literal[SHADOW_TERMINAL]
+    terminal_classification: Literal[SHADOW_TERMINAL, SHADOW_INCIDENT_TERMINAL]
     audit_release_block: Literal[0]
     reason_codes: list[Annotated[str, Field(min_length=1)]]
     stages: Annotated[list[StageRecord], Field(min_length=7, max_length=7)]
@@ -111,6 +112,8 @@ class AuditBundleManifest(StrictProtocolModel):
             raise ValueError("highest_stage does not match the reached-stage prefix")
         if self.stages[-1].status != "not_reached":
             raise ValueError("an offline rehearsal cannot reach chain terminal state")
+        if self.terminal_classification == SHADOW_INCIDENT_TERMINAL and reached[5]:
+            raise ValueError("a void rehearsal cannot reach weight build")
         digests = [bytes.fromhex(item.sha256) for item in self.objects]
         if digests != sorted(digests) or len(set(digests)) != len(digests):
             raise ValueError("bundle object table must be unique and sorted by raw digest")
@@ -167,7 +170,7 @@ def write_audit_bundle(
     stages: Sequence[StageInput],
     maximum_bundle_bytes: int = MAX_AUDIT_BUNDLE_BYTES,
 ) -> Path:
-    if terminal_classification != SHADOW_TERMINAL:
+    if terminal_classification not in {SHADOW_TERMINAL, SHADOW_INCIDENT_TERMINAL}:
         raise ValueError("offline bundles cannot claim a protocol terminal classification")
     if audit_release_block != 0:
         raise ValueError("offline rehearsal bundles have no chain audit-release block")
@@ -187,6 +190,8 @@ def write_audit_bundle(
         raise ValueError("audit bundle must reach at least the pool-and-selection stage")
     if stages[-1].not_reached_reason is None:
         raise ValueError("an offline rehearsal cannot reach chain terminal state")
+    if terminal_classification == SHADOW_INCIDENT_TERMINAL and stages[5].not_reached_reason is None:
+        raise ValueError("a void rehearsal cannot reach weight build")
     expected_reasons = sorted(
         {stage.not_reached_reason for stage in stages if stage.not_reached_reason is not None}
     )
@@ -297,6 +302,8 @@ def _fixed_point_manifest_size(base: dict[str, Any], *, object_bytes: int) -> in
 __all__ = [
     "AUDIT_BUNDLE_SCHEMA",
     "MAX_AUDIT_BUNDLE_BYTES",
+    "SHADOW_INCIDENT_TERMINAL",
+    "SHADOW_TERMINAL",
     "STAGE_IDS",
     "AuditBundleManifest",
     "AuditObject",

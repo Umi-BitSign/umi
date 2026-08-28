@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from umi.audit_bundle import (
+    SHADOW_INCIDENT_TERMINAL,
     STAGE_IDS,
     BundleObjectInput,
     StageInput,
@@ -180,6 +181,22 @@ def test_bundle_reason_table_must_match_not_reached_stages(tmp_path: Path) -> No
     path.write_bytes(canonical_json_bytes(manifest))
     with pytest.raises(ValueError, match="equal the not-reached"):
         verify_audit_bundle(root)
+
+
+def test_void_rehearsal_cannot_reach_weight_build(tmp_path: Path) -> None:
+    stages = list(stages_through(5))
+    stages[-1] = StageInput(STAGE_IDS[-1], not_reached_reason="canary_hit")
+    with pytest.raises(ValueError, match="void rehearsal cannot reach weight build"):
+        write_audit_bundle(
+            tmp_path / "invalid-void",
+            scoring_policy_hash="11" * 32,
+            software_revisions={"umi": "abc"},
+            window_id="22" * 32,
+            terminal_classification=SHADOW_INCIDENT_TERMINAL,
+            audit_release_block=0,
+            reason_codes=["canary_hit"],
+            stages=stages,
+        )
 
 
 def test_bundle_verifier_rejects_a_symlinked_manifest(tmp_path: Path) -> None:

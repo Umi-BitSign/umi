@@ -44,21 +44,33 @@ class PythonPluginTranslator:
         return result
 
 
-def load_translator(spec: str, *, maximum_concurrency: int = 1) -> PythonPluginTranslator:
+def load_translator(
+    spec: str,
+    *,
+    maximum_concurrency: int = 1,
+    allow_synchronous: bool = False,
+) -> PythonPluginTranslator:
     """Load a trusted backend named ``module:callable``.
 
-    The callable receives verified video bytes and the validated request.  It
-    may be synchronous or asynchronous and must return an English string.
+    The callable receives verified video bytes and the validated request and must
+    return an English string. Synchronous callables require explicit opt-in.
     """
 
     if isinstance(maximum_concurrency, bool) or maximum_concurrency <= 0:
         raise ValueError("maximum_concurrency must be a positive integer")
+    if not isinstance(allow_synchronous, bool):
+        raise TypeError("allow_synchronous must be boolean")
     module_name, separator, attribute = spec.partition(":")
     if not separator or not module_name or not attribute:
         raise ValueError("translator must be named as 'module:callable'")
     function = getattr(importlib.import_module(module_name), attribute, None)
     if not callable(function):
         raise ValueError(f"translator {spec!r} is not callable")
+    if not inspect.iscoroutinefunction(function) and not allow_synchronous:
+        raise ValueError(
+            "synchronous translators require explicit unsafe opt-in because Python cannot "
+            "terminate a hung worker thread"
+        )
     executor = (
         None
         if inspect.iscoroutinefunction(function)

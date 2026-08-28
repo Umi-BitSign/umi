@@ -44,7 +44,7 @@ class Limits:
 
 @dataclass(frozen=True)
 class SafetyBoundary:
-    """What this initial slice is—and is not—allowed to claim or do."""
+    """What this initial slice is allowed to claim and do."""
 
     netuid: int = 78
     mechanism_id: int = 0

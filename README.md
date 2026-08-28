@@ -18,8 +18,9 @@ protocol extension.
 ## Current status
 
 SN78 is active on mainnet, but UMI translation weights are not. The repository is
-ready for implementation review, miner integration, component tests, and offline
-shadow rehearsal. It is not ready for weight activation.
+ready to share for implementation review, miner integration, component tests, and
+offline shadow rehearsal. The calibration profile is published, but public
+calibration has not started and the repository is not ready for weight activation.
 
 There are two executable paths:
 
@@ -51,8 +52,8 @@ Implemented and adversarially tested offline primitives include canonical policy
 hashing, runtime and imported-module pins, bounded media decoding, strict portable
 timelock parsing, publisher pool certificates, post-close selection, three
 pre-reveal anchor sets, copy-bound authentication evidence, canaries, spent-state
-replay, rolling eligibility, exact weight projection, audit-bundle verification,
-and unsigned chain-call/evidence helpers.
+replay, rolling eligibility, exact weight projection, deterministic audit-bundle
+replay, and unsigned chain-call/evidence helpers.
 
 The remaining activation work is deliberately fail-closed:
 
@@ -66,6 +67,13 @@ The remaining activation work is deliberately fail-closed:
   disabled until a finalized-chain-bound objective classifier exists;
 - shadow rolling and registry state starts at version genesis and is not a
   persistent multi-window validator state machine;
+- source-conditioned monitoring and its signer-cluster bootstrap are specified but
+  are not wired into the offline shadow runner;
+- the offline runner emits a preserved canary-hit incident, but it does not provide
+  the general live incident classifier, submission pause state, or resume workflow;
+- FFmpeg runs as a child process without a repository-enforced child RSS limit;
+  any process that invokes media inspection must run inside an OS or container
+  memory limit;
 - the external publisher, miner-utility, metric-validity, challenge-supply,
   economics, and soak gates in the whitepaper have not passed.
 
@@ -95,7 +103,8 @@ as one package.
 
 The miner requires a trusted Python callable and has no placeholder fallback. Pass
 it as `module:callable`. The callable receives verified video bytes and the parsed
-request, may be synchronous or asynchronous, and must return an English string:
+request and must return an English string. An asynchronous callable is required by
+default:
 
 ```python
 async def translate(video: bytes, request) -> str:
@@ -106,10 +115,11 @@ If fetching, decoding, or inference fails, the miner emits a signed, timelocked
 error response whose score is zero.
 
 Inference concurrency defaults to one and can be changed with
-`--max-inference-concurrency`. Synchronous plugins run in a dedicated bounded
-thread pool. Python cannot terminate a hung worker thread, so a synchronous backend
-must implement its own cancellation and the operator must restart a process whose
-backend does not return.
+`--max-inference-concurrency`. A synchronous plugin requires the explicit
+`--allow-unsafe-sync-translator` flag and runs in a dedicated bounded thread pool.
+Python cannot terminate a hung worker thread, so such a backend must implement its
+own cancellation and the operator must restart a process whose backend does not
+return.
 
 The miner defaults to an in-memory `btauth/1` nonce store. Pass
 `--nonce-db /var/lib/umi/nonces.sqlite3` for a transactional SQLite store shared by
@@ -136,7 +146,9 @@ umi-protocol verify-rehearsal-bundle \
 ```
 
 The command refuses noncanonical input, mismatched local dependency bytes,
-import-shadowed modules, active policies, and a nonempty output directory. It
+import-shadowed modules, active policies, and a nonempty output directory. The
+bundle embeds its canonical source evidence, and verification reruns the complete
+rehearsal into a fresh directory and requires an identical canonical manifest. It
 prints false values for translation-weight activation, protocol conformance, and
 activation evidence.
 
@@ -211,7 +223,11 @@ umi-miner \
 ```
 
 HTTPS port 443 is allowed by default. Repeat `--video-port` to admit a different
-port explicitly.
+port explicitly. Production fetches resolve the allowlisted hostname once per
+attempt, reject any non-public result, pin the connection to one deterministic IP,
+and preserve the original Host authority and TLS SNI. Proxy environment variables
+are ignored. Operators should use a controlled DNS resolver and keep the allowlist
+narrow.
 
 After the service is reachable, replace `YOUR_PUBLIC_IP` and publish its endpoint:
 

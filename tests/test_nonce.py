@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 
+import bittensor as bt
 import pytest
 
 import umi.nonce as nonce_module
+from umi.auth import RequestAuthenticator
 from umi.nonce import SQLiteNonceStore
+
+from .factories import dev_wallet
 
 
 def test_nonce_store_persists_replay_state_across_reopened_instances(tmp_path) -> None:
@@ -64,3 +69,28 @@ def test_nonce_store_rejects_invalid_keys_nonces_and_symlink_database(tmp_path) 
 def test_nonce_store_rejects_nonpositive_retention(tmp_path) -> None:
     with pytest.raises(ValueError, match="retention"):
         SQLiteNonceStore(tmp_path / "nonces.sqlite3", retention_seconds=0)
+
+
+def test_nonce_store_exposes_retention_to_btauth_window_guard(tmp_path) -> None:
+    validator = dev_wallet("//NonceValidator")
+    miner = dev_wallet("//NonceMiner")
+    body = b"{}"
+    headers = bt.http_auth.sign(
+        validator,
+        method="POST",
+        path="/v1/translate",
+        body=body,
+        receiver_ss58=miner.hotkey.ss58_address,
+        nonce_ns=time.time_ns(),
+    )
+    store = SQLiteNonceStore(tmp_path / "short.sqlite3", retention_seconds=1.0)
+    authenticator = RequestAuthenticator(
+        self_hotkey_ss58=miner.hotkey.ss58_address,
+        nonce_store=store,
+        max_age_seconds=10.0,
+        allowed_skew_seconds=2.0,
+    )
+
+    assert store.retention == 1.0
+    with pytest.raises(ValueError, match="freshness window"):
+        authenticator.verify(headers, body, method="POST", path="/v1/translate")

@@ -185,7 +185,7 @@ def test_shadow_runner_tool_preserves_the_offline_safety_labels(
         }
     )
     manifest = {
-        "schema": "umi-shadow-rehearsal-bundle/1",
+        "schema": "umi-shadow-rehearsal-bundle/2",
         "translation_weights_active": False,
     }
     monkeypatch.setattr(

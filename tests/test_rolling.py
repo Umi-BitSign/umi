@@ -260,6 +260,11 @@ def test_weight_build_rejects_infeasible_live_maximum_and_checks_quantized_ratio
         state.build_weights(maximum_weight_limit_u16=32_768, **common)
 
     built = state.build_weights(maximum_weight_limit_u16=33_000, **common)
+    assert built.uid_vector == (
+        (1, Fraction(2_200, 4_369)),
+        (2, Fraction(2_169, 4_369)),
+    )
+    assert all(weight.denominator != 2**52 for _, weight in built.uid_vector)
     values = [value for _, value in built.quantized_row]
     assert max(values) * 65_535 <= 33_000 * sum(values)
 

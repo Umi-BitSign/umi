@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import os
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -25,7 +26,11 @@ from .crypto import verify_response_signature
 from .media import inspect_media
 from .policy import ScoringPolicy, activation_equivalence_digest, scoring_policy_hash
 from .protocol import GroundTruthPayload, canonical_json_bytes
-from .shadow import MAX_SHADOW_EVIDENCE_BYTES, run_shadow_rehearsal
+from .shadow import (
+    MAX_SHADOW_EVIDENCE_BYTES,
+    SOURCE_EVIDENCE_MEDIA_TYPE,
+    run_shadow_rehearsal,
+)
 
 _Model = TypeVar("_Model", bound=BaseModel)
 _MAX_POLICY_BYTES = 4 * 1024 * 1024
@@ -192,13 +197,32 @@ def _inspect_media(args: argparse.Namespace) -> dict[str, Any]:
 
 def _verify_rehearsal_bundle(args: argparse.Namespace) -> dict[str, Any]:
     manifest = verify_audit_bundle(args.bundle)
+    source_objects = [
+        item for item in manifest.objects if item.media_type == SOURCE_EVIDENCE_MEDIA_TYPE
+    ]
+    if len(source_objects) != 1:
+        raise ValueError("rehearsal bundle must contain exactly one replay source object")
+    source = source_objects[0]
+    source_bytes = _read_regular_file(
+        args.bundle / "objects" / source.sha256,
+        MAX_SHADOW_EVIDENCE_BYTES,
+    )
+    if len(source_bytes) != source.size_bytes:
+        raise ValueError("rehearsal replay source has the wrong byte length")
+    if hashlib.sha256(source_bytes).hexdigest() != source.sha256:
+        raise ValueError("rehearsal replay source failed SHA-256 verification")
+    with tempfile.TemporaryDirectory(prefix="umi-shadow-replay-") as temporary:
+        replayed = run_shadow_rehearsal(source_bytes, Path(temporary) / "bundle")
+    if canonical_json_bytes(replayed.audit_manifest) != canonical_json_bytes(manifest):
+        raise ValueError("rehearsal bundle does not match independent deterministic replay")
     return {
-        "schema": "umi-shadow-rehearsal-inspection/1",
+        "schema": "umi-shadow-rehearsal-inspection/2",
         "window_id": manifest.window_id,
         "highest_stage": manifest.highest_stage,
         "terminal_classification": manifest.terminal_classification,
         "audit_bundle_bytes": manifest.audit_bundle_bytes,
         "translation_weights_active": False,
+        "deterministic_replay_verified": True,
         "protocol_conformance": False,
         "activation_evidence": False,
     }
@@ -254,7 +278,7 @@ def _parser() -> argparse.ArgumentParser:
 
     bundle = subcommands.add_parser(
         "verify-rehearsal-bundle",
-        help="verify an offline rehearsal bundle's hashes and safety boundary",
+        help="verify and deterministically replay an offline rehearsal bundle",
     )
     bundle.add_argument("--bundle", type=Path, required=True)
     bundle.set_defaults(handler=_verify_rehearsal_bundle)

@@ -41,6 +41,7 @@ from umi.protocol import (
     request_digest,
 )
 from umi.shadow import (
+    CANARY_HIT_REASON,
     NO_CHAIN_REASON,
     SHADOW_REHEARSAL_SCHEMA,
     SHADOW_RESPONSE_SCHEMA,
@@ -50,6 +51,7 @@ from umi.shadow import (
     rehearsal_response_digest,
     run_shadow_rehearsal,
 )
+from umi.tools import _verify_rehearsal_bundle
 from umi.window import QUICKNET_GENESIS_MS, WindowClock
 
 ROUND = 1_000_000
@@ -532,6 +534,7 @@ def test_full_offline_rehearsal_reaches_weight_build_with_only_false_claims(
     run = run_shadow_rehearsal(encoded, tmp_path / "bundle")
 
     assert run.report.terminal_classification == "shadow_rehearsal_no_weight"
+    assert run.report.window_valid is True
     assert run.report.translation_weights_active is False
     assert run.report.protocol_conformance is False
     assert run.report.activation_evidence is False
@@ -547,6 +550,9 @@ def test_full_offline_rehearsal_reaches_weight_build_with_only_false_claims(
     assert run.audit_manifest.stages[-1].reason_code == NO_CHAIN_REASON
     assert run.audit_manifest.audit_release_block == 0
     assert run.manifest_path == tmp_path / "bundle" / "manifest.json"
+
+    verification = _verify_rehearsal_bundle(SimpleNamespace(bundle=tmp_path / "bundle"))
+    assert verification["deterministic_replay_verified"] is True
 
 
 def test_rehearsal_requires_exact_canonical_input_and_an_inactive_policy() -> None:
@@ -615,7 +621,7 @@ def test_rehearsal_rejects_tampered_response_signature(tmp_path) -> None:
         )
 
 
-def test_rehearsal_rejects_a_validly_signed_canary_hit(tmp_path) -> None:
+def test_rehearsal_writes_an_incident_bundle_for_a_validly_signed_canary_hit(tmp_path) -> None:
     evidence, signing_wallets = _fixture()
     attacked = evidence.model_dump(mode="json", by_alias=True)
     canary_reference_by_challenge = {
@@ -640,11 +646,86 @@ def test_rehearsal_rejects_a_validly_signed_canary_hit(tmp_path) -> None:
     assignment["response"]["signature_scheme"] = scheme
     assignment["response"]["signature"] = signature
 
-    with pytest.raises(ValueError, match="canary hit"):
-        run_shadow_rehearsal(
-            canonical_json_bytes(attacked),
-            tmp_path / "canary-hit",
-        )
+    output = tmp_path / "canary-hit"
+    run = run_shadow_rehearsal(canonical_json_bytes(attacked), output)
+
+    assert run.report.terminal_classification == "shadow_rehearsal_window_void"
+    assert run.report.window_valid is False
+    assert run.report.quantized_row == []
+    assert run.audit_manifest.highest_stage == "reveal_and_score"
+    assert run.audit_manifest.reason_codes == [CANARY_HIT_REASON]
+    assert run.audit_manifest.stages[5].reason_code == CANARY_HIT_REASON
+    reveal_objects = run.audit_manifest.stages[4].objects
+    records = [
+        json.loads((output / "objects" / item.sha256).read_bytes()) for item in reveal_objects
+    ]
+    reveal = next(
+        item for item in records if item.get("schema") == "umi-shadow-stage-reveal-score/1"
+    )
+    assert any(item["hit"] is True for item in reveal["canaries"])
+
+    verification = _verify_rehearsal_bundle(SimpleNamespace(bundle=output))
+    assert verification["deterministic_replay_verified"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    (
+        ("oversized_hypothesis", "hypothesis_utf8_limit"),
+        ("unpinned_error", "miner_error_code_unpinned"),
+    ),
+)
+def test_signed_inner_response_failures_score_zero_without_aborting_window(
+    tmp_path,
+    mutation,
+    reason,
+) -> None:
+    evidence, signing_wallets = _fixture()
+    modified = evidence.model_dump(mode="json", by_alias=True)
+    assignment = next(
+        item
+        for item in modified["assignments"]
+        if not next(
+            ground
+            for artifact in modified["batch_artifacts"]
+            for ground in artifact["revealed_ground_truth"]["items"]
+            if ground["challenge_id"] == item["challenge_id"]
+        )["canary"]
+    )
+    payload_record = assignment["response"]["payload"]
+    if mutation == "oversized_hypothesis":
+        payload_record["hypothesis"] = "x" * 4097
+    else:
+        payload_record["status"] = "error"
+        payload_record["hypothesis"] = None
+        payload_record["error_code"] = "not_policy_enumerated"
+    payload = RehearsalResponsePayload.model_validate(payload_record)
+    scheme, signature = sign_response_digest(
+        signing_wallets[assignment["miner_hotkey"]],
+        rehearsal_response_digest(payload),
+    )
+    assignment["response"]["signature_scheme"] = scheme
+    assignment["response"]["signature"] = signature
+
+    output = tmp_path / mutation
+    run = run_shadow_rehearsal(canonical_json_bytes(modified), output)
+
+    assert run.report.window_valid is True
+    reveal_stage = run.audit_manifest.stages[4]
+    reveal_records = [
+        json.loads((output / "objects" / item.sha256).read_bytes()) for item in reveal_stage.objects
+    ]
+    reveal = next(
+        item for item in reveal_records if item.get("schema") == "umi-shadow-stage-reveal-score/1"
+    )
+    score = next(
+        item
+        for item in reveal["scores"]
+        if item["challenge_id"] == assignment["challenge_id"]
+        and item["miner_root"] == assignment["miner_root"]
+    )
+    assert score["score"] == {"numerator": 0, "denominator": 1}
+    assert score["zero_score_reason"] == reason
 
 
 def test_rehearsal_rejects_cross_validator_copy_and_preissued_receipt(tmp_path) -> None:

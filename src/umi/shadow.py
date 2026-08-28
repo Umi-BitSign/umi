@@ -35,6 +35,7 @@ from .artifacts import (
     validate_revealed_batch_shape,
 )
 from .audit_bundle import (
+    SHADOW_INCIDENT_TERMINAL,
     SHADOW_TERMINAL,
     STAGE_IDS,
     AuditBundleManifest,
@@ -92,9 +93,11 @@ from .window import WindowClock, WindowSchedule
 
 SHADOW_REHEARSAL_SCHEMA = "umi-shadow-rehearsal/1"
 SHADOW_RESPONSE_SCHEMA = "umi-shadow-response/1"
-SHADOW_REPORT_SCHEMA = "umi-shadow-rehearsal-report/1"
+SHADOW_REPORT_SCHEMA = "umi-shadow-rehearsal-report/2"
 MAX_SHADOW_EVIDENCE_BYTES = 16 * 1024 * 1024
 NO_CHAIN_REASON = "offline_rehearsal_has_no_finalized_chain_terminal_state"
+CANARY_HIT_REASON = "canary_hit"
+SOURCE_EVIDENCE_MEDIA_TYPE = "application/vnd.umi.shadow-rehearsal-evidence+json"
 
 SignatureHex = Annotated[str, Field(pattern=r"^0x[0-9a-f]{128}$")]
 
@@ -326,7 +329,8 @@ class QuantizedWeightRecord(StrictProtocolModel):
 
 class ShadowRehearsalReport(StrictProtocolModel):
     schema_: Literal[SHADOW_REPORT_SCHEMA] = Field(alias="schema")
-    terminal_classification: Literal[SHADOW_TERMINAL]
+    terminal_classification: Literal[SHADOW_TERMINAL, SHADOW_INCIDENT_TERMINAL]
+    window_valid: bool
     translation_weights_active: Literal[False]
     protocol_conformance: Literal[False]
     activation_evidence: Literal[False]
@@ -349,13 +353,17 @@ class ShadowRehearsalReport(StrictProtocolModel):
     spent_resulting_root: Hex32
     publisher_fault_previous_root: Hex32
     publisher_fault_resulting_root: Hex32
-    quantized_row: Annotated[list[QuantizedWeightRecord], Field(min_length=1)]
+    quantized_row: list[QuantizedWeightRecord]
     limitations: list[NonEmptyText]
 
     @model_validator(mode="after")
     def validate_report(self) -> Self:
         if not self.limitations:
             raise ValueError("offline rehearsal report must state its limitations")
+        if self.window_valid != (self.terminal_classification == SHADOW_TERMINAL):
+            raise ValueError("rehearsal validity and terminal classification disagree")
+        if self.window_valid != bool(self.quantized_row):
+            raise ValueError("only a valid rehearsal window can carry a projected row")
         uids = [item.uid for item in self.quantized_row]
         if uids != sorted(uids) or len(set(uids)) != len(uids):
             raise ValueError("quantized row must be unique and sorted by UID")
@@ -447,10 +455,27 @@ def run_shadow_rehearsal(data: bytes, output_directory: Path) -> ShadowRehearsal
         evidence.window_index
     )
 
+    window_valid = replay.weight_build is not None
+    terminal_classification = SHADOW_TERMINAL if window_valid else SHADOW_INCIDENT_TERMINAL
+    limitations = [
+        "no finalized chain storage or event proofs",
+        "ground-truth ciphertext is hash-bound but not timelock-decrypted",
+        "response hypotheses use rehearsal signatures instead of response timelocks",
+        "committed media metadata is replayed but video bytes are not decoded",
+        "HTTP wire accounting and resource preflight are not integrated",
+        "missing, late, and outer-invalid response dispositions are not replayed",
+        "nonempty publisher-fault classification requires finalized chain evidence",
+        "rolling and registry state starts from the version genesis zero state",
+        "no weight call is built, signed, or submitted",
+        "the bundle is not activation evidence",
+    ]
+    if not window_valid:
+        limitations.append("the canary hit made this rehearsal window void before weight build")
     report = ShadowRehearsalReport.model_validate(
         {
             "schema": SHADOW_REPORT_SCHEMA,
-            "terminal_classification": SHADOW_TERMINAL,
+            "terminal_classification": terminal_classification,
+            "window_valid": window_valid,
             "translation_weights_active": False,
             "protocol_conformance": False,
             "activation_evidence": False,
@@ -474,20 +499,12 @@ def run_shadow_rehearsal(data: bytes, output_directory: Path) -> ShadowRehearsal
             "publisher_fault_previous_root": fault_transition.previous_root.hex(),
             "publisher_fault_resulting_root": fault_state.root.hex(),
             "quantized_row": [
-                {"uid": uid, "value": value} for uid, value in replay.weight_build.quantized_row
+                {"uid": uid, "value": value}
+                for uid, value in (
+                    replay.weight_build.quantized_row if replay.weight_build is not None else ()
+                )
             ],
-            "limitations": [
-                "no finalized chain storage or event proofs",
-                "ground-truth ciphertext is hash-bound but not timelock-decrypted",
-                "response hypotheses use rehearsal signatures instead of response timelocks",
-                "committed media metadata is replayed but video bytes are not decoded",
-                "HTTP wire accounting and resource preflight are not integrated",
-                "missing, late, and outer-invalid response dispositions are not replayed",
-                "nonempty publisher-fault classification requires finalized chain evidence",
-                "rolling and registry state starts from the version genesis zero state",
-                "no weight call is built, signed, or submitted",
-                "the bundle is not activation evidence",
-            ],
+            "limitations": limitations,
         }
     )
     stages = _audit_stages(
@@ -500,15 +517,16 @@ def run_shadow_rehearsal(data: bytes, output_directory: Path) -> ShadowRehearsal
         spent_transition,
         fault_transition,
         report,
+        canonical_json_bytes(evidence),
     )
     manifest_path = write_audit_bundle(
         output_directory,
         scoring_policy_hash=policy_hash,
         software_revisions=_software_revisions(),
         window_id=schedule.window_id,
-        terminal_classification=SHADOW_TERMINAL,
+        terminal_classification=terminal_classification,
         audit_release_block=0,
-        reason_codes=[NO_CHAIN_REASON],
+        reason_codes=list(replay.void_reason_codes or (NO_CHAIN_REASON,)),
         stages=stages,
         maximum_bundle_bytes=policy.limits.maximum_audit_bundle_bytes,
     )
@@ -544,12 +562,20 @@ class _ReplayResult:
     canary_records: tuple[dict[str, Any], ...]
     scored_assignment_count: int
     canary_check_count: int
-    rolling_state: RollingScoreState
-    weight_build: WeightBuild
+    rolling_state: RollingScoreState | None
+    weight_build: WeightBuild | None
+    void_reason_codes: tuple[str, ...]
     assignment_anchor_records: tuple[AssignmentAnchorRecord, ...]
     request_anchor_records: tuple[RequestAnchorRecord, ...]
     response_anchor_records: tuple[ResponseAnchorRecord, ...]
     sealed_records: tuple[SealedResponseRecord, ...]
+
+
+@dataclass(frozen=True)
+class _ValidatedRehearsalResponse:
+    sealed_record: SealedResponseRecord
+    hypothesis: str | None
+    zero_score_reason: str | None
 
 
 def _derive_and_validate_schedule(
@@ -715,6 +741,7 @@ def _replay_assignments(
     }
     score_records: list[dict[str, Any]] = []
     canary_records: list[dict[str, Any]] = []
+    canary_hit = False
     miner_root_by_hotkey = {
         account_id32(item.hotkey): account_id32(item.root) for item in evidence.miners
     }
@@ -750,7 +777,7 @@ def _replay_assignments(
         request_anchor = RequestAnchorRecord(
             auth_evidence=verified_auth,
         )
-        sealed = _validate_rehearsal_response(
+        validated_response = _validate_rehearsal_response(
             assignment,
             digest,
             expected_validator_hotkey=evidence.validator_hotkey,
@@ -758,14 +785,14 @@ def _replay_assignments(
         )
         response_anchor = ResponseAnchorRecord(
             request_leaf=request_anchor.leaf,
-            sealed_response_record=sealed,
+            sealed_response_record=validated_response.sealed_record,
         )
         assignment_anchors.append(assignment_anchor)
         request_anchors.append(request_anchor)
         response_anchors.append(response_anchor)
-        sealed_records.append(sealed)
+        sealed_records.append(validated_response.sealed_record)
 
-        hypothesis = assignment.response.payload.hypothesis
+        hypothesis = validated_response.hypothesis
         if ground_item.canary:
             canary = evaluate_canary(
                 ground_item,
@@ -781,11 +808,12 @@ def _replay_assignments(
                 "score": _fraction_record(canary.score),
                 "threshold": _fraction_record(canary.threshold),
                 "hit": canary.hit,
+                "zero_score_reason": validated_response.zero_score_reason,
                 "trace": canary.trace.to_record() if canary.trace is not None else None,
             }
             canary_records.append(record)
             if canary.hit:
-                raise ValueError("rehearsal canary hit makes the window void")
+                canary_hit = True
             scores_by_batch[assignment.batch_id].append(
                 AssignmentScore(
                     miner_root=assignment.miner_root,
@@ -827,6 +855,7 @@ def _replay_assignments(
                 "stratum": manifest_item.stratum,
                 "metric": ground_item.metric,
                 "score": _fraction_record(score),
+                "zero_score_reason": validated_response.zero_score_reason,
                 "trace": trace_record,
             }
         )
@@ -852,44 +881,51 @@ def _replay_assignments(
         validator_hotkey=evidence.validator_hotkey,
     )
 
-    scored_batches = tuple(
-        ScoredBatch(
-            window_index=evidence.window_index,
-            batch_rank=batch_rank(seed, candidate),
-            pool_leaf=candidate.pool_leaf,
-            challenge_ids=tuple(
-                item.challenge_id for item in artifacts[candidate.batch_id].public_manifest.items
-            ),
-            miner_roots=tuple(
-                sorted(
-                    (item.root for item in panel),
-                    key=account_id32,
-                )
-            ),
-            assignments=tuple(
-                sorted(
-                    scores_by_batch[candidate.batch_id],
-                    key=lambda item: item.key,
-                )
-            ),
+    rolling: RollingScoreState | None = None
+    weights: WeightBuild | None = None
+    void_reason_codes: tuple[str, ...] = ()
+    if canary_hit:
+        void_reason_codes = (CANARY_HIT_REASON,)
+    else:
+        scored_batches = tuple(
+            ScoredBatch(
+                window_index=evidence.window_index,
+                batch_rank=batch_rank(seed, candidate),
+                pool_leaf=candidate.pool_leaf,
+                challenge_ids=tuple(
+                    item.challenge_id
+                    for item in artifacts[candidate.batch_id].public_manifest.items
+                ),
+                miner_roots=tuple(
+                    sorted(
+                        (item.root for item in panel),
+                        key=account_id32,
+                    )
+                ),
+                assignments=tuple(
+                    sorted(
+                        scores_by_batch[candidate.batch_id],
+                        key=lambda item: item.key,
+                    )
+                ),
+            )
+            for candidate in selected
         )
-        for candidate in selected
-    )
-    rolling = RollingScoreState().advance(
-        evidence.window_index,
-        new_batches=scored_batches,
-        rolling_batch_count=evidence.policy.limits.rolling_batch_count,
-        score_max_age_windows=evidence.policy.limits.score_max_age_windows,
-    )
-    uid_by_root = {account_id32(item.root): item.uid for item in evidence.miners}
-    weights = rolling.build_weights(
-        minimum_assigned_clips=evidence.policy.limits.minimum_assigned_clips,
-        minimum_clips_per_stratum=evidence.policy.limits.minimum_clips_per_stratum,
-        quality_floor=evidence.policy.thresholds.quality_floor.fraction,
-        uid_by_root=uid_by_root,
-        minimum_positive_weights=evidence.minimum_positive_weights,
-        maximum_weight_limit_u16=evidence.maximum_weight_limit_u16,
-    )
+        rolling = RollingScoreState().advance(
+            evidence.window_index,
+            new_batches=scored_batches,
+            rolling_batch_count=evidence.policy.limits.rolling_batch_count,
+            score_max_age_windows=evidence.policy.limits.score_max_age_windows,
+        )
+        uid_by_root = {account_id32(item.root): item.uid for item in evidence.miners}
+        weights = rolling.build_weights(
+            minimum_assigned_clips=evidence.policy.limits.minimum_assigned_clips,
+            minimum_clips_per_stratum=evidence.policy.limits.minimum_clips_per_stratum,
+            quality_floor=evidence.policy.thresholds.quality_floor.fraction,
+            uid_by_root=uid_by_root,
+            minimum_positive_weights=evidence.minimum_positive_weights,
+            maximum_weight_limit_u16=evidence.maximum_weight_limit_u16,
+        )
     return _ReplayResult(
         assignment_root=assignment_root,
         request_root=request_root,
@@ -900,6 +936,7 @@ def _replay_assignments(
         canary_check_count=len(canary_records),
         rolling_state=rolling,
         weight_build=weights,
+        void_reason_codes=void_reason_codes,
         assignment_anchor_records=assignment_tuple,
         request_anchor_records=request_tuple,
         response_anchor_records=response_tuple,
@@ -965,7 +1002,7 @@ def _validate_rehearsal_response(
     *,
     expected_validator_hotkey: str,
     policy: ScoringPolicy,
-) -> SealedResponseRecord:
+) -> _ValidatedRehearsalResponse:
     response = assignment.response
     payload = response.payload
     if payload.request_digest != digest:
@@ -980,23 +1017,6 @@ def _validate_rehearsal_response(
         <= (assignment.request.deadline_block)
     ):
         raise ValueError("rehearsal response was recorded outside its block interval")
-    if payload.status == "ok":
-        if payload.received_video_sha256 != assignment.request.video.sha256:
-            raise ValueError("rehearsal response names a different video digest")
-        hypothesis = payload.hypothesis
-        if hypothesis is None:
-            raise ValueError("ok rehearsal response is missing a hypothesis")
-        if len(hypothesis.encode("utf-8")) > policy.limits.maximum_hypothesis_utf8_bytes:
-            raise ValueError("rehearsal hypothesis exceeds the UTF-8 ceiling")
-        if normalized_token_count(hypothesis) > policy.limits.maximum_hypothesis_tokens:
-            raise ValueError("rehearsal hypothesis exceeds the token ceiling")
-        if normalized_grapheme_count(hypothesis) > policy.limits.maximum_hypothesis_graphemes:
-            raise ValueError("rehearsal hypothesis exceeds the grapheme ceiling")
-    else:
-        if payload.error_code not in policy.implementation_pins.rules.miner_error_codes:
-            raise ValueError("rehearsal response uses an unpinned miner error code")
-        if payload.received_video_sha256 not in {None, assignment.request.video.sha256}:
-            raise ValueError("rehearsal error response names a different video digest")
     signature_digest = rehearsal_response_digest(payload)
     if not verify_response_signature(
         signature_digest,
@@ -1006,7 +1026,7 @@ def _validate_rehearsal_response(
     ):
         raise ValueError("rehearsal response signature does not verify")
     payload_bytes = canonical_json_bytes(payload)
-    return SealedResponseRecord.model_validate(
+    sealed_record = SealedResponseRecord.model_validate(
         {
             "disposition": "sealed",
             "receipt_metadata": {
@@ -1019,6 +1039,33 @@ def _validate_rehearsal_response(
             "signature": response.signature,
             "received_bytes_sha256": None,
         }
+    )
+    hypothesis: str | None = None
+    zero_score_reason: str | None = None
+    if payload.status == "ok":
+        candidate = payload.hypothesis
+        if candidate is None:
+            raise RuntimeError("strict rehearsal response lost its ok hypothesis")
+        if payload.received_video_sha256 != assignment.request.video.sha256:
+            zero_score_reason = "received_video_digest_mismatch"
+        elif len(candidate.encode("utf-8")) > policy.limits.maximum_hypothesis_utf8_bytes:
+            zero_score_reason = "hypothesis_utf8_limit"
+        elif normalized_token_count(candidate) > policy.limits.maximum_hypothesis_tokens:
+            zero_score_reason = "hypothesis_token_limit"
+        elif normalized_grapheme_count(candidate) > policy.limits.maximum_hypothesis_graphemes:
+            zero_score_reason = "hypothesis_grapheme_limit"
+        else:
+            hypothesis = candidate
+    elif payload.error_code not in policy.implementation_pins.rules.miner_error_codes:
+        zero_score_reason = "miner_error_code_unpinned"
+    elif payload.received_video_sha256 not in {None, assignment.request.video.sha256}:
+        zero_score_reason = "received_video_digest_mismatch"
+    else:
+        zero_score_reason = payload.error_code
+    return _ValidatedRehearsalResponse(
+        sealed_record=sealed_record,
+        hypothesis=hypothesis,
+        zero_score_reason=zero_score_reason,
     )
 
 
@@ -1072,6 +1119,7 @@ def _audit_stages(
     spent_transition: Any,
     fault_transition: Any,
     report: ShadowRehearsalReport,
+    source_evidence: bytes,
 ) -> tuple[StageInput, ...]:
     public_artifacts = [
         {
@@ -1151,29 +1199,64 @@ def _audit_stages(
             "spent_transition": _spent_transition_record(spent_transition),
             "publisher_fault_transition": _fault_transition_record(fault_transition),
         },
-        {
+    )
+    stages: list[StageInput] = []
+    for index, (stage_id, record) in enumerate(zip(STAGE_IDS[:5], stage_records, strict=True)):
+        objects = [
+            BundleObjectInput(
+                data=canonical_json_bytes(record),
+                media_type="application/json",
+            )
+        ]
+        if index == 0:
+            objects.append(
+                BundleObjectInput(
+                    data=source_evidence,
+                    media_type=SOURCE_EVIDENCE_MEDIA_TYPE,
+                )
+            )
+        if index == 4 and replay.weight_build is None:
+            objects.append(
+                BundleObjectInput(
+                    data=canonical_json_bytes(report),
+                    media_type="application/json",
+                )
+            )
+        stages.append(StageInput(stage_id=stage_id, objects=tuple(objects)))
+
+    if replay.weight_build is not None and replay.rolling_state is not None:
+        weight_record = {
             "schema": "umi-shadow-stage-weight/1",
             "rolling_queue": [_scored_batch_record(item) for item in replay.rolling_state.batches],
             "weight_build": _weight_build_record(replay.weight_build),
             "report": report.model_dump(mode="json", by_alias=True),
-        },
-    )
-    stages = [
-        StageInput(
-            stage_id=stage_id,
-            objects=(
-                BundleObjectInput(
-                    data=canonical_json_bytes(record),
-                    media_type="application/json",
+        }
+        stages.append(
+            StageInput(
+                stage_id=STAGE_IDS[5],
+                objects=(
+                    BundleObjectInput(
+                        data=canonical_json_bytes(weight_record),
+                        media_type="application/json",
+                    ),
                 ),
-            ),
+            )
         )
-        for stage_id, record in zip(STAGE_IDS[:6], stage_records, strict=True)
-    ]
+        terminal_reason = NO_CHAIN_REASON
+    else:
+        if len(replay.void_reason_codes) != 1:
+            raise RuntimeError("a void rehearsal must have exactly one canonical reason")
+        terminal_reason = replay.void_reason_codes[0]
+        stages.append(
+            StageInput(
+                stage_id=STAGE_IDS[5],
+                not_reached_reason=terminal_reason,
+            )
+        )
     stages.append(
         StageInput(
             stage_id=STAGE_IDS[6],
-            not_reached_reason=NO_CHAIN_REASON,
+            not_reached_reason=terminal_reason,
         )
     )
     return tuple(stages)
@@ -1262,11 +1345,13 @@ def _software_revisions() -> dict[str, str]:
 
 
 __all__ = [
+    "CANARY_HIT_REASON",
     "MAX_SHADOW_EVIDENCE_BYTES",
     "NO_CHAIN_REASON",
     "SHADOW_REHEARSAL_SCHEMA",
     "SHADOW_REPORT_SCHEMA",
     "SHADOW_RESPONSE_SCHEMA",
+    "SOURCE_EVIDENCE_MEDIA_TYPE",
     "QuantizedWeightRecord",
     "RehearsalAssignment",
     "RehearsalAuthRecord",

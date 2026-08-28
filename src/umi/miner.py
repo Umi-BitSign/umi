@@ -441,6 +441,7 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         translator=load_translator(
             args.translator,
             maximum_concurrency=limits.maximum_inference_concurrency,
+            allow_synchronous=args.allow_unsafe_sync_translator,
         ),
         video_fetcher=fetcher,
         allowed_validator_hotkeys=frozenset(args.validator_hotkey),
@@ -457,6 +458,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hotkey", required=True)
     parser.add_argument("--wallet-path", default="~/.bittensor/wallets")
     parser.add_argument("--translator", required=True, help="trusted module:callable backend")
+    parser.add_argument(
+        "--allow-unsafe-sync-translator",
+        action="store_true",
+        help="allow a synchronous backend whose hung worker thread cannot be terminated",
+    )
     parser.add_argument("--validator-hotkey", action="append", required=True)
     parser.add_argument("--video-host", action="append", required=True)
     parser.add_argument(

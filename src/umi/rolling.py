@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Literal
@@ -22,6 +23,47 @@ def _score(value: Fraction) -> Fraction:
     if not 0 <= value <= 1:
         raise ValueError("assignment score must be between zero and one")
     return value
+
+
+def _clip_to_max_weight_exact(
+    weights: Sequence[Fraction],
+    limit: Fraction,
+) -> tuple[Fraction, ...]:
+    """Redistribute clipped mass with exact water-filling arithmetic."""
+
+    if not weights or any(not isinstance(weight, Fraction) or weight <= 0 for weight in weights):
+        raise ValueError("weight clipping requires positive exact fractions")
+    if not isinstance(limit, Fraction) or not 0 < limit <= 1:
+        raise ValueError("maximum weight limit must be an exact unit fraction")
+    total = sum(weights, Fraction(0, 1))
+    if total <= 0:
+        raise ValueError("weight clipping requires positive total weight")
+    normalized = tuple(weight / total for weight in weights)
+    count = len(normalized)
+    if count * limit < 1:
+        raise ValueError("maximum weight limit is infeasible for the destination count")
+    if count * limit == 1:
+        return (Fraction(1, count),) * count
+    if max(normalized) <= limit:
+        return normalized
+
+    ordered = sorted(normalized)
+    prefix = Fraction(0, 1)
+    for uncapped_count in range(1, count):
+        prefix += ordered[uncapped_count - 1]
+        capped_count = count - uncapped_count
+        denominator = 1 - limit * capped_count
+        if denominator <= 0:
+            continue
+        cutoff = limit * prefix / denominator
+        if ordered[uncapped_count - 1] <= cutoff <= ordered[uncapped_count]:
+            clipped = tuple(min(weight, cutoff) for weight in normalized)
+            clipped_total = sum(clipped, Fraction(0, 1))
+            result = tuple(weight / clipped_total for weight in clipped)
+            if max(result) > limit or sum(result, Fraction(0, 1)) != 1:
+                raise RuntimeError("exact maximum-weight clipping did not converge")
+            return result
+    raise RuntimeError("exact maximum-weight clipping could not find a cutoff")
 
 
 @dataclass(frozen=True)
@@ -324,18 +366,17 @@ def _build_weights_from_scores(
     resolved_total = sum((weight for _, weight in resolved), Fraction(0, 1))
     uid_vector = tuple(sorted((uid, weight / resolved_total) for uid, weight in resolved))
     uids = [uid for uid, _ in uid_vector]
-    float_weights = [float(weight) for _, weight in uid_vector]
-    from bittensor.intents.weights import clip_to_max_weight, normalize
+    from bittensor.intents.weights import normalize
 
     if maximum_weight_limit_u16 < U16_MAX:
-        float_weights = clip_to_max_weight(
-            float_weights,
-            maximum_weight_limit_u16 / U16_MAX,
+        clipped = _clip_to_max_weight_exact(
+            tuple(weight for _, weight in uid_vector),
+            Fraction(maximum_weight_limit_u16, U16_MAX),
         )
-        uid_vector = tuple(
-            (uid, Fraction.from_float(weight))
-            for uid, weight in zip(uids, float_weights, strict=True)
-        )
+        uid_vector = tuple((uid, weight) for uid, weight in zip(uids, clipped, strict=True))
+    # The exact pre-quantization vector ends here. The pinned chain client owns
+    # the final IEEE-754 conversion and u16 encoding boundary.
+    float_weights = [float(weight) for _, weight in uid_vector]
     quantized_uids, quantized_values = normalize(uids, float_weights)
     quantized = tuple(zip(quantized_uids, quantized_values, strict=True))
     if len(quantized) < minimum_positive_weights:

@@ -10,6 +10,10 @@ from umi.protocol import Video
 from umi.video import HttpVideoFetcher, VideoFetchError
 
 
+async def public_resolver(_hostname: str, _port: int) -> tuple[str, ...]:
+    return ("93.184.216.34",)
+
+
 def descriptor(body: bytes, *, url: str = "https://objects.example/opaque") -> Video:
     return Video.model_validate(
         {
@@ -27,6 +31,7 @@ def fetcher(handler) -> HttpVideoFetcher:
         maximum_clip_size_bytes=32,
         timeout_seconds=5,
         transport=httpx.MockTransport(handler),
+        resolver=public_resolver,
     )
 
 
@@ -35,7 +40,7 @@ async def test_video_is_streamed_and_verified_exactly() -> None:
     body = b"video bytes"
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "objects.example"
+        assert request.url.host == "93.184.216.34"
         return httpx.Response(
             200,
             headers={
@@ -84,6 +89,7 @@ async def test_video_rejects_oversized_response_headers_before_body() -> None:
         maximum_http_header_bytes=64,
         timeout_seconds=5,
         transport=httpx.MockTransport(handler),
+        resolver=public_resolver,
     )
     with pytest.raises(VideoFetchError, match="headers exceed"):
         await bounded.fetch(descriptor(body))
@@ -114,6 +120,7 @@ async def test_video_declared_or_streamed_oversize_aborts() -> None:
                 content=body,
             )
         ),
+        resolver=public_resolver,
     )
     with pytest.raises(VideoFetchError, match="declared video size"):
         await streaming_fetcher.fetch(descriptor(body))
@@ -159,6 +166,7 @@ async def test_nonstandard_video_port_must_be_explicitly_allowlisted() -> None:
                 content=body,
             )
         ),
+        resolver=public_resolver,
     )
     assert await custom.fetch(descriptor(body, url="https://objects.example:8443/opaque")) == body
 
@@ -187,6 +195,87 @@ async def test_video_fetch_timeout_is_total_not_per_chunk() -> None:
                 stream=SlowStream(),
             )
         ),
+        resolver=public_resolver,
     )
     with pytest.raises(VideoFetchError, match="total deadline"):
         await slow.fetch(descriptor(body))
+
+
+@pytest.mark.asyncio
+async def test_video_fetch_pins_public_dns_result_and_preserves_https_authority() -> None:
+    body = b"video"
+
+    async def resolver(hostname: str, port: int) -> tuple[str, ...]:
+        assert (hostname, port) == ("objects.example", 443)
+        return ("93.184.216.34",)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "93.184.216.34"
+        assert request.headers["host"] == "objects.example"
+        assert request.extensions["sni_hostname"] == "objects.example"
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "video/mp4"},
+            content=body,
+        )
+
+    pinned = HttpVideoFetcher(
+        allowed_hosts=frozenset({"objects.example"}),
+        maximum_clip_size_bytes=32,
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+        resolver=resolver,
+    )
+    assert await pinned.fetch(descriptor(body)) == body
+
+
+@pytest.mark.asyncio
+async def test_video_fetch_timeout_includes_hostname_resolution() -> None:
+    body = b"video"
+    called = False
+
+    async def slow_resolver(_hostname: str, _port: int) -> tuple[str, ...]:
+        await asyncio.sleep(0.05)
+        return ("93.184.216.34",)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, content=body)
+
+    pinned = HttpVideoFetcher(
+        allowed_hosts=frozenset({"objects.example"}),
+        maximum_clip_size_bytes=32,
+        timeout_seconds=0.01,
+        transport=httpx.MockTransport(handler),
+        resolver=slow_resolver,
+    )
+    with pytest.raises(VideoFetchError, match="total deadline"):
+        await pinned.fetch(descriptor(body))
+    assert called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ("127.0.0.1", "10.0.0.1", "::1", "169.254.1.1"))
+async def test_video_fetch_rejects_nonpublic_dns_results_before_connect(address: str) -> None:
+    body = b"video"
+    called = False
+
+    async def resolver(_hostname: str, _port: int) -> tuple[str, ...]:
+        return (address,)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, content=body)
+
+    pinned = HttpVideoFetcher(
+        allowed_hosts=frozenset({"objects.example"}),
+        maximum_clip_size_bytes=32,
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+        resolver=resolver,
+    )
+    with pytest.raises(VideoFetchError, match="non-public"):
+        await pinned.fetch(descriptor(body))
+    assert called is False

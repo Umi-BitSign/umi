@@ -6,7 +6,6 @@ import hashlib
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from math import floor
 from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, Field, model_validator
@@ -270,7 +269,7 @@ def verify_availability_certificate(
         ):
             raise ValueError("availability signature does not verify")
         valid_signers.add(account)
-    quorum = max(3, floor(2 * validator_count / 3) + 1)
+    quorum = max(3, (2 * validator_count) // 3 + 1)
     if len(valid_signers) < quorum:
         raise ValueError("availability certificate does not meet quorum")
 
@@ -383,8 +382,8 @@ def candidate_pool_root(candidates: Sequence[CandidateBatch]) -> bytes:
 
 
 def selection_seed(drand_signature: bytes, pool_root: str | bytes) -> bytes:
-    if not isinstance(drand_signature, bytes) or not drand_signature:
-        raise ValueError("verified drand signature bytes must not be empty")
+    if not isinstance(drand_signature, bytes) or len(drand_signature) != 48:
+        raise ValueError("verified Quicknet signature must be exactly 48 bytes")
     return sha256_domain(
         b"umi-select-v2\0",
         drand_signature,
