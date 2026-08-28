@@ -1,8 +1,8 @@
 # Contributing to UMI
 
-UMI is open for implementation review and component testing. Translation weights
-remain inactive. A local run, test result, or rehearsal bundle is not activation
-evidence.
+UMI is licensed under Apache-2.0 and open for implementation review and component
+testing. Translation weights remain inactive. A local run, test result, or
+rehearsal bundle is not activation evidence.
 
 ## Set up the repository
 

@@ -259,3 +259,7 @@ umi-validator replay --bundle component-runs/run-001
 make check
 python -m pip wheel . --no-deps --wheel-dir dist
 ```
+
+## License
+
+UMI is licensed under the [Apache License 2.0](LICENSE).

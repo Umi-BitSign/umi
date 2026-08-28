@@ -7,6 +7,8 @@ name = "umi-subnet"
 version = "0.1.0"
 description = "Trust-minimized translation protocol for Bittensor SN78"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10,<3.15"
 dependencies = [
   "bittensor==11.1.0",
