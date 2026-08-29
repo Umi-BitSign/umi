@@ -42,6 +42,7 @@ def scoring_environment() -> dict[str, str]:
         "python_version": platform.python_version(),
         "unicode_data_version": unicodedata.unidata_version,
         "regex_distribution_version": version("regex"),
+        "bittensor_distribution_version": version("bittensor"),
         "scoring_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     }
 

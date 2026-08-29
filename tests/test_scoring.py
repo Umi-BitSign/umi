@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 from fractions import Fraction
+from importlib.metadata import version
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -19,10 +20,19 @@ from umi.scoring import (
     score_cer_with_trace,
     score_wer,
     score_wer_with_trace,
+    scoring_environment,
     utility_score,
     weighted_accuracy,
     weighted_accuracy_with_trace,
 )
+
+
+class ScoringEnvironmentTests(unittest.TestCase):
+    def test_fingerprints_bittensor_chain_encoding_dependency(self) -> None:
+        self.assertEqual(
+            scoring_environment()["bittensor_distribution_version"],
+            version("bittensor"),
+        )
 
 
 class NormalizationTests(unittest.TestCase):
