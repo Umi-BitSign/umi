@@ -24,7 +24,7 @@
 
 \title{\textbf{bitsign MVP} \\ \large Community Pilot Plan and Capability Gates}
 \author{}
-\date{Draft v0.8, 22 August 2026}
+\date{Draft v0.9, 29 August 2026}
 
 \begin{document}
 
@@ -141,21 +141,19 @@ buffers and streaming inference require separate evaluation.
   \item A framing guide that keeps the face, upper body, and both hands visible.
   \item Camera capture, clip review, reshoot, upload progress, cancel, and clear error
         states.
-  \item Returned English text, optional on-device speech, retry, discard, and simple
-        result feedback.
-  \item A settings screen showing app and model versions plus a data-deletion contact.
+  \item Returned English text, optional on-device speech, retry, discard, and an
+        optional local text edit.
+  \item A settings screen showing app and model versions, consent status when
+        applicable, and an in-app account-deletion action with status tracking.
   \item VoiceOver labels, Dynamic Type, sufficient contrast, and visual equivalents
         for every status communicated by sound.
 \end{itemize}
 
-Outside a consented study, categorical feedback remains on the device for the current
-session and is discarded with the result. It is not linked or published. The pilot may
-retain only the rating, an opaque participant code, task number, and app and model
-versions for 90 days after the final session. The code key is stored separately;
-withdrawal deletes linked feedback before aggregate publication, and only aggregate
-feedback is published. Retaining a correction, clip, or linked result requires a
-separate per-clip opt-in protocol that states its purpose, retention, access,
-withdrawal, and deletion rules.
+Outside a separately consented pilot or research protocol, ordinary Communicate offers
+only a local text edit. It remains in memory for the current app session and is
+discarded with the result. There is no ordinary rating or feedback endpoint. The
+closed pilot uses the evidence protocol in Section~\ref{sec:pilotdata}; ordinary
+Communicate use cannot be converted into pilot evidence after capture.
 
 \subsection{Capability boundary}
 
@@ -163,9 +161,9 @@ The pilot covers ASL-to-English output from short clips only within the frozen
 check-in scope list. It excludes medical, legal, financial, emergency, and other
 high-consequence communication. It also excludes unrestricted continuous translation,
 reverse sign generation, public App Store release, Android, and enterprise
-administration. Research data collection is excluded from pilot task flows and pilot
-sessions. Any later research study uses a separate informed-consent protocol and
-recruits separately from the pilot.
+administration. The pilot collects only the evaluation evidence defined in its
+separate consent and never training data. Any later research study uses another
+informed-consent protocol and recruits separately from the pilot.
 
 \section{Public Commitments}
 
@@ -314,12 +312,51 @@ technical review only and produces a change or stop decision.
 
 \section{Closed Pilot}
 
-Recruit 8 to 12 Deaf or hard-of-hearing ASL signers for a structured usability study.
+Recruit 8 to 12 Deaf or hard-of-hearing adult ASL signers, age 18 or older, for a
+structured usability study. Minor participation is outside this protocol.
 Each participant uses the build in three predefined, low-stakes tasks that match the
 capability label. At least two English-reading staff partners who do not know ASL are
 assigned as evenly as the sample permits. Partners do not see the task prompt,
 intended message, or reference translation. The participant's usual communication
 method remains available throughout each session.
+
+\subsection{Pilot evidence and consent}
+\label{sec:pilotdata}
+
+Reviewers need the source clip and exact returned output, so the pilot uses a data
+class separate from ordinary Communicate and from training contributions. Enrollment
+consent covers the three tasks, reviewer and incident access, withdrawal, aggregate
+publication, and the retention schedule. Before each task upload, the participant
+confirms pilot-evidence use; declining skips that task.
+
+The app uploads with \code{purpose=pilot\_evaluation} to a dedicated private bucket.
+The restricted record stores an opaque participant code, task id, clip digest and
+object key, exact output, model and configuration versions, ratings, review results,
+and timestamps. An ordinary Communicate upload cannot be copied or promoted into this
+store. Pilot evidence is excluded from training and the frozen model evaluation.
+
+Raw clips and linked exact outputs are deleted by the earlier of 30 days after final
+adjudication and 45 days after upload. Linked ratings are deleted on withdrawal and
+otherwise by the earlier of 90 days after the final session and 120 days after
+collection. The code key is held separately, and only aggregate, de-identified counts
+may remain in the report. Two named Deaf ASL-fluent reviewers
+receive time-limited access, and every access is audited. A retention miss,
+unauthorized access, or loss of withdrawal control pauses the pilot.
+
+Pilot capture and upload are foreground-only and have no offline queue. A protected,
+backup-excluded local clip is deleted once its upload is accepted or when the task is
+declined, cancelled, withdrawn, or abandoned. Reviewer downloads follow the same
+local protection and are removed on submission, expiry, permission revocation, or
+launch cleanup.
+
+The access audit contains actor id, object or review id, time, action, and outcome, but
+no clip or transcript content. It is retained through the later of 90 days after the
+final session and closure of a related incident, subject to an absolute 365-day cap
+from the event. Withdrawal does not erase this minimal security record, and the
+enrollment consent states that exception. The app
+uses an inactive-scene privacy cover but cannot prevent a reviewer from taking an iOS
+system screenshot; reviewer terms prohibit screenshots and the consent names this
+residual device risk.
 
 Measure:
 
@@ -344,8 +381,8 @@ output against the source clip and the task's predeclared intended message. The
 primary serious-error count uses the first returned output for each task; retry
 outputs are reported separately. The report gives raw participant, task, and output
 counts alongside percentages and ranges showing statistical uncertainty. The pilot
-protocol names reviewer access and the clip-deletion schedule; its clips remain
-excluded from training and the frozen model evaluation.
+protocol follows Section~\ref{sec:pilotdata}; its clips remain excluded from training
+and the frozen model evaluation.
 
 The task-completion bar is at least 70\% without facilitator rescue. The reuse bar is
 at least 75\% of participants choosing the build again in the target setting. The
@@ -408,8 +445,9 @@ tasks, and stop conditions. & Proceed when R1 passes. \\
 2. Model proof & Provenance and deployment-eligibility record, frozen evaluation,
 runtime benchmark, and capability label. & Continue with a qualifying label, change
 the model, or stop. \\
-3. Vertical slice & Accessible TestFlight build connected to the live Rust inference
-service. & Proceed when R3 through R5 pass. \\
+3. Pilot candidate & Accessible TestFlight build connected to the live inference
+service, with isolated participant and reviewer evidence flows. & Proceed when R3
+through R5 pass on this exact build. \\
 4. Closed pilot & Aggregate task, quality, timing, usefulness, and trust results. &
 Continue, constrain, change, or stop. \\
 5. Public report & Capability label, evaluation method, aggregate results, known
@@ -521,15 +559,18 @@ than two serious confusions.
 
 \subsection{Runtime and data handling}
 
-Short clips upload directly to the service and use ephemeral processing. Durable clip
-storage, background jobs, or extra platform services are added only when measured
-payload size or request duration requires them. A GPU runtime is used when the model
-requires it; a CPU deployment must clear the same release gates.
+Ordinary Communicate and pilot-evidence clips use foreground upload. Contribute clips
+use their separate consented store and may use background upload. A GPU runtime is used
+when the approved model and measured threshold require it; a CPU deployment must clear
+the same release gates.
 
 Routine clips are deleted after successful inference and within 24 hours after
-cancellation, timeout, or failure. Deletion tests cover on-device temporary files,
-API storage, runtime caches, queues, provider logs, and crash analytics, or record that
-a layer retains no clip material.
+cancellation, timeout, or failure. Server tests cover API storage, runtime caches,
+queues, provider logs, and crash analytics, or record that a layer retains no clip
+material. Separate iOS tests cover temporary and queued files, backup exclusion,
+Keychain state, and in-memory results. No server test claims to delete a device file.
+Pilot evidence follows the 30-day and 90-day limits in
+Section~\ref{sec:pilotdata} and has a separate retention drill.
 
 Inference telemetry uses opaque request identifiers and may record model version,
 input size, timing, status, and coarse failure code. It excludes video, raw frames,

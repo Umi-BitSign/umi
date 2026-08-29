@@ -8,13 +8,12 @@
 \usepackage{enumitem}
 \usepackage{parskip}
 \usepackage[hidelinks]{hyperref}
-\usepackage{xcolor}
 
-\newcommand{\open}[1]{\textcolor{red!60!black}{\textbf{Open:} #1}}
+\newcommand{\code}[1]{\texttt{#1}}
 
 \title{\textbf{bitsign MVP} \\ \large Engineering \& Product Design}
 \author{Product and Engineering Draft}
-\date{Draft v0.3 --- August 2026}
+\date{Draft v0.4, 29 August 2026}
 
 \begin{document}
 
@@ -24,7 +23,9 @@
 \noindent The bitsign MVP consists of a Rust backend deployed on Cloudflare, a
 replaceable reference translation model, and an iOS application for near-real-time
 sign-to-English inference. A separate, explicitly consented contribution workflow
-collects structured feedback and training samples. The initial scope is narrow:
+collects blind reviews and training samples. Ordinary communication offers only a
+local, in-memory text edit; ratings or corrections leave the device only in a
+separately consented pilot or research flow. The initial scope is narrow:
 demonstrate an end-to-end communication path, test whether signing users find it
 useful, and establish measurable quality, privacy, security, and accessibility
 gates for further evaluation.
@@ -37,11 +38,11 @@ gates for further evaluation.
 The MVP exists to prove three things, in order of importance:
 
 \begin{enumerate}[nosep]
-  \item \textbf{Demand} --- Deaf and signing users want this product and will use it.
-  \item \textbf{The data loop} --- contributors will provide explicitly consented,
+  \item \textbf{Demand}: Deaf and signing users want this product and will use it.
+  \item \textbf{The data loop}: contributors will provide explicitly consented,
         rights-cleared samples and blind reviews, producing a continuously improving
         corpus for evaluation and model development.
-  \item \textbf{The serving path} --- a working end-to-end demonstration (camera
+  \item \textbf{The serving path}: a working end-to-end demonstration (camera
         $\to$ inference $\to$ text/voice) meets defined performance, privacy, and
         accessibility gates.
 \end{enumerate}
@@ -50,20 +51,23 @@ The translation model is replaceable from day one (\S\ref{sec:model}). Every mod
 version carries a capability label based on a frozen evaluation suite and ASL-fluent
 human review. The initial label is \emph{technical prototype}.
 
-\subsection{Release gates}
+\subsection{Release boundaries}
 
-Two release gates can be prepared in parallel:
+Three releases can be prepared in parallel but advance independently:
 
 \begin{description}[nosep]
-  \item[Technical evaluation.] The app and backend must pass end-to-end,
+  \item[Internal vertical slice.] The app and backend must pass end-to-end,
         performance, privacy, security, and accessibility tests with internal
         testers.
-  \item[External evaluation.] The build must have a frozen capability label,
+  \item[Contribution build.] Training collection requires its own consent,
+        curriculum, access, retention, withdrawal, and deletion gates.
+  \item[Closed pilot.] The build must have a frozen capability label,
         ASL-fluent reviewer coverage, clear participant consent, and a documented
         stop condition before use with external participants.
 \end{description}
 
-External evaluation begins only after both gates pass.
+Completing one release does not authorize the next. The exact packages and checks are
+defined in \code{IMPLEMENTATION\_PLAN.md}.
 
 \section{Product Surface}
 
@@ -80,9 +84,10 @@ available. Signing avatars and multilingual routing are out of scope.
 MVP capture model: short buffered clips (2--6\,s) submitted continuously, rendered as
 a rolling transcript. True streaming inference is a post-MVP optimization; the UX
 should feel live even if the implementation is clip-based.
-Every transcript is displayed under the build's current capability label with a
-correction affordance (thumbs up/down + optional corrected text). Corrections enter
-evaluation data only after explicit consent.
+Every transcript is displayed under the build's current capability label with an
+optional local text edit. Ordinary Communicate has no rating or feedback endpoint;
+the edit disappears with the in-memory result unless a separate pilot or research
+protocol is active.
 
 \subsection{Contribute (labeler mode)}
 Contribute has a separate consent flow stating purpose (model training and
@@ -93,11 +98,11 @@ consent.
 Two task types form a blind semantic round trip:
 
 \begin{description}[nosep]
-  \item[Task A --- meaning $\to$ sign.] Contributor receives a text prompt
+  \item[Task A, meaning $\to$ sign.] Contributor receives a text prompt
         (``express this naturally in ASL''), records themselves signing, submits.
         The prompt is treated as a committed script: hashed at issuance, never shown
         to Task~B reviewers.
-  \item[Task B --- sign $\to$ meaning.] Reviewer receives \emph{only} a video (never
+  \item[Task B, sign $\to$ meaning.] Reviewer receives \emph{only} a video (never
         the prompt) and writes what it means. Each candidate clip is reviewed by
         $k$ independent reviewers ($k=3$ at MVP).
 \end{description}
@@ -146,9 +151,9 @@ evaluation, model development, consent enforcement, and deletion:
         allowing valid language variation.
   \item \textbf{Consent and privacy.} Contribute's consent protocol
         covers training use explicitly. Communicate video is ephemeral (deleted
-        after inference and excluded from training) unless the user explicitly opts
-        a clip in. A de-identification pass runs before any corpus export. Deletion
-        requests propagate to derived artifacts.
+        after inference and excluded from training). It cannot be converted into a
+        contribution. A de-identification pass runs before any corpus export.
+        Deletion requests propagate to derived artifacts.
   \item \textbf{Rights provenance per clip:} script id and hash, contributor
         account, consent record version, capture timestamps, device class, reviewer
         set, consensus scores, and outcome. Skeletal pose extraction can run offline
@@ -172,8 +177,9 @@ training path uses the explicitly consented corpus produced by Contribute.
   \item \textbf{Isolated-sign path.} A small
         keypoint-based classifier (MediaPipe landmarks) for fingerspelling and a
         bounded vocabulary of isolated signs, trained on \emph{our own consented
-        captures} --- the data requirement is small (26 handshapes + top-$N$ signs
-        at 10 variants each is Contribute's first script set), and the model is fast
+        captures}. The launch candidate requires at least 20 accepted clips per
+        approved class. Its class list is a community-approved versioned artifact,
+        not an engineering placeholder. The model is fast
         enough to serve at the edge. It is the first candidate for the
         \emph{bounded vocabulary} capability label.
   \item \textbf{Continuous translation.} Fine-tune on the consented corpus as it
@@ -189,50 +195,56 @@ training path uses the explicitly consented corpus produced by Contribute.
         surface.
 \end{enumerate}
 
-\open{benchmark candidate reference models on the frozen internal test set.}
+A fixture model supports local and CI integration but makes no translation claim.
+The owner selects a real candidate only after documenting its exact revision, weight
+hash, provenance, license, preprocessing, decoding, hardware, and permitted release
+scope. The frozen evaluation then determines whether it can leave internal use.
 
 \section{Backend Architecture}
 \label{sec:backend}
 
 Rust services use a shared Axum application pattern across two deployment planes.
 
-\subsection{Control plane --- Cloudflare}
+\subsection{Control plane: Cloudflare}
 
 \begin{itemize}[nosep]
-  \item \textbf{Worker front door} --- routing, auth verification, rate limiting,
-        request metadata, and dispatch to application containers.
-  \item \textbf{API service} --- Axum app on Cloudflare Containers via
+  \item \textbf{Worker front door}: streaming request limits, coarse IP rate
+        limiting, request metadata, and dispatch to the API container. Authentication
+        and authorization stay in the API.
+  \item \textbf{API service}: Axum app on Cloudflare Containers via
         a platform-binding adapter: accounts, sessions, task issuance and
         assignment, consensus scoring, consent records, and admin/review endpoints.
-  \item \textbf{Storage} --- R2 for video (upload via presigned URLs directly from
-        the app; Communicate objects carry a TTL lifecycle rule implementing the
-        ephemeral-processing guarantee); D1 for relational state (accounts, audit
-        entries, scripts, tasks, reviews, consensus, model registry) reached through the
-        command channel; KV for sessions/config/feature flags; Queues for
-        asynchronous work (consensus evaluation, corpus export, deletion
-        propagation, notification fan-out).
+  \item \textbf{Storage}: R2 for video (upload via presigned URLs directly from
+        the app; inline and hourly Communicate deletion are backed by a bucket
+        lifecycle rule); D1 for relational state (accounts, audit
+        entries, sessions, scripts, tasks, reviews, consensus, model registry); KV for
+        non-sensitive configuration and feature flags; Queues for
+        asynchronous work (consensus evaluation, corpus export, and deletion
+        propagation).
+  \item \textbf{Binding access}: the container reaches D1, R2, KV, and Queues
+        through narrow, versioned Worker outbound handlers. No handler exposes
+        arbitrary SQL or bucket access, and none is publicly routable.
   \item \textbf{Audit log} is append-only, with idempotency keys on task issuance,
         submission, review, consent, and deletion mutations.
 \end{itemize}
 
-\subsection{Inference plane --- same code, GPU where needed}
+\subsection{Inference plane: one contract, runtime chosen by evidence}
 
-Cloudflare Containers are CPU-class; the continuous VL model wants a GPU. Rather
-than duplicate application logic, the inference service uses the same Axum interface
-on a GPU-capable runtime:
+The Rust API resolves the active model and calls one language-neutral inference HTTP
+contract. The Worker does not choose a model. The checked-in fixture runtime is Rust;
+an approved real runtime may use Rust or Python:
 
 \begin{itemize}[nosep]
-  \item \textbf{Primary: Cloud Run GPU} --- the inference service is a second
-        Axum app (clip in $\to$ transcript + confidence out), deployed to Cloud Run
-        with an L4-class GPU and scale-to-zero during MVP. Planned evaluation
-        sessions pre-warm the service to avoid cold-start delays.
-  \item \textbf{Secondary: CPU path on Cloudflare Containers} for the
-        isolated-sign/keypoint model (\S\ref{sec:model} item 2), which is light
-        enough to run at the edge.
-  \item The Worker front door routes inference requests to whichever plane serves
-        the requested model version; the model registry records where each version
-        lives and its rights class. \open{benchmark a quantized 2B VL model on CPU;
-        if clip latency reaches p95 $\leq$ 12\,s end-to-end, defer the GPU plane.}
+  \item \textbf{Fixture path:} a Cloudflare CPU container maps checked-in media
+        digests to declared outputs and rejects every unknown digest. Production
+        configuration refuses this runtime.
+  \item \textbf{Real-model path:} first benchmark the signed-off model on its
+        declared CPU class. Use a GPU runtime only when warm end-to-end p95 exceeds
+        12 seconds or inference p95 exceeds 6 seconds. The provider and image are
+        deployment inputs recorded in the model manifest, not fixed in this design.
+  \item The model registry records the endpoint, runtime, rights class, weight hash,
+        release scope, and capability label. Scheduled evaluation sessions pre-warm
+        the selected runtime and record cold behavior separately.
 \end{itemize}
 
 Technical release tests require strict input and media validation with stable errors
@@ -241,16 +253,14 @@ generated-text length, wall time, and concurrency; deletion tests across every
 storage layer; and telemetry that excludes video, frames, returned text, and
 identity.
 
-\subsection{API sketch (MVP)}
+\subsection{API contract}
 
-\texttt{POST /v1/auth/apple} $\cdot$
-\texttt{POST /v1/infer} (clip $\to$ transcript + capability label)
-$\cdot$ \texttt{GET /v1/tasks/next} $\cdot$
-\texttt{POST /v1/tasks/\{id\}/submit} (Task A upload) $\cdot$
-\texttt{POST /v1/reviews/\{id\}/submit} (Task B reconstruction) $\cdot$
-\texttt{GET /v1/models/current} $\cdot$
-\texttt{DELETE /v1/me} (account + data deletion) $\cdot$
-\texttt{GET /healthz}.
+\code{contracts/openapi/bitsign-v1.yaml} is canonical and is written before feature
+code. It defines authentication challenges, Apple/App Attest exchange, configuration,
+uploads, inferences, consent, one next task, submissions, reviews, deletion, and health.
+The generated Swift client and Rust request types must pass the shared fixtures. The
+complete endpoint list, idempotency rules, errors, and pilot extension are in
+\code{IMPLEMENTATION\_PLAN.md}.
 
 \section{iOS Application}
 
@@ -260,22 +270,33 @@ SwiftUI, iOS 17+, distributed through TestFlight for controlled evaluation.
   \item \textbf{Screens (MVP):} onboarding + capability-label introduction,
         Sign in with Apple, Communicate (camera with framing guide, clip review
         before upload, rolling transcript, voice output, speech$\to$text reply
-        view), Contribute (study consent, task list, capture flow, review flow),
+        view), Contribute (study consent, one prioritized next task, capture flow,
+        review flow),
         and Settings (consent status, versions, deletion).
+        E9 adds a server-authorized Pilot task tab and a separate time-limited Review
+        tab; neither is a local toggle or an admin surface.
   \item \textbf{Capture:} AVFoundation, front camera, 720p clips, on-device
-        segmentation into 2--6\,s chunks with a hard 6\,s stop; review-before-upload;
-        background upload to R2 via presigned URLs; distinct upload vs.\ inference
+        MP4/H.264 video-only capture in portrait or landscape, segmented into
+        2--6\,s chunks with a hard 6\,s stop; review-before-upload;
+        foreground Communicate and background Contribute uploads to R2 via presigned
+        URLs; distinct upload vs.\ inference
         progress; graceful degradation on poor connectivity (Contribute works fully
         offline-queue, Communicate does not).
   \item \textbf{Voice output:} AVSpeechSynthesizer at MVP (natural TTS via a
-        provider is a post-MVP swap). Speech input: SFSpeechRecognizer on-device.
+        provider is a post-MVP swap). Speech input uses SFSpeechRecognizer only when
+        on-device recognition is supported, otherwise typed reply is available.
   \item \textbf{Accessibility is a release gate:} VoiceOver labels and reading
         order, Dynamic Type, contrast, and a visual equivalent for every
         audio-communicated status.
   \item \textbf{Trust \& safety surface:} capability label on every transcript,
-        correction affordance (feeds consented feedback), report/flag on any task
-        content, ``aid, not interpreter replacement'' framing in onboarding.
+        local-only correction affordance outside a separate protocol, report/flag on
+        any task content, and ``aid, not interpreter replacement'' framing in
+        onboarding.
 \end{itemize}
+
+Module ownership, navigation and feature gates, camera and permission timing,
+protected file lifecycles, the bounded contribution queue, scene privacy, accessibility
+checks, and state-machine tests are fixed in \code{IMPLEMENTATION\_PLAN.md}.
 
 \section{Milestones}
 
@@ -288,22 +309,19 @@ parallel.
 \toprule
 \# & Target & Definition of done \\
 \midrule
-M1 & wk 1--2 & Backend skeleton live on Cloudflare: auth, consent records, audit log,
-R2 upload with TTL lifecycle, and \texttt{/healthz} at a documented endpoint.
-Bring-up model evaluated (\S\ref{sec:model}). \\
-M2 & wk 2--4 & Inference plane serving the bring-up model behind the registry;
-\texttt{POST /v1/infer} returns a transcript for a real clip with stable errors on
-invalid media. \\
-M3 & wk 3--5 & iOS Communicate path against live backend; capability label shown;
-TestFlight build installable by an internal tester. \\
-M4 & wk 5--6 & Contribute pipeline end-to-end under its consent protocol (Task A
-$\to$ blind Task B $\times$3 $\to$ consensus); first consented script set
-(fingerspelling + top-$N$ signs) live. \\
-M5 & wk 6 & Recorded end-to-end demonstration: a signed request from the TestFlight
-build returns an inference result from the live backend. \\
-M6 & post-MVP & Frozen ASL-fluent evaluation of the isolated-sign model for the
-\emph{bounded vocabulary} label, followed by a closed external evaluation after all
-release gates pass. \\
+M1 & wk 1--2 & Contract, app, Worker, Rust, and emulator scaffolds pass the single local
+verification command without external credentials. \\
+M2 & wk 2--4 & Local auth, media, and fixture-inference path passes contract and
+adversarial tests; \texttt{POST /v1/inferences} returns only declared fixture output. \\
+M3 & wk 3--5 & iOS Communicate path runs against the local stack; capability label,
+privacy lifecycle, accessibility, and recovery states pass simulator tests. \\
+M4 & wk 5--6 & Contribute pipeline works end-to-end under fixture consent and a
+five-item internal curriculum (Task A $\to$ blind Task B $\times$3 $\to$ consensus).
+Approved consent and curriculum remain release gates. \\
+M5 & gated deploy & With owner approval, isolated staging and an internal TestFlight
+build pass D1--D3 on physical iPhones against an eligible declared model. \\
+M6 & gated release & After R1 and R2, the isolated pilot participant/reviewer mode is
+built; R3--R5 then certify that exact build before any closed-pilot invitation. \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -317,21 +335,16 @@ feature development beyond the demonstration path; avatar rendering; multilingua
 routing; Android; web app; natural-voice cloning; enterprise features; and external
 evaluation before the release gates pass.
 
-\section{Open Questions}
+\section{External Inputs}
 
-\begin{enumerate}[nosep]
-  \item Candidate reference-model evaluation on the frozen internal clip set
-        (\S\ref{sec:model}).
-  \item CPU-only inference viability --- decides whether the Cloud Run GPU plane
-        ships in MVP (\S\ref{sec:backend}).
-  \item First consented script-set contents: fingerspelling plus which top-$N$ signs.
-  \item ASL-fluent reviewer coverage and community-adviser recruitment for external
-        evaluation.
-  \item TestFlight tester list for technical evaluation.
-  \item Final bitsign wordmark and in-app capability-label presentation.
-  \item Corpus export layout: R2 bucket structure and manifest format.
-  \item Verification of external evidence supporting capability and safety claims
-        before publication.
-\end{enumerate}
+Implementation proceeds with fixtures until an external input reaches its gate. The
+owner supplies the real-model manifest and rights determination, Apple and Cloudflare
+access, tester list, and approved wordmark. The community process supplies the
+versioned curriculum, scope and capability copy, consent documents, Deaf ASL-fluent
+reviewer coverage, and pilot recruitment approval. CPU and GPU placement is decided by
+the measured threshold in \S\ref{sec:backend}, not by preference. Corpus-export layout
+is an engineering choice within the privacy contract and must be versioned before the
+first export. No agent may invent credentials, consent, reviewer identities, a model
+license, or a public capability claim.
 
 \end{document}
