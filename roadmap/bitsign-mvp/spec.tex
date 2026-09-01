@@ -152,7 +152,7 @@ The server \textbf{must} validate container, codec, duration, dimensions, and si
 by demuxing (not by trusting metadata), and \textbf{must} reject violations with
 \code{invalid\_media} and no partial processing. A versioned malformed/adversarial
 fixture set runs in CI; every fixture must be rejected without panic, hang, or
-residual object. Validation uses pinned FFmpeg/ffprobe 8.1.2, a full decode, exact
+residual object. Validation uses pinned FFmpeg/ffprobe 9.0.1, a full decode, exact
 rational frame-rate arithmetic, and the metadata and orientation policy in
 \code{IMPLEMENTATION\_PLAN.md}.
 

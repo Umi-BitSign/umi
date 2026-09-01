@@ -43,8 +43,8 @@ record that identifies affected work packages and tests.
 | Project generation | XcodeGen 2.46.0 from a committed `project.yml`. Commit `Package.resolved`; do not commit generated API sources. |
 | API client | OpenAPI 3.1 is canonical. Generate the Swift client at build time with Swift OpenAPI Generator 1.13.0 and use its URLSession transport for JSON endpoints. |
 | Rust toolchain | Rust 1.98.0, edition 2024, Axum 0.8.9. Commit `rust-toolchain.toml` and `Cargo.lock`. |
-| Media toolchain | FFmpeg and ffprobe 8.1.2. Pin the version in `.ffmpeg-version`, CI, and the API image; record the release image digest. |
-| Worker toolchain | Node 26.5.0, npm 11.17.0, Wrangler 4.127.1, TypeScript 7.0.2, and Vitest 4.1.11. Commit `.node-version`, exact package versions, and `package-lock.json`. |
+| Media toolchain | FFmpeg and ffprobe 9.0.1. Pin the version in `.ffmpeg-version`, CI, and the API image; record the release image digest. |
+| Worker toolchain | Node 24.20.0 LTS, npm 11.19.0, Wrangler 4.127.1, TypeScript 7.0.2, and Vitest 4.1.11. Commit `.node-version`, exact package versions, and `package-lock.json`. |
 | App architecture | Feature-first Swift packages, protocol-based dependency injection, Swift Observation, and actors for mutable service state. No third-party state-management framework. |
 | Camera format | Front camera, MP4/H.264, no audio track, nominal 30 fps, 720p preset, 2 through 6 seconds, and at most 12 MiB. Accept portrait or landscape after applying the transform: long edge 480 through 1280, short edge 360 through 720, measured frame rate 24 through 31, and at most 190 decoded frames. |
 | Speech reply | Require on-device recognition. If the active locale or device does not support it, offer typed reply instead. Audio never leaves the device. |
