@@ -14,6 +14,7 @@ protocol extension.
 - [LaTeX publication source](whitepaper/main.tex)
 - [Plain-text protocol source](whitepaper/README.md)
 - [bitsign product MVP](roadmap/bitsign-mvp/README.md)
+- [public observer API contract](docs/DASHBOARD_API.md)
 
 ## Current status
 
@@ -98,6 +99,32 @@ python -m pip install -e '.[dev]'
 
 The runtime is pinned to `bittensor==11.1.0`; the SDK, wallet, and `btcli` now ship
 as one package.
+
+## Run the public observer API
+
+The observer API gives `umi.vision` one read-only source for finalized SN78 state:
+
+```bash
+umi-observer \
+  --listen-host 127.0.0.1 \
+  --port 8092 \
+  --trusted-host api.umi.vision
+```
+
+It collects one internally consistent finalized block in the background and
+atomically publishes the last complete snapshot. Public requests read the cache;
+they do not trigger chain calls, miner probes, or artifact fetches. The process
+loads no wallet and contains no signing or transaction path.
+Run it on an always-on host; the `umi.vision` Vercel route is a same-origin proxy,
+not the background collector.
+
+The initial API exposes network state and public participant economics. Existing
+incentive, dividend, and emission values are labeled `unverified` until the required
+UMI cutover audit classifies them. They are never presented as UMI translation
+performance. Score, window, benchmark, activation, and incident feeds remain
+explicit empty states until their conforming public evidence sources exist.
+See the [dashboard API contract](docs/DASHBOARD_API.md) for endpoint schemas,
+Vercel integration, exact number handling, and deployment controls.
 
 ## Translation backend
 

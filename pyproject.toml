@@ -32,6 +32,7 @@ dev = [
 [project.scripts]
 umi-demo = "umi.demo:main"
 umi-miner = "umi.miner:main"
+umi-observer = "umi.observer:main"
 umi-protocol = "umi.tools:main"
 umi-validator = "umi.validator:main"
 
