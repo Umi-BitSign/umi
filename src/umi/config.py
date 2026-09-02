@@ -15,6 +15,8 @@ class Limits:
     maximum_hypothesis_utf8_bytes: int = 4 * 1024
     video_fetch_timeout_seconds: float = 30.0
     inference_timeout_seconds: float = 120.0
+    inference_admission_timeout_seconds: float = 0.25
+    backend_lifecycle_timeout_seconds: float = 30.0
     response_seal_margin_seconds: float = 1.0
     maximum_inference_concurrency: int = 1
 
@@ -33,6 +35,10 @@ class Limits:
             raise ValueError("video_fetch_timeout_seconds must be positive")
         if self.inference_timeout_seconds <= 0:
             raise ValueError("inference_timeout_seconds must be positive")
+        if self.inference_admission_timeout_seconds <= 0:
+            raise ValueError("inference_admission_timeout_seconds must be positive")
+        if self.backend_lifecycle_timeout_seconds <= 0:
+            raise ValueError("backend_lifecycle_timeout_seconds must be positive")
         if self.response_seal_margin_seconds <= 0:
             raise ValueError("response_seal_margin_seconds must be positive")
         if (

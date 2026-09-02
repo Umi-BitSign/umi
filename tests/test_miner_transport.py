@@ -16,6 +16,8 @@ from umi.video import VideoFetcher, VideoFetchError
 
 from .factories import VIDEO_BYTES, challenge_request, dev_wallet
 
+MODEL_REVISION = "ab" * 32
+
 
 @dataclass(frozen=True)
 class StaticFetcher(VideoFetcher):
@@ -47,7 +49,44 @@ class SlowTranslator(Translator):
         return "too late"
 
 
-def runtime(*, translator=None, fetcher=None, allowed_wallet=None, limits=None) -> MinerRuntime:
+class CountingFetcher(VideoFetcher):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def fetch(self, descriptor) -> bytes:
+        self.calls += 1
+        return VIDEO_BYTES
+
+
+class LifecycleTranslator(Translator):
+    model_revision = MODEL_REVISION
+
+    def __init__(self, *, startup_delay: float = 0, shutdown_delay: float = 0) -> None:
+        self.startup_delay = startup_delay
+        self.shutdown_delay = shutdown_delay
+        self.events: list[str] = []
+
+    async def startup(self) -> None:
+        self.events.append("startup")
+        await asyncio.sleep(self.startup_delay)
+
+    async def shutdown(self) -> None:
+        self.events.append("shutdown")
+        await asyncio.sleep(self.shutdown_delay)
+
+    async def translate(self, video: bytes, request: TranslationRequest) -> str:
+        return "hello world"
+
+
+def runtime(
+    *,
+    translator=None,
+    fetcher=None,
+    allowed_wallet=None,
+    limits=None,
+    model_revision=None,
+    inference_semaphore=None,
+) -> MinerRuntime:
     miner_wallet = dev_wallet("//Bob")
     validator_wallet = allowed_wallet or dev_wallet("//Alice")
     hotkey, scheme = _identity(miner_wallet)
@@ -60,6 +99,8 @@ def runtime(*, translator=None, fetcher=None, allowed_wallet=None, limits=None) 
         allowed_validator_hotkeys=frozenset({validator_wallet.hotkey.ss58_address}),
         authenticator=RequestAuthenticator.in_memory(hotkey),
         limits=limits or Limits(),
+        model_revision=model_revision,
+        inference_semaphore=inference_semaphore or asyncio.Semaphore(1),
     )
 
 
@@ -196,6 +237,67 @@ async def test_inference_timeout_becomes_an_explicit_zero_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_saturated_admission_returns_zero_before_fetching_video() -> None:
+    validator_wallet = dev_wallet("//Alice")
+    slot = asyncio.Semaphore(1)
+    await slot.acquire()
+    fetcher = CountingFetcher()
+    miner_runtime = runtime(
+        allowed_wallet=validator_wallet,
+        fetcher=fetcher,
+        limits=Limits(inference_admission_timeout_seconds=0.001),
+        inference_semaphore=slot,
+    )
+    try:
+        plaintext = await _translate(
+            miner_runtime,
+            challenge_request(),
+            validator_wallet.hotkey.ss58_address,
+        )
+    finally:
+        slot.release()
+
+    assert plaintext.status == "error"
+    assert plaintext.error_code == "inference_failed"
+    assert plaintext.received_video_sha256 is None
+    assert fetcher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_saturated_admission_still_returns_a_signed_sealed_envelope() -> None:
+    validator_wallet = dev_wallet("//Alice")
+    slot = asyncio.Semaphore(1)
+    await slot.acquire()
+    fetcher = CountingFetcher()
+    limits = Limits(inference_admission_timeout_seconds=0.001)
+    miner_runtime = runtime(
+        allowed_wallet=validator_wallet,
+        fetcher=fetcher,
+        limits=limits,
+        inference_semaphore=slot,
+    )
+    try:
+        outcome = await query_miner(
+            challenge_request(),
+            wallet=validator_wallet,
+            miner_url="http://miner.test",
+            miner_hotkey=miner_runtime.hotkey_ss58,
+            limits=limits,
+            timeout_seconds=5,
+            transport=httpx.ASGITransport(app=create_app(miner_runtime)),
+        )
+    finally:
+        slot.release()
+
+    assert outcome.failure_code is None
+    assert outcome.envelope is not None
+    assert outcome.sealed_response is not None
+    assert outcome.response_signature is not None
+    assert b"inference_failed" not in (outcome.envelope_bytes or b"")
+    assert fetcher.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_health_never_claims_weight_activation_or_conformance() -> None:
     app = create_app(runtime())
     async with httpx.AsyncClient(
@@ -208,7 +310,67 @@ async def test_health_never_claims_weight_activation_or_conformance() -> None:
         "netuid": 78,
         "translation_weights_active": False,
         "protocol_conformance": False,
+        "model_revision": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_backend_lifecycle_and_verified_revision_are_exposed() -> None:
+    translator = LifecycleTranslator()
+    miner_runtime = runtime(translator=translator, model_revision=MODEL_REVISION)
+    app = create_app(miner_runtime)
+
+    async with app.router.lifespan_context(app):
+        assert translator.events == ["startup"]
+        async with httpx.AsyncClient(
+            base_url="http://miner.test",
+            transport=httpx.ASGITransport(app=app),
+        ) as client:
+            response = await client.get("/healthz")
+        assert response.json()["model_revision"] == MODEL_REVISION
+
+    assert translator.events == ["startup", "shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_backend_startup_and_shutdown_hooks_are_time_bounded() -> None:
+    slow_start = LifecycleTranslator(startup_delay=0.05)
+    start_app = create_app(
+        runtime(
+            translator=slow_start,
+            limits=Limits(backend_lifecycle_timeout_seconds=0.001),
+        )
+    )
+    with pytest.raises(RuntimeError, match="startup hook timed out"):
+        async with start_app.router.lifespan_context(start_app):
+            pass
+    assert slow_start.events == ["startup", "shutdown"]
+
+    slow_shutdown = LifecycleTranslator(shutdown_delay=0.05)
+    shutdown_app = create_app(
+        runtime(
+            translator=slow_shutdown,
+            limits=Limits(backend_lifecycle_timeout_seconds=0.001),
+        )
+    )
+    with pytest.raises(RuntimeError, match="shutdown hook timed out"):
+        async with shutdown_app.router.lifespan_context(shutdown_app):
+            pass
+    assert slow_shutdown.events == ["startup", "shutdown"]
+
+
+def test_configured_model_revision_must_match_loaded_backend_identity() -> None:
+    translated = LifecycleTranslator()
+    assert runtime(translator=translated).model_revision == MODEL_REVISION
+    assert (
+        runtime(translator=translated, model_revision=MODEL_REVISION).model_revision
+        == MODEL_REVISION
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        runtime(translator=translated, model_revision="cd" * 32)
+    with pytest.raises(ValueError, match="requires the translation backend"):
+        runtime(translator=StaticTranslator(), model_revision=MODEL_REVISION)
 
 
 @pytest.mark.asyncio

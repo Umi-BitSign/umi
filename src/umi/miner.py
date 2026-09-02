@@ -8,6 +8,7 @@ import hashlib
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from .auth import RequestAuthenticator, wire_request_target
-from .backends import Translator, load_translator
+from .backends import Translator, backend_model_revision, is_async_callable, load_translator
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
 from .protocol import (
@@ -64,11 +65,40 @@ class MinerRuntime:
     )
 
     def __post_init__(self) -> None:
+        loaded_revision = backend_model_revision(self.translator)
+        if self.model_revision is not None:
+            if re.fullmatch(r"[0-9a-f]{64}", self.model_revision) is None:
+                raise ValueError("model revision must be a lowercase SHA-256 hex digest")
+            if loaded_revision is None:
+                raise ValueError(
+                    "configured model revision requires the translation backend to expose "
+                    "model_revision"
+                )
+            if loaded_revision != self.model_revision:
+                raise ValueError("configured model revision does not match the translation backend")
+        object.__setattr__(self, "model_revision", loaded_revision)
+        for hook_name in ("startup", "shutdown"):
+            hook = getattr(self.translator, hook_name, None)
+            if hook is not None and (not callable(hook) or not is_async_callable(hook)):
+                raise ValueError(f"translation backend {hook_name} hook must be asynchronous")
         _preflight_hotkey_signing(
             self.wallet,
             hotkey_ss58=self.hotkey_ss58,
             expected_scheme=self.signature_scheme,
         )
+
+
+async def _run_backend_hook(runtime: MinerRuntime, hook_name: str) -> None:
+    hook = getattr(runtime.translator, hook_name, None)
+    if hook is None:
+        return
+    try:
+        await asyncio.wait_for(
+            hook(),
+            timeout=runtime.limits.backend_lifecycle_timeout_seconds,
+        )
+    except asyncio.TimeoutError as error:
+        raise RuntimeError(f"translation backend {hook_name} hook timed out") from error
 
 
 async def _read_bounded_body(request: Request, maximum_bytes: int) -> bytes:
@@ -202,9 +232,12 @@ async def _translate(
 ) -> ResponsePlaintext:
     digest = request_digest(request)
     try:
-        video = await runtime.video_fetcher.fetch(request.video)
-    except VideoFetchError:
-        LOGGER.warning("video fetch failed for challenge %s", request.challenge_id)
+        await asyncio.wait_for(
+            runtime.inference_semaphore.acquire(),
+            timeout=runtime.limits.inference_admission_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        LOGGER.warning("translation capacity saturated for challenge %s", request.challenge_id)
         return _plaintext(
             request,
             request_digest_hex=digest,
@@ -214,32 +247,50 @@ async def _translate(
             received_video_sha256=None,
             hypothesis=None,
             model_revision=None,
-            error_code="video_fetch_failed",
+            error_code="inference_failed",
         )
 
     try:
-        async with runtime.inference_semaphore:
+        try:
+            video = await runtime.video_fetcher.fetch(request.video)
+        except VideoFetchError:
+            LOGGER.warning("video fetch failed for challenge %s", request.challenge_id)
+            return _plaintext(
+                request,
+                request_digest_hex=digest,
+                validator_hotkey=validator_hotkey,
+                miner_hotkey=runtime.hotkey_ss58,
+                status="error",
+                received_video_sha256=None,
+                hypothesis=None,
+                model_revision=None,
+                error_code="video_fetch_failed",
+            )
+
+        try:
             hypothesis = await asyncio.wait_for(
                 runtime.translator.translate(video, request),
                 timeout=runtime.limits.inference_timeout_seconds,
             )
-    except Exception as error:
-        LOGGER.warning(
-            "translation backend failed for challenge %s: %s",
-            request.challenge_id,
-            type(error).__name__,
-        )
-        return _plaintext(
-            request,
-            request_digest_hex=digest,
-            validator_hotkey=validator_hotkey,
-            miner_hotkey=runtime.hotkey_ss58,
-            status="error",
-            received_video_sha256=request.video.sha256,
-            hypothesis=None,
-            model_revision=None,
-            error_code="inference_failed",
-        )
+        except Exception as error:
+            LOGGER.warning(
+                "translation backend failed for challenge %s: %s",
+                request.challenge_id,
+                type(error).__name__,
+            )
+            return _plaintext(
+                request,
+                request_digest_hex=digest,
+                validator_hotkey=validator_hotkey,
+                miner_hotkey=runtime.hotkey_ss58,
+                status="error",
+                received_video_sha256=request.video.sha256,
+                hypothesis=None,
+                model_revision=None,
+                error_code="inference_failed",
+            )
+    finally:
+        runtime.inference_semaphore.release()
 
     try:
         hypothesis_bytes = hypothesis.encode("utf-8")
@@ -291,7 +342,25 @@ async def _translate(
 def create_app(runtime: MinerRuntime) -> FastAPI:
     """Create the miner app without performing any chain mutation."""
 
-    app = FastAPI(title="UMI component miner", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            await _run_backend_hook(runtime, "startup")
+        except BaseException:
+            try:
+                await _run_backend_hook(runtime, "shutdown")
+            except Exception as shutdown_error:
+                LOGGER.warning(
+                    "translation backend cleanup failed after startup failure: %s",
+                    type(shutdown_error).__name__,
+                )
+            raise
+        try:
+            yield
+        finally:
+            await _run_backend_hook(runtime, "shutdown")
+
+    app = FastAPI(title="UMI component miner", version="0.1.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def health() -> dict[str, object]:
@@ -300,6 +369,7 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
             "netuid": SAFETY_BOUNDARY.netuid,
             "translation_weights_active": False,
             "protocol_conformance": False,
+            "model_revision": runtime.model_revision,
         }
 
     @app.post(TRANSLATE_PATH)
@@ -420,6 +490,8 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         raise ValueError("model revision must be a lowercase SHA-256 hex digest")
     limits = Limits(
         inference_timeout_seconds=args.inference_timeout,
+        inference_admission_timeout_seconds=args.inference_admission_timeout,
+        backend_lifecycle_timeout_seconds=args.backend_lifecycle_timeout,
         maximum_inference_concurrency=args.max_inference_concurrency,
     )
     fetcher = HttpVideoFetcher(
@@ -473,6 +545,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-revision")
     parser.add_argument("--inference-timeout", type=float, default=120.0)
+    parser.add_argument("--inference-admission-timeout", type=float, default=0.25)
+    parser.add_argument("--backend-lifecycle-timeout", type=float, default=30.0)
     parser.add_argument("--max-inference-concurrency", type=int, default=1)
     parser.add_argument(
         "--nonce-db",
