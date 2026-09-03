@@ -168,6 +168,8 @@ def test_media_tool_uses_the_single_snapshot_inspection_result(
     assert calls == [video]
     assert record["video_sha256"] == inspection.video_sha256
     assert record["frame_digest"] == decoded.frame_digest
+    assert record["probe_sha256"] is None
+    assert record["executables_content_pinned"] is False
 
 
 def test_shadow_runner_tool_preserves_the_offline_safety_labels(

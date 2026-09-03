@@ -234,15 +234,20 @@ def test_request_anchor_enforces_bijection_and_anchored_first_attempt() -> None:
 
 
 def test_request_transcript_cannot_combine_other_request_or_actor_evidence() -> None:
-    first = _evidence(challenge_request(1), 10)
-    other_request = _evidence(challenge_request(2), 11)
+    reveal_round = bt.timelock.current_round() + 100
+    first_request = challenge_request(1, reveal_round=reveal_round)
+    first = _evidence(first_request, 10)
+    other_request = _evidence(
+        challenge_request(2, reveal_round=reveal_round),
+        11,
+    )
     with pytest.raises(ValueError, match="different request bytes"):
         RequestAnchorRecord(auth_evidence=(first, other_request))
 
     other_validator = dev_wallet("//Charlie")
-    headers = _headers(challenge_request(1), 11, wallet=other_validator)
+    headers = _headers(first_request, 11, wallet=other_validator)
     other_sender = _evidence(
-        challenge_request(1),
+        first_request,
         11,
         headers=headers,
         expected_validator=other_validator.hotkey.ss58_address,

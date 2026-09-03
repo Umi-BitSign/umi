@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
+import json
 
 import httpx
 import pytest
@@ -21,6 +23,25 @@ SIGNATURE = (
     "8fd8b11a029f1bee9d9e83b45088abe72"
 )
 RANDOMNESS = "b22aad4794f7451896f7a371aa46106fd84d919f3f569acd5b2fddf1d1440af3"
+
+
+class StaticStream(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def __aiter__(self):
+        yield self.body
+
+    async def aclose(self) -> None:
+        return None
+
+
+def json_response(record: dict, *, headers: dict[str, str] | None = None) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "application/json", **(headers or {})},
+        stream=StaticStream(json.dumps(record).encode()),
+    )
 
 
 def info_record() -> dict:
@@ -66,8 +87,8 @@ def test_tampered_round_signature_randomness_and_info_fail_closed() -> None:
 async def test_client_checks_info_round_body_ceiling_and_signature() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/info"):
-            return httpx.Response(200, json=info_record())
-        return httpx.Response(200, json=pulse_record())
+            return json_response(info_record())
+        return json_response(pulse_record())
 
     client = QuicknetClient(transport=httpx.MockTransport(handler))
     pulse = await client.fetch(ROUND)
@@ -82,7 +103,7 @@ async def test_client_checks_info_round_body_ceiling_and_signature() -> None:
 
     def bloated_headers(request: httpx.Request) -> httpx.Response:
         record = info_record() if request.url.path.endswith("/info") else pulse_record()
-        return httpx.Response(200, headers={"X-Bloat": "a" * 128}, json=record)
+        return json_response(record, headers={"X-Bloat": "a" * 128})
 
     header_bounded = QuicknetClient(
         maximum_header_bytes=64,
@@ -105,3 +126,39 @@ async def test_client_rejects_unpublished_round_before_network() -> None:
     with pytest.raises(DrandVerificationError, match="not published"):
         await client.fetch(10**12)
     assert not called
+
+
+@pytest.mark.asyncio
+async def test_client_rejects_encoded_body_before_decompression_or_body_read() -> None:
+    encoded = gzip.compress(b"x" * (8 * 1024 * 1024))
+    assert len(encoded) < 64 * 1024
+
+    class EncodedStream(httpx.AsyncByteStream):
+        iterated = False
+
+        async def __aiter__(self):
+            self.iterated = True
+            yield encoded
+
+        async def aclose(self) -> None:
+            return None
+
+    stream = EncodedStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        if request.url.path.endswith("/info"):
+            return httpx.Response(
+                200,
+                headers={
+                    "Content-Encoding": "gzip",
+                    "Content-Length": str(len(encoded)),
+                },
+                stream=stream,
+            )
+        return json_response(pulse_record())
+
+    client = QuicknetClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(DrandVerificationError, match="Content-Encoding"):
+        await client.fetch(ROUND)
+    assert not stream.iterated

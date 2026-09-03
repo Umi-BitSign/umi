@@ -35,10 +35,12 @@ async def discover_miner(
     if neuron.axon is None:
         raise ValueError("miner hotkey has no served endpoint")
     endpoint = str(neuron.axon)
-    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+    if endpoint.startswith("https://"):
         origin = endpoint
+    elif endpoint.startswith("http://"):
+        origin = "https://" + endpoint.removeprefix("http://")
     else:
-        origin = "http://" + endpoint
+        origin = "https://" + endpoint
     return MinerEndpoint(
         hotkey=neuron.hotkey,
         uid=neuron.uid,

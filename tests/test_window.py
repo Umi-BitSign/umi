@@ -95,6 +95,7 @@ def test_integer_ceiling_division_rejects_implicit_booleans_and_invalid_ranges()
     assert ceil_div(1, 3) == 1
     assert ceil_div(6, 3) == 2
     assert ceil_div(7, 3) == 3
+    assert ceil_div(2**80 + 1, 3) == ((2**80 + 1) + 2) // 3
 
     with pytest.raises(TypeError):
         ceil_div(True, 3)

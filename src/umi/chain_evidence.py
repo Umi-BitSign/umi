@@ -49,6 +49,7 @@ _WEIGHT_EVENT_NAMES = frozenset(
         "CRV3WeightsRevealed",
         "TimelockedWeightsCommitted",
         "TimelockedWeightsRevealed",
+        "WeightsBatchRevealed",
         "WeightsCommitted",
         "WeightsRevealed",
         "WeightsSet",
@@ -112,14 +113,6 @@ def _nonempty(value: str, *, field: str) -> str:
     return value
 
 
-def _proof_root(value: str | bytes) -> str:
-    if isinstance(value, bytes):
-        if len(value) != 32:
-            raise ValueError("proof verifier returned a state root with the wrong length")
-        return "0x" + value.hex()
-    return _block_hash(value, field="proof-derived state root")
-
-
 @dataclass(frozen=True, slots=True)
 class FinalizedSnapshotRef:
     """A block header reference the evidence collector has established as finalized."""
@@ -139,25 +132,27 @@ class FinalizedSnapshotRef:
 
 
 class StorageProofVerifier(Protocol):
-    """Verify storage proof bytes and return the state root derived from them."""
+    """Verify one membership/absence claim against an explicit state root."""
 
     def __call__(
         self,
         *,
-        block_hash: str,
+        state_root: bytes,
         storage_key: bytes,
         expected_value: bytes | None,
         proof: tuple[bytes, ...],
-    ) -> str | bytes: ...
+    ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class StorageEvidence:
     """One verified storage value or absence proof at a finalized state root.
 
-    Direct construction still requires ``verifier``.  A boolean verifier is not
-    accepted: the callback must return the root reconstructed from the proof, and
-    that root must equal the snapshot header's state root.
+    Direct construction still requires ``verifier``. The callback receives the
+    finalized header state root explicitly and must return the literal value
+    ``True``. ``None``, ``False``, and every other value are rejected. The
+    production verifier is content-pinned and uses Substrate LayoutV1 proof
+    verification.
     """
 
     snapshot: FinalizedSnapshotRef
@@ -189,25 +184,22 @@ class StorageEvidence:
         if not callable(verifier):
             raise TypeError("verifier must be callable")
         try:
-            derived_root = verifier(
-                block_hash=snapshot.block_hash,
+            verification = verifier(
+                state_root=bytes.fromhex(snapshot.state_root[2:]),
                 storage_key=storage_key,
                 expected_value=value,
                 proof=proof_tuple,
             )
         except Exception as error:
             raise ValueError("storage proof verification failed") from error
-        if isinstance(derived_root, bool):
-            raise ValueError("proof verifier must return the proof-derived state root")
-        verified_root = _proof_root(derived_root)
-        if verified_root != snapshot.state_root:
-            raise ValueError("storage proof state root does not match the finalized header")
+        if verification is not True:
+            raise ValueError("storage proof verifier did not affirm the proof")
 
         object.__setattr__(self, "snapshot", snapshot)
         object.__setattr__(self, "storage_key", storage_key)
         object.__setattr__(self, "value", value)
         object.__setattr__(self, "proof", proof_tuple)
-        object.__setattr__(self, "verified_state_root", verified_root)
+        object.__setattr__(self, "verified_state_root", snapshot.state_root)
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,11 +20,19 @@ from umi.policy import (
     ScoringPolicy,
     ValidatorRegistryEntry,
     activation_equivalence_digest,
+    require_live_chain_observation,
     scoring_policy_hash,
     umi_source_tree_sha256,
+    validate_live_shadow_runtime,
     validate_scoring_runtime,
 )
 from umi.protocol import canonical_json_bytes
+from umi.validator_delivery import (
+    DEFAULT_DELIVERY_ISSUANCE_PATH,
+    DEFAULT_MIRROR_INDEX_PATH,
+    MIRROR_DISCOVERY_SCHEMA,
+    MirrorDiscoveryRule,
+)
 
 
 def _address(uri: str) -> str:
@@ -78,6 +86,10 @@ def test_launch_policy_is_complete_strict_and_canonical() -> None:
     assert policy.schema_ == SCORING_POLICY_SCHEMA
     assert policy.limits.emission_bearing_clips_per_batch == 12
     assert policy.limits.max_candidate_batches_total == 3
+    assert policy.limits.btauth_max_age_seconds == 360
+    assert policy.clock.issue_allowance_seconds == 300
+    assert policy.clock.response_window_seconds == 300
+    assert policy.limits.btauth_allowed_skew_seconds == 2
     assert policy.clock.window_stride_blocks == 360
     assert policy.thresholds.canary_fraction.fraction.numerator == 1
     assert policy.thresholds.canary_fraction.fraction.denominator == 10
@@ -205,6 +217,11 @@ def test_policy_rejects_registry_ambiguity_and_nonlaunch_parameters() -> None:
     with pytest.raises(ValidationError, match="initial launch profile"):
         ScoringPolicy.model_validate(changed_limit)
 
+    short_auth_window = policy.model_dump(mode="json", by_alias=True)
+    short_auth_window["limits"]["btauth_max_age_seconds"] = 30
+    with pytest.raises(ValidationError, match="shorter than the issue allowance"):
+        ScoringPolicy.model_validate(short_auth_window)
+
     duplicate_validator_admin = policy.model_dump(mode="json", by_alias=True)
     duplicate_validator_admin["validator_registry"][1]["administrator_id"] = (
         duplicate_validator_admin["validator_registry"][0]["administrator_id"]
@@ -219,3 +236,247 @@ def test_exact_ratio_requires_reduced_integer_arithmetic() -> None:
         ExactRatio(numerator=2, denominator=20)
     with pytest.raises(ValidationError):
         ExactRatio.model_validate({"numerator": 0.1, "denominator": 1})
+
+
+def _live_shadow_policy_data() -> dict:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    pins = data["implementation_pins"]
+    pins["pin_profile"] = "live_shadow_calibration"
+    pins["conformance_fixtures_verified"] = True
+    pins["conformance_execution_report_sha256"] = "0f" * 32
+    pins["scoring"]["normalization_fixture_set_sha256"] = "10" * 32
+    pins["media"]["frame_digest_fixture_set_sha256"] = "11" * 32
+    pins["timelock"]["portable_envelope_fixture_set_sha256"] = "12" * 32
+    pins["chain"]["chain_fixture_set_sha256"] = "13" * 32
+    discovery = MirrorDiscoveryRule(
+        schema=MIRROR_DISCOVERY_SCHEMA,
+        protocol="umi-asl/0.1",
+        authentication_profile=pins["rules"]["mirror_authentication_profile"],
+        index_path_template=DEFAULT_MIRROR_INDEX_PATH,
+        delivery_issuance_path=DEFAULT_DELIVERY_ISSUANCE_PATH,
+        origins=[
+            "https://mirror.example",
+            "https://mirror1.example",
+            "https://mirror2.example",
+        ],
+        delivery_origins=[
+            "https://delivery.example",
+            "https://delivery1.example",
+            "https://delivery2.example",
+        ],
+    )
+    pins["rules"]["mirror_discovery_rule_sha256"] = hashlib.sha256(
+        canonical_json_bytes(discovery)
+    ).hexdigest()
+    pins["live_chain"] = {
+        "network": "finney",
+        "genesis_block_hash": "15" * 32,
+        "runtime_spec_version": 452,
+        "transaction_version": 1,
+        "state_version": 1,
+        "metadata_sha256": "16" * 32,
+        "subtensor_revision": "da06f033663896ef2fdbbfc3ecc68ca908fba0f5",
+        "live_chain_fixture_set_sha256": "17" * 32,
+    }
+    pins["storage_proof_verifier"] = {
+        "protocol": "umi-substrate-proof-verifier/1",
+        "polkadot_sdk_revision": "cacb4310f20c7cac83eb3ccd8ed5a5ad4212608a",
+        "source_tree_sha256": "18" * 32,
+        "cargo_lock_sha256": "19" * 32,
+        "proof_fixture_set_sha256": "1a" * 32,
+        "release_sha256_by_target": {
+            "aarch64-apple-darwin": "1b" * 32,
+            "x86_64-unknown-linux-gnu": "1c" * 32,
+        },
+    }
+    pins["finality_verifier"] = {
+        "profile": "smoldot-verifier-attested-finality/1",
+        "evidence_class": "verifier_attested_finality",
+        "offline_finality_proof": False,
+        "source_revision": "finality-verifier-v1",
+        "source_tree_sha256": "1d" * 32,
+        "cargo_lock_sha256": "1e" * 32,
+        "finality_fixture_set_sha256": "1f" * 32,
+        "release_sha256_by_target": {
+            "aarch64-apple-darwin": "20" * 32,
+            "x86_64-unknown-linux-gnu": "21" * 32,
+        },
+        "chain_spec_source_revision": "da06f033663896ef2fdbbfc3ecc68ca908fba0f5",
+        "chain_spec_sha256": "22" * 32,
+        "expected_genesis_hash": "15" * 32,
+        "bootstrap_kind": "grandpa_warp_sync_checkpoint",
+        "bootstrap_block_number": 1,
+        "bootstrap_block_hash": "24" * 32,
+    }
+    return data
+
+
+def test_live_shadow_profile_requires_all_verified_runtime_boundaries() -> None:
+    policy = ScoringPolicy.model_validate(_live_shadow_policy_data())
+    assert policy.implementation_pins.pin_profile == "live_shadow_calibration"
+    assert policy.implementation_pins.conformance_fixtures_verified
+    assert policy.implementation_pins.storage_proof_verifier is not None
+    assert policy.translation_weights_active is False
+
+    missing = _live_shadow_policy_data()
+    missing["implementation_pins"]["finality_verifier"] = None
+    with pytest.raises(ValidationError, match="requires chain, storage-proof, and finality"):
+        ScoringPolicy.model_validate(missing)
+
+    unverified = _live_shadow_policy_data()
+    unverified["implementation_pins"]["conformance_fixtures_verified"] = False
+    with pytest.raises(ValidationError, match="requires verified conformance fixtures"):
+        ScoringPolicy.model_validate(unverified)
+
+    missing_report = _live_shadow_policy_data()
+    missing_report["implementation_pins"]["conformance_execution_report_sha256"] = None
+    with pytest.raises(ValidationError, match="requires a conformance execution report"):
+        ScoringPolicy.model_validate(missing_report)
+
+
+def test_live_shadow_profile_rejects_rehearsal_placeholders_and_invalid_targets() -> None:
+    placeholder = _live_shadow_policy_data()
+    placeholder["implementation_pins"]["chain"]["chain_fixture_set_sha256"] = hashlib.sha256(
+        b"umi-rehearsal-placeholder-v1\0chain-schedule-and-calls"
+    ).hexdigest()
+    with pytest.raises(ValidationError, match="rehearsal placeholder"):
+        ScoringPolicy.model_validate(placeholder)
+
+    invalid_target = _live_shadow_policy_data()
+    releases = invalid_target["implementation_pins"]["storage_proof_verifier"][
+        "release_sha256_by_target"
+    ]
+    releases["../../not-a-target"] = releases.pop("x86_64-unknown-linux-gnu")
+    with pytest.raises(ValidationError, match="canonical target triples"):
+        ScoringPolicy.model_validate(invalid_target)
+
+    local_with_live_pin = make_policy().model_dump(mode="json", by_alias=True)
+    local_with_live_pin["implementation_pins"]["live_chain"] = _live_shadow_policy_data()[
+        "implementation_pins"
+    ]["live_chain"]
+    with pytest.raises(ValidationError, match="cannot carry live-chain"):
+        ScoringPolicy.model_validate(local_with_live_pin)
+
+
+def test_live_shadow_finality_checkpoint_and_genesis_are_policy_bound() -> None:
+    mismatch = _live_shadow_policy_data()
+    mismatch["implementation_pins"]["finality_verifier"]["expected_genesis_hash"] = "23" * 32
+    with pytest.raises(ValidationError, match="genesis hashes must match"):
+        ScoringPolicy.model_validate(mismatch)
+
+    invalid_checkpoint = _live_shadow_policy_data()
+    invalid_checkpoint["implementation_pins"]["finality_verifier"]["bootstrap_block_number"] = 0
+    with pytest.raises(ValidationError, match="must be above genesis"):
+        ScoringPolicy.model_validate(invalid_checkpoint)
+
+    legacy_checkpoint = _live_shadow_policy_data()
+    finality = legacy_checkpoint["implementation_pins"]["finality_verifier"]
+    finality["bootstrap_kind"] = "light_sync_state"
+    with pytest.raises(ValidationError, match="grandpa_warp_sync_checkpoint"):
+        ScoringPolicy.model_validate(legacy_checkpoint)
+
+
+def test_live_shadow_runtime_selects_and_verifies_exact_target_binaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = (tmp_path / "proof-verifier").resolve()
+    finality = (tmp_path / "finality-verifier").resolve()
+    chain_spec = (tmp_path / "finney.json").resolve()
+    proof.write_bytes(b"proof release")
+    finality.write_bytes(b"finality release")
+    chain_spec.write_bytes(b'{"name":"finney"}')
+    proof.chmod(0o700)
+    finality.chmod(0o700)
+    chain_spec.chmod(0o600)
+    data = _live_shadow_policy_data()
+    target = "aarch64-apple-darwin"
+    pins = data["implementation_pins"]
+    pins["storage_proof_verifier"]["release_sha256_by_target"][target] = hashlib.sha256(
+        proof.read_bytes()
+    ).hexdigest()
+    pins["finality_verifier"]["release_sha256_by_target"][target] = hashlib.sha256(
+        finality.read_bytes()
+    ).hexdigest()
+    pins["finality_verifier"]["chain_spec_sha256"] = hashlib.sha256(
+        chain_spec.read_bytes()
+    ).hexdigest()
+    policy = ScoringPolicy.model_validate(data)
+
+    selected = validate_live_shadow_runtime(
+        policy,
+        target_triple=target,
+        storage_proof_verifier_binary=proof,
+        finality_verifier_binary=finality,
+        finality_chain_spec_path=chain_spec,
+    )
+    assert selected == {
+        "target_triple": target,
+        "storage_proof_verifier_sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
+        "finality_verifier_sha256": hashlib.sha256(finality.read_bytes()).hexdigest(),
+        "finality_chain_spec_sha256": hashlib.sha256(chain_spec.read_bytes()).hexdigest(),
+        "finality_evidence_class": "verifier_attested_finality",
+        "finality_bootstrap_kind": "grandpa_warp_sync_checkpoint",
+        "finality_bootstrap_block_number": "1",
+        "finality_bootstrap_block_hash": "24" * 32,
+    }
+    assert policy.implementation_pins.live_chain is not None
+    require_live_chain_observation(policy, policy.implementation_pins.live_chain)
+
+    proof.write_bytes(b"tampered release")
+    with pytest.raises(RuntimeError, match="storage-proof verifier binary"):
+        validate_live_shadow_runtime(
+            policy,
+            target_triple=target,
+            storage_proof_verifier_binary=proof,
+            finality_verifier_binary=finality,
+            finality_chain_spec_path=chain_spec,
+        )
+
+    proof.write_bytes(b"proof release")
+    chain_spec.write_bytes(b'{"name":"tampered"}')
+    with pytest.raises(RuntimeError, match="finality chain spec"):
+        validate_live_shadow_runtime(
+            policy,
+            target_triple=target,
+            storage_proof_verifier_binary=proof,
+            finality_verifier_binary=finality,
+            finality_chain_spec_path=chain_spec,
+        )
+
+    chain_spec.write_bytes(b'{"name":"finney"}')
+    proof.chmod(0o600)
+    with pytest.raises(RuntimeError, match="not executable by its owner"):
+        validate_live_shadow_runtime(
+            policy,
+            target_triple=target,
+            storage_proof_verifier_binary=proof,
+            finality_verifier_binary=finality,
+            finality_chain_spec_path=chain_spec,
+        )
+
+    proof.chmod(0o700)
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+    with pytest.raises(RuntimeError, match="unsafe ownership"):
+        validate_live_shadow_runtime(
+            policy,
+            target_triple=target,
+            storage_proof_verifier_binary=proof,
+            finality_verifier_binary=finality,
+            finality_chain_spec_path=chain_spec,
+        )
+
+
+def test_local_profile_cannot_pass_live_runtime_validation(tmp_path: Path) -> None:
+    binary = (tmp_path / "verifier").resolve()
+    binary.write_bytes(b"release")
+    binary.chmod(0o700)
+    with pytest.raises(RuntimeError, match="not a live shadow"):
+        validate_live_shadow_runtime(
+            make_policy(),
+            target_triple="aarch64-apple-darwin",
+            storage_proof_verifier_binary=binary,
+            finality_verifier_binary=binary,
+            finality_chain_spec_path=binary,
+        )

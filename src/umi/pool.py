@@ -274,6 +274,58 @@ def verify_availability_certificate(
         raise ValueError("availability certificate does not meet quorum")
 
 
+def verify_availability_certificate_member(
+    certificate: AvailabilityCertificate,
+    pool_body: PoolBody,
+    *,
+    active_validator_hotkeys: Collection[str],
+    policy: ScoringPolicy,
+) -> None:
+    """Verify one pool body's membership in a valid committed quorum set."""
+
+    if not isinstance(pool_body, PoolBody):
+        raise TypeError("pool body must be a strict PoolBody object")
+    active_by_account = {account_id32(value): value for value in active_validator_hotkeys}
+    if len(active_by_account) != len(active_validator_hotkeys):
+        raise ValueError("active validator registry contains duplicate accounts")
+    registered_validators = {
+        account_id32(entry.validator_hotkey) for entry in policy.validator_registry
+    }
+    if not set(active_by_account).issubset(registered_validators):
+        raise ValueError("active validator is absent from the policy registry")
+    if len(active_by_account) < 4:
+        raise ValueError("fewer than four active validators makes the window void")
+    if pool_body.scoring_policy_hash != scoring_policy_hash(policy):
+        raise ValueError("availability pool body names a different scoring policy")
+    if account_id32(pool_body.publisher_hotkey) not in {
+        account_id32(entry.publisher_hotkey) for entry in policy.publisher_registry
+    }:
+        raise ValueError("availability pool publisher is absent from the policy registry")
+    leaf = availability_leaf(pool_body)
+    if leaf not in certificate.qualified_pool_leaves:
+        raise ValueError("availability certificate omits the pool body")
+    leaves = tuple(bytes.fromhex(value) for value in certificate.qualified_pool_leaves)
+    if certificate.availability_set_root != availability_set_root(leaves):
+        raise ValueError("availability set root does not reproduce")
+    digest = availability_digest(pool_body.window_id, certificate.availability_set_root)
+    valid_signers: set[bytes] = set()
+    for record in certificate.signatures:
+        account = account_id32(record.validator_hotkey)
+        if account not in active_by_account:
+            raise ValueError("availability signature is not from an active validator")
+        if not verify_response_signature(
+            digest,
+            hotkey_ss58=record.validator_hotkey,
+            scheme=record.scheme,
+            signature=record.signature,
+        ):
+            raise ValueError("availability signature does not verify")
+        valid_signers.add(account)
+    quorum = max(3, (2 * len(active_by_account)) // 3 + 1)
+    if len(valid_signers) < quorum:
+        raise ValueError("availability certificate does not meet quorum")
+
+
 def verify_pool_artifacts(
     body: PoolBody,
     *,
@@ -511,5 +563,6 @@ __all__ = [
     "select_miner_panel",
     "selection_seed",
     "verify_availability_certificate",
+    "verify_availability_certificate_member",
     "verify_pool_artifacts",
 ]

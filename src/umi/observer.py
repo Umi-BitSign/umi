@@ -31,6 +31,12 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .observer_bundle_feed import (
+    BundleFeedSnapshot,
+    ObserverBundleFeed,
+    VerifiedFeedWindow,
+    build_production_observer_bundle_feed,
+)
 from .observer_chain import BittensorChainCollector, ChainCollectionError, ChainCollector
 from .observer_models import (
     OBSERVER_API_VERSION,
@@ -41,12 +47,15 @@ from .observer_models import (
     ActivationGate,
     ActivationGatesResponse,
     BenchmarksResponse,
+    BundleFeedHealthRecord,
     ChainEconomicLeaderboard,
     ChainEconomicLeaderboardEntry,
     CursorPage,
     ErrorDetail,
     ErrorResponse,
+    EvidenceCursorPage,
     FinalizedBlock,
+    IncidentRecord,
     IncidentsResponse,
     LeaderboardResponse,
     NetworkResponse,
@@ -54,12 +63,15 @@ from .observer_models import (
     ObserverSnapshot,
     ParticipantsResponse,
     ProtocolState,
+    ReleasedWindow,
     SourceProvenance,
     StatusResponse,
     UmiTranslationLeaderboard,
+    ValidatorLocalScoreRecord,
     WindowResponse,
     WindowsResponse,
 )
+from .protocol import canonical_json_bytes
 
 _WINDOW_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURSOR_RE = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
@@ -106,6 +118,7 @@ _CURSOR_ERROR_RESPONSES = {
 _WINDOW_ERROR_RESPONSES = {
     **_COMMON_ERROR_RESPONSES,
     404: {"model": ErrorResponse, "description": "Released window not found"},
+    409: {"model": ErrorResponse, "description": "Validator selection required"},
 }
 
 _ACTIVATION_GATE_IDS = (
@@ -354,6 +367,13 @@ class ParticipantsQuery(BaseModel):
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
 
 
+class EvidenceQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=100, ge=1, le=256)
+    cursor: str | None = Field(default=None, min_length=1, max_length=512)
+
+
 def _finalized_block(snapshot: ObserverSnapshot) -> FinalizedBlock:
     blocks = [
         source.block
@@ -429,6 +449,43 @@ def _decode_cursor(cursor: str, *, block_hash: str, role: str) -> int:
         raise PublicAPIError(409, "cursor_snapshot_changed")
     if value["role"] != role:
         raise PublicAPIError(422, "cursor_role_mismatch")
+    offset = value["offset"]
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise PublicAPIError(422, "invalid_cursor")
+    return offset
+
+
+def _feed_revision(windows: Sequence[VerifiedFeedWindow], kind: str) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "kind": kind,
+                "manifests": [item.manifest_sha256 for item in windows],
+                "validators": [item.validator_account_id32 for item in windows],
+            }
+        )
+    ).hexdigest()
+
+
+def _encode_evidence_cursor(*, revision: str, kind: str, offset: int) -> str:
+    raw = canonical_json_bytes({"kind": kind, "offset": offset, "revision": revision})
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _decode_evidence_cursor(cursor: str, *, revision: str, kind: str) -> int:
+    if _CURSOR_RE.fullmatch(cursor) is None:
+        raise PublicAPIError(422, "invalid_cursor")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        value = json.loads(base64.b64decode(cursor + padding, altchars=b"-_", validate=True))
+    except (ValueError, UnicodeError, json.JSONDecodeError) as error:
+        raise PublicAPIError(422, "invalid_cursor") from error
+    if not isinstance(value, dict) or set(value) != {"kind", "offset", "revision"}:
+        raise PublicAPIError(422, "invalid_cursor")
+    if value["kind"] != kind:
+        raise PublicAPIError(422, "cursor_feed_mismatch")
+    if value["revision"] != revision:
+        raise PublicAPIError(409, "cursor_snapshot_changed")
     offset = value["offset"]
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise PublicAPIError(422, "invalid_cursor")
@@ -511,10 +568,24 @@ def _render(request: Request, model: ObserverModel, view: SnapshotView) -> Respo
     body = model.model_dump_json(by_alias=True).encode("utf-8")
     etag = '"' + hashlib.sha256(body).hexdigest() + '"'
     block = _finalized_block(view.snapshot)
+    released_artifacts = sorted(
+        source.artifact_sha256
+        for source in model.sources
+        if source.source_kind == "released_audit_bundle" and source.artifact_sha256 is not None
+    )
+    dataset_revision = (
+        block.hash
+        if not released_artifacts
+        else hashlib.sha256(
+            canonical_json_bytes(
+                {"finalized_block_hash": block.hash, "released_artifacts": released_artifacts}
+            )
+        ).hexdigest()
+    )
     headers = {
         "Cache-Control": _cache_control(view),
         "ETag": etag,
-        "X-UMI-Dataset-Revision": block.hash,
+        "X-UMI-Dataset-Revision": dataset_revision,
         "X-UMI-Contract-Revision": _STATIC_CONTRACT_REVISION,
         "X-UMI-Finalized-Block": block.number,
     }
@@ -538,6 +609,8 @@ def _error(status_code: int, reason_code: str) -> JSONResponse:
 def create_observer_app(
     cache: SnapshotCache,
     *,
+    bundle_feed: ObserverBundleFeed | None = None,
+    bundle_feed_poll_seconds: float = 15,
     cors_origins: Sequence[str] = (),
     trusted_hosts: Sequence[str] = ("127.0.0.1", "localhost", "testserver"),
 ) -> FastAPI:
@@ -549,9 +622,16 @@ def create_observer_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await cache.start()
+        if bundle_feed is not None:
+            await bundle_feed.start(
+                lambda: int(_finalized_block(cache.current().snapshot).number),
+                bundle_feed_poll_seconds,
+            )
         try:
             yield
         finally:
+            if bundle_feed is not None:
+                await bundle_feed.close()
             await cache.close()
 
     app = FastAPI(
@@ -606,6 +686,78 @@ def create_observer_app(
     def current() -> SnapshotView:
         return cache.current()
 
+    def released(view: SnapshotView) -> BundleFeedSnapshot:
+        if bundle_feed is None:
+            return BundleFeedSnapshot((), ())
+        finalized_height = int(_finalized_block(view.snapshot).number)
+        snapshot = bundle_feed.snapshot()
+        return BundleFeedSnapshot(
+            tuple(
+                item for item in snapshot.windows if item.audit_release_block <= finalized_height
+            ),
+            snapshot.health,
+        )
+
+    def released_sources(
+        view: SnapshotView, feed: BundleFeedSnapshot
+    ) -> tuple[SourceProvenance, ...]:
+        values = list(_sources(view.snapshot))
+        for item in feed.windows:
+            values.append(
+                SourceProvenance(
+                    source_id=f"released-{item.validator_account_id32}-{item.manifest_sha256}",
+                    source_kind="released_audit_bundle",
+                    verification_status="bundle_verified",
+                    block=None,
+                    policy_hash=item.scoring_policy_hash,
+                    artifact_sha256=item.manifest_sha256,
+                )
+            )
+        return tuple(values)
+
+    def released_window(item: VerifiedFeedWindow) -> ReleasedWindow:
+        return ReleasedWindow(
+            window_id=item.window_id,
+            window_index=str(item.window_index),
+            terminal_classification=item.terminal_classification,
+            audit_release_block=str(item.audit_release_block),
+            audit_bundle_sha256=item.manifest_sha256,
+            validator_account_id32=item.validator_account_id32,
+            scoring_policy_hash=item.scoring_policy_hash,
+            reason_codes=item.reason_codes,
+            score_scope="validator_local",
+            validator_local_scores=tuple(
+                ValidatorLocalScoreRecord(
+                    miner_root_account_id32=score.miner_root_account_id32,
+                    assigned_clips=score.assigned_clips,
+                    accuracy={
+                        "numerator": str(score.accuracy_numerator),
+                        "denominator": str(score.accuracy_denominator),
+                    },
+                    eligible=score.eligible,
+                    utility={
+                        "numerator": str(score.utility_numerator),
+                        "denominator": str(score.utility_denominator),
+                    },
+                )
+                for score in item.scores
+            ),
+        )
+
+    def released_health(feed: BundleFeedSnapshot) -> tuple[BundleFeedHealthRecord, ...]:
+        return tuple(
+            BundleFeedHealthRecord(
+                validator_account_id32=item.validator_account_id32,
+                status=item.status,
+                last_error_code=item.last_error_code,
+                last_checked_unix=(
+                    None if item.last_checked_unix is None else str(item.last_checked_unix)
+                ),
+                accepted_entries=item.accepted_entries,
+            )
+            for item in feed.health
+        )
+
     @app.get("/healthz", include_in_schema=False)
     async def health() -> JSONResponse:
         return JSONResponse(
@@ -634,12 +786,19 @@ def create_observer_app(
     )
     async def status(request: Request) -> Response:
         view = current()
+        feed = released(view)
+        feed_unhealthy = any(item.status in {"degraded", "stale"} for item in feed.health)
+        gaps = set(_OUTSTANDING_GAP_CODES)
+        if feed.windows:
+            gaps.discard("released_audit_bundle_feed_unavailable")
         response = StatusResponse(
             **_envelope(view),
-            service_status="ready" if view.freshness == "fresh" else "degraded",
+            service_status=(
+                "ready" if view.freshness == "fresh" and not feed_unhealthy else "degraded"
+            ),
             protocol_state=_protocol_state(view.snapshot),
             finalized_block=_finalized_block(view.snapshot),
-            outstanding_gap_codes=_OUTSTANDING_GAP_CODES,
+            outstanding_gap_codes=tuple(sorted(gaps)),
         )
         return _render(request, response, view)
 
@@ -791,16 +950,46 @@ def create_observer_app(
     @app.get(
         "/api/v1/windows",
         response_model=WindowsResponse,
-        responses={503: _COMMON_ERROR_RESPONSES[503]},
+        responses=_CURSOR_ERROR_RESPONSES,
     )
-    async def windows(request: Request) -> Response:
+    async def windows(request: Request, query: Annotated[EvidenceQuery, Query()]) -> Response:
         view = current()
+        feed = released(view)
+        revision = _feed_revision(feed.windows, "windows")
+        offset = (
+            0
+            if query.cursor is None
+            else _decode_evidence_cursor(query.cursor, revision=revision, kind="windows")
+        )
+        if offset > len(feed.windows):
+            raise PublicAPIError(422, "cursor_offset_out_of_range")
+        selected = feed.windows[offset : offset + query.limit]
+        next_offset = offset + len(selected)
+        records = tuple(released_window(item) for item in selected)
         response = WindowsResponse(
-            **_envelope(view),
+            **(
+                _envelope(view)
+                | {"sources": released_sources(view, BundleFeedSnapshot(selected, feed.health))}
+            ),
             protocol_state=_protocol_state(view.snapshot),
-            availability="not_started",
-            reason_code="public_calibration_not_started",
-            windows=(),
+            availability="available" if feed.windows else "not_started",
+            reason_code=None if feed.windows else "public_calibration_not_started",
+            windows=records,
+            bundle_feed_health=released_health(feed),
+            page=EvidenceCursorPage(
+                limit=query.limit,
+                total=len(feed.windows),
+                returned=len(records),
+                next_cursor=(
+                    None
+                    if next_offset >= len(feed.windows)
+                    else _encode_evidence_cursor(
+                        revision=revision,
+                        kind="windows",
+                        offset=next_offset,
+                    )
+                ),
+            ),
         )
         return _render(request, response, view)
 
@@ -811,10 +1000,35 @@ def create_observer_app(
         responses=_WINDOW_ERROR_RESPONSES,
     )
     async def window_detail(
+        request: Request,
         window_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+        validator: Annotated[str | None, Query(pattern=_WINDOW_ID_RE.pattern)] = None,
     ) -> Response:
-        current()
-        raise PublicAPIError(404, "released_window_not_found")
+        view = current()
+        feed = released(view)
+        matches = [
+            item
+            for item in feed.windows
+            if item.window_id == window_id
+            and (validator is None or item.validator_account_id32 == validator)
+        ]
+        if not matches:
+            raise PublicAPIError(404, "released_window_not_found")
+        if len(matches) != 1:
+            raise PublicAPIError(409, "released_window_validator_required")
+        response = WindowResponse(
+            **(
+                _envelope(view)
+                | {
+                    "sources": released_sources(
+                        view, BundleFeedSnapshot(tuple(matches), feed.health)
+                    )
+                }
+            ),
+            protocol_state=_protocol_state(view.snapshot),
+            window=released_window(matches[0]),
+        )
+        return _render(request, response, view)
 
     @app.head("/api/v1/activation-gates", include_in_schema=False)
     @app.get(
@@ -861,16 +1075,90 @@ def create_observer_app(
     @app.get(
         "/api/v1/incidents",
         response_model=IncidentsResponse,
-        responses={503: _COMMON_ERROR_RESPONSES[503]},
+        responses=_CURSOR_ERROR_RESPONSES,
     )
-    async def incidents(request: Request) -> Response:
+    async def incidents(request: Request, query: Annotated[EvidenceQuery, Query()]) -> Response:
         view = current()
+        feed = released(view)
+        incident_windows = tuple(
+            item for item in feed.windows if item.terminal_classification != "calibration_no_weight"
+        )
+        all_records = tuple(
+            IncidentRecord(
+                incident_id=hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "manifest_sha256": item.manifest_sha256,
+                            "reason_code": reason,
+                            "validator_account_id32": item.validator_account_id32,
+                        }
+                    )
+                ).hexdigest(),
+                reason_code=reason,
+                window_id=item.window_id,
+                published_at=None,
+                observer_verified_at=(
+                    None
+                    if item.observer_verified_unix is None
+                    else datetime.fromtimestamp(item.observer_verified_unix, tz=timezone.utc)
+                ),
+                artifact_sha256=item.manifest_sha256,
+                validator_account_id32=item.validator_account_id32,
+                audit_release_block=str(item.audit_release_block),
+                terminal_classification=item.terminal_classification,
+            )
+            for item in incident_windows
+            for reason in item.reason_codes
+        )
+        revision = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "incidents": [item.incident_id for item in all_records],
+                    "kind": "incidents",
+                }
+            )
+        ).hexdigest()
+        offset = (
+            0
+            if query.cursor is None
+            else _decode_evidence_cursor(query.cursor, revision=revision, kind="incidents")
+        )
+        if offset > len(all_records):
+            raise PublicAPIError(422, "cursor_offset_out_of_range")
+        records = all_records[offset : offset + query.limit]
+        next_offset = offset + len(records)
+        selected_hashes = {item.artifact_sha256 for item in records}
+        selected_windows = tuple(
+            item for item in incident_windows if item.manifest_sha256 in selected_hashes
+        )
         response = IncidentsResponse(
-            **_envelope(view),
+            **(
+                _envelope(view)
+                | {
+                    "sources": released_sources(
+                        view, BundleFeedSnapshot(selected_windows, feed.health)
+                    )
+                }
+            ),
             protocol_state=_protocol_state(view.snapshot),
-            availability="not_started",
-            reason_code="public_incident_feed_not_started",
-            incidents=(),
+            availability="available" if all_records else "not_started",
+            reason_code=None if all_records else "public_incident_feed_not_started",
+            incidents=records,
+            bundle_feed_health=released_health(feed),
+            page=EvidenceCursorPage(
+                limit=query.limit,
+                total=len(all_records),
+                returned=len(records),
+                next_cursor=(
+                    None
+                    if next_offset >= len(all_records)
+                    else _encode_evidence_cursor(
+                        revision=revision,
+                        kind="incidents",
+                        offset=next_offset,
+                    )
+                ),
+            ),
         )
         return _render(request, response, view)
 
@@ -882,6 +1170,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8092)
     parser.add_argument("--network", choices=("finney",), default="finney")
+    parser.add_argument("--bundle-feed-config")
     parser.add_argument("--cors-origin", action="append", default=[])
     parser.add_argument("--trusted-host", action="append", default=[])
     parser.add_argument("--fresh-for-seconds", type=float, default=24.0)
@@ -918,8 +1207,16 @@ def main() -> None:
         maximum_finalized_head_age_seconds=args.maximum_finalized_head_age_seconds,
         maximum_future_block_skew_seconds=args.maximum_future_block_skew_seconds,
     )
+    bundle_feed = None
+    bundle_feed_poll_seconds = 15.0
+    if args.bundle_feed_config:
+        bundle_feed, bundle_feed_poll_seconds = build_production_observer_bundle_feed(
+            args.bundle_feed_config
+        )
     app = create_observer_app(
         cache,
+        bundle_feed=bundle_feed,
+        bundle_feed_poll_seconds=bundle_feed_poll_seconds,
         cors_origins=args.cors_origin,
         trusted_hosts=trusted_hosts,
     )

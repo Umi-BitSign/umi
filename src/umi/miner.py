@@ -6,18 +6,38 @@ import argparse
 import asyncio
 import hashlib
 import logging
+import os
 import re
+import stat
 import time
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import ValidationError
 
-from .auth import RequestAuthenticator, wire_request_target
-from .backends import Translator, load_translator
+from .auth import REQUEST_BODY_SHA256_HEADER, RequestAuthenticator, wire_request_target
+from .backends import Translator, UnixSocketTranslator, load_translator
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
+from .grandpa_finality_supervisor import DurableGrandpaFinalityPort
+from .miner_admission import (
+    MinerAdmissionError,
+    MinerWindowAdmission,
+    MinerWindowAuthority,
+    ProofBackedMinerWindowAuthority,
+)
+from .miner_resources import (
+    CachedMinerResponse,
+    MinerAssignmentBinding,
+    MinerResourceError,
+    SQLiteMinerResourceLedger,
+)
+from .nonce import NonceStoreAuthorizationError, NonceStoreCapacityError, NonceStoreError
+from .policy import ScoringPolicy, scoring_policy_hash, validate_scoring_runtime
 from .protocol import (
     PROTOCOL_VERSION,
     RESPONSE_ENVELOPE_SCHEMA,
@@ -31,7 +51,7 @@ from .protocol import (
     normalized_token_count,
     request_digest,
 )
-from .video import HttpVideoFetcher, VideoFetcher, VideoFetchError
+from .video import HttpVideoFetcher, VideoFetcher, VideoFetchError, VideoFetchResult
 
 LOGGER = logging.getLogger("umi.miner")
 TRANSLATE_PATH = "/v1/translate"
@@ -46,6 +66,10 @@ class EnvelopeLimitExceeded(ValueError):
     pass
 
 
+class IngressLimitExceeded(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class MinerRuntime:
     wallet: Any
@@ -56,14 +80,113 @@ class MinerRuntime:
     allowed_validator_hotkeys: frozenset[str]
     authenticator: RequestAuthenticator
     limits: Limits
+    scoring_policy_sha256: str
+    response_deadline_blocks: int
+    resource_ledger: SQLiteMinerResourceLedger
+    window_authority: MinerWindowAuthority
     model_revision: str | None = None
+    finality_service: DurableGrandpaFinalityPort | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     inference_semaphore: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(1),
         repr=False,
         compare=False,
     )
+    work_semaphore: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(1),
+        repr=False,
+        compare=False,
+    )
+    preauth_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        repr=False,
+        compare=False,
+    )
+    active_preauth_tokens: set[object] = field(
+        default_factory=set,
+        repr=False,
+        compare=False,
+    )
+    maximum_preauth_concurrency: int = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    ingress_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        repr=False,
+        compare=False,
+    )
+    active_ingress_accounts: set[str] = field(
+        default_factory=set,
+        repr=False,
+        compare=False,
+    )
+    allowed_validator_accounts: tuple[tuple[str, str], ...] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    assignment_locks: WeakValueDictionary[str, asyncio.Lock] = field(
+        default_factory=WeakValueDictionary,
+        repr=False,
+        compare=False,
+    )
+    validator_work_semaphores: WeakValueDictionary[str, asyncio.Semaphore] = field(
+        default_factory=WeakValueDictionary,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
+        if re.fullmatch(r"[0-9a-f]{64}", self.scoring_policy_sha256) is None:
+            raise ValueError("scoring policy hash must be lowercase SHA-256 hexadecimal")
+        if (
+            self.model_revision is not None
+            and re.fullmatch(r"[0-9a-f]{64}", self.model_revision) is None
+        ):
+            raise ValueError("model revision must be a lowercase SHA-256 hex digest")
+        if not isinstance(self.limits, Limits):
+            raise TypeError("limits must be Limits")
+        if not isinstance(self.resource_ledger, SQLiteMinerResourceLedger):
+            raise TypeError("resource ledger must be the durable SQLite implementation")
+        if not callable(getattr(self.window_authority, "authorize", None)):
+            raise TypeError("window authority must implement request authorization")
+        if self.finality_service is not None and not isinstance(
+            self.finality_service, DurableGrandpaFinalityPort
+        ):
+            raise TypeError("finality service must be the durable GRANDPA implementation")
+        if not self.allowed_validator_hotkeys:
+            raise ValueError("at least one policy validator hotkey is required")
+        from .encoding import account_id32
+
+        account_pairs = [(account_id32(value), value) for value in self.allowed_validator_hotkeys]
+        accounts = [account for account, _hotkey in account_pairs]
+        if len(set(accounts)) != len(accounts):
+            raise ValueError("validator allowlist contains duplicate accounts")
+        object.__setattr__(
+            self,
+            "allowed_validator_accounts",
+            tuple(sorted((account.hex(), hotkey) for account, hotkey in account_pairs)),
+        )
+        object.__setattr__(
+            self,
+            "maximum_preauth_concurrency",
+            max(4, 2 * len(account_pairs)),
+        )
+        if self.limits.maximum_inference_concurrency < len(account_pairs):
+            raise ValueError(
+                "maximum inference concurrency must reserve one slot per policy validator"
+            )
+        if (
+            isinstance(self.response_deadline_blocks, bool)
+            or not isinstance(self.response_deadline_blocks, int)
+            or self.response_deadline_blocks <= 0
+        ):
+            raise ValueError("response deadline blocks must be a positive integer")
         _preflight_hotkey_signing(
             self.wallet,
             hotkey_ss58=self.hotkey_ss58,
@@ -72,14 +195,7 @@ class MinerRuntime:
 
 
 async def _read_bounded_body(request: Request, maximum_bytes: int) -> bytes:
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            declared = int(content_length)
-        except ValueError as error:
-            raise BodyLimitExceeded("invalid Content-Length") from error
-        if declared < 0 or declared > maximum_bytes:
-            raise BodyLimitExceeded("request body exceeds the configured ceiling")
+    _validate_declared_content_length(request, maximum_bytes)
 
     body = bytearray()
     async for chunk in request.stream():
@@ -89,9 +205,116 @@ async def _read_bounded_body(request: Request, maximum_bytes: int) -> bytes:
     return bytes(body)
 
 
+def _validate_declared_content_length(request: Request, maximum_bytes: int) -> None:
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        return
+    if not content_length.isdecimal() or content_length != str(int(content_length)):
+        raise BodyLimitExceeded("invalid Content-Length")
+    if int(content_length) > maximum_bytes:
+        raise BodyLimitExceeded("request body exceeds the configured ceiling")
+
+
 def _header_bytes(request: Request) -> int:
     headers = request.scope.get("headers", ())
     return sum(len(name) + len(value) + 4 for name, value in headers)
+
+
+def _claimed_policy_validator(
+    runtime: MinerRuntime,
+    request: Request,
+) -> tuple[str, str, dict[str, str], str]:
+    """Parse one bounded auth header set without treating it as authenticated."""
+
+    import bittensor as bt
+
+    raw_headers = request.scope.get("headers", ())
+    required_headers = (
+        bt.http_auth.HEADER_VERSION,
+        bt.http_auth.HEADER_HOTKEY,
+        bt.http_auth.HEADER_RECEIVER,
+        bt.http_auth.HEADER_NONCE,
+        bt.http_auth.HEADER_SIGNATURE,
+        REQUEST_BODY_SHA256_HEADER,
+    )
+    values = {
+        name: _single_ascii_header(raw_headers, name, required=True) for name in required_headers
+    }
+    crypto = _single_ascii_header(
+        raw_headers,
+        bt.http_auth.HEADER_CRYPTO,
+        required=False,
+    )
+    if crypto is not None:
+        values[bt.http_auth.HEADER_CRYPTO] = crypto
+    claimed = values[bt.http_auth.HEADER_HOTKEY]
+    if claimed != claimed.strip():
+        raise HTTPException(status_code=401, detail="invalid btauth sender header")
+    from .encoding import account_id32
+
+    try:
+        account_hex = account_id32(claimed).hex()
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail="invalid btauth sender header") from error
+    canonical_hotkey = dict(runtime.allowed_validator_accounts).get(account_hex)
+    if canonical_hotkey is None:
+        raise HTTPException(status_code=403, detail="claimed caller is not allowed")
+    body_sha256 = values.pop(REQUEST_BODY_SHA256_HEADER)
+    return account_hex, canonical_hotkey, values, body_sha256
+
+
+def _single_ascii_header(
+    raw_headers: Any,
+    name: str,
+    *,
+    required: bool,
+) -> str | None:
+    encoded_name = name.encode("ascii").lower()
+    matches = [value for key, value in raw_headers if key.lower() == encoded_name]
+    if not matches and not required:
+        return None
+    if len(matches) != 1 or not matches[0] or len(matches[0]) > 256:
+        raise HTTPException(status_code=401, detail=f"invalid or duplicate {name}")
+    try:
+        return matches[0].decode("ascii")
+    except UnicodeDecodeError as error:
+        raise HTTPException(status_code=401, detail=f"invalid {name}") from error
+
+
+@asynccontextmanager
+async def _preauth_slot(runtime: MinerRuntime):
+    """Bound identity-neutral body reads without trusting a claimed sender."""
+
+    token = object()
+    async with runtime.preauth_lock:
+        if len(runtime.active_preauth_tokens) >= runtime.maximum_preauth_concurrency:
+            raise IngressLimitExceeded("miner_preauth_busy")
+        runtime.active_preauth_tokens.add(token)
+    try:
+        yield
+    finally:
+        async with runtime.preauth_lock:
+            runtime.active_preauth_tokens.discard(token)
+
+
+@asynccontextmanager
+async def _authenticated_ingress_slot(
+    runtime: MinerRuntime,
+    validator_account_hex: str,
+):
+    """Admit one post-signature request for each authenticated validator."""
+
+    async with runtime.ingress_lock:
+        if validator_account_hex in runtime.active_ingress_accounts:
+            raise IngressLimitExceeded("validator_ingress_busy")
+        if len(runtime.active_ingress_accounts) >= len(runtime.allowed_validator_accounts):
+            raise IngressLimitExceeded("miner_ingress_busy")
+        runtime.active_ingress_accounts.add(validator_account_hex)
+    try:
+        yield
+    finally:
+        async with runtime.ingress_lock:
+            runtime.active_ingress_accounts.discard(validator_account_hex)
 
 
 def _identity(wallet: Any) -> tuple[str, str]:
@@ -195,30 +418,158 @@ def _seconds_until_round(reveal_round: int) -> float:
     return bt.timelock.reveal_time(reveal_round).timestamp() - time.time()
 
 
+def _validate_cached_response(
+    runtime: MinerRuntime,
+    request: TranslationRequest,
+    validator_hotkey: str,
+    cached: CachedMinerResponse,
+) -> None:
+    """Re-verify durable response bytes before every retransmission."""
+
+    try:
+        envelope = ResponseEnvelope.model_validate_json(cached.body)
+    except ValidationError as error:
+        raise MinerResourceError("cached_response_invalid") from error
+    if canonical_json_bytes(envelope) != cached.body:
+        raise MinerResourceError("cached_response_noncanonical")
+    expected = (
+        envelope.window_id == request.window_id
+        and envelope.batch_id == request.batch_id
+        and envelope.challenge_id == request.challenge_id
+        and envelope.request_digest == request_digest(request)
+        and envelope.issued_block_hash == request.issued_block_hash
+        and envelope.validator_hotkey == validator_hotkey
+        and envelope.serving_hotkey == runtime.hotkey_ss58
+        and envelope.response_reveal_round == request.reveal_round
+        and envelope.signature_scheme == runtime.signature_scheme
+    )
+    if not expected or not verify_response_signature(
+        envelope,
+        hotkey_ss58=runtime.hotkey_ss58,
+        scheme=envelope.signature_scheme,
+        signature=cached.signature,
+    ):
+        raise MinerResourceError("cached_response_binding_invalid")
+
+
 async def _translate(
     runtime: MinerRuntime,
     request: TranslationRequest,
     validator_hotkey: str,
+    binding: MinerAssignmentBinding | None = None,
+) -> ResponsePlaintext:
+    async with (
+        _validator_work_semaphore(runtime, validator_hotkey),
+        runtime.work_semaphore,
+    ):
+        return await _translate_bounded(runtime, request, validator_hotkey, binding)
+
+
+async def _translate_bounded(
+    runtime: MinerRuntime,
+    request: TranslationRequest,
+    validator_hotkey: str,
+    binding: MinerAssignmentBinding | None = None,
 ) -> ResponsePlaintext:
     digest = request_digest(request)
-    try:
-        video = await runtime.video_fetcher.fetch(request.video)
-    except VideoFetchError:
-        LOGGER.warning("video fetch failed for challenge %s", request.challenge_id)
-        return _plaintext(
+    if binding is None:
+        binding = MinerAssignmentBinding.from_request(
             request,
-            request_digest_hex=digest,
             validator_hotkey=validator_hotkey,
-            miner_hotkey=runtime.hotkey_ss58,
-            status="error",
-            received_video_sha256=None,
-            hypothesis=None,
-            model_revision=None,
-            error_code="video_fetch_failed",
+            window_index=0,
+        )
+        runtime.resource_ledger.record_request(binding, observed_wire_bytes=0)
+    video = runtime.resource_ledger.cached_video(binding)
+    fetch_wait_deadline = (
+        asyncio.get_running_loop().time() + runtime.limits.video_fetch_timeout_seconds
+    )
+    while video is None:
+        try:
+            fetch_operation = runtime.resource_ledger.begin_video_fetch(binding)
+        except MinerResourceError as error:
+            if (
+                error.reason_code == "video_fetch_in_progress"
+                and asyncio.get_running_loop().time() < fetch_wait_deadline
+            ):
+                await asyncio.sleep(0.01)
+                video = runtime.resource_ledger.cached_video(binding)
+                continue
+            LOGGER.warning("video fetch resource limit for challenge %s", request.challenge_id)
+            return _plaintext(
+                request,
+                request_digest_hex=digest,
+                validator_hotkey=validator_hotkey,
+                miner_hotkey=runtime.hotkey_ss58,
+                status="error",
+                received_video_sha256=None,
+                hypothesis=None,
+                model_revision=None,
+                error_code="video_fetch_failed",
+            )
+        try:
+            receipt_method = getattr(runtime.video_fetcher, "fetch_with_receipt", None)
+            if receipt_method is None:
+                video = await runtime.video_fetcher.fetch(request.video)
+                fetch_result = VideoFetchResult(data=video, wire_bytes=len(video))
+            else:
+                fetch_result = await receipt_method(request.video)
+                if not isinstance(fetch_result, VideoFetchResult):
+                    raise TypeError("video fetch receipt has an invalid type")
+                video = fetch_result.data
+        except VideoFetchError as error:
+            runtime.resource_ledger.finish_video_fetch(
+                fetch_operation,
+                observed_wire_bytes=error.wire_bytes,
+                error_code="video_fetch_failed",
+            )
+            LOGGER.warning("video fetch failed for challenge %s", request.challenge_id)
+            return _plaintext(
+                request,
+                request_digest_hex=digest,
+                validator_hotkey=validator_hotkey,
+                miner_hotkey=runtime.hotkey_ss58,
+                status="error",
+                received_video_sha256=None,
+                hypothesis=None,
+                model_revision=None,
+                error_code="video_fetch_failed",
+            )
+        except asyncio.CancelledError:
+            runtime.resource_ledger.abandon_video_fetch(
+                fetch_operation,
+                error_code="video_fetch_cancelled",
+            )
+            raise
+        except Exception as error:
+            runtime.resource_ledger.abandon_video_fetch(
+                fetch_operation,
+                error_code="video_fetch_internal_error",
+            )
+            LOGGER.warning(
+                "video fetch backend failed for challenge %s: %s",
+                request.challenge_id,
+                type(error).__name__,
+            )
+            return _plaintext(
+                request,
+                request_digest_hex=digest,
+                validator_hotkey=validator_hotkey,
+                miner_hotkey=runtime.hotkey_ss58,
+                status="error",
+                received_video_sha256=None,
+                hypothesis=None,
+                model_revision=None,
+                error_code="video_fetch_failed",
+            )
+        runtime.resource_ledger.finish_video_fetch(
+            fetch_operation,
+            observed_wire_bytes=fetch_result.wire_bytes,
+            error_code=None,
+            data=video,
         )
 
     try:
-        async with runtime.inference_semaphore:
+        async with _inference_slot(runtime):
             hypothesis = await asyncio.wait_for(
                 runtime.translator.translate(video, request),
                 timeout=runtime.limits.inference_timeout_seconds,
@@ -241,6 +592,20 @@ async def _translate(
             error_code="inference_failed",
         )
 
+    if not isinstance(hypothesis, str):
+        LOGGER.warning("translation backend returned a non-text result")
+        return _plaintext(
+            request,
+            request_digest_hex=digest,
+            validator_hotkey=validator_hotkey,
+            miner_hotkey=runtime.hotkey_ss58,
+            status="error",
+            received_video_sha256=request.video.sha256,
+            hypothesis=None,
+            model_revision=None,
+            error_code="inference_failed",
+        )
+
     try:
         hypothesis_bytes = hypothesis.encode("utf-8")
     except UnicodeEncodeError:
@@ -248,8 +613,8 @@ async def _translate(
     if (
         (not hypothesis_bytes and hypothesis != "")
         or len(hypothesis_bytes) > runtime.limits.maximum_hypothesis_utf8_bytes
-        or normalized_token_count(hypothesis) > 128
-        or normalized_grapheme_count(hypothesis) > 512
+        or normalized_token_count(hypothesis) > runtime.limits.maximum_hypothesis_tokens
+        or normalized_grapheme_count(hypothesis) > runtime.limits.maximum_hypothesis_graphemes
     ):
         return _plaintext(
             request,
@@ -288,18 +653,202 @@ async def _translate(
     )
 
 
+def _assignment_lock(runtime: MinerRuntime, assignment_id: str) -> asyncio.Lock:
+    lock = runtime.assignment_locks.get(assignment_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        runtime.assignment_locks[assignment_id] = lock
+    return lock
+
+
+def _validator_work_semaphore(
+    runtime: MinerRuntime,
+    validator_hotkey: str,
+) -> asyncio.Semaphore:
+    from .encoding import account_id32
+
+    key = account_id32(validator_hotkey).hex()
+    semaphore = runtime.validator_work_semaphores.get(key)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(1)
+        runtime.validator_work_semaphores[key] = semaphore
+    return semaphore
+
+
+@asynccontextmanager
+async def _inference_slot(runtime: MinerRuntime):
+    try:
+        await asyncio.wait_for(
+            runtime.inference_semaphore.acquire(),
+            timeout=runtime.limits.inference_admission_timeout_seconds,
+        )
+    except asyncio.TimeoutError as error:
+        raise RuntimeError("model inference capacity was unavailable") from error
+    try:
+        yield
+    finally:
+        runtime.inference_semaphore.release()
+
+
+async def _finish_recorded_request(
+    runtime: MinerRuntime,
+    challenge: TranslationRequest,
+    *,
+    validator_hotkey: str,
+    binding: MinerAssignmentBinding,
+    cached: CachedMinerResponse | None,
+) -> Response:
+    import bittensor as bt
+
+    current_round = bt.timelock.current_round()
+    runtime.resource_ledger.prune_closed_video_cache(current_round)
+    if current_round >= challenge.response_close_round:
+        raise HTTPException(status_code=422, detail="response window has closed")
+    if challenge.reveal_round <= current_round:
+        raise HTTPException(
+            status_code=422,
+            detail="response reveal round is not in the future",
+        )
+
+    work_budget = (
+        _seconds_until_round(challenge.response_close_round)
+        - runtime.limits.response_seal_margin_seconds
+    )
+    if work_budget <= 0:
+        raise HTTPException(status_code=422, detail="insufficient response-window budget")
+    if cached is None:
+        cached = runtime.resource_ledger.cached_response(binding)
+    if cached is not None:
+        _validate_cached_response(
+            runtime,
+            challenge,
+            validator_hotkey,
+            cached,
+        )
+        try:
+            runtime.resource_ledger.record_response(
+                binding,
+                body=cached.body,
+                signature=cached.signature,
+            )
+        except MinerResourceError as error:
+            raise HTTPException(status_code=429, detail=error.reason_code) from error
+        return Response(
+            content=cached.body,
+            media_type="application/json",
+            headers={RESPONSE_SIGNATURE_HEADER: cached.signature},
+        )
+    try:
+        plaintext = await asyncio.wait_for(
+            _translate(runtime, challenge, validator_hotkey, binding),
+            timeout=work_budget,
+        )
+    except asyncio.TimeoutError:
+        plaintext = _plaintext(
+            challenge,
+            request_digest_hex=request_digest(challenge),
+            validator_hotkey=validator_hotkey,
+            miner_hotkey=runtime.hotkey_ss58,
+            status="error",
+            received_video_sha256=None,
+            hypothesis=None,
+            model_revision=None,
+            error_code="response_deadline_exceeded",
+        )
+
+    if _seconds_until_round(challenge.response_close_round) <= 0:
+        raise HTTPException(status_code=422, detail="response window closed during work")
+    try:
+        try:
+            response_body, signature = _signed_envelope(runtime, challenge, plaintext)
+        except EnvelopeLimitExceeded:
+            plaintext = _plaintext(
+                challenge,
+                request_digest_hex=request_digest(challenge),
+                validator_hotkey=validator_hotkey,
+                miner_hotkey=runtime.hotkey_ss58,
+                status="error",
+                received_video_sha256=(
+                    challenge.video.sha256 if plaintext.received_video_sha256 is not None else None
+                ),
+                hypothesis=None,
+                model_revision=None,
+                error_code="hypothesis_invalid",
+            )
+            response_body, signature = _signed_envelope(runtime, challenge, plaintext)
+    except bt.timelock.TimelockError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="response reveal round elapsed before sealing",
+        ) from error
+    if _seconds_until_round(challenge.response_close_round) <= 0:
+        raise HTTPException(status_code=422, detail="response window closed during sealing")
+    try:
+        runtime.resource_ledger.record_response(
+            binding,
+            body=response_body,
+            signature=signature,
+        )
+    except MinerResourceError as error:
+        raise HTTPException(status_code=429, detail=error.reason_code) from error
+    return Response(
+        content=response_body,
+        media_type="application/json",
+        headers={RESPONSE_SIGNATURE_HEADER: signature},
+    )
+
+
 def create_app(runtime: MinerRuntime) -> FastAPI:
     """Create the miner app without performing any chain mutation."""
 
-    app = FastAPI(title="UMI component miner", version="0.1.0")
+    finality_task: asyncio.Task[None] | None = None
+    finality_stop: asyncio.Event | None = None
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        nonlocal finality_stop, finality_task
+        translator_lifecycle_entered = False
+        try:
+            translator_lifecycle_entered = True
+            await _run_translator_lifecycle(runtime, "startup")
+            if runtime.finality_service is not None:
+                finality_stop = asyncio.Event()
+                finality_task = asyncio.create_task(runtime.finality_service.run(finality_stop))
+                await asyncio.sleep(0)
+                if finality_task.done():
+                    await finality_task
+            yield
+        finally:
+            if finality_stop is not None:
+                finality_stop.set()
+            if finality_task is not None:
+                with suppress(asyncio.CancelledError):
+                    await finality_task
+            if translator_lifecycle_entered:
+                await _run_translator_lifecycle(runtime, "shutdown")
+
+    app = FastAPI(title="UMI component miner", version="0.1.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def health() -> dict[str, object]:
+        if runtime.finality_service is None:
+            finality_status = "component_authority"
+        elif finality_task is None:
+            finality_status = "not_started"
+        elif finality_task.done():
+            finality_status = "failed" if finality_task.exception() is not None else "stopped"
+        else:
+            finality_status = "running"
         return {
-            "ok": True,
+            "ok": finality_status not in {"failed", "stopped"},
             "netuid": SAFETY_BOUNDARY.netuid,
             "translation_weights_active": False,
             "protocol_conformance": False,
+            "runtime_mode": "inactive_shadow",
+            "scoring_policy_sha256": runtime.scoring_policy_sha256,
+            "model_revision": runtime.model_revision,
+            "window_authority": type(runtime.window_authority).__name__,
+            "finality_service": finality_status,
         }
 
     @app.post(TRANSLATE_PATH)
@@ -307,105 +856,149 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
         if _header_bytes(request) > runtime.limits.maximum_http_header_bytes:
             raise HTTPException(status_code=431, detail="request headers exceed the ceiling")
         try:
-            body = await _read_bounded_body(request, runtime.limits.maximum_request_body_bytes)
+            _validate_declared_content_length(
+                request,
+                runtime.limits.maximum_request_body_bytes,
+            )
         except BodyLimitExceeded as error:
             raise HTTPException(status_code=413, detail=str(error)) from error
-
         try:
-            caller = runtime.authenticator.verify(
-                request.headers,
-                body,
-                method=request.method,
-                path=wire_request_target(request.scope),
-            )
-        except Exception as error:
-            import bittensor as bt
+            (
+                validator_account_hex,
+                validator_hotkey,
+                auth_headers,
+                declared_body_sha256,
+            ) = _claimed_policy_validator(runtime, request)
+            async with _preauth_slot(runtime):
+                try:
+                    caller = runtime.authenticator.verify_declared_body_digest(
+                        auth_headers,
+                        declared_body_sha256,
+                        method=request.method,
+                        path=wire_request_target(request.scope),
+                    )
+                except Exception as error:
+                    import bittensor as bt
 
-            if isinstance(error, bt.http_auth.AuthError):
-                raise HTTPException(status_code=401, detail=str(error)) from error
-            raise
-        if caller.hotkey_ss58 not in runtime.allowed_validator_hotkeys:
-            raise HTTPException(status_code=403, detail="authenticated caller is not allowed")
+                    if isinstance(error, bt.http_auth.AuthError):
+                        raise HTTPException(status_code=401, detail=str(error)) from error
+                    raise
+                from .encoding import account_id32
 
-        try:
-            challenge = TranslationRequest.model_validate_json(body)
-        except ValidationError as error:
-            raise HTTPException(status_code=422, detail="invalid UMI request") from error
-        canonical_request = canonical_json_bytes(challenge)
-        if body != canonical_request:
-            raise HTTPException(status_code=422, detail="request JSON is not RFC 8785 canonical")
+                if account_id32(caller.hotkey_ss58).hex() != validator_account_hex:
+                    raise HTTPException(status_code=401, detail="authenticated caller changed")
 
-        import bittensor as bt
+            async with _authenticated_ingress_slot(runtime, validator_account_hex):
+                try:
+                    body = await asyncio.wait_for(
+                        _read_bounded_body(
+                            request,
+                            runtime.limits.maximum_request_body_bytes,
+                        ),
+                        timeout=runtime.limits.request_body_timeout_seconds,
+                    )
+                except asyncio.TimeoutError as error:
+                    raise HTTPException(
+                        status_code=408,
+                        detail="request body deadline exceeded",
+                    ) from error
+                except BodyLimitExceeded as error:
+                    raise HTTPException(status_code=413, detail=str(error)) from error
+                if hashlib.sha256(body).hexdigest() != declared_body_sha256:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="request body does not match its authenticated digest",
+                    )
+                try:
+                    runtime.authenticator.commit_replay(caller)
+                except NonceStoreAuthorizationError as error:
+                    raise HTTPException(status_code=403, detail=error.reason_code) from error
+                except NonceStoreCapacityError as error:
+                    raise HTTPException(status_code=429, detail=error.reason_code) from error
+                except NonceStoreError as error:
+                    raise HTTPException(status_code=503, detail=error.reason_code) from error
+                except Exception as error:
+                    import bittensor as bt
 
-        current_round = bt.timelock.current_round()
-        if current_round >= challenge.response_close_round:
-            raise HTTPException(status_code=422, detail="response window has closed")
-        if challenge.reveal_round <= current_round:
-            raise HTTPException(
-                status_code=422,
-                detail="response reveal round is not in the future",
-            )
+                    if isinstance(error, bt.http_auth.AuthError):
+                        raise HTTPException(status_code=401, detail=str(error)) from error
+                    raise
 
-        work_budget = (
-            _seconds_until_round(challenge.response_close_round)
-            - runtime.limits.response_seal_margin_seconds
-        )
-        if work_budget <= 0:
-            raise HTTPException(status_code=422, detail="insufficient response-window budget")
-        try:
-            plaintext = await asyncio.wait_for(
-                _translate(runtime, challenge, caller.hotkey_ss58),
-                timeout=work_budget,
-            )
-        except asyncio.TimeoutError:
-            plaintext = _plaintext(
-                challenge,
-                request_digest_hex=request_digest(challenge),
-                validator_hotkey=caller.hotkey_ss58,
-                miner_hotkey=runtime.hotkey_ss58,
-                status="error",
-                received_video_sha256=None,
-                hypothesis=None,
-                model_revision=None,
-                error_code="response_deadline_exceeded",
-            )
+                try:
+                    challenge = TranslationRequest.model_validate_json(body)
+                except ValidationError as error:
+                    raise HTTPException(status_code=422, detail="invalid UMI request") from error
+                canonical_request = canonical_json_bytes(challenge)
+                if body != canonical_request:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="request JSON is not RFC 8785 canonical",
+                    )
+                if challenge.scoring_policy_hash != runtime.scoring_policy_sha256:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="request scoring policy does not match",
+                    )
+                if challenge.deadline_block != (
+                    challenge.issued_block + runtime.response_deadline_blocks
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="request block deadline does not match",
+                    )
 
-        if _seconds_until_round(challenge.response_close_round) <= 0:
-            raise HTTPException(status_code=422, detail="response window closed during work")
-        try:
-            try:
-                response_body, signature = _signed_envelope(runtime, challenge, plaintext)
-            except EnvelopeLimitExceeded:
-                plaintext = _plaintext(
+                try:
+                    admission = await runtime.window_authority.authorize(challenge)
+                except MinerAdmissionError as error:
+                    status = 503 if error.retryable else 422
+                    raise HTTPException(status_code=status, detail=error.reason_code) from error
+                if (
+                    not isinstance(admission, MinerWindowAdmission)
+                    or admission.window_id != challenge.window_id
+                    or admission.response_close_round != challenge.response_close_round
+                    or admission.reveal_round != challenge.reveal_round
+                ):
+                    raise HTTPException(status_code=503, detail="window_authority_invalid")
+
+                binding = MinerAssignmentBinding.from_request(
                     challenge,
-                    request_digest_hex=request_digest(challenge),
-                    validator_hotkey=caller.hotkey_ss58,
-                    miner_hotkey=runtime.hotkey_ss58,
-                    status="error",
-                    received_video_sha256=(
-                        challenge.video.sha256
-                        if plaintext.received_video_sha256 is not None
-                        else None
-                    ),
-                    hypothesis=None,
-                    model_revision=None,
-                    error_code="hypothesis_invalid",
+                    validator_hotkey=validator_hotkey,
+                    window_index=admission.window_index,
                 )
-                response_body, signature = _signed_envelope(runtime, challenge, plaintext)
-        except bt.timelock.TimelockError as error:
-            raise HTTPException(
-                status_code=422,
-                detail="response reveal round elapsed before sealing",
-            ) from error
-        if _seconds_until_round(challenge.response_close_round) <= 0:
-            raise HTTPException(status_code=422, detail="response window closed during sealing")
-        return Response(
-            content=response_body,
-            media_type="application/json",
-            headers={RESPONSE_SIGNATURE_HEADER: signature},
-        )
+                try:
+                    import bittensor as bt
+
+                    cached = runtime.resource_ledger.record_request(
+                        binding,
+                        observed_wire_bytes=_header_bytes(request) + len(body),
+                        current_round=bt.timelock.current_round(),
+                    )
+                except MinerResourceError as error:
+                    raise HTTPException(status_code=429, detail=error.reason_code) from error
+        except IngressLimitExceeded as error:
+            raise HTTPException(status_code=429, detail=str(error)) from error
+        async with _assignment_lock(runtime, binding.assignment_id):
+            return await _finish_recorded_request(
+                runtime,
+                challenge,
+                validator_hotkey=validator_hotkey,
+                binding=binding,
+                cached=cached,
+            )
 
     return app
+
+
+async def _run_translator_lifecycle(runtime: MinerRuntime, operation: str) -> None:
+    hook = getattr(runtime.translator, operation, None)
+    if hook is None:
+        return
+    if not callable(hook):
+        raise RuntimeError(f"translator {operation} hook is invalid")
+    await asyncio.wait_for(
+        hook(),
+        timeout=runtime.limits.backend_lifecycle_timeout_seconds,
+    )
 
 
 def build_runtime(args: argparse.Namespace) -> MinerRuntime:
@@ -413,14 +1006,29 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
 
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path)
     hotkey_ss58, scheme = _identity(wallet)
+    policy = _load_policy(args.policy)
+    policy_hash = scoring_policy_hash(policy)
+    allowed_validator_hotkeys = frozenset(
+        item.validator_hotkey for item in policy.validator_registry
+    )
+    inference_concurrency = _effective_inference_concurrency(
+        args.max_inference_concurrency,
+        validator_count=len(allowed_validator_hotkeys),
+    )
     if (
         args.model_revision is not None
         and re.fullmatch(r"[0-9a-f]{64}", args.model_revision) is None
     ):
         raise ValueError("model revision must be a lowercase SHA-256 hex digest")
-    limits = Limits(
+    if args.translator_unix_socket is not None and args.allow_unsafe_sync_translator:
+        raise ValueError("the unsafe synchronous opt-in applies only to module translators")
+    limits = Limits.from_policy(
+        policy,
         inference_timeout_seconds=args.inference_timeout,
-        maximum_inference_concurrency=args.max_inference_concurrency,
+        backend_lifecycle_timeout_seconds=args.backend_lifecycle_timeout,
+        inference_admission_timeout_seconds=args.inference_admission_timeout,
+        maximum_inference_concurrency=inference_concurrency,
+        request_body_timeout_seconds=args.request_body_timeout,
     )
     fetcher = HttpVideoFetcher(
         allowed_hosts=frozenset(args.video_host),
@@ -429,41 +1037,203 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         maximum_http_header_bytes=limits.maximum_http_header_bytes,
         timeout_seconds=limits.video_fetch_timeout_seconds,
     )
-    authenticator = (
-        RequestAuthenticator.sqlite(hotkey_ss58, args.nonce_db)
-        if args.nonce_db is not None
-        else RequestAuthenticator.in_memory(hotkey_ss58)
+    authenticator = RequestAuthenticator.sqlite(
+        hotkey_ss58,
+        args.nonce_db,
+        max_age_seconds=limits.btauth_max_age_seconds,
+        allowed_skew_seconds=limits.btauth_allowed_skew_seconds,
+        allowed_hotkeys=allowed_validator_hotkeys,
+        maximum_nonces_per_hotkey=limits.maximum_nonce_rows_per_validator,
+        maximum_total_nonces=limits.maximum_nonce_rows_total,
+        maximum_database_bytes=limits.maximum_nonce_database_bytes,
+    )
+    finality_pin = policy.implementation_pins.finality_verifier
+    if finality_pin is None:
+        raise ValueError("miner live policy is missing its finality-verifier pin")
+    finality = DurableGrandpaFinalityPort.from_policy(
+        policy,
+        target_triple=args.target_triple,
+        binary_path=args.finality_verifier_binary,
+        chain_spec_path=args.finality_chain_spec,
+        state_path=args.finality_state,
+        initial_minimum_finalized_block=max(
+            finality_pin.bootstrap_block_number,
+            policy.activation_block - 1,
+        ),
     )
     return MinerRuntime(
         wallet=wallet,
         hotkey_ss58=hotkey_ss58,
         signature_scheme=scheme,
-        translator=load_translator(
-            args.translator,
-            maximum_concurrency=limits.maximum_inference_concurrency,
-            allow_synchronous=args.allow_unsafe_sync_translator,
+        translator=(
+            UnixSocketTranslator(
+                socket_path=args.translator_unix_socket,
+                maximum_request_metadata_bytes=limits.maximum_request_body_bytes,
+                maximum_response_bytes=limits.maximum_hypothesis_utf8_bytes,
+                expected_model_revision=args.model_revision,
+                expected_scoring_policy_sha256=policy_hash,
+                required_validator_slots=len(allowed_validator_hotkeys),
+                maximum_inference_seconds=limits.inference_timeout_seconds,
+            )
+            if args.translator_unix_socket is not None
+            else load_translator(
+                args.translator,
+                maximum_concurrency=limits.maximum_inference_concurrency,
+                allow_synchronous=args.allow_unsafe_sync_translator,
+                expected_model_revision=args.model_revision,
+            )
         ),
         video_fetcher=fetcher,
-        allowed_validator_hotkeys=frozenset(args.validator_hotkey),
+        allowed_validator_hotkeys=allowed_validator_hotkeys,
         authenticator=authenticator,
         limits=limits,
+        scoring_policy_sha256=policy_hash,
+        response_deadline_blocks=(
+            policy.clock.issue_allowance_seconds
+            + policy.clock.response_window_seconds
+            + policy.clock.target_block_interval_seconds
+            - 1
+        )
+        // policy.clock.target_block_interval_seconds,
+        resource_ledger=SQLiteMinerResourceLedger(
+            args.assignment_db,
+            miner_hotkey=hotkey_ss58,
+            scoring_policy_sha256=policy_hash,
+            limits=limits,
+        ),
+        window_authority=ProofBackedMinerWindowAuthority(
+            policy=policy,
+            finalized_blocks=finality,
+        ),
         model_revision=args.model_revision,
+        finality_service=finality,
         inference_semaphore=asyncio.Semaphore(limits.maximum_inference_concurrency),
+        work_semaphore=asyncio.Semaphore(len(policy.validator_registry)),
     )
 
 
+def _effective_inference_concurrency(
+    requested: int | None,
+    *,
+    validator_count: int,
+) -> int:
+    """Reserve one independently schedulable inference slot per validator."""
+
+    if isinstance(validator_count, bool) or not isinstance(validator_count, int):
+        raise TypeError("validator_count must be an integer")
+    if validator_count <= 0:
+        raise ValueError("validator_count must be positive")
+    if requested is None:
+        return validator_count
+    if isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
+        raise ValueError("maximum inference concurrency must be a positive integer")
+    if requested < validator_count:
+        raise ValueError("maximum inference concurrency must reserve one slot per policy validator")
+    return requested
+
+
+def _load_policy(path: str | Path) -> ScoringPolicy:
+    """Load an exact canonical policy without following a final symlink."""
+
+    resolved = Path(path).expanduser().absolute()
+    try:
+        parent = resolved.parent.lstat()
+    except OSError as error:
+        raise RuntimeError("scoring policy parent is unavailable") from error
+    if (
+        stat.S_ISLNK(parent.st_mode)
+        or not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.geteuid()
+        or parent.st_mode & 0o022
+    ):
+        raise RuntimeError("scoring policy parent is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as error:
+        raise RuntimeError("scoring policy could not be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o022
+        ):
+            raise RuntimeError("scoring policy file is unsafe")
+        if metadata.st_size <= 0 or metadata.st_size > 1024 * 1024:
+            raise RuntimeError("scoring policy file size is invalid")
+        encoded = bytearray()
+        while chunk := os.read(descriptor, min(1024 * 1024 + 1 - len(encoded), 64 * 1024)):
+            encoded.extend(chunk)
+            if len(encoded) > 1024 * 1024:
+                raise RuntimeError("scoring policy exceeds the startup ceiling")
+        after = os.fstat(descriptor)
+        before_identity = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity or len(encoded) != metadata.st_size:
+            raise RuntimeError("scoring policy changed while it was read")
+    finally:
+        os.close(descriptor)
+    raw = bytes(encoded)
+    try:
+        policy = ScoringPolicy.model_validate_json(raw)
+    except (ValidationError, ValueError) as error:
+        raise RuntimeError("scoring policy is invalid") from error
+    if canonical_json_bytes(policy) != raw:
+        raise RuntimeError("scoring policy is not RFC 8785 canonical")
+    validate_scoring_runtime(policy)
+    return policy
+
+
+def _uvicorn_limits(runtime: MinerRuntime) -> dict[str, int]:
+    """Bound open request tasks outside the application-level ingress gate."""
+
+    connection_limit = runtime.maximum_preauth_concurrency + 4
+    return {
+        "limit_concurrency": connection_limit,
+        "backlog": 2 * connection_limit,
+        "timeout_keep_alive": 5,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Serve the UMI no-weight component miner")
+    parser = argparse.ArgumentParser(description="Serve the UMI inactive-shadow miner")
     parser.add_argument("--wallet-name", required=True)
     parser.add_argument("--hotkey", required=True)
     parser.add_argument("--wallet-path", default="~/.bittensor/wallets")
-    parser.add_argument("--translator", required=True, help="trusted module:callable backend")
+    parser.add_argument("--policy", required=True, help="canonical inactive scoring policy")
+    parser.add_argument(
+        "--target-triple",
+        required=True,
+        help="target key used by the policy's finality-verifier release map",
+    )
+    parser.add_argument("--finality-verifier-binary", required=True)
+    parser.add_argument("--finality-chain-spec", required=True)
+    parser.add_argument("--finality-state", required=True)
+    translator = parser.add_mutually_exclusive_group(required=True)
+    translator.add_argument("--translator", help="trusted in-process module:callable backend")
+    translator.add_argument(
+        "--translator-unix-socket",
+        help="private mode-0600 Unix socket for an isolated async model sidecar",
+    )
     parser.add_argument(
         "--allow-unsafe-sync-translator",
         action="store_true",
         help="allow a synchronous backend whose hung worker thread cannot be terminated",
     )
-    parser.add_argument("--validator-hotkey", action="append", required=True)
     parser.add_argument("--video-host", action="append", required=True)
     parser.add_argument(
         "--video-port",
@@ -472,11 +1242,28 @@ def _parser() -> argparse.ArgumentParser:
         help="allowed HTTPS port; repeat as needed (default: 443)",
     )
     parser.add_argument("--model-revision")
+    parser.add_argument("--request-body-timeout", type=float, default=5.0)
+    parser.add_argument("--backend-lifecycle-timeout", type=float, default=60.0)
+    parser.add_argument("--inference-admission-timeout", type=float, default=10.0)
     parser.add_argument("--inference-timeout", type=float, default=120.0)
-    parser.add_argument("--max-inference-concurrency", type=int, default=1)
+    parser.add_argument(
+        "--max-inference-concurrency",
+        type=int,
+        default=None,
+        help=(
+            "total runnable model slots (default: policy validator count; values below "
+            "that count are rejected)"
+        ),
+    )
     parser.add_argument(
         "--nonce-db",
-        help="SQLite nonce database shared by same-host miner processes",
+        required=True,
+        help="SQLite nonce database owned by this single miner protocol process",
+    )
+    parser.add_argument(
+        "--assignment-db",
+        required=True,
+        help="durable resource-counter and encrypted-response cache database",
     )
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8091)
@@ -490,7 +1277,15 @@ def main() -> None:
     runtime = build_runtime(args)
     import uvicorn
 
-    uvicorn.run(create_app(runtime), host=args.listen_host, port=args.port)
+    try:
+        uvicorn.run(
+            create_app(runtime),
+            host=args.listen_host,
+            port=args.port,
+            **_uvicorn_limits(runtime),
+        )
+    finally:
+        runtime.resource_ledger.close()
 
 
 if __name__ == "__main__":

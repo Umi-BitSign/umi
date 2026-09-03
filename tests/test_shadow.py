@@ -52,6 +52,12 @@ from umi.shadow import (
     run_shadow_rehearsal,
 )
 from umi.tools import _verify_rehearsal_bundle
+from umi.validator_delivery import (
+    DEFAULT_DELIVERY_ISSUANCE_PATH,
+    DEFAULT_MIRROR_INDEX_PATH,
+    MIRROR_DISCOVERY_SCHEMA,
+    MirrorDiscoveryRule,
+)
 from umi.window import QUICKNET_GENESIS_MS, WindowClock
 
 ROUND = 1_000_000
@@ -96,7 +102,7 @@ def _policy(
         for index, wallet in enumerate(validator_wallets)
     ]
     validators.sort(key=lambda item: account_id32(item.validator_hotkey))
-    return ScoringPolicy.launch(
+    provisional = ScoringPolicy.launch(
         translation_weights_active=False,
         activation_block=1_000,
         minimum_publisher_collateral_alpha_rao=1_000_000_000,
@@ -108,6 +114,30 @@ def _policy(
         control_group_registry=groups,
         publisher_registry=publishers,
     )
+    discovery = MirrorDiscoveryRule(
+        schema=MIRROR_DISCOVERY_SCHEMA,
+        protocol="umi-asl/0.1",
+        authentication_profile=(
+            provisional.implementation_pins.rules.mirror_authentication_profile
+        ),
+        index_path_template=DEFAULT_MIRROR_INDEX_PATH,
+        delivery_issuance_path=DEFAULT_DELIVERY_ISSUANCE_PATH,
+        origins=[
+            "https://mirror.example",
+            "https://mirror1.example",
+            "https://mirror2.example",
+        ],
+        delivery_origins=[
+            "https://delivery.example",
+            "https://delivery1.example",
+            "https://delivery2.example",
+        ],
+    )
+    data = provisional.model_dump(mode="json", by_alias=True)
+    data["implementation_pins"]["rules"]["mirror_discovery_rule_sha256"] = hashlib.sha256(
+        canonical_json_bytes(discovery)
+    ).hexdigest()
+    return ScoringPolicy.model_validate(data)
 
 
 def _schedule(policy: ScoringPolicy):

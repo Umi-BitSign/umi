@@ -12,9 +12,13 @@ construction, shadow rehearsal, media inspection, and the full test suite.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install uv==0.12.9
+uv sync --locked --extra dev
 make check
 ```
+
+`uv.lock` is the release dependency lock. Run `uv lock --check` before testing;
+update and review the lock whenever `pyproject.toml` changes.
 
 ## Safety rules
 

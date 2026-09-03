@@ -129,7 +129,7 @@ def test_storage_evidence_requires_proof_verification_and_matching_root() -> Non
 
     def verifier(**kwargs):
         observed.update(kwargs)
-        return bytes.fromhex(ref.state_root[2:])
+        return True
 
     evidence = StorageEvidence(
         snapshot=ref,
@@ -141,7 +141,7 @@ def test_storage_evidence_requires_proof_verification_and_matching_root() -> Non
     assert evidence.verified_state_root == ref.state_root
     assert evidence.proof == (b"node-one", b"node-two")
     assert observed == {
-        "block_hash": ref.block_hash,
+        "state_root": bytes.fromhex(ref.state_root[2:]),
         "storage_key": b"\x12key",
         "expected_value": None,
         "proof": (b"node-one", b"node-two"),
@@ -149,21 +149,29 @@ def test_storage_evidence_requires_proof_verification_and_matching_root() -> Non
     with pytest.raises(FrozenInstanceError):
         evidence.value = b"replacement"  # type: ignore[misc]
 
-    with pytest.raises(ValueError, match="does not match"):
+    with pytest.raises(ValueError, match="did not affirm"):
         StorageEvidence(
             snapshot=ref,
             storage_key=b"key",
             value=b"value",
             proof=(b"node",),
-            verifier=lambda **_kwargs: block_hash(999),
+            verifier=lambda **_kwargs: False,
         )
-    with pytest.raises(ValueError, match="must return"):
+    with pytest.raises(ValueError, match="did not affirm"):
         StorageEvidence(
             snapshot=ref,
             storage_key=b"key",
             value=b"value",
             proof=(b"node",),
-            verifier=lambda **_kwargs: True,
+            verifier=lambda **_kwargs: b"unexpected",
+        )
+    with pytest.raises(ValueError, match="did not affirm"):
+        StorageEvidence(
+            snapshot=ref,
+            storage_key=b"key",
+            value=b"value",
+            proof=(b"node",),
+            verifier=lambda **_kwargs: None,
         )
     with pytest.raises(TypeError, match="verifier"):
         StorageEvidence(  # type: ignore[call-arg]
@@ -695,6 +703,36 @@ def test_shadow_scan_rejects_weight_event_and_allows_another_validator() -> None
     with pytest.raises(ValueError, match="weight event"):
         assert_shadow_no_weight_interval(
             (block_with_event(b"v" * 32),),
+            start_block=10,
+            end_block=10,
+            validator_account=b"v" * 32,
+        )
+
+
+def test_shadow_scan_rejects_current_batch_reveal_event_for_validator() -> None:
+    ref = snapshot(10)
+    event = FinalizedEventRecord(
+        snapshot=ref,
+        event_index=0,
+        payload_sha256=digest(22),
+        module="SubtensorModule",
+        event="WeightsBatchRevealed",
+        extrinsic_index=0,
+        account_id32=b"v" * 32,
+        netuid=78,
+        mechanism_id=0,
+    )
+    block = FinalizedBlockRecord(
+        snapshot=ref,
+        extrinsic_count=1,
+        event_count=1,
+        calls=(generic_call(ref),),
+        events=(event,),
+    )
+
+    with pytest.raises(ValueError, match="weight event"):
+        assert_shadow_no_weight_interval(
+            (block,),
             start_block=10,
             end_block=10,
             validator_account=b"v" * 32,

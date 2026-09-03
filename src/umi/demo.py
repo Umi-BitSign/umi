@@ -17,6 +17,8 @@ from .backends import Translator
 from .component import prepare_case
 from .config import Limits
 from .miner import MinerRuntime, _identity, create_app
+from .miner_admission import LocalComponentWindowAuthority
+from .miner_resources import SQLiteMinerResourceLedger
 from .protocol import (
     GROUND_TRUTH_SCHEMA,
     GROUND_TRUTH_TLE_PROFILE,
@@ -159,6 +161,7 @@ async def run_demo(output: Path) -> tuple[Path, dict[str, Any]]:
     validator_wallet = _development_wallet("//Alice")
     miner_wallet = _development_wallet("//Bob")
     miner_hotkey, scheme = _identity(miner_wallet)
+    limits = Limits(inference_timeout_seconds=5)
     runtime = MinerRuntime(
         wallet=miner_wallet,
         hotkey_ss58=miner_hotkey,
@@ -167,7 +170,16 @@ async def run_demo(output: Path) -> tuple[Path, dict[str, Any]]:
         video_fetcher=_DemoFetcher(),
         allowed_validator_hotkeys=frozenset({validator_wallet.hotkey.ss58_address}),
         authenticator=RequestAuthenticator.in_memory(miner_hotkey),
-        limits=Limits(inference_timeout_seconds=5),
+        limits=limits,
+        scoring_policy_sha256="20" * 32,
+        response_deadline_blocks=10,
+        resource_ledger=SQLiteMinerResourceLedger(
+            ":memory:",
+            miner_hotkey=miner_hotkey,
+            scoring_policy_sha256="20" * 32,
+            limits=limits,
+        ),
+        window_authority=LocalComponentWindowAuthority(),
     )
     bundle_root = output / "bundle"
     manifest = await run_component_case(

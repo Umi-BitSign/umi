@@ -1,9 +1,11 @@
 # UMI public observer API
 
 This API is the read-only data source for the public SN78 page on `umi.vision`.
-Its initial release observes finalized chain state. It does not publish live UMI
-scores, calibration results, or activation evidence because no conforming public
-bundle feed exists yet.
+It observes finalized chain state and can ingest released inactive-validator audit
+bundles. A publisher index is discovery only: the observer downloads the bounded
+manifest and complete object tree, checks canonical encoding, byte counts, hashes,
+route and release bindings, and independently runs the production bundle replay
+verifier before exposing a record.
 
 The chain remains authoritative. The API is a versioned index with explicit source
 and freshness metadata, not a validator input or a second consensus system.
@@ -32,17 +34,75 @@ key-sorted JSON for these facts:
 {"activation_evidence_available":false,"api_version":"v1","chain_result_classification":"unverified","conformance_evidence_available":false,"economic_era":"unverified","expected_chain_name":"UMI","mechanism_id":0,"netuid":78,"phase":"pre_public_calibration","protocol":"umi-asl/0.1","scoring_policy_hash":null,"specification_version":"0.1","translation_weights_active":false,"validator_input_eligible":false}
 ```
 
+For chain-only responses, `X-UMI-Dataset-Revision` is the finalized block hash.
+For a response containing released bundles, it is SHA-256 of canonical JSON binding
+that block hash to the sorted manifest hashes on that response page. ETags cover
+the exact response body.
+
 | Endpoint | Initial contents |
 |---|---|
 | `GET /api/v1/status` | Service readiness, UMI phase, finalized block, and outstanding gap codes |
 | `GET /api/v1/network` | SN78 topology, epoch, runtime, commit-reveal state, emission flags, counts, and selected hyperparameters |
 | `GET /api/v1/participants` | Public UID, hotkey, role, serving announcement, chain economics, and explicit UMI-score unavailability |
 | `GET /api/v1/leaderboard` | Separate native chain-economics ranking and empty UMI translation leaderboard |
-| `GET /api/v1/windows` | Empty public-calibration window feed with `not_started` |
-| `GET /api/v1/windows/{window_id}` | A released window once the future bundle feed exists; currently a structured `404` |
+| `GET /api/v1/windows` | Fully replayed validator-local calibration and incident windows |
+| `GET /api/v1/windows/{window_id}` | One released validator window; add `?validator=<AccountId32 hex>` when several validators published the same window |
 | `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
 | `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
-| `GET /api/v1/incidents` | Empty published-incident feed with `not_started` |
+| `GET /api/v1/incidents` | Reason records from fully replayed public incident bundles |
+
+Incident records leave `published_at` null because the append-only publisher index
+does not assert a wall-clock publication time. `observer_verified_at` is when this
+observer completed replay and durably accepted the bundle; it is not a publisher
+timestamp. `audit_release_block` is the protocol release boundary.
+
+## Released bundle feed
+
+Start the observer with `--bundle-feed-config /etc/umi/observer-bundle-feed.json`.
+The example at `docs/examples/observer-bundle-feed-config.json` is the production
+shape. Each target points to the exact local audit-publication config used for that
+validator. Startup authenticates its signed validator configuration, release
+manifest, scoring policy, finality verifier, storage-proof verifier, and production
+replay ports. The configured public origin must byte-match that publication config.
+The observer has no wallet-loading or chain-write capability.
+
+The observer resolves every HTTPS origin itself, rejects the request if any DNS
+answer is non-public, pins the connection to one verified public address, preserves
+the original Host and TLS SNI names, disables redirects, proxies, and content
+encoding, and applies absolute time, header, object, file-count, and total-bundle
+limits. A later DNS change cannot redirect an in-progress refresh.
+
+Accepted index entries are append-only per validator. A restart resumes after the
+last fully verified entry. Rollback, prefix mutation, duplicate windows, a future
+`audit_release_block`, or any account, path, policy, release, manifest, object, tree,
+or replay mismatch rejects the refresh. The API retains the last verified records
+and reports each target in `bundle_feed_health` as `current`, `degraded`, `stale`,
+or `not_started`; unverified candidate bytes are never visible.
+
+Each refresh admits at most `maximum_new_entries_per_refresh` new routes. When the
+public index has a larger verified backlog, the accepted prefix remains visible but
+the target reports `degraded` with `feed_backlog_pending`. It returns to `current`
+only after the complete observed index has been replayed and stored. A failure in a
+later route preserves the accepted prefix and replaces the backlog code with the
+bounded failure code.
+
+Every `/windows` row is scoped by `validator_account_id32` and says
+`score_scope: validator_local`. `validator_local_scores` contains exact rational
+accuracy and utility values from that validator's replayed weight-build object. It
+has no rank. Different validator samples may legitimately disagree, so the API
+does not merge them, choose a winner, or describe them as consensus. Native chain
+economics remain in the separate `leaderboard.chain_economics` object.
+
+The public validator index remains a convenient read-only interface for independent
+observers:
+
+`GET <origin>/validators/<validator_account_id32>/index.json`
+
+For each entry, fetch `<relative_path>/manifest.json` and every manifest object at
+`<relative_path>/objects/<sha256>`. Consumers must independently enforce the same
+canonical JSON, byte accounting, tree digest, index bindings, release-height, and
+full replay checks. Treating HTTP 200 or an index signature as bundle verification
+is incorrect.
 
 `HEAD` is supported on every public data endpoint. `POST`, `PUT`, `PATCH`, and
 `DELETE` are not. `/openapi.json` contains the machine-readable GET contract.
@@ -229,9 +289,12 @@ exact ties receive the same rank and `incentive_tie_size` reports the group size
 When all observed values are equal, `ranking_status` is
 `no_economic_separation`, every `chain_rank` is null, and UID order is not a rank.
 
-`umi_translation` is a separate object. It remains `not_started` with no entries
-until the future evidence index verifies conforming bundles and their release
-blocks. The site must keep these two lists visibly distinct.
+`umi_translation` is a separate object. Inactive-policy bundles contain
+validator-local samples, so they do not populate this consensus-style leaderboard.
+Use `/windows` for those scores. A future activated-policy contract would need a
+separate evidence rule before this leaderboard can become available. The site must
+keep chain economics, validator-local samples, and any later consensus result
+visibly distinct.
 
 ```json
 {
@@ -333,7 +396,8 @@ umi-observer \
   --listen-host 127.0.0.1 \
   --port 8092 \
   --network finney \
-  --trusted-host api.umi.vision
+  --trusted-host api.umi.vision \
+  --bundle-feed-config /etc/umi/observer-bundle-feed.json
 ```
 
 If the reverse proxy preserves an internal Host header, add that exact host with a
@@ -365,7 +429,7 @@ Public request handlers only read the cache and never trigger an RPC call, miner
 probe, or artifact fetch. Safe structured refresh failures and the last successful
 block are written to the process log; raw exception text is not.
 
-## Future score and evidence feed
+## Score and evidence boundaries
 
 Do not populate `umi_translation` from chain incentive, dividend, or emission
 values. Those values belong only in `chain_economics`. Do not ingest
@@ -373,8 +437,8 @@ values. Those values belong only in `chain_economics`. Do not ingest
 `umi-shadow-rehearsal-bundle/2` as calibration evidence. They are engineering
 fixtures and expressly deny activation evidence.
 
-The future evidence index must verify every content-addressed object, bind the
-bundle to its validator, window, policy, and finalized chain proofs, and quarantine
+The evidence reader verifies every content-addressed object, binds the
+bundle to its validator, window, policy, and finalized chain proofs, and quarantines
 it until its protocol-defined `audit_release_block`. Public counts, pagination,
 errors, ETags, and metrics must not reveal quarantined outcomes. Only then may the
 API expose translation scores, terminal window state, activation evidence, or
@@ -382,6 +446,8 @@ incidents. The response schema also requires every released score or window to c
 a `released_audit_bundle` source with the same artifact hash, and rejects a release
 block above the response's finalized-chain source.
 
-The initial window and incident feeds are deliberately empty and unpaginated. Before
-either feed begins retaining public history, introduce a cursor-bound page object under
-a new response schema and API contract version. Do not activate an unbounded v1 feed.
+Window and incident results are capped at 256 entries per response and include a
+cursor-bound `page` object. A cursor binds the complete verified feed revision and
+feed kind. Adding a verified entry invalidates an older cursor with
+`409 cursor_snapshot_changed`; clients restart at the first page. Invalid offsets
+and cross-feed cursors fail with a bounded `422`.

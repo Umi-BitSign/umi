@@ -15,6 +15,8 @@ from umi.backends import Translator
 from umi.component import load_case, prepare_case, score_component_responses
 from umi.config import Limits
 from umi.miner import MinerRuntime, _identity, create_app
+from umi.miner_admission import LocalComponentWindowAuthority
+from umi.miner_resources import SQLiteMinerResourceLedger
 from umi.protocol import (
     RESPONSE_PLAINTEXT_SCHEMA,
     ResponseEnvelope,
@@ -39,6 +41,31 @@ class FixtureFetcher(VideoFetcher):
 class FixtureTranslator(Translator):
     async def translate(self, video: bytes, request: TranslationRequest) -> str:
         return "hello" if request.task.stratum == "fingerspelling" else "hello world"
+
+
+def fixture_miner_runtime(miner_wallet, validator_wallet) -> MinerRuntime:
+    miner_hotkey, scheme = _identity(miner_wallet)
+    limits = Limits()
+    policy_hash = "20" * 32
+    return MinerRuntime(
+        wallet=miner_wallet,
+        hotkey_ss58=miner_hotkey,
+        signature_scheme=scheme,
+        translator=FixtureTranslator(),
+        video_fetcher=FixtureFetcher(),
+        allowed_validator_hotkeys=frozenset({validator_wallet.hotkey.ss58_address}),
+        authenticator=RequestAuthenticator.in_memory(miner_hotkey),
+        limits=limits,
+        scoring_policy_sha256=policy_hash,
+        response_deadline_blocks=10,
+        resource_ledger=SQLiteMinerResourceLedger(
+            ":memory:",
+            miner_hotkey=miner_hotkey,
+            scoring_policy_sha256=policy_hash,
+            limits=limits,
+        ),
+        window_authority=LocalComponentWindowAuthority(),
+    )
 
 
 def write_case_inputs(
@@ -124,17 +151,8 @@ async def build_completed_bundle(
     prepare_case(request_path, truth_path, case_root)
     validator_wallet = dev_wallet("//Alice")
     miner_wallet = dev_wallet("//Bob")
-    miner_hotkey, scheme = _identity(miner_wallet)
-    runtime = MinerRuntime(
-        wallet=miner_wallet,
-        hotkey_ss58=miner_hotkey,
-        signature_scheme=scheme,
-        translator=FixtureTranslator(),
-        video_fetcher=FixtureFetcher(),
-        allowed_validator_hotkeys=frozenset({validator_wallet.hotkey.ss58_address}),
-        authenticator=RequestAuthenticator.in_memory(miner_hotkey),
-        limits=Limits(),
-    )
+    runtime = fixture_miner_runtime(miner_wallet, validator_wallet)
+    miner_hotkey = runtime.hotkey_ss58
     revealed = [canonical_json_bytes(truth)]
     revealed.extend(
         response_bytes
@@ -203,17 +221,8 @@ async def test_run_and_offline_replay_reproduce_exact_scores(
 
     validator_wallet = dev_wallet("//Alice")
     miner_wallet = dev_wallet("//Bob")
-    miner_hotkey, scheme = _identity(miner_wallet)
-    runtime = MinerRuntime(
-        wallet=miner_wallet,
-        hotkey_ss58=miner_hotkey,
-        signature_scheme=scheme,
-        translator=FixtureTranslator(),
-        video_fetcher=FixtureFetcher(),
-        allowed_validator_hotkeys=frozenset({validator_wallet.hotkey.ss58_address}),
-        authenticator=RequestAuthenticator.in_memory(miner_hotkey),
-        limits=Limits(),
-    )
+    runtime = fixture_miner_runtime(miner_wallet, validator_wallet)
+    miner_hotkey = runtime.hotkey_ss58
 
     revealed = [canonical_json_bytes(truth)]
     revealed.extend(
@@ -272,17 +281,8 @@ async def test_replay_detects_content_object_tampering(
     prepare_case(request_path, truth_path, case_root)
     validator_wallet = dev_wallet("//Alice")
     miner_wallet = dev_wallet("//Bob")
-    miner_hotkey, scheme = _identity(miner_wallet)
-    runtime = MinerRuntime(
-        wallet=miner_wallet,
-        hotkey_ss58=miner_hotkey,
-        signature_scheme=scheme,
-        translator=FixtureTranslator(),
-        video_fetcher=FixtureFetcher(),
-        allowed_validator_hotkeys=frozenset({validator_wallet.hotkey.ss58_address}),
-        authenticator=RequestAuthenticator.in_memory(miner_hotkey),
-        limits=Limits(),
-    )
+    runtime = fixture_miner_runtime(miner_wallet, validator_wallet)
+    miner_hotkey = runtime.hotkey_ss58
     revealed = [canonical_json_bytes(truth)] + [
         canonical_json_bytes(
             response_plaintext(

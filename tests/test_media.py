@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +17,7 @@ from umi.media import (
     decode_frame_digest,
     frame_digest,
     inspect_media,
+    inspect_media_pinned,
     probe_media,
     profile_from_probe,
 )
@@ -151,6 +155,51 @@ def test_ffprobe_output_is_streamed_through_a_hard_evidence_ceiling(
     with pytest.raises(MediaConformanceError, match="evidence ceiling"):
         probe_media(clip, ffprobe=str(fake_probe))
 
+    with pytest.raises(MediaConformanceError, match="deadline"):
+        media_module._run_bounded_command(
+            [str(fake_probe)],
+            timeout_seconds=float("inf"),
+            maximum_stdout_bytes=64,
+            maximum_stderr_bytes=64,
+            label="ffprobe",
+        )
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="release memory limit is Linux-only",
+)
+def test_media_child_enters_finite_address_space_cpu_and_core_limits(tmp_path) -> None:
+    reporter = tmp_path / "limit-reporter"
+    reporter.write_text(
+        f"#!{Path(sys.executable).resolve()}\n"
+        "import json, resource\n"
+        "print(json.dumps({\n"
+        "  'address_space': resource.getrlimit(resource.RLIMIT_AS),\n"
+        "  'core': resource.getrlimit(resource.RLIMIT_CORE),\n"
+        "  'cpu': resource.getrlimit(resource.RLIMIT_CPU),\n"
+        "}, sort_keys=True))\n"
+    )
+    reporter.chmod(0o700)
+
+    return_code, stdout, stderr = media_module._run_bounded_command(
+        [str(reporter)],
+        timeout_seconds=3,
+        maximum_stdout_bytes=4096,
+        maximum_stderr_bytes=4096,
+        label="limit-reporter",
+    )
+
+    assert return_code == 0
+    assert stderr == b""
+    limits = json.loads(stdout)
+    assert limits["address_space"] == [
+        media_module.MAX_MEDIA_CHILD_ADDRESS_SPACE_BYTES,
+        media_module.MAX_MEDIA_CHILD_ADDRESS_SPACE_BYTES,
+    ]
+    assert limits["core"] == [0, 0]
+    assert limits["cpu"] == [4, 4]
+
 
 def test_probe_rejects_empty_oversized_and_symlink_inputs_before_invoking_ffprobe(tmp_path) -> None:
     empty = tmp_path / "empty.mp4"
@@ -210,6 +259,93 @@ def test_inspection_keeps_probe_decode_and_hash_on_one_snapshot(
     assert clip.read_bytes() == replacement
     assert snapshot_paths[0] == snapshot_paths[1]
     assert not snapshot_paths[0].exists()
+
+
+def test_pinned_inspection_uses_private_verified_tools_after_sources_are_swapped(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"immutable clip bytes")
+    ffmpeg_source = tmp_path / "ffmpeg"
+    ffprobe_source = tmp_path / "ffprobe"
+    probe_document = _probe_document()
+    probe_document["streams"][0].update({"width": 1, "height": 1, "avg_frame_rate": "1/1"})
+    ffmpeg_bytes = b"#!/bin/sh\nprintf '\\001\\002\\003'\n"
+    ffprobe_bytes = ("#!/bin/sh\nprintf '%s' '" + json.dumps(probe_document) + "'\n").encode()
+    ffmpeg_source.write_bytes(ffmpeg_bytes)
+    ffprobe_source.write_bytes(ffprobe_bytes)
+    ffmpeg_source.chmod(0o700)
+    ffprobe_source.chmod(0o700)
+    expected_ffmpeg = hashlib.sha256(ffmpeg_bytes).hexdigest()
+    expected_ffprobe = hashlib.sha256(ffprobe_bytes).hexdigest()
+    invoked_paths = []
+    real_popen = media_module.subprocess.Popen
+    sources_swapped = False
+
+    def swapping_popen(command, *args, **kwargs):
+        nonlocal sources_swapped
+        assert command[:4] == [
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-S",
+            "-c",
+        ]
+        invoked = Path(command[7])
+        invoked_paths.append(invoked)
+        assert invoked not in {ffmpeg_source, ffprobe_source}
+        if not sources_swapped:
+            sources_swapped = True
+            # Replace both mutable installation paths when the subprocess starts.
+            # The child must still execute the already-staged private copy.
+            ffprobe_source.write_bytes(b"#!/bin/sh\nexit 91\n")
+            ffmpeg_source.write_bytes(b"#!/bin/sh\nexit 92\n")
+        return real_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(media_module.subprocess, "Popen", swapping_popen)
+
+    result = inspect_media_pinned(
+        clip,
+        ffmpeg=str(ffmpeg_source),
+        ffprobe=str(ffprobe_source),
+        expected_ffmpeg_sha256=expected_ffmpeg,
+        expected_ffprobe_sha256=expected_ffprobe,
+    )
+
+    assert result.frames.decoder_sha256 == expected_ffmpeg
+    assert result.frames.probe_sha256 == expected_ffprobe
+    assert result.frames.executables_content_pinned is True
+    assert result.frames.frame_count == 1
+    assert result.frames.frame_digest == frame_digest(1, 1, (b"\x01\x02\x03",))[0]
+    assert len(invoked_paths) == 2
+    assert all(not path.exists() for path in invoked_paths)
+
+
+def test_pinned_inspection_rejects_a_tool_hash_mismatch_before_invocation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"immutable clip bytes")
+    ffmpeg = tmp_path / "ffmpeg"
+    ffprobe = tmp_path / "ffprobe"
+    ffmpeg.write_bytes(b"#!/bin/sh\nexit 0\n")
+    ffprobe.write_bytes(b"#!/bin/sh\nexit 0\n")
+    ffmpeg.chmod(0o700)
+    ffprobe.chmod(0o700)
+
+    def forbidden_probe(*_args, **_kwargs):
+        raise AssertionError("an unverified probe executable was invoked")
+
+    monkeypatch.setattr(media_module, "_probe_snapshot", forbidden_probe)
+    with pytest.raises(MediaConformanceError, match="ffprobe_hash_mismatch"):
+        inspect_media_pinned(
+            clip,
+            ffmpeg=str(ffmpeg),
+            ffprobe=str(ffprobe),
+            expected_ffmpeg_sha256=hashlib.sha256(ffmpeg.read_bytes()).hexdigest(),
+            expected_ffprobe_sha256="00" * 32,
+        )
 
 
 def test_snapshot_rejects_in_place_mutation_during_bounded_copy(

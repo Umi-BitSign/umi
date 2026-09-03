@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Conventional Bittensor neuron entry point for the UMI component validator."""
+"""Conventional Bittensor entry point for the inactive live-shadow validator."""
 
-from umi.validator import main
+from umi.validator_live import main
 
 if __name__ == "__main__":
     main()

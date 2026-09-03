@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from typing import Any
@@ -15,6 +17,12 @@ from umi.observer import (
     ObserverUnavailable,
     SnapshotCache,
     create_observer_app,
+)
+from umi.observer_bundle_feed import (
+    BundleFeedSnapshot,
+    FeedHealth,
+    ValidatorLocalScore,
+    VerifiedFeedWindow,
 )
 from umi.observer_models import (
     ChainNetworkSnapshot,
@@ -300,6 +308,137 @@ def test_unreleased_protocol_feeds_are_explicit_empty_states() -> None:
     assert {gate["status"] for gate in gates["gates"]} == {"pending"}
     assert benchmarks["benchmarks"] == []
     assert incidents["incidents"] == []
+
+
+class StaticBundleFeed:
+    def __init__(self, windows: tuple[VerifiedFeedWindow, ...]) -> None:
+        self.value = BundleFeedSnapshot(
+            windows,
+            tuple(
+                FeedHealth(item.validator_account_id32, "current", None, 1, 1) for item in windows
+            ),
+        )
+
+    async def start(self, _height, _poll) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    def snapshot(self) -> BundleFeedSnapshot:
+        return self.value
+
+
+def _released_local_window(validator: str, *, classification: str = "calibration_no_weight"):
+    return VerifiedFeedWindow(
+        validator_account_id32=validator,
+        window_id="cd" * 32,
+        window_index=7,
+        terminal_classification=classification,
+        reason_codes=()
+        if classification == "calibration_no_weight"
+        else ("response_anchor_failed",),
+        scoring_policy_hash="ef" * 32,
+        audit_release_block=99,
+        audit_release_block_hash="0x" + "44" * 32,
+        manifest_sha256=hashlib.sha256(validator.encode()).hexdigest(),
+        scores=(
+            ValidatorLocalScore(
+                miner_root_account_id32="aa" * 32,
+                assigned_clips=24,
+                accuracy_numerator=1,
+                accuracy_denominator=2,
+                eligible=True,
+                utility_numerator=4,
+                utility_denominator=25,
+            ),
+        ),
+    )
+
+
+def test_released_windows_expose_validator_local_scores_without_consensus_ranking() -> None:
+    first = _released_local_window("11" * 32)
+    second = _released_local_window("22" * 32)
+    second = second.__class__(
+        **{
+            **{field: getattr(second, field) for field in second.__dataclass_fields__},
+            "scores": (ValidatorLocalScore("aa" * 32, 24, 3, 4, True, 9, 25),),
+        }
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([_snapshot()])),
+        bundle_feed=StaticBundleFeed((first, second)),  # type: ignore[arg-type]
+    )
+
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/windows")
+        ambiguous = client.get(f"/api/v1/windows/{first.window_id}")
+        selected = client.get(
+            f"/api/v1/windows/{first.window_id}?validator={first.validator_account_id32}"
+        )
+
+    assert listed.status_code == 200
+    records = listed.json()["windows"]
+    assert len(records) == 2
+    assert {item["validator_account_id32"] for item in records} == {"11" * 32, "22" * 32}
+    assert records[0]["score_scope"] == "validator_local"
+    assert "rank" not in records[0]["validator_local_scores"][0]
+    assert ambiguous.status_code == 409
+    assert ambiguous.json()["error"]["reason_code"] == "released_window_validator_required"
+    assert selected.status_code == 200
+    assert selected.json()["window"]["validator_account_id32"] == "11" * 32
+
+
+def test_replayed_incidents_are_validator_bound_and_chain_economics_remain_separate() -> None:
+    incident = _released_local_window("11" * 32, classification="skipped")
+    app = create_observer_app(
+        _cache(SequenceCollector([_snapshot()])),
+        bundle_feed=StaticBundleFeed((incident,)),  # type: ignore[arg-type]
+    )
+
+    with TestClient(app) as client:
+        incidents = client.get("/api/v1/incidents").json()
+        leaderboard = client.get("/api/v1/leaderboard").json()
+
+    assert incidents["availability"] == "available"
+    assert incidents["incidents"][0]["validator_account_id32"] == "11" * 32
+    assert incidents["incidents"][0]["audit_release_block"] == "99"
+    assert leaderboard["umi_translation"]["availability"] == "not_started"
+    assert leaderboard["chain_economics"]["classification"] == "unverified"
+
+
+def test_window_cursor_is_bounded_and_invalidated_by_new_verified_entry() -> None:
+    first = _released_local_window("11" * 32)
+    second = replace(
+        _released_local_window("22" * 32),
+        window_id="ce" * 32,
+        window_index=8,
+    )
+    feed = StaticBundleFeed((first, second))
+    app = create_observer_app(
+        _cache(SequenceCollector([_snapshot()])),
+        bundle_feed=feed,  # type: ignore[arg-type]
+    )
+
+    with TestClient(app) as client:
+        page_one = client.get("/api/v1/windows?limit=1")
+        cursor = page_one.json()["page"]["next_cursor"]
+        page_two = client.get(f"/api/v1/windows?limit=1&cursor={cursor}")
+        feed.value = BundleFeedSnapshot(
+            (*feed.value.windows, replace(second, window_id="cf" * 32, window_index=9)),
+            feed.value.health,
+        )
+        changed = client.get(f"/api/v1/windows?limit=1&cursor={cursor}")
+        cross_feed = client.get(f"/api/v1/incidents?limit=1&cursor={cursor}")
+
+    assert page_one.status_code == 200
+    assert page_one.json()["page"]["returned"] == 1
+    assert page_one.json()["page"]["total"] == 2
+    assert page_two.json()["windows"][0]["window_id"] == second.window_id
+    assert changed.status_code == 409
+    assert changed.json()["error"]["reason_code"] == "cursor_snapshot_changed"
+    assert cross_feed.status_code == 422
+    assert cross_feed.json()["error"]["reason_code"] == "cursor_feed_mismatch"
 
 
 def test_chain_economics_uses_competition_ranks_for_exact_ties() -> None:

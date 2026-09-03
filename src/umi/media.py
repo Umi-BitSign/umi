@@ -4,25 +4,61 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 from .encoding import sha256_domain, u32be
+from .pinned_artifact import PinnedArtifact, PinnedArtifactError, staged_pinned_artifacts
 
 MAX_PROBE_OUTPUT_BYTES = 1024 * 1024
 MAX_DECODER_ERROR_BYTES = 64 * 1024
+MAX_MEDIA_TOOL_BYTES = 512 * 1024 * 1024
+MAX_MEDIA_CHILD_ADDRESS_SPACE_BYTES = 2 * 1024 * 1024 * 1024
+
+# This small isolated-interpreter shim applies process limits before replacing
+# itself with the already-resolved media executable.  Using a wrapper avoids
+# ``preexec_fn``, which can deadlock between fork and exec in a multithreaded
+# validator or publisher process.
+_BOUNDED_EXEC_CODE = """\
+import os
+import resource
+import sys
+
+address_space_bytes = int(sys.argv[1])
+cpu_seconds = int(sys.argv[2])
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+def bounded_limit(resource_id, requested):
+    _soft, hard = resource.getrlimit(resource_id)
+    if hard != resource.RLIM_INFINITY:
+        requested = min(requested, hard)
+    resource.setrlimit(resource_id, (requested, requested))
+
+# Production release targets are Linux. Darwin reserves hundreds of gigabytes
+# of virtual address space for its shared region before user code starts, so a
+# useful RLIMIT_AS cannot be applied there. Component tooling on Darwin retains
+# the CPU deadline and process-group kill but needs an outer memory sandbox for
+# untrusted media.
+if sys.platform.startswith("linux"):
+    bounded_limit(resource.RLIMIT_AS, address_space_bytes)
+bounded_limit(resource.RLIMIT_CPU, cpu_seconds)
+os.execv(sys.argv[3], sys.argv[3:])
+"""
 
 
 class MediaConformanceError(RuntimeError):
@@ -47,6 +83,8 @@ class FrameDigestResult:
     width: int
     height: int
     decoder_sha256: str
+    probe_sha256: str | None = None
+    executables_content_pinned: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,9 +245,15 @@ def inspect_media(
     probe_timeout_seconds: float = 15.0,
     decode_timeout_seconds: float = 30.0,
 ) -> MediaInspectionResult:
-    """Probe, hash, and decode one bounded immutable snapshot of caller bytes."""
+    """Component-only inspection using the executables selected by the caller.
+
+    Production qualification must use :func:`inspect_media_pinned`, which copies
+    both policy-pinned executables from the file descriptors that are hashed and
+    invokes only those private copies.
+    """
 
     with _snapshot_clip(path, maximum_clip_size) as snapshot:
+        probe_sha256 = _file_sha256(Path(_executable(ffprobe)))
         profile = _probe_snapshot(
             snapshot,
             ffprobe=ffprobe,
@@ -220,6 +264,8 @@ def inspect_media(
             profile,
             ffmpeg=ffmpeg,
             timeout_seconds=decode_timeout_seconds,
+            probe_sha256=probe_sha256,
+            executables_content_pinned=False,
         )
         _verify_snapshot(snapshot)
         return MediaInspectionResult(
@@ -229,16 +275,82 @@ def inspect_media(
         )
 
 
+def inspect_media_pinned(
+    path: str | Path,
+    *,
+    expected_ffmpeg_sha256: str,
+    expected_ffprobe_sha256: str,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+    maximum_clip_size: int = 16 * 1024 * 1024,
+    probe_timeout_seconds: float = 15.0,
+    decode_timeout_seconds: float = 30.0,
+) -> MediaInspectionResult:
+    """Inspect a clip with private copies of both policy-pinned media tools."""
+
+    _require_sha256(expected_ffmpeg_sha256, label="ffmpeg")
+    _require_sha256(expected_ffprobe_sha256, label="ffprobe")
+    with _snapshot_clip(path, maximum_clip_size) as snapshot:
+        try:
+            with staged_pinned_artifacts(
+                (
+                    PinnedArtifact(
+                        name="ffmpeg",
+                        source=Path(_executable(ffmpeg)),
+                        expected_sha256=expected_ffmpeg_sha256,
+                        maximum_bytes=MAX_MEDIA_TOOL_BYTES,
+                        executable=True,
+                    ),
+                    PinnedArtifact(
+                        name="ffprobe",
+                        source=Path(_executable(ffprobe)),
+                        expected_sha256=expected_ffprobe_sha256,
+                        maximum_bytes=MAX_MEDIA_TOOL_BYTES,
+                        executable=True,
+                    ),
+                )
+            ) as staged:
+                profile = _probe_snapshot(
+                    snapshot,
+                    ffprobe=str(staged["ffprobe"]),
+                    timeout_seconds=probe_timeout_seconds,
+                )
+                decoded = _decode_snapshot(
+                    snapshot,
+                    profile,
+                    ffmpeg=str(staged["ffmpeg"]),
+                    timeout_seconds=decode_timeout_seconds,
+                    decoder_sha256=expected_ffmpeg_sha256,
+                    probe_sha256=expected_ffprobe_sha256,
+                    executables_content_pinned=True,
+                )
+                _verify_snapshot(snapshot)
+                return MediaInspectionResult(
+                    video_sha256=snapshot.sha256,
+                    profile=profile,
+                    frames=decoded,
+                )
+        except PinnedArtifactError as error:
+            raise MediaConformanceError(
+                f"policy-pinned media tool failed verification: {error.reason_code}"
+            ) from error
+
+
 def _decode_snapshot(
     snapshot: _ClipSnapshot,
     profile: MediaProfile,
     *,
     ffmpeg: str,
     timeout_seconds: float,
+    decoder_sha256: str | None = None,
+    probe_sha256: str | None = None,
+    executables_content_pinned: bool = False,
 ) -> FrameDigestResult:
     _verify_snapshot(snapshot)
     executable = _executable(ffmpeg)
-    decoder_sha256 = _file_sha256(Path(executable))
+    observed_decoder_sha256 = _file_sha256(Path(executable))
+    if decoder_sha256 is not None and observed_decoder_sha256 != decoder_sha256:
+        raise MediaConformanceError("staged ffmpeg digest changed before execution")
     command = [
         executable,
         "-v",
@@ -255,14 +367,15 @@ def _decode_snapshot(
         "rawvideo",
         "pipe:1",
     ]
-    process = subprocess.Popen(
+    process = _start_bounded_media_process(
         command,
+        timeout_seconds=timeout_seconds,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     if process.stdout is None or process.stderr is None:
-        process.kill()
+        _kill_media_process_group(process)
         raise MediaConformanceError("decoder pipes were not created")
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
@@ -303,8 +416,7 @@ def _decode_snapshot(
                         raise MediaConformanceError("decoded frame count exceeds the profile")
         return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
     except Exception:
-        process.kill()
-        process.wait()
+        _kill_media_process_group(process)
         raise
     finally:
         selector.close()
@@ -323,7 +435,9 @@ def _decode_snapshot(
         frame_count=len(frame_hashes),
         width=profile.width,
         height=profile.height,
-        decoder_sha256=decoder_sha256,
+        decoder_sha256=observed_decoder_sha256,
+        probe_sha256=probe_sha256,
+        executables_content_pinned=executables_content_pinned,
     )
 
 
@@ -484,6 +598,11 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _require_sha256(value: str, *, label: str) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise MediaConformanceError(f"expected {label} SHA-256 is invalid")
+
+
 def _fraction(value: Any) -> Fraction:
     try:
         fraction = Fraction(str(value))
@@ -570,51 +689,143 @@ def _run_bounded_command(
 ) -> tuple[int, bytes, bytes]:
     """Drain a child process without ever buffering past either evidence ceiling."""
 
-    process = subprocess.Popen(
+    process = _start_bounded_media_process(
         command,
+        timeout_seconds=timeout_seconds,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     if process.stdout is None or process.stderr is None:
-        process.kill()
-        process.wait()
+        _kill_media_process_group(process)
         raise MediaConformanceError(f"{label} pipes were not created")
     selector = selectors.DefaultSelector()
+    os.set_blocking(process.stdout.fileno(), False)
+    os.set_blocking(process.stderr.fileno(), False)
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
     deadline = time.monotonic() + timeout_seconds
     stdout = bytearray()
     stderr = bytearray()
+
+    def consume(fileobj: Any, stream_name: str) -> bool:
+        """Drain one ready pipe once; return true after its EOF is observed."""
+
+        try:
+            chunk = os.read(fileobj.fileno(), 64 * 1024)
+        except BlockingIOError:
+            return False
+        if not chunk:
+            if fileobj in selector.get_map():
+                selector.unregister(fileobj)
+            return True
+        target = stdout if stream_name == "stdout" else stderr
+        limit = maximum_stdout_bytes if stream_name == "stdout" else maximum_stderr_bytes
+        if len(target) + len(chunk) > limit:
+            raise MediaConformanceError(f"{label} output exceeds its evidence ceiling")
+        target.extend(chunk)
+        return False
+
     try:
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise MediaConformanceError(f"{label} exceeded its deadline")
-            events = selector.select(timeout=remaining)
+            # Poll in bounded slices.  On macOS, kqueue can omit a final pipe event
+            # after a very short-lived child exits; checking ``poll`` lets us drain
+            # the already-closed nonblocking descriptors instead of misclassifying
+            # the command as a timeout.
+            events = selector.select(timeout=min(remaining, 0.1))
             if not events:
-                raise MediaConformanceError(f"{label} exceeded its deadline")
-            for key, _ in events:
-                chunk = os.read(key.fileobj.fileno(), 64 * 1024)
-                if not chunk:
-                    selector.unregister(key.fileobj)
+                if process.poll() is None:
                     continue
-                target = stdout if key.data == "stdout" else stderr
-                limit = maximum_stdout_bytes if key.data == "stdout" else maximum_stderr_bytes
-                if len(target) + len(chunk) > limit:
-                    raise MediaConformanceError(f"{label} output exceeds its evidence ceiling")
-                target.extend(chunk)
+                for key in tuple(selector.get_map().values()):
+                    consume(key.fileobj, key.data)
+                continue
+            for key, _ in events:
+                consume(key.fileobj, key.data)
         return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
     except Exception:
-        process.kill()
-        process.wait()
+        _kill_media_process_group(process)
         raise
     finally:
         selector.close()
     return return_code, bytes(stdout), bytes(stderr)
 
 
+def _start_bounded_media_process(
+    command: list[str],
+    *,
+    timeout_seconds: float,
+    stdin: Any,
+    stdout: Any,
+    stderr: Any,
+) -> subprocess.Popen[bytes]:
+    """Start one media tool only after an inherited resource envelope is set."""
+
+    if not command or not Path(command[0]).is_absolute():
+        raise MediaConformanceError("media executable path is not absolute")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or not 0 < timeout_seconds <= 86_400
+    ):
+        raise MediaConformanceError("media deadline must be positive")
+    cpu_seconds = max(1, int(timeout_seconds) + 1)
+    try:
+        interpreter = Path(sys.executable).resolve(strict=True)
+        interpreter_metadata = interpreter.stat()
+    except OSError as error:
+        raise MediaConformanceError("Python resource wrapper is unavailable") from error
+    if not stat.S_ISREG(interpreter_metadata.st_mode) or not os.access(interpreter, os.X_OK):
+        raise MediaConformanceError("Python resource wrapper is not executable")
+    wrapper = [
+        os.fspath(interpreter),
+        "-I",
+        "-S",
+        "-c",
+        _BOUNDED_EXEC_CODE,
+        str(MAX_MEDIA_CHILD_ADDRESS_SPACE_BYTES),
+        str(cpu_seconds),
+        *command,
+    ]
+    environment = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "TZ": "UTC",
+    }
+    try:
+        return subprocess.Popen(
+            wrapper,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=environment,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise MediaConformanceError("bounded media process could not start") from error
+
+
+def _kill_media_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Terminate the wrapper/media process and any descendants, then reap it."""
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        with suppress(ProcessLookupError):
+            process.kill()
+    with suppress(OSError, subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+
+
 __all__ = [
+    "MAX_MEDIA_CHILD_ADDRESS_SPACE_BYTES",
     "FrameDigestResult",
     "MediaConformanceError",
     "MediaInspectionResult",
@@ -622,6 +833,7 @@ __all__ = [
     "decode_frame_digest",
     "frame_digest",
     "inspect_media",
+    "inspect_media_pinned",
     "probe_media",
     "profile_from_probe",
 ]

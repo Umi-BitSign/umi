@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 
 import httpx
@@ -41,6 +42,7 @@ async def test_video_is_streamed_and_verified_exactly() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "93.184.216.34"
+        assert request.headers["accept-encoding"] == "identity"
         return httpx.Response(
             200,
             headers={
@@ -50,7 +52,11 @@ async def test_video_is_streamed_and_verified_exactly() -> None:
             content=body,
         )
 
-    assert await fetcher(handler).fetch(descriptor(body)) == body
+    selected = fetcher(handler)
+    assert await selected.fetch(descriptor(body)) == body
+    receipt = await selected.fetch_with_receipt(descriptor(body))
+    assert receipt.data == body
+    assert receipt.wire_bytes > len(body)
 
 
 @pytest.mark.asyncio
@@ -65,8 +71,9 @@ async def test_video_hash_mismatch_fails_closed() -> None:
             content=delivered,
         )
 
-    with pytest.raises(VideoFetchError, match="SHA-256"):
+    with pytest.raises(VideoFetchError, match="SHA-256") as error:
         await fetcher(handler).fetch(descriptor(declared))
+    assert error.value.wire_bytes >= len(delivered)
 
 
 @pytest.mark.asyncio
@@ -93,6 +100,70 @@ async def test_video_rejects_oversized_response_headers_before_body() -> None:
     )
     with pytest.raises(VideoFetchError, match="headers exceed"):
         await bounded.fetch(descriptor(body))
+
+
+@pytest.mark.asyncio
+async def test_video_rejects_content_encoding_before_decoding_or_hashing() -> None:
+    body = b"video"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Encoding": "gzip",
+            },
+            content=gzip.compress(body),
+        )
+
+    with pytest.raises(VideoFetchError, match="encoded video responses"):
+        await fetcher(handler).fetch(descriptor(body))
+
+
+@pytest.mark.asyncio
+async def test_video_rejects_oversized_generated_request_headers_before_send() -> None:
+    body = b"video"
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, content=body)
+
+    bounded = HttpVideoFetcher(
+        allowed_hosts=frozenset({"objects.example"}),
+        maximum_clip_size_bytes=32,
+        maximum_http_header_bytes=8,
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+        resolver=public_resolver,
+    )
+    with pytest.raises(VideoFetchError, match="request headers exceed") as error:
+        await bounded.fetch(descriptor(body))
+    assert error.value.wire_bytes > 8
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("maximum_clip_size_bytes", True),
+        ("maximum_http_header_bytes", 1.5),
+        ("timeout_seconds", float("nan")),
+        ("allowed_ports", frozenset({True})),
+    ],
+)
+def test_video_fetcher_rejects_ambiguous_limit_types(field: str, value: object) -> None:
+    values = {
+        "allowed_hosts": frozenset({"objects.example"}),
+        "maximum_clip_size_bytes": 32,
+        "maximum_http_header_bytes": 16,
+        "timeout_seconds": 5,
+    }
+    values[field] = value
+    with pytest.raises(ValueError):
+        HttpVideoFetcher(**values)
 
 
 @pytest.mark.asyncio

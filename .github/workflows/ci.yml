@@ -13,6 +13,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Audit locked Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv==0.12.9
+          uv lock --check
+          uv export --locked --no-dev --no-hashes --no-emit-project \
+            | uv tool run --from pip-audit==2.10.1 pip-audit -r /dev/stdin
+
+      - name: Install pinned Rust audit tool
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          cargo +1.98.0 install cargo-audit --locked --version 0.22.2
+
+      - name: Audit locked Rust dependencies
+        run: |
+          cargo +1.98.0 audit --file rust/substrate-proof-verifier/Cargo.lock
+          cargo +1.98.0 audit --file rust/grandpa-finality-observer/Cargo.lock
+
   verify:
     runs-on: ubuntu-latest
     strategy:
@@ -21,9 +49,9 @@ jobs:
         python-version: ["3.10", "3.12", "3.14"]
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -34,25 +62,130 @@ jobs:
           sudo apt-get install --yes ffmpeg
 
       - name: Install project
-        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv==0.12.9
+          uv lock --check
+          uv sync --locked --extra dev
+
+      - name: Check pinned Bittensor CLI startup
+        run: .venv/bin/btcli --version
+
+      - name: Check installed dependency compatibility
+        run: uv pip check --python .venv/bin/python
 
       - name: Lint
-        run: ruff check src tests neurons
+        run: uv run --locked ruff check src tests neurons
 
       - name: Check formatting
-        run: ruff format --check src tests neurons
+        run: uv run --locked ruff format --check src tests neurons
 
       - name: Test
-        run: pytest
+        run: uv run --locked pytest
 
       - name: Build wheel
         run: |
-          python -m pip wheel . --no-deps --wheel-dir dist
-          python -m pip install --force-reinstall --no-deps dist/*.whl
+          uv build --wheel --out-dir dist
+          uv pip install --python .venv/bin/python --force-reinstall --no-deps dist/*.whl
 
       - name: Check console entry points
         run: |
-          umi-demo --help
-          umi-miner --help
-          umi-protocol --help
-          umi-validator --help
+          .venv/bin/umi-demo --help
+          .venv/bin/umi-miner --help
+          .venv/bin/umi-mirror-service --help
+          .venv/bin/umi-observer --help
+          .venv/bin/umi-publisher-batch --help
+          .venv/bin/umi-publisher-availability --help
+          .venv/bin/umi-publisher-pool-anchor --help
+          .venv/bin/umi-protocol --help
+          .venv/bin/umi-shadow-release --help
+          .venv/bin/umi-shadow-release-finalize --help
+          .venv/bin/umi-shadow-release-materialize-operator --help
+          .venv/bin/umi-shadow-release-verify --help
+          .venv/bin/umi-validator --help
+          .venv/bin/umi-validator-audit-publish --help
+          .venv/bin/umi-validator-live --help
+          .venv/bin/umi-validator-live-configure --help
+          .venv/bin/umi-validator-live-reconcile --help
+
+  substrate-proof-verifier:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust/substrate-proof-verifier
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo +1.98.0 fmt -- --check
+
+      - name: Lint
+        run: cargo +1.98.0 clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo +1.98.0 test --locked
+
+      - name: Build release verifier
+        run: cargo +1.98.0 build --locked --release
+
+  grandpa-finality-observer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust/grandpa-finality-observer
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo +1.98.0 fmt -- --check
+
+      - name: Lint
+        run: cargo +1.98.0 clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo +1.98.0 test --locked
+
+      - name: Build release observer
+        run: cargo +1.98.0 build --locked --release
+
+  executable-conformance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+          rustup toolchain install 1.98.0 --profile minimal
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv==0.12.9
+          uv lock --check
+          uv sync --locked --extra dev
+
+      - name: Build pinned release executables
+        run: |
+          cargo +1.98.0 build --locked --release \
+            --manifest-path rust/substrate-proof-verifier/Cargo.toml
+          cargo +1.98.0 build --locked --release \
+            --manifest-path rust/grandpa-finality-observer/Cargo.toml
+
+      - name: Execute all conformance fixtures
+        run: uv run --locked pytest -q tests/test_conformance.py

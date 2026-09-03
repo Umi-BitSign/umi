@@ -11,9 +11,12 @@ import hashlib
 import importlib
 import importlib.metadata
 import math
+import os
 import platform
 import shutil
+import stat
 import unicodedata
+from contextlib import suppress
 from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
@@ -31,6 +34,7 @@ from .protocol import (
 )
 
 SCORING_POLICY_SCHEMA = "umi-scoring-policy/1"
+SCORING_POLICY_MEDIA_TYPE = "application/vnd.umi.scoring-policy+json"
 
 
 def _installed_version(distribution: str) -> str:
@@ -124,6 +128,19 @@ def _placeholder_digest(label: str) -> str:
     return hashlib.sha256(("umi-rehearsal-placeholder-v1\0" + label).encode()).hexdigest()
 
 
+def _validate_target_release_map(values: dict[str, str], *, label: str) -> None:
+    targets = list(values)
+    allowed = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
+    if any(
+        not target
+        or target != target.strip()
+        or len(target.encode()) > 128
+        or not set(target).issubset(allowed)
+        for target in targets
+    ):
+        raise ValueError(f"{label} target names must be canonical target triples")
+
+
 def umi_source_tree_sha256() -> str:
     """Hash every shipped UMI Python module by relative path and exact bytes."""
 
@@ -204,8 +221,8 @@ class PolicyClock(StrictProtocolModel):
             anchor_blocks=45,
             target_block_interval_seconds=12,
             selection_finality_buffer_seconds=300,
-            issue_allowance_seconds=60,
-            response_window_seconds=60,
+            issue_allowance_seconds=300,
+            response_window_seconds=300,
             delivery_grace_seconds=60,
             reveal_margin_seconds=300,
             weight_commit_buffer_blocks=30,
@@ -239,6 +256,8 @@ class PolicyLimits(StrictProtocolModel):
     maximum_request_body_bytes: Annotated[int, Field(gt=0)]
     maximum_response_body_bytes: Annotated[int, Field(gt=0)]
     maximum_http_header_bytes: Annotated[int, Field(gt=0)]
+    btauth_max_age_seconds: Annotated[int, Field(gt=0)]
+    btauth_allowed_skew_seconds: Annotated[int, Field(ge=0)]
     maximum_request_transmissions_per_assignment: Annotated[int, Field(gt=0)]
     maximum_response_bodies_per_assignment: Annotated[int, Field(gt=0)]
     maximum_video_fetch_attempts_per_actor: Annotated[int, Field(gt=0)]
@@ -271,6 +290,8 @@ class PolicyLimits(StrictProtocolModel):
             raise ValueError("selected batches cannot exceed the candidate-pool limit")
         if self.max_active_control_groups > self.max_active_publishers:
             raise ValueError("control-group count cannot exceed publisher count")
+        if self.btauth_allowed_skew_seconds >= self.btauth_max_age_seconds:
+            raise ValueError("btauth allowed skew must be less than its maximum age")
         return self
 
     @classmethod
@@ -303,6 +324,8 @@ class PolicyLimits(StrictProtocolModel):
             maximum_request_body_bytes=64 * 1024,
             maximum_response_body_bytes=64 * 1024,
             maximum_http_header_bytes=16 * 1024,
+            btauth_max_age_seconds=360,
+            btauth_allowed_skew_seconds=2,
             maximum_request_transmissions_per_assignment=2,
             maximum_response_bodies_per_assignment=2,
             maximum_video_fetch_attempts_per_actor=2,
@@ -498,6 +521,67 @@ class ChainRuntimePin(StrictProtocolModel):
     chain_fixture_set_sha256: Hex32
 
 
+class LiveChainObservationPin(StrictProtocolModel):
+    """Exact finalized runtime family accepted by a live shadow policy."""
+
+    network: Literal["finney"]
+    genesis_block_hash: Hex32
+    runtime_spec_version: Annotated[int, Field(gt=0)]
+    transaction_version: Annotated[int, Field(gt=0)]
+    state_version: Literal[1]
+    metadata_sha256: Hex32
+    subtensor_revision: NonEmptyText
+    live_chain_fixture_set_sha256: Hex32
+
+
+class StorageProofVerifierPin(StrictProtocolModel):
+    """Source and target-specific release pins for the LayoutV1 verifier."""
+
+    protocol: Literal["umi-substrate-proof-verifier/1"]
+    polkadot_sdk_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    source_tree_sha256: Hex32
+    cargo_lock_sha256: Hex32
+    proof_fixture_set_sha256: Hex32
+    release_sha256_by_target: Annotated[dict[str, Hex32], Field(min_length=1, max_length=8)]
+
+    @model_validator(mode="after")
+    def validate_release_targets(self) -> Self:
+        _validate_target_release_map(
+            self.release_sha256_by_target,
+            label="proof-verifier",
+        )
+        return self
+
+
+class FinalityVerifierPin(StrictProtocolModel):
+    """Cryptographic finalized-header verification required for live evidence."""
+
+    profile: Literal["smoldot-verifier-attested-finality/1"]
+    evidence_class: Literal["verifier_attested_finality"]
+    offline_finality_proof: Literal[False]
+    source_revision: NonEmptyText
+    source_tree_sha256: Hex32
+    cargo_lock_sha256: Hex32
+    finality_fixture_set_sha256: Hex32
+    release_sha256_by_target: Annotated[dict[str, Hex32], Field(min_length=1, max_length=8)]
+    chain_spec_source_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    chain_spec_sha256: Hex32
+    expected_genesis_hash: Hex32
+    bootstrap_kind: Literal["grandpa_warp_sync_checkpoint"]
+    bootstrap_block_number: Annotated[int, Field(ge=0)]
+    bootstrap_block_hash: Hex32
+
+    @model_validator(mode="after")
+    def validate_release_targets(self) -> Self:
+        _validate_target_release_map(
+            self.release_sha256_by_target,
+            label="finality-verifier",
+        )
+        if self.bootstrap_block_number == 0:
+            raise ValueError("GRANDPA warp-sync finality bootstrap must be above genesis")
+        return self
+
+
 class PolicyReasonCode(StrictProtocolModel):
     name: NonEmptyText
     code: Annotated[int, Field(ge=0, le=65535)]
@@ -556,8 +640,9 @@ class ResourceDeadlineRule(StrictProtocolModel):
 
 
 class PolicyImplementationPins(StrictProtocolModel):
-    pin_profile: Literal["local_rehearsal"]
-    conformance_fixtures_verified: Literal[False]
+    pin_profile: Literal["local_rehearsal", "live_shadow_calibration"]
+    conformance_fixtures_verified: bool
+    conformance_execution_report_sha256: Hex32 | None
     umi_source_tree_sha256: Hex32
     scoring: ScoringRuntimePin
     media: MediaRuntimePin
@@ -567,6 +652,9 @@ class PolicyImplementationPins(StrictProtocolModel):
     resource_deadline_stages: Annotated[
         list[ResourceDeadlineRule], Field(min_length=5, max_length=5)
     ]
+    live_chain: LiveChainObservationPin | None = None
+    storage_proof_verifier: StorageProofVerifierPin | None = None
+    finality_verifier: FinalityVerifierPin | None = None
 
     @model_validator(mode="after")
     def validate_deadline_stages(self) -> Self:
@@ -579,10 +667,57 @@ class PolicyImplementationPins(StrictProtocolModel):
         )
         if tuple(stage.stage_id for stage in self.resource_deadline_stages) != expected:
             raise ValueError("resource deadline stages must use the canonical order")
+        live_pins = (
+            self.live_chain,
+            self.storage_proof_verifier,
+            self.finality_verifier,
+        )
+        if self.pin_profile == "local_rehearsal":
+            if self.conformance_fixtures_verified:
+                raise ValueError("local rehearsal cannot claim verified conformance fixtures")
+            if self.conformance_execution_report_sha256 is not None:
+                raise ValueError("local rehearsal cannot carry a conformance execution report")
+            if any(pin is not None for pin in live_pins):
+                raise ValueError("local rehearsal cannot carry live-chain verifier pins")
+        else:
+            if not self.conformance_fixtures_verified:
+                raise ValueError("live shadow requires verified conformance fixtures")
+            if self.conformance_execution_report_sha256 is None:
+                raise ValueError("live shadow requires a conformance execution report")
+            if any(pin is None for pin in live_pins):
+                raise ValueError("live shadow requires chain, storage-proof, and finality pins")
+            placeholder_values = {
+                _placeholder_digest("normalization"),
+                _placeholder_digest("frame-digest"),
+                _placeholder_digest("portable-timelock"),
+                _placeholder_digest("chain-schedule-and-calls"),
+                _placeholder_digest("authenticated-content-mirror"),
+            }
+            fixture_values = {
+                self.scoring.normalization_fixture_set_sha256,
+                self.media.frame_digest_fixture_set_sha256,
+                self.timelock.portable_envelope_fixture_set_sha256,
+                self.chain.chain_fixture_set_sha256,
+                self.rules.mirror_discovery_rule_sha256,
+            }
+            if fixture_values.intersection(placeholder_values):
+                raise ValueError("live shadow cannot use rehearsal placeholder fixtures")
+            if (
+                self.live_chain is not None
+                and self.finality_verifier is not None
+                and self.finality_verifier.expected_genesis_hash
+                != self.live_chain.genesis_block_hash
+            ):
+                raise ValueError("finality and live-chain genesis hashes must match")
         return self
 
     @classmethod
-    def local_rehearsal(cls) -> PolicyImplementationPins:
+    def local_rehearsal(
+        cls,
+        *,
+        ffmpeg_binary: str | Path | None = None,
+        ffprobe_binary: str | Path | None = None,
+    ) -> PolicyImplementationPins:
         """Pin this machine for reproducible offline rehearsal, never activation by itself."""
 
         from .scoring import scoring_environment
@@ -596,6 +731,7 @@ class PolicyImplementationPins(StrictProtocolModel):
         return cls(
             pin_profile="local_rehearsal",
             conformance_fixtures_verified=False,
+            conformance_execution_report_sha256=None,
             umi_source_tree_sha256=umi_source_tree_sha256(),
             scoring=ScoringRuntimePin(
                 python_implementation=platform.python_implementation(),
@@ -615,8 +751,16 @@ class PolicyImplementationPins(StrictProtocolModel):
                 normalization_fixture_set_sha256=_placeholder_digest("normalization"),
             ),
             media=MediaRuntimePin(
-                ffmpeg_binary_sha256=_executable_sha256("ffmpeg"),
-                ffprobe_binary_sha256=_executable_sha256("ffprobe"),
+                ffmpeg_binary_sha256=(
+                    _executable_sha256("ffmpeg")
+                    if ffmpeg_binary is None
+                    else _secure_executable_sha256(ffmpeg_binary)
+                ),
+                ffprobe_binary_sha256=(
+                    _executable_sha256("ffprobe")
+                    if ffprobe_binary is None
+                    else _secure_executable_sha256(ffprobe_binary)
+                ),
                 frame_digest_fixture_set_sha256=_placeholder_digest("frame-digest"),
             ),
             timelock=TimelockRuntimePin(
@@ -682,6 +826,9 @@ class PolicyImplementationPins(StrictProtocolModel):
                     "audit_release",
                 )
             ],
+            live_chain=None,
+            storage_proof_verifier=None,
+            finality_verifier=None,
         )
 
 
@@ -759,6 +906,8 @@ class ScoringPolicy(StrictProtocolModel):
         ):
             raise ValueError("launch requires exactly one publisher per control group")
 
+        if limits.btauth_max_age_seconds < self.clock.issue_allowance_seconds:
+            raise ValueError("btauth maximum age cannot be shorter than the issue allowance")
         _validate_initial_launch_profile(self.clock, limits, self.thresholds)
         return self
 
@@ -920,9 +1069,171 @@ def validate_rehearsal_runtime(policy: ScoringPolicy) -> None:
             raise RuntimeError(f"rehearsal beacon does not match policy pin: {field}")
 
 
+def validate_live_shadow_runtime(
+    policy: ScoringPolicy,
+    *,
+    target_triple: str,
+    storage_proof_verifier_binary: str | Path,
+    finality_verifier_binary: str | Path,
+    finality_chain_spec_path: str | Path,
+) -> dict[str, str]:
+    """Verify the selected platform binaries for a live shadow process.
+
+    Source and lockfile digests are public reproducibility inputs. Runtime
+    execution is authorized only by the target-specific release digest in the
+    policy, and the selected target and both observed digests must be copied into
+    every live calibration audit bundle.
+    """
+
+    if not isinstance(policy, ScoringPolicy):
+        raise TypeError("policy must be a ScoringPolicy")
+    pins = policy.implementation_pins
+    if pins.pin_profile != "live_shadow_calibration":
+        raise RuntimeError("policy is not a live shadow calibration profile")
+    if (
+        pins.storage_proof_verifier is None
+        or pins.finality_verifier is None
+        or pins.live_chain is None
+    ):
+        raise RuntimeError("live shadow policy lost a required runtime pin")
+    validate_rehearsal_runtime(policy)
+    proof_expected = pins.storage_proof_verifier.release_sha256_by_target.get(target_triple)
+    finality_expected = pins.finality_verifier.release_sha256_by_target.get(target_triple)
+    if proof_expected is None or finality_expected is None:
+        raise RuntimeError("selected target triple is absent from the live policy")
+    proof_actual = _secure_executable_sha256(storage_proof_verifier_binary)
+    finality_actual = _secure_executable_sha256(finality_verifier_binary)
+    chain_spec_actual = _secure_regular_file_sha256(
+        finality_chain_spec_path,
+        maximum_bytes=64 * 1024 * 1024,
+        label="finality chain spec",
+    )
+    if proof_actual != proof_expected:
+        raise RuntimeError("storage-proof verifier binary does not match the live policy")
+    if finality_actual != finality_expected:
+        raise RuntimeError("finality verifier binary does not match the live policy")
+    if chain_spec_actual != pins.finality_verifier.chain_spec_sha256:
+        raise RuntimeError("finality chain spec does not match the live policy")
+    return {
+        "target_triple": target_triple,
+        "storage_proof_verifier_sha256": proof_actual,
+        "finality_verifier_sha256": finality_actual,
+        "finality_chain_spec_sha256": chain_spec_actual,
+        "finality_evidence_class": pins.finality_verifier.evidence_class,
+        "finality_bootstrap_kind": pins.finality_verifier.bootstrap_kind,
+        "finality_bootstrap_block_number": str(pins.finality_verifier.bootstrap_block_number),
+        "finality_bootstrap_block_hash": pins.finality_verifier.bootstrap_block_hash,
+    }
+
+
+def require_live_chain_observation(
+    policy: ScoringPolicy,
+    observation: LiveChainObservationPin,
+) -> None:
+    """Fail unless one finalized live observation exactly matches the policy."""
+
+    if not isinstance(policy, ScoringPolicy):
+        raise TypeError("policy must be a ScoringPolicy")
+    if not isinstance(observation, LiveChainObservationPin):
+        raise TypeError("observation must be a LiveChainObservationPin")
+    expected = policy.implementation_pins.live_chain
+    if policy.implementation_pins.pin_profile != "live_shadow_calibration" or expected is None:
+        raise RuntimeError("policy is not a live shadow calibration profile")
+    if observation != expected:
+        raise RuntimeError("finalized live chain observation does not match the policy")
+
+
+def _secure_executable_sha256(value: str | Path) -> str:
+    return _secure_owned_file_sha256(
+        value,
+        maximum_bytes=128 * 1024 * 1024,
+        label="live verifier binary",
+        executable=True,
+    )
+
+
+def _secure_regular_file_sha256(
+    value: str | Path,
+    *,
+    maximum_bytes: int,
+    label: str,
+) -> str:
+    return _secure_owned_file_sha256(
+        value,
+        maximum_bytes=maximum_bytes,
+        label=label,
+        executable=False,
+    )
+
+
+def _secure_owned_file_sha256(
+    value: str | Path,
+    *,
+    maximum_bytes: int,
+    label: str,
+    executable: bool,
+) -> str:
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError(f"{label} path must be absolute")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(os.fspath(path), flags)
+    except OSError as error:
+        raise RuntimeError(f"{label} is unavailable") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_mode & 0o022
+        ):
+            raise RuntimeError(f"{label} has unsafe ownership or permissions")
+        if executable and not before.st_mode & stat.S_IXUSR:
+            raise RuntimeError(f"{label} is not executable by its owner")
+        if before.st_size <= 0 or before.st_size > maximum_bytes:
+            raise RuntimeError(f"{label} has an invalid byte length")
+
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum_bytes + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum_bytes:
+                raise RuntimeError(f"{label} has an invalid byte length")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        stable = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if total != before.st_size or any(
+            getattr(before, field) != getattr(after, field) for field in stable
+        ):
+            raise RuntimeError(f"{label} changed while it was fingerprinted")
+        return digest.hexdigest()
+    except OSError as error:
+        raise RuntimeError(f"{label} could not be fingerprinted") from error
+    finally:
+        with suppress(OSError):
+            os.close(descriptor)
+
+
 __all__ = [
+    "SCORING_POLICY_MEDIA_TYPE",
     "SCORING_POLICY_SCHEMA",
     "ExactRatio",
+    "FinalityVerifierPin",
+    "LiveChainObservationPin",
     "PolicyClock",
     "PolicyImplementationPins",
     "PolicyLimits",
@@ -934,10 +1245,13 @@ __all__ = [
     "ResourceDeadlineRule",
     "ScoringPolicy",
     "ScoringRuntimePin",
+    "StorageProofVerifierPin",
     "ValidatorRegistryEntry",
     "activation_equivalence_digest",
+    "require_live_chain_observation",
     "scoring_policy_hash",
     "umi_source_tree_sha256",
+    "validate_live_shadow_runtime",
     "validate_rehearsal_runtime",
     "validate_scoring_runtime",
 ]

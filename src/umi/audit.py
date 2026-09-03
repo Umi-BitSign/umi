@@ -7,6 +7,8 @@ import json
 import os
 import re
 import stat
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -97,9 +99,19 @@ class EvidenceStore:
         self.maximum_manifest_bytes = maximum_manifest_bytes
         self.maximum_total_object_bytes = maximum_total_object_bytes
         self._accounted_objects: dict[str, int] = {}
+        root_existed = self.root.exists()
         self.objects.mkdir(parents=True, exist_ok=True)
+        if self.root.is_symlink() or not self.root.is_dir():
+            raise ValueError("component evidence root must be a real directory")
         if self.objects.is_symlink() or not self.objects.is_dir():
             raise ValueError("component objects path must be a real directory")
+        # Persist both directory entries before a later state transition can
+        # reference an object beneath them.  A missing parent entry after a
+        # power loss is otherwise possible even when the object file itself was
+        # fsynced.
+        _fsync_directory(self.root)
+        if not root_existed:
+            _fsync_directory(self.root.parent)
 
     def _account_object(self, digest: str, size_bytes: int) -> None:
         existing = self._accounted_objects.get(digest)
@@ -112,6 +124,8 @@ class EvidenceStore:
         self._accounted_objects[digest] = size_bytes
 
     def add_bytes(self, data: bytes, media_type: str) -> ObjectRef:
+        if not isinstance(data, bytes):
+            raise TypeError("component evidence object must be exact bytes")
         if len(data) > self.maximum_object_bytes:
             raise ValueError("component evidence object exceeds its byte ceiling")
         digest = hashlib.sha256(data).hexdigest()
@@ -122,9 +136,7 @@ class EvidenceStore:
             if existing != data:
                 raise RuntimeError("content-addressed object collision")
         else:
-            temporary = destination.with_name(f".{digest}.{os.getpid()}.tmp")
-            temporary.write_bytes(data)
-            temporary.replace(destination)
+            _write_content_addressed_file(destination, data)
         return ObjectRef(digest, media_type, len(data))
 
     def add_json(self, value: Any) -> ObjectRef:
@@ -160,9 +172,7 @@ class EvidenceStore:
         encoded = canonical_json_bytes(manifest)
         if len(encoded) > self.maximum_manifest_bytes:
             raise ValueError("component manifest exceeds its byte ceiling")
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        temporary.write_bytes(encoded)
-        temporary.replace(path)
+        _atomic_replace_file(path, encoded)
         return path
 
     def load_manifest_with_bytes(self) -> tuple[dict[str, Any], bytes]:
@@ -185,3 +195,70 @@ class EvidenceStore:
     def load_manifest(self) -> dict[str, Any]:
         decoded, _ = self.load_manifest_with_bytes()
         return decoded
+
+
+def _write_content_addressed_file(path: Path, data: bytes) -> None:
+    """Durably create an immutable object without replacing a concurrent writer."""
+
+    descriptor: int | None = None
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            existing = _read_bounded_regular_file(path, len(data))
+            if existing != data:
+                raise RuntimeError("content-addressed object collision") from None
+        _fsync_directory(path.parent)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary)
+
+
+def _atomic_replace_file(path: Path, data: bytes) -> None:
+    """Durably replace a mutable manifest after its full contents reach disk."""
+
+    descriptor: int | None = None
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        temporary = None
+        _fsync_directory(path.parent)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary)
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(descriptor, data[offset:])
+        if written <= 0:
+            raise OSError("evidence write made no progress")
+        offset += written
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

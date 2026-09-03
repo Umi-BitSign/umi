@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+import re
+import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+REQUEST_BODY_SHA256_HEADER = "X-UMI-Body-SHA256"
+_HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class _NonMutatingNonceStore:
+    """Let ``btauth`` verify freshness/signatures without consuming a nonce."""
+
+    retention = float("inf")
+
+    @staticmethod
+    def check_and_store(_hotkey_ss58: str, _nonce_ns: int) -> bool:
+        return True
+
+
+_NON_MUTATING_NONCE_STORE = _NonMutatingNonceStore()
 
 
 class HotkeyAuth(httpx.Auth):
@@ -31,6 +50,7 @@ class HotkeyAuth(httpx.Auth):
                 receiver_ss58=self.receiver_ss58,
             )
         )
+        request.headers[REQUEST_BODY_SHA256_HEADER] = hashlib.sha256(request.content).hexdigest()
         yield request
 
 
@@ -44,7 +64,7 @@ class HistoricalAuthVerification:
 
 @dataclass(frozen=True)
 class RequestAuthenticator:
-    """Verify raw request bytes and keep replay state process-local."""
+    """Verify raw request bytes against a caller-supplied replay store."""
 
     self_hotkey_ss58: str
     nonce_store: Any
@@ -77,13 +97,24 @@ class RequestAuthenticator:
         *,
         max_age_seconds: float = 10.0,
         allowed_skew_seconds: float = 2.0,
+        allowed_hotkeys: Iterable[str] | None = None,
+        maximum_nonces_per_hotkey: int = 1_024,
+        maximum_total_nonces: int = 16_384,
+        maximum_database_bytes: int = 8 * 1024 * 1024,
     ) -> RequestAuthenticator:
         from .nonce import SQLiteNonceStore
 
         retention = max(60.0, max_age_seconds + allowed_skew_seconds)
         return cls(
             self_hotkey_ss58=self_hotkey_ss58,
-            nonce_store=SQLiteNonceStore(path, retention_seconds=retention),
+            nonce_store=SQLiteNonceStore(
+                path,
+                retention_seconds=retention,
+                allowed_hotkeys=allowed_hotkeys,
+                maximum_nonces_per_hotkey=maximum_nonces_per_hotkey,
+                maximum_total_nonces=maximum_total_nonces,
+                maximum_database_bytes=maximum_database_bytes,
+            ),
             max_age_seconds=max_age_seconds,
             allowed_skew_seconds=allowed_skew_seconds,
         )
@@ -96,6 +127,25 @@ class RequestAuthenticator:
         method: str,
         path: str,
     ) -> Any:
+        caller = self.verify_without_replay(
+            headers,
+            body,
+            method=method,
+            path=path,
+        )
+        self.commit_replay(caller)
+        return caller
+
+    def verify_without_replay(
+        self,
+        headers: Mapping[str, str],
+        body: bytes,
+        *,
+        method: str,
+        path: str,
+    ) -> Any:
+        """Verify header shape, freshness, receiver, and signature without mutation."""
+
         import bittensor as bt
 
         return bt.http_auth.verify(
@@ -106,8 +156,111 @@ class RequestAuthenticator:
             self_hotkey_ss58=self.self_hotkey_ss58,
             max_age=self.max_age_seconds,
             allowed_skew=self.allowed_skew_seconds,
-            nonce_store=self.nonce_store,
+            nonce_store=_NON_MUTATING_NONCE_STORE,
         )
+
+    def verify_declared_body_digest(
+        self,
+        headers: Mapping[str, str],
+        body_sha256: str,
+        *,
+        method: str,
+        path: str,
+    ) -> Any:
+        """Authenticate the digest line of a btauth payload before reading its body."""
+
+        import bittensor as bt
+
+        if _HEX_SHA256_RE.fullmatch(body_sha256) is None:
+            raise bt.http_auth.MalformedAuth(
+                f"{REQUEST_BODY_SHA256_HEADER} must be lowercase SHA-256 hexadecimal"
+            )
+        lowered = {name.lower(): value for name, value in headers.items()}
+
+        def required(name: str) -> str:
+            value = lowered.get(name.lower())
+            if value is None:
+                raise bt.http_auth.MalformedAuth(f"missing {name}")
+            return value
+
+        if required(bt.http_auth.HEADER_VERSION) != bt.http_auth.VERSION:
+            raise bt.http_auth.MalformedAuth(f"unsupported {bt.http_auth.HEADER_VERSION}")
+        sender = required(bt.http_auth.HEADER_HOTKEY)
+        receiver = required(bt.http_auth.HEADER_RECEIVER)
+        if receiver != self.self_hotkey_ss58:
+            raise bt.http_auth.WrongReceiver("request was signed for a different receiving hotkey")
+        raw_nonce = required(bt.http_auth.HEADER_NONCE)
+        if not raw_nonce.isdecimal() or raw_nonce != str(int(raw_nonce)):
+            raise bt.http_auth.MalformedAuth(
+                f"{bt.http_auth.HEADER_NONCE} is not a canonical decimal integer"
+            )
+        nonce = int(raw_nonce)
+        now = time.time_ns()
+        if now - nonce > self.max_age_seconds * 1e9:
+            raise bt.http_auth.StaleRequest(
+                f"nonce is older than the {self.max_age_seconds:g}s freshness window"
+            )
+        if nonce - now > self.allowed_skew_seconds * 1e9:
+            raise bt.http_auth.StaleRequest(
+                f"nonce is more than {self.allowed_skew_seconds:g}s in the future"
+            )
+        try:
+            crypto_type = bt.wallets.parse_crypto_type(
+                lowered.get(bt.http_auth.HEADER_CRYPTO.lower(), "sr25519")
+            )
+            scheme = bt.wallets.format_crypto_type(crypto_type)
+        except ValueError as error:
+            raise bt.http_auth.MalformedAuth(f"unsupported {bt.http_auth.HEADER_CRYPTO}") from error
+        raw_signature = required(bt.http_auth.HEADER_SIGNATURE)
+        if not re.fullmatch(r"0x[0-9a-f]{128}", raw_signature):
+            raise bt.http_auth.MalformedAuth(f"{bt.http_auth.HEADER_SIGNATURE} is not canonical")
+        signature = bytes.fromhex(raw_signature[2:])
+        payload = "\n".join(
+            (
+                bt.http_auth.PROTOCOL,
+                scheme,
+                method.upper(),
+                path,
+                body_sha256,
+                str(nonce),
+                sender,
+                receiver,
+            )
+        ).encode()
+        try:
+            verified = bt.sp_core.verify(payload, signature, sender, crypto_type)
+        except ValueError as error:
+            raise bt.http_auth.MalformedAuth(
+                "invalid hotkey address or signature encoding"
+            ) from error
+        if not verified:
+            raise bt.http_auth.BadSignature(
+                "signature does not verify against the claimed body digest"
+            )
+        return bt.http_auth.Caller(
+            hotkey_ss58=sender,
+            nonce_ns=nonce,
+            crypto_type=crypto_type,
+        )
+
+    def commit_replay(self, caller: Any) -> None:
+        """Atomically consume a nonce after authenticated admission succeeds."""
+
+        import bittensor as bt
+
+        hotkey = getattr(caller, "hotkey_ss58", None)
+        nonce = getattr(caller, "nonce_ns", None)
+        if not isinstance(hotkey, str) or isinstance(nonce, bool) or not isinstance(nonce, int):
+            raise TypeError("authenticated caller has an invalid replay binding")
+        retention = getattr(self.nonce_store, "retention", None)
+        required = self.max_age_seconds + self.allowed_skew_seconds
+        if retention is not None and retention < required:
+            raise ValueError(
+                f"nonce store retains entries for {retention:g}s but the freshness window is "
+                f"{required:g}s"
+            )
+        if not self.nonce_store.check_and_store(hotkey, nonce):
+            raise bt.http_auth.ReplayedRequest("this nonce was already accepted from this hotkey")
 
 
 def wire_request_target(scope: Mapping[str, Any]) -> str:

@@ -205,6 +205,8 @@ class QuicknetClient:
             timeout=self.timeout_seconds,
             follow_redirects=False,
             transport=self.transport,
+            trust_env=False,
+            headers={"Accept-Encoding": "identity"},
         ) as client:
             info_record, pulse_record = await asyncio.gather(
                 self._get_json(client, "/info"),
@@ -224,8 +226,13 @@ class QuicknetClient:
                     raise DrandVerificationError(
                         "Quicknet response headers exceed the byte ceiling"
                     )
+                content_encoding = response.headers.get("content-encoding")
+                if content_encoding is not None and content_encoding.strip().lower() != "identity":
+                    raise DrandVerificationError(
+                        "Quicknet response Content-Encoding must be identity"
+                    )
                 body = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in response.aiter_raw():
                     if len(body) + len(chunk) > self.maximum_body_bytes:
                         raise DrandVerificationError("Quicknet response exceeds its byte ceiling")
                     body.extend(chunk)

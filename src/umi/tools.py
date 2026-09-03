@@ -190,6 +190,8 @@ def _inspect_media(args: argparse.Namespace) -> dict[str, Any]:
         "frame_digest": decoded.frame_digest,
         "frame_count": decoded.frame_count,
         "decoder_sha256": decoded.decoder_sha256,
+        "probe_sha256": decoded.probe_sha256,
+        "executables_content_pinned": decoded.executables_content_pinned,
         "protocol_conformance": False,
         "activation_evidence": False,
     }

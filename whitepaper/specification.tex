@@ -540,6 +540,12 @@ Version 0.1 makes these trust assumptions explicit:
 \item
   Timelock availability depends on the pinned drand Quicknet and artifact mirrors.
 \item
+  The current owned finality client verifies GRANDPA internally but emits a
+  hash-pinned verifier attestation rather than portable GRANDPA proof bytes. It
+  explicitly trusts the governed, policy-pinned Finney
+  \path|grandpaWarpSyncCheckpoint| and its authority set as a weak-subjectivity input,
+  then verifies peer-supplied warp and GRANDPA data from that point forward.
+\item
   Response timelocks prevent a validator from reading an answer early; they cannot
   prevent a miner from voluntarily sharing its own plaintext with another miner.
 \item
@@ -577,6 +583,8 @@ Launch value or source
 Application protocol & \path|umi-asl/0.1| \\
 Ground-truth schema & \path|umi-ground-truth/1| \\
 Pool manifest schema & \path|umi-pool-manifest/1| \\
+Mirror discovery schema & \path|umi-mirror-discovery/1| \\
+Video-delivery issuance schemas & \path|umi-video-delivery-issuance-request/1|, \path|umi-video-delivery-issuance-response/1|, and \path|umi-video-delivery-issuance-evidence/1| \\
 Availability certificate & \path|umi-availability/1| \\
 Publisher capacity schema & \path|umi-publisher-capacity/1| \\
 Validator economics schema & \path|umi-validator-economics/1| \\
@@ -601,17 +609,31 @@ Weight concealment & Current chain commit-reveal version \\
 \end{longtable}
 }
 
-A breaking request, pool, ground-truth, timelock, registry, or scoring change MUST
-increment its version. A scoring change MUST declare an activation block and MUST
-NOT alter any selection window opened under an earlier policy hash.
+A breaking request, pool, mirror, video-delivery, ground-truth, timelock, registry,
+or scoring change MUST increment its version. A scoring change MUST declare an
+activation block and MUST NOT alter any selection window opened under an earlier
+policy hash.
 
 \section{Miner API}\label{6-miner-api}
 
 \subsection{Transport}\label{61-transport}
 
-Miners MUST expose \path|POST /v1/translate| at their announced serving endpoint. Requests MUST use \path|btauth/1|. Deployments with several server processes MUST share replay state.
+Miners MUST expose \path|POST /v1/translate| over HTTPS at their announced serving
+endpoint. The certificate MUST be valid for the exact IP address in the finalized
+serving record under the validator\textquotesingle s system trust store. Requests MUST use
+\path|btauth/1|. Deployments with several server processes MUST share replay state.
 
 Validators MUST sign the exact request bytes. Miners MUST bind each response to the serving hotkey with a signature over the canonical response digest. JSON canonicalization follows RFC 8785.
+
+Each request MUST carry exactly one \path|X-UMI-Body-SHA256| header containing the
+lowercase hexadecimal SHA-256 of the exact body. This is the body-hash line already
+covered by the \path|btauth/1| signature, not a second authentication scheme. Before
+reading the body, the miner verifies the canonical authentication-header set,
+receiver, freshness, signature, and policy validator account against that declared
+digest. It then reads the body under the byte and time ceilings, checks the actual
+digest, and atomically consumes the nonce before parsing the request. A failed
+signature or body-digest check consumes no nonce. Duplicate authentication or body-
+digest headers are malformed.
 
 Validators and miners MUST enforce the policy-pinned HTTP body ceilings while
 streaming, before buffering or parsing the full body. A declared \path|Content-Length|
@@ -620,6 +642,23 @@ the streaming counter. An over-limit miner response becomes one canonical
 \path|outer_invalid| record containing only the limit reason and the hash of the bounded
 prefix retained for evidence. Validators and miners MUST NOT preserve an unbounded
 body merely to prove that it was oversized.
+
+Protocol and artifact requests MUST advertise \path|Accept-Encoding: identity|.
+Receivers MUST reject a response carrying any non-identity \path|Content-Encoding| and
+MUST apply byte ceilings to the undecoded response stream. Compression at a storage
+or transport layer outside the signed HTTP representation does not change this
+rule.
+
+The policy pins \path|btauth_max_age_seconds| and \path|btauth_allowed_skew_seconds|. The
+maximum age MUST be at least \path|issue_allowance_seconds|, because the exact initial
+signed request is committed and finalized before transmission. At launch these
+values are 360 seconds and 2 seconds. Miners MUST retain replay nonces for at least
+their sum, and every retry still uses a fresh nonce. Expanding the freshness window
+does not permit replay of an already accepted signature. Durable replay state MUST
+be keyed by decoded policy-validator \path|AccountId32|, reject accounts outside that
+registry before insertion, and enforce per-validator, total-row, and database-byte
+ceilings derived from the maximum assignment and retry counts. Reaching a ceiling
+fails closed and MUST NOT evict a still-fresh nonce.
 
 The policy also pins \path|maximum_http_header_bytes|,
 \path|maximum_request_transmissions_per_assignment|,
@@ -639,9 +678,25 @@ toward the wire ceilings.
 window tuple. A validator\textquotesingle s per-assignment counter covers its request and response
 traffic; its window counter also covers qualification, mirroring, and shared
 artifact retrieval. A miner\textquotesingle s per-assignment counter covers the request it receives,
-all video-fetch traffic, and the response it sends. Each actor enforces its own
-counter before the next read or write. Shared validator fetches count once at the
-window level rather than once for every miner assignment.
+all video-fetch traffic, and the response it sends. A miner isolates unverified
+video declarations, pending fetches, and failed-fetch budgets by authenticated
+issuing-validator hotkey. One validator therefore cannot spend another validator\textquotesingle s
+fetch budget or bind a public video digest to false metadata. A hash-verified body
+may enter the miner\textquotesingle s shared cache only after its size and digest match; only that
+verified body may be reused across validator partitions. The miner\textquotesingle s aggregate
+assignment, wire, and retained-byte ceilings still cover all partitions. Each actor
+enforces its applicable counter before the next read or write. Shared validator
+fetches count once at the validator window level rather than once for every miner
+assignment.
+
+A miner implementation MUST reserve one nonqueueing request-work slot and one
+runnable inference slot for every validator in the active policy registry. Its
+total enforced model concurrency MUST be at least that registry size. An isolated
+model process MUST bind the same minimum, the policy hash, and its model revision
+to an owner-private startup record that the protocol process checks before each
+request. These checks do not prove that a model framework or accelerator executes
+work concurrently internally; the activation soak measures that residual
+operating risk.
 
 Before the qualifying soak, every validator in the registered soak set signs this
 RFC 8785 object. The numeric values below illustrate field units; each validator
@@ -759,7 +814,7 @@ meters trustless. Their off-chain status remains a residual assumption in Sectio
   "response_close_round": 12345578,
   "reveal_round": 12345678,
   "video": {
-    "url": "https://short-lived.example/object",
+    "url": "https://delivery.example/v1/umi/deliveries/qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
     "sha256": "hex-encoded-sha256",
     "size_bytes": 1234567,
     "media_type": "video/mp4"
@@ -785,9 +840,46 @@ Requirements:
 \item
   The window ID and both rounds MUST match the committed public manifest.
 \item
+  The URL MUST be a credential-free HTTPS delivery URL issued after batch
+  selection. Its origin MUST appear in the mirror rule\textquotesingle s sorted
+  \path|delivery_origins|, which are disjoint from the authenticated retrieval origins.
   The URL MUST remain valid through \path|response_close_round|, expire within the
-  policy-pinned delivery grace after it, and contain no label, prompt, signer name,
-  or task answer.
+  policy-pinned delivery grace after it, and use exactly
+  \path|/v1/umi/deliveries/<token>|, where \path|token| is the canonical unpadded base64url
+  encoding of the 24-byte value derived below. Credentials, queries, fragments,
+  percent encoding, additional path segments, and any label, prompt, signer name,
+  or task answer are forbidden. An authenticated mirror object URL MUST NOT enter
+  a miner request.
+\item
+  Before the first issuance attempt, the validator MUST generate and durably store
+  one 256-bit cryptographically random \path|delivery_token_seed| for the window. The
+  seed enters the canonical authenticated video-delivery issuance request and MUST
+  be reused after a retry or restart. For each selected item, the delivery service
+  MUST use the first 24 bytes of this digest as the URL token, encoded as canonical
+  unpadded base64url:
+\end{itemize}
+
+\begin{UMICodeBlock}
+SHA256(
+  "umi-video-delivery-token-v1\0" ||
+  base64url_decode(delivery_token_seed) ||
+  window_id ||
+  U64BE(window_index) ||
+  scoring_policy_hash ||
+  U64BE(response_close_round) ||
+  base64url_decode(batch_id) ||
+  base64url_decode(challenge_id) ||
+  video_sha256 ||
+  U64BE(size_bytes)
+)[0:24]
+\end{UMICodeBlock}
+
+Hash fields in this formula are raw 32-byte values. A service-chosen token or a
+response that does not reproduce this token is invalid and cannot be cached as a
+successful issuance.
+
+\begin{itemize}
+\tightlist
 \item
   The validator MUST stream every video fetch through the declared \path|size_bytes|,
   \path|maximum_clip_size|, attempt, assignment, and window counters, abort on the first
@@ -1226,6 +1318,17 @@ The ground-truth payload has this logical shape:
 }
 \end{UMICodeBlock}
 
+\path|normalized_script_sha256| is not a hash of the publisher\textquotesingle s raw prompt bytes. For
+ordinary, canary-actual, and canary-reserved scripts alike, the publisher applies
+the complete Section 9.1 text normalization and hashes the normalized UTF-8 bytes:
+
+\begin{UMICodeBlock}
+normalized_script_sha256 = SHA256(UTF8(normalize_text_section_9_1(script)))
+\end{UMICodeBlock}
+
+The JSON field carries the 32-byte result as lowercase hexadecimal. A script whose
+normalized form is empty is ineligible.
+
 For an ordinary item, \path|retirement_script_sha256s| contains its normalized script
 hash and \path|canary_evidence| is null. For a canary, \path|canary_evidence| contains the
 actual references, actual script hash, reserved script hash, and mismatched
@@ -1319,8 +1422,11 @@ The active policy sets \path|max_active_publishers|, \path|max_active_control_gr
 publisher hotkeys in exactly three control groups, each group may contribute at
 most one batch, and the entire window may contain at most three candidate batches.
 A pool body or availability certificate that exceeds any limit is invalid. The
-policy also defines the content-addressed mirror discovery rule. Publisher and
-validator registry changes require a new policy hash and activation block.
+policy also defines the content-addressed mirror discovery rule. Its canonical
+bytes contain sorted authenticated retrieval origins, disjoint sorted public
+\path|delivery_origins|, and the fixed authenticated post-selection delivery-issuance
+endpoint. Publisher and validator registry changes require a new policy hash and
+activation block.
 
 \subsection{Seal, certify, and anchor}\label{82-seal-certify-and-anchor}
 
@@ -1350,8 +1456,16 @@ ciphertext and makes each video available through the authenticated mirror polic
 The availability signers become at least three independent mirrors before the
 publisher anchors its final pool manifest. Every participating validator retrieves
 and hash-checks the certified pool manifests, public batch manifests, and
-ciphertexts. After selection, it retrieves every selected video before issuing any
-request. Every publisher, availability signer, validator, and miner fetch streams
+ciphertexts. After selection, it retrieves every selected video, then sends one
+canonical authenticated request to the mirror rule\textquotesingle s fixed delivery-issuance
+endpoint before preparing miner assignments. The request binds the window, batch,
+challenge, video hash, and size. The canonical response binds the same fields and
+provides one credential-free HTTPS URL and expiry per selected item. The validator
+accepts only URLs under \path|delivery_origins| whose expiry is at least the response
+close time and at most the end of the delivery grace. The exact discovery rule,
+request, response, and non-secret exchange evidence enter the audit bundle and are
+replayed before accepting the assignments. Every publisher, availability signer,
+validator, and miner fetch streams
 HTTP headers and bodies through the applicable header, object-size, fetch-attempt,
 assignment, and validator-window counters in Section 6.1. It aborts the transfer at
 the first exceeded ceiling and retains only the bounded receipt. An availability
@@ -1452,7 +1566,10 @@ Here \path|drand_signature| means the verified raw signature bytes, not its hexa
 text. The signature and verification evidence enter the audit bundle.
 \path|selection_round| is declared before pool anchoring. The closing block MUST reach
 finality before that round\textquotesingle s pulse is published; otherwise the entire window is
-void.
+void. The validator proves that ordering with the closing header\textquotesingle s hash-chained
+local acceptance receipt. Its timestamp is evidence of that validator\textquotesingle s local
+clock, not chain- or GRANDPA-certified time, and cannot constrain a dishonest
+validator clock.
 A block hash is not used as entropy: block producers influence block hashes, and a
 one-block grind at pool close would bias the entire cohort\textquotesingle s selection. The drand
 signature of a future round is unpredictable to every chain participant, and the
@@ -2182,6 +2299,51 @@ Every logical snapshot MUST identify one block hash, and all state attributed to
 MUST come from that block. Mixing values from different heads is non-conforming.
 The economic fields are telemetry and activation inputs; they never change a miner
 score or rescue an invalid weight row.
+
+A validator MUST obtain finalized headers through the policy-pinned owned-finality
+profile, independently of the RPC provider used to retrieve block bodies or storage
+proofs. The version 0.1 implementation embeds smoldot, connects directly to Finney
+peers, and accepts no provider RPC URL for finality. Its public evidence is labeled
+\path|verifier_attested_finality| and \path|offline_finality_proof: false|: smoldot verifies
+warp and GRANDPA data internally, but its public wrapper does not export the
+portable justification bytes needed for an auditor to verify finality from the
+bundle alone. The bundle therefore pins and records the reviewed source, lockfile,
+fixture set, release binary, chain specification, genesis hash, bootstrap header,
+and hash-chained attestation transcript. It MUST NOT relabel that transcript as a
+self-contained GRANDPA proof. The transcript and local acceptance receipts are
+unsigned; their hashes detect alteration relative to a retained run but do not
+prevent creation of a synthetic offline chain. Activation evidence MUST be
+captured directly from an invocation of the exact policy-pinned sidecar over its
+peer-to-peer path. A caller-supplied transcript is replay material only.
+
+Version 0.1 accepts only a governed \path|grandpa_warp_sync_checkpoint| bootstrap. The
+policy pins the complete official Finney chain-specification bytes, their subtensor
+source revision, genesis hash, and the nonzero checkpoint number and hash. The
+observer independently decodes the checkpoint header and GRANDPA authority set,
+constructs one deterministic smoldot database, and requires a typed startup receipt
+showing that this exact checkpoint was selected. Every emitted attestation binds
+\path|bootstrap_source: grandpa_checkpoint|, \path|bootstrap_selected: true|, and the first
+verified finalized head. Both that startup head and the first emitted header MUST
+advance beyond the checkpoint. Genesis fallback, legacy \path|lightSyncState|, a locally
+chosen checkpoint, or an ambiguous specification is non-conforming.
+
+The checkpoint and its authority set are an explicit weak-subjectivity assumption
+and can change only with a new policy hash. They are not proof that an RPC provider
+reported finality honestly. From the selected checkpoint onward, the owned client
+verifies peer-supplied warp and GRANDPA data without accepting a provider RPC URL.
+Provider-supplied storage values become authoritative only after the independent
+LayoutV1 proof verifier binds their raw \path|StorageProof| nodes and claimed values to
+the attested header\textquotesingle s state root.
+
+When a verified header enters the validator\textquotesingle s durable finality store, the store
+captures a Unix-millisecond local acceptance time in the same transaction and
+binds it, the header, the attestation digest, and the preceding receipt into an
+append-only acceptance digest. Pool-close evidence includes the canonical receipt
+for the closing header and requires its local acceptance time to precede publication
+of the selection pulse. This is reproducible evidence of the validator\textquotesingle s own event
+ordering, not a GRANDPA-certified time or a defense against a dishonest validator
+clock.
+
 Section 10.3 separately defines the current-head schedule snapshot used to build a
 weight ciphertext; it is not the finalized block used to construct the score row.
 The scoring policy pins the exact client and timelock-core revisions, content
@@ -2440,10 +2602,14 @@ must prevent it before any request is issued.
 \tightlist
 \item
   \textbf{Pool and selection:} window index, announcement and closing blocks, derived
-  rounds, finality proofs, pool and public batch manifests, closing-block proofs,
-  availability certificate and certified bodies, selection pulse and trace,
-  encrypted ground-truth objects, previous and resulting spent roots, and previous
-  and resulting publisher-fault roots with all sorted deltas.
+  rounds, policy-declared finality evidence, pool and public batch manifests,
+  closing-block proofs,
+  availability certificate and certified bodies, selection pulse and trace, the
+  exact mirror-discovery rule and canonical video-delivery issuance request,
+  response, and evidence; every bounded successful, failed, or interrupted
+  retrieval and issuance attempt; exactly reconciled observed and ceiling-accounted
+  byte totals; encrypted ground-truth objects; previous and resulting spent roots;
+  and previous and resulting publisher-fault roots with all sorted deltas.
 \item
   \textbf{Assignment:} assigned miner roots and closing-block mappings, every exact
   initial signed request and authentication record, and the assignment leaves and
@@ -2517,6 +2683,7 @@ Selection grinding & Post-close drand selection round; pool and miner snapshot f
 Pool equivocation & One finalized per-publisher pool anchor and canonical manifest hashing \\
 Local pool omission & Whole-window fail-closed behavior; no validator-local candidate removal \\
 Artifact withholding & Pre-close availability quorum, signer mirrors, and fresh qualification after breach \\
+Validator mirror credential leakage & Disjoint authenticated retrieval and public delivery origins; canonical post-selection issuance; no source URL in miner requests \\
 Timelock profile drift & Pinned envelope fixture and drand tuple checked against activation-block state \\
 Spent-state divergence & Local replay failure skips the update; later peer mismatch pauses subsequent updates \\
 UID reassignment & Root-to-successor-to-UID proofs at build, inclusion, and reveal; mismatch fails the result \\
@@ -2881,6 +3048,7 @@ Maximum hypothesis length (\path|maximum_hypothesis_utf8_bytes|, \path|maximum_h
 Maximum signed request body (\path|maximum_request_body_bytes|) & 64 KiB \\
 Maximum signed response envelope body (\path|maximum_response_body_bytes|) & 64 KiB \\
 Maximum HTTP headers per message (\path|maximum_http_header_bytes|) & 16 KiB \\
+Signed-request maximum age and allowed clock skew (\path|btauth_max_age_seconds|, \path|btauth_allowed_skew_seconds|) & 360 seconds and 2 seconds \\
 Maximum request transmissions per assignment (\path|maximum_request_transmissions_per_assignment|) & 2 \\
 Maximum response bodies per assignment (\path|maximum_response_bodies_per_assignment|) & 2 \\
 Maximum video fetch attempts per actor, video, and window (\path|maximum_video_fetch_attempts_per_actor|) & 2 \\
@@ -2894,8 +3062,8 @@ Pool proposal close & 30 blocks after announcement \\
 Pool anchor close & 45 blocks after announcement \\
 Pinned target block interval & 12 seconds, verified at activation \\
 Selection finality buffer after expected pool close & 300 seconds \\
-Challenge anchor and issue allowance & 60 seconds \\
-Response window & 60 seconds; 10-block construction-to-deadline bound at the initial interval \\
+Challenge anchor and issue allowance & 300 seconds \\
+Response window & 300 seconds; 50-block construction-to-deadline bound at the initial interval \\
 Video delivery grace after response close & 60 seconds \\
 Weight-commit buffer after reveal observation & 30 blocks \\
 Weight-commit submission interval & 30 blocks within one observed epoch \\
@@ -2945,7 +3113,7 @@ tests those exact values. Evidence that calls for any change produces a new shad
 policy and restarts the soak. A faster cadence does not become eligible merely
 because the chain can accept it.
 
-The initial 60-second issue allowance and 60-second response window are calibration
+The initial five-minute issue allowance and five-minute response window are calibration
 candidates, not demonstrated operating margins. They can enter the qualifying soak
 only when every scheduled window supplies the exact deadline and resource evidence
 required by Sections 6.1 and 14. A deadline miss, inadequate headroom, or failed
@@ -3042,6 +3210,9 @@ A conforming validator under a policy with \path|translation_weights_active: tru
   state;
 \item
   selects batches and miners deterministically without local candidate removal;
+\item
+  obtains canonical short-lived miner delivery URLs after selection without
+  exposing authenticated mirror source URLs;
 \item
   anchors its assignment set before issuance, its retry-complete request set before
   response close, and one sealed response record per request before reveal;

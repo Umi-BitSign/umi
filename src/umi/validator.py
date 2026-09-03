@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import ipaddress
 import json
 import logging
+import socket
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -15,8 +19,9 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
 
+from .anchors import VerifiedAuthEvidence
 from .audit import EvidenceStore
-from .auth import verify_historical_auth_record
+from .auth import REQUEST_BODY_SHA256_HEADER, verify_historical_auth_record
 from .chain import discover_miner
 from .component import (
     BUNDLE_SCHEMA,
@@ -47,15 +52,61 @@ from .protocol import (
     canonical_json_bytes,
     request_digest,
 )
+from .resources import ResourceLedger, ResourceLimitExceeded
 from .scoring import scoring_environment
 
 LOGGER = logging.getLogger("umi.validator")
 
+OriginResolver = Callable[[str, int], Awaitable[Sequence[str]]]
+
 
 class ComponentResponseError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        received_bytes_sha256: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.received_bytes_sha256 = received_bytes_sha256
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRequestAttempt:
+    """Exact signed request material that can be anchored before transmission."""
+
+    request: TranslationRequest
+    request_bytes: bytes
+    validator_hotkey: str
+    miner_hotkey: str
+    auth_headers: tuple[tuple[str, str], ...]
+    auth_evidence: VerifiedAuthEvidence
+
+    def __post_init__(self) -> None:
+        if self.request_bytes != canonical_json_bytes(self.request):
+            raise ValueError("prepared request bytes are not the exact canonical request")
+        if self.auth_evidence.request_bytes != self.request_bytes:
+            raise ValueError("prepared authentication evidence binds different request bytes")
+        if self.auth_evidence.auth_record.sender != self.validator_hotkey:
+            raise ValueError("prepared authentication evidence binds a different validator")
+        if self.auth_evidence.auth_record.receiver != self.miner_hotkey:
+            raise ValueError("prepared authentication evidence binds a different miner")
+        if self.auth_headers != tuple(sorted(self.auth_headers)):
+            raise ValueError("prepared authentication headers must be in canonical order")
+        if len(dict(self.auth_headers)) != len(self.auth_headers) or any(
+            name != name.lower() for name, _value in self.auth_headers
+        ):
+            raise ValueError("prepared authentication headers must use unique lowercase names")
+        reproduced = VerifiedAuthEvidence.from_headers(
+            dict(self.auth_headers),
+            request=self.request,
+            expected_validator_hotkey=self.validator_hotkey,
+            expected_miner_hotkey=self.miner_hotkey,
+        )
+        if reproduced != self.auth_evidence:
+            raise ValueError("prepared authentication headers do not match their evidence")
 
 
 @dataclass(frozen=True)
@@ -70,6 +121,14 @@ class QueryOutcome:
     plaintext_bytes: bytes | None = None
     plaintext: ResponsePlaintext | None = None
     failure_code: str | None = None
+    received_bytes_sha256: str | None = None
+    received_body_prefix: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.received_body_prefix is not None and not isinstance(
+            self.received_body_prefix, bytes
+        ):
+            raise TypeError("received_body_prefix must be exact bytes or None")
 
 
 def _hotkey_ss58(wallet: Any) -> str:
@@ -79,14 +138,88 @@ def _hotkey_ss58(wallet: Any) -> str:
 
 
 def _validate_miner_url(miner_url: str) -> str:
-    parsed = urlsplit(miner_url)
+    try:
+        parsed = urlsplit(miner_url)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError("miner URL has an invalid origin") from error
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("miner URL must be an absolute HTTP(S) origin")
+    if hostname is None:
+        raise ValueError("miner URL must contain a hostname")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise ValueError("miner URL must be an origin without a path, query, or fragment")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("miner URL must not contain user information")
     return miner_url.rstrip("/")
+
+
+async def _system_origin_resolver(hostname: str, port: int) -> Sequence[str]:
+    records = await asyncio.to_thread(
+        socket.getaddrinfo,
+        hostname,
+        port,
+        family=socket.AF_UNSPEC,
+        type=socket.SOCK_STREAM,
+    )
+    return tuple(record[4][0] for record in records)
+
+
+async def _pinned_public_origin(
+    miner_url: str,
+    *,
+    resolver: OriginResolver | None,
+) -> tuple[str, str, str]:
+    """Resolve once, reject every non-public answer, and return a pinned origin.
+
+    The returned tuple is ``(pinned_origin, host_header, sni_hostname)``. Requiring
+    every answer to be globally routable prevents a mixed DNS response from being
+    used as a rebinding primitive while the selected address removes the later DNS
+    lookup from the actual connection.
+    """
+
+    try:
+        origin = _validate_miner_url(miner_url)
+    except ValueError as error:
+        raise ComponentResponseError("transport_error", "miner origin is invalid") from error
+    parsed = urlsplit(origin)
+    if parsed.scheme != "https":
+        raise ComponentResponseError(
+            "transport_error",
+            "public miner transport requires HTTPS",
+        )
+    if parsed.hostname is None:  # Defensive; _validate_miner_url already rejects it.
+        raise ComponentResponseError("transport_error", "miner origin has no hostname")
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except (UnicodeError, ValueError) as error:
+        raise ComponentResponseError("transport_error", "miner origin is invalid") from error
+
+    resolve = resolver or _system_origin_resolver
+    try:
+        resolved = await resolve(hostname, port)
+        addresses = {ipaddress.ip_address(value) for value in resolved}
+    except (OSError, ValueError, UnicodeError) as error:
+        raise ComponentResponseError(
+            "transport_error", "miner origin could not be resolved safely"
+        ) from error
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ComponentResponseError(
+            "transport_error", "miner origin did not resolve exclusively to public addresses"
+        )
+
+    selected = min(addresses, key=lambda address: (address.version, address.packed))
+    pinned_host = f"[{selected.compressed}]" if selected.version == 6 else selected.compressed
+    pinned_origin = f"{parsed.scheme}://{pinned_host}:{port}"
+
+    authority_host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 443 if parsed.scheme == "https" else 80
+    host_header = (
+        authority_host if parsed.port in {None, default_port} else f"{authority_host}:{port}"
+    )
+    return pinned_origin, host_header, hostname
 
 
 def _header_size(headers: httpx.Headers) -> int:
@@ -101,7 +234,21 @@ def _auth_record(headers: httpx.Headers) -> dict[str, str]:
     }
 
 
-async def _read_response_body(response: httpx.Response, maximum_bytes: int) -> bytes:
+async def _read_response_body(
+    response: httpx.Response,
+    maximum_bytes: int,
+    *,
+    prefix: bytearray,
+    resource_ledger: ResourceLedger | None = None,
+    assignment_id: str | None = None,
+) -> bytes:
+    content_encoding = response.headers.get("content-encoding")
+    if content_encoding is not None and content_encoding.strip().lower() != "identity":
+        raise ComponentResponseError(
+            "outer_invalid",
+            "miner response Content-Encoding must be identity",
+            received_bytes_sha256=hashlib.sha256(prefix).hexdigest(),
+        )
     content_length = response.headers.get("content-length")
     if content_length is not None:
         try:
@@ -112,16 +259,32 @@ async def _read_response_body(response: httpx.Response, maximum_bytes: int) -> b
             ) from error
         if declared < 0 or declared > maximum_bytes:
             raise ComponentResponseError(
-                "resource_limit", "miner response exceeds the configured body ceiling"
+                "resource_limit",
+                "miner response exceeds the configured body ceiling",
+                received_bytes_sha256=hashlib.sha256(prefix).hexdigest(),
             )
-    body = bytearray()
-    async for chunk in response.aiter_bytes():
-        if len(body) + len(chunk) > maximum_bytes:
+    async for chunk in response.aiter_raw():
+        if resource_ledger is not None:
+            try:
+                resource_ledger.charge(len(chunk), assignment_id=assignment_id)
+            except ResourceLimitExceeded as error:
+                remaining = max(0, maximum_bytes - len(prefix))
+                prefix.extend(chunk[:remaining])
+                raise ComponentResponseError(
+                    "resource_limit",
+                    str(error),
+                    received_bytes_sha256=hashlib.sha256(prefix).hexdigest(),
+                ) from error
+        if len(prefix) + len(chunk) > maximum_bytes:
+            remaining = max(0, maximum_bytes - len(prefix))
+            prefix.extend(chunk[:remaining])
             raise ComponentResponseError(
-                "resource_limit", "miner response exceeds the configured body ceiling"
+                "resource_limit",
+                "miner response exceeds the configured body ceiling",
+                received_bytes_sha256=hashlib.sha256(prefix).hexdigest(),
             )
-        body.extend(chunk)
-    return bytes(body)
+        prefix.extend(chunk)
+    return bytes(prefix)
 
 
 def validate_response_envelope(
@@ -208,21 +371,78 @@ def validate_response_plaintext(
     return plaintext
 
 
-async def query_miner(
+def prepare_request_attempt(
     request: TranslationRequest,
     *,
     wallet: Any,
-    miner_url: str,
     miner_hotkey: str,
-    limits: Limits,
-    timeout_seconds: float,
-    transport: httpx.AsyncBaseTransport | None = None,
-) -> QueryOutcome:
-    if timeout_seconds <= 0:
-        raise ValueError("request timeout must be positive")
+    nonce_ns: int | None = None,
+) -> PreparedRequestAttempt:
+    """Sign and self-verify exact request bytes before building an assignment root."""
+
+    if not isinstance(request, TranslationRequest):
+        raise TypeError("request must be a TranslationRequest")
     validator_hotkey = _hotkey_ss58(wallet)
     body = canonical_json_bytes(request)
     import bittensor as bt
+
+    auth_headers = _auth_record(
+        httpx.Headers(
+            bt.http_auth.sign(
+                wallet,
+                method="POST",
+                path=TRANSLATE_PATH,
+                body=body,
+                receiver_ss58=miner_hotkey,
+                nonce_ns=nonce_ns,
+            )
+        )
+    )
+    auth_evidence = VerifiedAuthEvidence.from_headers(
+        auth_headers,
+        request=request,
+        expected_validator_hotkey=validator_hotkey,
+        expected_miner_hotkey=miner_hotkey,
+    )
+    return PreparedRequestAttempt(
+        request=request,
+        request_bytes=body,
+        validator_hotkey=validator_hotkey,
+        miner_hotkey=miner_hotkey,
+        auth_headers=tuple(sorted(auth_headers.items())),
+        auth_evidence=auth_evidence,
+    )
+
+
+async def send_prepared_request(
+    prepared: PreparedRequestAttempt,
+    *,
+    miner_url: str,
+    limits: Limits,
+    timeout_seconds: float,
+    transport: httpx.AsyncBaseTransport | None = None,
+    resolver: OriginResolver | None = None,
+    resource_ledger: ResourceLedger | None = None,
+    assignment_id: str | None = None,
+    maximum_request_transmissions: int = 2,
+    maximum_response_bodies: int = 2,
+) -> QueryOutcome:
+    """Transmit one already-signed attempt without changing its anchored bytes."""
+
+    if not isinstance(prepared, PreparedRequestAttempt):
+        raise TypeError("prepared must be a PreparedRequestAttempt")
+    if timeout_seconds <= 0:
+        raise ValueError("request timeout must be positive")
+    if maximum_request_transmissions <= 0 or maximum_response_bodies <= 0:
+        raise ValueError("request and response attempt ceilings must be positive")
+    request = prepared.request
+    body = prepared.request_bytes
+    miner_hotkey = prepared.miner_hotkey
+    validator_hotkey = prepared.validator_hotkey
+    if assignment_id is None:
+        assignment_id = request_digest(request)
+    if not assignment_id:
+        raise ValueError("assignment_id must not be empty")
 
     response_close_ns = _round_time_ns(request.response_close_round)
     response_close_timestamp = response_close_ns / 1_000_000_000
@@ -230,53 +450,123 @@ async def query_miner(
     if remaining_response_seconds <= 0:
         raise ValueError("component request response window has already closed")
 
-    auth_headers = bt.http_auth.sign(
-        wallet,
-        method="POST",
-        path=TRANSLATE_PATH,
-        body=body,
-        receiver_ss58=miner_hotkey,
-    )
-    auth_headers = _auth_record(httpx.Headers(auth_headers))
+    auth_headers = dict(prepared.auth_headers)
     raw_body: bytes | None = None
     received_at: str | None = None
     signature: str | None = None
+    response_started = False
+    body_prefix = bytearray()
 
     async def exchange() -> None:
-        nonlocal auth_headers, raw_body, received_at, signature
-        async with (
-            httpx.AsyncClient(
-                base_url=_validate_miner_url(miner_url),
-                timeout=httpx.Timeout(min(timeout_seconds, remaining_response_seconds)),
-                follow_redirects=False,
-                transport=transport,
-            ) as client,
-            client.stream(
+        nonlocal auth_headers, raw_body, received_at, signature, response_started
+        # ASGITransport and MockTransport never open a socket. They are an explicit
+        # in-process test seam; every real network transport resolves and pins one
+        # verified public address before connecting.
+        in_process_transport = isinstance(
+            transport,
+            (httpx.ASGITransport, httpx.MockTransport),
+        )
+        if in_process_transport and resolver is None:
+            try:
+                pinned_origin = _validate_miner_url(miner_url)
+            except ValueError as error:
+                raise ComponentResponseError(
+                    "transport_error", "miner origin is invalid"
+                ) from error
+            host_header = ""
+            sni_hostname = ""
+        else:
+            pinned_origin, host_header, sni_hostname = await _pinned_public_origin(
+                miner_url,
+                resolver=resolver,
+            )
+        async with httpx.AsyncClient(
+            base_url=pinned_origin,
+            timeout=httpx.Timeout(min(timeout_seconds, remaining_response_seconds)),
+            follow_redirects=False,
+            transport=transport,
+            trust_env=False,
+        ) as client:
+            request_headers = {
+                "Accept-Encoding": "identity",
+                "Content-Type": "application/json",
+                REQUEST_BODY_SHA256_HEADER: hashlib.sha256(body).hexdigest(),
+                **auth_headers,
+            }
+            if host_header:
+                request_headers["Host"] = host_header
+            wire_request = client.build_request(
                 "POST",
                 TRANSLATE_PATH,
                 content=body,
-                headers={"Content-Type": "application/json", **auth_headers},
-            ) as response,
-        ):
-            auth_headers = _auth_record(response.request.headers)
-            if _header_size(response.headers) > limits.maximum_http_header_bytes:
-                raise ComponentResponseError(
-                    "resource_limit", "miner response headers exceed the ceiling"
-                )
-            if response.status_code != 200:
-                raise ComponentResponseError(
-                    "http_error", f"miner returned HTTP {response.status_code}"
-                )
-            raw_body = await _read_response_body(
-                response,
-                limits.maximum_response_body_bytes,
+                headers=request_headers,
             )
-            received_at = str(time.time_ns())
-            signature = response.headers.get(RESPONSE_SIGNATURE_HEADER)
-            if signature is None:
+            if sni_hostname:
+                wire_request.extensions["sni_hostname"] = sni_hostname
+            auth_headers = _auth_record(wire_request.headers)
+            request_header_bytes = _header_size(wire_request.headers)
+            if request_header_bytes > limits.maximum_http_header_bytes:
                 raise ComponentResponseError(
-                    "outer_invalid", "miner response signature header is missing"
+                    "resource_limit", "validator request headers exceed the ceiling"
                 )
+            if resource_ledger is not None:
+                try:
+                    resource_ledger.begin_attempt(
+                        f"request:{assignment_id}",
+                        maximum_attempts=maximum_request_transmissions,
+                    )
+                    resource_ledger.charge(
+                        request_header_bytes + len(body),
+                        assignment_id=assignment_id,
+                    )
+                except ResourceLimitExceeded as error:
+                    raise ComponentResponseError("resource_limit", str(error)) from error
+
+            response = await client.send(wire_request, stream=True)
+            response_started = True
+            try:
+                response_header_bytes = _header_size(response.headers)
+                if resource_ledger is not None:
+                    try:
+                        resource_ledger.begin_attempt(
+                            f"response:{assignment_id}",
+                            maximum_attempts=maximum_response_bodies,
+                        )
+                        resource_ledger.charge(
+                            response_header_bytes,
+                            assignment_id=assignment_id,
+                        )
+                    except ResourceLimitExceeded as error:
+                        raise ComponentResponseError(
+                            "resource_limit",
+                            str(error),
+                            received_bytes_sha256=hashlib.sha256(body_prefix).hexdigest(),
+                        ) from error
+                if response_header_bytes > limits.maximum_http_header_bytes:
+                    raise ComponentResponseError(
+                        "resource_limit",
+                        "miner response headers exceed the ceiling",
+                        received_bytes_sha256=hashlib.sha256(body_prefix).hexdigest(),
+                    )
+                if response.status_code != 200:
+                    raise ComponentResponseError(
+                        "http_error", f"miner returned HTTP {response.status_code}"
+                    )
+                raw_body = await _read_response_body(
+                    response,
+                    limits.maximum_response_body_bytes,
+                    prefix=body_prefix,
+                    resource_ledger=resource_ledger,
+                    assignment_id=assignment_id,
+                )
+                received_at = str(time.time_ns())
+                signature = response.headers.get(RESPONSE_SIGNATURE_HEADER)
+                if signature is None:
+                    raise ComponentResponseError(
+                        "outer_invalid", "miner response signature header is missing"
+                    )
+            finally:
+                await response.aclose()
 
     try:
         await asyncio.wait_for(
@@ -293,6 +583,11 @@ async def query_miner(
             response_signature=signature,
             sealed_response=None,
             failure_code=error.code,
+            received_bytes_sha256=(
+                error.received_bytes_sha256
+                or (hashlib.sha256(body_prefix).hexdigest() if response_started else None)
+            ),
+            received_body_prefix=(bytes(body_prefix) if response_started else None),
         )
     except asyncio.TimeoutError:
         failure_code = "late" if time.time() >= response_close_timestamp else "transport_timeout"
@@ -305,6 +600,10 @@ async def query_miner(
             response_signature=signature,
             sealed_response=None,
             failure_code=failure_code,
+            received_bytes_sha256=(
+                hashlib.sha256(body_prefix).hexdigest() if response_started else None
+            ),
+            received_body_prefix=(bytes(body_prefix) if response_started else None),
         )
     except httpx.HTTPError as error:
         LOGGER.warning("miner transport failed: %s", type(error).__name__)
@@ -317,6 +616,10 @@ async def query_miner(
             response_signature=None,
             sealed_response=None,
             failure_code="transport_error",
+            received_bytes_sha256=(
+                hashlib.sha256(body_prefix).hexdigest() if response_started else None
+            ),
+            received_body_prefix=(bytes(body_prefix) if response_started else None),
         )
 
     try:
@@ -339,6 +642,8 @@ async def query_miner(
             response_signature=signature,
             sealed_response=None,
             failure_code=error.code,
+            received_bytes_sha256=hashlib.sha256(raw_body).hexdigest(),
+            received_body_prefix=raw_body,
         )
     return QueryOutcome(
         request=request,
@@ -349,6 +654,36 @@ async def query_miner(
         response_signature=signature,
         sealed_response=sealed,
         failure_code=("late" if int(received_at) >= response_close_ns else None),
+        received_bytes_sha256=hashlib.sha256(raw_body).hexdigest(),
+        received_body_prefix=raw_body,
+    )
+
+
+async def query_miner(
+    request: TranslationRequest,
+    *,
+    wallet: Any,
+    miner_url: str,
+    miner_hotkey: str,
+    limits: Limits,
+    timeout_seconds: float,
+    transport: httpx.AsyncBaseTransport | None = None,
+    resolver: OriginResolver | None = None,
+) -> QueryOutcome:
+    """One-shot component helper; live validators anchor the prepared attempt first."""
+
+    prepared = prepare_request_attempt(
+        request,
+        wallet=wallet,
+        miner_hotkey=miner_hotkey,
+    )
+    return await send_prepared_request(
+        prepared,
+        miner_url=miner_url,
+        limits=limits,
+        timeout_seconds=timeout_seconds,
+        transport=transport,
+        resolver=resolver,
     )
 
 
@@ -414,6 +749,7 @@ def _write_run_bundle(
                 "response_signature": signature_ref.as_dict() if signature_ref else None,
                 "response_plaintext": plaintext_ref.as_dict() if plaintext_ref else None,
                 "failure_code": outcome.failure_code,
+                "received_bytes_sha256": outcome.received_bytes_sha256,
             }
         )
     scoring_ref = store.add_json(scoring)

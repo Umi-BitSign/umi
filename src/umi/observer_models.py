@@ -702,12 +702,73 @@ class LeaderboardResponse(ResponseEnvelope):
         return self
 
 
+class ValidatorLocalScoreRecord(ObserverModel):
+    """One validator's replayed score, never a consensus or chain ranking."""
+
+    miner_root_account_id32: Hex32
+    assigned_clips: NonNegativeInt
+    accuracy: ExactRational
+    eligible: bool
+    utility: ExactRational
+
+
 class ReleasedWindow(ObserverModel):
     window_id: Hex32
     window_index: UnsignedIntegerText
     terminal_classification: NonEmptyText
     audit_release_block: UnsignedIntegerText
     audit_bundle_sha256: Hex32
+    validator_account_id32: Hex32 | None = None
+    scoring_policy_hash: Hex32 | None = None
+    reason_codes: tuple[NonEmptyText, ...] = ()
+    score_scope: Literal["validator_local"] | None = None
+    validator_local_scores: tuple[ValidatorLocalScoreRecord, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_validator_local_data(self) -> Self:
+        bound = (self.validator_account_id32, self.scoring_policy_hash, self.score_scope)
+        if all(value is None for value in bound):
+            if self.validator_local_scores or self.reason_codes:
+                raise ValueError("unbound released window cannot contain validator-local data")
+        elif any(value is None for value in bound):
+            raise ValueError("released validator window requires complete source binding")
+        roots = [item.miner_root_account_id32 for item in self.validator_local_scores]
+        if len(roots) != len(set(roots)):
+            raise ValueError("validator-local miner roots must be unique")
+        if self.reason_codes != tuple(sorted(set(self.reason_codes))):
+            raise ValueError("released window reason codes must be unique and sorted")
+        return self
+
+
+class BundleFeedHealthRecord(ObserverModel):
+    validator_account_id32: Hex32
+    status: Literal["current", "degraded", "stale", "not_started"]
+    last_error_code: NonEmptyText | None
+    last_checked_unix: UnsignedIntegerText | None
+    accepted_entries: NonNegativeInt
+
+    @model_validator(mode="after")
+    def validate_health(self) -> Self:
+        if self.status == "current" and self.last_error_code is not None:
+            raise ValueError("current bundle feed cannot carry an error")
+        if self.status == "degraded" and self.last_error_code is None:
+            raise ValueError("degraded bundle feed requires a bounded error code")
+        return self
+
+
+class EvidenceCursorPage(ObserverModel):
+    limit: PositiveInt
+    total: NonNegativeInt
+    returned: NonNegativeInt
+    next_cursor: Annotated[str, Field(pattern=_CURSOR_RE.pattern)] | None
+
+    @model_validator(mode="after")
+    def validate_page(self) -> Self:
+        if self.returned > self.limit or self.returned > self.total:
+            raise ValueError("evidence page counts are inconsistent")
+        if self.returned == 0 and self.next_cursor is not None:
+            raise ValueError("empty evidence page cannot have a cursor")
+        return self
 
 
 class WindowsResponse(ResponseEnvelope):
@@ -719,6 +780,8 @@ class WindowsResponse(ResponseEnvelope):
     availability: Literal["not_started", "available"]
     reason_code: NonEmptyText | None
     windows: tuple[ReleasedWindow, ...]
+    bundle_feed_health: tuple[BundleFeedHealthRecord, ...] = ()
+    page: EvidenceCursorPage | None = None
 
     @model_validator(mode="after")
     def validate_windows(self) -> Self:
@@ -735,6 +798,9 @@ class WindowsResponse(ResponseEnvelope):
                     for window in self.windows
                 ),
             )
+        validators = [item.validator_account_id32 for item in self.bundle_feed_health]
+        if validators != sorted(set(validators)):
+            raise ValueError("bundle feed health must be unique and validator sorted")
         return self
 
 
@@ -807,12 +873,18 @@ class IncidentRecord(ObserverModel):
     incident_id: Hex32
     reason_code: NonEmptyText
     window_id: Hex32 | None
-    published_at: datetime
+    published_at: datetime | None = None
+    observer_verified_at: datetime | None = None
     artifact_sha256: Hex32
+    validator_account_id32: Hex32 | None = None
+    audit_release_block: UnsignedIntegerText | None = None
+    terminal_classification: Literal["skipped", "void", "failed"] | None = None
 
-    @field_validator("published_at")
+    @field_validator("published_at", "observer_verified_at")
     @classmethod
-    def validate_published_at(cls, value: datetime) -> datetime:
+    def validate_published_at(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
         return FinalizedBlock.validate_utc_timestamp(value)
 
 
@@ -826,6 +898,8 @@ class IncidentsResponse(ResponseEnvelope):
     availability: Literal["not_started", "available"]
     reason_code: NonEmptyText | None
     incidents: tuple[IncidentRecord, ...]
+    bundle_feed_health: tuple[BundleFeedHealthRecord, ...] = ()
+    page: EvidenceCursorPage | None = None
 
     @model_validator(mode="after")
     def validate_incidents(self) -> Self:
@@ -836,4 +910,16 @@ class IncidentsResponse(ResponseEnvelope):
                 )
         elif self.reason_code is not None:
             raise ValueError("an available incident feed must not have an unavailable reason")
+        else:
+            _validate_released_evidence(
+                self.sources,
+                tuple(
+                    (incident.artifact_sha256, incident.audit_release_block)
+                    for incident in self.incidents
+                    if incident.audit_release_block is not None
+                ),
+            )
+        validators = [item.validator_account_id32 for item in self.bundle_feed_health]
+        if validators != sorted(set(validators)):
+            raise ValueError("bundle feed health must be unique and validator sorted")
         return self

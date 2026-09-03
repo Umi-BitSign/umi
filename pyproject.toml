@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27,<2"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -14,12 +14,16 @@ dependencies = [
   "bittensor==11.1.0",
   "fastapi>=0.141,<1",
   "httpx>=0.28,<1",
+  "packaging==26.3",
   "py-ecc==8.0.0",
   "pydantic>=2.13,<3",
   "regex>=2026.7,<2027",
   "rfc8785>=0.1.4,<1",
+  "tomli==2.4.1; python_version < '3.11'",
+  "typer==0.27.1",
   "typing-extensions>=4.15,<5",
   "uvicorn>=0.52,<1",
+  "websockets==16.1.1",
 ]
 
 [project.optional-dependencies]
@@ -32,9 +36,21 @@ dev = [
 [project.scripts]
 umi-demo = "umi.demo:main"
 umi-miner = "umi.miner:main"
+umi-mirror-service = "umi.mirror_service:main"
 umi-observer = "umi.observer:main"
+umi-publisher-batch = "umi.publisher_batch_cli:main"
+umi-publisher-availability = "umi.publisher_availability_cli:main"
+umi-publisher-pool-anchor = "umi.publisher_pool_anchor_cli:main"
 umi-protocol = "umi.tools:main"
+umi-shadow-release = "umi.shadow_release:main"
+umi-shadow-release-finalize = "umi.shadow_release:finalize_main"
+umi-shadow-release-materialize-operator = "umi.shadow_release:materialize_operator_main"
+umi-shadow-release-verify = "umi.shadow_release:verify_main"
 umi-validator = "umi.validator:main"
+umi-validator-audit-publish = "umi.audit_publication:main"
+umi-validator-live = "umi.validator_live:main"
+umi-validator-live-configure = "umi.validator_operator:main"
+umi-validator-live-reconcile = "umi.validator_certificate_recovery:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/umi"]
