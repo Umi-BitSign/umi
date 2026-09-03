@@ -1,0 +1,45 @@
+[Unit]
+Description=UMI public validator audit-bundle publisher
+After=network-online.target caddy.service cloudflared.service
+Wants=network-online.target caddy.service cloudflared.service
+
+[Service]
+Type=simple
+User=umi-validator
+Group=umi-validator
+UMask=0077
+EnvironmentFile=/etc/umi/umi-validator-audit-publish.env
+ExecStart=/opt/umi/.venv/bin/umi-validator-audit-publish --config ${UMI_AUDIT_PUBLICATION_CONFIG}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=umi-audit-publisher
+StateDirectoryMode=0700
+RuntimeDirectory=umi-audit-publisher
+RuntimeDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/umi /opt/umi /var/lib/umi-validator
+ReadWritePaths=/srv/www/umi-audits /var/lib/umi-audit-publisher /run/umi-audit-publisher
+# Replace this existing-path sentinel with the absolute wallet parent used by this
+# validator. Leaving it unchanged deliberately prevents the unit from starting.
+InaccessiblePaths=/REPLACE_WITH_ABSOLUTE_WALLET_PARENT
+
+[Install]
+WantedBy=multi-user.target

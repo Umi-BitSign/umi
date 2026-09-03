@@ -27,16 +27,25 @@ read to a finalized block and cross-checks the block header, but this API does n
 claim to verify Substrate storage proofs.
 
 `X-UMI-Contract-Revision` and the `dashboard_static` source artifact hash identify
-the hardcoded protocol classification. The revision is SHA-256 of compact,
-key-sorted JSON for these facts:
+the immutable API safety contract and its conservative default protocol state. The
+revision is SHA-256 of compact, key-sorted JSON for these facts:
 
 ```json
 {"activation_evidence_available":false,"api_version":"v1","chain_result_classification":"unverified","conformance_evidence_available":false,"economic_era":"unverified","expected_chain_name":"UMI","mechanism_id":0,"netuid":78,"phase":"pre_public_calibration","protocol":"umi-asl/0.1","scoring_policy_hash":null,"specification_version":"0.1","translation_weights_active":false,"validator_input_eligible":false}
 ```
 
+That static revision is not a hash of the returned, evidence-derived
+`protocol_state`. Once at least one released bundle has passed complete production
+replay and exposes a nonempty, complete reveal solution set, the returned phase is
+`shadow_calibration`, `conformance_evidence_available` is true, and the unique
+verified scoring-policy hash is exposed when all such windows agree. Earlier
+releases without a complete solution set remain visible without advancing those
+fields. Translation weights and activation evidence remain false. The released-bundle sources and
+`X-UMI-Dataset-Revision`, not the static contract revision, bind this dynamic state.
+
 For chain-only responses, `X-UMI-Dataset-Revision` is the finalized block hash.
 For a response containing released bundles, it is SHA-256 of canonical JSON binding
-that block hash to the sorted manifest hashes on that response page. ETags cover
+that block hash to the sorted manifest hashes cited by that response. ETags cover
 the exact response body.
 
 | Endpoint | Initial contents |
@@ -47,6 +56,7 @@ the exact response body.
 | `GET /api/v1/leaderboard` | Separate native chain-economics ranking and empty UMI translation leaderboard |
 | `GET /api/v1/windows` | Fully replayed validator-local calibration and incident windows |
 | `GET /api/v1/windows/{window_id}` | One released validator window; add `?validator=<AccountId32 hex>` when several validators published the same window |
+| `GET /api/v1/windows/{window_id}/solutions` | A bounded page of every assignment from one fully replayed reveal result; add the validator query when needed |
 | `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
 | `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
 | `GET /api/v1/incidents` | Reason records from fully replayed public incident bundles |
@@ -72,6 +82,13 @@ the original Host and TLS SNI names, disables redirects, proxies, and content
 encoding, and applies absolute time, header, object, file-count, and total-bundle
 limits. A later DNS change cannot redirect an in-progress refresh.
 
+Download, replay, projection, and database promotion run on one dedicated worker
+thread, not on the public API event loop. A canceled refresh reuses the same
+in-flight job instead of starting another. Public snapshots use an immutable
+metadata cache, and solution pages use bounded indexed reads. The feed config also
+sets `maximum_state_database_bytes`; the production example caps the SQLite page
+count at 4 GiB.
+
 Accepted index entries are append-only per validator. A restart resumes after the
 last fully verified entry. Rollback, prefix mutation, duplicate windows, a future
 `audit_release_block`, or any account, path, policy, release, manifest, object, tree,
@@ -92,6 +109,27 @@ accuracy and utility values from that validator's replayed weight-build object. 
 has no rank. Different validator samples may legitimately disagree, so the API
 does not merge them, choose a winner, or describe them as consensus. Native chain
 economics remain in the separate `leaderboard.chain_economics` object.
+
+Each row also carries an `evidence` locator for its signed public index entry,
+bundle manifest, tree digest, exact audit-release block hash, and, when reached, the
+exact reveal-stage manifest and reveal result. `/windows/{window_id}/solutions` is
+available only when that released bundle contains a fully replayed normal reveal
+result with a complete nonempty assignment set. It returns every successful
+assignment and every explicit failure, including validator/window/policy/release
+binding, miner identity and root, outer disposition, protocol-valid response
+status, hypothesis or error, committed references when ground truth is valid,
+metric and canary classification, exact rational score and trace, and
+content-addressed links to the request, response, decryption, and ground-truth
+evidence objects. A canonical plaintext with invalid request or envelope bindings
+is not described as valid and its hypothesis is not projected; auditors can inspect
+the linked exact bytes and the recorded zero reason.
+
+Solution pages never include raw video bytes, private consent records, or
+participant identity data. The projected fields do not repeat the expired video
+delivery URL contained in the protocol's exact signed request evidence. Public
+post-reveal references and canary evidence are included because they are part of
+the released scoring evidence. The endpoint is validator-local evidence, not a
+canonical cross-validator ranking.
 
 The public validator index remains a convenient read-only interface for independent
 observers:
@@ -370,6 +408,12 @@ export async function fetchObserver(
 }
 ```
 
+Treat window detail and solution routes as separately allowlisted templates. Parse
+`window_id` and `validator` as exactly 64 lowercase hexadecimal characters, accept
+only `limit` and an opaque returned `cursor`, and construct
+`/api/v1/windows/<window_id>/solutions` on the server. Never forward an arbitrary
+browser-supplied path. Solution pages allow 1 through 50 records.
+
 Pass only parsed, allowlisted query fields to the participant route. Preserve the
 upstream `ETag`, `Cache-Control`, `X-UMI-Contract-Revision`,
 `X-UMI-Dataset-Revision`, and `X-UMI-Finalized-Block` headers in the Vercel
@@ -450,4 +494,6 @@ Window and incident results are capped at 256 entries per response and include a
 cursor-bound `page` object. A cursor binds the complete verified feed revision and
 feed kind. Adding a verified entry invalidates an older cursor with
 `409 cursor_snapshot_changed`; clients restart at the first page. Invalid offsets
-and cross-feed cursors fail with a bounded `422`.
+and cross-feed cursors fail with a bounded `422`. Solution results use the same
+cursor rules with a stricter 50-record page ceiling; the cursor binds the exact
+validator, window, and verified bundle manifest.

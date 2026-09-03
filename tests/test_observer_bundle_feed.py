@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sqlite3
+import threading
 from pathlib import Path
 
 import httpx
@@ -91,6 +93,80 @@ async def test_index_is_discovery_only_and_full_replay_precedes_durable_promotio
     assert restarted.snapshot().windows == snapshot.windows
     assert await restarted.refresh(finalized_height=10**9) is True
     assert restarted.snapshot().health[0].accepted_entries == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_work_cannot_block_the_api_event_loop(tmp_path: Path) -> None:
+    publisher, server, _source, docroot = await _published(tmp_path)
+    assert (await publisher.run_once()).completed == 1
+    feed = _feed(tmp_path, docroot, server)
+    original = feed._refresh_target
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def blocking_refresh(*args):
+        entered.set()
+        if not release.wait(timeout=2):
+            raise AssertionError("test refresh was not released")
+        return await original(*args)
+
+    feed._refresh_target = blocking_refresh  # type: ignore[method-assign]
+    refresh = asyncio.create_task(feed.refresh(10**9))
+    try:
+
+        async def wait_until_entered() -> None:
+            while not entered.is_set():
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_until_entered(), timeout=1)
+        heartbeat = asyncio.Event()
+        asyncio.get_running_loop().call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), timeout=0.1)
+    finally:
+        release.set()
+    assert await refresh is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reads_only_the_atomic_metadata_cache(tmp_path: Path) -> None:
+    publisher, server, _source, docroot = await _published(tmp_path)
+    assert (await publisher.run_once()).completed == 1
+    feed = _feed(tmp_path, docroot, server)
+    assert await feed.refresh(10**9)
+    expected = feed.snapshot()
+
+    def unexpected_connection():
+        raise AssertionError("snapshot opened the durable database")
+
+    feed._connection = unexpected_connection  # type: ignore[method-assign]
+    assert feed.snapshot() == expected
+
+
+@pytest.mark.asyncio
+async def test_refresh_updates_cache_without_reauditing_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher, server, _source, docroot = await _published(tmp_path)
+    assert (await publisher.run_once()).completed == 1
+    feed = _feed(tmp_path, docroot, server)
+
+    def unexpected_audit():
+        raise AssertionError("refresh rescanned historical rows")
+
+    monkeypatch.setattr(feed, "_audit_state", unexpected_audit)
+    assert await feed.refresh(10**9) is True
+    good = feed.snapshot()
+    assert len(good.windows) == 1
+    assert good.health[0].status == "current"
+
+    index_path = publisher.index_path
+    index_path.chmod(0o644)
+    index_path.write_bytes(index_path.read_bytes() + b" ")
+    assert await feed.refresh(10**9) is False
+    failed = feed.snapshot()
+    assert failed.windows == good.windows
+    assert failed.health[0].last_error_code == "feed_index_noncanonical"
 
 
 @pytest.mark.asyncio
@@ -371,6 +447,7 @@ def test_documented_feed_config_has_read_only_production_shape() -> None:
     assert config.wallet_loading_capability is False
     assert config.chain_write_capability is False
     assert config.weight_submission_capability is False
+    assert config.maximum_state_database_bytes == 4 * 1024**3
     assert (
         load_observer_bundle_feed_config("docs/examples/observer-bundle-feed-config.json") == config
     )

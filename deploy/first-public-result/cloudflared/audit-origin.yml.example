@@ -1,0 +1,11 @@
+# Replace both placeholders with the UUID created for this validator host.
+# The credentials JSON is secret local state; never commit it.
+tunnel: REPLACE_WITH_AUDIT_TUNNEL_UUID
+credentials-file: /etc/cloudflared/REPLACE_WITH_AUDIT_TUNNEL_UUID.json
+
+ingress:
+  - hostname: audit-validator-REPLACE_WITH_VALIDATOR_NUMBER.umi.vision
+    service: http://127.0.0.1:8093
+    originRequest:
+      connectTimeout: 10s
+  - service: http_status:404

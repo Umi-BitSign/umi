@@ -34,7 +34,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .observer_bundle_feed import (
     BundleFeedSnapshot,
     ObserverBundleFeed,
+    VerifiedEvidenceObject,
     VerifiedFeedWindow,
+    VerifiedMinerSolution,
     build_production_observer_bundle_feed,
 )
 from .observer_chain import BittensorChainCollector, ChainCollectionError, ChainCollector
@@ -54,21 +56,26 @@ from .observer_models import (
     ErrorDetail,
     ErrorResponse,
     EvidenceCursorPage,
+    EvidenceObjectLink,
     FinalizedBlock,
     IncidentRecord,
     IncidentsResponse,
     LeaderboardResponse,
+    MinerSolutionRecord,
     NetworkResponse,
     ObserverModel,
     ObserverSnapshot,
     ParticipantsResponse,
     ProtocolState,
+    ReleasedBundleLocator,
     ReleasedWindow,
+    SolutionEvidenceLinks,
     SourceProvenance,
     StatusResponse,
     UmiTranslationLeaderboard,
     ValidatorLocalScoreRecord,
     WindowResponse,
+    WindowSolutionsResponse,
     WindowsResponse,
 )
 from .protocol import canonical_json_bytes
@@ -117,7 +124,7 @@ _CURSOR_ERROR_RESPONSES = {
 }
 _WINDOW_ERROR_RESPONSES = {
     **_COMMON_ERROR_RESPONSES,
-    404: {"model": ErrorResponse, "description": "Released window not found"},
+    404: {"model": ErrorResponse, "description": "Released window or solution evidence not found"},
     409: {"model": ErrorResponse, "description": "Validator selection required"},
 }
 
@@ -374,6 +381,14 @@ class EvidenceQuery(BaseModel):
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
 
 
+class SolutionQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    validator: str | None = Field(default=None, pattern=_WINDOW_ID_RE.pattern)
+    limit: int = Field(default=25, ge=1, le=50)
+    cursor: str | None = Field(default=None, min_length=1, max_length=512)
+
+
 def _finalized_block(snapshot: ObserverSnapshot) -> FinalizedBlock:
     blocks = [
         source.block
@@ -391,27 +406,49 @@ def _sources(snapshot: ObserverSnapshot) -> tuple[SourceProvenance, ...]:
     return (*snapshot.sources, _STATIC_SOURCE)
 
 
-def _protocol_state(snapshot: ObserverSnapshot) -> ProtocolState:
+def _protocol_state(
+    snapshot: ObserverSnapshot,
+    released_windows: Sequence[VerifiedFeedWindow] = (),
+) -> ProtocolState:
     network = snapshot.network
     observed_names = tuple(
         value.casefold() for value in (network.name, network.identity) if value is not None
     )
     identity_matches = "umi" in observed_names if observed_names else None
+    public_solution_windows = _public_solution_windows(released_windows)
+    policy_hashes = {item.scoring_policy_hash for item in public_solution_windows}
+    has_released = bool(public_solution_windows)
     return ProtocolState(
         protocol=_STATIC_PROTOCOL_FACTS["protocol"],
         specification_version=_STATIC_PROTOCOL_FACTS["specification_version"],
-        phase=_STATIC_PROTOCOL_FACTS["phase"],
+        phase="shadow_calibration" if has_released else _STATIC_PROTOCOL_FACTS["phase"],
         netuid=_STATIC_PROTOCOL_FACTS["netuid"],
         mechanism_id=_STATIC_PROTOCOL_FACTS["mechanism_id"],
         translation_weights_active=_STATIC_PROTOCOL_FACTS["translation_weights_active"],
-        scoring_policy_hash=_STATIC_PROTOCOL_FACTS["scoring_policy_hash"],
-        conformance_evidence_available=_STATIC_PROTOCOL_FACTS["conformance_evidence_available"],
+        scoring_policy_hash=next(iter(policy_hashes)) if len(policy_hashes) == 1 else None,
+        conformance_evidence_available=has_released,
         activation_evidence_available=_STATIC_PROTOCOL_FACTS["activation_evidence_available"],
         economic_era=_STATIC_PROTOCOL_FACTS["economic_era"],
         chain_result_classification=_STATIC_PROTOCOL_FACTS["chain_result_classification"],
         expected_chain_name=_STATIC_PROTOCOL_FACTS["expected_chain_name"],
         chain_identity_matches_expected=identity_matches,
         validator_input_eligible=_STATIC_PROTOCOL_FACTS["validator_input_eligible"],
+    )
+
+
+def _public_solution_windows(
+    released_windows: Sequence[VerifiedFeedWindow],
+) -> tuple[VerifiedFeedWindow, ...]:
+    """Return replayed releases that actually carry complete reveal solutions."""
+
+    return tuple(item for item in released_windows if _has_public_solution_evidence(item))
+
+
+def _has_public_solution_evidence(item: VerifiedFeedWindow) -> bool:
+    return (
+        item.reveal_stage_manifest is not None
+        and item.reveal_result is not None
+        and (item.solution_count if item.solution_count is not None else len(item.solutions)) > 0
     )
 
 
@@ -715,13 +752,75 @@ def create_observer_app(
             )
         return tuple(values)
 
+    def released_envelope(
+        view: SnapshotView,
+        feed: BundleFeedSnapshot,
+        selected: Sequence[VerifiedFeedWindow] = (),
+    ) -> dict[str, Any]:
+        representatives: dict[str, VerifiedFeedWindow] = {}
+        for item in feed.windows:
+            prior = representatives.get(item.scoring_policy_hash)
+            item_key = (
+                _has_public_solution_evidence(item),
+                item.window_index,
+                item.validator_account_id32,
+            )
+            prior_key = (
+                (
+                    False,
+                    -1,
+                    "",
+                )
+                if prior is None
+                else (
+                    _has_public_solution_evidence(prior),
+                    prior.window_index,
+                    prior.validator_account_id32,
+                )
+            )
+            if prior is None or item_key > prior_key:
+                representatives[item.scoring_policy_hash] = item
+        merged = {item.manifest_sha256: item for item in (*selected, *representatives.values())}
+        source_feed = BundleFeedSnapshot(
+            tuple(sorted(merged.values(), key=lambda item: item.manifest_sha256)),
+            feed.health,
+        )
+        return _envelope(view) | {"sources": released_sources(view, source_feed)}
+
+    def evidence_link(
+        item: VerifiedFeedWindow,
+        reference: VerifiedEvidenceObject | None,
+    ) -> EvidenceObjectLink | None:
+        if reference is None:
+            return None
+        return EvidenceObjectLink(
+            sha256=reference.sha256,
+            media_type=reference.media_type,
+            size_bytes=reference.size_bytes,
+            url=(f"{item.public_origin}/{item.bundle_relative_path}/objects/{reference.sha256}"),
+        )
+
+    def bundle_locator(item: VerifiedFeedWindow) -> ReleasedBundleLocator:
+        return ReleasedBundleLocator(
+            public_origin=item.public_origin,
+            index_url=(f"{item.public_origin}/validators/{item.validator_account_id32}/index.json"),
+            relative_path=item.bundle_relative_path,
+            manifest_url=f"{item.public_origin}/{item.bundle_relative_path}/manifest.json",
+            manifest_sha256=item.manifest_sha256,
+            tree_sha256=item.tree_sha256,
+            reveal_stage_manifest=evidence_link(item, item.reveal_stage_manifest),
+            reveal_result=evidence_link(item, item.reveal_result),
+        )
+
     def released_window(item: VerifiedFeedWindow) -> ReleasedWindow:
         return ReleasedWindow(
             window_id=item.window_id,
             window_index=str(item.window_index),
             terminal_classification=item.terminal_classification,
             audit_release_block=str(item.audit_release_block),
+            audit_release_block_hash=item.audit_release_block_hash,
             audit_bundle_sha256=item.manifest_sha256,
+            evidence=bundle_locator(item),
             validator_account_id32=item.validator_account_id32,
             scoring_policy_hash=item.scoring_policy_hash,
             reason_codes=item.reason_codes,
@@ -741,6 +840,59 @@ def create_observer_app(
                     },
                 )
                 for score in item.scores
+            ),
+        )
+
+    def released_solution(
+        item: VerifiedFeedWindow,
+        solution: VerifiedMinerSolution,
+    ) -> MinerSolutionRecord:
+        evidence = solution.evidence
+
+        def required(reference: VerifiedEvidenceObject) -> EvidenceObjectLink:
+            link = evidence_link(item, reference)
+            if link is None:
+                raise ValueError("required solution evidence locator is absent")
+            return link
+
+        return MinerSolutionRecord(
+            assignment_id=solution.assignment_id,
+            request_leaf=solution.request_leaf,
+            batch_id=solution.batch_id,
+            challenge_id=solution.challenge_id,
+            miner_hotkey=solution.miner_hotkey,
+            miner_root_account_id32=solution.miner_root_account_id32,
+            stratum=solution.stratum,
+            metric=solution.metric,
+            canary=solution.canary,
+            outer_disposition=solution.outer_disposition,
+            zero_score_reason=solution.zero_score_reason,
+            response_plaintext_valid=solution.response_plaintext_valid,
+            response_status=solution.response_status,
+            hypothesis=solution.hypothesis,
+            response_error_code=solution.response_error_code,
+            model_revision=solution.model_revision,
+            references=solution.references,
+            canary_actual_references=solution.canary_actual_references,
+            score=(
+                None
+                if solution.score_numerator is None
+                else {
+                    "numerator": str(solution.score_numerator),
+                    "denominator": str(solution.score_denominator),
+                }
+            ),
+            score_trace=solution.score_trace,
+            canary_result=solution.canary_result,
+            evidence=SolutionEvidenceLinks(
+                prepared_attempt=required(evidence.prepared_attempt),
+                request=required(evidence.request),
+                attempt_outcome=required(evidence.attempt_outcome),
+                retained_response=evidence_link(item, evidence.retained_response),
+                response_plaintext=evidence_link(item, evidence.response_plaintext),
+                response_decryption=required(evidence.response_decryption),
+                ground_truth_plaintext=evidence_link(item, evidence.ground_truth_plaintext),
+                ground_truth_decryption=evidence_link(item, evidence.ground_truth_decryption),
             ),
         )
 
@@ -788,15 +940,20 @@ def create_observer_app(
         view = current()
         feed = released(view)
         feed_unhealthy = any(item.status in {"degraded", "stale"} for item in feed.health)
+        public_solution_windows = _public_solution_windows(feed.windows)
         gaps = set(_OUTSTANDING_GAP_CODES)
         if feed.windows:
             gaps.discard("released_audit_bundle_feed_unavailable")
+        if public_solution_windows:
+            gaps.discard("public_calibration_not_started")
+        if len({item.scoring_policy_hash for item in public_solution_windows}) == 1:
+            gaps.discard("active_scoring_policy_unavailable")
         response = StatusResponse(
-            **_envelope(view),
+            **released_envelope(view, feed),
             service_status=(
                 "ready" if view.freshness == "fresh" and not feed_unhealthy else "degraded"
             ),
-            protocol_state=_protocol_state(view.snapshot),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             finalized_block=_finalized_block(view.snapshot),
             outstanding_gap_codes=tuple(sorted(gaps)),
         )
@@ -810,9 +967,10 @@ def create_observer_app(
     )
     async def network(request: Request) -> Response:
         view = current()
+        feed = released(view)
         response = NetworkResponse(
-            **_envelope(view),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             network=view.snapshot.network,
         )
         return _render(request, response, view)
@@ -828,6 +986,7 @@ def create_observer_app(
         query: Annotated[ParticipantsQuery, Query()],
     ) -> Response:
         view = current()
+        feed = released(view)
         block = _finalized_block(view.snapshot)
         offset = (
             _decode_cursor(query.cursor, block_hash=block.hash, role=query.role)
@@ -849,8 +1008,8 @@ def create_observer_app(
             else None
         )
         response = ParticipantsResponse(
-            **_envelope(view),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             page=CursorPage(
                 role=query.role,
                 limit=query.limit,
@@ -870,6 +1029,8 @@ def create_observer_app(
     )
     async def leaderboard(request: Request) -> Response:
         view = current()
+        feed = released(view)
+        public_solution_windows = _public_solution_windows(feed.windows)
         miners = tuple(
             participant for participant in view.snapshot.participants if participant.role == "miner"
         )
@@ -910,8 +1071,8 @@ def create_observer_app(
             ranking_status = "ranked"
             ranking_reason = None
         response = LeaderboardResponse(
-            **_envelope(view),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             chain_economics=ChainEconomicLeaderboard(
                 ranking_status=ranking_status,
                 reason_code=ranking_reason,
@@ -939,8 +1100,12 @@ def create_observer_app(
                 ),
             ),
             umi_translation=UmiTranslationLeaderboard(
-                availability="not_started",
-                reason_code="public_calibration_not_started",
+                availability="unavailable" if public_solution_windows else "not_started",
+                reason_code=(
+                    "validator_local_scores_not_consensus"
+                    if public_solution_windows
+                    else "public_calibration_not_started"
+                ),
                 entries=(),
             ),
         )
@@ -967,11 +1132,8 @@ def create_observer_app(
         next_offset = offset + len(selected)
         records = tuple(released_window(item) for item in selected)
         response = WindowsResponse(
-            **(
-                _envelope(view)
-                | {"sources": released_sources(view, BundleFeedSnapshot(selected, feed.health))}
-            ),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed, selected),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             availability="available" if feed.windows else "not_started",
             reason_code=None if feed.windows else "public_calibration_not_started",
             windows=records,
@@ -1017,16 +1179,79 @@ def create_observer_app(
         if len(matches) != 1:
             raise PublicAPIError(409, "released_window_validator_required")
         response = WindowResponse(
-            **(
-                _envelope(view)
-                | {
-                    "sources": released_sources(
-                        view, BundleFeedSnapshot(tuple(matches), feed.health)
-                    )
-                }
-            ),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed, matches),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             window=released_window(matches[0]),
+        )
+        return _render(request, response, view)
+
+    @app.head("/api/v1/windows/{window_id}/solutions", include_in_schema=False)
+    @app.get(
+        "/api/v1/windows/{window_id}/solutions",
+        response_model=WindowSolutionsResponse,
+        responses=_WINDOW_ERROR_RESPONSES,
+    )
+    async def window_solutions(
+        request: Request,
+        window_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+        query: Annotated[SolutionQuery, Query()],
+    ) -> Response:
+        view = current()
+        feed = released(view)
+        matches = [
+            item
+            for item in feed.windows
+            if item.window_id == window_id
+            and (query.validator is None or item.validator_account_id32 == query.validator)
+        ]
+        if not matches:
+            raise PublicAPIError(404, "released_window_not_found")
+        if len(matches) != 1:
+            raise PublicAPIError(409, "released_window_validator_required")
+        item = matches[0]
+        if not _has_public_solution_evidence(item):
+            raise PublicAPIError(404, "released_solution_evidence_not_found")
+        kind = f"solutions:{item.validator_account_id32}:{item.window_id}"
+        revision = _feed_revision((item,), kind)
+        offset = (
+            0
+            if query.cursor is None
+            else _decode_evidence_cursor(query.cursor, revision=revision, kind=kind)
+        )
+        total = item.solution_count if item.solution_count is not None else len(item.solutions)
+        if offset > total:
+            raise PublicAPIError(422, "cursor_offset_out_of_range")
+        if isinstance(bundle_feed, ObserverBundleFeed):
+            stored_total, selected = bundle_feed.solution_page(
+                item.validator_account_id32,
+                item.window_id,
+                offset=offset,
+                limit=query.limit,
+            )
+            if stored_total != total:
+                raise PublicAPIError(503, "released_bundle_feed_inconsistent")
+        else:
+            selected = item.solutions[offset : offset + query.limit]
+        next_offset = offset + len(selected)
+        response = WindowSolutionsResponse(
+            **released_envelope(view, feed, (item,)),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            window=released_window(item),
+            page=EvidenceCursorPage(
+                limit=query.limit,
+                total=total,
+                returned=len(selected),
+                next_cursor=(
+                    None
+                    if next_offset >= total
+                    else _encode_evidence_cursor(
+                        revision=revision,
+                        kind=kind,
+                        offset=next_offset,
+                    )
+                ),
+            ),
+            solutions=tuple(released_solution(item, solution) for solution in selected),
         )
         return _render(request, response, view)
 
@@ -1038,9 +1263,10 @@ def create_observer_app(
     )
     async def activation_gates(request: Request) -> Response:
         view = current()
+        feed = released(view)
         response = ActivationGatesResponse(
-            **_envelope(view),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             readiness="not_ready",
             gates=tuple(
                 ActivationGate(
@@ -1062,9 +1288,10 @@ def create_observer_app(
     )
     async def benchmarks(request: Request) -> Response:
         view = current()
+        feed = released(view)
         response = BenchmarksResponse(
-            **_envelope(view),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             availability="not_started",
             reason_code="public_benchmark_feed_not_started",
             benchmarks=(),
@@ -1132,15 +1359,8 @@ def create_observer_app(
             item for item in incident_windows if item.manifest_sha256 in selected_hashes
         )
         response = IncidentsResponse(
-            **(
-                _envelope(view)
-                | {
-                    "sources": released_sources(
-                        view, BundleFeedSnapshot(selected_windows, feed.health)
-                    )
-                }
-            ),
-            protocol_state=_protocol_state(view.snapshot),
+            **released_envelope(view, feed, selected_windows),
+            protocol_state=_protocol_state(view.snapshot, feed.windows),
             availability="available" if all_records else "not_started",
             reason_code=None if all_records else "public_incident_feed_not_started",
             incidents=records,

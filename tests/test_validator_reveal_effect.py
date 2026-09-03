@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import bittensor as bt
+import bittensor_core
 import pytest
 
 from umi.artifacts import PublicBatchManifest, validate_revealed_batch_shape
@@ -17,7 +20,8 @@ from umi.calibration_bundle import (
 )
 from umi.crypto import seal_response, sign_response_digest
 from umi.drand import DrandPulse
-from umi.encoding import account_id32
+from umi.encoding import account_id32, sha256_domain
+from umi.policy import scoring_policy_hash
 from umi.protocol import (
     GROUND_TRUTH_SCHEMA,
     PROTOCOL_VERSION,
@@ -39,7 +43,7 @@ from umi.validator_adapters import (
 )
 from umi.validator_assignments import ValidatorAssignmentStore
 from umi.validator_extrinsics import ValidatorExtrinsicJournal
-from umi.validator_journal import ValidatorStageJournal
+from umi.validator_journal import StageObject, StageReceipt, ValidatorStageJournal
 from umi.validator_monitoring_state import (
     MonitoringStatePolicy,
     ValidatorMonitoringStateStore,
@@ -48,6 +52,7 @@ from umi.validator_reveal_effect import (
     REVEAL_AUDIT_RELEASE_SCHEMA,
     REVEAL_RESULT_SCHEMA,
     RevealAuditRelease,
+    RevealBindingError,
     RevealEffectPorts,
     RevealTransitionCoordinator,
     ValidatorRevealEffect,
@@ -274,6 +279,15 @@ class Harness:
             for item in ground.items:
                 self.ground_truth_by_challenge[(ground.batch_id, item.challenge_id)] = item
 
+        def replay_decrypt(portable_bytes, _signature):
+            digest = hashlib.sha256(portable_bytes).hexdigest()
+            try:
+                return self.ground_truth_by_ciphertext[digest]
+            except KeyError:
+                return self.response_plaintexts[digest]
+
+        monkeypatch.setattr(bittensor_core, "decrypt_with_signature", replay_decrypt)
+
         _rehearsal, signers = shadow_fixture()
         self.miner_wallets = {
             address: wallet
@@ -480,6 +494,159 @@ class Harness:
         )
 
 
+def _calibration_evidence(record, policy) -> CalibrationStageEvidence:
+    return CalibrationStageEvidence(
+        schema=CALIBRATION_STAGE_SCHEMA,
+        protocol=PROTOCOL_VERSION,
+        window_id=record.receipt.window_id,
+        scoring_policy_hash=scoring_policy_hash(policy),
+        stage_id=WindowStage.REVEAL_AND_SCORE.value,
+        replay_hook_id=calibration_stage_replay_hook_id(
+            policy,
+            WindowStage.REVEAL_AND_SCORE.value,
+        ),
+        previous_stage_evidence_sha256="11" * 32,
+        receipt_object=CalibrationObject.from_bytes(
+            record.receipt_bytes,
+            CALIBRATION_RECEIPT_MEDIA_TYPE,
+        ),
+        payload_objects=[
+            CalibrationObject(
+                sha256=item.sha256,
+                media_type=item.media_type,
+                size_bytes=item.size_bytes,
+            )
+            for item in record.receipt.objects
+        ],
+    )
+
+
+def _rewrite_reveal_result(record, journal, mutate):
+    """Rehash a forged reveal result through every pre-existing shallow binding."""
+
+    objects = {item.sha256: journal.read_object(item) for item in record.receipt.objects}
+    media_types = {item.sha256: item.media_type for item in record.receipt.objects}
+    manifest_digest, manifest = next(
+        (digest, json.loads(data))
+        for digest, data in objects.items()
+        if data.startswith(b"{")
+        and json.loads(data).get("schema") == "umi-validator-reveal-stage/1"
+    )
+    old_result_digest = manifest["reveal_result"]["sha256"]
+    result = json.loads(objects[old_result_digest])
+    mutate(result)
+    result_bytes = canonical_json_bytes(result)
+
+    pool_receipt_bytes = objects[manifest["pool_stage_receipt"]["sha256"]]
+    response_receipt_bytes = objects[manifest["response_stage_receipt"]["sha256"]]
+    pulse = DrandPulse.from_json(
+        json.loads(objects[manifest["reveal_pulse"]["sha256"]]),
+        expected_round=result["reveal_round"],
+    )
+    transition_evidence = sha256_domain(
+        b"umi-validator-reveal-evidence-v1\0",
+        hashlib.sha256(pool_receipt_bytes).digest(),
+        hashlib.sha256(response_receipt_bytes).digest(),
+        bytes.fromhex(pulse.evidence_digest),
+        hashlib.sha256(result_bytes).digest(),
+        bytes.fromhex(result["prior_protocol_state_digest"]),
+    ).hex()
+
+    old_request_digest = manifest["protocol_transition_request"]["sha256"]
+    transition_request = json.loads(objects[old_request_digest])
+    transition_request.update(
+        {
+            "evidence_digest": transition_evidence,
+            "monitoring_observations_sha256": hashlib.sha256(
+                canonical_json_bytes(result["monitoring_observations"])
+            ).hexdigest(),
+            "reveal_result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+            "scored_batches_sha256": hashlib.sha256(
+                canonical_json_bytes(result["scored_batches"])
+            ).hexdigest(),
+            "valid_scoring_window": not result["void_reason_codes"],
+            "void_reason_codes": result["void_reason_codes"],
+        }
+    )
+    transition_request_bytes = canonical_json_bytes(transition_request)
+
+    old_transition_result_digest = manifest["protocol_transition_result"]["sha256"]
+    transition_result = json.loads(objects[old_transition_result_digest])
+    transition_result["request_sha256"] = hashlib.sha256(transition_request_bytes).hexdigest()
+    transition_result_bytes = canonical_json_bytes(transition_result)
+
+    replacements = {
+        old_result_digest: (result_bytes, "application/json"),
+        old_request_digest: (transition_request_bytes, "application/json"),
+        old_transition_result_digest: (transition_result_bytes, "application/json"),
+    }
+    for old_digest, (data, media_type) in replacements.items():
+        objects.pop(old_digest)
+        media_types.pop(old_digest)
+        digest = hashlib.sha256(data).hexdigest()
+        objects[digest] = data
+        media_types[digest] = media_type
+
+    def object_ref(data, media_type):
+        return {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "media_type": media_type,
+            "size_bytes": len(data),
+        }
+
+    manifest.update(
+        {
+            "transition_evidence_sha256": transition_evidence,
+            "reveal_result": object_ref(result_bytes, "application/json"),
+            "protocol_transition_request": object_ref(
+                transition_request_bytes,
+                "application/json",
+            ),
+            "protocol_transition_result": object_ref(
+                transition_result_bytes,
+                "application/json",
+            ),
+        }
+    )
+    objects.pop(manifest_digest)
+    media_types.pop(manifest_digest)
+    manifest["source_objects"] = sorted(
+        (object_ref(data, media_types[digest]) for digest, data in objects.items()),
+        key=lambda item: bytes.fromhex(item["sha256"]),
+    )
+    manifest_bytes = canonical_json_bytes(manifest)
+    new_manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+    objects[new_manifest_digest] = manifest_bytes
+    media_types[new_manifest_digest] = "application/json"
+
+    receipt_value = record.receipt.model_dump(mode="json", by_alias=True)
+    metadata = dict(receipt_value["metadata"])
+    effect_metadata = dict(metadata.get("metadata", {}))
+    effect_metadata.update(
+        {
+            "reveal_manifest_sha256": new_manifest_digest,
+            "reveal_result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+            "transition_evidence_sha256": transition_evidence,
+        }
+    )
+    metadata["metadata"] = effect_metadata
+    receipt_value["metadata"] = metadata
+    receipt_value["objects"] = sorted(
+        (
+            StageObject(
+                sha256=digest,
+                media_type=media_types[digest],
+                size_bytes=len(data),
+            ).model_dump(mode="json")
+            for digest, data in objects.items()
+        ),
+        key=lambda item: bytes.fromhex(item["sha256"]),
+    )
+    receipt = StageReceipt.model_validate(receipt_value)
+    receipt_bytes = canonical_json_bytes(receipt)
+    return receipt, receipt_bytes, objects
+
+
 @pytest.mark.asyncio
 async def test_reveal_scores_zero_rows_commits_state_and_replays_after_crash(
     tmp_path: Path,
@@ -561,6 +728,111 @@ async def test_reveal_scores_zero_rows_commits_state_and_replays_after_crash(
     assert (
         receipt_resolved.resulting_protocol_state_digest == resolved.resulting_protocol_state_digest
     )
+
+
+@pytest.mark.asyncio
+async def test_public_replay_rejects_plaintext_not_decrypted_from_committed_ciphertext(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    work = await harness.build_prefix()
+    operation = stage_operation_id(harness.fixture.window.window_id, work.stage)
+    output = await harness.reveal_effect().perform(operation_id=operation, work=work)
+    record = harness.journal.record(
+        window_id=harness.fixture.window.window_id,
+        stage=WindowStage.REVEAL_AND_SCORE,
+        operation_id=operation,
+        objects=output.objects,
+        metadata=output.receipt_metadata(),
+    )
+    payloads = {item.sha256: harness.journal.read_object(item) for item in record.receipt.objects}
+    evidence = _calibration_evidence(record, harness.fixture.policy)
+
+    monkeypatch.setattr(
+        bittensor_core,
+        "decrypt_with_signature",
+        lambda _portable, _signature: b'{"forged":"plaintext"}',
+    )
+    with pytest.raises(RevealBindingError, match="committed ciphertexts"):
+        replay_reveal_stage(
+            policy=harness.fixture.policy,
+            evidence=evidence,
+            receipt=record.receipt,
+            objects=payloads,
+        )
+
+
+@pytest.mark.asyncio
+async def test_public_replay_recomputes_scores_canaries_and_ground_truth_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    work = await harness.build_prefix()
+    operation = stage_operation_id(harness.fixture.window.window_id, work.stage)
+    output = await harness.reveal_effect().perform(operation_id=operation, work=work)
+    record = harness.journal.record(
+        window_id=harness.fixture.window.window_id,
+        stage=WindowStage.REVEAL_AND_SCORE,
+        operation_id=operation,
+        objects=output.objects,
+        metadata=output.receipt_metadata(),
+    )
+
+    def change_response_score(result):
+        response = next(item for item in result["responses"] if item["score"] is not None)
+        response["score"] = {"denominator": 1, "numerator": 1}
+
+    def change_score_trace(result):
+        response = next(item for item in result["responses"] if item["score"] is not None)
+        response["score_trace"] = {"forged": True}
+
+    def change_zero_reason(result):
+        result["responses"][0]["zero_score_reason"] = "forged_zero_reason"
+
+    def change_canary(result):
+        response = next(item for item in result["responses"] if item["canary_result"] is not None)
+        response["canary_result"]["hit"] = True
+
+    def change_global_canary_hit(result):
+        result["canary_hit"] = True
+        result["void_reason_codes"] = ["canary_hit"]
+        result["scored_batches"] = []
+        result["monitoring_observations"] = []
+
+    def change_ground_truth_shape(result):
+        result["candidate_reveals"][0]["ground_truth_shape_valid"] = False
+
+    def change_scored_batch(result):
+        assignment = next(
+            item for item in result["scored_batches"][0]["assignments"] if not item["canary"]
+        )
+        assignment["score"] = {"denominator": 1, "numerator": 1}
+
+    for mutate in (
+        change_response_score,
+        change_score_trace,
+        change_zero_reason,
+        change_canary,
+        change_global_canary_hit,
+        change_ground_truth_shape,
+        change_scored_batch,
+    ):
+        receipt, receipt_bytes, payloads = _rewrite_reveal_result(
+            record,
+            harness.journal,
+            mutate,
+        )
+        rewritten = SimpleNamespace(receipt=receipt, receipt_bytes=receipt_bytes)
+        evidence = _calibration_evidence(rewritten, harness.fixture.policy)
+        with pytest.raises(RevealBindingError, match="committed ciphertexts"):
+            replay_reveal_stage(
+                policy=harness.fixture.policy,
+                evidence=evidence,
+                receipt=receipt,
+                objects=payloads,
+            )
 
 
 @pytest.mark.asyncio

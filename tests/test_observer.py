@@ -22,7 +22,10 @@ from umi.observer_bundle_feed import (
     BundleFeedSnapshot,
     FeedHealth,
     ValidatorLocalScore,
+    VerifiedEvidenceObject,
     VerifiedFeedWindow,
+    VerifiedMinerSolution,
+    VerifiedSolutionEvidence,
 )
 from umi.observer_models import (
     ChainNetworkSnapshot,
@@ -342,6 +345,12 @@ def _released_local_window(validator: str, *, classification: str = "calibration
         audit_release_block=99,
         audit_release_block_hash="0x" + "44" * 32,
         manifest_sha256=hashlib.sha256(validator.encode()).hexdigest(),
+        tree_sha256="43" * 32,
+        public_origin="https://audits.example",
+        bundle_relative_path=(f"validators/{validator}/windows/{'cd' * 32}/{classification}"),
+        reveal_stage_manifest=None,
+        reveal_result=None,
+        solutions=(),
         scores=(
             ValidatorLocalScore(
                 miner_root_account_id32="aa" * 32,
@@ -352,6 +361,46 @@ def _released_local_window(validator: str, *, classification: str = "calibration
                 utility_numerator=4,
                 utility_denominator=25,
             ),
+        ),
+    )
+
+
+def _solution(ordinal: int, *, missing: bool = False) -> VerifiedMinerSolution:
+    def evidence(byte: int) -> VerifiedEvidenceObject:
+        return VerifiedEvidenceObject(f"{byte:02x}" * 32, "application/json", 100)
+
+    return VerifiedMinerSolution(
+        assignment_id=f"{ordinal:02x}" * 32,
+        request_leaf=f"{ordinal + 16:02x}" * 32,
+        batch_id="AQEBAQEBAQEBAQEBAQEBAQ",
+        challenge_id="AgICAgICAgICAgICAgICAg",
+        miner_hotkey=f"5MinerHotkey{ordinal}",
+        miner_root_account_id32=f"{ordinal + 32:02x}" * 32,
+        stratum="short_utterance",
+        metric="wer",
+        canary=False,
+        outer_disposition="missing" if missing else "sealed",
+        zero_score_reason="missing" if missing else None,
+        response_plaintext_valid=not missing,
+        response_status=None if missing else "ok",
+        hypothesis=None if missing else "hello world",
+        response_error_code=None,
+        model_revision=None,
+        references=("hello world", "hi world", "hello there"),
+        canary_actual_references=(),
+        score_numerator=0 if missing else 1,
+        score_denominator=1,
+        score_trace=None if missing else {"distance": 0, "metric": "wer"},
+        canary_result=None,
+        evidence=VerifiedSolutionEvidence(
+            prepared_attempt=evidence(ordinal + 40),
+            request=evidence(ordinal + 50),
+            attempt_outcome=evidence(ordinal + 60),
+            retained_response=None if missing else evidence(ordinal + 70),
+            response_plaintext=None if missing else evidence(ordinal + 80),
+            response_decryption=evidence(ordinal + 90),
+            ground_truth_plaintext=evidence(ordinal + 100),
+            ground_truth_decryption=evidence(ordinal + 110),
         ),
     )
 
@@ -399,12 +448,134 @@ def test_replayed_incidents_are_validator_bound_and_chain_economics_remain_separ
     with TestClient(app) as client:
         incidents = client.get("/api/v1/incidents").json()
         leaderboard = client.get("/api/v1/leaderboard").json()
+        status = client.get("/api/v1/status").json()
 
     assert incidents["availability"] == "available"
     assert incidents["incidents"][0]["validator_account_id32"] == "11" * 32
     assert incidents["incidents"][0]["audit_release_block"] == "99"
     assert leaderboard["umi_translation"]["availability"] == "not_started"
+    assert leaderboard["umi_translation"]["reason_code"] == "public_calibration_not_started"
     assert leaderboard["chain_economics"]["classification"] == "unverified"
+    assert status["protocol_state"]["phase"] == "pre_public_calibration"
+    assert status["protocol_state"]["scoring_policy_hash"] is None
+    assert status["protocol_state"]["conformance_evidence_available"] is False
+    assert "public_calibration_not_started" in status["outstanding_gap_codes"]
+    assert "released_audit_bundle_feed_unavailable" not in status["outstanding_gap_codes"]
+    assert "active_scoring_policy_unavailable" in status["outstanding_gap_codes"]
+    assert any(
+        source["artifact_sha256"] == incident.manifest_sha256
+        for source in status["sources"]
+        if source["source_kind"] == "released_audit_bundle"
+    )
+
+
+def test_released_solutions_are_paginated_validator_local_and_evidence_bound() -> None:
+    base = _released_local_window("11" * 32)
+    reveal_manifest = VerifiedEvidenceObject("91" * 32, "application/json", 200)
+    reveal_result = VerifiedEvidenceObject("92" * 32, "application/json", 300)
+    window = replace(
+        base,
+        reveal_stage_manifest=reveal_manifest,
+        reveal_result=reveal_result,
+        solutions=(_solution(1), _solution(2, missing=True)),
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([_snapshot()])),
+        bundle_feed=StaticBundleFeed((window,)),  # type: ignore[arg-type]
+    )
+
+    with TestClient(app) as client:
+        status_response = client.get("/api/v1/status")
+        status = status_response.json()
+        first = client.get(
+            f"/api/v1/windows/{window.window_id}/solutions"
+            f"?validator={window.validator_account_id32}&limit=1"
+        )
+        cursor = first.json()["page"]["next_cursor"]
+        second = client.get(
+            f"/api/v1/windows/{window.window_id}/solutions"
+            f"?validator={window.validator_account_id32}&limit=1&cursor={cursor}"
+        )
+
+    assert status["protocol_state"]["phase"] == "shadow_calibration"
+    assert status["protocol_state"]["scoring_policy_hash"] == window.scoring_policy_hash
+    assert status["protocol_state"]["conformance_evidence_available"] is True
+    assert status["protocol_state"]["translation_weights_active"] is False
+    assert status["protocol_state"]["activation_evidence_available"] is False
+    assert "public_calibration_not_started" not in status["outstanding_gap_codes"]
+    assert "active_scoring_policy_unavailable" not in status["outstanding_gap_codes"]
+    assert status["sources"][-1]["artifact_sha256"] == window.manifest_sha256
+    assert status_response.headers["x-umi-dataset-revision"] != status["finalized_block"]["hash"]
+    static_source = next(
+        source for source in status["sources"] if source["source_kind"] == "dashboard_static"
+    )
+    assert static_source["artifact_sha256"] == status_response.headers["x-umi-contract-revision"]
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["schema"] == "umi-observer-window-solutions/1"
+    assert first_body["score_scope"] == "validator_local"
+    assert first_body["window"]["validator_account_id32"] == window.validator_account_id32
+    assert first_body["window"]["audit_release_block_hash"] == window.audit_release_block_hash
+    assert first_body["window"]["evidence"]["manifest_sha256"] == window.manifest_sha256
+    assert first_body["window"]["evidence"]["reveal_result"]["sha256"] == "92" * 32
+    assert first_body["page"]["total"] == 2
+    solution = first_body["solutions"][0]
+    assert solution["hypothesis"] == "hello world"
+    assert solution["references"] == ["hello world", "hi world", "hello there"]
+    assert solution["score"] == {"numerator": "1", "denominator": "1"}
+    assert solution["evidence"]["request"]["url"].endswith(
+        "/objects/" + solution["evidence"]["request"]["sha256"]
+    )
+    assert second.status_code == 200
+    failed = second.json()["solutions"][0]
+    assert failed["outer_disposition"] == "missing"
+    assert failed["zero_score_reason"] == "missing"
+    assert failed["response_status"] is None
+    assert failed["score"] == {"numerator": "0", "denominator": "1"}
+    serialized = first.text + second.text
+    assert "video_url" not in serialized
+    assert "consent_manifest" not in serialized
+
+
+def test_unreleased_solution_window_is_not_visible_or_status_advancing() -> None:
+    window = replace(
+        _released_local_window("11" * 32),
+        audit_release_block=100,
+        solutions=(_solution(1),),
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([_snapshot(block_number=99)])),
+        bundle_feed=StaticBundleFeed((window,)),  # type: ignore[arg-type]
+    )
+
+    with TestClient(app) as client:
+        status = client.get("/api/v1/status").json()
+        response = client.get(
+            f"/api/v1/windows/{window.window_id}/solutions"
+            f"?validator={window.validator_account_id32}"
+        )
+
+    assert status["protocol_state"]["phase"] == "pre_public_calibration"
+    assert "public_calibration_not_started" in status["outstanding_gap_codes"]
+    assert response.status_code == 404
+    assert response.json()["error"]["reason_code"] == "released_window_not_found"
+
+
+def test_released_incident_has_no_solutions_endpoint() -> None:
+    incident = _released_local_window("11" * 32, classification="skipped")
+    app = create_observer_app(
+        _cache(SequenceCollector([_snapshot()])),
+        bundle_feed=StaticBundleFeed((incident,)),  # type: ignore[arg-type]
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/windows/{incident.window_id}/solutions"
+            f"?validator={incident.validator_account_id32}"
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["reason_code"] == "released_solution_evidence_not_found"
 
 
 def test_window_cursor_is_bounded_and_invalidated_by_new_verified_entry() -> None:
@@ -413,6 +584,7 @@ def test_window_cursor_is_bounded_and_invalidated_by_new_verified_entry() -> Non
         _released_local_window("22" * 32),
         window_id="ce" * 32,
         window_index=8,
+        bundle_relative_path=(f"validators/{'22' * 32}/windows/{'ce' * 32}/calibration_no_weight"),
     )
     feed = StaticBundleFeed((first, second))
     app = create_observer_app(
@@ -425,7 +597,17 @@ def test_window_cursor_is_bounded_and_invalidated_by_new_verified_entry() -> Non
         cursor = page_one.json()["page"]["next_cursor"]
         page_two = client.get(f"/api/v1/windows?limit=1&cursor={cursor}")
         feed.value = BundleFeedSnapshot(
-            (*feed.value.windows, replace(second, window_id="cf" * 32, window_index=9)),
+            (
+                *feed.value.windows,
+                replace(
+                    second,
+                    window_id="cf" * 32,
+                    window_index=9,
+                    bundle_relative_path=(
+                        f"validators/{'22' * 32}/windows/{'cf' * 32}/calibration_no_weight"
+                    ),
+                ),
+            ),
             feed.value.health,
         )
         changed = client.get(f"/api/v1/windows?limit=1&cursor={cursor}")
@@ -583,6 +765,15 @@ def test_openapi_exposes_no_mutating_operation() -> None:
         assert window_get["responses"][status]["content"]["application/json"]["schema"][
             "$ref"
         ].endswith("/ErrorResponse")
+    solutions_get = document["paths"]["/api/v1/windows/{window_id}/solutions"]["get"]
+    parameters = {item["name"]: item for item in solutions_get["parameters"]}
+    assert parameters["window_id"]["schema"]["pattern"] == "^[0-9a-f]{64}$"
+    assert parameters["validator"]["schema"]["anyOf"][0]["pattern"] == "^[0-9a-f]{64}$"
+    assert parameters["limit"]["schema"]["minimum"] == 1
+    assert parameters["limit"]["schema"]["maximum"] == 50
+    assert solutions_get["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ].endswith("/WindowSolutionsResponse")
 
 
 @pytest.mark.asyncio
@@ -778,7 +969,26 @@ def test_released_score_and_window_feeds_require_finalized_bundle_evidence() -> 
         "window_index": "7",
         "terminal_classification": "calibration_no_weight",
         "audit_release_block": "99",
+        "audit_release_block_hash": "0x" + "44" * 32,
         "audit_bundle_sha256": bundle_hash,
+        "evidence": {
+            "public_origin": "https://audits.example",
+            "index_url": "https://audits.example/validators/" + "11" * 32 + "/index.json",
+            "relative_path": (
+                "validators/" + "11" * 32 + "/windows/" + "cd" * 32 + "/calibration_no_weight"
+            ),
+            "manifest_url": (
+                "https://audits.example/validators/"
+                + "11" * 32
+                + "/windows/"
+                + "cd" * 32
+                + "/calibration_no_weight/manifest.json"
+            ),
+            "manifest_sha256": bundle_hash,
+            "tree_sha256": "43" * 32,
+            "reveal_stage_manifest": None,
+            "reveal_result": None,
+        },
     }
     windows["availability"] = "available"
     windows["reason_code"] = None

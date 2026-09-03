@@ -22,6 +22,7 @@ protocol extension.
 - [public validator audit-bundle publication](docs/AUDIT_BUNDLE_PUBLICATION_OPERATOR.md)
 - [inactive live-shadow release operator](docs/SHADOW_CALIBRATION_OPERATOR.md)
 - [inactive calibration launch checklist](docs/INACTIVE_LAUNCH_CHECKLIST.md)
+- [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
 ## Current status
 
@@ -182,10 +183,16 @@ incentive, dividend, and emission values are labeled `unverified` until the requ
 UMI cutover audit classifies them. They are never presented as UMI translation
 performance. Released validator bundles appear only after bounded HTTPS retrieval
 and independent production replay. Their scores remain validator-local; they are
-not merged into a consensus leaderboard. Feeds without conforming evidence remain
-explicit empty states.
+not merged into a consensus leaderboard. Once a released reveal result is fully
+replayed, a bounded solution feed exposes every assignment with hypotheses,
+references, exact scores or failure reasons, and content-addressed evidence
+locators. It never exposes raw video or private consent data. Feeds without conforming evidence
+remain explicit empty states.
 See the [dashboard API contract](docs/DASHBOARD_API.md) for endpoint schemas,
-Vercel integration, exact number handling, and deployment controls.
+Vercel integration, exact number handling, and deployment controls. The
+[first-result deployment runbook](deploy/first-public-result/README.md) provides
+the hardened Caddy, Cloudflare Tunnel, and systemd configuration for publishing
+the first weight-disabled post-reveal result.
 
 ## Run the certified mirror data plane
 

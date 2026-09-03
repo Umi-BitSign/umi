@@ -3004,6 +3004,151 @@ def _unique_stage_objects(values: Sequence[StageObjectInput]) -> tuple[StageObje
     return tuple(unique[key] for key in sorted(unique, key=bytes.fromhex))
 
 
+def _replay_decrypt(sealed: SealedResponse, pulse: DrandPulse) -> bytes:
+    """Open one committed timelock with the already verified bundled pulse.
+
+    Public replay must not trust the plaintext objects emitted by the live
+    validator.  ``decrypt_with_signature`` is the pinned offline primitive: it
+    consumes the exact portable ciphertext and the verified Quicknet signature
+    without consulting a network service or waiting for a round.
+    """
+
+    try:
+        import bittensor_core
+    except (ImportError, ModuleNotFoundError) as error:
+        raise RevealBindingError(
+            "reveal replay requires the pinned bittensor-core decryption primitive"
+        ) from error
+    try:
+        value = bittensor_core.decrypt_with_signature(
+            sealed.portable_bytes,
+            pulse.signature,
+        )
+    except Exception as error:
+        # The live computation records structural-but-undecryptable ciphertext as
+        # a publisher/miner failure.  Normalize the implementation-specific core
+        # exception to the same protocol exception before recomputation.
+        raise TimelockDecryptionError("timelock_decryption_failed") from error
+    if not isinstance(value, (bytes, bytearray)):
+        raise RevealBindingError("bittensor-core replay decryption returned non-bytes")
+    return bytes(value)
+
+
+def _run_reveal_recomputation(
+    function: Callable[[], Awaitable[RevealComputation]],
+) -> RevealComputation:
+    """Run async reveal computation from synchronous bundle replay.
+
+    Receipt resolution is intentionally synchronous and is also called from
+    validator async tasks.  A private thread avoids nesting an event loop while
+    keeping the public replay API synchronous and deterministic.
+    """
+
+    result: list[RevealComputation] = []
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.append(asyncio.run(function()))
+        except BaseException as error:  # pragma: no cover - re-raised in caller
+            failure.append(error)
+
+    worker = threading.Thread(target=run, name="umi-reveal-replay", daemon=False)
+    worker.start()
+    worker.join()
+    if failure:
+        raise failure[0]
+    if len(result) != 1:
+        raise RevealBindingError("reveal replay computation did not return one result")
+    return result[0]
+
+
+def _verify_recomputed_object_indexes(
+    manifest: RevealStageManifest,
+    computation: RevealComputation,
+) -> None:
+    decrypt_refs: dict[str, RevealObjectRef] = {}
+    plaintext_refs: dict[str, RevealObjectRef] = {}
+    for item in computation.objects:
+        reference = _object_ref(item.data, item.media_type)
+        if item.media_type == "application/octet-stream":
+            plaintext_refs[reference.sha256] = reference
+            continue
+        value = _strict_json(item.data, "recomputed reveal object")
+        if isinstance(value, dict) and value.get("schema") == REVEAL_DECRYPTION_SCHEMA:
+            decrypt_refs[reference.sha256] = reference
+    expected_decrypt = [decrypt_refs[key] for key in sorted(decrypt_refs, key=bytes.fromhex)]
+    expected_plaintext = [plaintext_refs[key] for key in sorted(plaintext_refs, key=bytes.fromhex)]
+    if manifest.decryption_records != expected_decrypt:
+        raise RevealBindingError("reveal decryption-record index does not recompute")
+    if manifest.plaintext_objects != expected_plaintext:
+        raise RevealBindingError("reveal plaintext-object index does not recompute")
+
+
+def _recompute_normal_reveal(
+    *,
+    policy: ScoringPolicy,
+    selection: PoolSelectionEvidence,
+    pool_payloads: Mapping[str, bytes],
+    response_receipt: StageReceipt,
+    response_receipt_bytes: bytes,
+    response_payloads: Mapping[str, bytes],
+    response_replay: TranscriptStageReplay,
+    prior: ProtocolStateSnapshot,
+    pulse: DrandPulse,
+    pool_stage_digest: str,
+    response_stage_digest: str,
+) -> RevealComputation:
+    response_record = StageJournalRecord(
+        receipt=response_receipt,
+        receipt_bytes=response_receipt_bytes,
+        evidence_sha256=response_stage_digest,
+        path=Path("."),
+    )
+    responses, response_root, plan = _load_response_material(
+        record=response_record,
+        payloads=response_payloads,
+        stored=None,
+        expected_binding=response_replay.material_binding,
+        policy_hash=scoring_policy_hash(policy),
+    )
+    selection_pulse_bytes = _resolve(
+        pool_payloads,
+        selection.selection_pulse,
+        label="selection pulse",
+    )
+    selection_pulse_value = _strict_json(selection_pulse_bytes, "selection pulse")
+    if not isinstance(selection_pulse_value, dict):
+        raise RevealBindingError("selection pulse is not an object")
+    selection_round = selection_pulse_value.get("round")
+    if isinstance(selection_round, bool) or not isinstance(selection_round, int):
+        raise RevealBindingError("selection pulse round is not an exact integer")
+    candidates, _selection_pulse = _load_pool_candidates(
+        selection=selection,
+        payloads=pool_payloads,
+        policy=policy,
+        prior_state=prior,
+        plan=plan,
+        selection_round=selection_round,
+    )
+
+    async def compute() -> RevealComputation:
+        return await _compute_reveal(
+            policy=policy,
+            selection=selection,
+            candidates=candidates,
+            responses=responses,
+            prior_state=prior,
+            reveal_pulse=pulse,
+            decrypt=_replay_decrypt,
+            pool_stage_digest=pool_stage_digest,
+            response_stage_digest=response_stage_digest,
+            response_set_root=response_root,
+        )
+
+    return _run_reveal_recomputation(compute)
+
+
 def reveal_transition_operation_id(window_id: str) -> bytes:
     """Return the deterministic raw operation ID shared by both state stores."""
 
@@ -3822,14 +3967,26 @@ def _resolve_reveal_stage_payloads(
     if expected_transition_evidence.hex() != manifest.transition_evidence_sha256:
         raise RevealBindingError("reveal transition evidence does not reproduce")
 
+    pool_payloads = {
+        reference.sha256: payloads[reference.sha256] for reference in pool_receipt.objects
+    }
+    response_payloads = {
+        reference.sha256: payloads[reference.sha256] for reference in response_receipt.objects
+    }
+    selection, selection_bytes = _find_pool_stage_decision(pool_payloads)
+    explicit_selection_bytes = _resolve(
+        payloads,
+        manifest.pool_selection_evidence,
+        label="pool selection evidence",
+    )
+    if selection_bytes != explicit_selection_bytes:
+        raise RevealBindingError("reveal manifest points at another pool-stage decision")
+
     if isinstance(result, RevealResult):
         try:
             response_replay = replay_transcript_stage_receipt(
                 _transcript_receipt_for_replay(response_receipt),
-                {
-                    reference.sha256: payloads[reference.sha256]
-                    for reference in response_receipt.objects
-                },
+                response_payloads,
             )
         except TranscriptReplayError as error:
             raise RevealBindingError("embedded response receipt does not replay") from error
@@ -3838,6 +3995,24 @@ def _resolve_reveal_stage_payloads(
             or response_replay.root != result.response_set_root
         ):
             raise RevealBindingError("reveal result changes the response-set root")
+        if not isinstance(selection, PoolSelectionEvidence):
+            raise RevealBindingError("scored reveal embeds a pool no-score decision")
+        recomputed = _recompute_normal_reveal(
+            policy=policy,
+            selection=selection,
+            pool_payloads=pool_payloads,
+            response_receipt=response_receipt,
+            response_receipt_bytes=response_receipt_bytes,
+            response_payloads=response_payloads,
+            response_replay=response_replay,
+            prior=prior,
+            pulse=pulse,
+            pool_stage_digest=result.pool_stage_evidence_sha256,
+            response_stage_digest=result.response_stage_evidence_sha256,
+        )
+        if recomputed.result_bytes != result_bytes:
+            raise RevealBindingError("reveal result does not reproduce from committed ciphertexts")
+        _verify_recomputed_object_indexes(manifest, recomputed)
     elif isinstance(result, TranscriptAbortRevealResult):
         transcript_sources = _embedded_transcript_sources(
             payloads,

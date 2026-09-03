@@ -1,0 +1,57 @@
+[Unit]
+Description=UMI public read-only SN78 observer API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=umi-observer
+Group=umi-observer
+UMask=0077
+EnvironmentFile=/etc/umi/umi-observer.env
+ExecStart=/opt/umi/.venv/bin/umi-observer \
+  --listen-host ${UMI_OBSERVER_LISTEN_HOST} \
+  --port ${UMI_OBSERVER_PORT} \
+  --network ${UMI_OBSERVER_NETWORK} \
+  --trusted-host ${UMI_OBSERVER_TRUSTED_HOST} \
+  --bundle-feed-config ${UMI_OBSERVER_BUNDLE_FEED_CONFIG} \
+  --fresh-for-seconds 24 \
+  --maximum-stale-seconds 120 \
+  --refresh-interval-seconds 12 \
+  --refresh-timeout-seconds 45 \
+  --finalized-head-timeout-seconds 20 \
+  --maximum-finalized-head-age-seconds 120 \
+  --maximum-future-block-skew-seconds 30 \
+  --log-level info
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=umi-observer
+StateDirectoryMode=0700
+CacheDirectory=umi-observer
+CacheDirectoryMode=0700
+RuntimeDirectory=umi-observer
+RuntimeDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/umi /opt/umi
+ReadWritePaths=/var/lib/umi-observer /var/cache/umi-observer /run/umi-observer
+
+[Install]
+WantedBy=multi-user.target

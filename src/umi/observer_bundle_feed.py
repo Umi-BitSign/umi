@@ -8,6 +8,7 @@ replay verifier before committing a dashboard projection to durable state.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import ipaddress
 import json
@@ -19,14 +20,16 @@ import socket
 import sqlite3
 import tempfile
 import time
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal, Protocol
+from types import MappingProxyType
+from typing import Annotated, Any, Literal, Protocol
 from urllib.parse import quote, urlsplit
 
 import httpx
+from bittensor_core import decrypt_with_signature
 from pydantic import Field, ValidationError, model_validator
 from typing_extensions import Self
 
@@ -48,10 +51,36 @@ from .calibration_bundle import (
     MAX_CALIBRATION_BUNDLE_BYTES,
     MAX_CALIBRATION_MANIFEST_BYTES,
     MAX_CALIBRATION_OBJECT_BYTES,
+    CalibrationStageEvidence,
 )
-from .protocol import PROTOCOL_VERSION, StrictProtocolModel, canonical_json_bytes
+from .canary import evaluate_canary
+from .policy import ScoringPolicy
+from .protocol import (
+    PROTOCOL_VERSION,
+    GroundTruthPayload,
+    StrictProtocolModel,
+    TranslationRequest,
+    canonical_json_bytes,
+)
+from .scoring import score_cer_with_trace, score_wer_with_trace
+from .validator import (
+    ComponentResponseError,
+    validate_response_envelope,
+    validate_response_plaintext,
+)
+from .validator_assignments import AttemptOutcomeEvidence, PreparedAttemptEvidence
 from .validator_delivery import normalized_https_origin
+from .validator_journal import StageObject, StageReceipt
 from .validator_readiness import PublishedBundleVerifier, VerifiedPublishedBundle
+from .validator_reveal_effect import (
+    MAX_REVEAL_ASSIGNMENTS,
+    REVEAL_RESULT_SCHEMA,
+    REVEAL_STAGE_SCHEMA,
+    RevealResult,
+    RevealStageManifest,
+    _response_hypothesis,
+    _ResponseStageManifest,
+)
 from .validator_weight_build_effect import (
     WEIGHT_BUILD_RESULT_SCHEMA,
     WEIGHT_BUILD_STAGE_SCHEMA,
@@ -60,10 +89,21 @@ from .validator_weight_build_effect import (
 )
 
 OBSERVER_BUNDLE_FEED_CONFIG_SCHEMA = "umi-observer-bundle-feed-config/1"
-OBSERVER_BUNDLE_FEED_STATE_SCHEMA = "umi-observer-bundle-feed-state/1"
+OBSERVER_BUNDLE_FEED_STATE_SCHEMA = "umi-observer-bundle-feed-state/3"
+DEFAULT_MAXIMUM_STATE_DATABASE_BYTES = 4 * 1024**3
+_MINIMUM_STATE_DATABASE_BYTES = 1024**2
+_MAXIMUM_STATE_DATABASE_BYTES = 1024**4
 _HEX32_RE = re.compile(r"^[0-9a-f]{64}$")
 _BLOCK_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+
+# One worker for the process keeps every download, replay, projection, and
+# durable promotion away from the public API event loop. A stuck native call can
+# occupy this worker, but it cannot create an unbounded series of stuck threads.
+_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="umi-observer-feed",
+)
 
 
 class ObserverBundleFeedError(RuntimeError):
@@ -104,6 +144,10 @@ class ObserverBundleFeedConfig(StrictProtocolModel):
     maximum_new_entries_per_refresh: Annotated[int, Field(ge=1, le=16)] = 2
     maximum_target_refresh_seconds: Annotated[float, Field(gt=0, le=3_600)] = 600
     maximum_concurrent_targets: Annotated[int, Field(ge=1, le=16)] = 4
+    maximum_state_database_bytes: Annotated[
+        int,
+        Field(ge=_MINIMUM_STATE_DATABASE_BYTES, le=_MAXIMUM_STATE_DATABASE_BYTES),
+    ] = DEFAULT_MAXIMUM_STATE_DATABASE_BYTES
     targets: Annotated[list[ObserverFeedTargetConfig], Field(min_length=1, max_length=32)]
 
     @model_validator(mode="after")
@@ -145,6 +189,88 @@ class ValidatorLocalScore:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedEvidenceObject:
+    sha256: str
+    media_type: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        if _HEX32_RE.fullmatch(self.sha256) is None:
+            raise ValueError("evidence-object hash is invalid")
+        if not self.media_type or len(self.media_type) > 256:
+            raise ValueError("evidence-object media type is invalid")
+        if self.size_bytes < 0 or self.size_bytes > MAX_CALIBRATION_OBJECT_BYTES:
+            raise ValueError("evidence-object size is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedSolutionEvidence:
+    prepared_attempt: VerifiedEvidenceObject
+    request: VerifiedEvidenceObject
+    attempt_outcome: VerifiedEvidenceObject
+    retained_response: VerifiedEvidenceObject | None
+    response_plaintext: VerifiedEvidenceObject | None
+    response_decryption: VerifiedEvidenceObject
+    ground_truth_plaintext: VerifiedEvidenceObject | None
+    ground_truth_decryption: VerifiedEvidenceObject | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedMinerSolution:
+    assignment_id: str
+    request_leaf: str
+    batch_id: str
+    challenge_id: str
+    miner_hotkey: str
+    miner_root_account_id32: str
+    stratum: Literal["fingerspelling", "short_utterance", "continuous"]
+    metric: Literal["wer", "cer"] | None
+    canary: bool | None
+    outer_disposition: Literal["sealed", "missing", "late", "outer_invalid", "resource_limit"]
+    zero_score_reason: str | None
+    response_plaintext_valid: bool
+    response_status: Literal["ok", "error"] | None
+    hypothesis: str | None
+    response_error_code: str | None
+    model_revision: str | None
+    references: tuple[str, ...]
+    canary_actual_references: tuple[str, ...]
+    score_numerator: int | None
+    score_denominator: int | None
+    score_trace: dict[str, Any] | None
+    canary_result: dict[str, Any] | None
+    evidence: VerifiedSolutionEvidence
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.assignment_id, "assignment ID"),
+            (self.request_leaf, "request leaf"),
+            (self.miner_root_account_id32, "miner root"),
+        ):
+            if _HEX32_RE.fullmatch(value) is None:
+                raise ValueError(f"{label} is invalid")
+        if not self.batch_id or not self.challenge_id or not self.miner_hotkey:
+            raise ValueError("solution identity is incomplete")
+        if (self.score_numerator is None) != (self.score_denominator is None):
+            raise ValueError("solution score rational is incomplete")
+        if self.score_denominator is not None and (
+            self.score_denominator <= 0
+            or self.score_numerator is None
+            or self.score_numerator < 0
+            or self.score_numerator > self.score_denominator
+        ):
+            raise ValueError("solution score is outside the unit interval")
+        if self.response_plaintext_valid != (self.response_status is not None):
+            raise ValueError("response plaintext validity and status disagree")
+        if self.response_status == "ok" and self.hypothesis is None:
+            raise ValueError("a valid ok response requires its hypothesis")
+        if self.response_status == "error" and self.response_error_code is None:
+            raise ValueError("a valid error response requires its error code")
+        if self.canary is False and self.metric is None:
+            raise ValueError("a scored assignment requires its metric")
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedFeedWindow:
     validator_account_id32: str
     window_id: str
@@ -155,8 +281,15 @@ class VerifiedFeedWindow:
     audit_release_block: int
     audit_release_block_hash: str
     manifest_sha256: str
+    tree_sha256: str
+    public_origin: str
+    bundle_relative_path: str
+    reveal_stage_manifest: VerifiedEvidenceObject | None
+    reveal_result: VerifiedEvidenceObject | None
+    solutions: tuple[VerifiedMinerSolution, ...]
     scores: tuple[ValidatorLocalScore, ...]
     observer_verified_unix: int | None = None
+    solution_count: int | None = None
 
     def __post_init__(self) -> None:
         if _HEX32_RE.fullmatch(self.validator_account_id32) is None:
@@ -167,8 +300,15 @@ class VerifiedFeedWindow:
             raise ValueError("scoring policy hash is invalid")
         if _HEX32_RE.fullmatch(self.manifest_sha256) is None:
             raise ValueError("manifest hash is invalid")
+        if _HEX32_RE.fullmatch(self.tree_sha256) is None:
+            raise ValueError("bundle tree hash is invalid")
+        if normalized_https_origin(self.public_origin) != self.public_origin:
+            raise ValueError("bundle public origin is invalid")
+        _safe_relative_path(self.bundle_relative_path)
         if _BLOCK_HASH_RE.fullmatch(self.audit_release_block_hash) is None:
             raise ValueError("audit release block hash is invalid")
+        if self.solution_count is not None and self.solution_count < len(self.solutions):
+            raise ValueError("solution count is smaller than materialized solutions")
         if self.window_index < 0 or self.audit_release_block <= 0:
             raise ValueError("window and release positions are invalid")
         if self.observer_verified_unix is not None and self.observer_verified_unix < 0:
@@ -178,6 +318,13 @@ class VerifiedFeedWindow:
             raise ValueError("validator-local score roots must be unique")
         if self.reason_codes != tuple(sorted(set(self.reason_codes))):
             raise ValueError("reason codes must be unique and sorted")
+        assignments = [item.assignment_id for item in self.solutions]
+        if assignments != sorted(set(assignments)):
+            raise ValueError("solutions must be unique and sorted by assignment ID")
+        if len(assignments) > MAX_REVEAL_ASSIGNMENTS:
+            raise ValueError("solution count exceeds the reveal ceiling")
+        if (self.reveal_stage_manifest is None) != (self.reveal_result is None):
+            raise ValueError("reveal evidence locators must appear together")
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +356,22 @@ class FeedHealth:
 class BundleFeedSnapshot:
     windows: tuple[VerifiedFeedWindow, ...]
     health: tuple[FeedHealth, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedFeedState:
+    last_checked_unix: int | None
+    last_error_code: str | None
+    accepted_entries: int
+    binding_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FeedMetadataCache:
+    windows: tuple[VerifiedFeedWindow, ...]
+    states: Mapping[str, _CachedFeedState]
+    entries_by_validator: Mapping[str, tuple[PublicBundleIndexEntry, ...]]
+    windows_by_identity: Mapping[tuple[str, str], VerifiedFeedWindow]
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +550,7 @@ class ObserverBundleFeed:
         maximum_new_entries_per_refresh: int = 2,
         maximum_target_refresh_seconds: float = 600,
         maximum_concurrent_targets: int = 4,
+        maximum_state_database_bytes: int = DEFAULT_MAXIMUM_STATE_DATABASE_BYTES,
         fetcher_factory: Callable[[str, float], BoundedHTTPSFetcher] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -412,12 +576,21 @@ class ObserverBundleFeed:
         self.maximum_new_entries_per_refresh = maximum_new_entries_per_refresh
         if not 1 <= maximum_concurrent_targets <= 16:
             raise ValueError("maximum concurrent targets must be from 1 through 16")
+        if (
+            isinstance(maximum_state_database_bytes, bool)
+            or not isinstance(maximum_state_database_bytes, int)
+            or not _MINIMUM_STATE_DATABASE_BYTES
+            <= maximum_state_database_bytes
+            <= _MAXIMUM_STATE_DATABASE_BYTES
+        ):
+            raise ValueError("maximum state database bytes must be from 1 MiB through 1 TiB")
         if not callable(fetcher_factory) and fetcher_factory is not None:
             raise TypeError("fetcher factory must be callable")
         if not callable(clock):
             raise TypeError("feed clock must be callable")
         self.maximum_target_refresh_seconds = float(maximum_target_refresh_seconds)
         self.maximum_concurrent_targets = maximum_concurrent_targets
+        self.maximum_state_database_bytes = maximum_state_database_bytes
         self.fetcher_factory = fetcher_factory or (
             lambda origin, timeout: BoundedHTTPSFetcher(origin, timeout_seconds=timeout)
         )
@@ -425,6 +598,10 @@ class ObserverBundleFeed:
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._worker_job: concurrent.futures.Future[bool] | None = None
+        self._metadata_cache = _FeedMetadataCache(
+            (), MappingProxyType({}), MappingProxyType({}), MappingProxyType({})
+        )
         self._prepare()
 
     async def refresh(self, finalized_height: int) -> bool:
@@ -433,73 +610,63 @@ class ObserverBundleFeed:
         if finalized_height < 0:
             raise ValueError("finalized height must be nonnegative")
         async with self._lock:
-            semaphore = asyncio.Semaphore(self.maximum_concurrent_targets)
+            job = self._worker_job
+            if job is None or job.done():
+                job = _REFRESH_EXECUTOR.submit(self._run_refresh_worker, finalized_height)
+                self._worker_job = job
+            try:
+                return await asyncio.shield(asyncio.wrap_future(job))
+            finally:
+                if job.done() and self._worker_job is job:
+                    self._worker_job = None
 
-            async def refresh_target(target: ObserverFeedTarget) -> bool:
-                async with semaphore:
-                    try:
-                        caught_up = await asyncio.wait_for(
-                            self._refresh_target(target, finalized_height),
-                            timeout=self.maximum_target_refresh_seconds,
-                        )
-                    except Exception as error:
-                        code = (
-                            "feed_refresh_timeout"
-                            if isinstance(error, asyncio.TimeoutError)
-                            else error.reason_code
-                            if isinstance(error, ObserverBundleFeedError)
-                            else "feed_refresh_failed"
-                        )
-                        self._record_failure(target.validator_account_id32, code)
-                        return False
-                    return caught_up
+    def _run_refresh_worker(self, finalized_height: int) -> bool:
+        return asyncio.run(self._refresh_all(finalized_height))
 
-            return all(await asyncio.gather(*(refresh_target(target) for target in self.targets)))
+    async def _refresh_all(self, finalized_height: int) -> bool:
+        semaphore = asyncio.Semaphore(self.maximum_concurrent_targets)
+
+        async def refresh_target(target: ObserverFeedTarget) -> bool:
+            async with semaphore:
+                try:
+                    caught_up = await asyncio.wait_for(
+                        self._refresh_target(target, finalized_height),
+                        timeout=self.maximum_target_refresh_seconds,
+                    )
+                except Exception as error:
+                    code = (
+                        "feed_refresh_timeout"
+                        if isinstance(error, asyncio.TimeoutError)
+                        else error.reason_code
+                        if isinstance(error, ObserverBundleFeedError)
+                        else "feed_refresh_failed"
+                    )
+                    self._record_failure(target.validator_account_id32, code)
+                    return False
+                return caught_up
+
+        return all(await asyncio.gather(*(refresh_target(target) for target in self.targets)))
 
     def snapshot(self) -> BundleFeedSnapshot:
         now = int(self.clock())
-        windows: list[VerifiedFeedWindow] = []
+        metadata = self._metadata_cache
         health: list[FeedHealth] = []
-        with self._connection() as connection:
-            for row in connection.execute(
-                "SELECT validator_account,sequence,window_id,window_index,entry_bytes,"
-                "projection_bytes,manifest_sha256 FROM bundles "
-                "ORDER BY window_index,validator_account"
-            ):
-                target = next(
-                    (
-                        item
-                        for item in self.targets
-                        if item.validator_account_id32 == row["validator_account"]
-                    ),
-                    None,
-                )
-                if target is None:
-                    raise ObserverBundleFeedError("feed_state_unconfigured_validator")
-                _, projection = self._decode_stored_row(row, target)
-                windows.append(projection)
-            states = {
-                row["validator_account"]: row
-                for row in connection.execute("SELECT * FROM feeds ORDER BY validator_account")
-            }
         for target in self.targets:
-            row = states.get(target.validator_account_id32)
-            stored_count = sum(
-                item.validator_account_id32 == target.validator_account_id32 for item in windows
-            )
+            row = metadata.states.get(target.validator_account_id32)
+            stored_count = len(metadata.entries_by_validator.get(target.validator_account_id32, ()))
             if row is None:
                 if stored_count:
                     raise ObserverBundleFeedError("feed_state_cursor_missing")
                 status, checked, count, error = "not_started", None, 0, None
-            elif row["last_checked_unix"] is None:
+            elif row.last_checked_unix is None:
                 checked = None
-                count = int(row["accepted_entries"])
-                error = row["last_error_code"]
+                count = row.accepted_entries
+                error = row.last_error_code
                 status = "degraded" if error is not None else "not_started"
             else:
-                checked = int(row["last_checked_unix"])
-                error = row["last_error_code"]
-                count = int(row["accepted_entries"])
+                checked = row.last_checked_unix
+                error = row.last_error_code
+                count = row.accepted_entries
                 if now - checked > self.maximum_stale_seconds:
                     status = "stale"
                 elif error is not None:
@@ -507,11 +674,11 @@ class ObserverBundleFeed:
                 else:
                     status = "current"
             if row is not None and (
-                row["binding_sha256"] != _target_binding(target) or count != stored_count
+                row.binding_sha256 != _target_binding(target) or count != stored_count
             ):
                 raise ObserverBundleFeedError("feed_state_cursor_mismatch")
             health.append(FeedHealth(target.validator_account_id32, status, error, checked, count))
-        return BundleFeedSnapshot(tuple(windows), tuple(health))
+        return BundleFeedSnapshot(metadata.windows, tuple(health))
 
     async def start(self, finalized_height: Callable[[], int], poll_seconds: float) -> None:
         if not callable(finalized_height):
@@ -634,29 +801,20 @@ class ObserverBundleFeed:
                 raise ObserverBundleFeedError("feed_tree_index_binding_mismatch") from error
             binding = await target.verifier.verify(root)
             _bind_replay(binding, entry)
-            return _extract_projection(root, manifest_bytes, entry, target.validator_account_id32)
+            return _extract_projection(
+                root,
+                manifest_bytes,
+                entry,
+                target.validator_account_id32,
+                target.public_origin,
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
     def _stored_entries(self, validator: str) -> tuple[PublicBundleIndexEntry, ...]:
-        target = next(
-            (item for item in self.targets if item.validator_account_id32 == validator),
-            None,
-        )
-        if target is None:
+        if not any(item.validator_account_id32 == validator for item in self.targets):
             raise ObserverBundleFeedError("feed_state_unconfigured_validator")
-        with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT validator_account,sequence,window_id,window_index,entry_bytes,"
-                "projection_bytes,manifest_sha256 FROM bundles "
-                "WHERE validator_account=? ORDER BY sequence",
-                (validator,),
-            ).fetchall()
-        values: list[PublicBundleIndexEntry] = []
-        for row in rows:
-            entry, _ = self._decode_stored_row(row, target)
-            values.append(entry)
-        return tuple(values)
+        return self._metadata_cache.entries_by_validator.get(validator, ())
 
     @staticmethod
     def _decode_stored_row(
@@ -686,6 +844,8 @@ class ObserverBundleFeed:
         ):
             raise ObserverBundleFeedError("feed_state_row_binding_mismatch")
         _bind_projection_to_entry(projection, entry, target.validator_account_id32)
+        if projection.public_origin != target.public_origin:
+            raise ObserverBundleFeedError("feed_state_projection_origin_mismatch")
         return entry, projection
 
     def _commit_success(
@@ -697,8 +857,58 @@ class ObserverBundleFeed:
         last_error_code: str | None,
     ) -> None:
         now = int(self.clock())
+        if last_error_code is not None and _REASON_CODE_RE.fullmatch(last_error_code) is None:
+            raise ObserverBundleFeedError("feed_state_error_code_invalid")
+        current = self._metadata_cache
+        prior_entries = current.entries_by_validator.get(target.validator_account_id32, ())
+        accepted_entries = tuple(entries)
+        addition_entries = tuple(entry for entry, _ in additions)
+        if (
+            accepted_entries[: len(prior_entries)] != prior_entries
+            or accepted_entries[len(prior_entries) :] != addition_entries
+        ):
+            raise ObserverBundleFeedError("feed_state_cache_prefix_mismatch")
+        prepared: list[tuple[PublicBundleIndexEntry, VerifiedFeedWindow, VerifiedFeedWindow]] = []
+        for entry, projection_bytes in additions:
+            projection = _projection_from_bytes(projection_bytes)
+            _bind_projection_to_entry(projection, entry, target.validator_account_id32)
+            if projection.public_origin != target.public_origin or projection.solution_count != len(
+                projection.solutions
+            ):
+                raise ObserverBundleFeedError("feed_state_projection_binding_mismatch")
+            prepared.append(
+                (
+                    entry,
+                    projection,
+                    replace(projection, solutions=()),
+                )
+            )
+
+        windows = [*current.windows, *(stored for _, _, stored in prepared)]
+        windows.sort(key=lambda item: (item.window_index, item.validator_account_id32))
+        windows_by_identity = dict(current.windows_by_identity)
+        for _, _, stored in prepared:
+            identity = (stored.validator_account_id32, stored.window_id)
+            if identity in windows_by_identity:
+                raise ObserverBundleFeedError("feed_state_cache_duplicate_window")
+            windows_by_identity[identity] = stored
+        states = dict(current.states)
+        states[target.validator_account_id32] = _CachedFeedState(
+            last_checked_unix=now,
+            last_error_code=last_error_code,
+            accepted_entries=len(accepted_entries),
+            binding_sha256=_target_binding(target),
+        )
+        entries_by_validator = dict(current.entries_by_validator)
+        entries_by_validator[target.validator_account_id32] = accepted_entries
+        next_cache = _FeedMetadataCache(
+            tuple(windows),
+            MappingProxyType(states),
+            MappingProxyType(entries_by_validator),
+            MappingProxyType(windows_by_identity),
+        )
         with self._transaction() as connection:
-            for entry, projection in additions:
+            for entry, projection, stored in prepared:
                 connection.execute(
                     "INSERT INTO bundles VALUES(?,?,?,?,?,?,?)",
                     (
@@ -707,10 +917,20 @@ class ObserverBundleFeed:
                         entry.window_id,
                         entry.window_index,
                         canonical_json_bytes(entry),
-                        projection,
+                        _projection_bytes(stored),
                         entry.manifest_sha256,
                     ),
                 )
+                for ordinal, solution in enumerate(projection.solutions):
+                    connection.execute(
+                        "INSERT INTO solutions VALUES(?,?,?,?)",
+                        (
+                            target.validator_account_id32,
+                            entry.window_id,
+                            ordinal,
+                            canonical_json_bytes(_solution_dict(solution)),
+                        ),
+                    )
             connection.execute(
                 "INSERT INTO feeds VALUES(?,?,?,?,?) ON CONFLICT(validator_account) DO UPDATE SET "
                 "last_checked_unix=excluded.last_checked_unix,"
@@ -724,14 +944,70 @@ class ObserverBundleFeed:
                     _target_binding(target),
                 ),
             )
+        self._metadata_cache = next_cache
 
     def _record_failure(self, validator: str, code: str) -> None:
+        if _REASON_CODE_RE.fullmatch(code) is None:
+            raise ObserverBundleFeedError("feed_state_error_code_invalid")
+        current = self._metadata_cache
+        existing = current.states.get(validator)
+        state = _CachedFeedState(
+            last_checked_unix=None if existing is None else existing.last_checked_unix,
+            last_error_code=code,
+            accepted_entries=0 if existing is None else existing.accepted_entries,
+            binding_sha256=self._target_binding_by_account(validator),
+        )
+        states = dict(current.states)
+        states[validator] = state
+        next_cache = _FeedMetadataCache(
+            current.windows,
+            MappingProxyType(states),
+            current.entries_by_validator,
+            current.windows_by_identity,
+        )
         with self._transaction() as connection:
             connection.execute(
                 "INSERT INTO feeds VALUES(?,?,?,?,?) ON CONFLICT(validator_account) DO UPDATE SET "
                 "last_error_code=excluded.last_error_code",
                 (validator, None, code, 0, self._target_binding_by_account(validator)),
             )
+        self._metadata_cache = next_cache
+
+    def solution_page(
+        self, validator: str, window_id: str, *, offset: int, limit: int
+    ) -> tuple[int, tuple[VerifiedMinerSolution, ...]]:
+        """Load one bounded solution page without materializing feed history."""
+
+        if offset < 0 or limit < 1 or limit > 100:
+            raise ValueError("solution page bounds are invalid")
+        window = self._metadata_cache.windows_by_identity.get((validator, window_id))
+        if window is None:
+            raise ObserverBundleFeedError("feed_state_solution_window_missing")
+        total = (
+            window.solution_count if window.solution_count is not None else len(window.solutions)
+        )
+        values: list[VerifiedMinerSolution] = []
+        expected_ordinal = offset
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT ordinal,solution_bytes FROM solutions "
+                "WHERE validator_account=? AND window_id=? AND ordinal>=? "
+                "ORDER BY ordinal LIMIT ?",
+                (validator, window_id, offset, limit),
+            )
+            for row in rows:
+                if row["ordinal"] != expected_ordinal:
+                    raise ObserverBundleFeedError("feed_state_solution_set_invalid")
+                expected_ordinal += 1
+                encoded = bytes(row["solution_bytes"])
+                value = json.loads(encoded)
+                if canonical_json_bytes(value) != encoded:
+                    raise ObserverBundleFeedError("feed_state_solution_noncanonical")
+                values.append(_solution_from_dict(value))
+        expected_end = offset if offset >= total else min(total, offset + limit)
+        if expected_ordinal != expected_end:
+            raise ObserverBundleFeedError("feed_state_solution_set_invalid")
+        return total, tuple(values)
 
     def _target_binding_by_account(self, account: str) -> str:
         target = next(item for item in self.targets if item.validator_account_id32 == account)
@@ -777,6 +1053,11 @@ class ObserverBundleFeed:
                   manifest_sha256 TEXT NOT NULL,
                   PRIMARY KEY(validator_account,sequence),UNIQUE(validator_account,window_id)
                 ) STRICT;
+                CREATE TABLE IF NOT EXISTS solutions(
+                  validator_account TEXT NOT NULL,window_id TEXT NOT NULL,
+                  ordinal INTEGER NOT NULL,solution_bytes BLOB NOT NULL,
+                  PRIMARY KEY(validator_account,window_id,ordinal)
+                ) STRICT;
                 """
             )
             row = connection.execute("SELECT value FROM metadata WHERE key='schema'").fetchone()
@@ -809,29 +1090,82 @@ class ObserverBundleFeed:
                 raise ObserverBundleFeedError("feed_state_unconfigured_validator")
             connection.commit()
         self.state_path.chmod(0o600)
-        self._audit_state()
+        self._metadata_cache = self._audit_state()
 
-    def _audit_state(self) -> None:
+    def _audit_state(self) -> _FeedMetadataCache:
+        targets = {item.validator_account_id32: item for item in self.targets}
+        windows: list[VerifiedFeedWindow] = []
+        entries: dict[str, list[PublicBundleIndexEntry]] = {account: [] for account in targets}
+        states: dict[str, _CachedFeedState] = {}
         with self._connection() as connection:
-            for target in self.targets:
-                rows = connection.execute(
-                    "SELECT validator_account,sequence,window_id,window_index,entry_bytes,"
-                    "projection_bytes,manifest_sha256 FROM bundles "
-                    "WHERE validator_account=? ORDER BY sequence",
-                    (target.validator_account_id32,),
-                ).fetchall()
-                if [row["sequence"] for row in rows] != list(range(len(rows))):
+            rows = connection.execute(
+                "SELECT validator_account,sequence,window_id,window_index,entry_bytes,"
+                "projection_bytes,manifest_sha256 FROM bundles "
+                "ORDER BY validator_account,sequence"
+            )
+            for row in rows:
+                account = row["validator_account"]
+                target = targets.get(account)
+                if target is None:
+                    raise ObserverBundleFeedError("feed_state_unconfigured_validator")
+                if row["sequence"] != len(entries[account]):
                     raise ObserverBundleFeedError("feed_state_sequence_invalid")
-                feed_row = connection.execute(
-                    "SELECT accepted_entries FROM feeds WHERE validator_account=?",
-                    (target.validator_account_id32,),
-                ).fetchone()
-                if feed_row is None and rows:
-                    raise ObserverBundleFeedError("feed_state_cursor_missing")
-                if feed_row is not None and feed_row[0] != len(rows):
-                    raise ObserverBundleFeedError("feed_state_cursor_mismatch")
-                for row in rows:
-                    self._decode_stored_row(row, target)
+                entry, projection = self._decode_stored_row(row, target)
+                entries[account].append(entry)
+                windows.append(projection)
+                expected_count = (
+                    len(projection.solutions)
+                    if projection.solution_count is None
+                    else projection.solution_count
+                )
+                solution_rows = connection.execute(
+                    "SELECT ordinal,solution_bytes FROM solutions "
+                    "WHERE validator_account=? AND window_id=? ORDER BY ordinal",
+                    (account, row["window_id"]),
+                )
+                seen = 0
+                for solution_row in solution_rows:
+                    if solution_row["ordinal"] != seen:
+                        raise ObserverBundleFeedError("feed_state_solution_set_invalid")
+                    seen += 1
+                    encoded = bytes(solution_row["solution_bytes"])
+                    value = json.loads(encoded)
+                    if canonical_json_bytes(value) != encoded:
+                        raise ObserverBundleFeedError("feed_state_solution_noncanonical")
+                    _solution_from_dict(value)
+                if seen != expected_count:
+                    raise ObserverBundleFeedError("feed_state_solution_set_invalid")
+            for row in connection.execute("SELECT * FROM feeds ORDER BY validator_account"):
+                account = row["validator_account"]
+                if account not in targets:
+                    raise ObserverBundleFeedError("feed_state_unconfigured_validator")
+                states[account] = _CachedFeedState(
+                    last_checked_unix=(
+                        None if row["last_checked_unix"] is None else int(row["last_checked_unix"])
+                    ),
+                    last_error_code=row["last_error_code"],
+                    accepted_entries=int(row["accepted_entries"]),
+                    binding_sha256=row["binding_sha256"],
+                )
+        for account, values in entries.items():
+            state = states.get(account)
+            if state is None and values:
+                raise ObserverBundleFeedError("feed_state_cursor_missing")
+            if state is not None and (
+                state.accepted_entries != len(values)
+                or state.binding_sha256 != _target_binding(targets[account])
+            ):
+                raise ObserverBundleFeedError("feed_state_cursor_mismatch")
+        windows.sort(key=lambda item: (item.window_index, item.validator_account_id32))
+        window_index = {(item.validator_account_id32, item.window_id): item for item in windows}
+        if len(window_index) != len(windows):
+            raise ObserverBundleFeedError("feed_state_row_binding_mismatch")
+        return _FeedMetadataCache(
+            tuple(windows),
+            MappingProxyType(states),
+            MappingProxyType({account: tuple(values) for account, values in entries.items()}),
+            MappingProxyType(window_index),
+        )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -841,6 +1175,18 @@ class ObserverBundleFeed:
             raise ObserverBundleFeedError("feed_state_database_unsafe")
         connection = sqlite3.connect(self.state_path, timeout=5)
         connection.row_factory = sqlite3.Row
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        maximum_pages = self.maximum_state_database_bytes // page_size
+        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        if page_count > maximum_pages:
+            connection.close()
+            raise ObserverBundleFeedError("feed_state_database_byte_limit")
+        configured_pages = int(
+            connection.execute(f"PRAGMA max_page_count={maximum_pages}").fetchone()[0]
+        )
+        if configured_pages != maximum_pages:
+            connection.close()
+            raise ObserverBundleFeedError("feed_state_database_byte_limit")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA synchronous=FULL")
         try:
@@ -903,6 +1249,7 @@ def build_production_observer_bundle_feed(path: str | Path) -> tuple[ObserverBun
             maximum_new_entries_per_refresh=config.maximum_new_entries_per_refresh,
             maximum_target_refresh_seconds=config.maximum_target_refresh_seconds,
             maximum_concurrent_targets=config.maximum_concurrent_targets,
+            maximum_state_database_bytes=config.maximum_state_database_bytes,
         ),
         config.poll_seconds,
     )
@@ -923,12 +1270,481 @@ def _bind_replay(binding: VerifiedPublishedBundle, entry: PublicBundleIndexEntry
         raise ObserverBundleFeedError("feed_replay_binding_mismatch")
 
 
+def _strict_json_object(encoded: bytes) -> dict[str, Any]:
+    def pairs(values: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in values:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    value = json.loads(encoded, object_pairs_hook=pairs)
+    if not isinstance(value, dict):
+        raise ValueError("JSON value is not an object")
+    return value
+
+
+def _verified_reference(
+    object_table: dict[str, Any],
+    reference: Any,
+) -> VerifiedEvidenceObject:
+    try:
+        digest = reference.sha256
+        media_type = reference.media_type
+        size_bytes = reference.size_bytes
+    except AttributeError:
+        try:
+            parsed = StageObject.model_validate(reference)
+        except Exception as error:
+            raise ObserverBundleFeedError("feed_evidence_reference_invalid") from error
+        digest, media_type, size_bytes = parsed.sha256, parsed.media_type, parsed.size_bytes
+    declared = object_table.get(digest)
+    if declared is None or (declared.media_type != media_type or declared.size_bytes != size_bytes):
+        raise ObserverBundleFeedError("feed_evidence_reference_mismatch")
+    return VerifiedEvidenceObject(digest, media_type, size_bytes)
+
+
+def _read_object(root: Path, object_table: dict[str, Any], reference: Any) -> bytes:
+    verified = _verified_reference(object_table, reference)
+    path = root / "objects" / verified.sha256
+    try:
+        encoded = path.read_bytes()
+    except OSError as error:
+        raise ObserverBundleFeedError("feed_evidence_object_missing") from error
+    if (
+        len(encoded) != verified.size_bytes
+        or hashlib.sha256(encoded).hexdigest() != verified.sha256
+    ):
+        raise ObserverBundleFeedError("feed_evidence_object_mismatch")
+    return encoded
+
+
+def _parse_object_model(
+    root: Path,
+    object_table: dict[str, Any],
+    reference: Any,
+    model: type[Any],
+    error_code: str,
+) -> Any:
+    encoded = _read_object(root, object_table, reference)
+    try:
+        value = model.model_validate_json(encoded)
+    except Exception as error:
+        raise ObserverBundleFeedError(error_code) from error
+    if canonical_json_bytes(value) != encoded:
+        raise ObserverBundleFeedError(error_code)
+    return value
+
+
+def _schema_references(
+    root: Path,
+    object_table: dict[str, Any],
+    references: Sequence[Any],
+    schema: str,
+) -> list[tuple[Any, dict[str, Any]]]:
+    matches: list[tuple[Any, dict[str, Any]]] = []
+    for reference in references:
+        if reference.media_type != "application/json":
+            continue
+        encoded = _read_object(root, object_table, reference)
+        try:
+            value = _strict_json_object(encoded)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            continue
+        if value.get("schema") == schema:
+            matches.append((reference, value))
+    return matches
+
+
+def _inline_reference(object_table: dict[str, Any], value: Any) -> VerifiedEvidenceObject | None:
+    if value is None:
+        return None
+    return _verified_reference(object_table, value)
+
+
+def _inline_json_reference(object_table: dict[str, Any], value: Any) -> VerifiedEvidenceObject:
+    if not isinstance(value, dict):
+        raise ObserverBundleFeedError("feed_solution_decryption_invalid")
+    encoded = canonical_json_bytes(value)
+    digest = hashlib.sha256(encoded).hexdigest()
+    declared = object_table.get(digest)
+    if (
+        declared is None
+        or declared.media_type != "application/json"
+        or (declared.size_bytes != len(encoded))
+    ):
+        raise ObserverBundleFeedError("feed_solution_decryption_reference_missing")
+    return VerifiedEvidenceObject(digest, declared.media_type, declared.size_bytes)
+
+
+def _exact_fraction(value: Any) -> tuple[int, int] | tuple[None, None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, dict) or set(value) != {"numerator", "denominator"}:
+        raise ObserverBundleFeedError("feed_solution_score_invalid")
+    numerator, denominator = value["numerator"], value["denominator"]
+    if (
+        isinstance(numerator, bool)
+        or isinstance(denominator, bool)
+        or not isinstance(numerator, int)
+        or not isinstance(denominator, int)
+        or denominator <= 0
+        or numerator < 0
+        or numerator > denominator
+    ):
+        raise ObserverBundleFeedError("feed_solution_score_invalid")
+    return numerator, denominator
+
+
+def _extract_solutions(
+    *,
+    root: Path,
+    object_table: dict[str, Any],
+    reveal_manifest: RevealStageManifest,
+    result: RevealResult,
+) -> tuple[VerifiedMinerSolution, ...]:
+    policy = _parse_object_model(
+        root,
+        object_table,
+        reveal_manifest.policy_object,
+        ScoringPolicy,
+        "feed_solution_policy_invalid",
+    )
+    if policy.translation_weights_active:
+        raise ObserverBundleFeedError("feed_solution_policy_invalid")
+    pulse = _strict_json_object(_read_object(root, object_table, reveal_manifest.reveal_pulse))
+    pulse_signature = pulse.get("signature")
+    if not isinstance(pulse_signature, str):
+        raise ObserverBundleFeedError("feed_solution_reveal_pulse_invalid")
+    response_receipt = _parse_object_model(
+        root,
+        object_table,
+        reveal_manifest.response_stage_receipt,
+        StageReceipt,
+        "feed_response_receipt_invalid",
+    )
+    transcript_matches = _schema_references(
+        root,
+        object_table,
+        response_receipt.objects,
+        "umi-validator-transcript-stage/1",
+    )
+    if len(transcript_matches) != 1:
+        raise ObserverBundleFeedError("feed_response_manifest_missing_or_duplicate")
+    transcript_ref, transcript_value = transcript_matches[0]
+    del transcript_ref
+    try:
+        transcript = _ResponseStageManifest.model_validate(transcript_value)
+    except Exception as error:
+        raise ObserverBundleFeedError("feed_response_manifest_invalid") from error
+    transcript_bytes = canonical_json_bytes(transcript)
+    if (
+        transcript.window_id != result.window_id
+        or transcript.scoring_policy_hash != result.scoring_policy_hash
+        or transcript_bytes != _read_object(root, object_table, transcript_matches[0][0])
+    ):
+        raise ObserverBundleFeedError("feed_response_manifest_binding_mismatch")
+    assignments = {item.assignment_id: item for item in transcript.assignments}
+    response_ids = [item.get("assignment_id") for item in result.responses]
+    if (
+        len(result.responses) != result.issued_request_count
+        or response_ids != sorted(assignments)
+        or len(response_ids) > MAX_REVEAL_ASSIGNMENTS
+    ):
+        raise ObserverBundleFeedError("feed_solution_assignment_set_mismatch")
+
+    ground_truth: dict[
+        str,
+        tuple[
+            GroundTruthPayload | None,
+            VerifiedEvidenceObject | None,
+            VerifiedEvidenceObject | None,
+            bool,
+        ],
+    ] = {}
+    for candidate in result.candidate_reveals:
+        if not isinstance(candidate, dict):
+            raise ObserverBundleFeedError("feed_candidate_reveal_invalid")
+        batch_id = candidate.get("batch_id")
+        if not isinstance(batch_id, str) or batch_id in ground_truth:
+            raise ObserverBundleFeedError("feed_candidate_reveal_invalid")
+        plaintext_ref = _inline_reference(object_table, candidate.get("plaintext"))
+        parsed: GroundTruthPayload | None = None
+        if plaintext_ref is not None:
+            plaintext_bytes = _read_object(root, object_table, plaintext_ref)
+            try:
+                candidate_payload = GroundTruthPayload.model_validate_json(plaintext_bytes)
+            except Exception:
+                candidate_payload = None
+            if (
+                candidate_payload is not None
+                and canonical_json_bytes(candidate_payload) == plaintext_bytes
+            ):
+                parsed = candidate_payload
+        shape_valid = candidate.get("ground_truth_shape_valid") is True
+        if parsed is not None and (
+            parsed.window_id != result.window_id
+            or parsed.batch_id != batch_id
+            or parsed.scoring_policy_hash != result.scoring_policy_hash
+        ):
+            parsed = None
+        ground_truth[batch_id] = (
+            parsed,
+            plaintext_ref,
+            _inline_json_reference(object_table, candidate.get("decryption")),
+            shape_valid,
+        )
+
+    solutions: list[VerifiedMinerSolution] = []
+    for record in result.responses:
+        assignment_id = record.get("assignment_id")
+        if not isinstance(assignment_id, str) or assignment_id not in assignments:
+            raise ObserverBundleFeedError("feed_solution_record_invalid")
+        manifest_assignment = assignments[assignment_id]
+        selected_attempt = next(
+            (item for item in manifest_assignment.attempts if item.final),
+            manifest_assignment.attempts[-1],
+        )
+        prepared = _parse_object_model(
+            root,
+            object_table,
+            selected_attempt.prepared_evidence,
+            PreparedAttemptEvidence,
+            "feed_solution_prepared_evidence_invalid",
+        )
+        request = _parse_object_model(
+            root,
+            object_table,
+            prepared.request_object,
+            TranslationRequest,
+            "feed_solution_request_invalid",
+        )
+        outcome = _parse_object_model(
+            root,
+            object_table,
+            selected_attempt.outcome_evidence,
+            AttemptOutcomeEvidence,
+            "feed_solution_outcome_invalid",
+        )
+        request_leaf = record.get("request_leaf")
+        batch_id = record.get("batch_id")
+        challenge_id = record.get("challenge_id")
+        miner_hotkey = record.get("miner_hotkey")
+        miner_root = record.get("miner_root")
+        outer_disposition = record.get("outer_disposition")
+        if (
+            not isinstance(request_leaf, str)
+            or _HEX32_RE.fullmatch(request_leaf) is None
+            or not isinstance(miner_root, str)
+            or _HEX32_RE.fullmatch(miner_root) is None
+            or not isinstance(batch_id, str)
+            or not isinstance(challenge_id, str)
+            or not isinstance(miner_hotkey, str)
+            or outer_disposition
+            not in {"sealed", "missing", "late", "outer_invalid", "resource_limit"}
+            or manifest_assignment.miner_hotkey != miner_hotkey
+            or prepared.assignment_id != assignment_id
+            or prepared.miner_hotkey != miner_hotkey
+            or request.window_id != result.window_id
+            or request.scoring_policy_hash != result.scoring_policy_hash
+            or request.batch_id != batch_id
+            or request.challenge_id != challenge_id
+            or outcome.assignment_id != assignment_id
+            or outcome.attempt_index != selected_attempt.attempt_index
+            or outcome.sealed_response_record.disposition != outer_disposition
+        ):
+            raise ObserverBundleFeedError("feed_solution_record_binding_mismatch")
+
+        response_ref = _inline_reference(object_table, record.get("plaintext"))
+        response_valid = False
+        response_status: Literal["ok", "error"] | None = None
+        hypothesis: str | None = None
+        response_error: str | None = None
+        model_revision: str | None = None
+        if response_ref is not None:
+            response_bytes = _read_object(root, object_table, response_ref)
+            retained = outcome.retained_body
+            signature = outcome.sealed_response_record.signature
+            if retained is not None and signature is not None:
+                envelope_bytes = _read_object(root, object_table, retained)
+                try:
+                    envelope, sealed = validate_response_envelope(
+                        envelope_bytes,
+                        signature,
+                        request=request,
+                        validator_hotkey=prepared.validator_hotkey,
+                        miner_hotkey=prepared.miner_hotkey,
+                    )
+                    parsed_response = validate_response_plaintext(
+                        response_bytes,
+                        envelope=envelope,
+                        request=request,
+                    )
+                    if (
+                        decrypt_with_signature(sealed.portable_bytes, pulse_signature)
+                        != response_bytes
+                    ):
+                        raise ObserverBundleFeedError("feed_solution_plaintext_ciphertext_mismatch")
+                except ComponentResponseError as error:
+                    parsed_response = None
+                    recomputed_zero_reason = error.code
+                except (TypeError, ValueError):
+                    parsed_response = None
+                    recomputed_zero_reason = "plaintext_invalid"
+                if parsed_response is not None:
+                    response_valid = True
+                    response_status = parsed_response.status
+                    hypothesis, recomputed_zero_reason = _response_hypothesis(
+                        parsed_response, request=request, policy=policy
+                    )
+                    response_error = parsed_response.error_code
+                    model_revision = parsed_response.model_revision
+            else:
+                recomputed_zero_reason = "plaintext_invalid"
+        else:
+            recomputed_zero_reason = (
+                outer_disposition if outer_disposition != "sealed" else "undecryptable"
+            )
+
+        payload, ground_ref, ground_decryption, shape_valid = ground_truth.get(
+            batch_id, (None, None, None, False)
+        )
+        ground_item = (
+            None
+            if payload is None or not shape_valid
+            else next((item for item in payload.items if item.challenge_id == challenge_id), None)
+        )
+        metric = None if ground_item is None else ground_item.metric
+        canary = record.get("canary")
+        if canary is not None and not isinstance(canary, bool):
+            raise ObserverBundleFeedError("feed_solution_record_invalid")
+        if ground_item is not None and canary != ground_item.canary:
+            raise ObserverBundleFeedError("feed_solution_ground_truth_mismatch")
+        zero_reason = record.get("zero_score_reason")
+        if zero_reason is not None and (
+            not isinstance(zero_reason, str) or _REASON_CODE_RE.fullmatch(zero_reason) is None
+        ):
+            raise ObserverBundleFeedError("feed_solution_record_invalid")
+        if zero_reason != recomputed_zero_reason:
+            raise ObserverBundleFeedError("feed_solution_zero_reason_mismatch")
+        score_numerator, score_denominator = _exact_fraction(record.get("score"))
+        score_trace = record.get("score_trace")
+        canary_result = record.get("canary_result")
+        if score_trace is not None and not isinstance(score_trace, dict):
+            raise ObserverBundleFeedError("feed_solution_score_trace_invalid")
+        if canary_result is not None and not isinstance(canary_result, dict):
+            raise ObserverBundleFeedError("feed_solution_canary_result_invalid")
+        if ground_item is not None:
+            if ground_item.canary:
+                recomputed_canary = evaluate_canary(
+                    ground_item,
+                    hypothesis,
+                    cer_threshold=policy.thresholds.canary_cer_hit_threshold.fraction,
+                    wer_threshold=policy.thresholds.canary_wer_hit_threshold.fraction,
+                )
+                expected_canary = {
+                    "metric": recomputed_canary.metric,
+                    "score": {
+                        "numerator": recomputed_canary.score.numerator,
+                        "denominator": recomputed_canary.score.denominator,
+                    },
+                    "threshold": {
+                        "numerator": recomputed_canary.threshold.numerator,
+                        "denominator": recomputed_canary.threshold.denominator,
+                    },
+                    "hit": recomputed_canary.hit,
+                    "trace": (
+                        None
+                        if recomputed_canary.trace is None
+                        else recomputed_canary.trace.to_record()
+                    ),
+                }
+                if (
+                    record.get("score") is not None
+                    or score_trace is not None
+                    or canary_result != expected_canary
+                ):
+                    raise ObserverBundleFeedError("feed_solution_canary_replay_mismatch")
+            else:
+                if hypothesis is None:
+                    expected_score = {"numerator": 0, "denominator": 1}
+                    expected_trace = None
+                else:
+                    trace = (
+                        score_cer_with_trace(hypothesis, ground_item.references)
+                        if ground_item.metric == "cer"
+                        else score_wer_with_trace(hypothesis, ground_item.references)
+                    )
+                    expected_score = {
+                        "numerator": trace.score.numerator,
+                        "denominator": trace.score.denominator,
+                    }
+                    expected_trace = trace.to_record()
+                if (
+                    record.get("score") != expected_score
+                    or score_trace != expected_trace
+                    or canary_result is not None
+                ):
+                    raise ObserverBundleFeedError("feed_solution_score_replay_mismatch")
+        solutions.append(
+            VerifiedMinerSolution(
+                assignment_id=assignment_id,
+                request_leaf=request_leaf,
+                batch_id=batch_id,
+                challenge_id=challenge_id,
+                miner_hotkey=miner_hotkey,
+                miner_root_account_id32=miner_root,
+                stratum=request.task.stratum,
+                metric=metric,
+                canary=canary,
+                outer_disposition=outer_disposition,
+                zero_score_reason=zero_reason,
+                response_plaintext_valid=response_valid,
+                response_status=response_status,
+                hypothesis=hypothesis,
+                response_error_code=response_error,
+                model_revision=model_revision,
+                references=() if ground_item is None else tuple(ground_item.references),
+                canary_actual_references=(
+                    ()
+                    if ground_item is None or ground_item.canary_evidence is None
+                    else tuple(ground_item.canary_evidence.actual_references)
+                ),
+                score_numerator=score_numerator,
+                score_denominator=score_denominator,
+                score_trace=score_trace,
+                canary_result=canary_result,
+                evidence=VerifiedSolutionEvidence(
+                    prepared_attempt=_verified_reference(
+                        object_table, selected_attempt.prepared_evidence
+                    ),
+                    request=_verified_reference(object_table, prepared.request_object),
+                    attempt_outcome=_verified_reference(
+                        object_table, selected_attempt.outcome_evidence
+                    ),
+                    retained_response=_inline_reference(object_table, outcome.retained_body),
+                    response_plaintext=response_ref,
+                    response_decryption=_inline_json_reference(
+                        object_table, record.get("decryption")
+                    ),
+                    ground_truth_plaintext=ground_ref,
+                    ground_truth_decryption=ground_decryption,
+                ),
+            )
+        )
+    return tuple(solutions)
+
+
 def _extract_projection(
     root: Path,
     manifest_bytes: bytes,
     entry: PublicBundleIndexEntry,
     validator: str,
+    public_origin: str,
 ) -> VerifiedFeedWindow:
+    manifest = _parse_bundle_manifest(manifest_bytes)
+    object_table = {item.sha256: item for item in manifest.objects}
     scores: tuple[ValidatorLocalScore, ...] = ()
     weight_manifest: WeightBuildStageManifest | None = None
     for child in (root / "objects").iterdir():
@@ -990,6 +1806,83 @@ def _extract_projection(
                 )
             )
         scores = tuple(parsed)
+    reveal_stage_ref: VerifiedEvidenceObject | None = None
+    reveal_result_ref: VerifiedEvidenceObject | None = None
+    solutions: tuple[VerifiedMinerSolution, ...] = ()
+    reveal_stage_record = next(
+        (item for item in manifest.stages if item.stage_id == "reveal_and_score"),
+        None,
+    )
+    if reveal_stage_record is not None and reveal_stage_record.status == "reached":
+        stage_evidence = _parse_object_model(
+            root,
+            object_table,
+            reveal_stage_record.evidence_object,
+            CalibrationStageEvidence,
+            "feed_reveal_stage_evidence_invalid",
+        )
+        if (
+            stage_evidence.stage_id != "reveal_and_score"
+            or stage_evidence.window_id != entry.window_id
+            or stage_evidence.scoring_policy_hash != entry.scoring_policy_hash
+        ):
+            raise ObserverBundleFeedError("feed_reveal_stage_evidence_binding_mismatch")
+        receipt = _parse_object_model(
+            root,
+            object_table,
+            stage_evidence.receipt_object,
+            StageReceipt,
+            "feed_reveal_receipt_invalid",
+        )
+        reveal_matches = _schema_references(
+            root,
+            object_table,
+            receipt.objects,
+            REVEAL_STAGE_SCHEMA,
+        )
+        if len(reveal_matches) > 1:
+            raise ObserverBundleFeedError("feed_reveal_manifest_duplicate")
+        if reveal_matches:
+            raw_ref, reveal_manifest = reveal_matches[0]
+            try:
+                reveal_manifest = RevealStageManifest.model_validate(reveal_manifest)
+            except Exception as error:
+                raise ObserverBundleFeedError("feed_reveal_manifest_invalid") from error
+            reveal_bytes = _read_object(root, object_table, raw_ref)
+            if canonical_json_bytes(reveal_manifest) != reveal_bytes:
+                raise ObserverBundleFeedError("feed_reveal_manifest_noncanonical")
+            if (
+                reveal_manifest.window_id != entry.window_id
+                or reveal_manifest.window_index != entry.window_index
+                or reveal_manifest.scoring_policy_hash != entry.scoring_policy_hash
+            ):
+                raise ObserverBundleFeedError("feed_reveal_manifest_binding_mismatch")
+            reveal_stage_ref = _verified_reference(object_table, raw_ref)
+            result_bytes = _read_object(root, object_table, reveal_manifest.reveal_result)
+            reveal_result_ref = _verified_reference(object_table, reveal_manifest.reveal_result)
+            try:
+                result_document = _strict_json_object(result_bytes)
+            except ValueError as error:
+                raise ObserverBundleFeedError("feed_reveal_result_invalid") from error
+            if canonical_json_bytes(result_document) != result_bytes:
+                raise ObserverBundleFeedError("feed_reveal_result_noncanonical")
+            if result_document.get("schema") == REVEAL_RESULT_SCHEMA:
+                try:
+                    result = RevealResult.model_validate(result_document)
+                except Exception as error:
+                    raise ObserverBundleFeedError("feed_reveal_result_invalid") from error
+                if (
+                    result.window_id != entry.window_id
+                    or result.window_index != entry.window_index
+                    or result.scoring_policy_hash != entry.scoring_policy_hash
+                ):
+                    raise ObserverBundleFeedError("feed_reveal_result_binding_mismatch")
+                solutions = _extract_solutions(
+                    root=root,
+                    object_table=object_table,
+                    reveal_manifest=reveal_manifest,
+                    result=result,
+                )
     return VerifiedFeedWindow(
         validator_account_id32=validator,
         window_id=entry.window_id,
@@ -1000,7 +1893,14 @@ def _extract_projection(
         audit_release_block=entry.audit_release_block,
         audit_release_block_hash=entry.audit_release_block_hash,
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        tree_sha256=entry.tree_sha256,
+        public_origin=public_origin,
+        bundle_relative_path=entry.relative_path,
+        reveal_stage_manifest=reveal_stage_ref,
+        reveal_result=reveal_result_ref,
+        solutions=solutions,
         scores=scores,
+        solution_count=len(solutions),
     )
 
 
@@ -1011,7 +1911,11 @@ def _projection_bytes(value: VerifiedFeedWindow) -> bytes:
             "audit_release_block_hash": value.audit_release_block_hash,
             "manifest_sha256": value.manifest_sha256,
             "observer_verified_unix": value.observer_verified_unix,
+            "bundle_relative_path": value.bundle_relative_path,
+            "public_origin": value.public_origin,
             "reason_codes": list(value.reason_codes),
+            "reveal_result": _evidence_dict(value.reveal_result),
+            "reveal_stage_manifest": _evidence_dict(value.reveal_stage_manifest),
             "scores": [
                 {
                     "accuracy_denominator": score.accuracy_denominator,
@@ -1025,7 +1929,12 @@ def _projection_bytes(value: VerifiedFeedWindow) -> bytes:
                 for score in value.scores
             ],
             "scoring_policy_hash": value.scoring_policy_hash,
+            "solutions": [_solution_dict(item) for item in value.solutions],
+            "solution_count": (
+                len(value.solutions) if value.solution_count is None else value.solution_count
+            ),
             "terminal_classification": value.terminal_classification,
+            "tree_sha256": value.tree_sha256,
             "validator_account_id32": value.validator_account_id32,
             "window_id": value.window_id,
             "window_index": value.window_index,
@@ -1047,9 +1956,112 @@ def _projection_from_bytes(encoded: bytes) -> VerifiedFeedWindow:
         audit_release_block=value["audit_release_block"],
         audit_release_block_hash=value["audit_release_block_hash"],
         manifest_sha256=value["manifest_sha256"],
+        tree_sha256=value["tree_sha256"],
+        public_origin=value["public_origin"],
+        bundle_relative_path=value["bundle_relative_path"],
+        reveal_stage_manifest=_evidence_from_dict(value["reveal_stage_manifest"]),
+        reveal_result=_evidence_from_dict(value["reveal_result"]),
+        solutions=tuple(_solution_from_dict(item) for item in value["solutions"]),
         scores=tuple(ValidatorLocalScore(**item) for item in value["scores"]),
         observer_verified_unix=value["observer_verified_unix"],
+        solution_count=value.get("solution_count", len(value["solutions"])),
     )
+
+
+def _evidence_dict(value: VerifiedEvidenceObject | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "media_type": value.media_type,
+        "sha256": value.sha256,
+        "size_bytes": value.size_bytes,
+    }
+
+
+def _evidence_from_dict(value: Any) -> VerifiedEvidenceObject | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ObserverBundleFeedError("feed_state_evidence_reference_invalid")
+    return VerifiedEvidenceObject(**value)
+
+
+def _solution_dict(value: VerifiedMinerSolution) -> dict[str, Any]:
+    return {
+        "assignment_id": value.assignment_id,
+        "batch_id": value.batch_id,
+        "canary": value.canary,
+        "canary_actual_references": list(value.canary_actual_references),
+        "canary_result": value.canary_result,
+        "challenge_id": value.challenge_id,
+        "evidence": {
+            "attempt_outcome": _evidence_dict(value.evidence.attempt_outcome),
+            "ground_truth_decryption": _evidence_dict(value.evidence.ground_truth_decryption),
+            "ground_truth_plaintext": _evidence_dict(value.evidence.ground_truth_plaintext),
+            "prepared_attempt": _evidence_dict(value.evidence.prepared_attempt),
+            "request": _evidence_dict(value.evidence.request),
+            "response_decryption": _evidence_dict(value.evidence.response_decryption),
+            "response_plaintext": _evidence_dict(value.evidence.response_plaintext),
+            "retained_response": _evidence_dict(value.evidence.retained_response),
+        },
+        "hypothesis": value.hypothesis,
+        "metric": value.metric,
+        "miner_hotkey": value.miner_hotkey,
+        "miner_root_account_id32": value.miner_root_account_id32,
+        "model_revision": value.model_revision,
+        "outer_disposition": value.outer_disposition,
+        "references": list(value.references),
+        "request_leaf": value.request_leaf,
+        "response_error_code": value.response_error_code,
+        "response_plaintext_valid": value.response_plaintext_valid,
+        "response_status": value.response_status,
+        "score_denominator": value.score_denominator,
+        "score_numerator": value.score_numerator,
+        "score_trace": value.score_trace,
+        "stratum": value.stratum,
+        "zero_score_reason": value.zero_score_reason,
+    }
+
+
+def _solution_from_dict(value: Any) -> VerifiedMinerSolution:
+    if not isinstance(value, dict):
+        raise ObserverBundleFeedError("feed_state_solution_invalid")
+    fields = dict(value)
+    evidence = fields.pop("evidence", None)
+    if not isinstance(evidence, dict):
+        raise ObserverBundleFeedError("feed_state_solution_evidence_invalid")
+    required = {
+        "attempt_outcome",
+        "ground_truth_decryption",
+        "ground_truth_plaintext",
+        "prepared_attempt",
+        "request",
+        "response_decryption",
+        "response_plaintext",
+        "retained_response",
+    }
+    if set(evidence) != required:
+        raise ObserverBundleFeedError("feed_state_solution_evidence_invalid")
+    fields["references"] = tuple(fields["references"])
+    fields["canary_actual_references"] = tuple(fields["canary_actual_references"])
+    fields["evidence"] = VerifiedSolutionEvidence(
+        prepared_attempt=_required_evidence(evidence["prepared_attempt"]),
+        request=_required_evidence(evidence["request"]),
+        attempt_outcome=_required_evidence(evidence["attempt_outcome"]),
+        retained_response=_evidence_from_dict(evidence["retained_response"]),
+        response_plaintext=_evidence_from_dict(evidence["response_plaintext"]),
+        response_decryption=_required_evidence(evidence["response_decryption"]),
+        ground_truth_plaintext=_evidence_from_dict(evidence["ground_truth_plaintext"]),
+        ground_truth_decryption=_evidence_from_dict(evidence["ground_truth_decryption"]),
+    )
+    return VerifiedMinerSolution(**fields)
+
+
+def _required_evidence(value: Any) -> VerifiedEvidenceObject:
+    parsed = _evidence_from_dict(value)
+    if parsed is None:
+        raise ObserverBundleFeedError("feed_state_solution_evidence_invalid")
+    return parsed
 
 
 def _bind_projection_to_entry(
@@ -1067,6 +2079,8 @@ def _bind_projection_to_entry(
         or projection.audit_release_block != entry.audit_release_block
         or projection.audit_release_block_hash != entry.audit_release_block_hash
         or projection.manifest_sha256 != entry.manifest_sha256
+        or projection.tree_sha256 != entry.tree_sha256
+        or projection.bundle_relative_path != entry.relative_path
     ):
         raise ObserverBundleFeedError("feed_state_projection_binding_mismatch")
 
@@ -1118,7 +2132,10 @@ __all__ = [
     "ObserverBundleFeedError",
     "ObserverFeedTarget",
     "ValidatorLocalScore",
+    "VerifiedEvidenceObject",
     "VerifiedFeedWindow",
+    "VerifiedMinerSolution",
+    "VerifiedSolutionEvidence",
     "build_production_observer_bundle_feed",
     "load_observer_bundle_feed_config",
 ]

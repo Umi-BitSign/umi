@@ -6,9 +6,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import bittensor as bt
+import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from umi.artifacts import PublicBatchManifest
+from umi.audit_publication import AuditBundlePublisher, PublicOriginVerifier
 from umi.calibration_bundle import (
     CalibrationVerificationPorts,
     calibration_stage_replay_hook_id,
@@ -18,6 +21,12 @@ from umi.crypto import seal_response, sign_response_digest
 from umi.drand import DrandPulse
 from umi.encoding import account_id32
 from umi.grandpa_finality import EVIDENCE_CLASS, RECORD_SCHEMA
+from umi.observer import create_observer_app
+from umi.observer_bundle_feed import (
+    BoundedHTTPSFetcher,
+    ObserverBundleFeed,
+    ObserverFeedTarget,
+)
 from umi.policy import ScoringPolicy, scoring_policy_hash
 from umi.protocol import (
     PROTOCOL_VERSION,
@@ -64,6 +73,7 @@ from umi.validator_live import (
 )
 from umi.validator_plans import VerifiedFinalizedBlock
 from umi.validator_pool_replay import ProofBackedPoolStageReplayHook
+from umi.validator_readiness import ReplayPublishedBundleVerifier
 from umi.validator_reveal_effect import (
     REVEAL_AUDIT_RELEASE_SCHEMA,
     RevealAuditRelease,
@@ -85,6 +95,7 @@ from . import test_shadow as shadow_support
 from . import test_validator_pool_replay as pool_replay_support
 from . import test_validator_transcript_effects as transcript_support
 from . import test_validator_weight_build_effect as weight_support
+from .test_observer import SequenceCollector, _cache, _snapshot
 from .test_validator_closing_snapshot import _live_policy
 from .test_validator_live import _config, _runtime_validation
 from .test_validator_pool_effect import _Fixture as PoolFixture
@@ -113,6 +124,23 @@ def _pin_rehearsal_mirror_rule(policy_data: dict) -> None:
     rules["mirror_discovery_rule_sha256"] = hashlib.sha256(
         canonical_json_bytes(discovery)
     ).hexdigest()
+
+
+class _StaticPublicTree:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        target = self.root / request.url.path.lstrip("/")
+        if not target.is_file():
+            return httpx.Response(404, request=request)
+        body = target.read_bytes()
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "identity", "Content-Length": str(len(body))},
+            stream=httpx.ByteStream(body),
+            request=request,
+        )
 
 
 class _PlanningFinality:
@@ -545,15 +573,20 @@ async def test_full_live_shadow_rehearsal_executes_restarts_and_replays(
     }
     response_plaintexts: dict[str, bytes] = {}
     answered_strata: set[tuple[str, str]] = set()
+    invalid_canary_plaintext_sent = False
     transport_calls: list[str] = []
 
     async def transport(prepared, assignment_id, _miner_url, _work):
+        nonlocal invalid_canary_plaintext_sent
         transport_calls.append(assignment_id)
         ground = ground_truth_by_challenge[
             (prepared.request.batch_id, prepared.request.challenge_id)
         ]
         answer_key = (prepared.miner_hotkey, prepared.request.task.stratum)
-        if ground.canary or answer_key in answered_strata:
+        send_invalid_canary = ground.canary and not invalid_canary_plaintext_sent
+        if (ground.canary and not send_invalid_canary) or (
+            not ground.canary and answer_key in answered_strata
+        ):
             return QueryOutcome(
                 request=prepared.request,
                 auth_headers=dict(prepared.auth_headers),
@@ -564,14 +597,21 @@ async def test_full_live_shadow_rehearsal_executes_restarts_and_replays(
                 sealed_response=None,
                 failure_code="resource_limit",
             )
-        answered_strata.add(answer_key)
+        if send_invalid_canary:
+            invalid_canary_plaintext_sent = True
+        else:
+            answered_strata.add(answer_key)
         plaintext = ResponsePlaintext.model_validate(
             {
                 "schema": RESPONSE_PLAINTEXT_SCHEMA,
                 "protocol": PROTOCOL_VERSION,
                 "window_id": prepared.request.window_id,
                 "batch_id": prepared.request.batch_id,
-                "challenge_id": prepared.request.challenge_id,
+                "challenge_id": (
+                    "AwMDAwMDAwMDAwMDAwMDAw"
+                    if send_invalid_canary
+                    else prepared.request.challenge_id
+                ),
                 "request_digest": request_digest(prepared.request),
                 "issued_block_hash": prepared.request.issued_block_hash,
                 "validator_hotkey": prepared.validator_hotkey,
@@ -638,6 +678,14 @@ async def test_full_live_shadow_rehearsal_executes_restarts_and_replays(
         if sealed.sha256_hex in ground_truth_by_ciphertext:
             return ground_truth_by_ciphertext[sealed.sha256_hex]
         return response_plaintexts[sealed.sha256_hex]
+
+    def replay_decrypt(portable_bytes, _signature):
+        digest = hashlib.sha256(portable_bytes).hexdigest()
+        if digest in ground_truth_by_ciphertext:
+            return ground_truth_by_ciphertext[digest]
+        return response_plaintexts[digest]
+
+    monkeypatch.setattr("bittensor_core.decrypt_with_signature", replay_decrypt)
 
     async def reveal_release(work, reason):
         evidence = canonical_json_bytes({"kind": "release", "reason": reason})
@@ -778,6 +826,150 @@ async def test_full_live_shadow_rehearsal_executes_restarts_and_replays(
             call[0] == fixture.window.announcement_block and call[1] == 163
             for call in no_weight.calls
         )
+
+        public_root = (tmp_path / "published-audits").resolve()
+        staging_root = (tmp_path / "publication-staging").resolve()
+        incident_root = (tmp_path / "incident-bundles").resolve()
+        publisher_state = (tmp_path / "publication-state").resolve()
+        for path, mode in (
+            (public_root, 0o755),
+            (staging_root, 0o700),
+            (incident_root, 0o700),
+            (publisher_state, 0o700),
+        ):
+            path.mkdir(mode=mode)
+            path.chmod(mode)
+        static = _StaticPublicTree(public_root)
+        transport_mock = httpx.MockTransport(static)
+        release_manifest_sha256 = "ab" * 32
+        public_verifier = ReplayPublishedBundleVerifier(_verification_ports(policy))
+        publisher = AuditBundlePublisher(
+            policy_hash=scoring_policy_hash(policy),
+            validator_account_id32=account_id32(fixture.validator_wallet.hotkey.ss58_address),
+            release_manifest_sha256=release_manifest_sha256,
+            calibration_root=runtime.paths.bundles.resolve(),
+            incident_root=incident_root,
+            public_docroot=public_root,
+            private_staging_root=staging_root,
+            state_database_path=publisher_state / "publication.sqlite3",
+            bundle_verifier=public_verifier,
+            origin_verifier=PublicOriginVerifier(
+                "https://audit.example",
+                timeout_seconds=2,
+                maximum_concurrency=4,
+                transport=transport_mock,
+            ),
+        )
+        publication = await publisher.run_once()
+        assert publication.completed == 1
+
+        def feed_fetcher(origin: str, timeout: float) -> BoundedHTTPSFetcher:
+            return BoundedHTTPSFetcher(
+                origin,
+                timeout_seconds=timeout,
+                transport=transport_mock,
+            )
+
+        feed_target = ObserverFeedTarget(
+            validator_account_id32=account_id32(fixture.validator_wallet.hotkey.ss58_address).hex(),
+            scoring_policy_hash=scoring_policy_hash(policy),
+            release_manifest_sha256=release_manifest_sha256,
+            public_origin="https://audit.example",
+            verifier=public_verifier,
+        )
+        feed_state_path = (tmp_path / "observer-feed" / "state.sqlite3").resolve()
+        feed_temporary_root = (tmp_path / "observer-temporary").resolve()
+        monkeypatch.setattr(
+            "umi.observer_bundle_feed.decrypt_with_signature",
+            lambda encrypted, _signature: response_plaintexts[
+                hashlib.sha256(encrypted).hexdigest()
+            ],
+        )
+        feed = ObserverBundleFeed(
+            targets=(feed_target,),
+            state_database_path=feed_state_path,
+            temporary_root=feed_temporary_root,
+            maximum_stale_seconds=300,
+            timeout_seconds=2,
+            fetcher_factory=feed_fetcher,
+            clock=lambda: 100,
+        )
+        assert await feed.refresh(200)
+        feed_window = feed.snapshot().windows[0]
+        assert feed_window.solutions == ()
+        assert feed_window.solution_count == 56
+        total, materialized_solutions = feed.solution_page(
+            feed_window.validator_account_id32,
+            feed_window.window_id,
+            offset=0,
+            limit=100,
+        )
+        assert total == 56
+        assert sum(item.response_plaintext_valid for item in materialized_solutions) == 6
+        assert (
+            sum(item.outer_disposition == "resource_limit" for item in materialized_solutions) == 49
+        )
+        binding_invalid = next(
+            item
+            for item in materialized_solutions
+            if item.zero_score_reason == "plaintext_binding_mismatch"
+        )
+        assert binding_invalid.outer_disposition == "sealed"
+        assert binding_invalid.response_plaintext_valid is False
+        assert binding_invalid.response_status is None
+        assert binding_invalid.hypothesis is None
+        assert binding_invalid.evidence.response_plaintext is not None
+
+        restarted_feed = ObserverBundleFeed(
+            targets=(feed_target,),
+            state_database_path=feed_state_path,
+            temporary_root=feed_temporary_root,
+            maximum_stale_seconds=300,
+            timeout_seconds=2,
+            fetcher_factory=feed_fetcher,
+            clock=lambda: 100,
+        )
+        assert restarted_feed.snapshot().windows == feed.snapshot().windows
+
+        app = create_observer_app(
+            _cache(SequenceCollector([_snapshot(block_number=200)])),
+            bundle_feed=restarted_feed,
+        )
+        with TestClient(app) as client:
+            api_response = client.get(
+                f"/api/v1/windows/{fixture.window.window_id}/solutions"
+                f"?validator={feed_window.validator_account_id32}&limit=50"
+            )
+            api_next_response = client.get(
+                f"/api/v1/windows/{fixture.window.window_id}/solutions"
+                f"?validator={feed_window.validator_account_id32}&limit=50"
+                f"&cursor={api_response.json()['page']['next_cursor']}"
+            )
+        assert api_response.status_code == 200
+        assert api_next_response.status_code == 200
+        api = api_response.json()
+        assert api["score_scope"] == "validator_local"
+        assert api["page"] == {
+            "limit": 50,
+            "total": 56,
+            "returned": 50,
+            "next_cursor": api["page"]["next_cursor"],
+        }
+        assert api["page"]["next_cursor"] is not None
+        api_solutions = api["solutions"] + api_next_response.json()["solutions"]
+        assert len(api_solutions) == 56
+        assert any(item["hypothesis"] == "hello world" for item in api_solutions)
+        assert all(item["references"] for item in api_solutions)
+        assert all(item["evidence"]["request"]["url"] for item in api_solutions)
+        projected_binding_invalid = next(
+            item
+            for item in api_solutions
+            if item["zero_score_reason"] == "plaintext_binding_mismatch"
+        )
+        assert projected_binding_invalid["response_plaintext_valid"] is False
+        assert projected_binding_invalid["response_status"] is None
+        assert projected_binding_invalid["hypothesis"] is None
+        assert projected_binding_invalid["evidence"]["response_plaintext"] is not None
     finally:
         runtime.close()
         fixture.protocol_state.close()

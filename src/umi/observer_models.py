@@ -5,9 +5,19 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import Self
 
 OBSERVER_API_VERSION = "v1"
@@ -18,6 +28,7 @@ PARTICIPANTS_RESPONSE_SCHEMA = "umi-observer-participants/1"
 LEADERBOARD_RESPONSE_SCHEMA = "umi-observer-leaderboard/1"
 WINDOWS_RESPONSE_SCHEMA = "umi-observer-windows/1"
 WINDOW_RESPONSE_SCHEMA = "umi-observer-window/1"
+WINDOW_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-window-solutions/1"
 ACTIVATION_GATES_RESPONSE_SCHEMA = "umi-observer-activation-gates/1"
 BENCHMARKS_RESPONSE_SCHEMA = "umi-observer-benchmarks/1"
 INCIDENTS_RESPONSE_SCHEMA = "umi-observer-incidents/1"
@@ -712,12 +723,93 @@ class ValidatorLocalScoreRecord(ObserverModel):
     utility: ExactRational
 
 
+class EvidenceObjectLink(ObserverModel):
+    sha256: Hex32
+    media_type: Annotated[str, Field(min_length=1, max_length=256)]
+    size_bytes: NonNegativeInt
+    url: Annotated[str, Field(min_length=1, max_length=8_192)]
+
+    @model_validator(mode="after")
+    def validate_url(self) -> Self:
+        try:
+            parsed = urlsplit(self.url)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("evidence-object URL is invalid") from error
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.endswith("/" + self.sha256)
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError("evidence-object URL must be HTTPS and end in its digest")
+        return self
+
+
+class ReleasedBundleLocator(ObserverModel):
+    public_origin: Annotated[str, Field(min_length=1, max_length=8_192)]
+    index_url: Annotated[str, Field(min_length=1, max_length=8_192)]
+    relative_path: Annotated[str, Field(min_length=1, max_length=1_024)]
+    manifest_url: Annotated[str, Field(min_length=1, max_length=8_192)]
+    manifest_sha256: Hex32
+    tree_sha256: Hex32
+    reveal_stage_manifest: EvidenceObjectLink | None
+    reveal_result: EvidenceObjectLink | None
+
+    @model_validator(mode="after")
+    def validate_routes(self) -> Self:
+        prefix = self.public_origin.rstrip("/")
+        try:
+            parsed = urlsplit(prefix)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("public origin is invalid") from error
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or (port is not None and not 1 <= port <= 65535)
+            or self.public_origin != prefix
+        ):
+            raise ValueError("public origin must be normalized HTTPS")
+        path = PurePosixPath(self.relative_path)
+        parts = path.parts
+        if (
+            path.is_absolute()
+            or "." in parts
+            or ".." in parts
+            or path.as_posix() != self.relative_path
+            or any(not part.isascii() for part in parts)
+            or len(parts) != 5
+            or parts[0] != "validators"
+            or parts[2] != "windows"
+        ):
+            raise ValueError("bundle relative route is invalid")
+        if self.index_url != (prefix + "/validators/" + parts[1] + "/index.json"):
+            raise ValueError("bundle index URL does not match its relative route")
+        if self.manifest_url != prefix + "/" + self.relative_path + "/manifest.json":
+            raise ValueError("bundle manifest URL does not match its relative route")
+        if (self.reveal_stage_manifest is None) != (self.reveal_result is None):
+            raise ValueError("reveal locators must appear together")
+        return self
+
+
 class ReleasedWindow(ObserverModel):
     window_id: Hex32
     window_index: UnsignedIntegerText
     terminal_classification: NonEmptyText
     audit_release_block: UnsignedIntegerText
+    audit_release_block_hash: BlockHash
     audit_bundle_sha256: Hex32
+    evidence: ReleasedBundleLocator
     validator_account_id32: Hex32 | None = None
     scoring_policy_hash: Hex32 | None = None
     reason_codes: tuple[NonEmptyText, ...] = ()
@@ -737,6 +829,22 @@ class ReleasedWindow(ObserverModel):
             raise ValueError("validator-local miner roots must be unique")
         if self.reason_codes != tuple(sorted(set(self.reason_codes))):
             raise ValueError("released window reason codes must be unique and sorted")
+        if self.evidence.manifest_sha256 != self.audit_bundle_sha256:
+            raise ValueError("released window and evidence locator manifest hashes differ")
+        if self.validator_account_id32 is not None:
+            expected = (
+                f"validators/{self.validator_account_id32}/windows/"
+                f"{self.window_id}/{self.terminal_classification}"
+            )
+            if self.evidence.relative_path != expected:
+                raise ValueError("released window evidence route does not match its binding")
+        object_prefix = f"{self.evidence.public_origin}/{self.evidence.relative_path}/objects/"
+        for reference in (
+            self.evidence.reveal_stage_manifest,
+            self.evidence.reveal_result,
+        ):
+            if reference is not None and reference.url != object_prefix + reference.sha256:
+                raise ValueError("released window object URL does not match its bundle route")
         return self
 
 
@@ -815,6 +923,105 @@ class WindowResponse(ResponseEnvelope):
             self.sources,
             ((self.window.audit_bundle_sha256, self.window.audit_release_block),),
         )
+        return self
+
+
+class SolutionEvidenceLinks(ObserverModel):
+    prepared_attempt: EvidenceObjectLink
+    request: EvidenceObjectLink
+    attempt_outcome: EvidenceObjectLink
+    retained_response: EvidenceObjectLink | None
+    response_plaintext: EvidenceObjectLink | None
+    response_decryption: EvidenceObjectLink
+    ground_truth_plaintext: EvidenceObjectLink | None
+    ground_truth_decryption: EvidenceObjectLink | None
+
+
+class MinerSolutionRecord(ObserverModel):
+    assignment_id: Hex32
+    request_leaf: Hex32
+    batch_id: NonEmptyText
+    challenge_id: NonEmptyText
+    miner_hotkey: NonEmptyText
+    miner_root_account_id32: Hex32
+    stratum: Literal["fingerspelling", "short_utterance", "continuous"]
+    metric: Literal["wer", "cer"] | None
+    canary: bool | None
+    outer_disposition: Literal["sealed", "missing", "late", "outer_invalid", "resource_limit"]
+    zero_score_reason: NonEmptyText | None
+    response_plaintext_valid: bool
+    response_status: Literal["ok", "error"] | None
+    hypothesis: str | None
+    response_error_code: NonEmptyText | None
+    model_revision: Hex32 | None
+    references: tuple[str, ...]
+    canary_actual_references: tuple[str, ...]
+    score: ExactRational | None
+    score_trace: dict[str, JsonValue] | None
+    canary_result: dict[str, JsonValue] | None
+    evidence: SolutionEvidenceLinks
+
+    @model_validator(mode="after")
+    def validate_solution(self) -> Self:
+        if self.response_plaintext_valid != (self.response_status is not None):
+            raise ValueError("response plaintext validity and status disagree")
+        if self.response_status == "ok" and self.hypothesis is None:
+            raise ValueError("valid ok response requires its hypothesis")
+        if self.response_status == "error" and self.response_error_code is None:
+            raise ValueError("valid error response requires its error code")
+        if self.canary is False and self.metric is None:
+            raise ValueError("scored solution requires its metric")
+        if self.canary is not True and self.canary_actual_references:
+            raise ValueError("only a canary may expose actual canary references")
+        return self
+
+
+class WindowSolutionsResponse(ResponseEnvelope):
+    schema_: Literal[WINDOW_SOLUTIONS_RESPONSE_SCHEMA] = Field(
+        default=WINDOW_SOLUTIONS_RESPONSE_SCHEMA,
+        alias="schema",
+    )
+    protocol_state: ProtocolState
+    window: ReleasedWindow
+    score_scope: Literal["validator_local"] = "validator_local"
+    page: EvidenceCursorPage
+    solutions: tuple[MinerSolutionRecord, ...]
+
+    @model_validator(mode="after")
+    def validate_solutions(self) -> Self:
+        _validate_released_evidence(
+            self.sources,
+            ((self.window.audit_bundle_sha256, self.window.audit_release_block),),
+        )
+        identifiers = [item.assignment_id for item in self.solutions]
+        if identifiers != sorted(set(identifiers)):
+            raise ValueError("solution records must be unique and assignment sorted")
+        if self.page.returned != len(self.solutions):
+            raise ValueError("solution page returned count does not match records")
+        if self.page.total <= 0 or self.window.evidence.reveal_result is None:
+            raise ValueError("solution feed requires released reveal-result evidence")
+        if (
+            self.window.validator_account_id32 is None
+            or self.window.scoring_policy_hash is None
+            or self.window.score_scope != "validator_local"
+        ):
+            raise ValueError("solution feed requires complete validator-local binding")
+        object_prefix = (
+            f"{self.window.evidence.public_origin}/{self.window.evidence.relative_path}/objects/"
+        )
+        for solution in self.solutions:
+            for reference in (
+                solution.evidence.prepared_attempt,
+                solution.evidence.request,
+                solution.evidence.attempt_outcome,
+                solution.evidence.retained_response,
+                solution.evidence.response_plaintext,
+                solution.evidence.response_decryption,
+                solution.evidence.ground_truth_plaintext,
+                solution.evidence.ground_truth_decryption,
+            ):
+                if reference is not None and reference.url != object_prefix + reference.sha256:
+                    raise ValueError("solution object URL does not match its released bundle")
         return self
 
 
