@@ -75,13 +75,17 @@ published, an installed reconciliation command accepts only the originally
 committed objects, applies the public retirement and objective-fault transition
 without scoring the failed window, and releases only that incident's intake hold.
 
-The remaining repository work before the planned baseline demonstration is narrow:
+The protocol implementation is complete for the planned baseline demonstration.
+The separately versioned `umi-reference-model` repository contains the
+`umi-s1-baseline-v0` miner fixture and its release evidence. That model is
+deliberately low-accuracy and is a replacement target for miners, not activation
+evidence.
 
-- integrate, version, and exercise the baseline translator and its model artifacts;
-  the protocol-side in-process and Unix-socket interfaces are complete, but the
-  model itself is not in this repository yet;
-- finish release qualification against the exact baseline, signed inactive policy,
-  packaged binaries, and operator configuration that will be distributed.
+The remaining work before public calibration is deployment work: publish the
+owner-approved model release, then create the signed inactive UMI release and
+operator bindings for the exact policy, binaries, identities, mirrors, and
+configuration that will be deployed. These steps do not require another mechanism
+implementation.
 
 On supported Linux release targets, every FFmpeg and FFprobe child enters a finite
 address-space, CPU, and core-dump envelope before the pinned executable runs. A
