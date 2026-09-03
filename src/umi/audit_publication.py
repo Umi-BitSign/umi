@@ -318,6 +318,9 @@ class PublicationState:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        expected_identity = getattr(self, "_database_identity", None)
+        if expected_identity is not None:
+            self._assert_database_identity(expected_identity)
         _reject_database_links(self.path)
         connection = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
@@ -327,11 +330,7 @@ class PublicationState:
         connection.execute("PRAGMA fullfsync = ON")
         connection.execute("PRAGMA trusted_schema = OFF")
         _secure_database_files(self.path)
-        expected_identity = getattr(self, "_database_identity", None)
-        if (
-            expected_identity is not None
-            and _database_file_identity(self.path) != expected_identity
-        ):
+        if expected_identity is not None and not self._database_identity_matches(expected_identity):
             connection.close()
             raise AuditPublicationError("publication_state_database_replaced")
         try:
@@ -341,11 +340,18 @@ class PublicationState:
                 connection.close()
             finally:
                 _secure_database_files(self.path)
-                if (
-                    expected_identity is not None
-                    and _database_file_identity(self.path) != expected_identity
-                ):
-                    raise AuditPublicationError("publication_state_database_replaced")
+                if expected_identity is not None:
+                    self._assert_database_identity(expected_identity)
+
+    def _database_identity_matches(self, expected: tuple[int, int]) -> bool:
+        try:
+            return _database_file_identity(self.path) == expected
+        except AuditPublicationError:
+            return False
+
+    def _assert_database_identity(self, expected: tuple[int, int]) -> None:
+        if not self._database_identity_matches(expected):
+            raise AuditPublicationError("publication_state_database_replaced")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

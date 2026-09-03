@@ -1403,7 +1403,7 @@ class RequestTranscriptEffect(_TranscriptEffectBase):
                                 ),
                                 timeout=self._transport_timeout_seconds,
                             )
-                        except TimeoutError:
+                        except (asyncio.TimeoutError, TimeoutError):
                             # A coroutine timeout is an observed in-process
                             # outcome, unlike a process crash.  Persist it now so
                             # restart cannot mistake the durable claim for an

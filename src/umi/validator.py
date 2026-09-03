@@ -789,9 +789,12 @@ async def run_component_case(
     _require_empty_output(output)
     prepared = load_case(case_root)
     limits = Limits()
-    queried = await asyncio.gather(
-        *(
-            query_miner(
+    # Component mode uses one validator/miner pair.  Issue its requests serially
+    # so it honors the miner's one-ingress-per-validator admission boundary.
+    queried: list[QueryOutcome] = []
+    for request in prepared.requests:
+        queried.append(
+            await query_miner(
                 request,
                 wallet=wallet,
                 miner_url=miner_url,
@@ -800,9 +803,7 @@ async def run_component_case(
                 timeout_seconds=request_timeout_seconds,
                 transport=transport,
             )
-            for request in prepared.requests
         )
-    )
     outcomes = tuple(queried)
 
     ground_truth_bytes = await _decrypt(prepared.ground_truth, timeout=reveal_timeout_seconds)

@@ -60,15 +60,21 @@ def executable_pins(tmp_path_factory: pytest.TempPathFactory) -> ConformanceBina
     ffprobe.chmod(0o700)
     if not _PROOF_BINARY.is_file() or not _FINALITY_BINARY.is_file():
         pytest.skip("release Rust conformance binaries are not built")
+    proof_verifier = binary_directory / "umi-substrate-proof-verifier"
+    finality_verifier = binary_directory / "umi-grandpa-finality-observer"
+    shutil.copyfile(_PROOF_BINARY, proof_verifier)
+    shutil.copyfile(_FINALITY_BINARY, finality_verifier)
+    proof_verifier.chmod(0o700)
+    finality_verifier.chmod(0o700)
     return ConformanceBinaryPins(
         ffmpeg_path=ffmpeg,
         ffmpeg_sha256=_digest(ffmpeg),
         ffprobe_path=ffprobe,
         ffprobe_sha256=_digest(ffprobe),
-        storage_proof_verifier_path=_PROOF_BINARY,
-        storage_proof_verifier_sha256=_digest(_PROOF_BINARY),
-        finality_verifier_path=_FINALITY_BINARY,
-        finality_verifier_sha256=_digest(_FINALITY_BINARY),
+        storage_proof_verifier_path=proof_verifier,
+        storage_proof_verifier_sha256=_digest(proof_verifier),
+        finality_verifier_path=finality_verifier,
+        finality_verifier_sha256=_digest(finality_verifier),
     )
 
 

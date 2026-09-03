@@ -4,7 +4,6 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
-import bittensor as bt
 import pytest
 
 from umi.anchors import (
@@ -38,13 +37,13 @@ from umi.validator_assignments import (
     deterministic_assignment_id,
 )
 
-from .factories import challenge_request, dev_wallet
+from .factories import TEST_REVEAL_ROUND, challenge_request, dev_wallet
 
 VALIDATOR_WALLET = dev_wallet("//Alice")
 MINER_WALLET = dev_wallet("//Bob")
 VALIDATOR = VALIDATOR_WALLET.hotkey.ss58_address
 MINER = MINER_WALLET.hotkey.ss58_address
-REVEAL_ROUND = bt.timelock.current_round() + 100
+REVEAL_ROUND = TEST_REVEAL_ROUND
 RESPONSE_CLOSE_ROUND = REVEAL_ROUND - 2
 ISSUE_CLOSE_ROUND = RESPONSE_CLOSE_ROUND - 1
 

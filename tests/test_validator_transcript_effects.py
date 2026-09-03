@@ -7,7 +7,6 @@ from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
 
-import bittensor as bt
 import httpx
 import pytest
 from bittensor import UnsignedExtrinsic
@@ -74,13 +73,13 @@ from umi.validator_transcript_effects import (
     replay_transcript_stage_record,
 )
 
-from .factories import POLICY_HASH, challenge_request, dev_wallet
+from .factories import POLICY_HASH, TEST_REVEAL_ROUND, challenge_request, dev_wallet
 
 VALIDATOR_WALLET = dev_wallet("//Alice")
 MINER_WALLET = dev_wallet("//Bob")
 VALIDATOR = VALIDATOR_WALLET.hotkey.ss58_address
 MINER = MINER_WALLET.hotkey.ss58_address
-REVEAL_ROUND = bt.timelock.current_round() + 100
+REVEAL_ROUND = TEST_REVEAL_ROUND
 RESPONSE_CLOSE_ROUND = REVEAL_ROUND - 2
 ISSUE_CLOSE_ROUND = RESPONSE_CLOSE_ROUND - 1
 SIGNATURE = b"s" * 64

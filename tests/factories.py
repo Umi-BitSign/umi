@@ -19,6 +19,7 @@ POLICY_HASH = "20" * 32
 BLOCK_HASH = "0x" + "30" * 32
 VIDEO_BYTES = b"not-a-real-mp4-component-fixture"
 VIDEO_SHA256 = hashlib.sha256(VIDEO_BYTES).hexdigest()
+TEST_REVEAL_ROUND = 10**9
 
 
 def dev_wallet(uri: str, crypto_type: int = bt.sp_core.CRYPTO_SR25519):
@@ -33,7 +34,7 @@ def challenge_request(
     stratum: str = "short_utterance",
     reveal_round: int | None = None,
 ) -> TranslationRequest:
-    reveal = reveal_round or bt.timelock.current_round() + 100
+    reveal = TEST_REVEAL_ROUND if reveal_round is None else reveal_round
     return TranslationRequest.model_validate(
         {
             "protocol": "umi-asl/0.1",
@@ -62,7 +63,7 @@ def challenge_request(
 
 
 def three_requests(reveal_round: int | None = None) -> tuple[TranslationRequest, ...]:
-    reveal = reveal_round or bt.timelock.current_round() + 100
+    reveal = TEST_REVEAL_ROUND if reveal_round is None else reveal_round
     return (
         challenge_request(1, stratum="fingerspelling", reveal_round=reveal),
         challenge_request(2, stratum="short_utterance", reveal_round=reveal),

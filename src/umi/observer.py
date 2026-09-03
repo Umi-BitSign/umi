@@ -355,7 +355,7 @@ class SnapshotCache:
                     self._stop.wait(),
                     timeout=self._refresh_interval_seconds,
                 )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 await self.refresh()
 
 

@@ -702,7 +702,7 @@ class ValidatorExtrinsicJournal:
 
         try:
             return await asyncio.wait_for(invoke(), timeout=self.port_timeout_seconds)
-        except TimeoutError as error:
+        except (asyncio.TimeoutError, TimeoutError) as error:
             raise ExtrinsicPortTimeout(f"{name} port exceeded its hard deadline") from error
 
     def load(self, operation: ExtrinsicOperation) -> JournalEntry | None:

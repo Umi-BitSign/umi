@@ -6,7 +6,6 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
-import bittensor as bt
 import pytest
 
 from umi.protocol import PROTOCOL_VERSION, canonical_json_bytes
@@ -30,12 +29,12 @@ from umi.validator_window_material import (
     WindowMaterialStoreError,
 )
 
-from .factories import POLICY_HASH, challenge_request, dev_wallet
+from .factories import POLICY_HASH, TEST_REVEAL_ROUND, challenge_request, dev_wallet
 
 VALIDATOR_WALLET = dev_wallet("//Alice")
 VALIDATOR = VALIDATOR_WALLET.hotkey.ss58_address
 MINER = dev_wallet("//Bob").hotkey.ss58_address
-REVEAL_ROUND = bt.timelock.current_round() + 100
+REVEAL_ROUND = TEST_REVEAL_ROUND
 RESPONSE_CLOSE_ROUND = REVEAL_ROUND - 2
 ISSUE_CLOSE_ROUND = RESPONSE_CLOSE_ROUND - 1
 SOURCE_BYTES = b"canonical-pool-selection-evidence"

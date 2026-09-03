@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from umi.protocol import (
     canonical_json_bytes,
     request_digest,
 )
-from umi.validator import replay_bundle, run_component_case
+from umi.validator import QueryOutcome, replay_bundle, run_component_case
 from umi.video import VideoFetcher
 
 from .factories import VIDEO_BYTES, dev_wallet, ground_truth, three_requests
@@ -208,6 +209,55 @@ def test_component_scoring_keeps_missing_assignment_as_zero(tmp_path: Path) -> N
     assert all(clip["score"] == {"numerator": 0, "denominator": 1} for clip in scores["per_clip"])
     assert scores["diagnostic_accuracy"]["score"] == {"numerator": 0, "denominator": 1}
     assert scores["weight_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_component_runner_serializes_one_validators_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests, truth, request_path, truth_path = write_case_inputs(tmp_path)
+    case_root = tmp_path / "case"
+    prepare_case(request_path, truth_path, case_root)
+    active = 0
+    maximum_active = 0
+    observed: list[str] = []
+
+    async def fake_query(request: TranslationRequest, **_kwargs) -> QueryOutcome:
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        try:
+            await asyncio.sleep(0)
+            observed.append(request.challenge_id)
+            return QueryOutcome(
+                request=request,
+                auth_headers={},
+                received_at_unix_ns=None,
+                envelope_bytes=None,
+                envelope=None,
+                response_signature=None,
+                sealed_response=None,
+                failure_code="transport_error",
+            )
+        finally:
+            active -= 1
+
+    async def fake_decrypt(_sealed, *, timeout):
+        return canonical_json_bytes(truth)
+
+    monkeypatch.setattr(validator_module, "query_miner", fake_query)
+    monkeypatch.setattr(validator_module, "_decrypt", fake_decrypt)
+    await run_component_case(
+        case_root,
+        tmp_path / "bundle",
+        wallet=dev_wallet("//Alice"),
+        miner_url="http://miner.test",
+        miner_hotkey=dev_wallet("//Bob").hotkey.ss58_address,
+    )
+
+    assert maximum_active == 1
+    assert observed == [request.challenge_id for request in requests]
 
 
 @pytest.mark.asyncio

@@ -3053,7 +3053,7 @@ class PoolAndSelectionEffect:
             if inspect.isawaitable(result):
                 return await asyncio.wait_for(result, timeout=self.port_timeout_seconds)
             return result
-        except TimeoutError as error:
+        except (asyncio.TimeoutError, TimeoutError) as error:
             raise PoolEffectError(f"{label} port timed out") from error
 
 
