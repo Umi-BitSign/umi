@@ -36,6 +36,45 @@ All paths below should be absolute. Run every `--check` form first. A check read
 and validates its inputs, including media decoding, but creates no wallet, state
 directory, receipt, bundle, release, signature, or transaction.
 
+Run every availability command with the exact media tools from the already
+verified inactive release. They live in separate content-addressed directories,
+so installing the Python wheel does not put them on `PATH`:
+
+```sh
+RELEASE="$(realpath /operator/local/path/to/public-release)"
+FFMPEG_RELATIVE_PATH="$(
+  jq -er '.external_artifacts[] | select(.label == "ffmpeg_binary") | .relative_path' \
+    "$RELEASE/release-manifest.json"
+)"
+FFMPEG_SHA256="$(
+  jq -er '.external_artifacts[] | select(.label == "ffmpeg_binary") | .sha256' \
+    "$RELEASE/release-manifest.json"
+)"
+FFPROBE_RELATIVE_PATH="$(
+  jq -er '.external_artifacts[] | select(.label == "ffprobe_binary") | .relative_path' \
+    "$RELEASE/release-manifest.json"
+)"
+FFPROBE_SHA256="$(
+  jq -er '.external_artifacts[] | select(.label == "ffprobe_binary") | .sha256' \
+    "$RELEASE/release-manifest.json"
+)"
+case "$FFMPEG_RELATIVE_PATH" in "artifacts/sha256/$FFMPEG_SHA256/ffmpeg") ;; *) exit 1 ;; esac
+case "$FFPROBE_RELATIVE_PATH" in "artifacts/sha256/$FFPROBE_SHA256/ffprobe") ;; *) exit 1 ;; esac
+FFMPEG_PATH="$RELEASE/$FFMPEG_RELATIVE_PATH"
+FFPROBE_PATH="$RELEASE/$FFPROBE_RELATIVE_PATH"
+test "$(sha256sum "$FFMPEG_PATH" | cut -d ' ' -f 1)" = "$FFMPEG_SHA256"
+test "$(sha256sum "$FFPROBE_PATH" | cut -d ' ' -f 1)" = "$FFPROBE_SHA256"
+export PATH="$(dirname "$FFMPEG_PATH"):$(dirname "$FFPROBE_PATH"):$PATH"
+test "$(command -v ffmpeg)" = "$FFMPEG_PATH"
+test "$(command -v ffprobe)" = "$FFPROBE_PATH"
+```
+
+The coordinator and every validator keep this environment for `assemble`,
+`qualify`, and `aggregate`. Do not copy, symlink, or substitute either executable.
+Media inspection opens the resolved files, verifies their signed policy digests
+and ownership constraints, copies them into a private execution directory, and
+invokes only those copies.
+
 ## 1. Assemble the candidate bundle
 
 Each publisher can produce its pool body, public manifest, timelock, and 14 videos
@@ -113,8 +152,9 @@ Before the announcement block, start the planner with the signed validator
 configuration alone:
 
 ```sh
+VALIDATOR_CONFIG=/absolute/private/startup-config/operator-templates/VALIDATOR_ACCOUNT_ID32_HEX.validator.json
 umi-validator-live \
-  --config /absolute/private/startup/VALIDATOR_ACCOUNT.validator.json \
+  --config "$VALIDATOR_CONFIG" \
   --prime-next-window
 ```
 
@@ -130,9 +170,10 @@ protocol state, or a finality gap fails closed.
 Do not pass `--operator-config` to this command. The mirror readiness set does not
 exist yet, and the planner has no reason to load a wallet or private mirror
 credentials. Full `--check` and serving startup still require the operator config,
-verified readiness set, and all seven stage adapters. Use the exact same
-`state_root` for priming, authority collection, qualification, and the later live
-validator process.
+verified readiness set, and all seven stage adapters. Use the same live-validator
+`state_root` in the validator config and as `validator_state_root` in the authority
+config. The later qualification `--state-root` is a separate owner-private
+retention store and must not overlap the validator root or any input.
 
 Use the state root initialized by the primer and reserved for the live validator.
 Its finality database must already contain the exact `announcement_block` and its
