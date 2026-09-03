@@ -92,7 +92,7 @@ Current artifact pins are:
 - `fixtures/finney-grandpa-checkpoint-v1.json` SHA-256:
   `b3f2191587a21b57fbe9f56e3a8245e852c06cdebb0a4dd0b878a5242d9a8311`;
 - source-tree SHA-256:
-  `b53039b43185202d378496e1940b2a65974438be252fc9d83b18213257d591b7`;
+  `3bd630238cdc042572999b5058fadc63f6ca51ea7835b0f42023793a7abc0002`;
 - `aarch64-apple-darwin` release binary SHA-256:
   `7ab05980889a64657365dda53a3288be90ef720c914dc0f786a020f174b0270e`.
 
