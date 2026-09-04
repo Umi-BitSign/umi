@@ -194,17 +194,21 @@ jobs:
       - name: Seal and verify the native miner finality artifact
         run: |
           git worktree add --detach "$RUNNER_TEMP/umi-artifact-source" HEAD
+          ARTIFACT_PARENT="$GITHUB_WORKSPACE/target/ci-native-artifact"
+          ARTIFACT_DIR="$ARTIFACT_PARENT/umi-darwin-finality"
+          install -d -m 0700 "$ARTIFACT_PARENT"
+          chmod -RN "$ARTIFACT_PARENT"
           .venv/bin/umi-miner-finality-artifact \
             --repository-root "$RUNNER_TEMP/umi-artifact-source" \
             --binary "$GITHUB_WORKSPACE/rust/grandpa-finality-observer/target/release/umi-grandpa-finality-observer" \
-            --output-dir "$RUNNER_TEMP/umi-darwin-finality"
-          test -x "$RUNNER_TEMP/umi-darwin-finality/umi-grandpa-finality-observer"
-          "$RUNNER_TEMP/umi-darwin-finality/umi-grandpa-finality-observer" \
+            --output-dir "$ARTIFACT_DIR"
+          test -x "$ARTIFACT_DIR/umi-grandpa-finality-observer"
+          "$ARTIFACT_DIR/umi-grandpa-finality-observer" \
             --conformance-self-test
 
       - name: Test macOS miner runtime boundaries
         env:
-          UMI_TEST_NATIVE_DARWIN_FINALITY_ARTIFACT_DIR: ${{ runner.temp }}/umi-darwin-finality
+          UMI_TEST_NATIVE_DARWIN_FINALITY_ARTIFACT_DIR: ${{ github.workspace }}/target/ci-native-artifact/umi-darwin-finality
         run: |
           uv run --locked pytest -q \
             tests/test_grandpa_finality.py \
