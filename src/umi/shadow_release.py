@@ -5877,6 +5877,7 @@ def emit_miner_finality_artifact(
         temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=parent))
     except Exception as error:
         raise output_error("temporary_directory", error) from error
+    published = False
     try:
         payloads = {
             "umi-grandpa-finality-observer": (artifact.binary, 0o555),
@@ -5894,17 +5895,19 @@ def emit_miner_finality_artifact(
             except Exception as error:
                 raise output_error("file_chmod", error) from error
         try:
-            temporary.chmod(0o555)
-        except Exception as error:
-            raise output_error("directory_chmod", error) from error
-        try:
             os.replace(temporary, destination)
         except Exception as error:
             raise output_error("replace", error) from error
+        published = True
+        try:
+            destination.chmod(0o555)
+        except Exception as error:
+            raise output_error("directory_chmod", error) from error
     except ShadowReleaseError:
+        cleanup_root = destination if published else temporary
         with suppress(OSError):
-            temporary.chmod(0o700)
-        shutil.rmtree(temporary, ignore_errors=True)
+            cleanup_root.chmod(0o700)
+        shutil.rmtree(cleanup_root, ignore_errors=True)
         raise
 
 

@@ -1735,7 +1735,8 @@ def test_native_miner_finality_artifact_reports_atomic_replace_errno(
     )
     output = (tmp_path / "sealed-native-finality").resolve()
 
-    def fail_replace(_source: Path, _destination: Path) -> None:
+    def fail_replace(source: Path, _destination: Path) -> None:
+        assert stat.S_IMODE(Path(source).stat().st_mode) == 0o700
         raise OSError(28, "no space left on device")
 
     monkeypatch.setattr(shadow_release_module.os, "replace", fail_replace)
