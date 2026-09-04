@@ -193,8 +193,9 @@ jobs:
 
       - name: Seal and verify the native miner finality artifact
         run: |
+          git worktree add --detach "$RUNNER_TEMP/umi-artifact-source" HEAD
           .venv/bin/umi-miner-finality-artifact \
-            --repository-root "$GITHUB_WORKSPACE" \
+            --repository-root "$RUNNER_TEMP/umi-artifact-source" \
             --binary "$GITHUB_WORKSPACE/rust/grandpa-finality-observer/target/release/umi-grandpa-finality-observer" \
             --output-dir "$RUNNER_TEMP/umi-darwin-finality"
           test -x "$RUNNER_TEMP/umi-darwin-finality/umi-grandpa-finality-observer"
