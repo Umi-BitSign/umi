@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>vision.umi.observer</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_OBSERVER_BINARY</string>
+    <string>--listen-host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8092</string>
+    <string>--network</string>
+    <string>finney</string>
+    <string>--trusted-host</string>
+    <string>api.umi.vision</string>
+    <string>--cors-origin</string>
+    <string>https://umi.vision</string>
+    <string>--cors-origin</string>
+    <string>https://www.umi.vision</string>
+    <string>--fresh-for-seconds</string>
+    <string>24</string>
+    <string>--maximum-stale-seconds</string>
+    <string>120</string>
+    <string>--refresh-interval-seconds</string>
+    <string>12</string>
+    <string>--refresh-timeout-seconds</string>
+    <string>45</string>
+    <string>--finalized-head-timeout-seconds</string>
+    <string>20</string>
+    <string>--maximum-finalized-head-age-seconds</string>
+    <string>120</string>
+    <string>--maximum-future-block-skew-seconds</string>
+    <string>30</string>
+    <string>--log-level</string>
+    <string>info</string>
+  </array>
+
+  <key>UserName</key>
+  <string>REPLACE_WITH_SERVICE_USER</string>
+  <key>GroupName</key>
+  <string>REPLACE_WITH_SERVICE_GROUP</string>
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_REPOSITORY_ROOT</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>REPLACE_WITH_SERVICE_HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>BITTENSOR_RUNTIME_CACHE_DIR</key>
+    <string>REPLACE_WITH_RUNTIME_CACHE</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_OBSERVER_STDOUT</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_OBSERVER_STDERR</string>
+</dict>
+</plist>

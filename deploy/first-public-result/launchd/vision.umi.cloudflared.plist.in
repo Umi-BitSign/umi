@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>vision.umi.cloudflared</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_CLOUDFLARED_BINARY</string>
+    <string>tunnel</string>
+    <string>--no-autoupdate</string>
+    <string>--loglevel</string>
+    <string>info</string>
+    <string>--metrics</string>
+    <string>127.0.0.1:49092</string>
+    <string>run</string>
+    <string>--token-file</string>
+    <string>REPLACE_WITH_TUNNEL_TOKEN_FILE</string>
+  </array>
+
+  <key>UserName</key>
+  <string>REPLACE_WITH_SERVICE_USER</string>
+  <key>GroupName</key>
+  <string>REPLACE_WITH_SERVICE_GROUP</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>REPLACE_WITH_SERVICE_HOME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_CLOUDFLARED_STDOUT</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_CLOUDFLARED_STDERR</string>
+</dict>
+</plist>

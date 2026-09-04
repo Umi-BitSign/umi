@@ -235,6 +235,7 @@ def test_status_is_finalized_chain_observation_not_umi_evidence() -> None:
     )
     assert static_source["artifact_sha256"] == response.headers["x-umi-contract-revision"]
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["strict-transport-security"] == "max-age=2592000"
     assert network.status_code == 200
     assert collector.calls == 1, "request handlers must not trigger chain refreshes"
 

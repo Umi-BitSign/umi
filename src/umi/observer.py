@@ -701,6 +701,7 @@ def create_observer_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Strict-Transport-Security"] = "max-age=2592000"
         return response
 
     @app.exception_handler(ObserverUnavailable)

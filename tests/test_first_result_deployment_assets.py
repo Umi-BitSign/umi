@@ -188,3 +188,14 @@ def test_placeholder_checker_rejects_examples_and_expands_observer_targets(
     )
     assert passed.returncode == 0
     assert "deployment_files_resolved=3" in passed.stdout
+
+
+def test_macos_launchd_assets_pass_their_self_test() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "launchd" / "test_assets.py")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
