@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .protocol import Video
+from .validator_delivery import normalized_https_origin
 
 
 class VideoFetchError(RuntimeError):
@@ -54,20 +55,32 @@ AddressResolver = Callable[[str, int], Awaitable[Sequence[str]]]
 class HttpVideoFetcher:
     """HTTPS streaming fetcher with an allowlist and a public-IP connection pin."""
 
-    allowed_hosts: frozenset[str]
+    allowed_origins: frozenset[str]
     maximum_clip_size_bytes: int
     timeout_seconds: float
     maximum_http_header_bytes: int = 16 * 1024
-    allowed_ports: frozenset[int] = frozenset()
     allow_http_for_tests: bool = False
     transport: httpx.AsyncBaseTransport | None = None
     resolver: AddressResolver | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.allowed_hosts, frozenset) or not self.allowed_hosts:
-            raise ValueError("at least one allowed video hostname is required")
-        if any(not isinstance(host, str) or not host.strip() for host in self.allowed_hosts):
-            raise ValueError("allowed video hostnames must be nonempty strings")
+        if not isinstance(self.allow_http_for_tests, bool):
+            raise TypeError("allow_http_for_tests must be boolean")
+        if not isinstance(self.allowed_origins, frozenset) or not self.allowed_origins:
+            raise ValueError("at least one allowed video origin is required")
+        try:
+            normalized_origins = frozenset(
+                normalized_https_origin(
+                    origin,
+                    allow_http_for_tests=self.allow_http_for_tests,
+                )
+                for origin in self.allowed_origins
+            )
+        except ValueError as error:
+            raise ValueError("allowed video origins must be valid origin URLs") from error
+        if len(normalized_origins) != len(self.allowed_origins):
+            raise ValueError("allowed video origins must be unique after normalization")
+        object.__setattr__(self, "allowed_origins", normalized_origins)
         if (
             isinstance(self.maximum_clip_size_bytes, bool)
             or not isinstance(self.maximum_clip_size_bytes, int)
@@ -87,13 +100,6 @@ class HttpVideoFetcher:
             or self.timeout_seconds <= 0
         ):
             raise ValueError("timeout_seconds must be positive")
-        if not isinstance(self.allowed_ports, frozenset) or any(
-            isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
-            for port in self.allowed_ports
-        ):
-            raise ValueError("allowed video ports must be integers from 1 through 65535")
-        if not isinstance(self.allow_http_for_tests, bool):
-            raise TypeError("allow_http_for_tests must be boolean")
 
     async def fetch(self, descriptor: Video) -> bytes:
         return (await self.fetch_with_receipt(descriptor)).data
@@ -106,8 +112,6 @@ class HttpVideoFetcher:
         if parsed.scheme not in allowed_schemes:
             raise VideoFetchError("video URL scheme is not allowed")
         hostname = (parsed.hostname or "").lower().rstrip(".")
-        if hostname not in {host.lower().rstrip(".") for host in self.allowed_hosts}:
-            raise VideoFetchError("video URL hostname is not allowlisted")
         if parsed.username is not None or parsed.password is not None:
             raise VideoFetchError("video URL must not contain user information")
         if parsed.fragment:
@@ -118,9 +122,18 @@ class HttpVideoFetcher:
             raise VideoFetchError("video URL port is invalid") from error
         expected_port = 443 if parsed.scheme == "https" else 80
         actual_port = port or expected_port
-        allowed_ports = self.allowed_ports or frozenset({expected_port})
-        if actual_port not in allowed_ports:
-            raise VideoFetchError("video URL port is not allowlisted")
+        authority = f"[{hostname}]" if ":" in hostname else hostname
+        if actual_port != expected_port:
+            authority += f":{actual_port}"
+        try:
+            origin = normalized_https_origin(
+                f"{parsed.scheme}://{authority}",
+                allow_http_for_tests=self.allow_http_for_tests,
+            )
+        except ValueError as error:  # pragma: no cover - already parsed above
+            raise VideoFetchError("video URL origin is invalid") from error
+        if origin not in self.allowed_origins:
+            raise VideoFetchError("video URL origin is not allowlisted")
         if descriptor.size_bytes > self.maximum_clip_size_bytes:
             raise VideoFetchError("declared video size exceeds the clip ceiling")
 

@@ -92,9 +92,13 @@ Current artifact pins are:
 - `fixtures/finney-grandpa-checkpoint-v1.json` SHA-256:
   `b3f2191587a21b57fbe9f56e3a8245e852c06cdebb0a4dd0b878a5242d9a8311`;
 - source-tree SHA-256:
-  `3bd630238cdc042572999b5058fadc63f6ca51ea7835b0f42023793a7abc0002`;
-- `aarch64-apple-darwin` release binary SHA-256:
-  `7ab05980889a64657365dda53a3288be90ef720c914dc0f786a020f174b0270e`.
+  `3bd630238cdc042572999b5058fadc63f6ca51ea7835b0f42023793a7abc0002`.
+
+Release binary hashes are target- and release-specific. The primary Linux
+validator hash is fixed by its signed release. An Apple Silicon miner hash is
+derived from the native `umi-miner-finality-artifact` output, bound to its build
+report, and included in the same signed policy and release manifest. A local
+binary that is not named by that release is not a production pin.
 
 The source-tree digest starts with
 `umi-grandpa-finality-observer-source-v1\0`. It then covers, in bytewise sorted

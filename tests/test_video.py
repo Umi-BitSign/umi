@@ -28,7 +28,7 @@ def descriptor(body: bytes, *, url: str = "https://objects.example/opaque") -> V
 
 def fetcher(handler) -> HttpVideoFetcher:
     return HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=32,
         timeout_seconds=5,
         transport=httpx.MockTransport(handler),
@@ -91,7 +91,7 @@ async def test_video_rejects_oversized_response_headers_before_body() -> None:
         )
 
     bounded = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=32,
         maximum_http_header_bytes=64,
         timeout_seconds=5,
@@ -132,7 +132,7 @@ async def test_video_rejects_oversized_generated_request_headers_before_send() -
         return httpx.Response(200, content=body)
 
     bounded = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=32,
         maximum_http_header_bytes=8,
         timeout_seconds=5,
@@ -151,12 +151,12 @@ async def test_video_rejects_oversized_generated_request_headers_before_send() -
         ("maximum_clip_size_bytes", True),
         ("maximum_http_header_bytes", 1.5),
         ("timeout_seconds", float("nan")),
-        ("allowed_ports", frozenset({True})),
+        ("allowed_origins", frozenset({"ftp://objects.example"})),
     ],
 )
 def test_video_fetcher_rejects_ambiguous_limit_types(field: str, value: object) -> None:
     values = {
-        "allowed_hosts": frozenset({"objects.example"}),
+        "allowed_origins": frozenset({"https://objects.example"}),
         "maximum_clip_size_bytes": 32,
         "maximum_http_header_bytes": 16,
         "timeout_seconds": 5,
@@ -181,7 +181,7 @@ async def test_video_declared_or_streamed_oversize_aborts() -> None:
         await fetcher(wrong_length).fetch(descriptor(body))
 
     streaming_fetcher = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=2,
         timeout_seconds=5,
         transport=httpx.MockTransport(
@@ -223,11 +223,10 @@ async def test_video_url_boundary_rejects_untrusted_origins(url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_nonstandard_video_port_must_be_explicitly_allowlisted() -> None:
+async def test_nonstandard_video_port_must_be_in_exact_allowlisted_origin() -> None:
     body = b"video"
     custom = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
-        allowed_ports=frozenset({8443}),
+        allowed_origins=frozenset({"https://objects.example:8443"}),
         maximum_clip_size_bytes=32,
         timeout_seconds=5,
         transport=httpx.MockTransport(
@@ -240,6 +239,37 @@ async def test_nonstandard_video_port_must_be_explicitly_allowlisted() -> None:
         resolver=public_resolver,
     )
     assert await custom.fetch(descriptor(body, url="https://objects.example:8443/opaque")) == body
+
+
+@pytest.mark.asyncio
+async def test_video_origin_allowlist_does_not_cross_product_hosts_and_ports() -> None:
+    body = b"video"
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "video/mp4"},
+            content=body,
+        )
+
+    exact = HttpVideoFetcher(
+        allowed_origins=frozenset(
+            {
+                "https://objects-a.example",
+                "https://objects-b.example:8443",
+            }
+        ),
+        maximum_clip_size_bytes=32,
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+        resolver=public_resolver,
+    )
+    with pytest.raises(VideoFetchError, match="origin is not allowlisted"):
+        await exact.fetch(descriptor(body, url="https://objects-a.example:8443/opaque"))
+    assert called is False
 
 
 @pytest.mark.asyncio
@@ -256,7 +286,7 @@ async def test_video_fetch_timeout_is_total_not_per_chunk() -> None:
             return None
 
     slow = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=32,
         timeout_seconds=0.02,
         transport=httpx.MockTransport(
@@ -291,7 +321,7 @@ async def test_video_fetch_pins_public_dns_result_and_preserves_https_authority(
         )
 
     pinned = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=32,
         timeout_seconds=5,
         transport=httpx.MockTransport(handler),
@@ -315,7 +345,7 @@ async def test_video_fetch_timeout_includes_hostname_resolution() -> None:
         return httpx.Response(200, content=body)
 
     pinned = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=32,
         timeout_seconds=0.01,
         transport=httpx.MockTransport(handler),
@@ -341,7 +371,7 @@ async def test_video_fetch_rejects_nonpublic_dns_results_before_connect(address:
         return httpx.Response(200, content=body)
 
     pinned = HttpVideoFetcher(
-        allowed_hosts=frozenset({"objects.example"}),
+        allowed_origins=frozenset({"https://objects.example"}),
         maximum_clip_size_bytes=32,
         timeout_seconds=5,
         transport=httpx.MockTransport(handler),

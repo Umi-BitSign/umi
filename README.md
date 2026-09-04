@@ -16,6 +16,7 @@ protocol extension.
 - [bitsign product MVP](roadmap/bitsign-mvp/README.md)
 - [public observer API contract](docs/DASHBOARD_API.md)
 - [miner model integration](docs/MINER_MODEL_INTEGRATION.md)
+- [Apple Silicon miner operator](docs/MACOS_MINER_OPERATOR.md)
 - [publisher batch operator](docs/PUBLISHER_BATCH_OPERATOR.md)
 - [publisher availability operator](docs/PUBLISHER_AVAILABILITY_OPERATOR.md)
 - [reference mirror and delivery service](docs/MIRROR_SERVICE_OPERATOR.md)
@@ -94,6 +95,12 @@ wall-clock deadline kills the complete process group. Darwin reserves a very lar
 shared virtual-address region, so local component tooling on macOS still needs an
 outer memory sandbox when it inspects untrusted media. Public validator releases
 target Linux.
+
+Apple Silicon is supported as a miner-only target through an additive native
+finality artifact covered by the base release signatures. The signed miner
+template and resolver bind the Darwin binary, build report, license closure,
+policy, chain specification, wheel, and lockfile. This does not enable or imply a
+Darwin validator runtime. See the [macOS miner operator guide](docs/MACOS_MINER_OPERATOR.md).
 
 The remaining weight-activation gates are external evidence and governance work,
 not missing inactive-validator code. They include independent publishers and
@@ -230,8 +237,9 @@ If fetching, decoding, or inference fails, the miner emits a signed, timelocked
 error response whose score is zero.
 
 Inference concurrency defaults to the policy validator count. An explicit
-`--max-inference-concurrency` below that count is rejected, which reserves one
-runnable slot for each validator. A synchronous plugin requires the explicit
+`--max-inference-concurrency` must be a positive multiple of that count. The miner
+divides those slots equally among policy validators, so one validator cannot consume
+another validator's reserved capacity. A synchronous plugin requires the explicit
 `--allow-unsafe-sync-translator` flag and runs in a dedicated bounded thread pool.
 Python cannot terminate a hung worker thread, so such a backend must implement its
 own cancellation and the operator must restart a process whose backend does not
@@ -243,6 +251,13 @@ declare the same digest through its `model_revision` property. It may also expos
 async `startup()` and `shutdown()` hooks, which the miner runs under a bounded
 lifecycle timeout before serving and during shutdown. Waiting for a model slot is
 bounded separately from inference itself.
+
+An in-process model may explicitly enable `--coalesce-window-video-inference`
+with `--max-backend-workers` when its output depends only on the signed window,
+verified video, task, policy, and model revision. Matching requests then share one
+bounded model job while their envelopes remain separately bound to each validator
+and request. The mode is rejected for the request-digest-bound Unix-socket
+transport and must not be used with a request-sensitive backend.
 
 The miner requires a canonical inactive scoring policy and two durable SQLite
 stores. The policy supplies the validator registry, authentication window, request
@@ -347,7 +362,7 @@ umi-validator prepare \
 The prepared directory contains the public requests and encrypted ground truth;
 it does not contain reference plaintext.
 
-Start the miner with the policy-bound validator registry and a narrow video-host
+Start the miner with the policy-bound validator registry and an exact video-origin
 allowlist:
 
 ```bash
@@ -361,9 +376,9 @@ umi-miner \
   --finality-state /var/lib/umi/miner-finality.sqlite3 \
   --translator your_package.model:translator \
   --model-revision 64_LOWERCASE_HEX_CHARACTERS \
-  --video-host delivery-a.example.org \
-  --video-host delivery-b.example.org \
-  --video-host delivery-c.example.org \
+  --video-origin https://delivery-a.example.org \
+  --video-origin https://delivery-b.example.org:8443 \
+  --video-origin https://delivery-c.example.org \
   --nonce-db /var/lib/umi/miner-nonces.sqlite3 \
   --assignment-db /var/lib/umi/miner-assignments.sqlite3 \
   --listen-host 127.0.0.1 \
@@ -371,9 +386,10 @@ umi-miner \
 ```
 
 Take the target triple, finality binary, chain spec, and scoring policy from the
-verified inactive release. Use one `--video-host` for every delivery origin in
-that release's mirror-discovery rule and no other host. Start the miner early
-enough for its owned finality observer to reach the policy activation block.
+verified inactive release. Use one `--video-origin` for every delivery origin in
+that release's mirror-discovery rule and no other origin. The scheme, host, and
+effective port are checked as one tuple; ports are not shared across hosts. Start
+the miner early enough for its owned finality observer to reach the policy activation block.
 Use `--translator-unix-socket` instead of `--translator` when the model runs in
 the isolated process described below.
 
@@ -399,12 +415,12 @@ sudo certbot certonly \
   --deploy-hook 'systemctl reload your-umi-tls-proxy'
 ```
 
-HTTPS port 443 is allowed by default. Repeat `--video-port` to admit a different
-port explicitly. Production fetches resolve the allowlisted hostname once per
-attempt, reject any non-public result, pin the connection to one deterministic IP,
-and preserve the original Host authority and TLS SNI. Proxy environment variables
-are ignored. Operators should use a controlled DNS resolver and keep the allowlist
-narrow.
+Each `--video-origin` is an HTTPS origin with no path, query, user information, or
+fragment. Omit the port only for 443. Production fetches resolve the allowlisted
+hostname once per attempt, reject any non-public result, pin the connection to one
+deterministic IP, and preserve the original Host authority and TLS SNI. Proxy
+environment variables are ignored. Operators should use a controlled DNS resolver
+and keep the allowlist narrow.
 
 After the service is reachable, replace `YOUR_PUBLIC_IP` and publish its endpoint:
 

@@ -144,19 +144,20 @@ async def run_local_component_pilot(
             ledger.close()
 
 
-def _video_origins(requests_path: Path) -> tuple[frozenset[str], frozenset[int]]:
+def _video_origins(requests_path: Path) -> frozenset[str]:
     from .component import _parse_requests
 
     requests = _parse_requests(
         _read_bounded_regular_file(requests_path, MAX_COMPONENT_MANIFEST_BYTES)
     )
-    hosts: set[str] = set()
-    ports: set[int] = set()
+    origins: set[str] = set()
     for request in requests:
         host, port = validate_public_pilot_video_url(str(request.video.url))
-        hosts.add(host)
-        ports.add(port)
-    return frozenset(hosts), frozenset(ports)
+        authority = f"[{host}]" if ":" in host else host
+        if port != 443:
+            authority += f":{port}"
+        origins.add(f"https://{authority}")
+    return frozenset(origins)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -208,10 +209,9 @@ def main() -> None:
         allow_synchronous=args.allow_unsafe_sync_translator,
         expected_model_revision=args.model_revision,
     )
-    hosts, ports = _video_origins(args.requests)
+    origins = _video_origins(args.requests)
     video_fetcher = HttpVideoFetcher(
-        allowed_hosts=hosts,
-        allowed_ports=ports,
+        allowed_origins=origins,
         maximum_clip_size_bytes=Limits().maximum_clip_size_bytes,
         maximum_http_header_bytes=Limits().maximum_http_header_bytes,
         timeout_seconds=args.video_fetch_timeout,

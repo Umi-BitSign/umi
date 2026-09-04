@@ -93,6 +93,7 @@ jobs:
           .venv/bin/umi-component-pilot --help
           .venv/bin/umi-demo --help
           .venv/bin/umi-miner --help
+          .venv/bin/umi-miner-finality-artifact --help
           .venv/bin/umi-mirror-service --help
           .venv/bin/umi-observer --help
           .venv/bin/umi-publisher-batch --help
@@ -102,6 +103,7 @@ jobs:
           .venv/bin/umi-shadow-release --help
           .venv/bin/umi-shadow-release-finalize --help
           .venv/bin/umi-shadow-release-materialize-operator --help
+          .venv/bin/umi-shadow-release-resolve-miner --help
           .venv/bin/umi-shadow-release-verify --help
           .venv/bin/umi-validator --help
           .venv/bin/umi-validator-audit-publish --help
@@ -156,6 +158,65 @@ jobs:
 
       - name: Build release observer
         run: cargo +1.98.0 build --locked --release
+
+  macos-miner:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Install pinned toolchains and project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv==0.12.9
+          uv lock --check
+          uv sync --locked --extra dev
+          rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
+
+      - name: Test and build native finality observer
+        run: |
+          cargo +1.98.0 fmt --manifest-path rust/grandpa-finality-observer/Cargo.toml -- --check
+          cargo +1.98.0 clippy --locked --all-targets \
+            --manifest-path rust/grandpa-finality-observer/Cargo.toml -- -D warnings
+          cargo +1.98.0 test --locked \
+            --manifest-path rust/grandpa-finality-observer/Cargo.toml
+          cargo +1.98.0 build --locked --release \
+            --manifest-path rust/grandpa-finality-observer/Cargo.toml
+
+      - name: Seal and verify the native miner finality artifact
+        run: |
+          .venv/bin/umi-miner-finality-artifact \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --binary "$GITHUB_WORKSPACE/rust/grandpa-finality-observer/target/release/umi-grandpa-finality-observer" \
+            --output-dir "$RUNNER_TEMP/umi-darwin-finality"
+          test -x "$RUNNER_TEMP/umi-darwin-finality/umi-grandpa-finality-observer"
+          "$RUNNER_TEMP/umi-darwin-finality/umi-grandpa-finality-observer" \
+            --conformance-self-test
+
+      - name: Test macOS miner runtime boundaries
+        env:
+          UMI_TEST_NATIVE_DARWIN_FINALITY_ARTIFACT_DIR: ${{ runner.temp }}/umi-darwin-finality
+        run: |
+          uv run --locked pytest -q \
+            tests/test_grandpa_finality.py \
+            tests/test_grandpa_finality_supervisor.py \
+            tests/test_miner_admission.py \
+            tests/test_miner_resources.py \
+            tests/test_miner_transport.py \
+            tests/test_model_scheduler.py
+          uv run --locked pytest -q \
+            tests/test_shadow_release.py::test_signed_release_can_add_a_native_darwin_miner_finality_target
+          .venv/bin/umi-miner --help
+          .venv/bin/umi-miner-finality-artifact --help
+          .venv/bin/umi-shadow-release-resolve-miner --help
 
   executable-conformance:
     runs-on: ubuntu-latest

@@ -25,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import stat
@@ -69,6 +70,8 @@ from .conformance import (
     ConformanceError,
     ConformanceExecutionReport,
     ConformanceFixturePaths,
+    FinalityFixtures,
+    FinalitySelfTestReport,
     execute_conformance_suite,
 )
 from .crypto import verify_response_signature
@@ -89,6 +92,7 @@ from .grandpa_finality import (
     FinalityAttestation,
     GrandpaFinalityObserver,
 )
+from .pinned_artifact import PinnedArtifact, PinnedArtifactError, staged_pinned_artifacts
 from .policy import (
     ChainRuntimePin,
     FinalityVerifierPin,
@@ -152,6 +156,14 @@ RELEASE_BASELINE_PATCH_SCHEMA = "umi-live-shadow-release-baseline-patch/1"
 VALIDATOR_COST_SCHEDULE_SCHEMA = "umi-validator-cost-schedule/1"
 UV_TOOL_PROVENANCE_SCHEMA = "umi-uv-tool-provenance/1"
 MEDIA_RUNTIME_CLOSURE_SCHEMA = "umi-media-runtime-closure/1"
+MINER_FINALITY_BUILD_REPORT_SCHEMA = "umi-miner-finality-build-report/1"
+RELEASE_RELATIVE_MINER_CONFIG_SCHEMA = "umi-miner-live-config-template/1"
+RESOLVED_MINER_RELEASE_SCHEMA = "umi-resolved-miner-release/1"
+
+DARWIN_MINER_TARGET = "aarch64-apple-darwin"
+_DARWIN_ARM64_MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
+_DARWIN_ARM64_CPU_TYPE = 0x0100000C
+_MACHO_EXECUTE_FILE_TYPE = 2
 
 PINNED_UV_VERSION = "0.12.9"
 PINNED_FFMPEG_VERSION = "8.0.1"
@@ -232,6 +244,9 @@ _EXECUTABLE_ARTIFACT_LABELS = frozenset(
         "uv_binary",
     }
 )
+_MINER_FINALITY_BINARY_LABEL_PREFIX = "miner_finality_verifier."
+_MINER_FINALITY_REPORT_LABEL_PREFIX = "miner_finality_build_report."
+_MINER_FINALITY_LICENSE_LABEL_PREFIX = "miner_finality_license_closure."
 _PACKAGED_ARTIFACT_FILENAMES = {
     "python_wheel": "umi_subnet-0.1.0-py3-none-any.whl",
     "python_lockfile": "uv.lock",
@@ -494,6 +509,58 @@ class FinalityReleaseInput(StrictProtocolModel):
         return self
 
 
+class MinerFinalityTargetReleaseInput(StrictProtocolModel):
+    """One native finality artifact admitted for miner request validation only."""
+
+    target_triple: Literal[DARWIN_MINER_TARGET]
+    binary_path: str
+    build_report_path: str
+    license_closure_path: str
+    expected_binary_sha256: Hex32
+    expected_build_report_sha256: Hex32
+    expected_license_closure_sha256: Hex32
+
+    @model_validator(mode="after")
+    def validate_paths(self) -> Self:
+        paths = (
+            _absolute_normal_path(self.binary_path, "miner finality binary"),
+            _absolute_normal_path(self.build_report_path, "miner finality build report"),
+            _absolute_normal_path(self.license_closure_path, "miner finality license closure"),
+        )
+        if len(set(paths)) != len(paths):
+            raise ValueError("miner finality artifact paths must be distinct")
+        for label, digest in (
+            ("miner finality binary", self.expected_binary_sha256),
+            ("miner finality build report", self.expected_build_report_sha256),
+            ("miner finality license closure", self.expected_license_closure_sha256),
+        ):
+            _reject_digest(digest, label)
+        return self
+
+
+class MinerFinalityBuildReport(StrictProtocolModel):
+    """Native build and self-test record for an additive miner-only binary."""
+
+    schema_: Literal[MINER_FINALITY_BUILD_REPORT_SCHEMA] = Field(alias="schema")
+    role: Literal["miner-finality-only"]
+    target_triple: Literal[DARWIN_MINER_TARGET]
+    host_operating_system: Literal["darwin"]
+    host_architecture: Literal["arm64"]
+    binary_format: Literal["mach-o-64-arm64-executable"]
+    binary_sha256: Hex32
+    binary_size_bytes: Annotated[int, Field(gt=0, le=MAX_RELEASE_FILE_BYTES)]
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    finality_source_revision: Annotated[str, Field(min_length=1, max_length=2_048)]
+    finality_source_tree_sha256: Hex32
+    finality_cargo_lock_sha256: Hex32
+    finality_fixture_set_sha256: Hex32
+    license_closure_sha256: Hex32
+    self_test_output_sha256: Hex32
+    self_test: FinalitySelfTestReport
+    validator_runtime_supported: Literal[False]
+    media_runtime_included: Literal[False]
+
+
 class PublisherCapacityReleaseInput(StrictProtocolModel):
     """Capacity facts plus the administrator signature populated in pass two."""
 
@@ -587,6 +654,105 @@ class ReleaseRelativeValidatorConfig(StrictProtocolModel):
         return self
 
 
+class ReleaseRelativeMinerConfig(StrictProtocolModel):
+    """Signed paths needed by a miner on an additional release target."""
+
+    schema_: Literal[RELEASE_RELATIVE_MINER_CONFIG_SCHEMA] = Field(alias="schema")
+    protocol: Literal[PROTOCOL_VERSION]
+    role: Literal["miner"]
+    translation_weights_active: Literal[False]
+    target_triple: Literal[DARWIN_MINER_TARGET]
+    policy_path: Annotated[str, Field(min_length=1, max_length=4_096)]
+    scoring_policy_sha256: Hex32
+    python_wheel: Annotated[str, Field(min_length=1, max_length=4_096)]
+    python_lockfile: Annotated[str, Field(min_length=1, max_length=4_096)]
+    pyproject: Annotated[str, Field(min_length=1, max_length=4_096)]
+    mirror_discovery_rule_path: Annotated[str, Field(min_length=1, max_length=4_096)]
+    finality_verifier_binary: Annotated[str, Field(min_length=1, max_length=4_096)]
+    finality_chain_spec_path: Annotated[str, Field(min_length=1, max_length=4_096)]
+    finality_build_report: Annotated[str, Field(min_length=1, max_length=4_096)]
+    finality_license_closure: Annotated[str, Field(min_length=1, max_length=4_096)]
+    initial_minimum_finalized_block: Annotated[int, Field(ge=0)]
+    minimum_validator_transport_timeout_seconds: Annotated[float, Field(gt=0, le=300)]
+    minimum_validator_transport_concurrency: Annotated[int, Field(ge=1, le=1_024)]
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    umi_source_tree_sha256: Hex32
+    umi_revision: Annotated[str, Field(min_length=1, max_length=256)]
+    validator_runtime_supported: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_template(self) -> Self:
+        paths = (
+            self.policy_path,
+            self.python_wheel,
+            self.python_lockfile,
+            self.pyproject,
+            self.mirror_discovery_rule_path,
+            self.finality_verifier_binary,
+            self.finality_chain_spec_path,
+            self.finality_build_report,
+            self.finality_license_closure,
+        )
+        if len(set(paths)) != len(paths):
+            raise ValueError("release-relative miner paths must be distinct")
+        for value in paths:
+            _release_relative_path(value, "miner template")
+        if self.umi_revision != (
+            "git:" + self.umi_git_revision + ";source-tree-sha256:" + self.umi_source_tree_sha256
+        ):
+            raise ValueError("miner template UMI revision fields disagree")
+        return self
+
+
+class ResolvedMinerRelease(StrictProtocolModel):
+    """Absolute, authenticated runtime paths for one supported miner target."""
+
+    schema_: Literal[RESOLVED_MINER_RELEASE_SCHEMA] = Field(alias="schema")
+    protocol: Literal[PROTOCOL_VERSION]
+    role: Literal["miner"]
+    translation_weights_active: Literal[False]
+    target_triple: Literal[DARWIN_MINER_TARGET]
+    scoring_policy_sha256: Hex32
+    policy_path: str
+    python_wheel: str
+    python_lockfile: str
+    pyproject: str
+    mirror_discovery_rule_path: str
+    finality_verifier_binary: str
+    finality_chain_spec_path: str
+    finality_build_report: str
+    finality_license_closure: str
+    initial_minimum_finalized_block: Annotated[int, Field(ge=0)]
+    minimum_validator_transport_timeout_seconds: Annotated[float, Field(gt=0, le=300)]
+    minimum_validator_transport_concurrency: Annotated[int, Field(ge=1, le=1_024)]
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    umi_source_tree_sha256: Hex32
+    umi_revision: Annotated[str, Field(min_length=1, max_length=256)]
+    validator_runtime_supported: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_paths(self) -> Self:
+        paths = (
+            self.policy_path,
+            self.python_wheel,
+            self.python_lockfile,
+            self.pyproject,
+            self.mirror_discovery_rule_path,
+            self.finality_verifier_binary,
+            self.finality_chain_spec_path,
+            self.finality_build_report,
+            self.finality_license_closure,
+        )
+        normalized = [_absolute_normal_path(value, "resolved miner artifact") for value in paths]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("resolved miner artifact paths must be distinct")
+        if self.umi_revision != (
+            "git:" + self.umi_git_revision + ";source-tree-sha256:" + self.umi_source_tree_sha256
+        ):
+            raise ValueError("resolved miner UMI revision fields disagree")
+        return self
+
+
 class ReleaseRelativeOperatorConfig(StrictProtocolModel):
     """Secret-free signed operator template materialized on the validator host."""
 
@@ -669,6 +835,9 @@ class LiveShadowReleaseInput(StrictProtocolModel):
     artifacts: ArtifactPaths
     storage_proof: StorageProofReleaseInput
     finality: FinalityReleaseInput
+    miner_finality_targets: Annotated[
+        list[MinerFinalityTargetReleaseInput], Field(max_length=4)
+    ] = Field(default_factory=list, exclude_if=lambda value: not value)
     validator_registry: Annotated[list[ValidatorRegistryEntry], Field(min_length=4)]
     control_group_registry: Annotated[list[PublisherControlGroup], Field(min_length=3)]
     publisher_registry: Annotated[list[PublisherRegistryEntry], Field(min_length=3)]
@@ -684,6 +853,13 @@ class LiveShadowReleaseInput(StrictProtocolModel):
             raise ValueError("release install root and source repository must be disjoint")
         if _TARGET_RE.fullmatch(self.target_triple) is None:
             raise ValueError("target triple is not canonical")
+        if self.target_triple not in _STATIC_MEDIA_TARGET_MACHINE:
+            raise ValueError("validator release target must be a supported static Linux target")
+        miner_targets = [item.target_triple for item in self.miner_finality_targets]
+        if miner_targets != sorted(miner_targets) or len(set(miner_targets)) != len(miner_targets):
+            raise ValueError("miner finality targets must be unique and sorted")
+        if self.target_triple in miner_targets:
+            raise ValueError("primary validator target cannot be repeated as a miner target")
         if (
             self.clock != PolicyClock.launch()
             or self.limits != PolicyLimits.launch()
@@ -823,7 +999,7 @@ class ReleaseArtifactDigest(StrictProtocolModel):
         expected = _packaged_artifact_relative_path(self.label, self.sha256)
         if self.relative_path != expected:
             raise ValueError("packaged artifact path does not match its label and SHA-256")
-        expected_mode = "0555" if self.label in _EXECUTABLE_ARTIFACT_LABELS else "0444"
+        expected_mode = "0555" if _artifact_is_executable(self.label) else "0444"
         if self.install_mode != expected_mode:
             raise ValueError("packaged artifact mode does not match its label")
         return self
@@ -1052,6 +1228,16 @@ class BuiltShadowRelease:
     files: Mapping[str, bytes]
     file_modes: Mapping[str, int]
     _authority: object | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class BuiltMinerFinalityArtifact:
+    """Exact native miner-finality artifact bytes produced on the target host."""
+
+    report: MinerFinalityBuildReport
+    binary: bytes
+    report_bytes: bytes
+    license_closure: bytes
 
 
 def load_release_input(path: str | Path) -> tuple[LiveShadowReleaseInput, bytes]:
@@ -1319,6 +1505,116 @@ def _static_elf_machine(payload: bytes, *, label: str) -> int:
     return machine
 
 
+def _miner_finality_label(kind: Literal["binary", "report", "license"], target: str) -> str:
+    prefixes = {
+        "binary": _MINER_FINALITY_BINARY_LABEL_PREFIX,
+        "report": _MINER_FINALITY_REPORT_LABEL_PREFIX,
+        "license": _MINER_FINALITY_LICENSE_LABEL_PREFIX,
+    }
+    if target != DARWIN_MINER_TARGET:
+        raise ShadowReleaseError("miner_finality_target_unsupported")
+    return prefixes[kind] + target
+
+
+def _artifact_is_executable(label: str) -> bool:
+    return label in _EXECUTABLE_ARTIFACT_LABELS or label.startswith(
+        _MINER_FINALITY_BINARY_LABEL_PREFIX
+    )
+
+
+def _artifact_filename(label: str) -> str:
+    if label.startswith(_MINER_FINALITY_BINARY_LABEL_PREFIX):
+        return "umi-grandpa-finality-observer"
+    if label.startswith(_MINER_FINALITY_REPORT_LABEL_PREFIX):
+        return "miner-finality-build-report.json"
+    if label.startswith(_MINER_FINALITY_LICENSE_LABEL_PREFIX):
+        return "finality-third-party-licenses.zip"
+    try:
+        return _PACKAGED_ARTIFACT_FILENAMES[label]
+    except KeyError as error:
+        raise ShadowReleaseError(f"packaged_artifact_label_unknown:{label}") from error
+
+
+def _validate_darwin_arm64_executable(payload: bytes) -> None:
+    if (
+        len(payload) < 32
+        or payload[:4] != _DARWIN_ARM64_MACHO_MAGIC
+        or int.from_bytes(payload[4:8], "little") != _DARWIN_ARM64_CPU_TYPE
+        or int.from_bytes(payload[12:16], "little") != _MACHO_EXECUTE_FILE_TYPE
+    ):
+        raise ShadowReleaseError("miner_finality_binary_target_mismatch")
+
+
+def _parse_finality_self_test_output(
+    payload: bytes,
+    *,
+    fixture_bytes: bytes,
+) -> FinalitySelfTestReport:
+    if not payload or len(payload) > 64 * 1024 or b"\n" in payload:
+        raise ShadowReleaseError("miner_finality_self_test_output_invalid")
+    try:
+        fixture = FinalityFixtures.model_validate_json(fixture_bytes)
+        report = FinalitySelfTestReport.model_validate_json(payload)
+    except Exception as error:
+        raise ShadowReleaseError("miner_finality_self_test_output_invalid") from error
+    if (
+        canonical_json_bytes(fixture) != fixture_bytes
+        or canonical_json_bytes(report) != payload
+        or report.fixture_canonical_sha256 != hashlib.sha256(fixture_bytes).hexdigest()
+        or report.finney_checkpoint_canonical_sha256 != fixture.finney_checkpoint_fixture.sha256
+    ):
+        raise ShadowReleaseError("miner_finality_self_test_binding_mismatch")
+    return report
+
+
+def _validate_miner_finality_build_report(
+    *,
+    target: str,
+    binary_bytes: bytes,
+    report_bytes: bytes,
+    license_closure_bytes: bytes,
+    fixture_bytes: bytes,
+    cargo_lock_bytes: bytes,
+    source_tree_sha256: str,
+    umi_git_revision: str,
+) -> MinerFinalityBuildReport:
+    if target != DARWIN_MINER_TARGET:
+        raise ShadowReleaseError("miner_finality_target_unsupported")
+    _validate_darwin_arm64_executable(binary_bytes)
+    try:
+        report = MinerFinalityBuildReport.model_validate_json(report_bytes)
+    except Exception as error:
+        raise ShadowReleaseError("miner_finality_build_report_invalid") from error
+    if canonical_json_bytes(report) != report_bytes:
+        raise ShadowReleaseError("miner_finality_build_report_noncanonical")
+    self_test_bytes = canonical_json_bytes(report.self_test)
+    _parse_finality_self_test_output(self_test_bytes, fixture_bytes=fixture_bytes)
+    expected = (
+        report.target_triple == target,
+        report.binary_sha256 == hashlib.sha256(binary_bytes).hexdigest(),
+        report.binary_size_bytes == len(binary_bytes),
+        report.umi_git_revision == umi_git_revision,
+        report.finality_source_revision == FINALITY_SOURCE_REVISION,
+        report.finality_source_tree_sha256 == source_tree_sha256,
+        report.finality_cargo_lock_sha256 == hashlib.sha256(cargo_lock_bytes).hexdigest(),
+        report.finality_fixture_set_sha256 == hashlib.sha256(fixture_bytes).hexdigest(),
+        report.license_closure_sha256 == hashlib.sha256(license_closure_bytes).hexdigest(),
+        report.self_test_output_sha256 == hashlib.sha256(self_test_bytes).hexdigest(),
+    )
+    if not all(expected):
+        raise ShadowReleaseError("miner_finality_build_report_binding_mismatch")
+    try:
+        verify_rust_license_closure(
+            license_closure_bytes,
+            cargo_lock_bytes=cargo_lock_bytes,
+            target_triple=target,
+            binary_name="umi-grandpa-finality-observer",
+        )
+    except RustLicenseClosureError as error:
+        raise ShadowReleaseError(error.reason_code) from error
+    return report
+
+
 def _validate_distribution_zip(
     payload: bytes,
     *,
@@ -1391,6 +1687,7 @@ def _validate_packaged_python_environment(
     uv_bytes: bytes,
     uv_license_bytes: bytes,
     uv_provenance_bytes: bytes,
+    execute_lock_check: bool = True,
 ) -> None:
     """Bind the exact repository graph to one reviewed, target-specific uv tool."""
 
@@ -1409,12 +1706,13 @@ def _validate_packaged_python_environment(
         or provenance.license_sha256 != hashlib.sha256(uv_license_bytes).hexdigest()
     ):
         raise ShadowReleaseError("uv_provenance_binding_mismatch")
-    _run_pinned_uv_lock_check(
-        uv_bytes,
-        target_triple=target_triple,
-        pyproject_bytes=pyproject_bytes,
-        lock_bytes=lock_bytes,
-    )
+    if execute_lock_check:
+        _run_pinned_uv_lock_check(
+            uv_bytes,
+            target_triple=target_triple,
+            pyproject_bytes=pyproject_bytes,
+            lock_bytes=lock_bytes,
+        )
 
 
 def _validate_packaged_media_runtime(
@@ -1873,6 +2171,39 @@ def _prepare_shadow_release(
     ):
         raise ShadowReleaseError("finality_python_adapter_pin_mismatch")
 
+    miner_finality_sha256_by_target: dict[str, str] = {}
+    for item in descriptor.miner_finality_targets:
+        binary_label = _miner_finality_label("binary", item.target_triple)
+        report_label = _miner_finality_label("report", item.target_triple)
+        license_label = _miner_finality_label("license", item.target_triple)
+        binary_bytes = _read_executable(Path(item.binary_path), label=binary_label)
+        external[binary_label] = (
+            _nonplaceholder_sha256(binary_bytes, label=binary_label),
+            binary_bytes,
+        )
+        report_bytes = read(report_label, item.build_report_path, 4 * 1024 * 1024)
+        license_closure_bytes = read(license_label, item.license_closure_path)
+        if (
+            hashlib.sha256(binary_bytes).hexdigest() != item.expected_binary_sha256
+            or hashlib.sha256(report_bytes).hexdigest() != item.expected_build_report_sha256
+            or hashlib.sha256(license_closure_bytes).hexdigest()
+            != item.expected_license_closure_sha256
+        ):
+            raise ShadowReleaseError("miner_finality_input_digest_mismatch")
+        _validate_miner_finality_build_report(
+            target=item.target_triple,
+            binary_bytes=binary_bytes,
+            report_bytes=report_bytes,
+            license_closure_bytes=license_closure_bytes,
+            fixture_bytes=external["finality_fixture_set"][1],
+            cargo_lock_bytes=finality_lock,
+            source_tree_sha256=finality_source_sha256,
+            umi_git_revision=umi_git_revision,
+        )
+        miner_finality_sha256_by_target[item.target_triple] = hashlib.sha256(
+            binary_bytes
+        ).hexdigest()
+
     source_sha256 = wheel_source_sha256
     _reject_digest(source_sha256, "umi_source_tree")
     umi_source_marker = source_sha256.encode()
@@ -1945,7 +2276,8 @@ def _prepare_shadow_release(
         cargo_lock_sha256=hashlib.sha256(finality_lock).hexdigest(),
         finality_fixture_set_sha256=external["finality_fixture_set"][0],
         release_sha256_by_target={
-            descriptor.target_triple: hashlib.sha256(finality_binary).hexdigest()
+            descriptor.target_triple: hashlib.sha256(finality_binary).hexdigest(),
+            **miner_finality_sha256_by_target,
         },
         chain_spec_source_revision=descriptor.finality.chain_spec_source_revision,
         chain_spec_sha256=hashlib.sha256(chain_spec_bytes).hexdigest(),
@@ -2061,7 +2393,7 @@ def _prepare_shadow_release(
             relative_path=_packaged_artifact_relative_path(label, digest),
             sha256=digest,
             size_bytes=len(payload),
-            install_mode="0555" if label in _EXECUTABLE_ARTIFACT_LABELS else "0444",
+            install_mode="0555" if _artifact_is_executable(label) else "0444",
         )
         for label, (digest, payload) in sorted(external.items())
     )
@@ -2819,13 +3151,12 @@ def verify_shadow_release_signing_stage(
     return manifest, request
 
 
-def verify_shadow_release_directory(
+def _load_authenticated_release_manifest(
     release_dir: str | Path,
     *,
     expected_authority_hotkey: str,
-    now_ms: int | None = None,
-) -> LiveShadowReleaseManifest:
-    """Verify one finalized public release and both authority signatures."""
+) -> tuple[Path, LiveShadowReleaseManifest, UnsignedLiveShadowReleaseManifest]:
+    """Load a final manifest and verify its full-manifest authority signature."""
 
     root = _absolute_normal_path(release_dir, "release directory")
     _validate_release_root(root, "release")
@@ -2861,6 +3192,21 @@ def verify_shadow_release_directory(
         signature=final_authority.signature,
     ):
         raise ShadowReleaseError("release_final_authority_signature_invalid")
+    return root, manifest, unsigned
+
+
+def verify_shadow_release_directory(
+    release_dir: str | Path,
+    *,
+    expected_authority_hotkey: str,
+    now_ms: int | None = None,
+) -> LiveShadowReleaseManifest:
+    """Verify one finalized public release and both authority signatures."""
+
+    root, manifest, unsigned = _load_authenticated_release_manifest(
+        release_dir,
+        expected_authority_hotkey=expected_authority_hotkey,
+    )
     _verify_unsigned_release_contents(
         root=root,
         manifest=unsigned,
@@ -2869,6 +3215,46 @@ def verify_shadow_release_directory(
         now_ms=now_ms,
     )
     return manifest
+
+
+def verify_miner_release_target(
+    release_dir: str | Path,
+    *,
+    expected_authority_hotkey: str,
+    target_triple: str,
+    output_dir: str | Path,
+) -> ResolvedMinerRelease:
+    """Verify and privately materialize one signed native miner target."""
+
+    if target_triple != DARWIN_MINER_TARGET:
+        raise ShadowReleaseError("release_miner_finality_target_unsupported")
+    root, _manifest, unsigned = _load_authenticated_release_manifest(
+        release_dir,
+        expected_authority_hotkey=expected_authority_hotkey,
+    )
+    payload_by_path = _verify_unsigned_release_contents(
+        root=root,
+        manifest=unsigned,
+        expected_authority_hotkey=expected_authority_hotkey,
+        metadata_paths={"release-manifest.json"},
+        now_ms=None,
+        miner_target=target_triple,
+    )
+    template_relative = f"miner-templates/{target_triple}.json"
+    template_bytes = payload_by_path[template_relative]
+    try:
+        template = ReleaseRelativeMinerConfig.model_validate_json(template_bytes)
+    except Exception as error:
+        raise ShadowReleaseError("release_miner_template_invalid") from error
+    if canonical_json_bytes(template) != template_bytes:
+        raise ShadowReleaseError("release_miner_template_noncanonical")
+    return _materialize_resolved_miner_release(
+        release_root=root,
+        destination=_absolute_normal_path(output_dir, "resolved miner output directory"),
+        manifest=unsigned,
+        template=template,
+        payload_by_path=payload_by_path,
+    )
 
 
 def _replace_final_release_directory(source: Path, destination: Path) -> None:
@@ -3003,7 +3389,8 @@ def _verify_unsigned_release_contents(
     expected_authority_hotkey: str,
     metadata_paths: set[str],
     now_ms: int | None,
-) -> None:
+    miner_target: str | None = None,
+) -> dict[str, bytes]:
     if manifest.translation_weights_active is not False:
         raise ShadowReleaseError("release_weights_not_disabled")
     if (
@@ -3080,6 +3467,7 @@ def _verify_unsigned_release_contents(
         intent.netuid == manifest.netuid,
         intent.mechanism_id == manifest.mechanism_id,
         intent.translation_weights_active is manifest.translation_weights_active is False,
+        intent.target_triple in _STATIC_MEDIA_TARGET_MACHINE,
         intent.activation_block == manifest.activation_block,
         intent.minimum_release_lead_blocks == manifest.minimum_release_lead_blocks,
         intent.maximum_finalized_head_age_ms == manifest.maximum_finalized_head_age_ms,
@@ -3105,6 +3493,25 @@ def _verify_unsigned_release_contents(
 
     external = {item.label: item for item in manifest.external_artifacts}
     expected_labels = set(_PACKAGED_ARTIFACT_FILENAMES)
+    pins = policy.implementation_pins
+    finality_pin = pins.finality_verifier
+    proof_pin = pins.storage_proof_verifier
+    if finality_pin is None or proof_pin is None:
+        raise ShadowReleaseError("release_live_pins_missing")
+    primary_target = manifest.release_authority.intent.target_triple
+    miner_targets = sorted(set(finality_pin.release_sha256_by_target) - {primary_target})
+    if set(proof_pin.release_sha256_by_target) != {primary_target}:
+        raise ShadowReleaseError("release_validator_target_scope_invalid")
+    if any(target != DARWIN_MINER_TARGET for target in miner_targets):
+        raise ShadowReleaseError("release_miner_finality_target_unsupported")
+    for target in miner_targets:
+        expected_labels.update(
+            {
+                _miner_finality_label("binary", target),
+                _miner_finality_label("report", target),
+                _miner_finality_label("license", target),
+            }
+        )
     expected_labels.update(
         f"control_disclosure.{item.control_group_id}" for item in policy.control_group_registry
     )
@@ -3124,6 +3531,7 @@ def _verify_unsigned_release_contents(
             for item in policy.validator_registry
             for suffix in (".operator-template.json", ".validator-template.json")
         ),
+        *(f"miner-templates/{target}.json" for target in miner_targets),
     }
     if {item.relative_path for item in manifest.generated_artifacts} != expected_generated_paths:
         raise ShadowReleaseError("release_generated_artifact_set_mismatch")
@@ -3143,14 +3551,19 @@ def _verify_unsigned_release_contents(
         policy=policy,
         external=external,
         payload_by_path=payload_by_path,
+        execute_primary_tools=miner_target is None,
     )
-    _verify_installed_release_observation(
-        root=root,
-        manifest=manifest,
-        policy=policy,
-        external=external,
-        now_ms=now_ms,
-    )
+    if miner_target is None:
+        _verify_installed_release_observation(
+            root=root,
+            manifest=manifest,
+            policy=policy,
+            external=external,
+            now_ms=now_ms,
+        )
+    elif miner_target != DARWIN_MINER_TARGET:
+        raise ShadowReleaseError("release_miner_finality_target_unsupported")
+    return payload_by_path
 
 
 def _verify_packaged_policy_bindings(
@@ -3159,6 +3572,7 @@ def _verify_packaged_policy_bindings(
     policy: ScoringPolicy,
     external: Mapping[str, ReleaseArtifactDigest],
     payload_by_path: Mapping[str, bytes],
+    execute_primary_tools: bool = True,
 ) -> None:
     """Reproduce every policy-to-package binding without builder-local paths."""
 
@@ -3205,6 +3619,7 @@ def _verify_packaged_policy_bindings(
         uv_bytes=payload("uv_binary"),
         uv_license_bytes=payload("uv_license"),
         uv_provenance_bytes=payload("uv_provenance"),
+        execute_lock_check=execute_primary_tools,
     )
     _validate_packaged_media_runtime(
         target_triple=target,
@@ -3238,6 +3653,28 @@ def _verify_packaged_policy_bindings(
         != pins.umi_source_tree_sha256
     ):
         raise ShadowReleaseError("release_source_artifact_binding_mismatch")
+
+    miner_targets = sorted(set(finality_pin.release_sha256_by_target) - {target})
+    if set(proof_pin.release_sha256_by_target) != {target}:
+        raise ShadowReleaseError("release_validator_target_scope_invalid")
+    for miner_target in miner_targets:
+        if miner_target != DARWIN_MINER_TARGET:
+            raise ShadowReleaseError("release_miner_finality_target_unsupported")
+        binary_label = _miner_finality_label("binary", miner_target)
+        report_label = _miner_finality_label("report", miner_target)
+        license_label = _miner_finality_label("license", miner_target)
+        if external[binary_label].sha256 != finality_pin.release_sha256_by_target[miner_target]:
+            raise ShadowReleaseError("release_miner_finality_policy_binding_mismatch")
+        _validate_miner_finality_build_report(
+            target=miner_target,
+            binary_bytes=payload(binary_label),
+            report_bytes=payload(report_label),
+            license_closure_bytes=payload(license_label),
+            fixture_bytes=payload("finality_fixture_set"),
+            cargo_lock_bytes=payload("finality_cargo_lock"),
+            source_tree_sha256=finality_pin.source_tree_sha256,
+            umi_git_revision=manifest.umi_git_revision,
+        )
 
     capacity_bytes = payload("validator_capacity_set")
     cost_schedule_bytes = payload("validator_cost_schedule")
@@ -3306,6 +3743,8 @@ def _verify_packaged_policy_bindings(
     if expected_statement_hashes != manifest.publisher_capacity_statement_sha256s:
         raise ShadowReleaseError("release_publisher_capacity_digest_mismatch")
 
+    validator_transport_timeouts: list[float] = []
+    validator_transport_concurrency: list[int] = []
     for entry in policy.validator_registry:
         account_hex = account_id32(entry.validator_hotkey).hex()
         validator_path = f"operator-templates/{account_hex}.validator-template.json"
@@ -3352,13 +3791,60 @@ def _verify_packaged_policy_bindings(
             != external["mirror_discovery_rule"].relative_path
         ):
             raise ShadowReleaseError("release_operator_template_binding_mismatch")
+        validator_transport_timeouts.append(validator_template.transport_timeout_seconds)
+        validator_transport_concurrency.append(validator_template.maximum_transport_concurrency)
 
-    _verify_packaged_conformance(
-        manifest=manifest,
-        policy=policy,
-        external=external,
-        payload_by_path=payload_by_path,
-    )
+    for miner_target in miner_targets:
+        relative = f"miner-templates/{miner_target}.json"
+        try:
+            miner_template = ReleaseRelativeMinerConfig.model_validate_json(
+                payload_by_path[relative]
+            )
+        except Exception as error:
+            raise ShadowReleaseError("release_miner_template_invalid") from error
+        if canonical_json_bytes(miner_template) != payload_by_path[relative]:
+            raise ShadowReleaseError("release_miner_template_noncanonical")
+        if (
+            miner_template.target_triple != miner_target
+            or miner_template.policy_path != "scoring-policy.json"
+            or miner_template.scoring_policy_sha256 != manifest.scoring_policy_sha256
+            or miner_template.python_wheel != external["python_wheel"].relative_path
+            or miner_template.python_lockfile != external["python_lockfile"].relative_path
+            or miner_template.pyproject != external["pyproject"].relative_path
+            or miner_template.mirror_discovery_rule_path
+            != external["mirror_discovery_rule"].relative_path
+            or miner_template.finality_verifier_binary
+            != external[_miner_finality_label("binary", miner_target)].relative_path
+            or miner_template.finality_chain_spec_path
+            != external["finality_chain_spec"].relative_path
+            or miner_template.finality_build_report
+            != external[_miner_finality_label("report", miner_target)].relative_path
+            or miner_template.finality_license_closure
+            != external[_miner_finality_label("license", miner_target)].relative_path
+            or miner_template.initial_minimum_finalized_block != manifest.activation_block - 1
+            or miner_template.minimum_validator_transport_timeout_seconds
+            != min(validator_transport_timeouts)
+            or miner_template.minimum_validator_transport_concurrency
+            != min(validator_transport_concurrency)
+            or miner_template.umi_git_revision != manifest.umi_git_revision
+            or miner_template.umi_source_tree_sha256 != manifest.umi_source_tree_sha256
+            or miner_template.umi_revision
+            != (
+                "git:"
+                + manifest.umi_git_revision
+                + ";source-tree-sha256:"
+                + manifest.umi_source_tree_sha256
+            )
+        ):
+            raise ShadowReleaseError("release_miner_template_binding_mismatch")
+
+    if execute_primary_tools:
+        _verify_packaged_conformance(
+            manifest=manifest,
+            policy=policy,
+            external=external,
+            payload_by_path=payload_by_path,
+        )
 
 
 def _verify_packaged_conformance(
@@ -3449,6 +3935,368 @@ def _verify_packaged_conformance(
         shutil.rmtree(temporary, ignore_errors=True)
     if rerun_sha256 != expected_report_sha256 or rerun_bytes != report_bytes:
         raise ShadowReleaseError("release_conformance_report_reproduction_mismatch")
+
+
+def _write_resolved_miner_artifact(
+    directory_descriptor: int,
+    *,
+    filename: str,
+    payload: bytes,
+    mode: Literal[0o444, 0o555],
+) -> None:
+    """Write one direct child through an already verified private directory FD."""
+
+    if not filename or "/" in filename or filename in {".", ".."}:
+        raise ShadowReleaseError("resolved_miner_artifact_name_invalid")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            filename,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:  # pragma: no cover - an OS write invariant
+                raise OSError("resolved miner artifact write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.fchmod(descriptor, mode)
+        status = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or status.st_uid != os.getuid()
+            or status.st_nlink != 1
+            or status.st_size != len(payload)
+            or stat.S_IMODE(status.st_mode) != mode
+        ):
+            raise ShadowReleaseError("resolved_miner_artifact_unsafe")
+    except ShadowReleaseError:
+        raise
+    except OSError as error:
+        raise ShadowReleaseError("resolved_miner_artifact_emit_failed") from error
+    finally:
+        if descriptor >= 0:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _run_native_miner_finality_self_test(
+    *,
+    binary_path: Path,
+    expected_binary_sha256: str,
+    report: MinerFinalityBuildReport,
+) -> None:
+    """Execute an FD-verified private copy of the materialized native binary."""
+
+    if sys.platform != "darwin" or platform.machine().casefold() not in {"arm64", "aarch64"}:
+        raise ShadowReleaseError("miner_finality_native_host_required")
+    try:
+        with staged_pinned_artifacts(
+            (
+                PinnedArtifact(
+                    name="miner_finality",
+                    source=binary_path,
+                    expected_sha256=expected_binary_sha256,
+                    maximum_bytes=MAX_RELEASE_FILE_BYTES,
+                    executable=True,
+                ),
+            )
+        ) as staged:
+            process = subprocess.run(
+                [os.fspath(staged["miner_finality"]), "--conformance-self-test"],
+                cwd=staged["miner_finality"].parent,
+                env={"LANG": "C", "LC_ALL": "C"},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError, PinnedArtifactError) as error:
+        raise ShadowReleaseError("miner_finality_self_test_failed") from error
+    expected_output = canonical_json_bytes(report.self_test) + b"\n"
+    if process.returncode != 0 or process.stdout != expected_output:
+        raise ShadowReleaseError("miner_finality_self_test_reproduction_mismatch")
+
+
+def _materialize_resolved_miner_release(
+    *,
+    release_root: Path,
+    destination: Path,
+    manifest: UnsignedLiveShadowReleaseManifest,
+    template: ReleaseRelativeMinerConfig,
+    payload_by_path: Mapping[str, bytes],
+) -> ResolvedMinerRelease:
+    """Create a fresh read-only runtime tree solely from authenticated bytes."""
+
+    try:
+        source_root = release_root.resolve(strict=True)
+        parent = destination.parent
+        parent_status = parent.lstat()
+        resolved_parent = parent.resolve(strict=True)
+    except OSError as error:
+        raise ShadowReleaseError("resolved_miner_output_parent_unavailable") from error
+    parent_mode = stat.S_IMODE(parent_status.st_mode)
+    if (
+        parent.is_symlink()
+        or resolved_parent != parent
+        or not stat.S_ISDIR(parent_status.st_mode)
+        or parent_status.st_uid != os.getuid()
+        or parent_mode & 0o077
+        or parent_mode & 0o300 != 0o300
+    ):
+        raise ShadowReleaseError("resolved_miner_output_parent_unsafe")
+    try:
+        for ancestor in (parent, *parent.parents):
+            status = ancestor.lstat()
+            mode = stat.S_IMODE(status.st_mode)
+            root_sticky_boundary = status.st_uid == 0 and bool(mode & stat.S_ISVTX)
+            if (
+                ancestor.is_symlink()
+                or not stat.S_ISDIR(status.st_mode)
+                or (mode & 0o022 and not root_sticky_boundary)
+            ):
+                raise ShadowReleaseError("resolved_miner_output_parent_unsafe")
+    except OSError as error:
+        raise ShadowReleaseError("resolved_miner_output_parent_unavailable") from error
+    prospective = destination.resolve(strict=False)
+    if (
+        destination == release_root
+        or destination in release_root.parents
+        or release_root in destination.parents
+        or prospective == source_root
+        or prospective in source_root.parents
+        or source_root in prospective.parents
+    ):
+        raise ShadowReleaseError("resolved_miner_output_overlaps_release")
+
+    fields = (
+        ("policy_path", "scoring-policy.json", template.policy_path, 0o444),
+        ("python_wheel", "umi-python-wheel.whl", template.python_wheel, 0o444),
+        ("python_lockfile", "uv.lock", template.python_lockfile, 0o444),
+        ("pyproject", "pyproject.toml", template.pyproject, 0o444),
+        (
+            "mirror_discovery_rule_path",
+            "mirror-discovery-rule.json",
+            template.mirror_discovery_rule_path,
+            0o444,
+        ),
+        (
+            "finality_verifier_binary",
+            "umi-grandpa-finality-observer",
+            template.finality_verifier_binary,
+            0o555,
+        ),
+        (
+            "finality_chain_spec_path",
+            "finney-chain-spec.json",
+            template.finality_chain_spec_path,
+            0o444,
+        ),
+        (
+            "finality_build_report",
+            "miner-finality-build-report.json",
+            template.finality_build_report,
+            0o444,
+        ),
+        (
+            "finality_license_closure",
+            "finality-third-party-licenses.zip",
+            template.finality_license_closure,
+            0o444,
+        ),
+    )
+    try:
+        source_payloads = {
+            field: payload_by_path[
+                _release_relative_path(relative, "miner template artifact").as_posix()
+            ]
+            for field, _filename, relative, _mode in fields
+        }
+    except KeyError as error:
+        raise ShadowReleaseError("release_miner_artifact_unavailable") from error
+    output_paths = {field: destination / filename for field, filename, _relative, _mode in fields}
+    resolved = ResolvedMinerRelease(
+        schema=RESOLVED_MINER_RELEASE_SCHEMA,
+        protocol=template.protocol,
+        role="miner",
+        translation_weights_active=False,
+        target_triple=template.target_triple,
+        scoring_policy_sha256=manifest.scoring_policy_sha256,
+        **{field: os.fspath(output_paths[field]) for field, _name, _relative, _mode in fields},
+        initial_minimum_finalized_block=template.initial_minimum_finalized_block,
+        minimum_validator_transport_timeout_seconds=(
+            template.minimum_validator_transport_timeout_seconds
+        ),
+        minimum_validator_transport_concurrency=(template.minimum_validator_transport_concurrency),
+        umi_git_revision=template.umi_git_revision,
+        umi_source_tree_sha256=template.umi_source_tree_sha256,
+        umi_revision=template.umi_revision,
+        validator_runtime_supported=False,
+    )
+
+    parent_descriptor = -1
+    directory_descriptor = -1
+    created_status: os.stat_result | None = None
+    try:
+        parent_descriptor = os.open(
+            os.fspath(parent),
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened_parent = os.fstat(parent_descriptor)
+        if (opened_parent.st_dev, opened_parent.st_ino) != (
+            parent_status.st_dev,
+            parent_status.st_ino,
+        ):
+            raise ShadowReleaseError("resolved_miner_output_parent_changed")
+        try:
+            os.mkdir(destination.name, 0o700, dir_fd=parent_descriptor)
+        except FileExistsError as error:
+            raise ShadowReleaseError("resolved_miner_output_directory_exists") from error
+        created_status = os.stat(
+            destination.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        directory_descriptor = os.open(
+            destination.name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+        opened_status = os.fstat(directory_descriptor)
+        if (
+            (opened_status.st_dev, opened_status.st_ino)
+            != (created_status.st_dev, created_status.st_ino)
+            or not stat.S_ISDIR(opened_status.st_mode)
+            or opened_status.st_uid != os.getuid()
+            or stat.S_IMODE(opened_status.st_mode) != 0o700
+        ):
+            raise ShadowReleaseError("resolved_miner_output_directory_unsafe")
+
+        for field, filename, _relative, mode in fields:
+            _write_resolved_miner_artifact(
+                directory_descriptor,
+                filename=filename,
+                payload=source_payloads[field],
+                mode=mode,
+            )
+
+        staged_payloads: dict[str, bytes] = {}
+        for field, filename, _relative, mode in fields:
+            path = output_paths[field]
+            status = os.stat(filename, dir_fd=directory_descriptor, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or status.st_uid != os.getuid()
+                or status.st_nlink != 1
+                or stat.S_IMODE(status.st_mode) != mode
+            ):
+                raise ShadowReleaseError("resolved_miner_artifact_unsafe")
+            payload = _read_owned_file(
+                path,
+                label="resolved_miner_artifact",
+                maximum_bytes=MAX_RELEASE_FILE_BYTES,
+                executable=mode == 0o555,
+                private=False,
+            )
+            if payload != source_payloads[field]:
+                raise ShadowReleaseError("resolved_miner_artifact_changed")
+            staged_payloads[field] = payload
+
+        policy = ScoringPolicy.model_validate_json(staged_payloads["policy_path"])
+        finality_pin = policy.implementation_pins.finality_verifier
+        external = {item.label: item for item in manifest.external_artifacts}
+        if finality_pin is None:
+            raise ShadowReleaseError("release_miner_finality_runtime_binding_missing")
+        try:
+            fixture_bytes = payload_by_path[external["finality_fixture_set"].relative_path]
+            cargo_lock_bytes = payload_by_path[external["finality_cargo_lock"].relative_path]
+            expected_binary_sha256 = finality_pin.release_sha256_by_target[template.target_triple]
+        except KeyError as error:
+            raise ShadowReleaseError("release_miner_finality_runtime_binding_missing") from error
+        report = _validate_miner_finality_build_report(
+            target=template.target_triple,
+            binary_bytes=staged_payloads["finality_verifier_binary"],
+            report_bytes=staged_payloads["finality_build_report"],
+            license_closure_bytes=staged_payloads["finality_license_closure"],
+            fixture_bytes=fixture_bytes,
+            cargo_lock_bytes=cargo_lock_bytes,
+            source_tree_sha256=finality_pin.source_tree_sha256,
+            umi_git_revision=manifest.umi_git_revision,
+        )
+        _run_native_miner_finality_self_test(
+            binary_path=output_paths["finality_verifier_binary"],
+            expected_binary_sha256=expected_binary_sha256,
+            report=report,
+        )
+        _write_resolved_miner_artifact(
+            directory_descriptor,
+            filename="resolved-miner-release.json",
+            payload=canonical_json_bytes(resolved),
+            mode=0o444,
+        )
+        expected_names = {filename for _field, filename, _relative, _mode in fields} | {
+            "resolved-miner-release.json"
+        }
+        if set(os.listdir(directory_descriptor)) != expected_names:
+            raise ShadowReleaseError("resolved_miner_output_tree_mismatch")
+        os.fsync(directory_descriptor)
+        os.fchmod(directory_descriptor, 0o555)
+        final_status = os.fstat(directory_descriptor)
+        lexical_parent_status = parent.lstat()
+        destination_status = os.stat(
+            destination.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            (lexical_parent_status.st_dev, lexical_parent_status.st_ino)
+            != (opened_parent.st_dev, opened_parent.st_ino)
+            or parent.resolve(strict=True) != parent
+            or (final_status.st_dev, final_status.st_ino)
+            != (created_status.st_dev, created_status.st_ino)
+            or (destination_status.st_dev, destination_status.st_ino)
+            != (created_status.st_dev, created_status.st_ino)
+            or stat.S_IMODE(final_status.st_mode) != 0o555
+            or stat.S_IMODE(destination_status.st_mode) != 0o555
+        ):
+            raise ShadowReleaseError("resolved_miner_output_directory_changed")
+        return resolved
+    except ShadowReleaseError:
+        raise
+    except (OSError, ValidationError, ValueError, TypeError) as error:
+        raise ShadowReleaseError("resolved_miner_output_emit_failed") from error
+    finally:
+        if directory_descriptor >= 0:
+            with suppress(OSError):
+                os.close(directory_descriptor)
+        if parent_descriptor >= 0:
+            with suppress(OSError):
+                os.close(parent_descriptor)
+        if created_status is not None and sys.exc_info()[0] is not None:
+            try:
+                current = destination.lstat()
+                if (current.st_dev, current.st_ino) == (
+                    created_status.st_dev,
+                    created_status.st_ino,
+                ):
+                    destination.chmod(0o700)
+                    shutil.rmtree(destination)
+            except OSError:
+                pass
 
 
 def _verify_installed_release_observation(
@@ -3965,6 +4813,39 @@ def _operator_artifacts(
         files[f"operator-templates/{account_hex}.operator-template.json"] = canonical_json_bytes(
             operator_config
         )
+    for item in descriptor.miner_finality_targets:
+        target = item.target_triple
+        miner_config = ReleaseRelativeMinerConfig(
+            schema=RELEASE_RELATIVE_MINER_CONFIG_SCHEMA,
+            protocol=PROTOCOL_VERSION,
+            role="miner",
+            translation_weights_active=False,
+            target_triple=target,
+            policy_path="scoring-policy.json",
+            scoring_policy_sha256=policy_hash,
+            python_wheel=packaged("python_wheel"),
+            python_lockfile=packaged("python_lockfile"),
+            pyproject=packaged("pyproject"),
+            mirror_discovery_rule_path=packaged("mirror_discovery_rule"),
+            finality_verifier_binary=packaged(_miner_finality_label("binary", target)),
+            finality_chain_spec_path=packaged("finality_chain_spec"),
+            finality_build_report=packaged(_miner_finality_label("report", target)),
+            finality_license_closure=packaged(_miner_finality_label("license", target)),
+            initial_minimum_finalized_block=descriptor.activation_block - 1,
+            minimum_validator_transport_timeout_seconds=min(
+                operator.transport_timeout_seconds for operator in descriptor.operators
+            ),
+            minimum_validator_transport_concurrency=min(
+                operator.maximum_transport_concurrency for operator in descriptor.operators
+            ),
+            umi_git_revision=umi_git_revision,
+            umi_source_tree_sha256=umi_source_tree_sha256,
+            umi_revision=(
+                "git:" + umi_git_revision + ";source-tree-sha256:" + umi_source_tree_sha256
+            ),
+            validator_runtime_supported=False,
+        )
+        files[f"miner-templates/{target}.json"] = canonical_json_bytes(miner_config)
     return files
 
 
@@ -4814,10 +5695,7 @@ def _packaged_artifact_relative_path(label: str, digest: str) -> str:
     if label.startswith("control_disclosure."):
         filename = f"{label}.json"
     else:
-        try:
-            filename = _PACKAGED_ARTIFACT_FILENAMES[label]
-        except KeyError as error:
-            raise ShadowReleaseError(f"packaged_artifact_label_unknown:{label}") from error
+        filename = _artifact_filename(label)
     return PurePosixPath("artifacts", "sha256", digest, filename).as_posix()
 
 
@@ -4857,6 +5735,155 @@ def _assert_no_private_material(files: Mapping[str, bytes]) -> None:
             inspect_value(json.loads(payload))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ShadowReleaseError("generated_artifact_invalid") from error
+
+
+def build_miner_finality_artifact(
+    *,
+    repository_root: str | Path,
+    binary_path: str | Path,
+) -> BuiltMinerFinalityArtifact:
+    """Seal and test the native Darwin finality binary used by live miners."""
+
+    if sys.platform != "darwin" or platform.machine().casefold() not in {"arm64", "aarch64"}:
+        raise ShadowReleaseError("miner_finality_native_host_required")
+    repository = _absolute_normal_path(repository_root, "repository root")
+    source_root = repository / "rust" / "grandpa-finality-observer"
+    if source_root.resolve(strict=False) != source_root or not source_root.is_dir():
+        raise ShadowReleaseError("miner_finality_source_root_invalid")
+    umi_git_revision = _verified_clean_repository_revision(repository)
+    binary = _read_executable(
+        _absolute_normal_path(binary_path, "miner finality binary"),
+        label="miner_finality_verifier",
+    )
+    _validate_darwin_arm64_executable(binary)
+    cargo_lock = _read_file(
+        source_root / "Cargo.lock",
+        label="miner_finality_cargo_lock",
+        maximum_bytes=32 * 1024 * 1024,
+    )
+    fixture = _read_file(
+        source_root / "fixtures" / "finality-v1.json",
+        label="miner_finality_fixture",
+        maximum_bytes=20 * 1024 * 1024,
+    )
+    source_tree_sha256 = _finality_source_tree_sha256(source_root)
+    if (
+        source_tree_sha256 != FINALITY_SOURCE_TREE_SHA256
+        or hashlib.sha256(cargo_lock).hexdigest() != FINALITY_CARGO_LOCK_SHA256
+        or hashlib.sha256(fixture).hexdigest() != FINALITY_FIXTURE_SET_SHA256
+    ):
+        raise ShadowReleaseError("miner_finality_source_pin_mismatch")
+    try:
+        with staged_pinned_artifacts(
+            (
+                PinnedArtifact(
+                    name="miner_finality",
+                    source=_absolute_normal_path(binary_path, "miner finality binary"),
+                    expected_sha256=hashlib.sha256(binary).hexdigest(),
+                    maximum_bytes=MAX_RELEASE_FILE_BYTES,
+                    executable=True,
+                ),
+            )
+        ) as staged:
+            process = subprocess.run(
+                [os.fspath(staged["miner_finality"]), "--conformance-self-test"],
+                cwd=source_root,
+                env={"LANG": "C", "LC_ALL": "C"},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError, PinnedArtifactError) as error:
+        raise ShadowReleaseError("miner_finality_self_test_failed") from error
+    if process.returncode != 0 or not process.stdout.endswith(b"\n"):
+        raise ShadowReleaseError("miner_finality_self_test_failed")
+    if process.stdout.count(b"\n") != 1:
+        raise ShadowReleaseError("miner_finality_self_test_output_invalid")
+    self_test_bytes = process.stdout[:-1]
+    self_test = _parse_finality_self_test_output(self_test_bytes, fixture_bytes=fixture)
+    try:
+        license_closure = build_rust_license_closure(
+            source_root=source_root,
+            repository_root=repository,
+            target_triple=DARWIN_MINER_TARGET,
+            binary_name="umi-grandpa-finality-observer",
+            expected_root_package="umi-grandpa-finality-observer",
+        )
+    except RustLicenseClosureError as error:
+        raise ShadowReleaseError(error.reason_code) from error
+    report = MinerFinalityBuildReport(
+        schema=MINER_FINALITY_BUILD_REPORT_SCHEMA,
+        role="miner-finality-only",
+        target_triple=DARWIN_MINER_TARGET,
+        host_operating_system="darwin",
+        host_architecture="arm64",
+        binary_format="mach-o-64-arm64-executable",
+        binary_sha256=hashlib.sha256(binary).hexdigest(),
+        binary_size_bytes=len(binary),
+        umi_git_revision=umi_git_revision,
+        finality_source_revision=FINALITY_SOURCE_REVISION,
+        finality_source_tree_sha256=source_tree_sha256,
+        finality_cargo_lock_sha256=hashlib.sha256(cargo_lock).hexdigest(),
+        finality_fixture_set_sha256=hashlib.sha256(fixture).hexdigest(),
+        license_closure_sha256=hashlib.sha256(license_closure).hexdigest(),
+        self_test_output_sha256=hashlib.sha256(self_test_bytes).hexdigest(),
+        self_test=self_test,
+        validator_runtime_supported=False,
+        media_runtime_included=False,
+    )
+    report_bytes = canonical_json_bytes(report)
+    _validate_miner_finality_build_report(
+        target=DARWIN_MINER_TARGET,
+        binary_bytes=binary,
+        report_bytes=report_bytes,
+        license_closure_bytes=license_closure,
+        fixture_bytes=fixture,
+        cargo_lock_bytes=cargo_lock,
+        source_tree_sha256=source_tree_sha256,
+        umi_git_revision=umi_git_revision,
+    )
+    return BuiltMinerFinalityArtifact(
+        report=report,
+        binary=binary,
+        report_bytes=report_bytes,
+        license_closure=license_closure,
+    )
+
+
+def emit_miner_finality_artifact(
+    artifact: BuiltMinerFinalityArtifact,
+    output_dir: str | Path,
+) -> None:
+    """Atomically create one immutable directory for release input consumption."""
+
+    if not isinstance(artifact, BuiltMinerFinalityArtifact):
+        raise TypeError("artifact must be a BuiltMinerFinalityArtifact")
+    destination = _absolute_normal_path(output_dir, "miner finality output directory")
+    if destination.exists():
+        raise ShadowReleaseError("miner_finality_output_directory_exists")
+    parent = destination.parent
+    if not parent.exists() or parent.is_symlink() or not parent.is_dir():
+        raise ShadowReleaseError("miner_finality_output_parent_invalid")
+    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=parent))
+    try:
+        payloads = {
+            "umi-grandpa-finality-observer": (artifact.binary, 0o555),
+            "miner-finality-build-report.json": (artifact.report_bytes, 0o444),
+            "finality-third-party-licenses.zip": (artifact.license_closure, 0o444),
+        }
+        for name, (payload, mode) in payloads.items():
+            target = temporary / name
+            target.write_bytes(payload)
+            target.chmod(mode)
+        temporary.chmod(0o555)
+        os.replace(temporary, destination)
+    except Exception as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        if isinstance(error, ShadowReleaseError):
+            raise
+        raise ShadowReleaseError("miner_finality_output_emit_failed") from error
 
 
 def _summary(build: BuiltShadowRelease) -> bytes:
@@ -5010,6 +6037,65 @@ def verify_main(argv: Sequence[str] | None = None) -> int:
         return 2
 
 
+def miner_finality_artifact_main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Seal a native Apple Silicon finality binary for a signed UMI release"
+    )
+    parser.add_argument("--repository-root", type=Path, required=True)
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    arguments = parser.parse_args(argv)
+    try:
+        artifact = build_miner_finality_artifact(
+            repository_root=arguments.repository_root,
+            binary_path=arguments.binary,
+        )
+        emit_miner_finality_artifact(artifact, arguments.output_dir)
+        sys.stdout.buffer.write(
+            canonical_json_bytes(
+                {
+                    "binary_sha256": artifact.report.binary_sha256,
+                    "build_report_sha256": hashlib.sha256(artifact.report_bytes).hexdigest(),
+                    "license_closure_sha256": hashlib.sha256(artifact.license_closure).hexdigest(),
+                    "ok": True,
+                    "output_dir": str(arguments.output_dir),
+                    "target_triple": artifact.report.target_triple,
+                    "validator_runtime_supported": False,
+                }
+            )
+            + b"\n"
+        )
+        return 0
+    except (ShadowReleaseError, ValidationError, ValueError, TypeError) as error:
+        reason = error.reason_code if isinstance(error, ShadowReleaseError) else "invalid_release"
+        sys.stderr.write(reason + "\n")
+        return 2
+
+
+def resolve_miner_main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify and privately materialize one signed UMI native miner target"
+    )
+    parser.add_argument("release_dir", type=Path)
+    parser.add_argument("--expected-authority-hotkey", required=True)
+    parser.add_argument("--target-triple", choices=[DARWIN_MINER_TARGET], required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    arguments = parser.parse_args(argv)
+    try:
+        resolved = verify_miner_release_target(
+            arguments.release_dir,
+            expected_authority_hotkey=arguments.expected_authority_hotkey,
+            target_triple=arguments.target_triple,
+            output_dir=arguments.output_dir,
+        )
+        sys.stdout.buffer.write(canonical_json_bytes(resolved) + b"\n")
+        return 0
+    except (ShadowReleaseError, ValidationError, ValueError, TypeError) as error:
+        reason = error.reason_code if isinstance(error, ShadowReleaseError) else "invalid_release"
+        sys.stderr.write(reason + "\n")
+        return 2
+
+
 def finalize_main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Finalize a freshly staged UMI shadow release with its authority signature"
@@ -5104,6 +6190,7 @@ def materialize_operator_main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "ArtifactPaths",
+    "BuiltMinerFinalityArtifact",
     "BuiltShadowRelease",
     "CapacitySigningRequest",
     "FinalManifestAuthorityAttestation",
@@ -5115,6 +6202,8 @@ __all__ = [
     "LiveShadowReleaseInput",
     "LiveShadowReleaseIntent",
     "LiveShadowReleaseManifest",
+    "MinerFinalityBuildReport",
+    "MinerFinalityTargetReleaseInput",
     "OperatorMaterializationBindings",
     "OperatorReleaseInput",
     "PreparedShadowRelease",
@@ -5124,17 +6213,21 @@ __all__ = [
     "ReleaseAuthorityAttestation",
     "ReleaseAuthorityInput",
     "ReleaseAuthorityRequest",
+    "ReleaseRelativeMinerConfig",
     "ReleaseRelativeOperatorConfig",
     "ReleaseRelativeValidatorConfig",
+    "ResolvedMinerRelease",
     "ShadowReleaseError",
     "SignedPublisherCapacity",
     "StorageProofReleaseInput",
     "UnsignedLiveShadowReleaseManifest",
     "ValidatorCostClass",
     "ValidatorCostSchedule",
+    "build_miner_finality_artifact",
     "build_shadow_release",
     "collect_live_release_observation",
     "emit_capacity_signing_requests",
+    "emit_miner_finality_artifact",
     "emit_release_authority_request",
     "emit_shadow_release_signing_stage",
     "final_manifest_authority_request",
@@ -5144,9 +6237,12 @@ __all__ = [
     "main",
     "materialize_operator_main",
     "materialize_private_operator_configs",
+    "miner_finality_artifact_main",
     "prepare_shadow_release",
     "release_authority_request",
+    "resolve_miner_main",
     "verify_main",
+    "verify_miner_release_target",
     "verify_shadow_release_directory",
     "verify_shadow_release_signing_stage",
 ]

@@ -62,11 +62,15 @@ explicitly grants the `public-release-approved` class, after a privacy review.
 
 Before provisioning the public services:
 
-1. Correct the finalized SN78 identity to UMI and retain its block proof.
+1. Retain the completed UMI identity proof from finalized block `8993215` and do
+   not replace the identity with an obsolete partial record.
 2. Read the live `activity_cutoff_factor` and make sure the derived cutoff is no
-   longer than the policy's 360-block window stride. At the 2026-09-03 audit the
-   factor was `13889`, which derived a 5,000-block cutoff and failed the live
-   weight-build gate. This observation is not a permanent chain value.
+   longer than the policy's 360-block window stride. The public observer is live
+   and confirms the UMI identity, but finalized block `8995150` on 2026-09-04 still
+   showed factor `13889`, which derived a 5,000-block cutoff and failed the live
+   weight-build gate despite the reported hyperparameter update. It also showed
+   `subnet_emission_enabled: false`. These observations are not permanent chain
+   values.
 3. Build, sign, verify, and publish the target-specific inactive UMI release.
 4. Materialize the policy-bound validator configurations from that release.
 5. Complete the publisher, validator, miner, collateral, capacity, consent,

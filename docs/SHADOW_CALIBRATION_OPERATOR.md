@@ -6,7 +6,7 @@ wallet, signature-generation, extrinsic, broadcast, or weight-submission
 capability.
 
 The public directory contains every UMI executable and configuration byte selected
-for one declared `target_triple`. Its wheel, repository-exact lockfile, pinned `uv`
+for one primary validator `target_triple`. Its wheel, repository-exact lockfile, pinned `uv`
 binary and provenance, FFmpeg and FFprobe binaries, Rust verifier binaries, Finney
 chain spec, runtime metadata, fixture sets, validator-capacity set, cost schedule,
 mirror rule, and control disclosures are copied under
@@ -16,7 +16,9 @@ license and corresponding-source bundles, the vendored finality patches and lice
 files, the root `LICENSE`, and `THIRD_PARTY_NOTICES.md`. An operator does not need
 the builder's source paths after emission. Python and locked Python packages are
 installed from their signed metadata and are not claimed to be bundled for offline
-installation.
+installation. An optional `aarch64-apple-darwin` miner target adds only a native
+finality observer, its build report and license closure, and a signed miner
+template. It does not add a Darwin validator or media runtime.
 
 Operator documentation is deliberately outside the wheel and signed runtime
 artifact tree. The manifest records both the exact 40-character UMI Git commit
@@ -86,6 +88,14 @@ host named by `target_triple`. Gather all absolute artifact paths required by
   owners and collateral already present on chain; and
 - a dedicated release-authority hotkey whose private key is available to an
   external signing tool, never to `umi-shadow-release`.
+
+To include an Apple Silicon miner, first create the native artifact on that host
+with `umi-miner-finality-artifact`, then transfer its three immutable files to the
+release builder. Record the three emitted SHA-256 values and confirm them through a
+separate trusted channel. Add the files and those expected digests through the
+top-level `miner_finality_targets` input before any publisher or release-authority
+signature is collected. The exact workflow and schema are in [the macOS miner
+operator guide](MACOS_MINER_OPERATOR.md).
 
 Release preparation runs `cargo +1.98.0 metadata --locked --offline` for the target
 triple and derives one deterministic license archive for each Rust binary. Every
@@ -741,6 +751,11 @@ request. It does contain two secret-free templates per validator under
 settings, and release-relative paths; they are covered by both release-authority
 signatures.
 
+When the input includes the Apple Silicon miner target, the release also contains
+`miner-templates/aarch64-apple-darwin.json`. That template is covered by both
+authority signatures and carries no wallet or model path. The primary validator
+templates and Linux artifact pins are unchanged.
+
 ## 9. Verify before distribution or startup
 
 Run the verifier from an independently trusted checkout or previously verified
@@ -767,6 +782,27 @@ It stages the signed release's exact fixture and executable bytes into a private
 temporary directory, executes all 34 conformance cases, and requires the resulting
 canonical report and digest to match the signed report exactly. Checking only the
 stored `verified` field is insufficient.
+
+On an Apple Silicon miner host, use the role-scoped resolver after obtaining this
+same release and trusted authority hotkey:
+
+```bash
+install -d -m 0700 /absolute/private/umi-resolved-releases
+umi-shadow-release-resolve-miner /absolute/path/to/public-release \
+  --expected-authority-hotkey 5ExpectedReleaseAuthorityAddress \
+  --target-triple aarch64-apple-darwin \
+  --output-dir /absolute/private/umi-resolved-releases/release-001
+```
+
+It authenticates the complete tree and static policy bindings, then runs the
+signed Darwin finality self-test from a fresh private copy. The destination must not
+exist before the command; its parent must be owner-only. It does not execute the
+Linux-only validator conformance or storage-proof binaries. Consume
+`/absolute/private/umi-resolved-releases/release-001/resolved-miner-release.json`;
+its output paths are suitable only for the miner command. Its minimum validator
+transport timeout and concurrency fields are derived from the signed validator
+templates for use by the miner capacity rehearsal. Follow [the macOS miner operator
+guide](MACOS_MINER_OPERATOR.md) for installation and startup.
 
 Publish these three values together through the same trusted channel used for the
 authority hotkey:

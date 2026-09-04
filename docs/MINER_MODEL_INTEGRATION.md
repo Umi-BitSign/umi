@@ -142,9 +142,24 @@ file is a persistent coordination inode, not stale state: do not delete it durin
 restart handling. The OS releases its lock on both clean and unclean process exit.
 Use `--max-inference-concurrency` inside the protocol process, and keep the model in
 the separately supervised sidecar when process isolation is needed. The default is
-the policy validator count. A lower value is rejected so work from one validator
-cannot occupy another validator's model slot. The same minimum applies to the
-in-process executor and isolated sidecar.
+the policy validator count. An explicit value must be a positive multiple of that
+count. The miner partitions the slots equally so work from one validator cannot
+occupy another validator's model capacity. The same limit applies to the in-process
+executor and isolated sidecar.
+
+An in-process model whose output is invariant across validators for the same
+signed window, verified video, task, policy, and model revision may opt into
+`--coalesce-window-video-inference` with an explicit
+`--max-backend-workers`. UMI then shares one bounded task and successful result
+across matching requests while each response remains separately signed and bound
+to its full request and validator. The shared task has its own queue-inclusive
+inference deadline and is not canceled when one HTTP waiter disconnects. Results
+are cleared at response close and only successes are cached.
+
+This mode is an explicit backend-contract assertion. It is rejected for the
+request-digest-bound Unix-socket transport. Do not enable it if the model reads
+validator, challenge, issuance, deadline, delivery URL, or other request fields
+outside the documented sharing projection.
 
 ### Socket frame
 

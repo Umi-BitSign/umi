@@ -5,7 +5,9 @@ import base64
 import hashlib
 import io
 import json
+import os
 import shutil
+import stat
 import subprocess
 import zipfile
 from pathlib import Path
@@ -19,6 +21,7 @@ from packaging.requirements import Requirement
 from pydantic import ValidationError
 
 import umi.conformance as conformance
+import umi.rust_license as rust_license_module
 import umi.shadow_release as shadow_release_module
 import umi.validator_live as validator_live_module
 
@@ -59,6 +62,7 @@ from umi.release_chain_evidence import (
 )
 from umi.shadow_release import (
     _LIVE_CAPTURE_AUTHORITY,
+    BuiltMinerFinalityArtifact,
     BuiltShadowRelease,
     FinalizedReleaseObservation,
     FinalManifestAuthorityAttestation,
@@ -67,12 +71,15 @@ from umi.shadow_release import (
     OperatorMaterializationBindings,
     ReleaseRelativeOperatorConfig,
     ReleaseRelativeValidatorConfig,
+    ResolvedMinerRelease,
     ShadowReleaseError,
     _finality_source_tree_sha256,
     _umi_source_tree_sha256_from_wheel,
     _verify_packaged_policy_bindings,
+    build_miner_finality_artifact,
     build_shadow_release,
     collect_live_release_observation,
+    emit_miner_finality_artifact,
     emit_release_authority_request,
     emit_shadow_release_signing_stage,
     final_manifest_authority_request,
@@ -83,6 +90,7 @@ from umi.shadow_release import (
     materialize_private_operator_configs,
     prepare_shadow_release,
     release_authority_request,
+    verify_miner_release_target,
     verify_shadow_release_directory,
     verify_shadow_release_signing_stage,
 )
@@ -302,6 +310,15 @@ def _static_elf(*, machine: int, salt: bytes, program_type: int = 1) -> bytes:
     program[:4] = program_type.to_bytes(4, "little")
     program[4:8] = (5).to_bytes(4, "little")
     return bytes(header + program) + salt
+
+
+def _arm64_mach_o(*, salt: bytes) -> bytes:
+    header = bytearray(32)
+    header[:4] = b"\xcf\xfa\xed\xfe"
+    header[4:8] = (0x0100000C).to_bytes(4, "little")
+    header[8:12] = (0).to_bytes(4, "little")
+    header[12:16] = (2).to_bytes(4, "little")
+    return bytes(header) + salt
 
 
 def _zip_bytes(members: dict[str, bytes]) -> bytes:
@@ -638,7 +655,10 @@ def release_environment(
     ) -> bytes:
         assert source_root.is_dir()
         assert repository_root == Path(__file__).resolve().parents[1]
-        assert target_triple == "aarch64-unknown-linux-musl"
+        assert target_triple in {
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-musl",
+        }
         assert binary_name == expected_root_package
         return _zip_bytes(
             {
@@ -657,7 +677,10 @@ def release_environment(
     ) -> None:
         assert payload
         assert cargo_lock_bytes.startswith(b"# This file is automatically")
-        assert target_triple == "aarch64-unknown-linux-musl"
+        assert target_triple in {
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-musl",
+        }
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             fixture = json.loads(archive.read("fixture.json"))
         assert fixture == {"binary_name": binary_name, "target_triple": target_triple}
@@ -1121,6 +1144,138 @@ def release_environment(
     return descriptor, release_root, block["timestamp_ms"] + 10, capture
 
 
+def _descriptor_with_darwin_miner(
+    descriptor: LiveShadowReleaseInput,
+    tmp_path: Path,
+    *,
+    now_ms: int,
+) -> tuple[LiveShadowReleaseInput, bytes]:
+    repository = Path(descriptor.repository_root)
+    source_root = repository / "rust" / "grandpa-finality-observer"
+    fixture_bytes = (source_root / "fixtures" / "finality-v1.json").read_bytes()
+    target = "aarch64-apple-darwin"
+    native_artifact = os.environ.get("UMI_TEST_NATIVE_DARWIN_FINALITY_ARTIFACT_DIR")
+    if native_artifact is not None:
+        artifact_root = Path(native_artifact).resolve(strict=True)
+        binary = artifact_root / "umi-grandpa-finality-observer"
+        report = artifact_root / "miner-finality-build-report.json"
+        license_closure = artifact_root / "finality-third-party-licenses.zip"
+        native_report = shadow_release_module.MinerFinalityBuildReport.model_validate_json(
+            report.read_bytes()
+        )
+        self_test_bytes = canonical_json_bytes(native_report.self_test)
+    else:
+        fixture = conformance.FinalityFixtures.model_validate_json(fixture_bytes)
+        self_test = {
+            "case_ids": [
+                "checkpoint-header-positive",
+                "contiguous-first-positive",
+                "contiguous-second-positive",
+                "finney-checkpoint-positive",
+                "missing-prefix-negative",
+                "truncated-header-negative",
+            ],
+            "finney_checkpoint_canonical_sha256": fixture.finney_checkpoint_fixture.sha256,
+            "fixture_canonical_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
+            "ok": True,
+            "schema": "umi-grandpa-finality-conformance-result/1",
+        }
+        self_test_bytes = canonical_json_bytes(self_test)
+        artifact_root = tmp_path / "darwin-miner"
+        binary = _write(
+            artifact_root / "umi-grandpa-finality-observer",
+            _arm64_mach_o(salt=b"darwin-miner-finality-fixture"),
+            executable=True,
+        )
+        license_closure = _write(
+            artifact_root / "finality-third-party-licenses.zip",
+            _zip_bytes(
+                {
+                    "fixture.json": canonical_json_bytes(
+                        {
+                            "binary_name": "umi-grandpa-finality-observer",
+                            "target_triple": target,
+                        }
+                    )
+                }
+            ),
+        )
+        report = _write(
+            artifact_root / "miner-finality-build-report.json",
+            canonical_json_bytes(
+                {
+                    "binary_format": "mach-o-64-arm64-executable",
+                    "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                    "binary_size_bytes": len(binary.read_bytes()),
+                    "finality_cargo_lock_sha256": hashlib.sha256(
+                        (source_root / "Cargo.lock").read_bytes()
+                    ).hexdigest(),
+                    "finality_fixture_set_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
+                    "finality_source_revision": shadow_release_module.FINALITY_SOURCE_REVISION,
+                    "finality_source_tree_sha256": (
+                        shadow_release_module.FINALITY_SOURCE_TREE_SHA256
+                    ),
+                    "host_architecture": "arm64",
+                    "host_operating_system": "darwin",
+                    "license_closure_sha256": hashlib.sha256(
+                        license_closure.read_bytes()
+                    ).hexdigest(),
+                    "media_runtime_included": False,
+                    "role": "miner-finality-only",
+                    "schema": "umi-miner-finality-build-report/1",
+                    "self_test": self_test,
+                    "self_test_output_sha256": hashlib.sha256(self_test_bytes).hexdigest(),
+                    "target_triple": target,
+                    "umi_git_revision": "ab" * 20,
+                    "validator_runtime_supported": False,
+                }
+            ),
+        )
+    values = descriptor.model_dump(mode="json", by_alias=True)
+    values["miner_finality_targets"] = [
+        {
+            "binary_path": str(binary),
+            "build_report_path": str(report),
+            "expected_binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            "expected_build_report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+            "expected_license_closure_sha256": hashlib.sha256(
+                license_closure.read_bytes()
+            ).hexdigest(),
+            "license_closure_path": str(license_closure),
+            "target_triple": target,
+        }
+    ]
+    for item in values["publisher_capacities"]:
+        item["signature"] = None
+    values["release_authority"]["signature"] = None
+    unsigned = LiveShadowReleaseInput.model_validate(values)
+    prepared = prepare_shadow_release(unsigned, now_ms=now_ms)
+    group_wallets = [_wallet(f"//ReleaseGroup{index}") for index in range(3)]
+    wallets_by_account = {
+        account_id32(wallet.hotkey.ss58_address): wallet for wallet in group_wallets
+    }
+    signatures = {
+        request.control_group_id: "0x"
+        + bytes(
+            wallets_by_account[account_id32(request.administrator)].hotkey.sign(
+                bytes.fromhex(request.digest)
+            )
+        ).hex()
+        for request in prepared.signing_requests
+    }
+    for item in values["publisher_capacities"]:
+        item["signature"] = signatures[item["control_group_id"]]
+    capacity_signed = LiveShadowReleaseInput.model_validate(values)
+    authority_request = release_authority_request(
+        prepare_shadow_release(capacity_signed, now_ms=now_ms)
+    )
+    authority_wallet = _wallet("//ReleaseValidator0")
+    values["release_authority"]["signature"] = (
+        "0x" + bytes(authority_wallet.hotkey.sign(bytes.fromhex(authority_request.digest))).hex()
+    )
+    return LiveShadowReleaseInput.model_validate(values), self_test_bytes
+
+
 def _final_authority(build: BuiltShadowRelease) -> FinalManifestAuthorityAttestation:
     request = final_manifest_authority_request(build.manifest)
     wallet = _wallet("//ReleaseValidator0")
@@ -1175,7 +1330,9 @@ def test_release_build_is_deterministic_inactive_and_contains_no_secrets(
         for name, payload in first.files.items()
         if name.endswith(".validator-template.json")
     )
-    assert json.loads(validator_template_bytes)["umi_revision"].startswith(
+    validator_template = json.loads(validator_template_bytes)
+    assert validator_template["transport_timeout_seconds"] == 90.0
+    assert validator_template["umi_revision"].startswith(
         "git:" + "ab" * 20 + ";source-tree-sha256:"
     )
     assert len([name for name in first.files if name.startswith("publisher-capacity/")]) == 3
@@ -1243,6 +1400,326 @@ def test_release_build_is_deterministic_inactive_and_contains_no_secrets(
         assert request.statement.issued_block == descriptor.observation.block_number
         assert request.statement.issued_block_hash == descriptor.observation.block_hash
         assert request.statement.valid_from_block == descriptor.activation_block
+
+
+def test_default_release_preserves_the_single_linux_validator_target(
+    release_environment: tuple[LiveShadowReleaseInput, Path, int, LiveReleaseObservationCapture],
+) -> None:
+    descriptor, _release_root, now_ms, capture = release_environment
+    assert "miner_finality_targets" not in descriptor.model_dump(mode="json", by_alias=True)
+
+    build = build_shadow_release(descriptor, live_capture=capture, now_ms=now_ms)
+    finality = build.policy.implementation_pins.finality_verifier
+    proof = build.policy.implementation_pins.storage_proof_verifier
+    assert finality is not None and proof is not None
+    assert (
+        set(finality.release_sha256_by_target)
+        == set(proof.release_sha256_by_target)
+        == {"aarch64-unknown-linux-musl"}
+    )
+    assert not any(path.startswith("miner-templates/") for path in build.files)
+
+
+def test_release_rejects_darwin_artifact_that_disagrees_with_trusted_handoff_digest(
+    release_environment: tuple[LiveShadowReleaseInput, Path, int, LiveReleaseObservationCapture],
+    tmp_path: Path,
+) -> None:
+    descriptor, _release_root, now_ms, _capture = release_environment
+    descriptor, _self_test_bytes = _descriptor_with_darwin_miner(
+        descriptor,
+        tmp_path,
+        now_ms=now_ms,
+    )
+    values = descriptor.model_dump(mode="json", by_alias=True)
+    values["miner_finality_targets"][0]["expected_binary_sha256"] = hashlib.sha256(
+        b"wrong trusted handoff binary"
+    ).hexdigest()
+    mismatched = LiveShadowReleaseInput.model_validate(values)
+
+    with pytest.raises(ShadowReleaseError) as raised:
+        prepare_shadow_release(mismatched, now_ms=now_ms)
+    assert raised.value.reason_code == "miner_finality_input_digest_mismatch"
+
+
+def test_signed_release_can_add_a_native_darwin_miner_finality_target(
+    release_environment: tuple[LiveShadowReleaseInput, Path, int, LiveReleaseObservationCapture],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor, release_root, now_ms, capture = release_environment
+    native_artifact = os.environ.get("UMI_TEST_NATIVE_DARWIN_FINALITY_ARTIFACT_DIR")
+    if native_artifact is not None:
+        artifact_root = Path(native_artifact).resolve(strict=True)
+        native_report = shadow_release_module.MinerFinalityBuildReport.model_validate_json(
+            (artifact_root / "miner-finality-build-report.json").read_bytes()
+        )
+        repository_root = Path(descriptor.repository_root)
+        monkeypatch.setattr(
+            shadow_release_module,
+            "_verified_clean_repository_revision",
+            lambda root: native_report.umi_git_revision if root == repository_root else "",
+        )
+        fixture_license_verifier = shadow_release_module.verify_rust_license_closure
+
+        def verify_target_license_closure(
+            payload: bytes,
+            *,
+            cargo_lock_bytes: bytes,
+            target_triple: str,
+            binary_name: str,
+        ) -> None:
+            if target_triple == "aarch64-apple-darwin":
+                rust_license_module.verify_rust_license_closure(
+                    payload,
+                    cargo_lock_bytes=cargo_lock_bytes,
+                    target_triple=target_triple,
+                    binary_name=binary_name,
+                )
+                return
+            fixture_license_verifier(
+                payload,
+                cargo_lock_bytes=cargo_lock_bytes,
+                target_triple=target_triple,
+                binary_name=binary_name,
+            )
+
+        monkeypatch.setattr(
+            shadow_release_module,
+            "verify_rust_license_closure",
+            verify_target_license_closure,
+        )
+    descriptor, self_test_bytes = _descriptor_with_darwin_miner(
+        descriptor,
+        tmp_path,
+        now_ms=now_ms,
+    )
+    build = build_shadow_release(descriptor, live_capture=capture, now_ms=now_ms)
+    finality = build.policy.implementation_pins.finality_verifier
+    proof = build.policy.implementation_pins.storage_proof_verifier
+    assert finality is not None and proof is not None
+    assert set(finality.release_sha256_by_target) == {
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-musl",
+    }
+    assert set(proof.release_sha256_by_target) == {"aarch64-unknown-linux-musl"}
+    template_path = "miner-templates/aarch64-apple-darwin.json"
+    assert json.loads(build.files[template_path]) == {
+        "finality_build_report": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "miner_finality_build_report.aarch64-apple-darwin"
+        ),
+        "finality_chain_spec_path": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "finality_chain_spec"
+        ),
+        "finality_license_closure": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "miner_finality_license_closure.aarch64-apple-darwin"
+        ),
+        "finality_verifier_binary": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "miner_finality_verifier.aarch64-apple-darwin"
+        ),
+        "initial_minimum_finalized_block": descriptor.activation_block - 1,
+        "minimum_validator_transport_concurrency": 32,
+        "minimum_validator_transport_timeout_seconds": 90.0,
+        "mirror_discovery_rule_path": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "mirror_discovery_rule"
+        ),
+        "policy_path": "scoring-policy.json",
+        "protocol": PROTOCOL_VERSION,
+        "pyproject": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "pyproject"
+        ),
+        "python_lockfile": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "python_lockfile"
+        ),
+        "python_wheel": next(
+            item.relative_path
+            for item in build.manifest.external_artifacts
+            if item.label == "python_wheel"
+        ),
+        "role": "miner",
+        "schema": "umi-miner-live-config-template/1",
+        "scoring_policy_sha256": build.manifest.scoring_policy_sha256,
+        "target_triple": "aarch64-apple-darwin",
+        "translation_weights_active": False,
+        "umi_git_revision": build.manifest.umi_git_revision,
+        "umi_revision": (
+            "git:"
+            + build.manifest.umi_git_revision
+            + ";source-tree-sha256:"
+            + build.manifest.umi_source_tree_sha256
+        ),
+        "umi_source_tree_sha256": build.manifest.umi_source_tree_sha256,
+        "validator_runtime_supported": False,
+    }
+
+    stage_root = (tmp_path / "darwin-miner-stage").resolve()
+    emit_shadow_release_signing_stage(build, stage_root)
+    finalize_shadow_release(
+        stage_root,
+        final_authority=_final_authority(build),
+        emit_dir=release_root,
+        expected_authority_hotkey=descriptor.release_authority.authority_hotkey,
+    )
+    external = {item.label: item for item in build.manifest.external_artifacts}
+    source_binary = (
+        release_root / external["miner_finality_verifier.aarch64-apple-darwin"].relative_path
+    )
+    expected_binary = source_binary.read_bytes()
+    source_template = release_root / template_path
+    unsafe_parent = tmp_path / "group-writable-resolved-parent"
+    unsafe_parent.mkdir(mode=0o770)
+    unsafe_parent.chmod(0o770)
+    with pytest.raises(ShadowReleaseError) as unsafe_output:
+        verify_miner_release_target(
+            release_root,
+            expected_authority_hotkey=descriptor.release_authority.authority_hotkey,
+            target_triple="aarch64-apple-darwin",
+            output_dir=unsafe_parent / "darwin-release",
+        )
+    assert unsafe_output.value.reason_code == "resolved_miner_output_parent_unsafe"
+
+    original_verify = shadow_release_module._verify_unsigned_release_contents
+
+    def verify_then_replace_sources(**kwargs: Any) -> dict[str, bytes]:
+        verified = original_verify(**kwargs)
+        source_template.chmod(0o644)
+        source_template.write_bytes(b"{}")
+        source_template.chmod(0o444)
+        source_binary.chmod(0o755)
+        source_binary.write_bytes(_arm64_mach_o(salt=b"post-verification-swap"))
+        source_binary.chmod(0o555)
+        return verified
+
+    monkeypatch.setattr(
+        shadow_release_module,
+        "_verify_unsigned_release_contents",
+        verify_then_replace_sources,
+    )
+    original_run = subprocess.run
+
+    def native_self_test(command: list[str], **kwargs: object) -> Any:
+        if command[-1] == "--conformance-self-test":
+            executed = Path(command[0])
+            assert release_root not in executed.parents
+            assert executed.read_bytes() == expected_binary
+            return SimpleNamespace(returncode=0, stdout=self_test_bytes + b"\n")
+        return original_run(command, **kwargs)
+
+    if native_artifact is None:
+        monkeypatch.setattr(shadow_release_module.subprocess, "run", native_self_test)
+        monkeypatch.setattr(shadow_release_module.sys, "platform", "darwin")
+        monkeypatch.setattr(shadow_release_module.platform, "machine", lambda: "arm64")
+    output_parent = tmp_path / "resolved-miner-releases"
+    output_parent.mkdir(mode=0o700)
+    output_parent.chmod(0o700)
+    output = output_parent / "darwin-release"
+    resolved = verify_miner_release_target(
+        release_root,
+        expected_authority_hotkey=descriptor.release_authority.authority_hotkey,
+        target_triple="aarch64-apple-darwin",
+        output_dir=output,
+    )
+    assert isinstance(resolved, ResolvedMinerRelease)
+    assert resolved.target_triple == "aarch64-apple-darwin"
+    assert resolved.minimum_validator_transport_concurrency == 32
+    assert resolved.minimum_validator_transport_timeout_seconds == 90.0
+    assert resolved.umi_git_revision == build.manifest.umi_git_revision
+    assert resolved.umi_source_tree_sha256 == build.manifest.umi_source_tree_sha256
+    assert Path(resolved.mirror_discovery_rule_path).name == "mirror-discovery-rule.json"
+    assert Path(resolved.finality_verifier_binary).read_bytes() == expected_binary
+    assert resolved.validator_runtime_supported is False
+    assert stat.S_IMODE(output.stat().st_mode) == 0o555
+    returned_paths = (
+        resolved.policy_path,
+        resolved.python_wheel,
+        resolved.python_lockfile,
+        resolved.pyproject,
+        resolved.mirror_discovery_rule_path,
+        resolved.finality_verifier_binary,
+        resolved.finality_chain_spec_path,
+        resolved.finality_build_report,
+        resolved.finality_license_closure,
+    )
+    for value in returned_paths:
+        path = Path(value)
+        assert output in path.parents
+        assert not path.is_symlink()
+        assert stat.S_ISREG(path.stat().st_mode)
+        expected_mode = 0o555 if path == Path(resolved.finality_verifier_binary) else 0o444
+        assert stat.S_IMODE(path.stat().st_mode) == expected_mode
+    assert (output / "resolved-miner-release.json").read_bytes() == canonical_json_bytes(resolved)
+
+
+def test_native_miner_finality_artifact_is_self_tested_and_emitted_immutably(
+    release_environment: tuple[LiveShadowReleaseInput, Path, int, LiveReleaseObservationCapture],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor, _release_root, _now_ms, _capture = release_environment
+    repository = Path(descriptor.repository_root)
+    fixture_bytes = (
+        repository / "rust" / "grandpa-finality-observer" / "fixtures" / "finality-v1.json"
+    ).read_bytes()
+    fixture = conformance.FinalityFixtures.model_validate_json(fixture_bytes)
+    self_test_bytes = canonical_json_bytes(
+        {
+            "case_ids": [
+                "checkpoint-header-positive",
+                "contiguous-first-positive",
+                "contiguous-second-positive",
+                "finney-checkpoint-positive",
+                "missing-prefix-negative",
+                "truncated-header-negative",
+            ],
+            "finney_checkpoint_canonical_sha256": fixture.finney_checkpoint_fixture.sha256,
+            "fixture_canonical_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
+            "ok": True,
+            "schema": "umi-grandpa-finality-conformance-result/1",
+        }
+    )
+    binary = _write(
+        tmp_path / "native-finality",
+        _arm64_mach_o(salt=b"native-build-fixture"),
+        executable=True,
+    )
+    monkeypatch.setattr(shadow_release_module.sys, "platform", "darwin")
+    monkeypatch.setattr(shadow_release_module.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(
+        shadow_release_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=self_test_bytes + b"\n",
+        ),
+    )
+
+    artifact = build_miner_finality_artifact(
+        repository_root=repository,
+        binary_path=binary,
+    )
+    assert isinstance(artifact, BuiltMinerFinalityArtifact)
+    assert artifact.report.target_triple == "aarch64-apple-darwin"
+    assert artifact.report.validator_runtime_supported is False
+    output = (tmp_path / "sealed-native-finality").resolve()
+    emit_miner_finality_artifact(artifact, output)
+    assert (output / "miner-finality-build-report.json").read_bytes() == artifact.report_bytes
+    assert (output / "umi-grandpa-finality-observer").read_bytes() == artifact.binary
+    assert (output.stat().st_mode & 0o777) == 0o555
+    assert ((output / "umi-grandpa-finality-observer").stat().st_mode & 0o777) == 0o555
+    assert ((output / "miner-finality-build-report.json").stat().st_mode & 0o777) == 0o444
 
 
 def test_installed_binding_recomputes_source_pin_from_packaged_wheel(
@@ -2096,6 +2573,8 @@ def test_emit_is_atomic_refuses_overwrite_and_check_writes_nothing(
         "umi.validator_live.execute_conformance_suite",
         record_startup_conformance,
     )
+    monkeypatch.setattr(validator_live_module.sys, "platform", "linux")
+    monkeypatch.setattr(validator_live_module.platform, "machine", lambda: "aarch64")
     materialize_private_operator_configs(
         relocated_release,
         local_bindings,
@@ -2506,6 +2985,8 @@ def test_cli_final_actions_collect_live_observation_in_same_invocation(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(validator_live_module.sys, "platform", "linux")
+    monkeypatch.setattr(validator_live_module.platform, "machine", lambda: "aarch64")
     descriptor, release_root, _now_ms, capture = release_environment
     input_path = _write(
         tmp_path / "final-release-input.json",

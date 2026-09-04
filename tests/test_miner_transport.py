@@ -14,8 +14,12 @@ import pytest
 from umi.auth import REQUEST_BODY_SHA256_HEADER, HotkeyAuth, RequestAuthenticator
 from umi.backends import Translator
 from umi.config import Limits
+from umi.encoding import account_id32
 from umi.miner import (
+    IngressLimitExceeded,
     MinerRuntime,
+    _authenticated_ingress_slot,
+    _authenticated_request_task_limits,
     _effective_inference_concurrency,
     _identity,
     _load_policy,
@@ -243,7 +247,7 @@ def runtime(
         window_authority=window_authority or LocalComponentWindowAuthority(),
         model_revision=model_revision,
         inference_semaphore=asyncio.Semaphore(selected_limits.maximum_inference_concurrency),
-        work_semaphore=asyncio.Semaphore(4),
+        work_semaphore=asyncio.Semaphore(selected_limits.maximum_inference_concurrency),
     )
 
 
@@ -474,6 +478,7 @@ async def test_one_validator_cannot_fill_the_global_inference_queue() -> None:
     miner_runtime = runtime(
         translator=model,
         limits=Limits(maximum_inference_concurrency=2),
+        allowed_wallets=(first_validator, second_validator),
     )
     first_request = challenge_request(1)
     queued_same_validator = challenge_request(2)
@@ -507,7 +512,7 @@ async def test_one_validator_cannot_fill_the_global_inference_queue() -> None:
 
 @pytest.mark.parametrize(
     ("requested", "validators", "expected"),
-    ((None, 4, 4), (7, 4, 7)),
+    ((None, 4, 4), (8, 4, 8)),
 )
 def test_inference_concurrency_reserves_one_slot_per_validator(
     requested: int | None,
@@ -520,6 +525,93 @@ def test_inference_concurrency_reserves_one_slot_per_validator(
 def test_inference_concurrency_rejects_a_value_below_validator_count() -> None:
     with pytest.raises(ValueError, match="one slot per policy validator"):
         _effective_inference_concurrency(3, validator_count=4)
+
+
+def test_inference_concurrency_rejects_an_unequal_validator_partition() -> None:
+    with pytest.raises(ValueError, match="multiple of the policy validator count"):
+        _effective_inference_concurrency(7, validator_count=4)
+
+
+@pytest.mark.asyncio
+async def test_extra_inference_slots_are_partitioned_fairly_between_validators() -> None:
+    first_validator = dev_wallet("//Alice")
+    second_validator = dev_wallet("//Charlie")
+    started = asyncio.Queue[str]()
+    release = asyncio.Event()
+
+    @dataclass
+    class ProbeTranslator(Translator):
+        async def translate(self, video: bytes, request: TranslationRequest) -> str:
+            await started.put(request.challenge_id)
+            await release.wait()
+            return "hello world"
+
+    miner_runtime = runtime(
+        translator=ProbeTranslator(),
+        limits=Limits(maximum_inference_concurrency=4),
+        allowed_wallets=(first_validator, second_validator),
+    )
+    first_requests = [challenge_request(index) for index in range(1, 4)]
+    second_requests = [challenge_request(index) for index in range(4, 6)]
+    tasks = [
+        asyncio.create_task(_translate(miner_runtime, request, first_validator.hotkey.ss58_address))
+        for request in first_requests
+    ]
+    tasks.extend(
+        asyncio.create_task(
+            _translate(miner_runtime, request, second_validator.hotkey.ss58_address)
+        )
+        for request in second_requests
+    )
+    try:
+        observed = {await asyncio.wait_for(started.get(), timeout=1) for _index in range(4)}
+        assert observed == {
+            first_requests[0].challenge_id,
+            first_requests[1].challenge_id,
+            second_requests[0].challenge_id,
+            second_requests[1].challenge_id,
+        }
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_authenticated_ingress_accepts_the_full_launch_attempt_burst() -> None:
+    validators = tuple(dev_wallet(seed) for seed in ("//Alice", "//Charlie", "//Dave", "//Eve"))
+    miner_runtime = runtime(allowed_wallets=validators)
+    accounts = tuple(account_id32(wallet.hotkey.ss58_address).hex() for wallet in validators)
+    per_validator_limit, total_limit = _authenticated_request_task_limits(miner_runtime)
+    assert (per_validator_limit, total_limit) == (56, 224)
+
+    release = asyncio.Event()
+    entered = asyncio.Queue[str]()
+
+    async def occupy(account: str) -> None:
+        async with _authenticated_ingress_slot(miner_runtime, account):
+            await entered.put(account)
+            await release.wait()
+
+    tasks = [
+        asyncio.create_task(occupy(account))
+        for account in accounts
+        for _index in range(per_validator_limit)
+    ]
+    try:
+        observed = [
+            await asyncio.wait_for(entered.get(), timeout=1) for _index in range(total_limit)
+        ]
+        assert {account: observed.count(account) for account in accounts} == {
+            account: per_validator_limit for account in accounts
+        }
+        assert sum(miner_runtime.active_ingress_accounts.values()) == total_limit
+        with pytest.raises(IngressLimitExceeded, match="validator_ingress_busy"):
+            async with _authenticated_ingress_slot(miner_runtime, accounts[0]):
+                pytest.fail("the per-validator ingress ceiling was not enforced")
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+    assert miner_runtime.active_ingress_accounts == {}
 
 
 @pytest.mark.asyncio
@@ -588,7 +680,11 @@ async def test_one_validator_cannot_fill_fetch_slots_or_delay_another_validator(
         release_attacker=asyncio.Event(),
         bodies=bodies,
     )
-    miner_runtime = runtime(fetcher=fetcher, translator=CountingTranslator())
+    miner_runtime = runtime(
+        fetcher=fetcher,
+        translator=CountingTranslator(),
+        allowed_wallets=(first_validator, second_validator),
+    )
     attacker_requests = [unique_request(index, owner="attacker") for index in range(1, 29)]
     honest_request = unique_request(100, owner="honest")
 
@@ -668,7 +764,11 @@ async def test_overlapping_validators_do_not_share_unverified_fetch_state() -> N
     second_validator = dev_wallet("//Charlie")
     fetcher = CoordinatedFetcher(asyncio.Event(), asyncio.Event())
     translator = CountingTranslator()
-    miner_runtime = runtime(fetcher=fetcher, translator=translator)
+    miner_runtime = runtime(
+        fetcher=fetcher,
+        translator=translator,
+        allowed_wallets=(first_validator, second_validator),
+    )
     request = challenge_request()
 
     first = asyncio.create_task(
@@ -1126,14 +1226,75 @@ async def test_unsigned_slow_claims_cannot_reserve_authenticated_validator_slot(
     assert started_count == 0
 
 
-def test_uvicorn_connection_limits_leave_only_bounded_headroom() -> None:
-    first = dev_wallet("//Alice")
-    second = dev_wallet("//Charlie")
-    options = _uvicorn_limits(runtime(allowed_wallets=(first, second)))
+@pytest.mark.asyncio
+async def test_signed_route_burst_is_not_rejected_by_the_preauth_guard() -> None:
+    first_validator = dev_wallet("//Alice")
+    second_validator = dev_wallet("//Charlie")
+    started = asyncio.Queue[str]()
+    release = asyncio.Event()
 
-    assert options == {
-        "limit_concurrency": 8,
-        "backlog": 16,
+    @dataclass
+    class BlockingTranslator(Translator):
+        calls: int = 0
+
+        async def translate(self, video: bytes, request: TranslationRequest) -> str:
+            self.calls += 1
+            await started.put(request.challenge_id)
+            await release.wait()
+            return "hello world"
+
+    translator = BlockingTranslator()
+    miner_runtime = runtime(
+        translator=translator,
+        allowed_wallets=(first_validator, second_validator),
+        limits=Limits(
+            maximum_assignments_per_validator_window=4,
+            maximum_total_assignments_per_window=8,
+            maximum_inference_concurrency=2,
+        ),
+    )
+    assert miner_runtime.maximum_preauth_concurrency == 4
+    requests = (
+        *((first_validator, challenge_request(index)) for index in range(1, 5)),
+        *((second_validator, challenge_request(index)) for index in range(5, 9)),
+    )
+
+    async with httpx.AsyncClient(
+        base_url="http://miner.test",
+        transport=httpx.ASGITransport(app=create_app(miner_runtime)),
+    ) as client:
+        tasks = [
+            asyncio.create_task(
+                client.post(
+                    "/v1/translate",
+                    content=canonical_json_bytes(request),
+                    auth=HotkeyAuth(validator, miner_runtime.hotkey_ss58),
+                )
+            )
+            for validator, request in requests
+        ]
+        try:
+            observed = {await asyncio.wait_for(started.get(), timeout=2) for _index in range(2)}
+            assert observed == {requests[0][1].challenge_id, requests[4][1].challenge_id}
+            assert not any(task.done() for task in tasks)
+        finally:
+            release.set()
+        responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+
+    assert [response.status_code for response in responses] == [200] * 8
+    assert translator.calls == 8
+    assert miner_runtime.active_preauth_tokens == set()
+    assert miner_runtime.active_ingress_accounts == {}
+
+
+def test_launch_connection_limit_covers_every_bounded_signed_attempt() -> None:
+    validators = tuple(dev_wallet(seed) for seed in ("//Alice", "//Charlie", "//Dave", "//Eve"))
+    miner_runtime = runtime(allowed_wallets=validators)
+    assert _authenticated_request_task_limits(miner_runtime) == (56, 224)
+
+    assert _uvicorn_limits(miner_runtime) == {
+        "limit_concurrency": 236,
+        "backlog": 472,
         "timeout_keep_alive": 5,
     }
 

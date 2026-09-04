@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import umi.validator_live as validator_live_module
 from umi.artifacts import PublicBatchManifest
 from umi.audit_publication import AuditBundlePublisher, PublicOriginVerifier
 from umi.calibration_bundle import (
@@ -96,10 +97,26 @@ from . import test_validator_pool_replay as pool_replay_support
 from . import test_validator_transcript_effects as transcript_support
 from . import test_validator_weight_build_effect as weight_support
 from .test_observer import SequenceCollector, _cache, _snapshot
-from .test_validator_closing_snapshot import _live_policy
+from .test_validator_closing_snapshot import _live_policy as _base_live_policy
 from .test_validator_live import _config, _runtime_validation
 from .test_validator_pool_effect import _Fixture as PoolFixture
 from .test_validator_reveal_effect import _ground_truth
+
+LIVE_TARGET = "aarch64-unknown-linux-musl"
+
+
+@pytest.fixture(autouse=True)
+def _supported_linux_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(validator_live_module.sys, "platform", "linux")
+    monkeypatch.setattr(validator_live_module.platform, "machine", lambda: "aarch64")
+
+
+def _live_policy() -> ScoringPolicy:
+    values = _base_live_policy().model_dump(mode="json", by_alias=True)
+    for name in ("storage_proof_verifier", "finality_verifier"):
+        releases = values["implementation_pins"][name]["release_sha256_by_target"]
+        releases[LIVE_TARGET] = releases.pop("aarch64-apple-darwin")
+    return ScoringPolicy.model_validate(values)
 
 
 def _pin_rehearsal_mirror_rule(policy_data: dict) -> None:
@@ -168,7 +185,7 @@ class _PlanningFinality:
             timestamp_ms=self.timestamp_ms,
             scoring_policy_hash=scoring_policy_hash(self.policy),
             chain_observation=live,
-            finality_verifier_sha256=finality.release_sha256_by_target["aarch64-apple-darwin"],
+            finality_verifier_sha256=finality.release_sha256_by_target[LIVE_TARGET],
             finality_evidence=evidence,
             finality_evidence_sha256=hashlib.sha256(evidence).hexdigest(),
         )
@@ -382,7 +399,7 @@ def _verification_ports(policy: ScoringPolicy) -> CalibrationVerificationPorts:
     finality_pin = policy.implementation_pins.finality_verifier
     proof_pin = policy.implementation_pins.storage_proof_verifier
     assert finality_pin is not None and proof_pin is not None
-    target = "aarch64-apple-darwin"
+    target = LIVE_TARGET
     finality_digest = finality_pin.release_sha256_by_target[target]
 
     def finality_verifier(*, identities, attestations, replay_bindings, policy):
@@ -447,7 +464,7 @@ def _with_replayable_issuance(fixture: PoolFixture, policy: ScoringPolicy) -> No
     original = fixture.prepared
     finality = policy.implementation_pins.finality_verifier
     assert finality is not None
-    digest = finality.release_sha256_by_target["aarch64-apple-darwin"]
+    digest = finality.release_sha256_by_target[LIVE_TARGET]
 
     def prepared(context, work):
         value = original(context, work)

@@ -41,34 +41,25 @@ Three milestones must stay separate:
   download location.
 - [ ] Tag and publish the reviewed commit only after repository-owner approval.
 
-## 2. Correct the public SN78 identity
+## 2. Verify the public SN78 identity and live parameters
 
-The finalized chain identity must say UMI, not the subnet's previous name. The
-subnet owner must dry-run and then submit the full `btcli tx
-set-subnet-identity` operation for netuid 78. Identity updates replace the whole
-record, so every field is explicit; an abbreviated update can erase the repository
-or retain obsolete branding. A safe first preview is:
+The owner identity update is complete. Finalized block `8993215`, block hash
+`0xacdbccd65638585a820d1c18d29c57e45010bfa6ee9b6474c9a3a6e4fd1c3db3`,
+contains successful extrinsic
+`0xb9db7098a6c65de5a2694cf74c0b4d1b414400cd492cdcf1cc12c31e2f10ecec`
+and `SubnetIdentitySet(78)`. The resulting identity names UMI, links the public
+repository and `https://www.umi.vision`, and retains the live Discord and logo
+fields. Do not rerun an old replacement command: identity updates replace the
+whole record and can erase fields that are already correct.
 
-```bash
-btcli tx set-subnet-identity \
-  --network finney \
-  --wallet YOUR_OWNER_WALLET \
-  --wallet-path /absolute/path/to/wallets \
-  --netuid 78 \
-  --subnet-name UMI \
-  --github-repo https://github.com/Umi-BitSign/umi \
-  --subnet-contact "" \
-  --subnet-url https://umi.vision \
-  --discord "" \
-  --description "Trust-minimized ASL-to-English translation on Bittensor" \
-  --logo-url "" \
-  --additional "" \
-  --dry-run
-```
-
-Review the signer, fee, raw call, and effects from the exact owner coldkey before
-rerunning without `--dry-run`. Lower the live activity cutoff to one 360-block
-tempo in a separate preview and submission:
+The group reported that the subnet owner identity and hyperparameters were updated
+and that the services were running. The public observer confirms the identity and
+is serving fresh finalized state. Its read at block `8995150`, block hash
+`0x66e448a52cb4f650b8fdcd9d3bf03cac1fb6e1ec131e6aad5ad6dc605754bd7f`,
+on 2026-09-04 still showed one separate launch requirement unmet: the live
+`activity_cutoff_factor` remained `13889`, which derives a 5,000-block cutoff at
+tempo 360. `subnet_emission_enabled` also remained false. Lower the cutoff to one
+360-block tempo in a separate preview and submission:
 
 ```bash
 btcli tx set-hyperparameter \
@@ -86,8 +77,8 @@ window. If a token-symbol change is wanted, choose an unused live-catalog symbol
 explicitly and dry-run `btcli tx update-symbol` separately; renaming the subnet
 does not change its symbol.
 
-- [ ] Confirm the identity and optional symbol at one finalized block and retain
-  the transaction events and block hash.
+- [x] Confirm the identity at one finalized block and retain the transaction
+  events and block hash.
 - [ ] Confirm MechId 0, commit-reveal state, runtime version, tempo, weight rate,
   activity cutoff, immunity period, and subnet emission flags at that same block.
 - [ ] Keep existing chain incentive and emission numbers labeled as native,
@@ -162,8 +153,14 @@ requires a new policy and restarts the soak.
 
 - [ ] Start the model sidecar under its own supervisor, memory limit, inference
   deadline, and restart policy. Start `umi-miner` with the same model revision,
-  scoring-policy digest, validator slot count, and exact mirror host allowlist.
+  scoring-policy digest, validator slot count, and exact delivery-origin allowlist.
   Follow [MINER_MODEL_INTEGRATION.md](MINER_MODEL_INTEGRATION.md).
+- [ ] For an Apple Silicon miner, follow
+  [MACOS_MINER_OPERATOR.md](MACOS_MINER_OPERATOR.md), resolve the signed Darwin
+  miner target, and pass the 112-request capacity rehearsal on that host. A Mac
+  Studio validator runs inside a dedicated native ARM64 Linux VM and follows the
+  ordinary signed Linux validator procedure; a host-native Darwin validator is
+  not conforming.
 - [ ] Verify that exact miner retries return the original ciphertext and never run
   inference twice. Verify that model and protocol logs contain neither video nor
   hypotheses before reveal.

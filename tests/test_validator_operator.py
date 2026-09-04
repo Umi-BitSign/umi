@@ -79,6 +79,8 @@ def _operator_material(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[ScoringPolicy, object, LiveValidatorOperatorConfig]:
+    monkeypatch.setattr("umi.validator_live.sys.platform", "linux")
+    monkeypatch.setattr("umi.validator_live.platform.machine", lambda: "aarch64")
     policy_data = _live_shadow_policy_data()
     proof_binary = (tmp_path / "proof-verifier").resolve()
     finality_binary = (tmp_path / "finality-verifier").resolve()
@@ -88,13 +90,17 @@ def _operator_material(
     chain_spec.write_bytes(b'{"name":"pinned-test-chain"}')
     proof_binary.chmod(0o755)
     finality_binary.chmod(0o755)
-    target = "aarch64-apple-darwin"
-    policy_data["implementation_pins"]["storage_proof_verifier"]["release_sha256_by_target"][
-        target
-    ] = hashlib.sha256(proof_binary.read_bytes()).hexdigest()
-    policy_data["implementation_pins"]["finality_verifier"]["release_sha256_by_target"][target] = (
-        hashlib.sha256(finality_binary.read_bytes()).hexdigest()
-    )
+    target = "aarch64-unknown-linux-musl"
+    proof_releases = policy_data["implementation_pins"]["storage_proof_verifier"][
+        "release_sha256_by_target"
+    ]
+    finality_releases = policy_data["implementation_pins"]["finality_verifier"][
+        "release_sha256_by_target"
+    ]
+    proof_releases.clear()
+    finality_releases.clear()
+    proof_releases[target] = hashlib.sha256(proof_binary.read_bytes()).hexdigest()
+    finality_releases[target] = hashlib.sha256(finality_binary.read_bytes()).hexdigest()
     policy_data["implementation_pins"]["finality_verifier"]["chain_spec_sha256"] = hashlib.sha256(
         chain_spec.read_bytes()
     ).hexdigest()

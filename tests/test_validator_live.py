@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import umi.validator_live as validator_live_module
 from umi.encoding import account_id32
 from umi.mirror_readiness import VerifiedLiveMirrorReadiness
 from umi.policy import ScoringPolicy, scoring_policy_hash
@@ -56,11 +57,22 @@ from umi.validator_state import (
 from .factories import dev_wallet
 from .test_policy import _live_shadow_policy_data, make_policy
 
-TARGET = "aarch64-apple-darwin"
+TARGET = "aarch64-unknown-linux-musl"
+
+
+@pytest.fixture(autouse=True)
+def _supported_linux_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(validator_live_module.sys, "platform", "linux")
+    monkeypatch.setattr(validator_live_module.platform, "machine", lambda: "aarch64")
 
 
 def _policy() -> ScoringPolicy:
-    return ScoringPolicy.model_validate(_live_shadow_policy_data())
+    data = _live_shadow_policy_data()
+    pins = data["implementation_pins"]
+    for name in ("storage_proof_verifier", "finality_verifier"):
+        releases = pins[name]["release_sha256_by_target"]
+        releases[TARGET] = releases.pop("aarch64-apple-darwin")
+    return ScoringPolicy.model_validate(data)
 
 
 def _config(tmp_path: Path, policy: ScoringPolicy) -> LiveValidatorConfig:
@@ -397,6 +409,44 @@ def test_config_and_policy_loaders_require_canonical_fully_pinned_bytes(
     with pytest.raises(LiveValidatorConfigError) as active:
         load_live_policy(active_config)
     assert active.value.reason_code == "policy_invalid"
+
+
+def test_live_validator_rejects_darwin_even_when_a_policy_names_it(tmp_path: Path) -> None:
+    policy = _policy()
+    darwin = "aarch64-apple-darwin"
+    values = policy.model_dump(mode="json", by_alias=True)
+    pins = values["implementation_pins"]
+    for name in ("storage_proof_verifier", "finality_verifier"):
+        releases = pins[name]["release_sha256_by_target"]
+        releases[darwin] = releases[TARGET]
+    darwin_policy = ScoringPolicy.model_validate(values)
+    policy_path = tmp_path / "darwin-policy.json"
+    policy_path.write_bytes(canonical_json_bytes(darwin_policy))
+    config = _config(tmp_path, darwin_policy).model_copy(
+        update={
+            "policy_path": str(policy_path),
+            "scoring_policy_sha256": scoring_policy_hash(darwin_policy),
+            "target_triple": darwin,
+        }
+    )
+
+    with pytest.raises(LiveValidatorConfigError) as raised:
+        load_live_policy(config)
+    assert raised.value.reason_code == "live_validator_target_unsupported"
+
+
+def test_live_validator_rejects_linux_target_on_a_darwin_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy()
+    config = _config(tmp_path, policy)
+    monkeypatch.setattr(validator_live_module.sys, "platform", "darwin")
+    monkeypatch.setattr(validator_live_module.platform, "machine", lambda: "arm64")
+
+    with pytest.raises(LiveValidatorConfigError) as raised:
+        load_live_policy(config)
+    assert raised.value.reason_code == "live_validator_host_unsupported"
 
 
 def test_startup_loader_rejects_symlinks_and_group_writable_inputs(tmp_path: Path) -> None:

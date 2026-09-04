@@ -23,6 +23,7 @@ import errno
 import hashlib
 import inspect
 import os
+import platform
 import re
 import signal
 import stat
@@ -154,6 +155,9 @@ from .validator_window_material import ValidatorWindowMaterialStore
 
 LIVE_VALIDATOR_CONFIG_SCHEMA = "umi-validator-live-config/1"
 LIVE_SHADOW_MODE = "live_shadow_calibration"
+SUPPORTED_LIVE_VALIDATOR_TARGETS = frozenset(
+    {"aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"}
+)
 WEIGHT_DISABLED_HOLD_ID = "umi-live-shadow-weight-disabled-v1"
 MAX_STARTUP_DOCUMENT_BYTES = 4 * 1024 * 1024
 
@@ -1627,6 +1631,21 @@ def build_production_live_validator(
 
 
 def _require_live_policy(policy: ScoringPolicy, config: LiveValidatorConfig) -> None:
+    if config.target_triple not in SUPPORTED_LIVE_VALIDATOR_TARGETS:
+        raise LiveValidatorConfigError("live_validator_target_unsupported")
+    if sys.platform != "linux":
+        raise LiveValidatorConfigError("live_validator_host_unsupported")
+    machine = platform.machine().casefold()
+    host_target = {
+        "aarch64": "aarch64-unknown-linux-musl",
+        "arm64": "aarch64-unknown-linux-musl",
+        "amd64": "x86_64-unknown-linux-musl",
+        "x86_64": "x86_64-unknown-linux-musl",
+    }.get(machine)
+    if host_target is None:
+        raise LiveValidatorConfigError("live_validator_host_unsupported")
+    if config.target_triple != host_target:
+        raise LiveValidatorConfigError("live_validator_host_target_mismatch")
     if policy.translation_weights_active is not False:
         raise LiveValidatorConfigError("policy_weights_active")
     pins = policy.implementation_pins

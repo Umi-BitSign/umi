@@ -36,6 +36,7 @@ from .miner_resources import (
     MinerResourceError,
     SQLiteMinerResourceLedger,
 )
+from .model_scheduler import WindowCoalescingTranslator
 from .nonce import NonceStoreAuthorizationError, NonceStoreCapacityError, NonceStoreError
 from .policy import ScoringPolicy, scoring_policy_hash, validate_scoring_runtime
 from .protocol import (
@@ -120,8 +121,8 @@ class MinerRuntime:
         repr=False,
         compare=False,
     )
-    active_ingress_accounts: set[str] = field(
-        default_factory=set,
+    active_ingress_accounts: dict[str, int] = field(
+        default_factory=dict,
         repr=False,
         compare=False,
     )
@@ -180,6 +181,10 @@ class MinerRuntime:
         if self.limits.maximum_inference_concurrency < len(account_pairs):
             raise ValueError(
                 "maximum inference concurrency must reserve one slot per policy validator"
+            )
+        if self.limits.maximum_inference_concurrency % len(account_pairs) != 0:
+            raise ValueError(
+                "maximum inference concurrency must be a multiple of the policy validator count"
             )
         if (
             isinstance(self.response_deadline_blocks, bool)
@@ -283,7 +288,11 @@ def _single_ascii_header(
 
 @asynccontextmanager
 async def _preauth_slot(runtime: MinerRuntime):
-    """Bound identity-neutral body reads without trusting a claimed sender."""
+    """Bound identity-neutral signature checks before trusting a claimed sender.
+
+    The caller intentionally performs no await inside this scope. This keeps an
+    authenticated burst from queueing behind the small untrusted-ingress guard.
+    """
 
     token = object()
     async with runtime.preauth_lock:
@@ -302,19 +311,40 @@ async def _authenticated_ingress_slot(
     runtime: MinerRuntime,
     validator_account_hex: str,
 ):
-    """Admit one post-signature request for each authenticated validator."""
+    """Admit the policy-bounded request burst without cross-validator starvation."""
 
     async with runtime.ingress_lock:
-        if validator_account_hex in runtime.active_ingress_accounts:
+        per_validator_limit, total_limit = _authenticated_request_task_limits(runtime)
+        active_for_validator = runtime.active_ingress_accounts.get(validator_account_hex, 0)
+        if active_for_validator >= per_validator_limit:
             raise IngressLimitExceeded("validator_ingress_busy")
-        if len(runtime.active_ingress_accounts) >= len(runtime.allowed_validator_accounts):
+        if sum(runtime.active_ingress_accounts.values()) >= total_limit:
             raise IngressLimitExceeded("miner_ingress_busy")
-        runtime.active_ingress_accounts.add(validator_account_hex)
+        runtime.active_ingress_accounts[validator_account_hex] = active_for_validator + 1
     try:
         yield
     finally:
         async with runtime.ingress_lock:
-            runtime.active_ingress_accounts.discard(validator_account_hex)
+            remaining = runtime.active_ingress_accounts.get(validator_account_hex, 0) - 1
+            if remaining <= 0:
+                runtime.active_ingress_accounts.pop(validator_account_hex, None)
+            else:
+                runtime.active_ingress_accounts[validator_account_hex] = remaining
+
+
+def _authenticated_request_task_limits(runtime: MinerRuntime) -> tuple[int, int]:
+    """Return per-validator and global bounds for simultaneous signed attempts."""
+
+    transmissions = runtime.limits.maximum_request_transmissions_per_assignment
+    per_validator = runtime.limits.maximum_assignments_per_validator_window * transmissions
+    unique_total = min(
+        runtime.limits.maximum_total_assignments_per_window,
+        (
+            runtime.limits.maximum_assignments_per_validator_window
+            * len(runtime.allowed_validator_accounts)
+        ),
+    )
+    return per_validator, unique_total * transmissions
 
 
 def _identity(wallet: Any) -> tuple[str, str]:
@@ -670,7 +700,9 @@ def _validator_work_semaphore(
     key = account_id32(validator_hotkey).hex()
     semaphore = runtime.validator_work_semaphores.get(key)
     if semaphore is None:
-        semaphore = asyncio.Semaphore(1)
+        validator_count = len(runtime.allowed_validator_accounts)
+        capacity = runtime.limits.maximum_inference_concurrency // validator_count
+        semaphore = asyncio.Semaphore(capacity)
         runtime.validator_work_semaphores[key] = semaphore
     return semaphore
 
@@ -1031,8 +1063,7 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         request_body_timeout_seconds=args.request_body_timeout,
     )
     fetcher = HttpVideoFetcher(
-        allowed_hosts=frozenset(args.video_host),
-        allowed_ports=frozenset(args.video_port or (443,)),
+        allowed_origins=frozenset(args.video_origin),
         maximum_clip_size_bytes=limits.maximum_clip_size_bytes,
         maximum_http_header_bytes=limits.maximum_http_header_bytes,
         timeout_seconds=limits.video_fetch_timeout_seconds,
@@ -1061,28 +1092,17 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             policy.activation_block - 1,
         ),
     )
+    translator = _build_translator(
+        args,
+        limits=limits,
+        scoring_policy_sha256=policy_hash,
+        validator_count=len(allowed_validator_hotkeys),
+    )
     return MinerRuntime(
         wallet=wallet,
         hotkey_ss58=hotkey_ss58,
         signature_scheme=scheme,
-        translator=(
-            UnixSocketTranslator(
-                socket_path=args.translator_unix_socket,
-                maximum_request_metadata_bytes=limits.maximum_request_body_bytes,
-                maximum_response_bytes=limits.maximum_hypothesis_utf8_bytes,
-                expected_model_revision=args.model_revision,
-                expected_scoring_policy_sha256=policy_hash,
-                required_validator_slots=len(allowed_validator_hotkeys),
-                maximum_inference_seconds=limits.inference_timeout_seconds,
-            )
-            if args.translator_unix_socket is not None
-            else load_translator(
-                args.translator,
-                maximum_concurrency=limits.maximum_inference_concurrency,
-                allow_synchronous=args.allow_unsafe_sync_translator,
-                expected_model_revision=args.model_revision,
-            )
-        ),
+        translator=translator,
         video_fetcher=fetcher,
         allowed_validator_hotkeys=allowed_validator_hotkeys,
         authenticator=authenticator,
@@ -1108,7 +1128,58 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         model_revision=args.model_revision,
         finality_service=finality,
         inference_semaphore=asyncio.Semaphore(limits.maximum_inference_concurrency),
-        work_semaphore=asyncio.Semaphore(len(policy.validator_registry)),
+        work_semaphore=asyncio.Semaphore(limits.maximum_inference_concurrency),
+    )
+
+
+def _build_translator(
+    args: argparse.Namespace,
+    *,
+    limits: Limits,
+    scoring_policy_sha256: str,
+    validator_count: int,
+) -> Translator:
+    """Construct the configured backend and any explicit semantic-sharing layer."""
+
+    sharing = args.coalesce_window_video_inference
+    backend_workers = args.max_backend_workers
+    if args.translator_unix_socket is not None:
+        if sharing or backend_workers is not None:
+            raise ValueError("window-video coalescing is limited to in-process translators")
+        return UnixSocketTranslator(
+            socket_path=args.translator_unix_socket,
+            maximum_request_metadata_bytes=limits.maximum_request_body_bytes,
+            maximum_response_bytes=limits.maximum_hypothesis_utf8_bytes,
+            expected_model_revision=args.model_revision,
+            expected_scoring_policy_sha256=scoring_policy_sha256,
+            required_validator_slots=validator_count,
+            maximum_inference_seconds=limits.inference_timeout_seconds,
+        )
+
+    backend = load_translator(
+        args.translator,
+        maximum_concurrency=limits.maximum_inference_concurrency,
+        allow_synchronous=args.allow_unsafe_sync_translator,
+        expected_model_revision=args.model_revision,
+    )
+    if not sharing:
+        if backend_workers is not None:
+            raise ValueError("--max-backend-workers requires --coalesce-window-video-inference")
+        return backend
+    if args.model_revision is None:
+        raise ValueError("window-video coalescing requires a bound model revision")
+    if backend_workers is None:
+        raise ValueError("window-video coalescing requires --max-backend-workers")
+    if isinstance(backend_workers, bool) or backend_workers <= 0:
+        raise ValueError("maximum backend workers must be a positive integer")
+    if backend_workers > limits.maximum_inference_concurrency:
+        raise ValueError("maximum backend workers cannot exceed outer inference concurrency")
+    return WindowCoalescingTranslator(
+        backend,
+        model_revision=args.model_revision,
+        maximum_workers=backend_workers,
+        maximum_window_keys=limits.maximum_unique_videos_per_validator_window,
+        maximum_inference_seconds=limits.inference_timeout_seconds,
     )
 
 
@@ -1129,6 +1200,10 @@ def _effective_inference_concurrency(
         raise ValueError("maximum inference concurrency must be a positive integer")
     if requested < validator_count:
         raise ValueError("maximum inference concurrency must reserve one slot per policy validator")
+    if requested % validator_count != 0:
+        raise ValueError(
+            "maximum inference concurrency must be a multiple of the policy validator count"
+        )
     return requested
 
 
@@ -1201,7 +1276,8 @@ def _load_policy(path: str | Path) -> ScoringPolicy:
 def _uvicorn_limits(runtime: MinerRuntime) -> dict[str, int]:
     """Bound open request tasks outside the application-level ingress gate."""
 
-    connection_limit = runtime.maximum_preauth_concurrency + 4
+    _per_validator_limit, authenticated_limit = _authenticated_request_task_limits(runtime)
+    connection_limit = authenticated_limit + runtime.maximum_preauth_concurrency + 4
     return {
         "limit_concurrency": connection_limit,
         "backlog": 2 * connection_limit,
@@ -1234,12 +1310,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow a synchronous backend whose hung worker thread cannot be terminated",
     )
-    parser.add_argument("--video-host", action="append", required=True)
     parser.add_argument(
-        "--video-port",
+        "--video-origin",
         action="append",
-        type=int,
-        help="allowed HTTPS port; repeat as needed (default: 443)",
+        required=True,
+        help="exact allowed HTTPS origin; repeat as needed",
     )
     parser.add_argument("--model-revision")
     parser.add_argument("--request-body-timeout", type=float, default=5.0)
@@ -1251,9 +1326,23 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "total runnable model slots (default: policy validator count; values below "
-            "that count are rejected)"
+            "total runnable model slots (default: policy validator count; explicit values "
+            "must be a positive multiple of that count)"
         ),
+    )
+    parser.add_argument(
+        "--coalesce-window-video-inference",
+        action="store_true",
+        help=(
+            "explicitly assert that the in-process backend depends only on the signed "
+            "window/video/task/model projection and share identical work across validators"
+        ),
+    )
+    parser.add_argument(
+        "--max-backend-workers",
+        type=int,
+        default=None,
+        help="unique model jobs allowed when window-video coalescing is enabled",
     )
     parser.add_argument(
         "--nonce-db",
