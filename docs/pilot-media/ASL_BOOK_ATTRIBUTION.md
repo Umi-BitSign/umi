@@ -6,6 +6,7 @@ together. BOOK.”
 
 - Source page: <https://commons.wikimedia.org/wiki/File:ASL_BOOK.ogv>
 - Original file: <https://upload.wikimedia.org/wikipedia/commons/2/29/ASL_BOOK.ogv>
+- Pilot MP4: <https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/component-pilot/media/7558c4b41aa18a9dc8377b84bda06c1595b4fcdcf5e69dd154d5e210127a29ff.mp4>
 - Author and required attribution: Richard Goodrow
 - Source license: [Creative Commons Attribution 3.0
   Unported](https://creativecommons.org/licenses/by/3.0/)
