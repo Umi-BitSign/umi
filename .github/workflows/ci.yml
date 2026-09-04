@@ -190,10 +190,10 @@ jobs:
             --manifest-path rust/grandpa-finality-observer/Cargo.toml
           cargo +1.98.0 build --locked --release \
             --manifest-path rust/grandpa-finality-observer/Cargo.toml
-          test -x rust/grandpa-finality-observer/target/release/umi-grandpa-finality-observer
           cargo +1.98.0 clean \
             --manifest-path rust/grandpa-finality-observer/Cargo.toml \
             --profile test
+          test -x rust/grandpa-finality-observer/target/release/umi-grandpa-finality-observer
 
       - name: Seal and verify the native miner finality artifact
         run: |

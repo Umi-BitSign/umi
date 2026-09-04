@@ -1750,6 +1750,35 @@ def test_native_miner_finality_artifact_reports_atomic_replace_errno(
     assert not tuple(tmp_path.glob(".sealed-native-finality.tmp-*"))
 
 
+def test_native_miner_finality_artifact_removes_published_tree_on_chmod_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = BuiltMinerFinalityArtifact(
+        report=MinerFinalityBuildReport.model_construct(),
+        binary=b"binary",
+        report_bytes=b"report",
+        license_closure=b"licenses",
+    )
+    output = (tmp_path / "sealed-native-finality").resolve()
+    chmod = Path.chmod
+
+    def fail_published_chmod(path: Path, mode: int) -> None:
+        if path == output and mode == 0o555:
+            raise OSError(13, "permission denied")
+        chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", fail_published_chmod)
+    with pytest.raises(
+        ShadowReleaseError,
+        match=r"^miner_finality_output_directory_chmod_failed:errno_13$",
+    ):
+        emit_miner_finality_artifact(artifact, output)
+
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".sealed-native-finality.tmp-*"))
+
+
 def test_installed_binding_recomputes_source_pin_from_packaged_wheel(
     release_environment: tuple[LiveShadowReleaseInput, Path, int, LiveReleaseObservationCapture],
 ) -> None:
