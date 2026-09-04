@@ -68,6 +68,7 @@ from umi.shadow_release import (
     FinalManifestAuthorityAttestation,
     LiveReleaseObservationCapture,
     LiveShadowReleaseInput,
+    MinerFinalityBuildReport,
     OperatorMaterializationBindings,
     ReleaseRelativeOperatorConfig,
     ReleaseRelativeValidatorConfig,
@@ -1720,6 +1721,32 @@ def test_native_miner_finality_artifact_is_self_tested_and_emitted_immutably(
     assert (output.stat().st_mode & 0o777) == 0o555
     assert ((output / "umi-grandpa-finality-observer").stat().st_mode & 0o777) == 0o555
     assert ((output / "miner-finality-build-report.json").stat().st_mode & 0o777) == 0o444
+
+
+def test_native_miner_finality_artifact_reports_atomic_replace_errno(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = BuiltMinerFinalityArtifact(
+        report=MinerFinalityBuildReport.model_construct(),
+        binary=b"binary",
+        report_bytes=b"report",
+        license_closure=b"licenses",
+    )
+    output = (tmp_path / "sealed-native-finality").resolve()
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError(28, "no space left on device")
+
+    monkeypatch.setattr(shadow_release_module.os, "replace", fail_replace)
+    with pytest.raises(
+        ShadowReleaseError,
+        match=r"^miner_finality_output_replace_failed:errno_28$",
+    ):
+        emit_miner_finality_artifact(artifact, output)
+
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".sealed-native-finality.tmp-*"))
 
 
 def test_installed_binding_recomputes_source_pin_from_packaged_wheel(

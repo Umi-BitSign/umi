@@ -5866,7 +5866,17 @@ def emit_miner_finality_artifact(
     parent = destination.parent
     if not parent.exists() or parent.is_symlink() or not parent.is_dir():
         raise ShadowReleaseError("miner_finality_output_parent_invalid")
-    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=parent))
+
+    def output_error(stage: str, error: Exception) -> ShadowReleaseError:
+        reason = f"miner_finality_output_{stage}_failed"
+        if isinstance(error, OSError) and error.errno is not None:
+            reason = f"{reason}:errno_{error.errno}"
+        return ShadowReleaseError(reason)
+
+    try:
+        temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=parent))
+    except Exception as error:
+        raise output_error("temporary_directory", error) from error
     try:
         payloads = {
             "umi-grandpa-finality-observer": (artifact.binary, 0o555),
@@ -5875,15 +5885,27 @@ def emit_miner_finality_artifact(
         }
         for name, (payload, mode) in payloads.items():
             target = temporary / name
-            target.write_bytes(payload)
-            target.chmod(mode)
-        temporary.chmod(0o555)
-        os.replace(temporary, destination)
-    except Exception as error:
+            try:
+                target.write_bytes(payload)
+            except Exception as error:
+                raise output_error("file_write", error) from error
+            try:
+                target.chmod(mode)
+            except Exception as error:
+                raise output_error("file_chmod", error) from error
+        try:
+            temporary.chmod(0o555)
+        except Exception as error:
+            raise output_error("directory_chmod", error) from error
+        try:
+            os.replace(temporary, destination)
+        except Exception as error:
+            raise output_error("replace", error) from error
+    except ShadowReleaseError:
+        with suppress(OSError):
+            temporary.chmod(0o700)
         shutil.rmtree(temporary, ignore_errors=True)
-        if isinstance(error, ShadowReleaseError):
-            raise
-        raise ShadowReleaseError("miner_finality_output_emit_failed") from error
+        raise
 
 
 def _summary(build: BuiltShadowRelease) -> bytes:
