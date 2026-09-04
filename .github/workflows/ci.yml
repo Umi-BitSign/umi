@@ -175,6 +175,7 @@ jobs:
 
       - name: Install pinned toolchains and project
         run: |
+          brew install ffmpeg
           python -m pip install --upgrade pip
           python -m pip install uv==0.12.9
           uv lock --check
