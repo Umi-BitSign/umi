@@ -1,0 +1,1 @@
+{"activation_evidence":false,"bundle_roots":["/var/lib/umi-observer/pilots/first-public-pilot"],"mode":"component_test_no_weight","protocol":"umi-asl/0.1","protocol_conformance":false,"public_origin":"https://api.umi.vision","schema":"umi-observer-pilot-feed-config/1","translation_weights_active":false}

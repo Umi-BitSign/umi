@@ -29,6 +29,9 @@ LEADERBOARD_RESPONSE_SCHEMA = "umi-observer-leaderboard/1"
 WINDOWS_RESPONSE_SCHEMA = "umi-observer-windows/1"
 WINDOW_RESPONSE_SCHEMA = "umi-observer-window/1"
 WINDOW_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-window-solutions/1"
+PILOTS_RESPONSE_SCHEMA = "umi-observer-pilots/1"
+PILOT_RESPONSE_SCHEMA = "umi-observer-pilot/1"
+PILOT_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-pilot-solutions/1"
 ACTIVATION_GATES_RESPONSE_SCHEMA = "umi-observer-activation-gates/1"
 BENCHMARKS_RESPONSE_SCHEMA = "umi-observer-benchmarks/1"
 INCIDENTS_RESPONSE_SCHEMA = "umi-observer-incidents/1"
@@ -196,8 +199,18 @@ class FinalizedBlock(ObserverModel):
 
 class SourceProvenance(ObserverModel):
     source_id: NonEmptyText
-    source_kind: Literal["chain_finalized", "dashboard_static", "released_audit_bundle"]
-    verification_status: Literal["finalized_read", "repository_static", "bundle_verified"]
+    source_kind: Literal[
+        "chain_finalized",
+        "dashboard_static",
+        "released_audit_bundle",
+        "component_pilot_bundle",
+    ]
+    verification_status: Literal[
+        "finalized_read",
+        "repository_static",
+        "bundle_verified",
+        "component_replay_verified",
+    ]
     block: FinalizedBlock | None
     policy_hash: Hex32 | None = None
     artifact_sha256: Hex32 | None = None
@@ -209,6 +222,7 @@ class SourceProvenance(ObserverModel):
             "chain_finalized": "finalized_read",
             "dashboard_static": "repository_static",
             "released_audit_bundle": "bundle_verified",
+            "component_pilot_bundle": "component_replay_verified",
         }[self.source_kind]
         if self.verification_status != expected_status:
             raise ValueError("verification_status does not match source_kind")
@@ -216,8 +230,11 @@ class SourceProvenance(ObserverModel):
             raise ValueError("a finalized-chain source requires a block")
         if self.source_kind == "dashboard_static" and self.block is not None:
             raise ValueError("a static source must not claim a chain block")
-        if self.source_kind == "released_audit_bundle" and self.artifact_sha256 is None:
-            raise ValueError("an audit-bundle source requires its artifact hash")
+        if self.source_kind in {"released_audit_bundle", "component_pilot_bundle"}:
+            if self.artifact_sha256 is None:
+                raise ValueError("a bundle source requires its artifact hash")
+            if self.block is not None:
+                raise ValueError("an off-chain bundle source must not claim a chain block")
         return self
 
 
@@ -763,6 +780,8 @@ class ReleasedBundleLocator(ObserverModel):
     @model_validator(mode="after")
     def validate_routes(self) -> Self:
         prefix = self.public_origin.rstrip("/")
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in self.public_origin):
+            raise ValueError("pilot public origin contains a control character")
         try:
             parsed = urlsplit(prefix)
             port = parsed.port
@@ -1022,6 +1041,185 @@ class WindowSolutionsResponse(ResponseEnvelope):
             ):
                 if reference is not None and reference.url != object_prefix + reference.sha256:
                     raise ValueError("solution object URL does not match its released bundle")
+        return self
+
+
+class PilotBundleLocator(ObserverModel):
+    public_origin: Annotated[str, Field(min_length=1, max_length=8_192)]
+    manifest_sha256: Hex32
+    manifest_url: Annotated[str, Field(min_length=1, max_length=8_192)]
+    replay_command: Annotated[str, Field(min_length=1, max_length=8_192)]
+
+    @model_validator(mode="after")
+    def validate_routes(self) -> Self:
+        prefix = self.public_origin.rstrip("/")
+        try:
+            parsed = urlsplit(prefix)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("pilot public origin is invalid") from error
+        if (
+            self.public_origin != prefix
+            or parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or "?" in self.public_origin
+            or "#" in self.public_origin
+            or self.public_origin != f"{parsed.scheme}://{parsed.netloc}"
+            or (port is not None and not 1 <= port <= 65_535)
+        ):
+            raise ValueError("pilot public origin must be normalized HTTPS")
+        expected = f"{prefix}/api/v1/pilots/{self.manifest_sha256}/bundle/manifest.json"
+        if self.manifest_url != expected:
+            raise ValueError("pilot manifest URL does not match its bundle hash")
+        if self.replay_command != "umi-validator replay --bundle ./bundle":
+            raise ValueError("pilot replay command is not canonical")
+        return self
+
+
+class ComponentPilotRecord(ObserverModel):
+    pilot_id: Hex32
+    evidence_class: Literal["component_test_no_weight"]
+    terminal_code: Literal["component_test_no_weight"]
+    translation_weights_active: Literal[False]
+    protocol_conformance: Literal[False]
+    activation_evidence: Literal[False]
+    validator_input_eligible: Literal[False] = False
+    deterministic_replay_verified: Literal[True]
+    bundle_manifest_sha256: Hex32
+    bundle_bytes: NonNegativeInt
+    object_count: NonNegativeInt
+    solution_count: PositiveInt
+    validator_hotkey: NonEmptyText
+    miner_hotkey: NonEmptyText
+    missing_canonical_stages: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
+    evidence: PilotBundleLocator
+
+    @model_validator(mode="after")
+    def validate_pilot(self) -> Self:
+        if self.pilot_id != self.bundle_manifest_sha256:
+            raise ValueError("pilot ID must equal its canonical manifest hash")
+        if self.missing_canonical_stages != tuple(dict.fromkeys(self.missing_canonical_stages)):
+            raise ValueError("missing pilot stages must be unique and ordered")
+        if self.evidence.manifest_sha256 != self.bundle_manifest_sha256:
+            raise ValueError("pilot locator does not bind its manifest hash")
+        return self
+
+
+class PilotSolutionEvidenceLinks(ObserverModel):
+    request: EvidenceObjectLink
+    authentication_record: EvidenceObjectLink
+    response_envelope: EvidenceObjectLink | None
+    response_signature: EvidenceObjectLink | None
+    response_plaintext: EvidenceObjectLink | None
+    ground_truth_envelope: EvidenceObjectLink
+    ground_truth_plaintext: EvidenceObjectLink
+    scoring: EvidenceObjectLink
+
+
+class PilotSolutionRecord(ObserverModel):
+    batch_id: NonEmptyText
+    challenge_id: NonEmptyText
+    validator_hotkey: NonEmptyText
+    miner_hotkey: NonEmptyText
+    video_sha256: Hex32
+    stratum: Literal["fingerspelling", "short_utterance", "continuous"]
+    metric: Literal["wer", "cer"]
+    response_plaintext_valid: bool
+    response_status: Literal["ok", "error"] | None
+    hypothesis: str | None
+    response_error_code: NonEmptyText | None
+    model_revision: Hex32 | None
+    references: Annotated[tuple[str, ...], Field(min_length=3, max_length=5)]
+    failure_code: NonEmptyText | None
+    score: ExactRational
+    score_trace: dict[str, JsonValue] | None
+    evidence: PilotSolutionEvidenceLinks
+
+    @model_validator(mode="after")
+    def validate_solution(self) -> Self:
+        if self.response_plaintext_valid != (self.response_status is not None):
+            raise ValueError("pilot response validity and status disagree")
+        if self.response_status == "ok" and self.hypothesis is None:
+            raise ValueError("valid pilot ok response requires its hypothesis")
+        if self.response_status != "ok" and self.hypothesis is not None:
+            raise ValueError("only a valid ok response may expose a hypothesis")
+        if self.response_status == "error" and self.response_error_code is None:
+            raise ValueError("valid pilot error response requires its error code")
+        if self.response_status != "error" and self.response_error_code is not None:
+            raise ValueError("only a valid error response may expose an error code")
+        return self
+
+
+class PilotsResponse(ResponseEnvelope):
+    schema_: Literal[PILOTS_RESPONSE_SCHEMA] = Field(default=PILOTS_RESPONSE_SCHEMA, alias="schema")
+    protocol_state: ProtocolState
+    availability: Literal["not_started", "available"]
+    reason_code: NonEmptyText | None
+    page: EvidenceCursorPage
+    pilots: tuple[ComponentPilotRecord, ...]
+
+    @model_validator(mode="after")
+    def validate_pilots(self) -> Self:
+        if self.availability == "not_started":
+            if self.reason_code is None or self.pilots:
+                raise ValueError("an empty pilot feed requires a reason code")
+        elif self.reason_code is not None:
+            raise ValueError("an available pilot feed must not carry a reason code")
+        identifiers = [pilot.pilot_id for pilot in self.pilots]
+        if identifiers != sorted(set(identifiers)):
+            raise ValueError("pilot records must be unique and sorted")
+        if self.page.returned != len(self.pilots):
+            raise ValueError("pilot page count does not match its records")
+        return self
+
+
+class PilotResponse(ResponseEnvelope):
+    schema_: Literal[PILOT_RESPONSE_SCHEMA] = Field(default=PILOT_RESPONSE_SCHEMA, alias="schema")
+    protocol_state: ProtocolState
+    pilot: ComponentPilotRecord
+
+
+class PilotSolutionsResponse(ResponseEnvelope):
+    schema_: Literal[PILOT_SOLUTIONS_RESPONSE_SCHEMA] = Field(
+        default=PILOT_SOLUTIONS_RESPONSE_SCHEMA,
+        alias="schema",
+    )
+    protocol_state: ProtocolState
+    pilot: ComponentPilotRecord
+    page: EvidenceCursorPage
+    solutions: tuple[PilotSolutionRecord, ...]
+
+    @model_validator(mode="after")
+    def validate_solutions(self) -> Self:
+        if self.page.returned != len(self.solutions):
+            raise ValueError("pilot solution page count does not match its records")
+        if self.page.total != self.pilot.solution_count:
+            raise ValueError("pilot solution count does not match its pilot record")
+        identifiers = [solution.challenge_id for solution in self.solutions]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("pilot solution IDs must be unique")
+        prefix = (
+            f"{self.pilot.evidence.public_origin}/api/v1/pilots/{self.pilot.pilot_id}"
+            "/bundle/objects/"
+        )
+        for solution in self.solutions:
+            for reference in (
+                solution.evidence.request,
+                solution.evidence.authentication_record,
+                solution.evidence.response_envelope,
+                solution.evidence.response_signature,
+                solution.evidence.response_plaintext,
+                solution.evidence.ground_truth_envelope,
+                solution.evidence.ground_truth_plaintext,
+                solution.evidence.scoring,
+            ):
+                if reference is not None and reference.url != prefix + reference.sha256:
+                    raise ValueError("pilot solution object URL does not match its bundle")
         return self
 
 

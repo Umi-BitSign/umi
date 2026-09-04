@@ -57,6 +57,8 @@ the exact response body.
 | `GET /api/v1/windows` | Fully replayed validator-local calibration and incident windows |
 | `GET /api/v1/windows/{window_id}` | One released validator window; add `?validator=<AccountId32 hex>` when several validators published the same window |
 | `GET /api/v1/windows/{window_id}/solutions` | A bounded page of every assignment from one fully replayed reveal result; add the validator query when needed |
+| `GET /api/v1/pilots` | Explicitly nonconforming, no-weight component pilots, separate from protocol windows |
+| `GET /api/v1/pilots/{pilot_id}/solutions` | Replayed hypotheses, references, scores, failures, and evidence for one pilot |
 | `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
 | `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
 | `GET /api/v1/incidents` | Reason records from fully replayed public incident bundles |
@@ -109,6 +111,33 @@ accuracy and utility values from that validator's replayed weight-build object. 
 has no rank. Different validator samples may legitimately disagree, so the API
 does not merge them, choose a winner, or describe them as consensus. Native chain
 economics remain in the separate `leaderboard.chain_economics` object.
+
+## Component pilot feed
+
+The optional `--pilot-feed-config` reads completed `umi-component-bundle/1`
+directories from local disk. This is a separate evidence class and namespace. It
+never adds a `/windows` record, changes `protocol_state`, supplies activation
+evidence, or becomes a validator input.
+
+The observer requires the config, bundle roots, object directory, and files to be
+owned by its service user and not group- or world-writable. It rejects symlinks,
+noncanonical config or manifest bytes, unknown schema fields, more than eight
+pilots, more than 14 solutions per pilot, and more than 128 MiB across the feed.
+Before listening, it verifies every referenced object and reruns request-auth,
+miner-signature, timelock, binding, and exact-score replay. It then holds the
+verified manifest and object bytes as an immutable startup snapshot.
+
+The pilot ID is SHA-256 of the exact canonical bundle manifest. Object URLs use
+their own SHA-256 digests and return immutable cache headers. The solutions response
+links every result to its request, authentication record, optional response
+evidence, revealed ground truth, and scoring object. Invalid plaintext is not
+projected as a valid hypothesis.
+
+Every pilot record says `component_test_no_weight`, carries false translation-
+weight, conformance, activation-evidence, and validator-input flags, and lists every
+canonical stage that the component runner did not reach. See
+[`COMPONENT_PILOT.md`](COMPONENT_PILOT.md) for the operator and independent-replay
+commands.
 
 Each row also carries an `evidence` locator for its signed public index entry,
 bundle manifest, tree digest, exact audit-release block hash, and, when reached, the
@@ -389,6 +418,7 @@ const upstreamPaths = {
   participants: "/api/v1/participants",
   leaderboard: "/api/v1/leaderboard",
   windows: "/api/v1/windows",
+  pilots: "/api/v1/pilots",
   gates: "/api/v1/activation-gates",
   benchmarks: "/api/v1/benchmarks",
   incidents: "/api/v1/incidents",
@@ -408,16 +438,24 @@ export async function fetchObserver(
 }
 ```
 
-Treat window detail and solution routes as separately allowlisted templates. Parse
-`window_id` and `validator` as exactly 64 lowercase hexadecimal characters, accept
-only `limit` and an opaque returned `cursor`, and construct
-`/api/v1/windows/<window_id>/solutions` on the server. Never forward an arbitrary
-browser-supplied path. Solution pages allow 1 through 50 records.
+Treat window and pilot detail, solution, manifest, and object routes as separately
+allowlisted templates. Parse `window_id`, `validator`, `pilot_id`, and an evidence
+object's `sha256` as exactly 64 lowercase hexadecimal characters. Construct only
+the documented `/api/v1/windows/<window_id>`,
+`/api/v1/windows/<window_id>/solutions`, `/api/v1/pilots/<pilot_id>`,
+`/api/v1/pilots/<pilot_id>/solutions`,
+`/api/v1/pilots/<pilot_id>/bundle/manifest.json`, and
+`/api/v1/pilots/<pilot_id>/bundle/objects/<sha256>` forms on the server. Accept
+only the documented query fields (`validator`, bounded `limit`, and an opaque
+returned `cursor`) and never forward an arbitrary browser-supplied path. Window
+solution pages allow 1 through 50 records; pilot solution pages allow 1 through
+14.
 
 Pass only parsed, allowlisted query fields to the participant route. Preserve the
 upstream `ETag`, `Cache-Control`, `X-UMI-Contract-Revision`,
 `X-UMI-Dataset-Revision`, and `X-UMI-Finalized-Block` headers in the Vercel
-response. Render all returned strings as text; do not insert API values as HTML.
+response. Preserve `X-UMI-Pilot-Bundle` on pilot manifest and object responses.
+Render all returned strings as text; do not insert API values as HTML.
 
 If the browser must call the observer directly, configure exact origins:
 
@@ -429,7 +467,8 @@ If the browser must call the observer directly, configure exact origins:
 Preview domains are not wildcarded. Add a particular preview origin only when it
 is intentionally trusted. CORS is browser policy, not API authentication.
 Direct browser responses expose `ETag`, `X-UMI-Contract-Revision`,
-`X-UMI-Dataset-Revision`, and `X-UMI-Finalized-Block` to allowed origins.
+`X-UMI-Dataset-Revision`, `X-UMI-Finalized-Block`, and
+`X-UMI-Pilot-Bundle` to allowed origins.
 
 ## Deployment
 
@@ -441,7 +480,8 @@ umi-observer \
   --port 8092 \
   --network finney \
   --trusted-host api.umi.vision \
-  --bundle-feed-config /etc/umi/observer-bundle-feed.json
+  --bundle-feed-config /etc/umi/observer-bundle-feed.json \
+  --pilot-feed-config /etc/umi/observer-pilot-feed.json
 ```
 
 If the reverse proxy preserves an internal Host header, add that exact host with a
@@ -477,9 +517,10 @@ block are written to the process log; raw exception text is not.
 
 Do not populate `umi_translation` from chain incentive, dividend, or emission
 values. Those values belong only in `chain_economics`. Do not ingest
-`umi-component-bundle/1` or
-`umi-shadow-rehearsal-bundle/2` as calibration evidence. They are engineering
-fixtures and expressly deny activation evidence.
+`umi-component-bundle/1` or `umi-shadow-rehearsal-bundle/2` as calibration
+evidence. A component bundle may appear only through the isolated `/pilots` feed
+described above; it remains an engineering result that expressly denies protocol
+conformance and activation evidence.
 
 The evidence reader verifies every content-addressed object, binds the
 bundle to its validator, window, policy, and finalized chain proofs, and quarantines

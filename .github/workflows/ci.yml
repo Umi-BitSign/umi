@@ -90,6 +90,7 @@ jobs:
 
       - name: Check console entry points
         run: |
+          .venv/bin/umi-component-pilot --help
           .venv/bin/umi-demo --help
           .venv/bin/umi-miner --help
           .venv/bin/umi-mirror-service --help

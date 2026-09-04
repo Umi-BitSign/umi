@@ -131,6 +131,32 @@ class QueryOutcome:
             raise TypeError("received_body_prefix must be exact bytes or None")
 
 
+@dataclass(frozen=True)
+class ReplayedComponentOutcome:
+    """One component outcome after full offline verification."""
+
+    request: TranslationRequest
+    response: ResponsePlaintext | None
+    failure_code: str | None
+    request_ref: dict[str, Any]
+    authentication_record_ref: dict[str, Any]
+    response_envelope_ref: dict[str, Any] | None
+    response_signature_ref: dict[str, Any] | None
+    response_plaintext_ref: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class ComponentBundleReplay:
+    """Verified component-bundle values used by replay and public projection."""
+
+    manifest: dict[str, Any]
+    validator_hotkey: str
+    miner_hotkey: str
+    ground_truth: GroundTruthPayload
+    outcomes: tuple[ReplayedComponentOutcome, ...]
+    scoring: dict[str, Any]
+
+
 def _hotkey_ss58(wallet: Any) -> str:
     import bittensor as bt
 
@@ -719,6 +745,16 @@ def _write_run_bundle(
     ground_truth_ref = store.add_bytes(ground_truth_bytes, "application/json")
     outcome_records: list[dict[str, Any]] = []
     for outcome in outcomes:
+        retained_response_digest = (
+            None
+            if outcome.envelope_bytes is None
+            else hashlib.sha256(outcome.envelope_bytes).hexdigest()
+        )
+        if (
+            retained_response_digest is not None
+            and outcome.received_bytes_sha256 != retained_response_digest
+        ):
+            raise ValueError("received response digest does not match retained bytes")
         request_ref = store.add_json(outcome.request)
         auth_ref = store.add_json(outcome.auth_headers)
         envelope_ref = (
@@ -749,7 +785,9 @@ def _write_run_bundle(
                 "response_signature": signature_ref.as_dict() if signature_ref else None,
                 "response_plaintext": plaintext_ref.as_dict() if plaintext_ref else None,
                 "failure_code": outcome.failure_code,
-                "received_bytes_sha256": outcome.received_bytes_sha256,
+                # Only publish a digest when the exact bytes are retained in
+                # the bundle and can therefore be checked by offline replay.
+                "received_bytes_sha256": (retained_response_digest),
             }
         )
     scoring_ref = store.add_json(scoring)
@@ -895,8 +933,8 @@ def _round_time_ns(round_number: int) -> int:
     return int(bt.timelock.reveal_time(round_number).timestamp()) * 1_000_000_000
 
 
-def replay_bundle(root: Path) -> dict[str, Any]:
-    """Recompute timelocks, signatures, bindings, and scores without a miner/model."""
+def replay_bundle_detailed(root: Path) -> ComponentBundleReplay:
+    """Recompute and return verified component evidence without a miner/model."""
 
     store = EvidenceStore(root)
     manifest = store.load_manifest()
@@ -964,6 +1002,13 @@ def replay_bundle(root: Path) -> dict[str, Any]:
         ):
             raise ValueError("bundle response failure code is malformed")
         failures[request.challenge_id] = failure_code
+        received_digest = raw_outcome.get("received_bytes_sha256")
+        if received_digest is not None and (
+            not isinstance(received_digest, str)
+            or len(received_digest) != 64
+            or any(character not in "0123456789abcdef" for character in received_digest)
+        ):
+            raise ValueError("bundle response byte digest is malformed")
         received_at = _parse_receipt_time(raw_outcome.get("received_at_unix_ns"))
         auth_record = json.loads(_read_object(store, raw_outcome.get("authentication_record")))
         if not isinstance(auth_record, dict):
@@ -988,6 +1033,8 @@ def replay_bundle(root: Path) -> dict[str, Any]:
         envelope_ref = raw_outcome.get("response_envelope")
         signature_ref = raw_outcome.get("response_signature")
         if envelope_ref is None:
+            if received_digest is not None:
+                raise ValueError("bundle response digest has no retained response bytes")
             if plaintext_ref is not None or signature_ref is not None:
                 raise ValueError("partial response evidence is not replayable")
             if failure_code is None:
@@ -995,6 +1042,8 @@ def replay_bundle(root: Path) -> dict[str, Any]:
             responses[request.challenge_id] = None
             continue
         envelope_bytes = _read_object(store, envelope_ref)
+        if received_digest != hashlib.sha256(envelope_bytes).hexdigest():
+            raise ValueError("bundle response byte digest does not match retained bytes")
         if signature_ref is None:
             if plaintext_ref is None and failure_code == "outer_invalid":
                 responses[request.challenge_id] = None
@@ -1098,7 +1147,48 @@ def replay_bundle(root: Path) -> dict[str, Any]:
     stored_scoring = json.loads(_read_object(store, manifest.get("scoring")))
     if canonical_json_bytes(recomputed) != canonical_json_bytes(stored_scoring):
         raise ValueError("stored scores do not match deterministic replay")
-    return recomputed
+    if validator_hotkey is None:
+        raise ValueError("bundle contains no validator authentication evidence")
+    replayed_outcomes: list[ReplayedComponentOutcome] = []
+    for raw_outcome, request in zip(raw_outcomes, ordered_requests, strict=True):
+        replayed_outcomes.append(
+            ReplayedComponentOutcome(
+                request=request,
+                response=responses[request.challenge_id],
+                failure_code=failures[request.challenge_id],
+                request_ref=dict(raw_outcome["request"]),
+                authentication_record_ref=dict(raw_outcome["authentication_record"]),
+                response_envelope_ref=(
+                    None
+                    if raw_outcome.get("response_envelope") is None
+                    else dict(raw_outcome["response_envelope"])
+                ),
+                response_signature_ref=(
+                    None
+                    if raw_outcome.get("response_signature") is None
+                    else dict(raw_outcome["response_signature"])
+                ),
+                response_plaintext_ref=(
+                    None
+                    if raw_outcome.get("response_plaintext") is None
+                    else dict(raw_outcome["response_plaintext"])
+                ),
+            )
+        )
+    return ComponentBundleReplay(
+        manifest=manifest,
+        validator_hotkey=validator_hotkey,
+        miner_hotkey=miner_hotkey,
+        ground_truth=ground_truth,
+        outcomes=tuple(replayed_outcomes),
+        scoring=recomputed,
+    )
+
+
+def replay_bundle(root: Path) -> dict[str, Any]:
+    """Recompute timelocks, signatures, bindings, and scores without a miner/model."""
+
+    return replay_bundle_detailed(root).scoring
 
 
 def score_summary(scoring: dict[str, Any]) -> dict[str, Any]:

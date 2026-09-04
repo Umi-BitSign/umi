@@ -44,23 +44,47 @@ Three milestones must stay separate:
 ## 2. Correct the public SN78 identity
 
 The finalized chain identity must say UMI, not the subnet's previous name. The
-subnet owner must dry-run and then submit the current `btcli sudo set-identity`
-operation for netuid 78 with the approved name, website URL, and description. If
-a token-symbol change is wanted, choose it explicitly and submit
-`btcli sudo set-symbol` separately. A safe first preview is:
+subnet owner must dry-run and then submit the full `btcli tx
+set-subnet-identity` operation for netuid 78. Identity updates replace the whole
+record, so every field is explicit; an abbreviated update can erase the repository
+or retain obsolete branding. A safe first preview is:
 
 ```bash
-btcli sudo set-identity \
+btcli tx set-subnet-identity \
   --network finney \
   --wallet YOUR_OWNER_WALLET \
+  --wallet-path /absolute/path/to/wallets \
   --netuid 78 \
-  --name UMI \
-  --url https://umi.vision \
+  --subnet-name UMI \
+  --github-repo https://github.com/Umi-BitSign/umi \
+  --subnet-contact "" \
+  --subnet-url https://umi.vision \
+  --discord "" \
   --description "Trust-minimized ASL-to-English translation on Bittensor" \
+  --logo-url "" \
+  --additional "" \
   --dry-run
 ```
 
-Review the preview from the owner account before rerunning without `--dry-run`.
+Review the signer, fee, raw call, and effects from the exact owner coldkey before
+rerunning without `--dry-run`. Lower the live activity cutoff to one 360-block
+tempo in a separate preview and submission:
+
+```bash
+btcli tx set-hyperparameter \
+  --network finney \
+  --wallet YOUR_OWNER_WALLET \
+  --wallet-path /absolute/path/to/wallets \
+  --netuid 78 \
+  --name activity_cutoff_factor \
+  --value 1000 \
+  --dry-run
+```
+
+Run that change comfortably outside the runtime's final ten-block admin freeze
+window. If a token-symbol change is wanted, choose an unused live-catalog symbol
+explicitly and dry-run `btcli tx update-symbol` separately; renaming the subnet
+does not change its symbol.
 
 - [ ] Confirm the identity and optional symbol at one finalized block and retain
   the transaction events and block hash.

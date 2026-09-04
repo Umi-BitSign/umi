@@ -52,6 +52,7 @@ from .observer_models import (
     BundleFeedHealthRecord,
     ChainEconomicLeaderboard,
     ChainEconomicLeaderboardEntry,
+    ComponentPilotRecord,
     CursorPage,
     ErrorDetail,
     ErrorResponse,
@@ -66,6 +67,12 @@ from .observer_models import (
     ObserverModel,
     ObserverSnapshot,
     ParticipantsResponse,
+    PilotBundleLocator,
+    PilotResponse,
+    PilotSolutionEvidenceLinks,
+    PilotSolutionRecord,
+    PilotSolutionsResponse,
+    PilotsResponse,
     ProtocolState,
     ReleasedBundleLocator,
     ReleasedWindow,
@@ -77,6 +84,12 @@ from .observer_models import (
     WindowResponse,
     WindowSolutionsResponse,
     WindowsResponse,
+)
+from .observer_pilot_feed import (
+    ObserverPilotFeed,
+    VerifiedComponentPilot,
+    VerifiedPilotSolution,
+    build_observer_pilot_feed,
 )
 from .protocol import canonical_json_bytes
 
@@ -126,6 +139,10 @@ _WINDOW_ERROR_RESPONSES = {
     **_COMMON_ERROR_RESPONSES,
     404: {"model": ErrorResponse, "description": "Released window or solution evidence not found"},
     409: {"model": ErrorResponse, "description": "Validator selection required"},
+}
+_PILOT_ERROR_RESPONSES = {
+    **_COMMON_ERROR_RESPONSES,
+    404: {"model": ErrorResponse, "description": "Verified component pilot not found"},
 }
 
 _ACTIVATION_GATE_IDS = (
@@ -389,6 +406,13 @@ class SolutionQuery(BaseModel):
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
 
 
+class PilotSolutionQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=14, ge=1, le=14)
+    cursor: str | None = Field(default=None, min_length=1, max_length=512)
+
+
 def _finalized_block(snapshot: ObserverSnapshot) -> FinalizedBlock:
     blocks = [
         source.block
@@ -608,7 +632,8 @@ def _render(request: Request, model: ObserverModel, view: SnapshotView) -> Respo
     released_artifacts = sorted(
         source.artifact_sha256
         for source in model.sources
-        if source.source_kind == "released_audit_bundle" and source.artifact_sha256 is not None
+        if source.source_kind in {"released_audit_bundle", "component_pilot_bundle"}
+        and source.artifact_sha256 is not None
     )
     dataset_revision = (
         block.hash
@@ -634,6 +659,32 @@ def _render(request: Request, model: ObserverModel, view: SnapshotView) -> Respo
     return Response(content=body, status_code=200, headers=headers, media_type="application/json")
 
 
+def _render_immutable_bytes(
+    request: Request,
+    data: bytes,
+    *,
+    media_type: str,
+    sha256: str,
+    bundle_sha256: str,
+) -> Response:
+    """Serve one startup-verified content-addressed pilot object."""
+
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise RuntimeError("immutable pilot object no longer matches its digest")
+    etag = f'"{sha256}"'
+    headers = {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Length": str(len(data)),
+        "ETag": etag,
+        "X-UMI-Pilot-Bundle": bundle_sha256,
+    }
+    if _if_none_match_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    if request.method == "HEAD":
+        return Response(status_code=200, headers=headers, media_type=media_type)
+    return Response(content=data, status_code=200, headers=headers, media_type=media_type)
+
+
 def _error(status_code: int, reason_code: str) -> JSONResponse:
     body = ErrorResponse(error=ErrorDetail(reason_code=reason_code))
     return JSONResponse(
@@ -647,6 +698,7 @@ def create_observer_app(
     cache: SnapshotCache,
     *,
     bundle_feed: ObserverBundleFeed | None = None,
+    pilot_feed: ObserverPilotFeed | None = None,
     bundle_feed_poll_seconds: float = 15,
     cors_origins: Sequence[str] = (),
     trusted_hosts: Sequence[str] = ("127.0.0.1", "localhost", "testserver"),
@@ -691,6 +743,7 @@ def create_observer_app(
                 "X-UMI-Contract-Revision",
                 "X-UMI-Dataset-Revision",
                 "X-UMI-Finalized-Block",
+                "X-UMI-Pilot-Bundle",
             ],
             max_age=600,
         )
@@ -714,11 +767,15 @@ def create_observer_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_: Request, error: RequestValidationError) -> JSONResponse:
-        reason_code = (
-            "invalid_window_id"
-            if any(tuple(item.get("loc", ())) == ("path", "window_id") for item in error.errors())
-            else "invalid_request"
-        )
+        locations = {tuple(item.get("loc", ())) for item in error.errors()}
+        if ("path", "window_id") in locations:
+            reason_code = "invalid_window_id"
+        elif ("path", "pilot_id") in locations:
+            reason_code = "invalid_pilot_id"
+        elif ("path", "object_sha256") in locations:
+            reason_code = "invalid_object_sha256"
+        else:
+            reason_code = "invalid_request"
         return _error(422, reason_code)
 
     def current() -> SnapshotView:
@@ -909,6 +966,124 @@ def create_observer_app(
                 accepted_entries=item.accepted_entries,
             )
             for item in feed.health
+        )
+
+    def configured_pilots() -> tuple[VerifiedComponentPilot, ...]:
+        return () if pilot_feed is None else pilot_feed.pilots
+
+    def pilot_envelope(
+        view: SnapshotView,
+        selected: Sequence[VerifiedComponentPilot],
+    ) -> dict[str, Any]:
+        sources = list(_sources(view.snapshot))
+        sources.extend(
+            SourceProvenance(
+                source_id=f"component-pilot-{pilot.pilot_id}",
+                source_kind="component_pilot_bundle",
+                verification_status="component_replay_verified",
+                block=None,
+                policy_hash=None,
+                artifact_sha256=pilot.manifest_sha256,
+            )
+            for pilot in selected
+        )
+        return _envelope(view) | {"sources": tuple(sources)}
+
+    def pilot_object_link(
+        pilot: VerifiedComponentPilot,
+        digest: str,
+    ) -> EvidenceObjectLink:
+        evidence_object = pilot.objects.get(digest)
+        if evidence_object is None:
+            raise ValueError("verified pilot projection names an absent object")
+        return EvidenceObjectLink(
+            sha256=evidence_object.sha256,
+            media_type=evidence_object.media_type,
+            size_bytes=evidence_object.size_bytes,
+            url=(
+                f"{pilot.public_origin}/api/v1/pilots/{pilot.pilot_id}"
+                f"/bundle/objects/{evidence_object.sha256}"
+            ),
+        )
+
+    def pilot_record(pilot: VerifiedComponentPilot) -> ComponentPilotRecord:
+        return ComponentPilotRecord(
+            pilot_id=pilot.pilot_id,
+            evidence_class="component_test_no_weight",
+            terminal_code="component_test_no_weight",
+            translation_weights_active=False,
+            protocol_conformance=False,
+            activation_evidence=False,
+            deterministic_replay_verified=True,
+            bundle_manifest_sha256=pilot.manifest_sha256,
+            bundle_bytes=pilot.bundle_bytes,
+            object_count=len(pilot.objects),
+            solution_count=len(pilot.solutions),
+            validator_hotkey=pilot.validator_hotkey,
+            miner_hotkey=pilot.miner_hotkey,
+            missing_canonical_stages=pilot.missing_stages,
+            evidence=PilotBundleLocator(
+                public_origin=pilot.public_origin,
+                manifest_sha256=pilot.manifest_sha256,
+                manifest_url=(
+                    f"{pilot.public_origin}/api/v1/pilots/{pilot.pilot_id}/bundle/manifest.json"
+                ),
+                replay_command="umi-validator replay --bundle ./bundle",
+            ),
+        )
+
+    def pilot_solution(
+        pilot: VerifiedComponentPilot,
+        solution: VerifiedPilotSolution,
+    ) -> PilotSolutionRecord:
+        return PilotSolutionRecord(
+            batch_id=solution.batch_id,
+            challenge_id=solution.challenge_id,
+            validator_hotkey=solution.validator_hotkey,
+            miner_hotkey=solution.miner_hotkey,
+            video_sha256=solution.video_sha256,
+            stratum=solution.stratum,
+            metric=solution.metric,
+            response_plaintext_valid=solution.response_plaintext_valid,
+            response_status=solution.response_status,
+            hypothesis=solution.hypothesis,
+            response_error_code=solution.response_error_code,
+            model_revision=solution.model_revision,
+            references=solution.references,
+            failure_code=solution.failure_code,
+            score={
+                "numerator": str(solution.score_numerator),
+                "denominator": str(solution.score_denominator),
+            },
+            score_trace=solution.score_trace,
+            evidence=PilotSolutionEvidenceLinks(
+                request=pilot_object_link(pilot, solution.request_sha256),
+                authentication_record=pilot_object_link(
+                    pilot, solution.authentication_record_sha256
+                ),
+                response_envelope=(
+                    None
+                    if solution.response_envelope_sha256 is None
+                    else pilot_object_link(pilot, solution.response_envelope_sha256)
+                ),
+                response_signature=(
+                    None
+                    if solution.response_signature_sha256 is None
+                    else pilot_object_link(pilot, solution.response_signature_sha256)
+                ),
+                response_plaintext=(
+                    None
+                    if solution.response_plaintext_sha256 is None
+                    else pilot_object_link(pilot, solution.response_plaintext_sha256)
+                ),
+                ground_truth_envelope=pilot_object_link(
+                    pilot, solution.ground_truth_envelope_sha256
+                ),
+                ground_truth_plaintext=pilot_object_link(
+                    pilot, solution.ground_truth_plaintext_sha256
+                ),
+                scoring=pilot_object_link(pilot, solution.scoring_sha256),
+            ),
         )
 
     @app.get("/healthz", include_in_schema=False)
@@ -1256,6 +1431,174 @@ def create_observer_app(
         )
         return _render(request, response, view)
 
+    @app.head("/api/v1/pilots", include_in_schema=False)
+    @app.get(
+        "/api/v1/pilots",
+        response_model=PilotsResponse,
+        responses=_CURSOR_ERROR_RESPONSES,
+    )
+    async def pilots(request: Request, query: Annotated[EvidenceQuery, Query()]) -> Response:
+        view = current()
+        all_pilots = configured_pilots()
+        revision = hashlib.sha256(
+            canonical_json_bytes(
+                {"kind": "pilots", "manifests": [pilot.pilot_id for pilot in all_pilots]}
+            )
+        ).hexdigest()
+        offset = (
+            0
+            if query.cursor is None
+            else _decode_evidence_cursor(query.cursor, revision=revision, kind="pilots")
+        )
+        if offset > len(all_pilots):
+            raise PublicAPIError(422, "cursor_offset_out_of_range")
+        selected = all_pilots[offset : offset + query.limit]
+        next_offset = offset + len(selected)
+        response = PilotsResponse(
+            **pilot_envelope(view, selected),
+            protocol_state=_protocol_state(view.snapshot, released(view).windows),
+            availability="available" if all_pilots else "not_started",
+            reason_code=None if all_pilots else "public_component_pilot_not_started",
+            page=EvidenceCursorPage(
+                limit=query.limit,
+                total=len(all_pilots),
+                returned=len(selected),
+                next_cursor=(
+                    None
+                    if next_offset >= len(all_pilots)
+                    else _encode_evidence_cursor(
+                        revision=revision,
+                        kind="pilots",
+                        offset=next_offset,
+                    )
+                ),
+            ),
+            pilots=tuple(pilot_record(pilot) for pilot in selected),
+        )
+        return _render(request, response, view)
+
+    @app.head("/api/v1/pilots/{pilot_id}", include_in_schema=False)
+    @app.get(
+        "/api/v1/pilots/{pilot_id}",
+        response_model=PilotResponse,
+        responses=_PILOT_ERROR_RESPONSES,
+    )
+    async def pilot_detail(
+        request: Request,
+        pilot_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+    ) -> Response:
+        view = current()
+        pilot = None if pilot_feed is None else pilot_feed.get(pilot_id)
+        if pilot is None:
+            raise PublicAPIError(404, "component_pilot_not_found")
+        response = PilotResponse(
+            **pilot_envelope(view, (pilot,)),
+            protocol_state=_protocol_state(view.snapshot, released(view).windows),
+            pilot=pilot_record(pilot),
+        )
+        return _render(request, response, view)
+
+    @app.head("/api/v1/pilots/{pilot_id}/solutions", include_in_schema=False)
+    @app.get(
+        "/api/v1/pilots/{pilot_id}/solutions",
+        response_model=PilotSolutionsResponse,
+        responses={**_PILOT_ERROR_RESPONSES, 409: _CURSOR_ERROR_RESPONSES[409]},
+    )
+    async def pilot_solutions(
+        request: Request,
+        pilot_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+        query: Annotated[PilotSolutionQuery, Query()],
+    ) -> Response:
+        view = current()
+        pilot = None if pilot_feed is None else pilot_feed.get(pilot_id)
+        if pilot is None:
+            raise PublicAPIError(404, "component_pilot_not_found")
+        kind = f"pilot-solutions:{pilot.pilot_id}"
+        offset = (
+            0
+            if query.cursor is None
+            else _decode_evidence_cursor(
+                query.cursor,
+                revision=pilot.manifest_sha256,
+                kind=kind,
+            )
+        )
+        if offset > len(pilot.solutions):
+            raise PublicAPIError(422, "cursor_offset_out_of_range")
+        selected = pilot.solutions[offset : offset + query.limit]
+        next_offset = offset + len(selected)
+        response = PilotSolutionsResponse(
+            **pilot_envelope(view, (pilot,)),
+            protocol_state=_protocol_state(view.snapshot, released(view).windows),
+            pilot=pilot_record(pilot),
+            page=EvidenceCursorPage(
+                limit=query.limit,
+                total=len(pilot.solutions),
+                returned=len(selected),
+                next_cursor=(
+                    None
+                    if next_offset >= len(pilot.solutions)
+                    else _encode_evidence_cursor(
+                        revision=pilot.manifest_sha256,
+                        kind=kind,
+                        offset=next_offset,
+                    )
+                ),
+            ),
+            solutions=tuple(pilot_solution(pilot, solution) for solution in selected),
+        )
+        return _render(request, response, view)
+
+    @app.head(
+        "/api/v1/pilots/{pilot_id}/bundle/manifest.json",
+        include_in_schema=False,
+    )
+    @app.get(
+        "/api/v1/pilots/{pilot_id}/bundle/manifest.json",
+        responses=_PILOT_ERROR_RESPONSES,
+    )
+    async def pilot_manifest(
+        request: Request,
+        pilot_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+    ) -> Response:
+        pilot = None if pilot_feed is None else pilot_feed.get(pilot_id)
+        if pilot is None:
+            raise PublicAPIError(404, "component_pilot_not_found")
+        return _render_immutable_bytes(
+            request,
+            pilot.manifest_bytes,
+            media_type="application/json",
+            sha256=pilot.manifest_sha256,
+            bundle_sha256=pilot.manifest_sha256,
+        )
+
+    @app.head(
+        "/api/v1/pilots/{pilot_id}/bundle/objects/{object_sha256}",
+        include_in_schema=False,
+    )
+    @app.get(
+        "/api/v1/pilots/{pilot_id}/bundle/objects/{object_sha256}",
+        responses=_PILOT_ERROR_RESPONSES,
+    )
+    async def pilot_object(
+        request: Request,
+        pilot_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+        object_sha256: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+    ) -> Response:
+        pilot = None if pilot_feed is None else pilot_feed.get(pilot_id)
+        if pilot is None:
+            raise PublicAPIError(404, "component_pilot_not_found")
+        evidence_object = pilot.objects.get(object_sha256)
+        if evidence_object is None:
+            raise PublicAPIError(404, "component_pilot_object_not_found")
+        return _render_immutable_bytes(
+            request,
+            evidence_object.data,
+            media_type=evidence_object.media_type,
+            sha256=evidence_object.sha256,
+            bundle_sha256=pilot.manifest_sha256,
+        )
+
     @app.head("/api/v1/activation-gates", include_in_schema=False)
     @app.get(
         "/api/v1/activation-gates",
@@ -1392,6 +1735,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8092)
     parser.add_argument("--network", choices=("finney",), default="finney")
     parser.add_argument("--bundle-feed-config")
+    parser.add_argument("--pilot-feed-config")
     parser.add_argument("--cors-origin", action="append", default=[])
     parser.add_argument("--trusted-host", action="append", default=[])
     parser.add_argument("--fresh-for-seconds", type=float, default=24.0)
@@ -1434,9 +1778,15 @@ def main() -> None:
         bundle_feed, bundle_feed_poll_seconds = build_production_observer_bundle_feed(
             args.bundle_feed_config
         )
+    pilot_feed = (
+        None
+        if args.pilot_feed_config is None
+        else build_observer_pilot_feed(args.pilot_feed_config)
+    )
     app = create_observer_app(
         cache,
         bundle_feed=bundle_feed,
+        pilot_feed=pilot_feed,
         bundle_feed_poll_seconds=bundle_feed_poll_seconds,
         cors_origins=args.cors_origin,
         trusted_hosts=trusted_hosts,

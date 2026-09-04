@@ -168,7 +168,8 @@ umi-observer \
   --listen-host 127.0.0.1 \
   --port 8092 \
   --trusted-host api.umi.vision \
-  --bundle-feed-config /etc/umi/observer-bundle-feed.json
+  --bundle-feed-config /etc/umi/observer-bundle-feed.json \
+  --pilot-feed-config /etc/umi/observer-pilot-feed.json
 ```
 
 It collects one internally consistent finalized block in the background and
@@ -193,6 +194,12 @@ Vercel integration, exact number handling, and deployment controls. The
 [first-result deployment runbook](deploy/first-public-result/README.md) provides
 the hardened Caddy, Cloudflare Tunnel, and systemd configuration for publishing
 the first weight-disabled post-reveal result.
+
+While independent publishers and validators are still unavailable, the separate
+[`/api/v1/pilots` component path](docs/COMPONENT_PILOT.md) can publish a real
+model's signed hypotheses, revealed references, exact scores, and immutable replay
+bundle. It stays `component_test_no_weight`, never appears under `/windows`, and
+cannot be presented as protocol conformance or activation evidence.
 
 ## Run the certified mirror data plane
 

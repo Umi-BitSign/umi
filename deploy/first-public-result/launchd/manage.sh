@@ -19,16 +19,19 @@ fail() {
 usage() {
   cat <<'EOF'
 Usage:
+  manage.sh migration-check [options]
   manage.sh render --output-dir DIRECTORY [options]
   manage.sh install [--replace] [--check-public-edge] [options]
   manage.sh check [--check-public-edge] [options]
 
 Options:
   --repo-root DIRECTORY
-  --observer-bin FILE
+  --observer-bin FILE          Run this installed observer entry point.
+  --observer-python FILE       Run FILE -m umi.observer; conflicts with --observer-bin.
   --cloudflared-bin FILE
   --token-file FILE
   --bundle-feed-config FILE
+  --pilot-feed-config FILE
   --output-dir DIRECTORY       Required only by render.
   --replace                    Replace different installed plists with rollback.
   --check-public-edge          Require a permanent HTTP redirect and HTTPS HSTS.
@@ -106,7 +109,13 @@ render_plists() {
 
   # On current macOS, plutil's array `-replace` inserts and shifts the old
   # element. Removing the exact element first makes the operation unambiguous.
-  plist_replace_array_string "$observer_output" ProgramArguments.0 "$observer_binary"
+  if [ -n "$observer_python" ]; then
+    plist_replace_array_string "$observer_output" ProgramArguments.0 "$observer_python"
+    /usr/bin/plutil -insert ProgramArguments.1 -string '-m' "$observer_output" >/dev/null
+    /usr/bin/plutil -insert ProgramArguments.2 -string 'umi.observer' "$observer_output" >/dev/null
+  else
+    plist_replace_array_string "$observer_output" ProgramArguments.0 "$observer_binary"
+  fi
   plist_replace_string "$observer_output" UserName "$service_user"
   plist_replace_string "$observer_output" GroupName "$service_group"
   plist_replace_string "$observer_output" WorkingDirectory "$repository_root"
@@ -118,6 +127,10 @@ render_plists() {
   if [ -n "$bundle_feed_config" ]; then
     /usr/bin/plutil -insert ProgramArguments -string '--bundle-feed-config' -append "$observer_output" >/dev/null
     /usr/bin/plutil -insert ProgramArguments -string "$bundle_feed_config" -append "$observer_output" >/dev/null
+  fi
+  if [ -n "$pilot_feed_config" ]; then
+    /usr/bin/plutil -insert ProgramArguments -string '--pilot-feed-config' -append "$observer_output" >/dev/null
+    /usr/bin/plutil -insert ProgramArguments -string "$pilot_feed_config" -append "$observer_output" >/dev/null
   fi
 
   plist_replace_array_string "$cloudflared_output" ProgramArguments.0 "$cloudflared_binary"
@@ -177,6 +190,15 @@ check_public_edge() {
     --dump-header "$https_headers" --output /dev/null \
     "https://api.umi.vision$request_path"
   /usr/bin/grep -Eiq '^strict-transport-security:[[:space:]]*max-age=[1-9][0-9]*' "$https_headers" || fail "public HTTPS endpoint does not return a nonzero HSTS max-age"
+
+  if /usr/bin/curl --silent --show-error --head --max-time 15 \
+    --tlsv1.1 --tls-max 1.1 --output /dev/null \
+    "https://api.umi.vision$request_path" 2>/dev/null; then
+    fail "public HTTPS endpoint still accepts TLS 1.1"
+  fi
+  /usr/bin/curl --fail --silent --show-error --head --max-time 15 \
+    --tlsv1.2 --tls-max 1.2 --output /dev/null \
+    "https://api.umi.vision$request_path" || fail "public HTTPS endpoint does not accept TLS 1.2"
 }
 
 check_installed_mode() {
@@ -225,8 +247,41 @@ legacy_screen_is_running() {
   /usr/bin/screen -ls 2>/dev/null | /usr/bin/grep -Eq '[.]umi-(observer|cloudflared)[[:space:]]'
 }
 
+listener_pids() {
+  /usr/sbin/lsof -nP -t -a -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | /usr/bin/sort -n -u
+}
+
 port_is_listening() {
-  /usr/sbin/lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  [ -n "$(listener_pids "$1")" ]
+}
+
+report_listener_blocker() {
+  service_name=$1
+  port=$2
+  pids=$(listener_pids "$port")
+  [ -n "$pids" ] || return 0
+  pids=$(printf '%s\n' "$pids" | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/[[:space:]]*$//')
+  printf 'migration_blocker=%s_listener port=%s pids=%s\n' "$service_name" "$port" "$pids" >&2
+  printf 'inspect each PID with: /bin/ps -p PID -o pid=,ppid=,user=,comm=\n' >&2
+  printf 'after confirming it is a legacy process, stop that exact PID with: /bin/kill -TERM PID\n' >&2
+}
+
+migration_check() {
+  blocked=0
+  if legacy_screen_is_running; then
+    printf 'migration_blocker=legacy_screen_session\n' >&2
+    blocked=1
+  fi
+  if ! service_is_loaded "$OBSERVER_LABEL" && port_is_listening "$OBSERVER_PORT"; then
+    report_listener_blocker observer "$OBSERVER_PORT"
+    blocked=1
+  fi
+  if ! service_is_loaded "$CLOUDFLARED_LABEL" && port_is_listening "$CLOUDFLARED_METRICS_PORT"; then
+    report_listener_blocker cloudflared "$CLOUDFLARED_METRICS_PORT"
+    blocked=1
+  fi
+  [ "$blocked" = 0 ] || fail "migration is blocked; stop only the verified legacy processes and run migration-check again"
+  printf 'migration_preflight_ready=1\n'
 }
 
 rollback_install() {
@@ -293,7 +348,9 @@ install_services() {
     if ! /usr/bin/cmp -s "$rendered_directory/$OBSERVER_PLIST_NAME" "$observer_target" && [ "$replace_installed" != 1 ]; then
       fail "installed observer plist differs; review it and rerun with --replace"
     fi
-  elif [ "$observer_was_loaded" = 0 ] && port_is_listening "$OBSERVER_PORT"; then
+  fi
+  if [ "$observer_was_loaded" = 0 ] && port_is_listening "$OBSERVER_PORT"; then
+    report_listener_blocker observer "$OBSERVER_PORT"
     fail "TCP port $OBSERVER_PORT is already in use"
   fi
 
@@ -305,7 +362,9 @@ install_services() {
     if ! /usr/bin/cmp -s "$rendered_directory/$CLOUDFLARED_PLIST_NAME" "$cloudflared_target" && [ "$replace_installed" != 1 ]; then
       fail "installed cloudflared plist differs; review it and rerun with --replace"
     fi
-  elif [ "$cloudflared_was_loaded" = 0 ] && port_is_listening "$CLOUDFLARED_METRICS_PORT"; then
+  fi
+  if [ "$cloudflared_was_loaded" = 0 ] && port_is_listening "$CLOUDFLARED_METRICS_PORT"; then
+    report_listener_blocker cloudflared "$CLOUDFLARED_METRICS_PORT"
     fail "TCP port $CLOUDFLARED_METRICS_PORT is already in use"
   fi
 
@@ -357,7 +416,7 @@ install_services() {
 command_name=$1
 shift
 case "$command_name" in
-  render | install | check) ;;
+  migration-check | render | install | check) ;;
   -h | --help | help) usage; exit 0 ;;
   *) usage >&2; fail "unknown command: $command_name" ;;
 esac
@@ -365,9 +424,11 @@ esac
 SCRIPT_DIRECTORY=$(absolute_directory "$(/usr/bin/dirname -- "$0")")
 repository_root=$(absolute_directory "$SCRIPT_DIRECTORY/../../..")
 observer_binary=''
+observer_python=''
 cloudflared_binary=''
 token_file=''
 bundle_feed_config=''
+pilot_feed_config=''
 output_directory=''
 replace_installed=0
 check_edge=0
@@ -384,6 +445,11 @@ while [ "$#" -gt 0 ]; do
       observer_binary=$2
       shift 2
       ;;
+    --observer-python)
+      require_argument "$@"
+      observer_python=$2
+      shift 2
+      ;;
     --cloudflared-bin)
       require_argument "$@"
       cloudflared_binary=$2
@@ -397,6 +463,11 @@ while [ "$#" -gt 0 ]; do
     --bundle-feed-config)
       require_argument "$@"
       bundle_feed_config=$2
+      shift 2
+      ;;
+    --pilot-feed-config)
+      require_argument "$@"
+      pilot_feed_config=$2
       shift 2
       ;;
     --output-dir)
@@ -424,22 +495,38 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$command_name" = install ] || [ "$replace_installed" = 0 ] || fail "--replace is valid only with install"
+if [ -n "$observer_binary" ] && [ -n "$observer_python" ]; then
+  fail "--observer-bin and --observer-python are mutually exclusive"
+fi
+if [ "$command_name" = migration-check ]; then
+  [ -z "$output_directory" ] || fail "--output-dir is valid only with render"
+  migration_check
+  exit 0
+fi
+
 service_user=$(/usr/bin/id -un)
 service_group=$(/usr/bin/id -gn)
 service_home=$(/usr/bin/dscl . -read "/Users/$service_user" NFSHomeDirectory | /usr/bin/sed -n 's/^NFSHomeDirectory: //p')
 [ -n "$service_home" ] || fail "cannot resolve the service account home directory"
 service_home=$(absolute_directory "$service_home")
 repository_root=$(absolute_directory "$repository_root")
-if [ -z "$observer_binary" ]; then observer_binary="$repository_root/.venv/bin/umi-observer"; fi
+if [ -z "$observer_binary" ] && [ -z "$observer_python" ]; then
+  observer_binary="$repository_root/.venv/bin/umi-observer"
+fi
 if [ -z "$cloudflared_binary" ]; then
   cloudflared_binary=$(command -v cloudflared || true)
   [ -n "$cloudflared_binary" ] || fail "cloudflared is not on PATH; pass --cloudflared-bin"
 fi
-require_executable "$observer_binary"
+if [ -n "$observer_python" ]; then
+  require_executable "$observer_python"
+else
+  require_executable "$observer_binary"
+fi
 require_executable "$cloudflared_binary"
 if [ -z "$token_file" ]; then token_file="$service_home/.cloudflared/umi-observer-api.token"; fi
 token_file=$(require_private_file "$token_file")
 if [ -n "$bundle_feed_config" ]; then bundle_feed_config=$(require_private_file "$bundle_feed_config"); fi
+if [ -n "$pilot_feed_config" ]; then pilot_feed_config=$(require_private_file "$pilot_feed_config"); fi
 
 log_directory="$service_home/Library/Logs/UMI"
 runtime_cache="$service_home/Library/Caches/umi-observer/bittensor-runtime"

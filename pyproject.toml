@@ -35,6 +35,7 @@ dev = [
 
 [project.scripts]
 umi-demo = "umi.demo:main"
+umi-component-pilot = "umi.component_pilot:main"
 umi-miner = "umi.miner:main"
 umi-mirror-service = "umi.mirror_service:main"
 umi-observer = "umi.observer:main"

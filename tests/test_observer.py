@@ -738,6 +738,7 @@ def test_cors_is_absent_by_default_and_exact_when_configured() -> None:
         "x-umi-contract-revision",
         "x-umi-dataset-revision",
         "x-umi-finalized-block",
+        "x-umi-pilot-bundle",
     }
     assert "access-control-allow-origin" not in spoofed.headers
     with pytest.raises(ValueError, match="exact HTTPS origins"):
