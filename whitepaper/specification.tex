@@ -111,9 +111,13 @@ requirements throughout this whitepaper.
   \textbf{Availability certificate}: a quorum of validator signatures confirming that
   the signed pool artifacts were retrieved, verified, and mirrored before close.
 \item
-  \textbf{Publisher control group}: publisher hotkeys under common ownership,
-  administration, funding, or ground-truth access. Exposure caps apply to the
-  group, not merely to its hotkeys.
+  \textbf{Publisher control group}: publisher hotkeys under common beneficial ownership
+  or control, common administration or operational decision authority, common
+  custody or recovery authority over publisher wallets or collateral, common
+  privileged or non-public access to plaintext ground truth or sealing material
+  before the applicable reveal, or a funding arrangement that confers material
+  influence over any of those matters. Exposure caps apply to the group, not
+  merely to its hotkeys.
 \item
   \textbf{Spent registry}: the deterministic append-only state derived from finalized
   pool anchors and revealed batch artifacts. It is calculated, not edited by a
@@ -183,7 +187,7 @@ Status at publication
 \endlastfoot
 Who holds the answer key? & Before independent groups are active, the founding publisher control group may prepare every calibration reference. All hotkeys under that common administration count as one control group. Locks, canaries, and audit bundles make behavior more attributable; they do not make that source independent. \\
 Do models clear the \path|0.10| floor? & Not yet demonstrated under UMI\textquotesingle s exact normalization, reference, stratum, assignment-failure, and rolling-score rules. The value is an initial calibration candidate, not a reported model result. \\
-Who bears single-use challenge cost? & Each publisher bears the production and review cost of its candidate batches and receives no subnet emission for publishing them. Publishers in the founding control group therefore bear that group\textquotesingle s cost. Only benchmark eligibility is spent after reveal; the underlying data is not destroyed, although any later use still depends on its consent class. \\
+Who bears single-use challenge cost? & The protocol assigns no publisher emission. Each publisher is accountable for financing and delivering its candidate batches, including work that retires unselected. An independent publisher MAY receive disclosed arm\textquotesingle s-length external compensation that passes Section 4.3\textquotesingle s control test; direct collateral funding or influential financing affects its control-group classification. The founding control group currently bears its own cost. Only benchmark eligibility is spent after reveal; the underlying data is not destroyed, although any later use still depends on its consent class. \\
 Does validation guarantee profit? & No. A permitted conforming validator is eligible for variable Yuma dividends, but realized operator return also depends on stake, bonds, consensus, delegation, subnet emission, alpha liquidity and price, and direct operating cost. A calibration run, even on mainnet, does not guarantee future dividend revenue. \\
 \end{longtable}
 }
@@ -348,11 +352,147 @@ not drain. Clearing the floor creates no direct withdrawal path; without later
 emission, the collateral remains locked. This is a standing participation cost.
 Version 0.1 provides no escrow, slashing, or transfer to a harmed party.
 The active publisher registry is an ordered list of publisher hotkeys, owning
-coldkeys, and declared control-group IDs in the scoring policy. Hotkeys with common
-ownership, administration, funding, or ground-truth access MUST share one group.
+coldkeys, and declared control-group IDs in the scoring policy. Hotkeys that meet
+the publisher-control-group definition in Section 1.1 MUST share one group.
+Standard arm\textquotesingle s-length compensation for completed goods or services does not by
+itself establish common funding or common control when all of these conditions
+hold:
+
+\begin{itemize}
+\tightlist
+\item
+  the amount, term, and objective payment events are fixed before the work and are
+  not contingent on miner outputs, scores, weights, emissions, or batch selection;
+\item
+  the payer has no beneficial ownership, wallet or collateral custody,
+  administrative authority, privileged pre-reveal access to plaintext ground
+  truth or sealing material, right to select or replace contributors or reviewers,
+  reference-approval right, or direction over prompt creation, review, sealing,
+  publication, or incident decisions; and
+\item
+  the provider controls its own personnel, systems, credentials, wallets,
+  collateral, and protocol decisions.
+\end{itemize}
+
+Ordinary contractual rights to enforce applicable law, confidentiality, uniform
+public policy-pinned protocol and security requirements, objective delivery
+criteria, and payment do not alone establish control. Those rights MUST NOT include
+publisher-specific approval, selection, discretion, access, or direction over the
+protected functions above. Direct collateral funding, shared administrators or
+reviewer operations, financing outside the fixed contract that can direct protocol
+decisions, score-linked revenue sharing, or any access or decision right named
+above remains evidence of common control. Every funding and service relationship
+MUST be disclosed and assessed on its actual operation. Calling a payment an
+invoice, grant, or standard rate does not create a safe harbor.
+
+Before its first window in which it is represented as separate from another group,
+and no later than its first qualifying soak window, every declared publisher
+control group MUST publish one signed control disclosure. The public object
+contains no contributor or reviewer identity, contract text, rate, or private
+system detail. It uses this logical schema:
+
+\begin{UMICodeBlock}
+{
+  "schema": "umi-publisher-control-disclosure/1",
+  "statement": {
+    "control_group_id": "hex-encoded-32-bytes",
+    "administrator": "ss58-policy-declared-group-administrator",
+    "publisher_hotkeys": ["ss58-sorted-publisher-hotkey"],
+    "scoring_policy_hash": "hex-encoded-sha256",
+    "issued_block": 123456,
+    "issued_block_hash": "0x...",
+    "classification": "separate_control_group",
+    "relationships": [
+      {
+        "relationship_id": "hex-encoded-32-bytes",
+        "related_party_account": "ss58-public-attestation-account",
+        "relationship_kinds": ["service_compensation"],
+        "private_evidence_sha256": "hex-encoded-sha256",
+        "facts": {
+          "terms_fixed_before_work": true,
+          "miner_output_contingent": false,
+          "score_contingent": false,
+          "weight_contingent": false,
+          "emission_contingent": false,
+          "batch_selection_contingent": false,
+          "common_beneficial_ownership": false,
+          "common_administration_or_decision_authority": false,
+          "wallet_or_collateral_custody": false,
+          "direct_collateral_funding": false,
+          "privileged_pre_reveal_ground_truth_access": false,
+          "protected_function_direction": false,
+          "uniform_objective_requirements_only": true,
+          "provider_controls_operations": true
+        }
+      }
+    ],
+    "material_change_commitment": true
+  },
+  "signatures": [
+    {
+      "signer_account": "ss58-administrator-or-required-payer-account",
+      "scheme": "sr25519",
+      "signature": "0x..."
+    }
+  ]
+}
+\end{UMICodeBlock}
+
+\path|relationship_kinds| uses the version 0.1 enumeration \path|ownership|,
+\path|administration|, \path|service_compensation|, \path|other_funding|, \path|wallet_or_collateral|,
+\path|infrastructure|, \path|ground_truth|, and \path|other|, sorted in that order without
+duplicates. Relationships are sorted by raw \path|relationship_id|; duplicate
+relationship IDs are invalid. Publisher hotkeys and signatures are sorted by
+decoded account. The statement includes every known
+owner, administrator, funder, wallet or collateral custodian, ground-truth
+operator, shared infrastructure administrator, and non-commodity service
+relationship relevant to the classification. \path|private_evidence_sha256| binds the
+restricted contract or assessment record without publishing it.
+
+The signature list contains exactly the administrator and every distinct payer
+account named under \path|service_compensation| or \path|other_funding|, without duplicates.
+Each signs the same raw digest:
+
+\begin{UMICodeBlock}
+publisher_control_disclosure_digest = SHA256(
+  "umi-publisher-control-disclosure-v1\0" || RFC8785(statement)
+)
+\end{UMICodeBlock}
+
+Signatures follow Section 6.3. The complete signed object\textquotesingle s canonical SHA-256 is
+the \path|control_disclosure_sha256| in the group\textquotesingle s capacity statement. The disclosure
+statement and capacity statement MUST have byte-identical \path|control_group_id|,
+\path|administrator|, \path|publisher_hotkeys|, and \path|scoring_policy_hash| values. Both bind
+the shadow policy used for the soak. The activation-equivalent policy preserves
+that pair only when the capacity statement\textquotesingle s \path|activation_equivalence_digest|
+matches the digest recomputed from both policies under Section 14; the changed
+activated-policy hash does not by itself require replacement. Any disclosure
+replacement changes \path|control_disclosure_sha256| and requires a replacement,
+re-signed capacity statement. The bytes MUST be public before the soak announcement
+block and remain available with every soak bundle. Signatures authenticate the
+disclosed assertions; they do not prove that an off-chain fact is complete or
+true.
+
+A material change to ownership, administration, funding terms, custody, privileged
+pre-reveal access, protected-function authority, or any relationship named in the
+statement invalidates each not-yet-revealed window that relied on the prior
+classification and restarts the soak. When the change occurs or is discovered, the
+group MUST immediately publish a signed material-change notice naming the prior
+disclosure hash, effective or discovery block, and affected relationship kinds,
+and MUST pause pool proposals. Validators that receive the notice MUST pause
+publisher intake and UMI weight submission for every affected window. Every
+validator MUST check the public notice location at pool close and again before
+weight build; any affected window still awaiting reveal is void. The group MUST
+publish and sign a replacement disclosure and capacity statement before another
+pool proposal. A resulting
+registry or control-group change also requires a new policy hash and activation
+block under the rule below. Failure to disclose remains an off-chain residual risk.
+
 Adding an entry, removing an entry, or changing a group requires a new policy hash
-and activation block and cannot affect an open selection window. A new identity is
-a new governance decision backed by fresh collateral; the protocol does not infer
+and activation block. The new registry mapping does not retroactively remap an open
+selection window, but this does not preserve a window invalidated by a material
+factual change under the preceding paragraph. A new identity is a new governance
+decision backed by fresh collateral; the protocol does not infer
 off-chain succession or treat a new hotkey as independent of its controller.
 Control-group IDs are immutable within protocol version 0.1. A later policy MAY
 merge groups only through a canonical alias record that names every predecessor and
@@ -370,8 +510,11 @@ Until that gate is met, collateral, canaries, and public audit support testing b
 do not establish publisher independence.
 
 Challenge production is an external protocol input and receives no
-protocol-assigned publisher emission in version 0.1. Each publisher bears the cost
-of every batch it proposes, including an unselected batch that retires unused.
+protocol-assigned publisher emission in version 0.1. Each publisher is accountable
+for financing and delivering every batch it proposes, including an unselected
+batch that retires unused. It MAY fund that work internally or receive disclosed
+fixed arm\textquotesingle s-length compensation under the control test above. External payment
+creates no protocol entitlement, reimbursement claim, or exception to retirement.
 Before UMI weight activation, each independent group
 MUST sign a capacity statement covering the policy\textquotesingle s \path|challenge_supply_runway_days|
 at the proposed activated cadence and the loss of any one other group. The statement
@@ -538,6 +681,14 @@ Version 0.1 makes these trust assumptions explicit:
   Publisher control groups depend on disclosed off-chain relationships; the chain
   cannot detect undisclosed common control.
 \item
+  Control-disclosure signatures authenticate assertions by the named accounts;
+  they cannot prove that an off-chain relationship, access path, or change was
+  disclosed completely or truthfully.
+\item
+  A common arm\textquotesingle s-length payer can create correlated funding and supply risk even
+  when it has no publisher-control rights. Capacity statements cannot prove that
+  the payer or providers will remain available through the declared runway.
+\item
   Validators cannot observe every failed availability attempt. A publisher can
   conceal that it disclosed an uncertified batch and later reuse the material;
   the publisher-local quarantine below makes reuse non-conforming but cannot make
@@ -592,6 +743,7 @@ Mirror discovery schema & \path|umi-mirror-discovery/1| \\
 Video-delivery issuance schemas & \path|umi-video-delivery-issuance-request/1|, \path|umi-video-delivery-issuance-response/1|, and \path|umi-video-delivery-issuance-evidence/1| \\
 Availability certificate & \path|umi-availability/1| \\
 Publisher capacity schema & \path|umi-publisher-capacity/1| \\
+Publisher control disclosure & \path|umi-publisher-control-disclosure/1| \\
 Validator economics schema & \path|umi-validator-economics/1| \\
 Validator resource-capacity schema & \path|umi-validator-capacity/1| \\
 Spent-registry schema & \path|umi-spent-registry/1| \\
@@ -2637,12 +2789,14 @@ must prevent it before any request is issued.
   \textbf{Pool and selection:} window index, announcement and closing blocks, derived
   rounds, policy-declared finality evidence, pool and public batch manifests,
   closing-block proofs,
-  availability certificate and certified bodies, selection pulse and trace, the
-  exact mirror-discovery rule and canonical video-delivery issuance request,
-  response, and evidence; every bounded successful, failed, or interrupted
-  retrieval and issuance attempt; exactly reconciled observed and ceiling-accounted
-  byte totals; encrypted ground-truth objects; previous and resulting spent roots;
-  and previous and resulting publisher-fault roots with all sorted deltas.
+  availability certificate and certified bodies, applicable signed publisher
+  control disclosures and, for a soak window, capacity statements for every
+  selected source; selection pulse and trace; the exact mirror-discovery rule and
+  canonical video-delivery issuance request, response, and evidence; every bounded
+  successful, failed, or interrupted retrieval and issuance attempt; exactly
+  reconciled observed and ceiling-accounted byte totals; encrypted ground-truth
+  objects; previous and resulting spent roots; and previous and resulting
+  publisher-fault roots with all sorted deltas.
 \item
   \textbf{Assignment:} assigned miner roots and closing-block mappings, every exact
   initial signed request and authentication record, and the assignment leaves and
@@ -2963,8 +3117,10 @@ and resume rule, responsible role, and reactivation criterion.
 \item
   exactly three active challenge-publisher hotkeys across exactly three
   independently administered control groups at launch, with all common control
-  relationships disclosed, every hotkey meeting the locked-collateral requirement,
-  and the signed runway statements plus realized soak evidence showing that any two
+  relationships disclosed through valid public
+  \path|umi-publisher-control-disclosure/1| objects whose hashes match the signed
+  capacity statements, every hotkey meeting the locked-collateral requirement, and
+  the signed runway statements plus realized soak evidence showing that any two
   groups can sustain the declared cadence after the third enters cooldown; each
   future window still requires a fresh availability certificate;
 \item
@@ -3298,6 +3454,10 @@ A conforming publisher:
   anchors one canonical pool-manifest hash for the selection window;
 \item
   declares its complete publisher control group under the active policy;
+\item
+  publishes the signed control disclosure before a qualifying soak, immediately
+  reports any material relationship change, pauses proposals, and replaces both
+  the disclosure and capacity statement before another proposal;
 \item
   exposes the artifacts from which every revealed script group retires;
 \item

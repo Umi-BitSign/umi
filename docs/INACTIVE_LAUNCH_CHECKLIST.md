@@ -111,8 +111,21 @@ window.
   limits, deadlines, and economics schedule.
 - [ ] Obtain all publisher-capacity and validator-capacity signatures before the
   release authority signs the final inactive release.
-- [ ] Verify that no account is represented as independent when ownership,
-  administration, funding, or ground-truth access is shared.
+- [ ] Verify that no account is represented as independent when beneficial
+  ownership, administration, wallet or collateral custody, privileged pre-reveal
+  ground-truth access, or operational decision authority is shared. Disclose every
+  funding relationship and apply the arm's-length compensation test in whitepaper
+  Sections 1.1 and 4.3 before assigning control groups.
+- [ ] Publish one signed `umi-publisher-control-disclosure/1` object per group
+  before the soak announcement, verify every required payer countersignature, and
+  byte-match its canonical hash to `control_disclosure_sha256` in that group's
+  capacity statement. Byte-match the group ID, administrator, publisher-hotkey
+  list, and shadow-policy hash across both objects. A replacement disclosure also
+  requires a replacement signed capacity statement.
+- [ ] Establish the public material-change notice path. Affected publishers pause
+  proposals immediately; validators check it at pool close and weight build, void
+  affected unrevealed windows, and pause UMI submissions until replacement
+  disclosure, capacity, and policy evidence is valid.
 
 Any registry, cadence, scoring, resource, or economics change after the soak starts
 requires a new policy and restarts the soak.
