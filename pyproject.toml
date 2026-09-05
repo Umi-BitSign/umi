@@ -36,6 +36,7 @@ dev = [
 [project.scripts]
 umi-demo = "umi.demo:main"
 umi-component-pilot = "umi.component_pilot:main"
+umi-external-miner-pilot = "umi.external_miner_pilot:main"
 umi-miner = "umi.miner:main"
 umi-miner-finality-artifact = "umi.shadow_release:miner_finality_artifact_main"
 umi-mirror-service = "umi.mirror_service:main"

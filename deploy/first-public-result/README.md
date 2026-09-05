@@ -65,12 +65,11 @@ Before provisioning the public services:
 1. Retain the completed UMI identity proof from finalized block `8993215` and do
    not replace the identity with an obsolete partial record.
 2. Read the live `activity_cutoff_factor` and make sure the derived cutoff is no
-   longer than the policy's 360-block window stride. The public observer is live
-   and confirms the UMI identity, but finalized block `8995150` on 2026-09-04 still
-   showed factor `13889`, which derived a 5,000-block cutoff and failed the live
-   weight-build gate despite the reported hyperparameter update. It also showed
-   `subnet_emission_enabled: false`. These observations are not permanent chain
-   values.
+   longer than the policy's 360-block window stride. On 2026-09-05, the fresh
+   public observer still reported a 5,000-block derived cutoff, so this prerequisite
+   had not passed. These observations are not permanent chain values. Use the
+   exact owner-only procedure and read-only finalized-state verifier in
+   [`owner-cutoff/README.md`](owner-cutoff/README.md).
 3. Build, sign, verify, and publish the target-specific inactive UMI release.
 4. Materialize the policy-bound validator configurations from that release.
 5. Complete the publisher, validator, miner, collateral, capacity, consent,
@@ -83,34 +82,14 @@ the tunnels. If DNS is still delegated elsewhere, coordinate that migration and
 preserve the existing apex and `www` Vercel records; do not change nameservers as
 an incidental deployment step.
 
-The subnet owner can inspect the current best-head value without a wallet:
-
-```sh
-btcli sudo get --network finney --netuid 78 --name activity_cutoff_factor --json
-```
-
-This convenience read is operational reconnaissance only: it is neither pinned to
-a finalized block nor backed by a storage proof, so it MUST NOT enter an audit
-bundle or satisfy the launch check.
-
-If the derived cutoff exceeds 360 blocks, the owner must preview the bounded
-minimum factor before submitting anything:
-
-```sh
-btcli sudo set --network finney --wallet REPLACE_WITH_OWNER_WALLET \
-  --wallet-path REPLACE_WITH_OWNER_WALLET_PATH --netuid 78 \
-  --name activity_cutoff_factor --value 1000 --dry-run
-```
-
-Only the owner may remove `--dry-run`, after reviewing the signer, call, fee, and
-effect. Retain the finalized inclusion event, and repeat the best-head read only as
-an operational check. The repository does not expose a generic proof-read command
-for this key. Final protocol confirmation comes from the first live weight-build
-snapshot, which reads `ActivityCutoffFactorMilli`, `Tempo`, and the other required
-fields at one explicit finalized block through the release-pinned proof path. Do
-not accept that result unless its bundle contains the block, state root, storage
-proofs, and a derived cutoff no greater than the window stride. Never present an
-unpinned `btcli sudo get` result as that evidence. `activity_cutoff` itself is derived and read-only.
+Do not use older `btcli sudo set` examples for this change. The dedicated handoff
+pins the tested `btcli 11.1.0` command shape, requires a dry run, and verifies the
+finalized result through the fixed observer endpoint. Final protocol confirmation
+still comes from the first live weight-build snapshot, which reads
+`ActivityCutoffFactorMilli`, `Tempo`, and the other required fields at one explicit
+finalized block through the release-pinned proof path. Its bundle must contain the
+block, state root, storage proofs, and a derived cutoff no greater than the window
+stride.
 
 The observer machine needs outbound access to the configured Finney RPC and every
 validator audit origin. It needs no wallet. Each audit publisher needs outbound

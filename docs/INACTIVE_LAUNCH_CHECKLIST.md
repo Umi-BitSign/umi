@@ -73,9 +73,11 @@ btcli tx set-hyperparameter \
 ```
 
 Run that change comfortably outside the runtime's final ten-block admin freeze
-window. If a token-symbol change is wanted, choose an unused live-catalog symbol
-explicitly and dry-run `btcli tx update-symbol` separately; renaming the subnet
-does not change its symbol.
+window, then follow the live-submission and finalized-state verification steps in
+[`../deploy/first-public-result/owner-cutoff/README.md`](../deploy/first-public-result/owner-cutoff/README.md).
+If a token-symbol change is wanted, choose an unused live-catalog symbol explicitly
+and dry-run `btcli tx update-symbol` separately; renaming the subnet does not change
+its symbol.
 
 - [x] Confirm the identity at one finalized block and retain the transaction
   events and block hash.

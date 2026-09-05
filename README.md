@@ -206,7 +206,10 @@ While independent publishers and validators are still unavailable, the separate
 [`/api/v1/pilots` component path](docs/COMPONENT_PILOT.md) can publish a real
 model's signed hypotheses, revealed references, exact scores, and immutable replay
 bundle. It stays `component_test_no_weight`, never appears under `/windows`, and
-cannot be presented as protocol conformance or activation evidence.
+cannot be presented as protocol conformance or activation evidence. The
+[external-miner component pilot](docs/EXTERNAL_MINER_COMPONENT_PILOT.md) provides
+the one-command path for the pinned public S1 model and licensed `ASL BOOK` asset;
+it runs locally and explicitly does not prove the miner's public axon.
 
 ## Run the certified mirror data plane
 

@@ -5,6 +5,13 @@ independent actors required by the launch policy are still missing. It does not
 create a protocol window, submit weights, satisfy an activation gate, or claim
 protocol conformance.
 
+For the one-command external-miner run using the pinned public S1 model and the
+checked-in `ASL BOOK` asset, use
+[`EXTERNAL_MINER_COMPONENT_PILOT.md`](EXTERNAL_MINER_COMPONENT_PILOT.md). That
+wrapper generates the inputs and future Quicknet rounds, verifies the signed model
+release, produces the bundle, and replays it. It still runs the miner in-process and
+does not prove the miner's public axon.
+
 The observer publishes these results only under `/api/v1/pilots`. It does not put
 them under `/api/v1/windows`, advance the reported protocol phase, or populate the
 UMI translation leaderboard.
