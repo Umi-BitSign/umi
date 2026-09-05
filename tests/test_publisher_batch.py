@@ -13,7 +13,12 @@ import umi.publisher_batch as publisher_batch_module
 import umi.publisher_batch_cli as publisher_batch_cli_module
 from tests.test_policy import make_policy
 from umi.crypto import SealedResponse
-from umi.media import FrameDigestResult, MediaInspectionResult, MediaProfile
+from umi.media import (
+    FrameDigestResult,
+    MediaConformanceError,
+    MediaInspectionResult,
+    MediaProfile,
+)
 from umi.policy import ScoringPolicy, scoring_policy_hash
 from umi.protocol import canonical_json_bytes
 from umi.publisher_availability_cli import AvailabilityAssemblyConfig
@@ -27,8 +32,10 @@ from umi.publisher_batch import (
     PublisherBatchIdentity,
     PublisherBatchSource,
     PublisherBatchWindow,
+    PublisherReserveVideoInspection,
     create_publisher_batch_identity,
     derive_publisher_batch_window,
+    inspect_publisher_reserve_video,
     load_publisher_batch_release,
     prepare_publisher_batch,
     prepare_publisher_batch_from_paths,
@@ -720,6 +727,205 @@ def test_path_builder_snapshots_all_clips_and_uses_both_policy_pins(
         prepared.public_manifest.ciphertext_sha256
         == hashlib.sha256(prepared.ground_truth_envelope).hexdigest()
     )
+
+
+def test_reserve_video_inspection_binds_one_snapshot_policy_pins_and_full_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = make_policy()
+    root = _private_directory(tmp_path / "reserve-inspection")
+    payload = b"private reserve video fixture"
+    video = _private_file(root / "opaque.mp4", payload)
+    expected_digest = hashlib.sha256(payload).hexdigest()
+    observed: dict[str, object] = {}
+
+    def inspect(path: Path, **kwargs) -> MediaInspectionResult:
+        snapshot = Path(path)
+        observed.update(path=snapshot, payload=snapshot.read_bytes(), kwargs=kwargs)
+        return _inspection(policy, payload, 9)
+
+    monkeypatch.setattr(publisher_batch_module, "inspect_media_pinned", inspect)
+    receipt = inspect_publisher_reserve_video(
+        policy=policy,
+        video_path=video,
+        expected_video_sha256=expected_digest,
+        ffmpeg="/not/executed/ffmpeg",
+        ffprobe="/not/executed/ffprobe",
+    )
+
+    assert isinstance(receipt, PublisherReserveVideoInspection)
+    assert receipt.status == "passed"
+    assert receipt.state_mutated is False
+    assert receipt.translation_weights_active is False
+    assert observed["payload"] == payload
+    assert observed["path"] != video
+    assert not Path(observed["path"]).exists()
+    assert observed["kwargs"] == {
+        "expected_ffmpeg_sha256": policy.implementation_pins.media.ffmpeg_binary_sha256,
+        "expected_ffprobe_sha256": policy.implementation_pins.media.ffprobe_binary_sha256,
+        "ffmpeg": "/not/executed/ffmpeg",
+        "ffprobe": "/not/executed/ffprobe",
+        "maximum_clip_size": policy.limits.maximum_clip_size_bytes,
+    }
+    assert receipt.scoring_policy_hash == scoring_policy_hash(policy)
+    assert receipt.ffmpeg_binary_sha256 == policy.implementation_pins.media.ffmpeg_binary_sha256
+    assert receipt.ffprobe_binary_sha256 == policy.implementation_pins.media.ffprobe_binary_sha256
+    assert receipt.frame_count == 2
+    assert receipt.media.sha256 == expected_digest
+    assert receipt.media.frame_digest == f"{1009:064x}"
+    assert receipt.media.duration_ms == 2_000
+    assert receipt.media.video_codec == "h264"
+    assert receipt.media.audio_track_count == 0
+    assert str(video).encode() not in canonical_json_bytes(receipt)
+
+    non_integral = _inspection(policy, payload, 9)
+    non_integral = MediaInspectionResult(
+        video_sha256=non_integral.video_sha256,
+        profile=MediaProfile(
+            size_bytes=len(payload),
+            duration=Fraction(2_000_001, 1_000_000),
+            width=1,
+            height=1,
+            frame_rate=Fraction(1, 1),
+            codec_name="h264",
+            format_names=("mp4",),
+        ),
+        frames=non_integral.frames,
+    )
+    monkeypatch.setattr(
+        publisher_batch_module,
+        "inspect_media_pinned",
+        lambda *_args, **_kwargs: non_integral,
+    )
+    with pytest.raises(PublisherBatchError, match="duration_not_integer_milliseconds"):
+        inspect_publisher_reserve_video(
+            policy=policy,
+            video_path=video,
+            expected_video_sha256=expected_digest,
+        )
+
+
+def test_reserve_video_inspection_rejects_mutation_before_media_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = make_policy()
+    root = _private_directory(tmp_path / "reserve-mutation")
+    video = _private_file(root / "opaque.mp4", b"original reserve video")
+    expected_digest = hashlib.sha256(video.read_bytes()).hexdigest()
+    video.chmod(0o600)
+    video.write_bytes(b"mutated reserve video")
+    video.chmod(0o400)
+    inspection_calls = 0
+
+    def inspect(*_args, **_kwargs):
+        nonlocal inspection_calls
+        inspection_calls += 1
+        raise AssertionError("media tools ran before the expected video digest check")
+
+    monkeypatch.setattr(publisher_batch_module, "inspect_media_pinned", inspect)
+    with pytest.raises(PublisherBatchError, match="publisher_video_digest_mismatch"):
+        inspect_publisher_reserve_video(
+            policy=policy,
+            video_path=video,
+            expected_video_sha256=expected_digest,
+        )
+    assert inspection_calls == 0
+
+
+def test_reserve_video_cli_writes_private_receipt_and_hides_media_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsysbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    policy = make_policy()
+    root = _private_directory(tmp_path / "reserve-cli")
+    policy_path = root / "policy.json"
+    policy_path.write_bytes(canonical_json_bytes(policy))
+    policy_path.chmod(0o444)
+    payload = b"private reserve CLI fixture"
+    video = _private_file(root / "opaque-private-name.mp4", payload)
+    expected_digest = hashlib.sha256(payload).hexdigest()
+    frame_digest = f"{1011:064x}"
+
+    monkeypatch.setattr(
+        publisher_batch_module,
+        "inspect_media_pinned",
+        lambda *_args, **_kwargs: _inspection(policy, payload, 11),
+    )
+    output = root / "reserve-receipt.json"
+    arguments = [
+        "inspect-reserve-video",
+        "--policy",
+        str(policy_path),
+        "--video",
+        str(video),
+        "--expected-video-sha256",
+        expected_digest,
+        "--ffmpeg",
+        "/not/executed/ffmpeg",
+        "--ffprobe",
+        "/not/executed/ffprobe",
+        "--output",
+        str(output),
+    ]
+    assert publisher_batch_cli_module.run_cli(arguments) == 0
+    stdout, stderr = capsysbinary.readouterr()
+    assert stderr == b""
+    summary = json.loads(stdout)
+    receipt = PublisherReserveVideoInspection.model_validate_json(output.read_bytes())
+    assert output.read_bytes() == canonical_json_bytes(receipt)
+    assert stat.S_IMODE(output.stat().st_mode) == 0o400
+    assert summary == {
+        "schema": "umi-publisher-reserve-video-inspection-result/1",
+        "protocol": "umi-asl/0.1",
+        "status": "created",
+        "receipt_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        "state_mutated": True,
+        "translation_weights_active": False,
+    }
+    for private_value in (str(video), expected_digest, frame_digest):
+        assert private_value.encode() not in stdout + stderr
+
+    def failed_tool(*_args, **_kwargs):
+        raise MediaConformanceError(f"private path must stay hidden: {video}")
+
+    monkeypatch.setattr(publisher_batch_module, "inspect_media_pinned", failed_tool)
+    failed_output = root / "failed-tool-receipt.json"
+    failed_arguments = [*arguments[:-1], str(failed_output)]
+    assert publisher_batch_cli_module.run_cli(failed_arguments) == 2
+    stdout, stderr = capsysbinary.readouterr()
+    assert stdout == b""
+    assert json.loads(stderr)["reason_code"] == "publisher_reserve_media_inspection_failed"
+    assert str(video).encode() not in stderr
+    assert not failed_output.exists()
+
+    changed_pins = policy.implementation_pins.model_copy(
+        update={"umi_source_tree_sha256": "00" * 32}
+    )
+    changed_policy = policy.model_copy(update={"implementation_pins": changed_pins})
+    changed_policy_path = root / "invalid-policy.json"
+    changed_policy_path.write_bytes(canonical_json_bytes(changed_policy))
+    changed_policy_path.chmod(0o444)
+
+    def unexpected_inspection(**_kwargs):
+        raise AssertionError("reserve video was read before policy validation")
+
+    monkeypatch.setattr(
+        publisher_batch_cli_module,
+        "inspect_publisher_reserve_video",
+        unexpected_inspection,
+    )
+    policy_failed_output = root / "policy-failed-receipt.json"
+    policy_arguments = list(arguments)
+    policy_arguments[2] = str(changed_policy_path)
+    policy_arguments[-1] = str(policy_failed_output)
+    assert publisher_batch_cli_module.run_cli(policy_arguments) == 2
+    stdout, stderr = capsysbinary.readouterr()
+    assert stdout == b""
+    assert json.loads(stderr)["reason_code"] == "publisher_batch_failed"
+    assert not policy_failed_output.exists()
 
 
 def test_atomic_tree_is_read_only_complete_and_replays_into_availability(

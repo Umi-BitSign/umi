@@ -6,6 +6,42 @@ precedes pool anchoring. It is restricted to a policy whose
 a read-only chain client. The command has no transaction signer or
 weight-submission path.
 
+## First external disclosure and permanent quarantine
+
+Before sending a pool body, public manifest, ground-truth ciphertext, challenge
+video, or retrieval access to the first validator, mirror, public store, or other
+actor outside the publisher control group, append a signed record to the private
+publisher disclosure-quarantine ledger. Bind the record to:
+
+- window ID, batch ID, batch commitment, and reveal round;
+- first-disclosure time, recipient class, and disclosure-evidence digest;
+- all 14 video SHA-256 values and all 14 frame digests; and
+- all 16 normalized script hashes, covering the 14 actual scripts and both
+  reserved canary scripts.
+
+Set first-disclosure time to the instant the first external access authorization
+becomes valid. The disclosure-evidence digest binds the signed outbound
+authorization or transfer receipt. Prepare and record that evidence before
+delivering it or enabling the corresponding access, so a process failure cannot
+leave disclosed material outside the ledger.
+
+From that point, every recorded video, frame, and script hash is permanently
+ineligible for a later pool body. This rule applies when qualification is refused,
+receipts disagree, quorum is short, aggregation fails, mirror readiness fails, an
+anchor is late or rejected, or no anchor is attempted. Record the terminal outcome
+and retain the minimum evidence required by the consent, incident, and retention
+policies. Do not return the material to unspent inventory.
+
+This private ledger does not alter the canonical spent registry, candidate pool,
+score, or validator weight. Validators must derive those values only from the
+finalized evidence named by the protocol. A subquorum receipt can prove one
+disclosure but cannot prove that the publisher reported every failed attempt.
+Completeness remains a publisher assertion and residual trust assumption.
+
+A batch release that remains entirely inside the publisher control group has not
+crossed this boundary. It may return to inventory only after verified deletion of
+every window-bound artifact and access credential.
+
 The workflow has seven steps:
 
 1. Publishers prepare canonical pool bodies, public batch manifests, timelock

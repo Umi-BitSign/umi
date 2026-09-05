@@ -224,6 +224,67 @@ remains in the immutable private source record because version 0.1 has no public
 review-digest field. It is construction evidence, not a claim that the network
 verified reviewer identity, independence, or fluency.
 
+## Inspect non-delivered reserve videos
+
+A canary's reserved script and references may come from a fully reviewed source
+whose video is not one of the 14 delivered clips. Inspect each such reserve video
+with the same signed policy and release-pinned media tools used for the batch
+build. Start from the SHA-256 recorded for the exact prepared video, then run:
+
+```sh
+umi-publisher-batch inspect-reserve-video \
+  --policy /absolute/config/shadow-policy.json \
+  --video /absolute/umi-publisher/window-42/private-videos/reserve-opaque.mp4 \
+  --expected-video-sha256 64-lowercase-hex \
+  --ffmpeg /absolute/pinned/bin/ffmpeg \
+  --ffprobe /absolute/pinned/bin/ffprobe \
+  --output /absolute/umi-publisher/window-42/private-evidence/reserve-media-receipt.json
+```
+
+There is no `--check` mode and `--output` is mandatory. The command reads the
+owner-held mode-`0400` source once, rejects a mismatch with the expected digest
+before invoking a media tool, stages and verifies private copies of both
+policy-pinned executables, and applies the complete batch media profile including
+the integral-millisecond duration rule. It atomically writes a canonical
+mode-`0400` `umi-publisher-reserve-video-inspection/1` receipt containing:
+
+```json
+{
+  "schema": "umi-publisher-reserve-video-inspection/1",
+  "protocol": "umi-asl/0.1",
+  "status": "passed",
+  "scoring_policy_hash": "64-lowercase-hex",
+  "ffmpeg_binary_sha256": "64-lowercase-hex",
+  "ffprobe_binary_sha256": "64-lowercase-hex",
+  "frame_count": 60,
+  "media": {
+    "sha256": "64-lowercase-hex",
+    "frame_digest": "64-lowercase-hex",
+    "size_bytes": 123456,
+    "duration_ms": 5000,
+    "width": 1280,
+    "height": 720,
+    "frame_rate_numerator": 30,
+    "frame_rate_denominator": 1,
+    "media_type": "video/mp4",
+    "container": "mp4",
+    "video_codec": "h264",
+    "audio_track_count": 0,
+    "metadata_stripped": true
+  },
+  "state_mutated": false,
+  "translation_weights_active": false
+}
+```
+
+The receipt is private governance evidence because its hashes can identify
+unreleased reserve material. Standard output contains only the result schema,
+status, receipt SHA-256, and mutation/weight-state flags; it contains no video or
+frame digest and no input or output path. Bind the receipt hash and its private
+video and frame digests to the applicable window, batch, reveal round, and reserve
+script record in the publisher's governance ledger. A later file mutation requires
+a new receipt and cannot be reconciled by changing the expected digest silently.
+
 ## Inspect, seal, and publish the batch directory
 
 Run the full read-only check first. It inspects all clips with private copies of

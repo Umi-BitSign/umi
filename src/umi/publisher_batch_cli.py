@@ -23,6 +23,7 @@ from .publisher_batch import (
     PublisherBatchWindow,
     create_publisher_batch_identity,
     derive_publisher_batch_window,
+    inspect_publisher_reserve_video,
     load_publisher_batch_release,
     prepare_publisher_batch_from_paths,
     read_canonical_private_publisher_input,
@@ -73,6 +74,17 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--ffprobe", default="ffprobe")
     build.add_argument("--check", action="store_true")
 
+    reserve = commands.add_parser(
+        "inspect-reserve-video",
+        help="inspect one reserve clip with the policy-pinned media tools",
+    )
+    reserve.add_argument("--policy", type=Path, required=True)
+    reserve.add_argument("--video", type=Path, required=True)
+    reserve.add_argument("--expected-video-sha256", required=True)
+    reserve.add_argument("--ffmpeg", default="ffmpeg")
+    reserve.add_argument("--ffprobe", default="ffprobe")
+    reserve.add_argument("--output", type=Path, required=True)
+
     availability = commands.add_parser(
         "availability-config",
         help="replay one to three batch releases and create exact availability assembly input",
@@ -95,7 +107,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     try:
         policy = read_canonical_public_publisher_input(args.policy, ScoringPolicy)
         validate_rehearsal_runtime(policy)
-        if not args.check and args.output is None:
+        if args.command != "inspect-reserve-video" and not args.check and args.output is None:
             raise PublisherBatchError("publisher_batch_output_required")
         if args.command == "derive-window":
             return _derive_window(args, policy)
@@ -103,6 +115,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             return _initialize(args, policy)
         if args.command == "build":
             return _build(args, policy)
+        if args.command == "inspect-reserve-video":
+            return _inspect_reserve_video(args, policy)
         if args.command == "availability-config":
             return _availability_config(args, policy)
         raise RuntimeError("argument parser returned an unknown publisher command")
@@ -225,6 +239,29 @@ def _build(args: argparse.Namespace, policy: ScoringPolicy) -> int:
             "batch_commitment": prepared.release.batch_commitment,
             "release_sha256": hashlib.sha256(release_bytes).hexdigest(),
             "state_mutated": not args.check,
+            "translation_weights_active": False,
+        }
+    )
+    return 0
+
+
+def _inspect_reserve_video(args: argparse.Namespace, policy: ScoringPolicy) -> int:
+    inspection = inspect_publisher_reserve_video(
+        policy=policy,
+        video_path=args.video,
+        expected_video_sha256=args.expected_video_sha256,
+        ffmpeg=args.ffmpeg,
+        ffprobe=args.ffprobe,
+    )
+    encoded = canonical_json_bytes(inspection)
+    write_private_publisher_document(inspection, args.output)
+    _emit(
+        {
+            "schema": "umi-publisher-reserve-video-inspection-result/1",
+            "protocol": PROTOCOL_VERSION,
+            "status": "created",
+            "receipt_sha256": hashlib.sha256(encoded).hexdigest(),
+            "state_mutated": True,
             "translation_weights_active": False,
         }
     )

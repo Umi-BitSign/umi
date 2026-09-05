@@ -133,6 +133,13 @@ requires a new policy and restarts the soak.
   artifacts.
 - [ ] Run qualification and collect the unique quorum certificate using
   [PUBLISHER_AVAILABILITY_OPERATOR.md](PUBLISHER_AVAILABILITY_OPERATOR.md).
+- [ ] Before the first qualification transfer, append the publisher's signed
+  disclosure-quarantine record with the window, batch, commitment, reveal round,
+  disclosure evidence, all 14 video hashes, all 14 frame digests, and all 16
+  actual and reserved script hashes.
+- [ ] Reconcile the proposed inventory against the publisher's private
+  disclosure-quarantine ledger and reject every video, frame, or script hash hit,
+  while leaving the canonical validator spent root unchanged.
 - [ ] Put every certified object on the authenticated mirror origins and make the
   distinct miner-delivery origins ready using
   [MIRROR_SERVICE_OPERATOR.md](MIRROR_SERVICE_OPERATOR.md).
@@ -201,6 +208,13 @@ requires a new policy and restarts the soak.
 If any required check fails, publish the bounded incident, preserve the evidence,
 and keep new window intake paused until the documented recovery procedure succeeds.
 Do not replace missing evidence with a hand-edited status or fallback row.
+
+For a failed qualification, short quorum, failed aggregation, failed mirror
+readiness, late or rejected anchor, or abandoned anchor attempt, record the
+terminal outcome against the existing disclosure-quarantine record. Confirm that
+the material did not return to publisher inventory. Do not append the private
+record to canonical spent state or use it to change validator candidate selection,
+scores, or weights.
 
 ## 7. Public launch message
 

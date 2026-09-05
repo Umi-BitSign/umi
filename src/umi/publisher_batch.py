@@ -43,7 +43,7 @@ from .artifacts import (
 from .canary import wer_canary_stratum
 from .crypto import SealedResponse, parse_sealed_response, seal_response
 from .encoding import account_id32
-from .media import MediaInspectionResult, inspect_media_pinned
+from .media import MediaConformanceError, MediaInspectionResult, inspect_media_pinned
 from .policy import ScoringPolicy, scoring_policy_hash, validate_rehearsal_runtime
 from .pool import (
     POOL_MANIFEST_SCHEMA,
@@ -78,6 +78,7 @@ from .window import WindowClock, quicknet_round_at_ms
 PUBLISHER_BATCH_IDENTITY_SCHEMA = "umi-publisher-batch-identity/1"
 PUBLISHER_BATCH_SOURCE_SCHEMA = "umi-publisher-batch-source/1"
 PUBLISHER_BATCH_RELEASE_SCHEMA = "umi-publisher-batch-release/1"
+PUBLISHER_RESERVE_VIDEO_INSPECTION_SCHEMA = "umi-publisher-reserve-video-inspection/1"
 
 MAXIMUM_PUBLISHER_BATCH_INPUT_BYTES = 4 * 1024 * 1024
 MAXIMUM_PRIVATE_EVIDENCE_BYTES = 4 * 1024 * 1024
@@ -321,6 +322,21 @@ class PublisherBatchSource(StrictProtocolModel):
         return self
 
 
+class PublisherReserveVideoInspection(StrictProtocolModel):
+    """Private receipt for one policy-pinned reserve-video inspection."""
+
+    schema_: Literal[PUBLISHER_RESERVE_VIDEO_INSPECTION_SCHEMA] = Field(alias="schema")
+    protocol: Literal[PROTOCOL_VERSION]
+    status: Literal["passed"]
+    scoring_policy_hash: Hex32
+    ffmpeg_binary_sha256: Hex32
+    ffprobe_binary_sha256: Hex32
+    frame_count: Annotated[int, Field(gt=0)]
+    media: MediaCommitment
+    state_mutated: Literal[False]
+    translation_weights_active: Literal[False]
+
+
 class PublisherBatchReleaseObject(StrictProtocolModel):
     kind: Literal["pool_body", "public_manifest", "ground_truth_envelope", "video"]
     relative_path: Annotated[str, Field(min_length=1, max_length=4096)]
@@ -554,6 +570,7 @@ def prepare_publisher_batch(
             raise PublisherBatchError("publisher_video_bytes_invalid")
         _validate_video_source_digest(video, source_item.video_sha256)
         _validate_inspection(video, inspection, policy)
+        media = _media_commitment_from_inspection(inspection)
         if (
             inspection.video_sha256 in video_digests
             or inspection.frames.frame_digest in frame_digests
@@ -612,29 +629,12 @@ def prepare_publisher_batch(
                 consent_manifest_sha256=source_item.consent_manifest_sha256,
             )
         )
-        duration_ms = inspection.profile.duration * 1000
-        if duration_ms.denominator != 1:
-            raise PublisherBatchError("publisher_video_duration_not_integer_milliseconds")
         public_items.append(
             PublicBatchItem(
                 challenge_id=identity_item.challenge_id,
                 metric=metric,
                 stratum=stratum,
-                media=MediaCommitment(
-                    sha256=inspection.video_sha256,
-                    frame_digest=inspection.frames.frame_digest,
-                    size_bytes=inspection.profile.size_bytes,
-                    duration_ms=duration_ms.numerator,
-                    width=inspection.profile.width,
-                    height=inspection.profile.height,
-                    frame_rate_numerator=inspection.profile.frame_rate.numerator,
-                    frame_rate_denominator=inspection.profile.frame_rate.denominator,
-                    media_type="video/mp4",
-                    container="mp4",
-                    video_codec="h264",
-                    audio_track_count=0,
-                    metadata_stripped=True,
-                ),
+                media=media,
                 signer_id_sha256=source_item.signer_id_sha256,
                 consent_manifest_sha256=source_item.consent_manifest_sha256,
                 provenance_manifest_sha256=source_item.provenance_manifest_sha256,
@@ -774,6 +774,59 @@ def prepare_publisher_batch_from_paths(
             inspection_by_role=inspections,
             now_ms=now_ms,
         )
+
+
+def inspect_publisher_reserve_video(
+    *,
+    policy: ScoringPolicy,
+    video_path: str | Path,
+    expected_video_sha256: str,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+) -> PublisherReserveVideoInspection:
+    """Inspect one owner-held reserve clip with the policy-pinned media path."""
+
+    if not isinstance(policy, ScoringPolicy):
+        raise TypeError("reserve-video inspection requires a ScoringPolicy")
+    validate_rehearsal_runtime(policy)
+    if policy.translation_weights_active:
+        raise PublisherBatchError("publisher_builder_requires_inactive_policy")
+    _validate_expected_video_sha256(expected_video_sha256)
+    payload = _read_private_regular_file(
+        Path(video_path),
+        maximum_bytes=policy.limits.maximum_clip_size_bytes,
+        label="publisher_reserve_video",
+    )
+    _validate_video_source_digest(payload, expected_video_sha256)
+    with tempfile.TemporaryDirectory(prefix="umi-publisher-reserve-video-") as temporary:
+        snapshot = Path(temporary) / "reserve.mp4"
+        snapshot.write_bytes(payload)
+        snapshot.chmod(0o400)
+        try:
+            inspection = inspect_media_pinned(
+                snapshot,
+                expected_ffmpeg_sha256=policy.implementation_pins.media.ffmpeg_binary_sha256,
+                expected_ffprobe_sha256=policy.implementation_pins.media.ffprobe_binary_sha256,
+                ffmpeg=ffmpeg,
+                ffprobe=ffprobe,
+                maximum_clip_size=policy.limits.maximum_clip_size_bytes,
+            )
+        except MediaConformanceError as error:
+            raise PublisherBatchError("publisher_reserve_media_inspection_failed") from error
+        _validate_inspection(payload, inspection, policy)
+        media = _media_commitment_from_inspection(inspection)
+    return PublisherReserveVideoInspection(
+        schema=PUBLISHER_RESERVE_VIDEO_INSPECTION_SCHEMA,
+        protocol=PROTOCOL_VERSION,
+        status="passed",
+        scoring_policy_hash=scoring_policy_hash(policy),
+        ffmpeg_binary_sha256=policy.implementation_pins.media.ffmpeg_binary_sha256,
+        ffprobe_binary_sha256=policy.implementation_pins.media.ffprobe_binary_sha256,
+        frame_count=inspection.frames.frame_count,
+        media=media,
+        state_mutated=False,
+        translation_weights_active=False,
+    )
 
 
 def write_publisher_batch(prepared: PublisherBatchPrepared, output: str | Path) -> Path:
@@ -1230,6 +1283,36 @@ def _validate_inspection(
         raise PublisherBatchError("publisher_media_inspection_mismatch")
 
 
+def _media_commitment_from_inspection(inspection: MediaInspectionResult) -> MediaCommitment:
+    duration_ms = inspection.profile.duration * 1000
+    if duration_ms.denominator != 1:
+        raise PublisherBatchError("publisher_video_duration_not_integer_milliseconds")
+    return MediaCommitment(
+        sha256=inspection.video_sha256,
+        frame_digest=inspection.frames.frame_digest,
+        size_bytes=inspection.profile.size_bytes,
+        duration_ms=duration_ms.numerator,
+        width=inspection.profile.width,
+        height=inspection.profile.height,
+        frame_rate_numerator=inspection.profile.frame_rate.numerator,
+        frame_rate_denominator=inspection.profile.frame_rate.denominator,
+        media_type="video/mp4",
+        container="mp4",
+        video_codec="h264",
+        audio_track_count=0,
+        metadata_stripped=True,
+    )
+
+
+def _validate_expected_video_sha256(value: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise PublisherBatchError("publisher_reserve_expected_video_sha256_invalid")
+
+
 def _validate_video_source_digest(video: bytes, expected: str) -> None:
     if not hmac.compare_digest(hashlib.sha256(video).hexdigest(), expected):
         raise PublisherBatchError("publisher_video_digest_mismatch")
@@ -1579,6 +1662,7 @@ __all__ = [
     "PUBLISHER_BATCH_RELEASE_SCHEMA",
     "PUBLISHER_BATCH_ROLES",
     "PUBLISHER_BATCH_SOURCE_SCHEMA",
+    "PUBLISHER_RESERVE_VIDEO_INSPECTION_SCHEMA",
     "LoadedPublisherBatchRelease",
     "PublisherBatchError",
     "PublisherBatchIdentity",
@@ -1589,8 +1673,10 @@ __all__ = [
     "PublisherBatchSource",
     "PublisherBatchSourceItem",
     "PublisherBatchWindow",
+    "PublisherReserveVideoInspection",
     "create_publisher_batch_identity",
     "derive_publisher_batch_window",
+    "inspect_publisher_reserve_video",
     "load_publisher_batch_release",
     "normalized_script_sha256",
     "prepare_publisher_batch",

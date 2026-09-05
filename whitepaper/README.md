@@ -439,6 +439,10 @@ Version 0.1 makes these trust assumptions explicit:
   validator registry equivocates.
 - Publisher control groups depend on disclosed off-chain relationships; the chain
   cannot detect undisclosed common control.
+- Validators cannot observe every failed availability attempt. A publisher can
+  conceal that it disclosed an uncertified batch and later reuse the material;
+  the publisher-local quarantine below makes reuse non-conforming but cannot make
+  the disclosure history complete or trustless.
 - Timelock availability depends on the pinned drand Quicknet and artifact mirrors.
 - The current owned finality client verifies GRANDPA internally but emits a
   hash-pinned verifier attestation rather than portable GRANDPA proof bytes. It
@@ -1278,10 +1282,28 @@ certificate-breach alert.
 
 A breached certificate never salvages or shrinks the current window. The signed
 promise, requested hashes, and retrieval records enter the incident bundle. The
-next scheduled window runs a fresh qualification, so the failed pool is absent
-unless a new quorum certifies it. Removing a publisher or availability signer from
-the active registry still requires a new policy hash and cannot change the failed
-window.
+next scheduled window runs a fresh qualification. Material from the failed pool
+that crossed the external-disclosure boundary below is ineligible for that or any
+later proposal, even if no quorum formed or no pool anchor finalized. Removing a
+publisher or availability signer from the active registry still requires a new
+policy hash and cannot change the failed window.
+
+The first time a publisher gives any window-bound pool body, public manifest,
+ground-truth ciphertext, challenge video, or retrieval access to a validator,
+mirror, public store, or any other actor outside its control group, it MUST append
+one permanent record to its private disclosure-quarantine ledger. The record MUST
+bind the window ID, batch ID, batch commitment, reveal round, first-disclosure
+time, recipient class, disclosure-evidence digest, all 14 video SHA-256 values,
+all 14 frame digests, and all 16 normalized script hashes: 14 actual scripts and
+the two reserved canary scripts. `first-disclosure time` is the instant the first
+external access authorization becomes valid; `disclosure-evidence digest` binds
+the signed authorization or transfer receipt prepared for that boundary. The
+publisher MUST exclude every recorded video, frame, and script hash from all later
+pool bodies, whether qualification succeeds, a quorum forms, certification
+completes, or anchoring succeeds. A release built and
+retained entirely inside the publisher control group does not cross this boundary;
+it MAY be reused only after verified deletion of every window-bound artifact and
+access credential.
 
 The envelope reveal round MUST equal the window-derived value in Section 8.1. A
 candidate batch belongs to that window only. When its reveal round arrives, an
@@ -1585,6 +1607,16 @@ A batch commitment MUST occur in exactly one certified pool body and one window.
 A duplicate across certified pools makes the window void. The next window cannot
 open before all candidates in the preceding window reach `spent`, so pending
 content cannot re-enter a later candidate pool.
+
+The disclosure-quarantine ledger is publisher-local operational state, not a
+fifth canonical batch state and not an input to the spent root, candidate pool,
+score, or validator weight. A validator MUST NOT remove a candidate or change a
+result from a private quarantine record or a locally observed failed attempt.
+Subquorum recipients may retain signed disclosure evidence, but their observations
+need not be complete or identical. Auditors can prove a disclosed attempt when
+shown its evidence; they cannot prove that the publisher disclosed every failed
+attempt. The publisher's private operating evidence MUST record quarantined
+inventory, including attempts that never became `anchored-eligible`.
 
 The spent registry is derived state. No publisher, validator, API, or database is
 authorized to append to it directly. For each reveal round, take every unique batch
@@ -2358,7 +2390,7 @@ resolved.
 | Threat | Required control |
 |---|---|
 | Label leakage | Opaque IDs, scrubbed metadata, silent video, label-free URLs |
-| Challenge lookup | Fresh human clips and single-use script-group retirement |
+| Challenge lookup | Fresh human clips, canonical single-use retirement, and permanent publisher-local quarantine after first external disclosure; failed-attempt completeness remains a publisher-trust assumption |
 | Replay or substitution | Video digest, frame digest, derived spent registry, block-bound signatures |
 | Publisher and miner collusion | Control-group caps and mixed-group windows; canaries, shadow alerts, public audit; declared residual risk |
 | Publisher reveal sabotage | Objective fault leaves, cooldown after one strike, version-level exclusion after two |
@@ -2840,6 +2872,10 @@ A conforming publisher:
 - anchors one canonical pool-manifest hash for the selection window;
 - declares its complete publisher control group under the active policy;
 - exposes the artifacts from which every revealed script group retires;
+- records all 14 video hashes, all 14 frame digests, and all 16 actual and reserved
+  script hashes at first external disclosure, permanently excludes them from later
+  proposals, and reports quarantined failed attempts without treating its private
+  ledger as canonical validator state;
 - includes the declared canary fraction in every batch;
 - proposes at most one launch batch per window and signs the independent capacity
   statement required for UMI weight activation;
