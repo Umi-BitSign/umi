@@ -75,15 +75,19 @@ def test_local_observer_probe_uses_the_configured_trusted_host() -> None:
     assert "http://127.0.0.1:8092/healthz" in runbook
 
 
-def test_runbook_preserves_owner_activity_cutoff_preview_boundary() -> None:
+def test_runbook_delegates_owner_activity_cutoff_to_verified_handoff() -> None:
     runbook = (ROOT / "README.md").read_text()
+    handoff = (ROOT / "owner-cutoff" / "README.md").read_text()
 
-    assert "--name activity_cutoff_factor --value 1000 --dry-run" in runbook
-    assert "Only the owner may remove `--dry-run`" in runbook
-    assert "`activity_cutoff` itself is derived and read-only" in runbook
-    assert "neither pinned to\na finalized block nor backed by a storage proof" in runbook
-    assert "does not expose a generic proof-read command" in runbook
-    assert "Final protocol confirmation comes from the first live weight-build" in runbook
+    assert "[`owner-cutoff/README.md`](owner-cutoff/README.md)" in runbook
+    assert "btcli sudo set --network" not in runbook
+    assert '"$BTCLI" tx set-hyperparameter' in handoff
+    assert "--name activity_cutoff_factor" in handoff
+    assert "--value 1000" in handoff
+    assert "--dry-run" in handoff
+    assert "deliberately omits `--yes`" in handoff
+    assert "Do not substitute a\nbest-head read" in handoff
+    assert "first live UMI weight-build snapshot" in handoff
 
 
 def test_runbook_preserves_owner_only_validator_bundle_modes() -> None:
