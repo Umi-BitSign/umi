@@ -222,6 +222,7 @@ class PublisherBatchSourceItem(StrictProtocolModel):
 
     role: PublisherBatchRole
     video_path: Annotated[str, Field(min_length=1, max_length=4096)]
+    video_sha256: Hex32
     signer_id_sha256: Hex32
     consent_manifest_sha256: Hex32
     consent_manifest_path: Annotated[str, Field(min_length=1, max_length=4096)]
@@ -551,6 +552,7 @@ def prepare_publisher_batch(
         inspection = inspection_by_role[role]
         if not isinstance(video, bytes) or not video:
             raise PublisherBatchError("publisher_video_bytes_invalid")
+        _validate_video_source_digest(video, source_item.video_sha256)
         _validate_inspection(video, inspection, policy)
         if (
             inspection.video_sha256 in video_digests
@@ -750,6 +752,7 @@ def prepare_publisher_batch_from_paths(
                 maximum_bytes=policy.limits.maximum_clip_size_bytes,
                 label="publisher_video",
             )
+            _validate_video_source_digest(payload, item.video_sha256)
             snapshot = root / f"{index:02d}.mp4"
             snapshot.write_bytes(payload)
             snapshot.chmod(0o400)
@@ -1225,6 +1228,11 @@ def _validate_inspection(
         or not frames.executables_content_pinned
     ):
         raise PublisherBatchError("publisher_media_inspection_mismatch")
+
+
+def _validate_video_source_digest(video: bytes, expected: str) -> None:
+    if not hmac.compare_digest(hashlib.sha256(video).hexdigest(), expected):
+        raise PublisherBatchError("publisher_video_digest_mismatch")
 
 
 def _release_index(

@@ -119,6 +119,7 @@ def _source(
         row = {
             "role": role,
             "video_path": str(video),
+            "video_sha256": hashlib.sha256(payload).hexdigest(),
             "signer_id_sha256": f"{index // 2 + 1:064x}",
             **common,
             "script": f"private script {index}",
@@ -605,6 +606,74 @@ def test_source_evidence_digests_and_exact_millisecond_duration_are_checked(
             inspection_by_role=inspections,
             now_ms=window.announcement_timestamp_ms,
         )
+
+
+def test_path_builder_rejects_video_mutation_before_media_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = make_policy()
+    window = _window(policy)
+    identity = _identity(policy, window)
+    source, _videos = _source(tmp_path, identity)
+    video_path = Path(source.items[0].video_path)
+    video_path.chmod(0o600)
+    video_path.write_bytes(b"mutated-after-source-record")
+    video_path.chmod(0o400)
+    inspection_calls = 0
+
+    def inspect(*_args, **_kwargs):
+        nonlocal inspection_calls
+        inspection_calls += 1
+        raise AssertionError("media inspection ran before the source digest check")
+
+    monkeypatch.setattr(publisher_batch_module, "inspect_media_pinned", inspect)
+    with pytest.raises(PublisherBatchError, match="publisher_video_digest_mismatch"):
+        prepare_publisher_batch_from_paths(
+            policy=policy,
+            identity=identity,
+            source=source,
+            now_ms=window.announcement_timestamp_ms,
+        )
+    assert inspection_calls == 0
+
+
+def test_builder_rejects_supplied_video_digest_mismatch_before_inspection_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = make_policy()
+    window = _window(policy)
+    identity = _identity(policy, window)
+    source, videos = _source(tmp_path, identity)
+    changed_videos = dict(videos)
+    changed_videos[PUBLISHER_BATCH_ROLES[0]] = b"different-supplied-video-bytes"
+    inspections = {
+        role: _inspection(policy, payload, index)
+        for index, (role, payload) in enumerate(videos.items())
+    }
+    inspection_validation_calls = 0
+
+    def validate_inspection(*_args, **_kwargs):
+        nonlocal inspection_validation_calls
+        inspection_validation_calls += 1
+        raise AssertionError("inspection validation ran before the source digest check")
+
+    monkeypatch.setattr(
+        publisher_batch_module,
+        "_validate_inspection",
+        validate_inspection,
+    )
+    with pytest.raises(PublisherBatchError, match="publisher_video_digest_mismatch"):
+        prepare_publisher_batch(
+            policy=policy,
+            identity=identity,
+            source=source,
+            video_bytes_by_role=changed_videos,
+            inspection_by_role=inspections,
+            now_ms=window.announcement_timestamp_ms,
+        )
+    assert inspection_validation_calls == 0
 
 
 def test_path_builder_snapshots_all_clips_and_uses_both_policy_pins(

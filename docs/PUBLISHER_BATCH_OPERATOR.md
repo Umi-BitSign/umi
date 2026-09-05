@@ -149,6 +149,7 @@ An ordinary item has this shape:
 {
   "role": "ordinary_short_utterance_1",
   "video_path": "/absolute/umi-publisher/window-42/private-videos/04.mp4",
+  "video_sha256": "sha256-of-exact-video-bytes",
   "signer_id_sha256": "64-lowercase-hex",
   "consent_manifest_sha256": "64-lowercase-hex",
   "consent_manifest_path": "/absolute/umi-publisher/window-42/private-evidence/consent-04.json",
@@ -170,6 +171,7 @@ A canary sets `references` to `null` and supplies all three canary fields:
 {
   "role": "canary_cer",
   "video_path": "/absolute/umi-publisher/window-42/private-videos/12.mp4",
+  "video_sha256": "sha256-of-exact-video-bytes",
   "signer_id_sha256": "64-lowercase-hex",
   "consent_manifest_sha256": "64-lowercase-hex",
   "consent_manifest_path": "/absolute/umi-publisher/window-42/private-evidence/consent-12.json",
@@ -212,13 +214,15 @@ The top-level source object is:
 ```
 
 Put the 14 rows in `items`, encode the object with RFC 8785, and set the file to
-mode `0400`. Evidence manifests remain opaque to the builder. Their content must
-be maintained under the data policy; the builder only proves that the declared
-digest matched an exact local file at construction time. Consent and provenance
-digests enter the protocol manifest. The review digest remains in the immutable
-private source record because version 0.1 has no public review-digest field. It is
-construction evidence, not a claim that the network verified reviewer identity,
-independence, or fluency.
+mode `0400`. Each `video_sha256` must bind the exact clip bytes at the time the
+source record is created. The builder checks that digest before media inspection
+and rejects a clip changed afterward. Evidence manifests remain opaque to the
+builder. Their content must be maintained under the data policy; the builder only
+proves that the declared digest matched an exact local file at construction time.
+Consent and provenance digests enter the protocol manifest. The review digest
+remains in the immutable private source record because version 0.1 has no public
+review-digest field. It is construction evidence, not a claim that the network
+verified reviewer identity, independence, or fluency.
 
 ## Inspect, seal, and publish the batch directory
 
