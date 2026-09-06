@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
@@ -20,6 +21,10 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from .encoding import account_id32
+from .grandpa_finality import FINNEY_GENESIS_HASH
+from .public_pilot_campaign import CAMPAIGN_ID
+
 OBSERVER_API_VERSION = "v1"
 OBSERVER_SNAPSHOT_SCHEMA = "umi-observer-snapshot/1"
 STATUS_RESPONSE_SCHEMA = "umi-observer-status/1"
@@ -29,9 +34,9 @@ LEADERBOARD_RESPONSE_SCHEMA = "umi-observer-leaderboard/1"
 WINDOWS_RESPONSE_SCHEMA = "umi-observer-windows/1"
 WINDOW_RESPONSE_SCHEMA = "umi-observer-window/1"
 WINDOW_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-window-solutions/1"
-PILOTS_RESPONSE_SCHEMA = "umi-observer-pilots/1"
-PILOT_RESPONSE_SCHEMA = "umi-observer-pilot/1"
-PILOT_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-pilot-solutions/1"
+PILOTS_RESPONSE_SCHEMA = "umi-observer-pilots/2"
+PILOT_RESPONSE_SCHEMA = "umi-observer-pilot/2"
+PILOT_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-pilot-solutions/2"
 ACTIVATION_GATES_RESPONSE_SCHEMA = "umi-observer-activation-gates/1"
 BENCHMARKS_RESPONSE_SCHEMA = "umi-observer-benchmarks/1"
 INCIDENTS_RESPONSE_SCHEMA = "umi-observer-incidents/1"
@@ -1076,13 +1081,122 @@ class PilotBundleLocator(ObserverModel):
         expected = f"{prefix}/api/v1/pilots/{self.manifest_sha256}/bundle/manifest.json"
         if self.manifest_url != expected:
             raise ValueError("pilot manifest URL does not match its bundle hash")
-        if self.replay_command != "umi-validator replay --bundle ./bundle":
+        if self.replay_command not in {
+            "umi-validator replay --bundle ./bundle",
+            "umi-public-pilot replay --bundle ./bundle",
+        }:
             raise ValueError("pilot replay command is not canonical")
         return self
 
 
+class PublicEndpointPilotChainEvidence(ObserverModel):
+    """Finalized SDK observation, explicitly without portable storage proofs."""
+
+    observation_class: Literal["sdk_finalized_block_without_storage_proofs"]
+    network: Literal["finney"]
+    genesis_block_hash: BlockHash
+    netuid: Literal[SN78_NETUID] = SN78_NETUID
+    mechanism_id: Literal[UMI_MECHANISM_ID] = UMI_MECHANISM_ID
+    block_number: UnsignedIntegerText
+    block_hash: BlockHash
+    block_timestamp_unix_ms: UnsignedIntegerText
+    storage_proofs_verified: Literal[False]
+    expected_miner_uid: NonNegativeInt
+    miner_hotkey: NonEmptyText
+    validator_permit: Literal[False]
+
+    @field_validator("genesis_block_hash")
+    @classmethod
+    def validate_finney_genesis(cls, value: str) -> str:
+        if value != "0x" + FINNEY_GENESIS_HASH:
+            raise ValueError("public pilot chain evidence is not bound to Finney genesis")
+        return value
+
+
+class PublicEndpointPilotTransportEvidence(ObserverModel):
+    """Coordinator-signed facts about the one remote pilot request."""
+
+    announced_origin: Annotated[str, Field(min_length=1, max_length=8_192)]
+    contacted_origin: Annotated[str, Field(min_length=1, max_length=8_192)]
+    coordinator_attested_origin_match: Literal[True]
+    request_digest: Hex32
+    known_public_challenge: Literal[True]
+    public_miner_transport_used: Literal[True]
+    attempt_count: Literal[1]
+    outcome_classification: Literal["ok", "signed_error", "failed"]
+    failure_code: NonEmptyText | None
+    miner_signed_envelope_verified: bool
+    miner_signed_plaintext_verified: bool
+    response_receipt_time_is_coordinator_assertion: Literal[True]
+    attempt_completeness_is_coordinator_assertion: Literal[True]
+
+    @field_validator("announced_origin", "contacted_origin")
+    @classmethod
+    def validate_origin(cls, value: str) -> str:
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            raise ValueError("public pilot origin contains a control character")
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+            address = ipaddress.ip_address(parsed.hostname or "")
+        except ValueError as error:
+            raise ValueError("public pilot origin is invalid") from error
+        normalized_host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+        if (
+            parsed.scheme != "https"
+            or not address.is_global
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or port is None
+            or not 1 <= port <= 65_535
+            or value != f"https://{normalized_host}:{port}"
+        ):
+            raise ValueError(
+                "public pilot origin must be a normalized HTTPS global IP with explicit port"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_transport(self) -> Self:
+        if self.announced_origin != self.contacted_origin:
+            raise ValueError("public pilot origins must match")
+        if self.miner_signed_plaintext_verified and not self.miner_signed_envelope_verified:
+            raise ValueError("verified public pilot plaintext requires a verified envelope")
+        if self.outcome_classification == "ok":
+            if (
+                self.failure_code is not None
+                or not self.miner_signed_envelope_verified
+                or not self.miner_signed_plaintext_verified
+            ):
+                raise ValueError("an ok public pilot requires one verified response")
+        elif self.outcome_classification == "signed_error":
+            if (
+                self.failure_code is None
+                or not self.miner_signed_envelope_verified
+                or not self.miner_signed_plaintext_verified
+            ):
+                raise ValueError("a signed-error public pilot requires verified evidence")
+        elif self.failure_code is None:
+            raise ValueError("a failed public pilot requires a failure code")
+        return self
+
+
+class PublicEndpointPilotEvidence(ObserverModel):
+    campaign_id: Literal[CAMPAIGN_ID]
+    coordinator_hotkey: NonEmptyText
+    coordinator_signature_verified: Literal[True]
+    chain: PublicEndpointPilotChainEvidence
+    transport: PublicEndpointPilotTransportEvidence
+    attestation: EvidenceObjectLink
+    signature: EvidenceObjectLink
+
+
 class ComponentPilotRecord(ObserverModel):
     pilot_id: Hex32
+    pilot_profile: Literal["local_in_process", "public_endpoint"]
     evidence_class: Literal["component_test_no_weight"]
     terminal_code: Literal["component_test_no_weight"]
     translation_weights_active: Literal[False]
@@ -1098,6 +1212,7 @@ class ComponentPilotRecord(ObserverModel):
     miner_hotkey: NonEmptyText
     missing_canonical_stages: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
     evidence: PilotBundleLocator
+    public_endpoint_evidence: PublicEndpointPilotEvidence | None
 
     @model_validator(mode="after")
     def validate_pilot(self) -> Self:
@@ -1107,6 +1222,34 @@ class ComponentPilotRecord(ObserverModel):
             raise ValueError("missing pilot stages must be unique and ordered")
         if self.evidence.manifest_sha256 != self.bundle_manifest_sha256:
             raise ValueError("pilot locator does not bind its manifest hash")
+        expected_replay = (
+            "umi-validator replay --bundle ./bundle"
+            if self.pilot_profile == "local_in_process"
+            else "umi-public-pilot replay --bundle ./bundle"
+        )
+        if self.evidence.replay_command != expected_replay:
+            raise ValueError("pilot replay command does not match its profile")
+        if self.pilot_profile == "local_in_process":
+            if self.public_endpoint_evidence is not None:
+                raise ValueError("a local pilot cannot carry public endpoint evidence")
+        elif self.public_endpoint_evidence is None:
+            raise ValueError("a public endpoint pilot requires signed endpoint evidence")
+        else:
+            public_evidence = self.public_endpoint_evidence
+            if account_id32(public_evidence.chain.miner_hotkey) != account_id32(self.miner_hotkey):
+                raise ValueError("public endpoint chain evidence names another miner")
+            if account_id32(public_evidence.coordinator_hotkey) != account_id32(
+                self.validator_hotkey
+            ):
+                raise ValueError("public endpoint evidence names another coordinator")
+            object_prefix = (
+                f"{self.evidence.public_origin}/api/v1/pilots/{self.pilot_id}/bundle/objects/"
+            )
+            for reference in (public_evidence.attestation, public_evidence.signature):
+                if reference.media_type != "application/json":
+                    raise ValueError("public endpoint evidence objects must be canonical JSON")
+                if reference.url != object_prefix + reference.sha256:
+                    raise ValueError("public endpoint evidence URL does not match its bundle")
         return self
 
 

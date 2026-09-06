@@ -1,0 +1,68 @@
+{
+	admin off
+	auto_https off
+	servers {
+		protocols h1 h2
+		max_header_size 16KiB
+		timeouts {
+			read_header 10s
+			read_body 30s
+			write 300s
+			idle 30s
+		}
+	}
+}
+
+# Required process environment:
+# PILOT_PUBLIC_ORIGIN=https://203.0.113.10:443
+# PILOT_TLS_CERTIFICATE=/etc/letsencrypt/live/203.0.113.10/fullchain.pem
+# PILOT_TLS_PRIVATE_KEY=/etc/letsencrypt/live/203.0.113.10/privkey.pem
+{$PILOT_PUBLIC_ORIGIN} {
+	tls {$PILOT_TLS_CERTIFICATE} {$PILOT_TLS_PRIVATE_KEY}
+
+	header {
+		Cache-Control "no-store, no-transform"
+		Content-Encoding identity
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		-Server
+	}
+
+	@health {
+		method GET HEAD
+		path /healthz
+	}
+	@translate {
+		method POST
+		path /v1/translate
+	}
+
+	handle @health {
+		reverse_proxy 127.0.0.1:8091 {
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 10s
+				max_response_header 16KiB
+				compression off
+			}
+		}
+	}
+
+	handle @translate {
+		request_body {
+			max_size 64KiB
+		}
+		reverse_proxy 127.0.0.1:8091 {
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 240s
+				max_response_header 16KiB
+				compression off
+			}
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}

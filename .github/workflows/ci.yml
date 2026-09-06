@@ -99,6 +99,8 @@ jobs:
           .venv/bin/umi-publisher-batch --help
           .venv/bin/umi-publisher-availability --help
           .venv/bin/umi-publisher-pool-anchor --help
+          .venv/bin/umi-public-pilot --help
+          .venv/bin/umi-public-pilot-miner --help
           .venv/bin/umi-protocol --help
           .venv/bin/umi-shadow-release --help
           .venv/bin/umi-shadow-release-finalize --help
@@ -226,6 +228,8 @@ jobs:
             tests/test_shadow_release.py::test_signed_release_can_add_a_native_darwin_miner_finality_target
           .venv/bin/umi-miner --help
           .venv/bin/umi-miner-finality-artifact --help
+          .venv/bin/umi-public-pilot --help
+          .venv/bin/umi-public-pilot-miner --help
           .venv/bin/umi-shadow-release-resolve-miner --help
 
   executable-conformance:

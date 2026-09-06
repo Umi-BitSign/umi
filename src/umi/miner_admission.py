@@ -8,6 +8,7 @@ chain history before caller-controlled identifiers reach durable resource state.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -16,7 +17,7 @@ from .policy import (
     require_live_chain_observation,
     scoring_policy_hash,
 )
-from .protocol import TranslationRequest
+from .protocol import TranslationRequest, canonical_json_bytes, request_digest
 from .validator_plans import VerifiedFinalizedAnnouncementPort, VerifiedFinalizedBlock
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, WindowClock
 
@@ -177,6 +178,59 @@ class ProofBackedMinerWindowAuthority:
             raise MinerAdmissionError("finality_verifier_mismatch")
 
 
+class ExactComponentWindowAuthority:
+    """Admit only the exact requests loaded from one prepared component case.
+
+    This authority is suitable for a deliberately nonconforming public component
+    pilot.  It has no chain view, so it must never infer or broaden the request
+    set supplied by the operator.  Authentication retries remain possible because
+    admission is idempotent; replay protection and retry ceilings are enforced by
+    the miner's durable authentication and resource ledgers.
+    """
+
+    def __init__(
+        self,
+        requests: Sequence[TranslationRequest],
+        *,
+        window_index: int = 0,
+    ) -> None:
+        if isinstance(window_index, bool) or not isinstance(window_index, int):
+            raise TypeError("component window index must be an integer")
+        if window_index < 0:
+            raise ValueError("component window index must not be negative")
+        if isinstance(requests, (str, bytes, bytearray)) or not isinstance(requests, Sequence):
+            raise TypeError("component requests must be a sequence")
+        if not requests:
+            raise ValueError("component request set must not be empty")
+
+        exact_requests: dict[str, bytes] = {}
+        for request in requests:
+            if not isinstance(request, TranslationRequest):
+                raise TypeError("component request set contains another type")
+            digest = request_digest(request)
+            encoded = canonical_json_bytes(request)
+            if digest in exact_requests:
+                raise ValueError("component request set contains a duplicate request")
+            exact_requests[digest] = encoded
+
+        self._window_index = window_index
+        self._exact_requests = exact_requests
+
+    async def authorize(self, request: TranslationRequest) -> MinerWindowAdmission:
+        if not isinstance(request, TranslationRequest):
+            raise TypeError("request must be a TranslationRequest")
+        expected = self._exact_requests.get(request_digest(request))
+        if expected is None or canonical_json_bytes(request) != expected:
+            raise MinerAdmissionError("component_request_not_authorized")
+        return MinerWindowAdmission(
+            window_index=self._window_index,
+            window_id=request.window_id,
+            response_close_round=request.response_close_round,
+            reveal_round=request.reveal_round,
+            observed_finalized_height=request.issued_block,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class LocalComponentWindowAuthority:
     """Explicitly non-conforming authority for isolated component fixtures only."""
@@ -196,6 +250,7 @@ class LocalComponentWindowAuthority:
 
 
 __all__ = [
+    "ExactComponentWindowAuthority",
     "LocalComponentWindowAuthority",
     "MinerAdmissionError",
     "MinerWindowAdmission",

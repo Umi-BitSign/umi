@@ -28,11 +28,15 @@ from .component import BUNDLE_SCHEMA, MAX_COMPONENT_REQUESTS, NOT_REACHED
 from .component_pilot import validate_public_pilot_video_url
 from .encoding import account_id32
 from .protocol import PROTOCOL_VERSION, StrictProtocolModel, canonical_json_bytes
+from .public_pilot_evidence import (
+    VerifiedPublicEndpointPilot,
+    verify_public_endpoint_pilot_attachment,
+)
 from .validator import replay_bundle_detailed
 
 PILOT_FEED_CONFIG_SCHEMA = "umi-observer-pilot-feed-config/1"
 PILOT_EVIDENCE_CLASS = "component_test_no_weight"
-MAX_PILOTS = 8
+MAX_PILOTS = 256
 MAX_PILOT_CONFIG_BYTES = 64 * 1024
 MAX_PILOT_FEED_BYTES = 128 * 1024 * 1024
 
@@ -147,6 +151,7 @@ class VerifiedComponentPilot:
     miner_hotkey: str
     missing_stages: tuple[str, ...]
     solutions: tuple[VerifiedPilotSolution, ...]
+    public_endpoint: VerifiedPublicEndpointPilot | None
 
     @property
     def manifest_sha256(self) -> str:
@@ -275,7 +280,11 @@ def _strict_ref(value: Any) -> ObjectRef:
 
 
 def _bundle_refs(manifest: dict[str, Any]) -> tuple[ObjectRef, ...]:
-    if set(manifest) != _MANIFEST_FIELDS:
+    manifest_fields = set(manifest)
+    if manifest_fields not in (
+        _MANIFEST_FIELDS,
+        _MANIFEST_FIELDS | {"public_endpoint_pilot"},
+    ):
         raise ValueError("pilot bundle manifest has an invalid schema")
     outcomes = manifest.get("outcomes")
     if not isinstance(outcomes, list) or not 1 <= len(outcomes) <= MAX_COMPONENT_REQUESTS:
@@ -285,6 +294,19 @@ def _bundle_refs(manifest: dict[str, Any]) -> tuple[ObjectRef, ...]:
         _strict_ref(manifest["ground_truth_plaintext"]),
         _strict_ref(manifest["scoring"]),
     ]
+    raw_public_endpoint = manifest.get("public_endpoint_pilot")
+    if raw_public_endpoint is not None:
+        if not isinstance(raw_public_endpoint, dict) or set(raw_public_endpoint) != {
+            "attestation",
+            "signature",
+        }:
+            raise ValueError("public endpoint pilot attachment has an invalid schema")
+        refs.extend(
+            (
+                _strict_ref(raw_public_endpoint["attestation"]),
+                _strict_ref(raw_public_endpoint["signature"]),
+            )
+        )
     for outcome in outcomes:
         if not isinstance(outcome, dict) or set(outcome) != _OUTCOME_FIELDS:
             raise ValueError("pilot bundle outcome has an invalid schema")
@@ -337,6 +359,7 @@ def _load_pilot(root: Path, public_origin: str) -> VerifiedComponentPilot:
     replay = replay_bundle_detailed(root)
     if replay.manifest != manifest:
         raise ValueError("pilot replay did not bind the loaded manifest")
+    public_endpoint = verify_public_endpoint_pilot_attachment(store, manifest, replay)
     if account_id32(replay.validator_hotkey) == account_id32(replay.miner_hotkey):
         raise ValueError("pilot validator and miner hotkeys must be distinct")
     for outcome in replay.outcomes:
@@ -453,6 +476,7 @@ def _load_pilot(root: Path, public_origin: str) -> VerifiedComponentPilot:
         miner_hotkey=replay.miner_hotkey,
         missing_stages=NOT_REACHED,
         solutions=tuple(solutions),
+        public_endpoint=public_endpoint,
     )
 
 
@@ -468,6 +492,19 @@ def build_observer_pilot_feed(config_path: str | Path) -> ObserverPilotFeed:
     )
     if len({pilot.pilot_id for pilot in pilots}) != len(pilots):
         raise ValueError("pilot feed contains the same bundle more than once")
+    campaign_miners: set[tuple[str, str]] = set()
+    for pilot in pilots:
+        if pilot.public_endpoint is None:
+            continue
+        key = (
+            pilot.public_endpoint.attestation.campaign_id,
+            account_id32(pilot.public_endpoint.attestation.miner_hotkey).hex(),
+        )
+        if key in campaign_miners:
+            raise ValueError(
+                "pilot feed contains more than one public endpoint pilot for a miner and campaign"
+            )
+        campaign_miners.add(key)
     if sum(pilot.bundle_bytes for pilot in pilots) > MAX_PILOT_FEED_BYTES:
         raise ValueError("pilot feed exceeds its aggregate byte ceiling")
     return ObserverPilotFeed(pilots=pilots)

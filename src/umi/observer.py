@@ -74,6 +74,9 @@ from .observer_models import (
     PilotSolutionsResponse,
     PilotsResponse,
     ProtocolState,
+    PublicEndpointPilotChainEvidence,
+    PublicEndpointPilotEvidence,
+    PublicEndpointPilotTransportEvidence,
     ReleasedBundleLocator,
     ReleasedWindow,
     SolutionEvidenceLinks,
@@ -1007,8 +1010,50 @@ def create_observer_app(
         )
 
     def pilot_record(pilot: VerifiedComponentPilot) -> ComponentPilotRecord:
+        public_endpoint_evidence = None
+        if pilot.public_endpoint is not None:
+            verified = pilot.public_endpoint
+            attestation = verified.attestation
+            chain = attestation.chain_observation
+            public_endpoint_evidence = PublicEndpointPilotEvidence(
+                campaign_id=attestation.campaign_id,
+                coordinator_hotkey=attestation.coordinator_hotkey,
+                coordinator_signature_verified=True,
+                chain=PublicEndpointPilotChainEvidence(
+                    observation_class=chain.observation_class,
+                    network=chain.network,
+                    genesis_block_hash=chain.genesis_block_hash,
+                    block_number=str(chain.block_number),
+                    block_hash=chain.block_hash,
+                    block_timestamp_unix_ms=str(chain.block_timestamp_unix_ms),
+                    storage_proofs_verified=False,
+                    expected_miner_uid=attestation.expected_miner_uid,
+                    miner_hotkey=attestation.miner_hotkey,
+                    validator_permit=False,
+                ),
+                transport=PublicEndpointPilotTransportEvidence(
+                    announced_origin=attestation.announced_origin,
+                    contacted_origin=attestation.contacted_origin,
+                    coordinator_attested_origin_match=True,
+                    request_digest=attestation.request_digest,
+                    known_public_challenge=True,
+                    public_miner_transport_used=True,
+                    attempt_count=1,
+                    outcome_classification=attestation.outcome_classification,
+                    failure_code=attestation.failure_code,
+                    miner_signed_envelope_verified=(attestation.miner_signed_envelope_verified),
+                    miner_signed_plaintext_verified=(attestation.miner_signed_plaintext_verified),
+                    response_receipt_time_is_coordinator_assertion=True,
+                    attempt_completeness_is_coordinator_assertion=True,
+                ),
+                attestation=pilot_object_link(pilot, verified.attestation_ref.sha256),
+                signature=pilot_object_link(pilot, verified.signature_ref.sha256),
+            )
         return ComponentPilotRecord(
             pilot_id=pilot.pilot_id,
+            pilot_profile=(
+                "local_in_process" if pilot.public_endpoint is None else "public_endpoint"
+            ),
             evidence_class="component_test_no_weight",
             terminal_code="component_test_no_weight",
             translation_weights_active=False,
@@ -1022,13 +1067,18 @@ def create_observer_app(
             validator_hotkey=pilot.validator_hotkey,
             miner_hotkey=pilot.miner_hotkey,
             missing_canonical_stages=pilot.missing_stages,
+            public_endpoint_evidence=public_endpoint_evidence,
             evidence=PilotBundleLocator(
                 public_origin=pilot.public_origin,
                 manifest_sha256=pilot.manifest_sha256,
                 manifest_url=(
                     f"{pilot.public_origin}/api/v1/pilots/{pilot.pilot_id}/bundle/manifest.json"
                 ),
-                replay_command="umi-validator replay --bundle ./bundle",
+                replay_command=(
+                    "umi-validator replay --bundle ./bundle"
+                    if pilot.public_endpoint is None
+                    else "umi-public-pilot replay --bundle ./bundle"
+                ),
             ),
         )
 

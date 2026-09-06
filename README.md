@@ -210,6 +210,11 @@ cannot be presented as protocol conformance or activation evidence. The
 [external-miner component pilot](docs/EXTERNAL_MINER_COMPONENT_PILOT.md) provides
 the one-command path for the pinned public S1 model and licensed `ASL BOOK` asset;
 it runs locally and explicitly does not prove the miner's public axon.
+The [public-endpoint miner pilot](docs/PUBLIC_ENDPOINT_MINER_PILOT.md) tests one
+registered miner through its finalized SN78 serving announcement and publishes the
+coordinator-signed endpoint evidence with the replayable bundle. It remains a
+component test: it does not create a protocol window, submit weights, or satisfy an
+activation gate.
 
 ## Run the certified mirror data plane
 

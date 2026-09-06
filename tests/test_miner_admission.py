@@ -4,7 +4,11 @@ from dataclasses import replace
 
 import pytest
 
-from umi.miner_admission import MinerAdmissionError, ProofBackedMinerWindowAuthority
+from umi.miner_admission import (
+    ExactComponentWindowAuthority,
+    MinerAdmissionError,
+    ProofBackedMinerWindowAuthority,
+)
 from umi.policy import ScoringPolicy, scoring_policy_hash
 from umi.protocol import TranslationRequest
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
@@ -116,3 +120,68 @@ async def test_rejects_an_issuance_block_outside_the_schedule_interval() -> None
 
     with pytest.raises(MinerAdmissionError, match="issuance_outside_window"):
         await authority.authorize(request)
+
+
+@pytest.mark.asyncio
+async def test_exact_component_authority_admits_only_a_loaded_request() -> None:
+    request = challenge_request()
+    authority = ExactComponentWindowAuthority((request,), window_index=7)
+
+    admitted = await authority.authorize(request)
+
+    assert admitted.window_index == 7
+    assert admitted.window_id == request.window_id
+    assert admitted.response_close_round == request.response_close_round
+    assert admitted.reveal_round == request.reveal_round
+    assert admitted.observed_finalized_height == request.issued_block
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("window_id", "99" * 32),
+        ("challenge_id", "EREREREREREREREREREREQ"),
+        ("issued_block_hash", "0x" + "99" * 32),
+        ("response_close_round", 20_000_001),
+        ("reveal_round", 20_000_002),
+        ("scoring_policy_hash", "88" * 32),
+    ),
+)
+async def test_exact_component_authority_rejects_any_unexpected_request(
+    field: str,
+    value: object,
+) -> None:
+    request = challenge_request()
+    authority = ExactComponentWindowAuthority((request,))
+    changed = request.model_copy(update={field: value})
+
+    with pytest.raises(MinerAdmissionError, match="component_request_not_authorized") as raised:
+        await authority.authorize(changed)
+
+    assert raised.value.reason_code == "component_request_not_authorized"
+    assert raised.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_exact_component_authority_compares_bytes_after_digest_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = challenge_request()
+    monkeypatch.setattr("umi.miner_admission.request_digest", lambda _request: "00" * 32)
+    authority = ExactComponentWindowAuthority((request,))
+    changed = request.model_copy(update={"window_id": "99" * 32})
+
+    with pytest.raises(MinerAdmissionError, match="component_request_not_authorized"):
+        await authority.authorize(changed)
+
+
+def test_exact_component_authority_rejects_an_invalid_request_set() -> None:
+    request = challenge_request()
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        ExactComponentWindowAuthority(())
+    with pytest.raises(ValueError, match="duplicate request"):
+        ExactComponentWindowAuthority((request, request))
+    with pytest.raises(TypeError, match="another type"):
+        ExactComponentWindowAuthority((request, object()))  # type: ignore[arg-type]

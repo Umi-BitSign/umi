@@ -20,6 +20,7 @@ from umi.miner_admission import LocalComponentWindowAuthority
 from umi.miner_resources import SQLiteMinerResourceLedger
 from umi.protocol import (
     RESPONSE_PLAINTEXT_SCHEMA,
+    GroundTruthPayload,
     ResponseEnvelope,
     ResponsePlaintext,
     TranslationRequest,
@@ -34,8 +35,10 @@ from .factories import VIDEO_BYTES, dev_wallet, ground_truth, three_requests
 
 @dataclass(frozen=True)
 class FixtureFetcher(VideoFetcher):
+    data: bytes = VIDEO_BYTES
+
     async def fetch(self, descriptor) -> bytes:
-        return VIDEO_BYTES
+        return self.data
 
 
 @dataclass(frozen=True)
@@ -44,21 +47,28 @@ class FixtureTranslator(Translator):
         return "hello" if request.task.stratum == "fingerspelling" else "hello world"
 
 
-def fixture_miner_runtime(miner_wallet, validator_wallet) -> MinerRuntime:
+def fixture_miner_runtime(
+    miner_wallet,
+    validator_wallet,
+    *,
+    scoring_policy_sha256: str = "20" * 32,
+    response_deadline_blocks: int = 10,
+    video_bytes: bytes = VIDEO_BYTES,
+) -> MinerRuntime:
     miner_hotkey, scheme = _identity(miner_wallet)
     limits = Limits()
-    policy_hash = "20" * 32
+    policy_hash = scoring_policy_sha256
     return MinerRuntime(
         wallet=miner_wallet,
         hotkey_ss58=miner_hotkey,
         signature_scheme=scheme,
         translator=FixtureTranslator(),
-        video_fetcher=FixtureFetcher(),
+        video_fetcher=FixtureFetcher(video_bytes),
         allowed_validator_hotkeys=frozenset({validator_wallet.hotkey.ss58_address}),
         authenticator=RequestAuthenticator.in_memory(miner_hotkey),
         limits=limits,
         scoring_policy_sha256=policy_hash,
-        response_deadline_blocks=10,
+        response_deadline_blocks=response_deadline_blocks,
         resource_ledger=SQLiteMinerResourceLedger(
             ":memory:",
             miner_hotkey=miner_hotkey,
@@ -146,13 +156,30 @@ async def build_completed_bundle(
     *,
     response_bytes: list[bytes] | None = None,
     requests: tuple[TranslationRequest, ...] | None = None,
+    truth_override: GroundTruthPayload | None = None,
+    video_bytes: bytes = VIDEO_BYTES,
 ) -> tuple[Path, tuple[TranslationRequest, ...]]:
-    requests, truth, request_path, truth_path = write_case_inputs(root, requests)
+    requests = requests or three_requests()
+    truth = truth_override or ground_truth(requests)
+    request_path = root / "requests.json"
+    truth_path = root / "ground-truth.json"
+    request_path.write_bytes(
+        canonical_json_bytes(
+            [request.model_dump(mode="json", by_alias=True) for request in requests]
+        )
+    )
+    truth_path.write_bytes(canonical_json_bytes(truth))
     case_root = root / "case"
     prepare_case(request_path, truth_path, case_root)
     validator_wallet = dev_wallet("//Alice")
     miner_wallet = dev_wallet("//Bob")
-    runtime = fixture_miner_runtime(miner_wallet, validator_wallet)
+    runtime = fixture_miner_runtime(
+        miner_wallet,
+        validator_wallet,
+        scoring_policy_sha256=requests[0].scoring_policy_hash,
+        response_deadline_blocks=(requests[0].deadline_block - requests[0].issued_block),
+        video_bytes=video_bytes,
+    )
     miner_hotkey = runtime.hotkey_ss58
     revealed = [canonical_json_bytes(truth)]
     revealed.extend(

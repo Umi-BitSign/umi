@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
 import bittensor as bt
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import umi.component_pilot as pilot_module
 import umi.observer_pilot_feed as pilot_feed_module
@@ -16,8 +18,10 @@ from umi.component import NOT_REACHED
 from umi.component_pilot import run_local_component_pilot
 from umi.encoding import account_id32
 from umi.observer import create_observer_app
-from umi.observer_pilot_feed import build_observer_pilot_feed
+from umi.observer_models import ComponentPilotRecord, PublicEndpointPilotTransportEvidence
+from umi.observer_pilot_feed import MAX_PILOTS, PilotFeedConfig, build_observer_pilot_feed
 from umi.protocol import canonical_json_bytes
+from umi.public_pilot_campaign import CAMPAIGN_ID
 
 from .factories import dev_wallet
 from .test_component_run import (
@@ -76,19 +80,24 @@ async def test_component_pilot_is_replayed_and_stays_out_of_windows(
     assert listing.status_code == 200
     listed = listing.json()
     assert listed["protocol_state"]["phase"] == "pre_public_calibration"
+    assert listed["schema"] == "umi-observer-pilots/2"
     assert listed["protocol_state"]["conformance_evidence_available"] is False
     assert listed["protocol_state"]["activation_evidence_available"] is False
     record = listed["pilots"][0]
     assert record["pilot_id"] == pilot.pilot_id
+    assert record["pilot_profile"] == "local_in_process"
+    assert record["public_endpoint_evidence"] is None
     assert record["evidence_class"] == "component_test_no_weight"
     assert record["translation_weights_active"] is False
     assert record["protocol_conformance"] is False
     assert record["activation_evidence"] is False
     assert record["deterministic_replay_verified"] is True
     assert record["missing_canonical_stages"] == list(NOT_REACHED)
+    assert record["evidence"]["replay_command"] == "umi-validator replay --bundle ./bundle"
 
     assert solutions.status_code == 200
     solution_body = solutions.json()
+    assert solution_body["schema"] == "umi-observer-pilot-solutions/2"
     assert solution_body["pilot"]["bundle_manifest_sha256"] == pilot.pilot_id
     assert len(solution_body["solutions"]) == 3
     assert all(item["response_plaintext_valid"] for item in solution_body["solutions"])
@@ -110,6 +119,172 @@ async def test_component_pilot_is_replayed_and_stays_out_of_windows(
     assert evidence_object.content == first_object.data
     assert evidence_object.headers["etag"] == f'"{first_object.sha256}"'
     assert evidence_object.headers["x-umi-pilot-bundle"] == pilot.pilot_id
+
+    mismatched = record | {
+        "evidence": record["evidence"]
+        | {"replay_command": "umi-public-pilot replay --bundle ./bundle"}
+    }
+    with pytest.raises(ValidationError, match="replay command does not match"):
+        ComponentPilotRecord.model_validate_json(canonical_json_bytes(mismatched))
+
+
+def test_pilot_feed_config_accepts_256_roots_and_rejects_257() -> None:
+    base = {
+        "schema": "umi-observer-pilot-feed-config/1",
+        "protocol": "umi-asl/0.1",
+        "mode": "component_test_no_weight",
+        "translation_weights_active": False,
+        "protocol_conformance": False,
+        "activation_evidence": False,
+        "public_origin": "https://api.umi.vision",
+    }
+    accepted = PilotFeedConfig.model_validate(
+        base | {"bundle_roots": [f"/var/lib/umi/pilots/{index}" for index in range(MAX_PILOTS)]}
+    )
+    assert len(accepted.bundle_roots) == 256
+
+    with pytest.raises(ValidationError):
+        PilotFeedConfig.model_validate(
+            base
+            | {"bundle_roots": [f"/var/lib/umi/pilots/{index}" for index in range(MAX_PILOTS + 1)]}
+        )
+
+
+def test_public_pilot_record_compares_decoded_account_ids() -> None:
+    coordinator = dev_wallet("//Alice").hotkey.ss58_address
+    miner = dev_wallet("//Bob").hotkey.ss58_address
+    coordinator_alternate = bt.sp_core.encode_ss58(account_id32(coordinator), 0)
+    miner_alternate = bt.sp_core.encode_ss58(account_id32(miner), 0)
+    pilot_id = "21" * 32
+    object_prefix = f"https://api.umi.vision/api/v1/pilots/{pilot_id}/bundle/objects/"
+    record = {
+        "pilot_id": pilot_id,
+        "pilot_profile": "public_endpoint",
+        "evidence_class": "component_test_no_weight",
+        "terminal_code": "component_test_no_weight",
+        "translation_weights_active": False,
+        "protocol_conformance": False,
+        "activation_evidence": False,
+        "validator_input_eligible": False,
+        "deterministic_replay_verified": True,
+        "bundle_manifest_sha256": pilot_id,
+        "bundle_bytes": 1,
+        "object_count": 2,
+        "solution_count": 1,
+        "validator_hotkey": coordinator,
+        "miner_hotkey": miner,
+        "missing_canonical_stages": ("publisher_pool",),
+        "evidence": {
+            "public_origin": "https://api.umi.vision",
+            "manifest_sha256": pilot_id,
+            "manifest_url": (
+                f"https://api.umi.vision/api/v1/pilots/{pilot_id}/bundle/manifest.json"
+            ),
+            "replay_command": "umi-public-pilot replay --bundle ./bundle",
+        },
+        "public_endpoint_evidence": {
+            "campaign_id": CAMPAIGN_ID,
+            "coordinator_hotkey": coordinator_alternate,
+            "coordinator_signature_verified": True,
+            "chain": {
+                "observation_class": "sdk_finalized_block_without_storage_proofs",
+                "network": "finney",
+                "genesis_block_hash": (
+                    "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+                ),
+                "netuid": 78,
+                "mechanism_id": 0,
+                "block_number": "12345",
+                "block_hash": "0x" + "31" * 32,
+                "block_timestamp_unix_ms": "1725555555000",
+                "storage_proofs_verified": False,
+                "expected_miner_uid": 236,
+                "miner_hotkey": miner_alternate,
+                "validator_permit": False,
+            },
+            "transport": {
+                "announced_origin": "https://8.8.8.8:443",
+                "contacted_origin": "https://8.8.8.8:443",
+                "coordinator_attested_origin_match": True,
+                "request_digest": "41" * 32,
+                "known_public_challenge": True,
+                "public_miner_transport_used": True,
+                "attempt_count": 1,
+                "outcome_classification": "ok",
+                "failure_code": None,
+                "miner_signed_envelope_verified": True,
+                "miner_signed_plaintext_verified": True,
+                "response_receipt_time_is_coordinator_assertion": True,
+                "attempt_completeness_is_coordinator_assertion": True,
+            },
+            "attestation": {
+                "sha256": "51" * 32,
+                "media_type": "application/json",
+                "size_bytes": 1,
+                "url": object_prefix + "51" * 32,
+            },
+            "signature": {
+                "sha256": "61" * 32,
+                "media_type": "application/json",
+                "size_bytes": 1,
+                "url": object_prefix + "61" * 32,
+            },
+        },
+    }
+
+    ComponentPilotRecord.model_validate(record)
+    for invalid_origin in (
+        "https://miner.example:443",
+        "https://127.0.0.1:443",
+        "https://8.8.8.8",
+    ):
+        changed_origin = deepcopy(record)
+        transport = changed_origin["public_endpoint_evidence"]["transport"]
+        transport["announced_origin"] = invalid_origin
+        transport["contacted_origin"] = invalid_origin
+        with pytest.raises(ValidationError, match="public pilot origin"):
+            ComponentPilotRecord.model_validate(changed_origin)
+
+    changed_miner = dev_wallet("//Charlie").hotkey.ss58_address
+    record["public_endpoint_evidence"]["chain"]["miner_hotkey"] = changed_miner
+    with pytest.raises(ValidationError, match="another miner"):
+        ComponentPilotRecord.model_validate(record)
+
+
+@pytest.mark.parametrize(
+    ("classification", "failure_code", "envelope_verified", "plaintext_verified"),
+    (
+        ("signed_error", "translator_error", True, True),
+        ("failed", "request_timeout", False, False),
+    ),
+)
+def test_public_pilot_transport_preserves_non_ok_outcomes(
+    classification: str,
+    failure_code: str,
+    envelope_verified: bool,
+    plaintext_verified: bool,
+) -> None:
+    evidence = PublicEndpointPilotTransportEvidence.model_validate(
+        {
+            "announced_origin": "https://8.8.8.8:443",
+            "contacted_origin": "https://8.8.8.8:443",
+            "coordinator_attested_origin_match": True,
+            "request_digest": "41" * 32,
+            "known_public_challenge": True,
+            "public_miner_transport_used": True,
+            "attempt_count": 1,
+            "outcome_classification": classification,
+            "failure_code": failure_code,
+            "miner_signed_envelope_verified": envelope_verified,
+            "miner_signed_plaintext_verified": plaintext_verified,
+            "response_receipt_time_is_coordinator_assertion": True,
+            "attempt_completeness_is_coordinator_assertion": True,
+        }
+    )
+
+    assert evidence.outcome_classification == classification
+    assert evidence.failure_code == failure_code
+    assert evidence.coordinator_attested_origin_match is True
 
 
 @pytest.mark.asyncio

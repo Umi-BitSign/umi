@@ -1,0 +1,81 @@
+name: Public miner endpoint pilot
+description: Request UMI's one-shot public HTTPS and signed-response interoperability test for an SN78 miner.
+title: "[Miner pilot] UID "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the [public endpoint pilot runbook](https://github.com/Umi-BitSign/umi/blob/main/docs/PUBLIC_ENDPOINT_MINER_PILOT.md) before enrolling. Use this form only for a hotkey already registered on SN78. UMI resolves the UID and HTTPS axon from finalized chain state. Do not post seed phrases, private keys, wallet files, private model URLs, or credentials.
+
+  - type: input
+    id: uid
+    attributes:
+      label: SN78 UID
+      description: The current decimal UID shown by the finalized metagraph.
+      placeholder: "236"
+    validations:
+      required: true
+
+  - type: input
+    id: hotkey
+    attributes:
+      label: Miner hotkey
+      description: The public SS58 hotkey registered at that UID.
+      placeholder: 5G...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Host platform
+      options:
+        - Linux x86_64
+        - Linux arm64
+        - macOS Apple Silicon
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: accelerator
+    attributes:
+      label: Inference device
+      description: Examples are RTX 5090, Apple M4 Max MPS, or CPU.
+    validations:
+      required: true
+
+  - type: input
+    id: model_revision
+    attributes:
+      label: Model revision
+      description: Your lowercase 64-character SHA-256 declaration for the selected model and inference configuration. A successful signed response returns it and UMI reports it. The campaign does not bind or attest it.
+      placeholder: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Readiness confirmations
+      options:
+        - label: My hotkey is registered on SN78, has no validator permit, and I control the wallet needed to publish its axon endpoint.
+          required: true
+        - label: Before I report ready, the endpoint will have a valid certificate for its literal IP and will forward only to my loopback UMI pilot service.
+          required: true
+        - label: Before I report ready, I will test my stable globally routable IP from another network and configure renewal for its short-lived IP certificate.
+          required: true
+        - label: I recorded any previous axon endpoint and understand that serve/reset writes are rate-limited and may interrupt or delay restoration of a production service.
+          required: true
+        - label: I understand this uses one known public clip and measures protocol and endpoint interoperability, not benchmark quality or weight eligibility.
+          required: true
+        - label: I understand UMI publishes a completed outcome, or reports a verified non-feed journal after a later local failure, and will not rerun after possible issuance.
+          required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Operator notes
+      description: Optional public details that help schedule the case. Do not include secrets.
+    validations:
+      required: false

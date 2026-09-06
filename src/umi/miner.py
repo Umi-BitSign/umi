@@ -13,7 +13,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from weakref import WeakValueDictionary
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -86,6 +86,7 @@ class MinerRuntime:
     resource_ledger: SQLiteMinerResourceLedger
     window_authority: MinerWindowAuthority
     model_revision: str | None = None
+    runtime_mode: Literal["inactive_shadow", "public_component_pilot"] = "inactive_shadow"
     finality_service: DurableGrandpaFinalityPort | None = field(
         default=None,
         repr=False,
@@ -150,6 +151,10 @@ class MinerRuntime:
             and re.fullmatch(r"[0-9a-f]{64}", self.model_revision) is None
         ):
             raise ValueError("model revision must be a lowercase SHA-256 hex digest")
+        if self.runtime_mode not in {"inactive_shadow", "public_component_pilot"}:
+            raise ValueError("unsupported miner runtime mode")
+        if self.runtime_mode == "public_component_pilot" and self.finality_service is not None:
+            raise ValueError("public component pilots cannot attach a finality service")
         if not isinstance(self.limits, Limits):
             raise TypeError("limits must be Limits")
         if not isinstance(self.resource_ledger, SQLiteMinerResourceLedger):
@@ -871,17 +876,20 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
             finality_status = "failed" if finality_task.exception() is not None else "stopped"
         else:
             finality_status = "running"
-        return {
+        result: dict[str, object] = {
             "ok": finality_status not in {"failed", "stopped"},
             "netuid": SAFETY_BOUNDARY.netuid,
             "translation_weights_active": False,
             "protocol_conformance": False,
-            "runtime_mode": "inactive_shadow",
+            "runtime_mode": runtime.runtime_mode,
             "scoring_policy_sha256": runtime.scoring_policy_sha256,
             "model_revision": runtime.model_revision,
             "window_authority": type(runtime.window_authority).__name__,
             "finality_service": finality_status,
         }
+        if runtime.runtime_mode == "public_component_pilot":
+            result["activation_evidence"] = False
+        return result
 
     @app.post(TRANSLATE_PATH)
     async def translate(request: Request) -> Response:

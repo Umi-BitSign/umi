@@ -58,6 +58,7 @@ the exact response body.
 | `GET /api/v1/windows/{window_id}` | One released validator window; add `?validator=<AccountId32 hex>` when several validators published the same window |
 | `GET /api/v1/windows/{window_id}/solutions` | A bounded page of every assignment from one fully replayed reveal result; add the validator query when needed |
 | `GET /api/v1/pilots` | Explicitly nonconforming, no-weight component pilots, separate from protocol windows |
+| `GET /api/v1/pilots/{pilot_id}` | One replayed local or public-endpoint component pilot and its evidence boundary |
 | `GET /api/v1/pilots/{pilot_id}/solutions` | Replayed hypotheses, references, scores, failures, and evidence for one pilot |
 | `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
 | `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
@@ -112,6 +113,10 @@ has no rank. Different validator samples may legitimately disagree, so the API
 does not merge them, choose a winner, or describe them as consensus. Native chain
 economics remain in the separate `leaderboard.chain_economics` object.
 
+Each window row also carries an `evidence` locator for its signed public index
+entry, bundle manifest, tree digest, exact audit-release block hash, and, when
+reached, the exact reveal-stage manifest and reveal result.
+
 ## Component pilot feed
 
 The optional `--pilot-feed-config` reads completed `umi-component-bundle/1`
@@ -121,11 +126,13 @@ evidence, or becomes a validator input.
 
 The observer requires the config, bundle roots, object directory, and files to be
 owned by its service user and not group- or world-writable. It rejects symlinks,
-noncanonical config or manifest bytes, unknown schema fields, more than eight
-pilots, more than 14 solutions per pilot, and more than 128 MiB across the feed.
-Before listening, it verifies every referenced object and reruns request-auth,
-miner-signature, timelock, binding, and exact-score replay. It then holds the
-verified manifest and object bytes as an immutable startup snapshot.
+noncanonical config or manifest bytes, unknown schema fields, more than 256 pilots,
+more than 14 solutions per pilot, and more than 128 MiB across the feed. Only one
+public-endpoint pilot for a decoded miner account and campaign ID is accepted;
+changing the SS58 prefix does not create another identity. Before listening, the
+observer verifies every referenced object and reruns request-auth, miner-signature,
+timelock, binding, and exact-score replay. It then holds the verified manifest and
+object bytes as an immutable startup snapshot.
 
 The pilot ID is SHA-256 of the exact canonical bundle manifest. Object URLs use
 their own SHA-256 digests and return immutable cache headers. The solutions response
@@ -139,9 +146,23 @@ canonical stage that the component runner did not reach. See
 [`COMPONENT_PILOT.md`](COMPONENT_PILOT.md) for the operator and independent-replay
 commands.
 
-Each row also carries an `evidence` locator for its signed public index entry,
-bundle manifest, tree digest, exact audit-release block hash, and, when reached, the
-exact reveal-stage manifest and reveal result. `/windows/{window_id}/solutions` is
+`pilot_profile` distinguishes a local in-process run from a request sent to the
+registered miner's public endpoint. Local records publish
+`umi-validator replay --bundle ./bundle`; public-endpoint records publish
+`umi-public-pilot replay --bundle ./bundle`, which also verifies the signed endpoint
+attachment. Public records expose `coordinator_signature_verified: true` and
+`coordinator_attested_origin_match: true`. These assert that the observer verified
+the coordinator signature and that the two origins in that signed attestation
+match. Both origins must be the same normalized, globally routable IP with an
+explicit HTTPS port. They do not claim portable storage-proof verification; the
+chain evidence binds `network: finney` and the Finney genesis block hash while
+keeping `storage_proofs_verified: false`.
+
+The pilot list, detail, and solutions response schemas are
+`umi-observer-pilots/2`, `umi-observer-pilot/2`, and
+`umi-observer-pilot-solutions/2`. The HTTP route base remains `/api/v1`.
+
+`/windows/{window_id}/solutions` is
 available only when that released bundle contains a fully replayed normal reveal
 result with a complete nonempty assignment set. It returns every successful
 assignment and every explicit failure, including validator/window/policy/release
