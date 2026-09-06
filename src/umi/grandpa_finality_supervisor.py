@@ -589,65 +589,7 @@ class DurableGrandpaFinalityPort:
             raise TypeError("attestation must be a FinalityAttestation")
         if len(attestation.canonical_bytes) > self._limits.maximum_evidence_bytes:
             raise GrandpaFinalitySupervisorError("evidence_size_limit")
-        with self._connect(read_only=True) as connection:
-            existing = connection.execute(
-                """
-                SELECT h.*, s.minimum_finalized_block, s.maximum_records,
-                       s.startup_timeout_seconds, s.request_id
-                FROM finalized_headers AS h
-                JOIN observer_segments AS s USING(segment_index)
-                WHERE h.height = ?
-                """,
-                (attestation.block.number,),
-            ).fetchone()
-        if existing is not None:
-            exact_binding = (
-                existing["segment_index"] == binding.segment_index
-                and existing["minimum_finalized_block"] == binding.minimum_finalized_block
-                and existing["maximum_records"] == binding.maximum_records
-                and existing["startup_timeout_seconds"] == binding.startup_timeout_seconds
-            )
-            if exact_binding and existing["canonical_evidence"] == attestation.canonical_bytes:
-                return _stored_header(existing).head
-            raise GrandpaFinalityStoreConflict("finalized_height_conflict")
-        # Reparse at the durable boundary; callers cannot bypass the observer's
-        # pin, header, ancestry, or transcript checks with a forged dataclass.
-        with self._connect(read_only=True) as connection:
-            prior = connection.execute(
-                """
-                SELECT * FROM finalized_headers
-                WHERE segment_index = ? ORDER BY segment_sequence DESC LIMIT 1
-                """,
-                (binding.segment_index,),
-            ).fetchone()
-        prior_attestation = None if prior is None else _stored_header(prior)
-        try:
-            parsed = self._observer.validate_attestation(
-                attestation.canonical_bytes,
-                minimum_finalized_block=binding.minimum_finalized_block,
-                maximum_records=binding.maximum_records,
-                startup_timeout_seconds=binding.startup_timeout_seconds,
-                expected_sequence=(
-                    0 if prior_attestation is None else prior_attestation.head.segment_sequence + 1
-                ),
-                previous_hash=(
-                    None if prior_attestation is None else prior_attestation.head.block_hash
-                ),
-                previous_digest=(
-                    "0" * 64 if prior_attestation is None else prior_attestation.transcript_digest
-                ),
-                previous_number=(
-                    None if prior_attestation is None else prior_attestation.head.height
-                ),
-                previous_timestamp_ms=(
-                    None if prior_attestation is None else prior_attestation.head.timestamp_ms
-                ),
-            )
-        except GrandpaFinalityObserverError as error:
-            raise GrandpaFinalitySupervisorError(f"attestation_{error.reason_code}") from error
-        if parsed != attestation:
-            raise GrandpaFinalityStoreConflict("attestation_dataclass_mismatch")
-        return self._commit(binding, parsed)
+        return self._commit(binding, attestation)
 
     def run_blocking(self, stop_event: threading.Event) -> None:
         """Run the owned observer until stopped; any observer fault is terminal."""
@@ -873,22 +815,82 @@ class DurableGrandpaFinalityPort:
         self, binding: ObserverRunBinding, attestation: FinalityAttestation
     ) -> PersistedFinalityHead:
         evidence_sha = hashlib.sha256(attestation.canonical_bytes).hexdigest()
-        record = json.loads(attestation.canonical_bytes)
-        request_id = record["request_id"]
         try:
             with (
                 self._connect(read_only=False) as connection,
                 self._transaction(connection),
             ):
                 existing = connection.execute(
-                    "SELECT * FROM finalized_headers WHERE height = ?",
+                    """
+                    SELECT h.*, s.minimum_finalized_block, s.maximum_records,
+                           s.startup_timeout_seconds, s.request_id
+                    FROM finalized_headers AS h
+                    JOIN observer_segments AS s USING(segment_index)
+                    WHERE h.height = ?
+                    """,
                     (attestation.block.number,),
                 ).fetchone()
                 if existing is not None:
                     stored = _stored_header(existing)
-                    if stored.canonical_evidence != attestation.canonical_bytes:
-                        raise GrandpaFinalityStoreConflict("finalized_height_conflict")
-                    return stored.head
+                    exact_binding = (
+                        existing["segment_index"] == binding.segment_index
+                        and existing["minimum_finalized_block"] == binding.minimum_finalized_block
+                        and existing["maximum_records"] == binding.maximum_records
+                        and existing["startup_timeout_seconds"] == binding.startup_timeout_seconds
+                    )
+                    if exact_binding and stored.canonical_evidence == attestation.canonical_bytes:
+                        return stored.head
+                    raise GrandpaFinalityStoreConflict("finalized_height_conflict")
+
+                # Reparse while holding the same write transaction used for the
+                # insert. A competing process cannot advance the segment between
+                # the expected-sequence read and the idempotent height check.
+                prior_row = connection.execute(
+                    """
+                    SELECT * FROM finalized_headers
+                    WHERE segment_index = ?
+                    ORDER BY segment_sequence DESC LIMIT 1
+                    """,
+                    (binding.segment_index,),
+                ).fetchone()
+                prior_attestation = None if prior_row is None else _stored_header(prior_row)
+                try:
+                    parsed = self._observer.validate_attestation(
+                        attestation.canonical_bytes,
+                        minimum_finalized_block=binding.minimum_finalized_block,
+                        maximum_records=binding.maximum_records,
+                        startup_timeout_seconds=binding.startup_timeout_seconds,
+                        expected_sequence=(
+                            0
+                            if prior_attestation is None
+                            else prior_attestation.head.segment_sequence + 1
+                        ),
+                        previous_hash=(
+                            None if prior_attestation is None else prior_attestation.head.block_hash
+                        ),
+                        previous_digest=(
+                            "0" * 64
+                            if prior_attestation is None
+                            else prior_attestation.transcript_digest
+                        ),
+                        previous_number=(
+                            None if prior_attestation is None else prior_attestation.head.height
+                        ),
+                        previous_timestamp_ms=(
+                            None
+                            if prior_attestation is None
+                            else prior_attestation.head.timestamp_ms
+                        ),
+                    )
+                except GrandpaFinalityObserverError as error:
+                    raise GrandpaFinalitySupervisorError(
+                        f"attestation_{error.reason_code}"
+                    ) from error
+                if parsed != attestation:
+                    raise GrandpaFinalityStoreConflict("attestation_dataclass_mismatch")
+
+                record = json.loads(attestation.canonical_bytes)
+                request_id = record["request_id"]
                 count, total_evidence = connection.execute(
                     "SELECT COUNT(*), COALESCE(SUM(length(canonical_evidence)), 0) "
                     "FROM finalized_headers"

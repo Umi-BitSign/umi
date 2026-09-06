@@ -460,17 +460,19 @@ def test_concurrent_exact_acceptance_serializes_and_limit_failure_rolls_back(
         maximum_records_per_process=1,
     )
     port = _port(tmp_path, observer, chain_observation, limits=limits)
+    second_port = _port(tmp_path, observer, chain_observation, limits=limits)
     binding = port.next_run_binding()
     block = _header(10, parent_hash=f"0x{'11' * 32}", seed=20)
     attestation = _attestation(observer, binding, block=block, sequence=0, previous=None)
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    ports = (port, second_port) * 8
+    with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(
             executor.map(
-                lambda _index: port.accept_attestation(binding, attestation),
-                range(2),
+                lambda candidate: candidate.accept_attestation(binding, attestation),
+                ports,
             )
         )
-    assert results[0] == results[1]
+    assert all(result == results[0] for result in results)
 
     next_binding = port.next_run_binding()
     next_block = _header(11, parent_hash=str(block["hash"]), seed=21)
@@ -481,6 +483,7 @@ def test_concurrent_exact_acceptance_serializes_and_limit_failure_rolls_back(
         port.accept_attestation(next_binding, next_attestation)
     assert port.persisted_head() == results[0]
     port.audit()
+    second_port.audit()
 
 
 def test_blocking_supervisor_runs_multiple_segments_and_stops_promptly(
