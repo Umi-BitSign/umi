@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Read the [public endpoint pilot runbook](https://github.com/Umi-BitSign/umi/blob/main/docs/PUBLIC_ENDPOINT_MINER_PILOT.md) before enrolling. Use this form only for a hotkey already registered on SN78. UMI resolves the UID and HTTPS axon from finalized chain state. Do not post seed phrases, private keys, wallet files, private model URLs, or credentials.
+        Read the [public endpoint pilot runbook](https://github.com/Umi-BitSign/umi/blob/main/docs/PUBLIC_ENDPOINT_MINER_PILOT.md) before enrolling. Use this form only for a hotkey already registered on SN78. UMI resolves the UID and HTTPS axon from finalized chain state. Enrollment joins a manual scheduling queue; it does not start ongoing requests or a timed case. Wait for UMI to request a `READY FOR CASE` reply on this issue. Do not post seed phrases, private keys, wallet files, private model URLs, or credentials.
 
   - type: input
     id: uid
@@ -68,6 +68,8 @@ body:
         - label: I recorded any previous axon endpoint and understand that serve/reset writes are rate-limited and may interrupt or delay restoration of a production service.
           required: true
         - label: I understand this uses one known public clip and measures protocol and endpoint interoperability, not benchmark quality or weight eligibility.
+          required: true
+        - label: I understand enrollment starts no request traffic. I will wait for UMI's scheduling comment and post `READY FOR CASE` only when I can load the case promptly and stay online through reveal.
           required: true
         - label: I understand UMI publishes a completed outcome, or reports a verified non-feed journal after a later local failure, and will not rerun after possible issuance.
           required: true

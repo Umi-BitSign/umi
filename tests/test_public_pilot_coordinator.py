@@ -5,6 +5,7 @@ import json
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import bittensor as bt
 import httpx
@@ -35,9 +36,12 @@ from umi.public_pilot_campaign import (
     prepare_public_pilot_case,
 )
 from umi.public_pilot_coordinator import (
+    _coordinator_possession_challenge,
     _effective_reveal_timeout,
+    _prove_coordinator_signer,
     _require_response_headroom,
     _validated_request_timeout,
+    prepare_public_endpoint_pilot_case,
     replay_public_endpoint_pilot,
     run_public_endpoint_pilot,
 )
@@ -48,6 +52,130 @@ from umi.public_pilot_journal import (
 )
 
 from .factories import dev_wallet
+
+
+def test_coordinator_possession_preflight_accepts_the_expected_private_hotkey() -> None:
+    wallet = dev_wallet("//PublicPilotCoordinatorPossession")
+    hotkey = wallet.hotkey.ss58_address
+
+    challenge = _coordinator_possession_challenge(hotkey)
+
+    assert len(challenge) == 32
+    assert (
+        challenge
+        == hashlib.sha256(
+            b"umi-public-pilot-coordinator-possession-v1\0" + bytes(wallet.hotkey.public_key)
+        ).digest()
+    )
+    assert _prove_coordinator_signer(wallet, hotkey) == hotkey
+
+
+def test_prepare_creates_a_timed_case_after_coordinator_possession_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = dev_wallet("//PublicPilotPreparedCoordinator")
+    miner_wallet = dev_wallet("//PublicPilotPreparedMiner")
+    output = tmp_path / "case"
+    observed: dict[str, object] = {}
+
+    def fake_prepare(case_root: Path, **kwargs: object) -> Path:
+        observed.update(kwargs)
+        case_root.mkdir()
+        manifest = case_root / "manifest.json"
+        manifest.write_bytes(b"{}")
+        return manifest
+
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: 123_456)
+    monkeypatch.setattr(coordinator_module, "prepare_public_pilot_case", fake_prepare)
+
+    manifest = prepare_public_endpoint_pilot_case(
+        output,
+        wallet=wallet,
+        expected_coordinator_hotkey=wallet.hotkey.ss58_address,
+        expected_miner_uid=247,
+        expected_miner_hotkey=miner_wallet.hotkey.ss58_address,
+        setup_allowance_seconds=600,
+        response_window_seconds=120,
+        reveal_margin_seconds=90,
+    )
+
+    assert manifest == output / "manifest.json"
+    assert observed == {
+        "coordinator_hotkey": wallet.hotkey.ss58_address,
+        "current_round": 123_456,
+        "expected_miner_hotkey": miner_wallet.hotkey.ss58_address,
+        "expected_miner_uid": 247,
+        "response_window_seconds": 120,
+        "reveal_margin_seconds": 90,
+        "setup_allowance_seconds": 600,
+    }
+
+
+def test_prepare_rejects_an_address_only_coordinator_before_timing_or_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_wallet = dev_wallet("//PublicPilotAddressOnlyCoordinator")
+    miner_wallet = dev_wallet("//PublicPilotAddressOnlyMiner")
+    address_only_hotkey = bt.sp_core.Keypair(
+        public_key=private_wallet.hotkey.public_key,
+        crypto_type=private_wallet.hotkey.crypto_type,
+    )
+    address_only_wallet = SimpleNamespace(
+        coldkey=private_wallet.coldkey,
+        coldkeypub=private_wallet.coldkeypub,
+        hotkey=address_only_hotkey,
+    )
+    timing_checked = False
+
+    def should_not_read_current_round() -> int:
+        nonlocal timing_checked
+        timing_checked = True
+        raise AssertionError("timelock round was read before signer possession was proved")
+
+    monkeypatch.setattr(bt.timelock, "current_round", should_not_read_current_round)
+    output = tmp_path / "case"
+    with pytest.raises(RuntimeError, match="signing preflight failed"):
+        prepare_public_endpoint_pilot_case(
+            output,
+            wallet=address_only_wallet,
+            expected_coordinator_hotkey=address_only_hotkey.ss58_address,
+            expected_miner_uid=247,
+            expected_miner_hotkey=miner_wallet.hotkey.ss58_address,
+        )
+
+    assert timing_checked is False
+    assert not output.exists()
+
+
+def test_prepare_rejects_a_coordinator_mismatch_before_timing_or_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = dev_wallet("//PublicPilotWrongCoordinator")
+    expected_wallet = dev_wallet("//PublicPilotExpectedCoordinator")
+    miner_wallet = dev_wallet("//PublicPilotMismatchMiner")
+    timing_checked = False
+
+    def should_not_read_current_round() -> int:
+        nonlocal timing_checked
+        timing_checked = True
+        raise AssertionError("timelock round was read before coordinator identity was checked")
+
+    monkeypatch.setattr(bt.timelock, "current_round", should_not_read_current_round)
+    output = tmp_path / "case"
+    with pytest.raises(ValueError, match="expected coordinator hotkey"):
+        prepare_public_endpoint_pilot_case(
+            output,
+            wallet=wallet,
+            expected_coordinator_hotkey=expected_wallet.hotkey.ss58_address,
+            expected_miner_uid=247,
+            expected_miner_hotkey=miner_wallet.hotkey.ss58_address,
+        )
+
+    assert timing_checked is False
+    assert not output.exists()
 
 
 def test_reveal_timeout_covers_the_prepared_case_schedule() -> None:

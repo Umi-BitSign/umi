@@ -12,22 +12,32 @@ scoring window, model-quality benchmark, activation gate, validator input, or
 weight result. The clip and references are public, so its score has no ranking
 meaning.
 
+Submitting the issue joins a manual scheduling queue. The coordinator does not
+poll the miner or send ongoing requests. Each scheduled case sends at most one
+request after the two readiness replies described below.
+
 ## Public workflow
 
 1. The miner opens the public pilot issue form with its SN78 UID, hotkey,
    platform, inference device, and model revision.
-2. UMI verifies the finalized registration and schedules a fresh case. Each case
-   is bound to one miner hotkey and the published UMI coordinator hotkey.
-3. UMI posts the sealed case archive, archive SHA-256, exact UMI Git revision,
+2. UMI verifies the finalized registration, posts the intended UMI revision and
+   setup instructions, and asks the miner for a `READY FOR CASE` reply.
+3. The miner prepares its TLS endpoint and dependencies, then posts
+   `READY FOR CASE` only when it can load a fresh case promptly and remain online
+   through reveal. Enrollment by itself does not start a timer or request traffic.
+4. The coordinator proves that its local wallet can sign for the published UMI
+   coordinator hotkey. Only then does it create a fresh timed case bound to that
+   coordinator and the enrolled miner.
+5. UMI posts the sealed case archive, archive SHA-256, exact UMI Git revision,
    response-close round, and reveal round on the issue. The archive contains no
    plaintext references.
-4. The miner verifies the archive, starts the exact-case service on loopback,
-   exposes it through the chain-announced TLS endpoint, and reports readiness on
-   the issue.
-5. UMI resolves the UID, hotkey, permit, and axon again from one finalized SDK
+6. The miner verifies the archive, starts the exact-case service on loopback,
+   exposes it through the chain-announced TLS endpoint, and posts
+   `READY TO ISSUE` on the issue.
+7. UMI resolves the UID, hotkey, permit, and axon again from one finalized SDK
    snapshot. It sends one authenticated request to that exact origin. There is no
    URL override.
-6. After reveal, UMI publishes the successful response or ordinary canonical
+8. After reveal, UMI publishes the successful response or ordinary canonical
    request failure if the remaining local steps finish. An exceptional reveal,
    request-send, scoring, attachment, or publication failure leaves a verified
    non-feed attempt journal. UMI reports that incomplete state and does not rerun
@@ -50,6 +60,11 @@ configured pilot in one process, so a different Python, Unicode, `regex`,
 Bittensor, or scoring-source version cannot be added to the existing feed.
 Set `PILOT_FEED_CONFIG=''` only when the observer has never served a pilot. When
 the public API already lists a pilot, use its deployed config path.
+Do not create the timed case until the miner has posted `READY FOR CASE` on the
+enrollment issue. The `prepare` command signs and verifies a domain-separated
+32-byte possession challenge before reading the current timelock round or creating
+the case directory. It fails if the selected wallet is address-only or does not
+match the published coordinator hotkey.
 Keep this private Bash session open for the later coordinator blocks. If the
 session is lost, set the same values again before continuing.
 
@@ -61,6 +76,7 @@ export UMI_PYTHON="/absolute/path/to/the/observer/python"
 export PILOT_FEED_CONFIG="/absolute/path/to/observer-pilot-feed.json"
 export COORDINATOR_WALLET=YOUR_UMI_WALLET_NAME
 export COORDINATOR_HOTKEY=YOUR_UMI_HOTKEY_NAME
+export COORDINATOR_HOTKEY_SS58=YOUR_PUBLISHED_UMI_COORDINATOR_SS58
 export COORDINATOR_WALLET_PATH="/absolute/path/to/umi/wallets"
 export MINER_UID=DECIMAL_UID_FROM_ISSUE
 export MINER_HOTKEY_SS58=SS58_HOTKEY_FROM_ISSUE
@@ -137,13 +153,16 @@ install -d -m 700 "$HANDOFF_ROOT"
   --wallet-name "$COORDINATOR_WALLET" \
   --hotkey "$COORDINATOR_HOTKEY" \
   --wallet-path "$COORDINATOR_WALLET_PATH" \
+  --expected-coordinator-hotkey "$COORDINATOR_HOTKEY_SS58" \
   --expected-miner-uid "$MINER_UID" \
   --expected-miner-hotkey "$MINER_HOTKEY_SS58" \
   --setup-allowance 1800 \
   --response-window 300 \
   --reveal-margin 60 | tee "$HANDOFF_ROOT/prepare-result.json"
 
-jq -e '.status == "public_endpoint_pilot_case_prepared"' \
+jq -e --arg coordinator "$COORDINATOR_HOTKEY_SS58" \
+  '.status == "public_endpoint_pilot_case_prepared" and
+   .coordinator_hotkey == $coordinator' \
   "$HANDOFF_ROOT/prepare-result.json"
 tar -czf "$CASE_ARCHIVE" -C "$HANDOFF_ROOT" "$(basename "$CASE_ROOT")"
 
@@ -191,7 +210,7 @@ using repository credentials, and verify its SHA-256 before asking the miner to
 proceed. A changed case gets a new comment and new hashes; the old handoff remains
 visible.
 
-After the miner reports readiness, independently run the finalized-chain
+After the miner posts `READY TO ISSUE`, independently run the finalized-chain
 preflight in [Expose and announce the endpoint](#expose-and-announce-the-endpoint).
 Confirm that at least 300 seconds remain before the announced response-close time.
 The `run` command enforces this guard, so readiness must arrive before the nominal

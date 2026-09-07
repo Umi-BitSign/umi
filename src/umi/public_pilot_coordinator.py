@@ -20,7 +20,11 @@ from .audit import EvidenceStore
 from .chain import discover_miner_finalized
 from .component import load_case, score_component_responses, validate_case_bindings
 from .config import Limits
-from .crypto import TimelockDecryptionError
+from .crypto import (
+    TimelockDecryptionError,
+    sign_response_digest,
+    verify_response_signature,
+)
 from .encoding import account_id32
 from .protocol import GroundTruthPayload, ResponsePlaintext, canonical_json_bytes
 from .public_pilot_campaign import (
@@ -53,12 +57,75 @@ LOGGER = logging.getLogger("umi.public_pilot_coordinator")
 _MINIMUM_RESPONSE_HEADROOM_SECONDS = 300.0
 _MINIMUM_POST_REQUEST_HEADROOM_SECONDS = 60.0
 _REVEAL_TIMEOUT_GRACE_SECONDS = 120.0
+_COORDINATOR_POSSESSION_DOMAIN = b"umi-public-pilot-coordinator-possession-v1\0"
 
 
 def _wallet_hotkey(wallet: Any) -> str:
     import bittensor as bt
 
     return bt.resolve_signer(wallet, role="hotkey").ss58_address
+
+
+def _coordinator_possession_challenge(expected_coordinator_hotkey: str) -> bytes:
+    """Bind a fixed-size signing challenge to the announced coordinator account."""
+
+    return hashlib.sha256(
+        _COORDINATOR_POSSESSION_DOMAIN + account_id32(expected_coordinator_hotkey)
+    ).digest()
+
+
+def _prove_coordinator_signer(wallet: Any, expected_coordinator_hotkey: str) -> str:
+    """Require the selected wallet to hold the announced coordinator private key."""
+
+    try:
+        coordinator_hotkey = _wallet_hotkey(wallet)
+    except Exception as error:
+        raise RuntimeError("coordinator hotkey signer is unavailable") from error
+    if account_id32(coordinator_hotkey) != account_id32(expected_coordinator_hotkey):
+        raise ValueError("coordinator wallet does not match the expected coordinator hotkey")
+
+    challenge = _coordinator_possession_challenge(expected_coordinator_hotkey)
+    try:
+        scheme, signature = sign_response_digest(wallet, challenge)
+    except Exception as error:
+        raise RuntimeError("coordinator hotkey signing preflight failed") from error
+    if not verify_response_signature(
+        challenge,
+        hotkey_ss58=expected_coordinator_hotkey,
+        scheme=scheme,
+        signature=signature,
+    ):
+        raise RuntimeError("coordinator hotkey signing preflight did not verify")
+    return coordinator_hotkey
+
+
+def prepare_public_endpoint_pilot_case(
+    output: Path,
+    *,
+    wallet: Any,
+    expected_coordinator_hotkey: str,
+    expected_miner_uid: int,
+    expected_miner_hotkey: str,
+    setup_allowance_seconds: float = DEFAULT_SETUP_ALLOWANCE_SECONDS,
+    response_window_seconds: float = DEFAULT_RESPONSE_WINDOW_SECONDS,
+    reveal_margin_seconds: float = DEFAULT_REVEAL_MARGIN_SECONDS,
+) -> Path:
+    """Prove coordinator signing custody before creating a timed sealed case."""
+
+    coordinator_hotkey = _prove_coordinator_signer(wallet, expected_coordinator_hotkey)
+
+    import bittensor as bt
+
+    return prepare_public_pilot_case(
+        output,
+        coordinator_hotkey=coordinator_hotkey,
+        expected_miner_uid=expected_miner_uid,
+        expected_miner_hotkey=expected_miner_hotkey,
+        current_round=bt.timelock.current_round(),
+        setup_allowance_seconds=setup_allowance_seconds,
+        response_window_seconds=response_window_seconds,
+        reveal_margin_seconds=reveal_margin_seconds,
+    )
 
 
 def _require_distinct_output(case_root: Path, output: Path) -> None:
@@ -470,6 +537,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--wallet-name", required=True)
     prepare.add_argument("--hotkey", required=True, help="UMI coordinator hotkey name")
     prepare.add_argument("--wallet-path", default="~/.bittensor/wallets")
+    prepare.add_argument(
+        "--expected-coordinator-hotkey",
+        required=True,
+        help="public SS58 coordinator hotkey that the selected wallet must sign for",
+    )
     prepare.add_argument("--expected-miner-uid", type=int, required=True)
     prepare.add_argument("--expected-miner-hotkey", required=True)
     prepare.add_argument("--setup-allowance", type=float, default=DEFAULT_SETUP_ALLOWANCE_SECONDS)
@@ -527,15 +599,12 @@ def main() -> None:
             result = replay_public_endpoint_pilot(args.bundle)
         elif args.command == "prepare":
             wallet = _wallet(args)
-            coordinator_hotkey = _wallet_hotkey(wallet)
-            import bittensor as bt
-
-            manifest = prepare_public_pilot_case(
+            manifest = prepare_public_endpoint_pilot_case(
                 args.output,
-                coordinator_hotkey=coordinator_hotkey,
+                wallet=wallet,
+                expected_coordinator_hotkey=args.expected_coordinator_hotkey,
                 expected_miner_uid=args.expected_miner_uid,
                 expected_miner_hotkey=args.expected_miner_hotkey,
-                current_round=bt.timelock.current_round(),
                 setup_allowance_seconds=args.setup_allowance,
                 response_window_seconds=args.response_window,
                 reveal_margin_seconds=args.reveal_margin,
@@ -549,6 +618,7 @@ def main() -> None:
                 "manifest": str(manifest),
                 "manifest_sha256": hashlib.sha256(case_manifest_bytes).hexdigest(),
                 "campaign_id": campaign.campaign_id,
+                "coordinator_hotkey": campaign.coordinator_hotkey,
                 "expected_miner_uid": campaign.expected_miner_uid,
                 "expected_miner_hotkey": campaign.expected_miner_hotkey,
                 "response_close_round": campaign.response_close_round,
