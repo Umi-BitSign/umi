@@ -18,7 +18,7 @@ usage() {
 Usage: manage.sh --env-file FILE COMMAND
 
 Commands:
-  build             Build the revision-bound linux/amd64 validator image.
+  build             Build the revision-bound validator and audit-origin images.
   preflight         Verify macOS, Apple Silicon, Docker, Compose, and the image.
   initialize        Initialize persistent Linux volumes without deleting data.
   account-id        Print the validator hotkey's decoded AccountId32 hex.
@@ -134,7 +134,7 @@ case "$command_name" in
       || fail "UMI_GIT_REVISION in the env file must equal the clean checkout HEAD"
     [ "$(read_env_value UMI_VALIDATOR_IMAGE)" = "umi-validator:$revision" ] \
       || fail "UMI_VALIDATOR_IMAGE must be umi-validator:<UMI_GIT_REVISION>"
-    compose build --pull validator
+    compose build --pull validator audit-origin
     printf 'built_revision=%s\n' "$revision"
     ;;
   preflight)

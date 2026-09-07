@@ -42,7 +42,9 @@ Install a current Docker Desktop for Apple Silicon and enable its Apple
 Virtualization Framework and x86/amd64 emulation. Give Docker's Linux VM at least
 16 GiB of memory, 8 CPUs, and 100 GiB of disk. The UMI service itself defaults to a
 12 GiB cgroup limit, 8 CPUs, 512 processes, a read-only root filesystem, no Linux
-capabilities, and `no-new-privileges`.
+capabilities, and `no-new-privileges`. The revision-bound audit-origin image also
+removes Caddy's upstream low-port file capability before running on unprivileged
+port 8093 with no Linux capabilities.
 
 This is an always-on service. Disable automatic host sleep while connected to
 power, enable Docker Desktop at login, and make sure the operator account can
@@ -156,8 +158,9 @@ or `0600`.
 Keep `UMI_VALIDATOR_PLATFORM=linux/amd64` unless the release coordinator explicitly
 publishes a different single target for the complete validator cohort.
 
-Set `UMI_VALIDATOR_HOTKEY` first and build the image. This is the only management
-command allowed to build it, and it requires the checkout to be clean:
+Set `UMI_VALIDATOR_HOTKEY` first and build the validator and audit-origin images.
+This is the only management command allowed to build them, and it requires the
+checkout to be clean:
 
 ```sh
 deploy/macos-validator/manage.sh \
@@ -182,7 +185,7 @@ deploy/macos-validator/manage.sh \
   --env-file /absolute/private/umi-validator-inputs/operator.env initialize
 ```
 
-The image is only a revision-bound launcher. The signed release remains
+The validator image is only a revision-bound launcher. The signed release remains
 authoritative for every protocol binary, fixture, policy byte, and runtime pin.
 The image resolves its own Debian/glibc wheels, and startup compares their exact
 fingerprint with the signed policy. The release coordinator must build the x86_64

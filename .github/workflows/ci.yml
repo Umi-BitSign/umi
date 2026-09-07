@@ -289,9 +289,11 @@ jobs:
           docker compose --file deploy/macos-validator/compose.yaml config --quiet
           docker compose --file deploy/macos-validator/compose.yaml \
             run --rm --no-deps volume-init init-volumes
+          docker compose --file deploy/macos-validator/compose.yaml \
+            build --pull audit-origin
           trap 'docker compose --file deploy/macos-validator/compose.yaml stop audit-origin' EXIT
           docker compose --file deploy/macos-validator/compose.yaml \
-            up --detach --no-deps audit-origin
+            up --detach --no-deps --no-build --pull never audit-origin
           for attempt in $(seq 1 30); do
             status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
               "http://127.0.0.1:${UMI_AUDIT_ORIGIN_PORT}/not-a-public-route" || true)"

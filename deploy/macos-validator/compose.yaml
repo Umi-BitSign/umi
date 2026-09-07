@@ -153,7 +153,13 @@ services:
           nocopy: true
 
   audit-origin:
-    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    image: umi-validator-audit-origin:${UMI_GIT_REVISION:?set UMI_GIT_REVISION}
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: deploy/macos-validator/Caddy.Dockerfile
+      args:
+        UMI_GIT_REVISION: ${UMI_GIT_REVISION:?set UMI_GIT_REVISION}
     user: "${UMI_HOST_UID:?set UMI_HOST_UID}:${UMI_HOST_GID:?set UMI_HOST_GID}"
     read_only: true
     init: true

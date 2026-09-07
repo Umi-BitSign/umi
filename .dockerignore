@@ -9,6 +9,7 @@
 !src/**
 !deploy/
 !deploy/macos-validator/
+!deploy/macos-validator/Caddy.Dockerfile
 !deploy/macos-validator/Dockerfile
 !deploy/macos-validator/container-entrypoint.sh
 

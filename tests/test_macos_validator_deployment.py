@@ -64,7 +64,7 @@ def test_bootstrap_commands_have_no_wallet_mount_and_runtime_logs_are_bounded() 
     assert "target: /wallets" not in bootstrap
     assert "max-size: 10m" in compose
     assert 'max-file: "5"' in compose
-    assert compose.count("pull_policy: never") == 2
+    assert compose.count("pull_policy: never") == 3
 
 
 def test_audit_publication_uses_one_atomic_volume_and_a_public_only_origin_mount() -> None:
@@ -82,6 +82,7 @@ def test_audit_publication_uses_one_atomic_volume_and_a_public_only_origin_mount
 
 def test_container_audit_origin_is_host_loopback_only_but_container_reachable() -> None:
     compose = (DEPLOYMENT / "compose.yaml").read_text(encoding="utf-8")
+    origin = compose.split("  audit-origin:\n", 1)[1].split("\nvolumes:\n", 1)[0]
     caddyfile = (DEPLOYMENT / "Caddyfile").read_text(encoding="utf-8")
     assert '"127.0.0.1:${UMI_AUDIT_ORIGIN_PORT:-8093}:8093"' in compose
     assert "source: ./Caddyfile" in compose
@@ -90,6 +91,12 @@ def test_container_audit_origin_is_host_loopback_only_but_container_reachable() 
     assert "bind 0.0.0.0" in caddyfile
     assert "bind 127.0.0.1" not in caddyfile
     assert "@non_read not method GET HEAD" in caddyfile
+    assert "cap_add:" not in origin
+
+    caddy_dockerfile = (DEPLOYMENT / "Caddy.Dockerfile").read_text(encoding="utf-8")
+    assert re.search(r"caddy:2[.]10[.]2-alpine@sha256:[0-9a-f]{64}", caddy_dockerfile)
+    assert "setcap -r /usr/bin/caddy" in caddy_dockerfile
+    assert 'test -z "$(getcap /usr/bin/caddy)"' in caddy_dockerfile
 
 
 def test_macos_audit_tunnel_is_token_file_only_and_supervised() -> None:
@@ -163,7 +170,10 @@ def test_compose_file_resolves_with_only_declared_public_configuration() -> None
         "validator": "never",
         "audit-publisher": "never",
     }
-    assert resolved["services"]["audit-origin"].get("pull_policy") is None
+    assert resolved["services"]["audit-origin"].get("pull_policy") == "never"
+    assert resolved["services"]["audit-origin"]["image"] == (
+        "umi-validator-audit-origin:" + "1" * 40
+    )
 
 
 def test_runner_image_is_revision_bound_and_contains_no_secret_interface() -> None:
@@ -191,6 +201,7 @@ def test_management_script_never_deletes_runtime_state() -> None:
     assert "/bin/rm" not in manager
     assert "rm -r" not in manager
     assert "run --rm --no-deps --pull never" in manager
+    assert "compose build --pull validator audit-origin" in manager
     assert "up --detach --no-deps --no-build --pull never validator" in manager
     assert '--env "UMI_RECOVERY_WINDOW_ID=$recovery_window_id" bootstrap reconcile' in manager
     assert '--project-name "$compose_project"' in manager
@@ -294,6 +305,7 @@ def test_docker_context_is_allowlisted_and_excludes_ignored_credentials() -> Non
         "!pyproject.toml",
         "!uv.lock",
         "!src/**",
+        "!deploy/macos-validator/Caddy.Dockerfile",
         "!deploy/macos-validator/container-entrypoint.sh",
         "**/.env.*",
         "**/.envrc",
