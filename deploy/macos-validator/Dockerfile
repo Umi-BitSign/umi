@@ -22,7 +22,7 @@ ENV LANG=C.UTF-8 \
 WORKDIR /opt/umi
 COPY --from=uv /uv /uvx /usr/local/bin/
 COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN test "$(uv --version)" = "uv 0.12.9" \
+RUN test "$(uv --version)" = "uv 0.12.9 (x86_64-unknown-linux-musl)" \
     && uv sync --locked --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --locked --no-dev \

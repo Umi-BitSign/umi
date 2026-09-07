@@ -171,7 +171,7 @@ def test_runner_image_is_revision_bound_and_contains_no_secret_interface() -> No
     entrypoint = (DEPLOYMENT / "container-entrypoint.sh").read_text(encoding="utf-8")
     assert re.search(r"python:3[.]12[.]12-slim-bookworm@sha256:[0-9a-f]{64}", dockerfile)
     assert re.search(r"ghcr[.]io/astral-sh/uv:0[.]12[.]9@sha256:[0-9a-f]{64}", dockerfile)
-    assert 'test "$(uv --version)" = "uv 0.12.9"' in dockerfile
+    assert 'test "$(uv --version)" = "uv 0.12.9 (x86_64-unknown-linux-musl)"' in dockerfile
     assert "UMI_GIT_REVISION" in dockerfile
     assert "image/release revision mismatch" in entrypoint
     assert "runtime wallet tree contains an unexpected file" in entrypoint
