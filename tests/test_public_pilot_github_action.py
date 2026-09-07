@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
 
 from umi.public_pilot_github import (
     PublicPilotGithubAuthorization,

@@ -198,9 +198,9 @@ sudo systemctl enable --now umi-public-pilot-controller.service
 
 Start these services before adding the pilot label to any existing issue. Confirm
 from the controller log and state database that it is idle and has not prepared a
-case or contacted a miner. Then check the R2 Worker, `https://api.umi.vision/health`,
-and the immutable public result origin before announcing enrollment or adding the
-pilot label to existing issues.
+case or contacted a miner. Then check the R2 Worker,
+`https://api.umi.vision/api/v1/network`, and the immutable public result origin
+before announcing enrollment or adding the pilot label to existing issues.
 
 Stopping the controller stops new case preparation and request issuance. Stopping
 the spool does not lose an archive: files remain in `incoming` or `processing` and
