@@ -12,16 +12,25 @@ scoring window, model-quality benchmark, activation gate, validator input, or
 weight result. The clip and references are public, so its score has no ranking
 meaning.
 
-Submitting the issue joins a manual scheduling queue. The coordinator does not
-poll the miner or send ongoing requests. Each scheduled case sends at most one
-request after the two readiness replies described below.
+Enrollment is open to every verified registered SN78 miner hotkey without a
+validator permit. There is no exclusive pilot slot, and one miner does not wait
+for another miner's offer to expire. The coordinator does not poll miners or send
+ongoing requests. A miner starts its pilot by posting `READY FOR CASE` on its
+enrollment issue when it is available. Each miner may complete at most one pilot
+in this campaign, and each case sends at most one request after the two readiness
+replies described below.
+
+The coordinator currently prepares no more than two cases and issues one live
+request at a time. Ready miners are processed in reply order when several are
+waiting. This bounded issuance order protects the coordinator host and does not
+reserve or deny pilot eligibility.
 
 ## Public workflow
 
 1. The miner opens the public pilot issue form with its SN78 UID, hotkey,
    platform, inference device, and model revision.
-2. UMI verifies the finalized registration, posts the intended UMI revision and
-   setup instructions, and asks the miner for a `READY FOR CASE` reply.
+2. UMI verifies the finalized registration and posts the intended UMI revision
+   and setup instructions. The miner does not need a separate slot offer.
 3. The miner prepares its TLS endpoint and dependencies, then posts
    `READY FOR CASE` only when it can load a fresh case promptly and remain online
    through reveal. Enrollment by itself does not start a timer or request traffic.
@@ -65,6 +74,11 @@ enrollment issue. The `prepare` command signs and verifies a domain-separated
 32-byte possession challenge before reading the current timelock round or creating
 the case directory. It fails if the selected wallet is address-only or does not
 match the published coordinator hotkey.
+Use one authoritative coordinator session for the campaign. Prepare no more than
+two cases at once, use a distinct `HANDOFF_ROOT` for each miner, and run only one
+case at a time on the current coordinator host. Before preparation, check the
+public feed and the coordinator's retained case and attempt records for this miner
+and campaign. Never run the same case through a second output path.
 Keep this private Bash session open for the later coordinator blocks. If the
 session is lost, set the same values again before continuing.
 
@@ -314,11 +328,12 @@ The miner must have:
 
 Release CI exercises the protocol service on Linux x86_64 and Apple Silicon
 macOS. Linux arm64 uses the same Python service but is not release-tested in CI;
-its operator must complete every install and health check before UMI schedules a
-case. Model runtime support is the model operator's responsibility. A Mac may use
-MPS in its translator, but automatic sleep must be disabled for the full case
-window. CUDA miners may use any compatible CUDA stack. The model environment does
-not have to match the UMI environment when the Unix-socket boundary is used.
+its operator must complete every install and health check before asking UMI to
+prepare a case. Model runtime support is the model operator's responsibility. A
+Mac may use MPS in its translator, but automatic sleep must be disabled for the
+full case window. CUDA miners may use any compatible CUDA stack. The model
+environment does not have to match the UMI environment when the Unix-socket
+boundary is used.
 
 The pilot HTTP clients do not inherit proxy environment variables. A hostname-only
 endpoint, shared CDN hostname, carrier-grade NAT address, or outbound-only tunnel
@@ -386,7 +401,7 @@ hung Python thread cannot be terminated safely.
 
 For a separate model environment, follow the Unix-socket contract in
 [`MINER_MODEL_INTEGRATION.md`](MINER_MODEL_INTEGRATION.md). The public pilot uses
-one coordinator slot. Start the sidecar first, then pass
+one miner inference slot. Start the sidecar first, then pass
 `--translator-unix-socket /absolute/private/path/model.sock` instead of
 `--translator`.
 
@@ -1025,5 +1040,5 @@ above.
 
 If finalized chain discovery fails before a request is issued, no pilot bundle
 exists. UMI records the preflight reason on the public enrollment issue and does
-not claim that the endpoint was tested. A fresh case may be scheduled after the
+not claim that the endpoint was tested. A fresh case may be prepared after the
 operator fixes the registration or axon.
