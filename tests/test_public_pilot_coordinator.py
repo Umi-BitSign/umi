@@ -54,6 +54,15 @@ from umi.public_pilot_journal import (
 from .factories import dev_wallet
 
 
+def test_public_pilot_runbook_binds_r2_handoffs_to_the_archive_digest() -> None:
+    runbook = Path(__file__).resolve().parents[1] / "docs" / "PUBLIC_ENDPOINT_MINER_PILOT.md"
+    text = runbook.read_text(encoding="utf-8")
+
+    assert "public-pilot-cases/ARCHIVE_SHA256/sealed-case.tar.gz" in text
+    assert "MUST be new and MUST NOT be overwritten" in text
+    assert "without repository or R2 credentials" in text
+
+
 def test_coordinator_possession_preflight_accepts_the_expected_private_hotkey() -> None:
     wallet = dev_wallet("//PublicPilotCoordinatorPossession")
     hotkey = wallet.hotkey.ss58_address

@@ -203,12 +203,14 @@ Post the archive, archive SHA-256, manifest SHA-256, exact 40-character UMI
 revision, coordinator SS58 hotkey, miner UID and SS58 hotkey, both rounds, and both
 UTC times on the issue. The archive is not coordinator-signed. Its hash and the
 coordinator identity must therefore come through UMI's authenticated announcement.
-Use a new comment from the UMI organization operator account and attach the
-archive through GitHub's issue UI. Do not replace the attachment or edit the
-comment after the handoff. Copy the resulting attachment URL, download it without
-using repository credentials, and verify its SHA-256 before asking the miner to
-proceed. A changed case gets a new comment and new hashes; the old handoff remains
-visible.
+Use a new comment from the UMI organization operator account. Publish the archive
+either through GitHub's issue UI or at the public R2 key
+`public-pilot-cases/ARCHIVE_SHA256/sealed-case.tar.gz`. The digest-keyed R2 object
+MUST be new and MUST NOT be overwritten. Do not edit the handoff comment. Download
+the announced URL without repository or R2 credentials and verify its SHA-256
+before asking the miner to proceed. The issue comment and announced digest remain
+authoritative if an off-chain host later changes. A changed case gets a new URL,
+comment, and hashes; the old handoff remains visible.
 
 After the miner posts `READY TO ISSUE`, independently run the finalized-chain
 preflight in [Expose and announce the endpoint](#expose-and-announce-the-endpoint).
@@ -532,10 +534,10 @@ Run the local and public health checks below with
 
 ## Verify the sealed case
 
-UMI sends a `.tar.gz` attachment and both announced hashes only after the operator
-is ready. Copy the public attachment URL from UMI's unedited issue comment. The
-default case leaves 30 minutes for setup and five minutes for the response, then
-waits one minute before reveal. Do not reuse an expired case.
+UMI sends a `.tar.gz` attachment or digest-keyed public R2 URL and both announced
+hashes only after the operator is ready. Copy the public URL from UMI's unedited
+issue comment. The default case leaves 30 minutes for setup and five minutes for
+the response, then waits one minute before reveal. Do not reuse an expired case.
 
 ```bash
 set -euo pipefail
