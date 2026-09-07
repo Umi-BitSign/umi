@@ -1,0 +1,88 @@
+name: Public calibration validator enrollment
+description: Apply to operate a weight-disabled, audit-publishing SN78 calibration validator.
+title: "[Validator calibration] UID "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the [inactive validator operator guide](https://github.com/Umi-BitSign/umi/blob/main/docs/SHADOW_CALIBRATION_OPERATOR.md) first. Apple Silicon operators should also read the [macOS validator guide](https://github.com/Umi-BitSign/umi/blob/main/docs/MACOS_VALIDATOR_OPERATOR.md). Enrollment is public, but wallet files, keys, passwords, seeds, mirror bearers, and tunnel credentials are not.
+
+  - type: input
+    id: uid
+    attributes:
+      label: SN78 UID
+      description: Current decimal UID at a finalized block.
+      placeholder: "110"
+    validations:
+      required: true
+
+  - type: input
+    id: hotkey
+    attributes:
+      label: Validator hotkey
+      description: Public SS58 hotkey registered at that UID.
+      placeholder: 5G...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Deployment target
+      options:
+        - Linux x86_64
+        - Apple Silicon via UMI Linux container
+    validations:
+      required: true
+
+  - type: textarea
+    id: capacity
+    attributes:
+      label: Host capacity
+      description: State the machine class, CPU count, RAM, accelerator if any, dedicated storage, region, and expected availability. The coordinator will generate the exact capacity statement for hotkey signature.
+      placeholder: Dedicated host; 16 CPU; 64 GiB RAM; no accelerator; 2 TiB SSD; EU; always on.
+    validations:
+      required: true
+
+  - type: input
+    id: audit_origin
+    attributes:
+      label: Proposed audit origin
+      description: Public HTTPS hostname that will expose only released replay bundles.
+      placeholder: https://audit-validator-name.umi.vision
+    validations:
+      required: true
+
+  - type: input
+    id: administration
+    attributes:
+      label: Independent administration statement
+      description: Identify the operator organization or pseudonymous team and disclose any shared control, funding, infrastructure, or keys with another UMI validator or publisher.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Required confirmations
+      options:
+        - label: This hotkey currently has an SN78 validator permit and I control it.
+          required: true
+        - label: I understand public calibration is weight-disabled and this process will not submit UMI translation weights.
+          required: true
+        - label: I will run only the signed policy and target-specific release assigned to this hotkey.
+          required: true
+        - label: I can keep the validator and its audit origin available through each assigned reveal and evidence-retention interval.
+          required: true
+        - label: I will publish replayable terminal bundles and signed resource measurements for every scheduled window.
+          required: true
+        - label: I have not included a seed, keyfile, password, wallet path, bearer, private endpoint credential, or other secret in this issue.
+          required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Operator notes
+      description: Optional public scheduling or deployment details. Do not include secrets.
+    validations:
+      required: false

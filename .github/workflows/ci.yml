@@ -232,6 +232,76 @@ jobs:
           .venv/bin/umi-public-pilot-miner --help
           .venv/bin/umi-shadow-release-resolve-miner --help
 
+  macos-validator-container:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the revision-bound Linux validator runtime used on Apple Silicon
+        run: |
+          UMI_IMAGE="umi-validator:${GITHUB_SHA}"
+          docker build --pull --platform linux/amd64 \
+            --build-arg "UMI_GIT_REVISION=${GITHUB_SHA}" \
+            --file deploy/macos-validator/Dockerfile \
+            --tag "$UMI_IMAGE" \
+            .
+          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$UMI_IMAGE")" = "$GITHUB_SHA"
+
+      - name: Check the bounded container without mounting a wallet or release
+        run: |
+          UMI_IMAGE="umi-validator:${GITHUB_SHA}"
+          docker run --rm --platform linux/amd64 \
+            --user "$(id -u):$(id -g)" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 64 \
+            --memory 1g \
+            --cpus 1 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777 \
+            "$UMI_IMAGE" version | tee /tmp/umi-validator-version.txt
+          grep -Fx "umi_git_revision=${GITHUB_SHA}" /tmp/umi-validator-version.txt
+          grep -Fx 'machine=x86_64' /tmp/umi-validator-version.txt
+          grep -Fx 'kernel=Linux' /tmp/umi-validator-version.txt
+          grep -Fx 'validator_entrypoints_ready=1' /tmp/umi-validator-version.txt
+
+      - name: Smoke-test persistent volumes and the loopback audit origin
+        run: |
+          export UMI_HOST_UID="$(id -u)"
+          export UMI_HOST_GID="$(id -g)"
+          export UMI_GIT_REVISION="${GITHUB_SHA}"
+          export UMI_DEPLOYMENT_ID="ci-${GITHUB_SHA}"
+          export UMI_VALIDATOR_IMAGE="umi-validator:${GITHUB_SHA}"
+          export UMI_RELEASE_ROOT=/tmp/umi-release
+          export UMI_OPERATOR_INPUT_ROOT=/tmp/umi-operator-input
+          export UMI_WALLET_ROOT=/tmp/umi-wallets
+          export UMI_AUDIT_PUBLISHER_INPUT_ROOT=/tmp/umi-publisher-input
+          export UMI_EXPECTED_AUTHORITY_HOTKEY=5ExpectedAuthority
+          export UMI_VALIDATOR_HOTKEY=5ExpectedValidator
+          export UMI_VALIDATOR_ACCOUNT_HEX=2222222222222222222222222222222222222222222222222222222222222222
+          export UMI_AUDIT_ORIGIN_PORT=18093
+          mkdir -p \
+            "$UMI_RELEASE_ROOT" \
+            "$UMI_OPERATOR_INPUT_ROOT" \
+            "$UMI_WALLET_ROOT" \
+            "$UMI_AUDIT_PUBLISHER_INPUT_ROOT"
+          docker compose --file deploy/macos-validator/compose.yaml config --quiet
+          docker compose --file deploy/macos-validator/compose.yaml \
+            run --rm --no-deps volume-init init-volumes
+          trap 'docker compose --file deploy/macos-validator/compose.yaml stop audit-origin' EXIT
+          docker compose --file deploy/macos-validator/compose.yaml \
+            up --detach --no-deps audit-origin
+          for attempt in $(seq 1 30); do
+            status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              "http://127.0.0.1:${UMI_AUDIT_ORIGIN_PORT}/not-a-public-route" || true)"
+            [ "$status" = 404 ] && break
+            sleep 1
+          done
+          test "$status" = 404
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --request POST "http://127.0.0.1:${UMI_AUDIT_ORIGIN_PORT}/not-a-public-route")" = 405
+
   executable-conformance:
     runs-on: ubuntu-latest
 

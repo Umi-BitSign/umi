@@ -17,6 +17,7 @@ protocol extension.
 - [public observer API contract](docs/DASHBOARD_API.md)
 - [miner model integration](docs/MINER_MODEL_INTEGRATION.md)
 - [Apple Silicon miner operator](docs/MACOS_MINER_OPERATOR.md)
+- [Apple Silicon validator operator](docs/MACOS_VALIDATOR_OPERATOR.md)
 - [publisher batch operator](docs/PUBLISHER_BATCH_OPERATOR.md)
 - [publisher availability operator](docs/PUBLISHER_AVAILABILITY_OPERATOR.md)
 - [reference mirror and delivery service](docs/MIRROR_SERVICE_OPERATOR.md)
@@ -96,11 +97,13 @@ shared virtual-address region, so local component tooling on macOS still needs a
 outer memory sandbox when it inspects untrusted media. Public validator releases
 target Linux.
 
-Apple Silicon is supported as a miner-only target through an additive native
-finality artifact covered by the base release signatures. The signed miner
-template and resolver bind the Darwin binary, build report, license closure,
-policy, chain specification, wheel, and lockfile. This does not enable or imply a
-Darwin validator runtime. See the [macOS miner operator guide](docs/MACOS_MINER_OPERATOR.md).
+Apple Silicon is supported as a native miner target through an additive finality
+artifact covered by the base release signatures. A Mac can also operate a
+validator through the supplied fixed-resource Linux container, using the same
+signed `linux/amd64` release target as the initial Linux cohort. This does not
+enable or imply a host-native Darwin validator runtime. See the
+[macOS miner guide](docs/MACOS_MINER_OPERATOR.md) and
+[macOS validator guide](docs/MACOS_VALIDATOR_OPERATOR.md).
 
 The remaining weight-activation gates are external evidence and governance work,
 not missing inactive-validator code. They include independent publishers and

@@ -5,6 +5,9 @@ artifact is the GRANDPA finality observer used to admit validator requests. Mode
 inference for the initial reference model runs through its tested asynchronous
 in-process translator and uses Metal Performance Shaders when available. The public
 validator runtime remains limited to the signed static Linux targets.
+Apple Silicon operators can run that validator inside the bounded Linux container
+described in [MACOS_VALIDATOR_OPERATOR.md](MACOS_VALIDATOR_OPERATOR.md); this does
+not turn Darwin itself into a validator target.
 
 This separation is deliberate. A miner receives already bounded request metadata,
 fetches one policy-sized clip, checks finality, and returns a sealed response. A
@@ -286,40 +289,12 @@ hypotheses before reveal.
 
 ## Supported Mac Studio validator route
 
-A Mac Studio can host a conforming validator inside a dedicated native ARM64
-Linux virtual machine. This is a Linux validator deployment hosted by a Mac, not a
-Darwin validator. Apple Virtualization through Colima is one workable route:
-
-```bash
-brew install colima
-colima start \
-  --profile umi-validator \
-  --arch aarch64 \
-  --vm-type vz \
-  --cpu 16 \
-  --memory 64 \
-  --disk 250
-colima ssh --profile umi-validator -- uname -m
-```
-
-Choose CPU, memory, and disk values from the validator capacity statement rather
-than copying the example. `uname -m` inside the VM must report `aarch64`. Do not
-enable Rosetta or use QEMU emulation for the validator.
-
-Copy the signed `aarch64-unknown-linux-musl` release from the host mount into the
-VM's own filesystem, then verify it inside the VM. Keep validator state, wallet,
-mirror headers, databases, audit output, and temporary media on the VM disk, not
-on a macOS shared mount. Build the Python environment and materialize the private
-operator configuration inside the VM by following the
-[shadow calibration operator guide](SHADOW_CALIBRATION_OPERATOR.md).
-
-Every validator process stays inside that VM, including the Python runtime,
-smoldot finality observer, storage-proof verifier, static FFmpeg and FFprobe,
-mirror retrieval, transcript anchors, and audit publication. Before joining
-public calibration, the operator still needs a registered validator hotkey with a
-live permit, the authority-signed release and local bindings, a signed capacity
-statement matching the VM resources, current in-VM conformance, and full in-VM
-deadline and load evidence. Hosting Linux on the Mac waives none of those gates.
+The single supported Apple Silicon validator deployment for the initial public
+cohort is the bounded `linux/amd64` Docker Desktop route in
+[MACOS_VALIDATOR_OPERATOR.md](MACOS_VALIDATOR_OPERATOR.md). It uses the same signed
+target as the x86_64 Linux validators. Do not substitute a native ARM64 Linux VM,
+Rosetta-based Colima profile, or host-native Darwin process unless a later signed
+release and its operator guide explicitly select that target for the whole cohort.
 
 ## Host-native validator boundary
 

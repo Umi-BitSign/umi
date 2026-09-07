@@ -1,0 +1,34 @@
+# This build has an intentionally tiny allowlist. Ignored local credentials and
+# multi-gigabyte Rust build trees must never enter the Docker daemon's context.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!src/**
+!deploy/
+!deploy/macos-validator/
+!deploy/macos-validator/Dockerfile
+!deploy/macos-validator/container-entrypoint.sh
+
+# Defense in depth for ignored files accidentally placed below an allowed path.
+**/.env
+**/.env.*
+**/.envrc
+**/.bittensor/
+**/wallets/
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pem
+**/*.pfx
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.egg-info/
+**/.mypy_cache/
+**/.pytest_cache/
+**/build/
+**/target/

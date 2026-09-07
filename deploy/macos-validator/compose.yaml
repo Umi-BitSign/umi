@@ -1,0 +1,203 @@
+name: umi-macos-validator-${UMI_DEPLOYMENT_ID:?set UMI_DEPLOYMENT_ID}
+
+x-runtime: &runtime
+  image: ${UMI_VALIDATOR_IMAGE:?set UMI_VALIDATOR_IMAGE}
+  pull_policy: never
+  build:
+    context: ../..
+    dockerfile: deploy/macos-validator/Dockerfile
+    args:
+      UMI_GIT_REVISION: ${UMI_GIT_REVISION:?set UMI_GIT_REVISION}
+  platform: ${UMI_VALIDATOR_PLATFORM:-linux/amd64}
+  user: "${UMI_HOST_UID:?set UMI_HOST_UID}:${UMI_HOST_GID:?set UMI_HOST_GID}"
+  read_only: true
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 512
+  mem_limit: ${UMI_VALIDATOR_MEMORY_LIMIT:-12g}
+  cpus: ${UMI_VALIDATOR_CPUS:-8.0}
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=2147483648,mode=1777
+  environment:
+    HOME: /private/home
+    BITTENSOR_RUNTIME_CACHE_DIR: /private/cache/bittensor-runtime
+    PYTHONUNBUFFERED: "1"
+    UMI_EXPECTED_AUTHORITY_HOTKEY: ${UMI_EXPECTED_AUTHORITY_HOTKEY:?set UMI_EXPECTED_AUTHORITY_HOTKEY}
+    UMI_VALIDATOR_HOTKEY: ${UMI_VALIDATOR_HOTKEY:?set UMI_VALIDATOR_HOTKEY}
+    UMI_VALIDATOR_ACCOUNT_HEX: ${UMI_VALIDATOR_ACCOUNT_HEX:?set UMI_VALIDATOR_ACCOUNT_HEX}
+
+services:
+  volume-init:
+    image: ${UMI_VALIDATOR_IMAGE:?set UMI_VALIDATOR_IMAGE}
+    pull_policy: never
+    platform: ${UMI_VALIDATOR_PLATFORM:-linux/amd64}
+    user: "0:0"
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 256m
+    cpus: 1.0
+    environment:
+      UMI_VOLUME_UID: ${UMI_HOST_UID:?set UMI_HOST_UID}
+      UMI_VOLUME_GID: ${UMI_HOST_GID:?set UMI_HOST_GID}
+    command:
+      - init-volumes
+    volumes:
+      - validator-state:/private
+      - audit-publisher-state:/publisher-private
+      - audit-publication:/publication
+
+  bootstrap:
+    <<: *runtime
+    command:
+      - help
+    working_dir: /private
+    volumes:
+      - type: bind
+        source: ${UMI_RELEASE_ROOT:?set UMI_RELEASE_ROOT}
+        target: /release
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UMI_OPERATOR_INPUT_ROOT:?set UMI_OPERATOR_INPUT_ROOT}
+        target: /operator-input
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: validator-state
+        target: /private
+
+  validator:
+    <<: *runtime
+    command:
+      - run
+    restart: unless-stopped
+    working_dir: /private
+    volumes:
+      - type: bind
+        source: ${UMI_RELEASE_ROOT:?set UMI_RELEASE_ROOT}
+        target: /release
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UMI_OPERATOR_INPUT_ROOT:?set UMI_OPERATOR_INPUT_ROOT}
+        target: /operator-input
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UMI_WALLET_ROOT:?set UMI_WALLET_ROOT}
+        target: /wallets
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: validator-state
+        target: /private
+
+  audit-publisher:
+    <<: *runtime
+    command:
+      - audit-run
+    restart: unless-stopped
+    working_dir: /publisher-private
+    environment:
+      HOME: /publisher-private/home
+      BITTENSOR_RUNTIME_CACHE_DIR: /publisher-private/cache/bittensor-runtime
+      PYTHONUNBUFFERED: "1"
+      UMI_EXPECTED_AUTHORITY_HOTKEY: ${UMI_EXPECTED_AUTHORITY_HOTKEY:?set UMI_EXPECTED_AUTHORITY_HOTKEY}
+      UMI_VALIDATOR_HOTKEY: ${UMI_VALIDATOR_HOTKEY:?set UMI_VALIDATOR_HOTKEY}
+      UMI_VALIDATOR_ACCOUNT_HEX: ${UMI_VALIDATOR_ACCOUNT_HEX:?set UMI_VALIDATOR_ACCOUNT_HEX}
+    volumes:
+      - type: bind
+        source: ${UMI_RELEASE_ROOT:?set UMI_RELEASE_ROOT}
+        target: /release
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UMI_AUDIT_PUBLISHER_INPUT_ROOT:?set UMI_AUDIT_PUBLISHER_INPUT_ROOT}
+        target: /publisher-input
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: validator-state
+        target: /private
+        read_only: true
+      - type: volume
+        source: audit-publisher-state
+        target: /publisher-private
+      - type: volume
+        source: audit-publication
+        target: /publication
+        volume:
+          nocopy: true
+
+  audit-origin:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    user: "${UMI_HOST_UID:?set UMI_HOST_UID}:${UMI_HOST_GID:?set UMI_HOST_GID}"
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    ports:
+      - "127.0.0.1:${UMI_AUDIT_ORIGIN_PORT:-8093}:8093"
+    tmpfs:
+      - /config:rw,noexec,nosuid,nodev,size=16777216,mode=0700,uid=${UMI_HOST_UID:?set UMI_HOST_UID},gid=${UMI_HOST_GID:?set UMI_HOST_GID}
+      - /data:rw,noexec,nosuid,nodev,size=16777216,mode=0700,uid=${UMI_HOST_UID:?set UMI_HOST_UID},gid=${UMI_HOST_GID:?set UMI_HOST_GID}
+      - /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777
+    volumes:
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: audit-publication
+        target: /srv/www/umi-audits
+        read_only: true
+        volume:
+          nocopy: true
+          subpath: public
+
+volumes:
+  validator-state:
+    labels:
+      vision.umi.data-class: private-validator-state
+  audit-publisher-state:
+    labels:
+      vision.umi.data-class: private-audit-publisher-state
+  audit-publication:
+    labels:
+      vision.umi.data-class: atomic-audit-publication
