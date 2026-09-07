@@ -246,7 +246,7 @@ jobs:
             --file deploy/macos-validator/Dockerfile \
             --tag "$UMI_IMAGE" \
             .
-          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$UMI_IMAGE")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$UMI_IMAGE")" = "$GITHUB_SHA"
 
       - name: Check the bounded container without mounting a wallet or release
         run: |
