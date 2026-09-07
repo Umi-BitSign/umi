@@ -1,11 +1,12 @@
 name: Public miner endpoint pilot
 description: Request UMI's one-shot public HTTPS and signed-response interoperability test for an SN78 miner.
 title: "[Miner pilot] UID "
+labels: ["public-miner-pilot"]
 body:
   - type: markdown
     attributes:
       value: |
-        Read the [public endpoint pilot runbook](https://github.com/Umi-BitSign/umi/blob/main/docs/PUBLIC_ENDPOINT_MINER_PILOT.md) before enrolling. Use this form only for a hotkey already registered on SN78 without a validator permit. UMI resolves the UID and HTTPS axon from finalized chain state. Every verified hotkey meeting those requirements is eligible; there is no exclusive pilot slot. Enrollment does not start ongoing requests or a timed case. Post `READY FOR CASE` on this issue when you can load a fresh case promptly and stay online through reveal. Do not post seed phrases, private keys, wallet files, private model URLs, or credentials.
+        Read the [public endpoint pilot runbook](https://github.com/Umi-BitSign/umi/blob/main/docs/PUBLIC_ENDPOINT_MINER_PILOT.md) before enrolling. Use this form only for a hotkey already registered on SN78 without a validator permit. UMI resolves the UID and HTTPS axon from finalized chain state. Every verified hotkey meeting those requirements is eligible; there is no exclusive pilot slot. Enrollment does not start ongoing requests or a timed case. The bot will post an issue-bound `READY FOR CASE` payload. Sign it with `umi-public-pilot-miner authorize` and paste the command's exact output when you can load a fresh case promptly and stay online through reveal. Do not edit the issue or signed comment while an authorization is pending. The coordinator verifies the hotkey signature and finalized chain state before acting. Do not post seed phrases, private keys, wallet files, private model URLs, or credentials.
 
   - type: input
     id: uid
@@ -69,7 +70,7 @@ body:
           required: true
         - label: I understand this uses one known public clip and measures protocol and endpoint interoperability, not benchmark quality or weight eligibility.
           required: true
-        - label: I understand enrollment starts no request traffic. I will post `READY FOR CASE` only when I can load a fresh case promptly and stay online through reveal. The coordinator may briefly serialize issuance when several miners are ready.
+        - label: I understand enrollment starts no request traffic. I will sign the bot's fresh `READY FOR CASE` payload only when I can load a fresh case promptly and stay online through reveal. The coordinator may briefly serialize issuance when several miners are ready.
           required: true
         - label: I understand UMI publishes a completed outcome, or reports a verified non-feed journal after a later local failure, and will not rerun after possible issuance.
           required: true

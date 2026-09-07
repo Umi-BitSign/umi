@@ -1,0 +1,4 @@
+[Service]
+LoadCredential=github-api-token:/etc/umi/public-pilot-secrets/github-api-token
+ExecStart=
+ExecStart=/opt/umi-public-pilot/.venv/bin/umi-public-pilot-controller --config /etc/umi/public-pilot-automation.json --github-token-file %d/github-api-token --github-hmac-secret-file %d/github-auth-hmac --result-hmac-secret-file %d/result-hmac --upload-hmac-secret-file %d/upload-hmac

@@ -15,42 +15,47 @@ meaning.
 Enrollment is open to every verified registered SN78 miner hotkey without a
 validator permit. There is no exclusive pilot slot, and one miner does not wait
 for another miner's offer to expire. The coordinator does not poll miners or send
-ongoing requests. A miner starts its pilot by posting `READY FOR CASE` on its
-enrollment issue when it is available. Each miner may complete at most one pilot
-in this campaign, and each case sends at most one request after the two readiness
-replies described below.
+ongoing requests. The issue bot posts a fresh payload for each readiness step.
+The miner starts its pilot by signing the `READY FOR CASE` payload with the enrolled
+hotkey when it is available. Each miner may complete at most one pilot in this
+campaign, and each case sends at most one request after the two signed readiness
+proofs described below. Bare `READY FOR CASE` and `READY TO ISSUE` comments do not
+authorize the coordinator.
 
-The coordinator currently prepares no more than two cases and issues one live
-request at a time. Ready miners are processed in reply order when several are
-waiting. This bounded issuance order protects the coordinator host and does not
-reserve or deny pilot eligibility.
+The coordinator issues one live request at a time. Signed issuance authorizations
+for already prepared cases take priority; within the same stage, miners are
+processed in authorization order. This bounded order protects the coordinator host
+and does not reserve or deny pilot eligibility.
 
 ## Public workflow
 
 1. The miner opens the public pilot issue form with its SN78 UID, hotkey,
    platform, inference device, and model revision.
-2. UMI verifies the finalized registration and posts the intended UMI revision
-   and setup instructions. The miner does not need a separate slot offer.
-3. The miner prepares its TLS endpoint and dependencies, then posts
-   `READY FOR CASE` only when it can load a fresh case promptly and remain online
-   through reveal. Enrollment by itself does not start a timer or request traffic.
-4. The coordinator proves that its local wallet can sign for the published UMI
-   coordinator hotkey. Only then does it create a fresh timed case bound to that
-   coordinator and the enrolled miner.
-5. UMI posts the sealed case archive, archive SHA-256, exact UMI Git revision,
-   response-close round, and reveal round on the issue. The archive contains no
-   plaintext references.
+2. The bot posts a random, issue-bound `READY FOR CASE` payload, the pinned UMI
+   revision, and its expiration. Enrollment by itself starts no timer or request
+   traffic.
+3. When ready to load a fresh case, the issue owner signs that exact payload with
+   the enrolled miner hotkey and posts the command's single-line output without
+   editing it.
+4. The coordinator verifies the signature and finalized SN78 registration. It
+   also proves that its local wallet controls the published coordinator hotkey,
+   then creates one fresh timed case bound to both hotkeys.
+5. The bot posts the sealed case URL, archive and manifest SHA-256 digests,
+   response-close round, reveal round, and a separate `READY TO ISSUE` payload.
+   The archive contains no plaintext references.
 6. The miner verifies the archive, starts the exact-case service on loopback,
-   exposes it through the chain-announced TLS endpoint, and posts
-   `READY TO ISSUE` on the issue.
-7. UMI resolves the UID, hotkey, permit, and axon again from one finalized SDK
-   snapshot. It sends one authenticated request to that exact origin. There is no
-   URL override.
+   exposes it through the chain-announced TLS endpoint, and signs the exact
+   `READY TO ISSUE` payload. This proof binds the case manifest, endpoint origin,
+   and prior case authorization.
+7. UMI verifies the second hotkey signature and resolves the UID, hotkey, permit,
+   and axon again from one finalized SDK snapshot. It sends one authenticated
+   request to that exact origin. There is no URL override.
 8. After reveal, UMI publishes the successful response or ordinary canonical
    request failure if the remaining local steps finish. An exceptional reveal,
    request-send, scoring, attachment, or publication failure leaves a verified
    non-feed attempt journal. UMI reports that incomplete state and does not rerun
-   the case.
+   the case. A missing result never creates a retry authorization: the coordinator
+   must recover and publish a terminal or incomplete result first.
 
 Open a request at:
 
@@ -59,9 +64,23 @@ Open a request at:
 Never post a seed phrase, private key, wallet file, password, private model URL,
 or credential in the issue or case handoff.
 
-## UMI coordinator handoff
+The issue owner must post each signed proof from the same GitHub account that
+opened the enrollment. That account check prevents another GitHub user from
+advancing the issue. Hotkey control comes from the signature, which the coordinator
+verifies independently. Do not edit the issue or a signed proof comment while its
+authorization is pending. If the issue body changes, the bot will not reuse the
+old binding.
 
-Only the UMI coordinator operator runs this section. Use a clean checkout at the
+## Manual coordinator procedure (disabled during bot automation)
+
+> [!WARNING]
+> Do not run the `prepare` or `run` commands in this section for an issue handled
+> by the public-pilot bot and automation controller. The controller is the sole
+> execution path for that deployment. Running this manual path at the same time
+> could create a second case or request path. This section is retained only for a
+> deliberately declared manual fallback after the bot and controller are stopped.
+
+Only the UMI coordinator operator uses this fallback. Use a clean checkout at the
 revision that will be announced and a coordinator hotkey whose public SS58 address
 is already pinned in UMI's public announcement channel. Run the coordinator with
 the exact Python environment used by the observer. The observer replays every
@@ -69,11 +88,12 @@ configured pilot in one process, so a different Python, Unicode, `regex`,
 Bittensor, or scoring-source version cannot be added to the existing feed.
 Set `PILOT_FEED_CONFIG=''` only when the observer has never served a pilot. When
 the public API already lists a pilot, use its deployed config path.
-Do not create the timed case until the miner has posted `READY FOR CASE` on the
-enrollment issue. The `prepare` command signs and verifies a domain-separated
-32-byte possession challenge before reading the current timelock round or creating
-the case directory. It fails if the selected wallet is address-only or does not
-match the published coordinator hotkey.
+Do not create the timed case from a bare readiness comment. Wait until the issue
+bot has accepted the miner's signed `READY FOR CASE` proof and emitted the
+HMAC-authenticated authorization marker. The `prepare` command signs and verifies
+a domain-separated 32-byte possession challenge before reading the current
+timelock round or creating the case directory. It fails if the selected wallet is
+address-only or does not match the published coordinator hotkey.
 Use one authoritative coordinator session for the campaign. Prepare no more than
 two cases at once, use a distinct `HANDOFF_ROOT` for each miner, and run only one
 case at a time on the current coordinator host. Before preparation, check the
@@ -213,21 +233,20 @@ printf 'UMI revision: %s\nmanifest SHA-256: %s\narchive SHA-256: %s\n' \
   "$UMI_REVISION" "$CASE_MANIFEST_SHA256" "$CASE_ARCHIVE_SHA256"
 ```
 
-Post the archive, archive SHA-256, manifest SHA-256, exact 40-character UMI
-revision, coordinator SS58 hotkey, miner UID and SS58 hotkey, both rounds, and both
-UTC times on the issue. The archive is not coordinator-signed. Its hash and the
-coordinator identity must therefore come through UMI's authenticated announcement.
-Use a new comment from the UMI organization operator account. Publish the archive
-either through GitHub's issue UI or at the public R2 key
-`public-pilot-cases/ARCHIVE_SHA256/sealed-case.tar.gz`. The digest-keyed R2 object
-MUST be new and MUST NOT be overwritten. Do not edit the handoff comment. Download
-the announced URL without repository or R2 credentials and verify its SHA-256
-before asking the miner to proceed. The issue comment and announced digest remain
-authoritative if an off-chain host later changes. A changed case gets a new URL,
-comment, and hashes; the old handoff remains visible.
+The automation controller uploads the archive as a create-only object at
+`/public-pilot-cases/ARCHIVE_SHA256/sealed-case.tar.gz`, then uploads an
+HMAC-authenticated `case_ready` result bound to the GitHub authorization. The
+issue bot accepts only that configured public R2 origin and exact digest-keyed
+path. The digest-keyed object MUST be new and MUST NOT be overwritten. The bot
+posts the archive URL, both SHA-256 digests, pinned revision, endpoint, and
+schedule from the authenticated result. Do not attach an alternate archive or
+post a manual readiness handoff. Before allowing the run to continue, download
+the bot-announced URL and verify its archive digest. The immutable archive is
+publicly readable without repository or R2 credentials.
 
-After the miner posts `READY TO ISSUE`, independently run the finalized-chain
-preflight in [Expose and announce the endpoint](#expose-and-announce-the-endpoint).
+After the issue bot accepts the signed `READY TO ISSUE` proof, independently run
+the finalized-chain preflight in
+[Expose and announce the endpoint](#expose-and-announce-the-endpoint).
 Confirm that at least 300 seconds remain before the announced response-close time.
 The `run` command enforces this guard, so readiness must arrive before the nominal
 30-minute setup allowance ends. If less time remains, let the case expire and
@@ -366,12 +385,40 @@ python3.12 -m venv "$PILOT_UV_ENV"
 python3.12 -m venv .venv
 "$PILOT_UV_ENV/bin/uv" sync --locked
 .venv/bin/python -m umi.public_pilot_miner --help >/dev/null
+.venv/bin/umi-public-pilot-miner authorize --help >/dev/null
 .venv/bin/python -m umi.public_pilot_coordinator --help >/dev/null
 ```
 
 Keep the checkout detached and clean until the result is complete. The published
 bundle records the coordinator's scoring environment. A miner response separately
 binds the model revision declared below.
+
+## Sign the READY FOR CASE payload
+
+The bot's challenge comment shows the exact UMI revision, campaign ID, expiration,
+and a `Challenge payload` token. Check those visible fields, then copy only the
+token into the command below. Use the wallet name and hotkey alias that resolve to
+the public miner hotkey in the enrollment issue.
+
+```bash
+set -euo pipefail
+export PILOT_ROOT="$HOME/umi-public-pilot"
+export READY_FOR_CASE_PAYLOAD='BASE64URL_TOKEN_FROM_BOT_COMMENT'
+export MINER_WALLET=YOUR_WALLET_NAME
+export MINER_HOTKEY=YOUR_HOTKEY_NAME
+
+"$PILOT_ROOT/umi/.venv/bin/umi-public-pilot-miner" authorize \
+  --payload-token "$READY_FOR_CASE_PAYLOAD" \
+  --wallet-name "$MINER_WALLET" \
+  --hotkey "$MINER_HOTKEY" \
+  --wallet-path "$HOME/.bittensor/wallets"
+```
+
+The command checks the canonical payload encoding, field types, campaign, expiry,
+and wallet identity before signing. It prints one line beginning
+`UMI-PILOT-READINESS-V1`. Post that line as a new issue comment with no code fence,
+prefix, suffix, or extra whitespace. Do not edit it. The signature authorizes case
+preparation only. It does not authorize a request.
 
 ## Connect a model
 
@@ -549,8 +596,8 @@ Run the local and public health checks below with
 
 ## Verify the sealed case
 
-UMI sends a `.tar.gz` attachment or digest-keyed public R2 URL and both announced
-hashes only after the operator is ready. Copy the public URL from UMI's unedited
+UMI publishes a digest-keyed public R2 URL and both announced hashes only after the
+operator is ready. Copy the public URL from UMI's unedited
 issue comment. The default case leaves 30 minutes for setup and five minutes for
 the response, then waits one minute before reveal. Do not reuse an expired case.
 
@@ -558,7 +605,7 @@ the response, then waits one minute before reveal. Do not reuse an expired case.
 set -euo pipefail
 umask 077
 export PILOT_ROOT="$HOME/umi-public-pilot"
-export CASE_ARCHIVE_URL='HTTPS_GITHUB_ATTACHMENT_URL_FROM_UMI'
+export CASE_ARCHIVE_URL='HTTPS_R2_URL_FROM_THE_UMI_BOT'
 export CASE_ARCHIVE="$PILOT_ROOT/case.tar.gz"
 export CASE_ARCHIVE_PART="$PILOT_ROOT/.case.tar.gz.download"
 export CASE_ARCHIVE_SHA256=64_LOWERCASE_HEX_FROM_UMI
@@ -570,7 +617,7 @@ test ! -e "$CASE_ARCHIVE_PART"
 curl --fail --location --show-error --silent \
   --proto '=https' \
   --proto-redir '=https' \
-  --max-filesize 16777216 \
+  --max-filesize 100663296 \
   --max-time 60 \
   --output "$CASE_ARCHIVE_PART" \
   "$CASE_ARCHIVE_URL"
@@ -579,63 +626,16 @@ test "$(openssl dgst -sha256 "$CASE_ARCHIVE_PART" | awk '{print $NF}')" = \
 mv "$CASE_ARCHIVE_PART" "$CASE_ARCHIVE"
 
 "$PILOT_ROOT/umi/.venv/bin/python" - "$CASE_ARCHIVE" "$CASE_ROOT" <<'PY'
-import os
-import shutil
 import sys
-import tarfile
 from pathlib import Path
 
-archive = Path(sys.argv[1]).resolve(strict=True)
-destination = Path(sys.argv[2]).resolve(strict=False)
-staging = destination.with_name(f".{destination.name}.extract")
-if destination.exists() or staging.exists():
-    raise SystemExit("case destination or extraction staging path already exists")
-if archive.stat().st_size > 16 * 1024 * 1024:
-    raise SystemExit("case archive exceeds the 16 MiB compressed-size limit")
+from umi.public_pilot_archive import extract_evidence_archive
 
-staging.mkdir(mode=0o700)
-try:
-    with tarfile.open(archive, mode="r:gz") as bundle:
-        members = bundle.getmembers()
-        names: set[str] = set()
-        total_size = 0
-        root_is_directory = False
-        if not members or len(members) > 1024:
-            raise ValueError("case archive has an invalid member count")
-        for member in members:
-            name = member.name.rstrip("/")
-            parts = name.split("/")
-            if (
-                not name
-                or name.startswith("/")
-                or any(part in {"", ".", ".."} for part in parts)
-                or any(ord(character) < 0x20 or ord(character) == 0x7F for character in name)
-                or parts[0] != "sealed-case"
-                or member.issym()
-                or member.islnk()
-                or not (member.isfile() or member.isdir())
-                or name in names
-            ):
-                raise ValueError(f"unsafe case archive member: {member.name!r}")
-            names.add(name)
-            root_is_directory |= name == "sealed-case" and member.isdir()
-            if member.isfile():
-                if member.size < 0:
-                    raise ValueError("case archive member has a negative size")
-                total_size += member.size
-                if total_size > 64 * 1024 * 1024:
-                    raise ValueError("case archive exceeds the 64 MiB expanded-size limit")
-        if not root_is_directory:
-            raise ValueError("case archive lacks its sealed-case top-level directory")
-        bundle.extractall(staging, members=members, filter="data")
-    source = staging / "sealed-case"
-    if source.is_symlink() or not source.is_dir():
-        raise ValueError("extracted case root is unsafe")
-    os.replace(source, destination)
-    staging.rmdir()
-except BaseException:
-    shutil.rmtree(staging, ignore_errors=True)
-    raise
+extract_evidence_archive(
+    Path(sys.argv[1]),
+    Path(sys.argv[2]),
+    archive_root="sealed-case",
+)
 PY
 
 test "$(openssl dgst -sha256 "$CASE_ROOT/manifest.json" | awk '{print $NF}')" = \
@@ -892,10 +892,33 @@ printf '%s\n' "$CHAIN_RESULT" | jq \
     finalized_block_number, finalized_block_hash}'
 ```
 
-Post `ready`, the finalized block number, and finalized block hash from
-`CHAIN_RESULT` on the enrollment issue. Do not post the case contents or any
-secret. UMI resolves the endpoint again from finalized chain state; the
-coordinator has no command-line endpoint override.
+Compare `CHAIN_RESULT` with the bot's `READY TO ISSUE` challenge. The challenge
+must name the same literal-IP HTTPS origin and the manifest SHA-256 from the case
+you loaded. It also binds the prior case authorization. If any value differs, do
+not sign it.
+
+Copy the new `Challenge payload` token and sign it with the same miner hotkey:
+
+```bash
+set -euo pipefail
+export PILOT_ROOT="$HOME/umi-public-pilot"
+export READY_TO_ISSUE_PAYLOAD='BASE64URL_TOKEN_FROM_BOT_COMMENT'
+export MINER_WALLET=YOUR_WALLET_NAME
+export MINER_HOTKEY=YOUR_HOTKEY_NAME
+
+"$PILOT_ROOT/umi/.venv/bin/umi-public-pilot-miner" authorize \
+  --payload-token "$READY_TO_ISSUE_PAYLOAD" \
+  --wallet-name "$MINER_WALLET" \
+  --hotkey "$MINER_HOTKEY" \
+  --wallet-path "$HOME/.bittensor/wallets"
+```
+
+Post the command's exact single-line `UMI-PILOT-READINESS-V1 ...` output as a
+new comment without other text. Do not edit the issue or proof comment while the
+authorization is pending. This is the one-shot request authorization. UMI resolves
+the endpoint again from finalized chain state; the coordinator has no command-line
+endpoint override. You may post the finalized block number and hash separately for
+operator context, but that prose does not authorize issuance.
 
 ## What UMI publishes
 
@@ -931,16 +954,18 @@ Public results appear only under `GET https://api.umi.vision/api/v1/pilots`. The
 never populate `/windows`, change the translation leaderboard, or activate
 weights.
 
-After the exact public checks in `COMPONENT_PILOT.md` pass, comment on the
-enrollment issue with the outcome classification, pilot ID, pilot-detail URL,
-solutions URL, manifest URL, and replay command. Close the issue only after those
-URLs work without GitHub or observer credentials. Do not summarize a
-`signed_error` or `failed` result as a successful translation.
+After the exact public checks in `COMPONENT_PILOT.md` pass, the controller uploads
+one immutable, HMAC-authenticated `pilot_complete` result. Scheduled issue-bot
+reconciliation posts its fixed summary and evidence URL if the direct workflow
+run ended first. Close the issue only after the evidence and observer URLs work
+without GitHub or observer credentials. An outcome classified as `signed_error`
+or `failed` is not a successful translation.
 
-If request sending raises unexpectedly, or a later local reveal, attachment, or
-publication step fails, the coordinator operator verifies the retained journal and
-posts its non-feed summary on the enrollment issue. This is a manual handoff, not
-an automatic CLI publication. The summary does not appear under `/pilots`.
+If request sending raises after possible contact, or a later local reveal,
+attachment, or publication step fails, the controller verifies and uploads the
+retained journal and an authenticated `pilot_incomplete` result. The bot posts a
+fixed non-feed summary and attempt-journal URL. That summary does not appear under
+`/pilots`, carries no replayable score, and does not permit a retry.
 
 ## Restore or clear the serving record
 

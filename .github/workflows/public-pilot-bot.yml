@@ -1,0 +1,62 @@
+name: Public pilot GitHub boundary
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: public-pilot-github-boundary-${{ github.repository_id }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      (github.event_name == 'schedule') ||
+      (github.event_name == 'workflow_dispatch') ||
+      (
+        contains(github.event.issue.labels.*.name, 'public-miner-pilot') &&
+        (
+          (github.event_name != 'issue_comment') ||
+          (
+            github.event.comment.user.type == 'User' &&
+            github.event.comment.user.id == github.event.issue.user.id
+          )
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Reconcile public pilot issue state
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          PUBLIC_PILOT_AUTH_HMAC_KEY_B64: ${{ secrets.PUBLIC_PILOT_AUTH_HMAC_KEY_B64 }}
+          PUBLIC_PILOT_RESULT_HMAC_KEY_B64: ${{ secrets.PUBLIC_PILOT_RESULT_HMAC_KEY_B64 }}
+          PUBLIC_PILOT_PUBLIC_ORIGIN: ${{ vars.PUBLIC_PILOT_PUBLIC_ORIGIN }}
+          PUBLIC_PILOT_COORDINATOR_HOTKEY: ${{ vars.PUBLIC_PILOT_COORDINATOR_HOTKEY }}
+          UMI_CAMPAIGN_ID: 483f38fc41356d3272bf95a0e47ae1f0aadbc1fec7ac2b5014631ce5097b847a
+          UMI_REVISION: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}
+          PUBLIC_PILOT_CHALLENGE_TTL_SECONDS: "86400"
+          PUBLIC_PILOT_DIRECT_POLL_SECONDS: "30"
+          PUBLIC_PILOT_POLL_INTERVAL_SECONDS: "5"
+        run: python tools/public_pilot_github_action.py

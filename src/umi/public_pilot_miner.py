@@ -6,6 +6,8 @@ import argparse
 import ipaddress
 import logging
 import re
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -18,6 +20,11 @@ from .miner import MinerRuntime, _identity, _uvicorn_limits, create_app
 from .miner_admission import ExactComponentWindowAuthority
 from .miner_resources import SQLiteMinerResourceLedger
 from .public_pilot_campaign import load_public_pilot_campaign
+from .public_pilot_readiness import (
+    parse_public_pilot_readiness_payload_token,
+    public_pilot_readiness_marker,
+    sign_public_pilot_readiness,
+)
 from .video import HttpVideoFetcher
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -217,7 +224,11 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=("Serve one exact UMI component-pilot case on loopback for a public TLS proxy")
+        description=("Serve one exact UMI component-pilot case on loopback for a public TLS proxy"),
+        epilog=(
+            "Use 'umi-public-pilot-miner authorize --help' to sign a public-pilot "
+            "readiness challenge."
+        ),
     )
     parser.add_argument("--case", type=Path, required=True, help="sealed prepared-case directory")
     parser.add_argument("--wallet-name", required=True)
@@ -253,9 +264,45 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def _authorize_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="umi-public-pilot-miner authorize",
+        description="Sign one exact public-pilot readiness challenge with the miner hotkey",
+    )
+    parser.add_argument(
+        "--payload-token",
+        required=True,
+        help="unpadded base64url RFC8785 challenge payload from the coordinator",
+    )
+    parser.add_argument("--wallet-name", required=True)
+    parser.add_argument("--hotkey", required=True)
+    parser.add_argument("--wallet-path", default="~/.bittensor/wallets")
+    return parser
+
+
+def _authorize(argv: Sequence[str]) -> None:
+    parser = _authorize_parser()
+    args = parser.parse_args(argv)
+    try:
+        payload = parse_public_pilot_readiness_payload_token(args.payload_token)
+
+        import bittensor as bt
+
+        wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path)
+        proof = sign_public_pilot_readiness(payload, wallet=wallet)
+        marker = public_pilot_readiness_marker(proof)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        parser.exit(2, f"public-pilot readiness authorization failed: {error}\n")
+    print(marker, flush=True)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["authorize"]:
+        _authorize(arguments[1:])
+        return
     parser = _parser()
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
     try:
         args.listen_host = _require_loopback(args.listen_host)
         if isinstance(args.port, bool) or not 1 <= args.port <= 65_535:

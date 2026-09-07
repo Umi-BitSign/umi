@@ -75,10 +75,10 @@ jobs:
         run: uv pip check --python .venv/bin/python
 
       - name: Lint
-        run: uv run --locked ruff check src tests neurons
+        run: uv run --locked ruff check src tests neurons tools
 
       - name: Check formatting
-        run: uv run --locked ruff format --check src tests neurons
+        run: uv run --locked ruff format --check src tests neurons tools
 
       - name: Test
         run: uv run --locked pytest
@@ -100,7 +100,10 @@ jobs:
           .venv/bin/umi-publisher-availability --help
           .venv/bin/umi-publisher-pool-anchor --help
           .venv/bin/umi-public-pilot --help
+          .venv/bin/umi-public-pilot-controller --help
           .venv/bin/umi-public-pilot-miner --help
+          .venv/bin/umi-public-pilot-publication --help
+          .venv/bin/umi-public-pilot-spool --help
           .venv/bin/umi-protocol --help
           .venv/bin/umi-shadow-release --help
           .venv/bin/umi-shadow-release-finalize --help
@@ -112,6 +115,30 @@ jobs:
           .venv/bin/umi-validator-live --help
           .venv/bin/umi-validator-live-configure --help
           .venv/bin/umi-validator-live-reconcile --help
+
+  public-pilot-r2-uploader:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/public-pilot-automation/r2-uploader
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: deploy/public-pilot-automation/r2-uploader/package-lock.json
+
+      - name: Install locked Worker dependencies
+        run: npm ci
+
+      - name: Audit Worker dependencies
+        run: npm audit --audit-level=high
+
+      - name: Test and build Worker
+        run: npm run check
 
   substrate-proof-verifier:
     runs-on: ubuntu-latest

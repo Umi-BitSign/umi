@@ -417,12 +417,75 @@ async def test_public_endpoint_pilot_rejects_uid_change_before_contact(
         )
 
     monkeypatch.setattr(coordinator_module, "discover_miner_finalized", fake_discovery)
-    with pytest.raises(RuntimeError, match="UID"):
+    with pytest.raises(ValueError, match="UID"):
         await run_public_endpoint_pilot(
             case_root,
             tmp_path / "result",
             wallet=validator_wallet,
         )
+
+
+@pytest.mark.asyncio
+async def test_public_endpoint_pilot_rejects_unsigned_case_or_origin_change_before_contact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator_wallet = dev_wallet("//PublicPilotAuthorizedValidator")
+    miner_wallet = dev_wallet("//PublicPilotAuthorizedMiner")
+    case_root = tmp_path / "case"
+    prepare_public_pilot_case(
+        case_root,
+        coordinator_hotkey=validator_wallet.hotkey.ss58_address,
+        expected_miner_uid=236,
+        expected_miner_hotkey=miner_wallet.hotkey.ss58_address,
+        current_round=bt.timelock.current_round(),
+    )
+    _manifest, manifest_bytes = EvidenceStore(case_root).load_manifest_with_bytes()
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    endpoint = FinalizedMinerEndpoint(
+        hotkey=miner_wallet.hotkey.ss58_address,
+        uid=236,
+        origin="https://8.8.8.8:443",
+        validator_permit=False,
+        network="finney",
+        genesis_block_hash=("0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"),
+        finalized_block_number=99,
+        finalized_block_hash="0x" + "44" * 32,
+        finalized_block_timestamp_ms=1_788_609_600_123,
+    )
+    contacted = False
+
+    async def fake_discovery(*_args, **_kwargs):
+        return endpoint
+
+    async def should_not_contact(*_args, **_kwargs):
+        nonlocal contacted
+        contacted = True
+        raise AssertionError("miner was contacted")
+
+    monkeypatch.setattr(coordinator_module, "discover_miner_finalized", fake_discovery)
+    monkeypatch.setattr(coordinator_module, "send_prepared_request", should_not_contact)
+
+    with pytest.raises(ValueError, match="authorized manifest digest"):
+        await run_public_endpoint_pilot(
+            case_root,
+            tmp_path / "wrong-case-result",
+            wallet=validator_wallet,
+            expected_case_manifest_sha256="00" * 32,
+            expected_origin=endpoint.origin,
+        )
+    with pytest.raises(ValueError, match="miner-authorized origin"):
+        await run_public_endpoint_pilot(
+            case_root,
+            tmp_path / "wrong-origin-result",
+            wallet=validator_wallet,
+            expected_case_manifest_sha256=manifest_sha256,
+            expected_origin="https://8.8.4.4:443",
+        )
+
+    assert contacted is False
+    assert not (tmp_path / "wrong-case-result").exists()
+    assert not (tmp_path / "wrong-origin-result").exists()
 
 
 @pytest.mark.asyncio
@@ -469,6 +532,42 @@ async def test_response_headroom_guard_runs_before_journal_or_miner_contact(
     output = tmp_path / "result"
     with pytest.raises(ValueError, match="fewer than 300 seconds"):
         await run_public_endpoint_pilot(case_root, output, wallet=validator_wallet)
+
+    assert contacted is False
+    assert not output.exists()
+    assert not (tmp_path / "result.incomplete").exists()
+
+
+@pytest.mark.asyncio
+async def test_attempt_started_callback_is_durable_and_can_abort_before_contact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator_wallet, _miner_wallet, case_root, _truth, endpoint = _prepared_failure_case(tmp_path)
+    contacted = False
+
+    async def fake_discovery(*_args, **_kwargs):
+        return endpoint
+
+    async def should_not_contact(*_args, **_kwargs):
+        nonlocal contacted
+        contacted = True
+        raise AssertionError("miner was contacted")
+
+    def abort_after_durable_start(journal: Path) -> None:
+        assert load_attempt_journal(journal).manifest.phase == "attempt_started"
+        raise RuntimeError("state transition failed")
+
+    monkeypatch.setattr(coordinator_module, "discover_miner_finalized", fake_discovery)
+    monkeypatch.setattr(coordinator_module, "send_prepared_request", should_not_contact)
+    output = tmp_path / "result"
+    with pytest.raises(RuntimeError, match="state transition failed"):
+        await run_public_endpoint_pilot(
+            case_root,
+            output,
+            wallet=validator_wallet,
+            on_attempt_started=abort_after_durable_start,
+        )
 
     assert contacted is False
     assert not output.exists()

@@ -1,0 +1,55 @@
+[Unit]
+Description=UMI GitHub-authorized public-pilot coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sam
+Group=sam
+SupplementaryGroups=umi-pilot
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=umi-public-pilot-controller
+StateDirectoryMode=0700
+LoadCredential=github-auth-hmac:/etc/umi/public-pilot-secrets/github-auth-hmac.hex
+LoadCredential=result-hmac:/etc/umi/public-pilot-secrets/result-hmac.hex
+LoadCredential=upload-hmac:/etc/umi/public-pilot-secrets/upload-hmac.hex
+ExecStart=/opt/umi-public-pilot/.venv/bin/umi-public-pilot-controller --config /etc/umi/public-pilot-automation.json --github-hmac-secret-file %d/github-auth-hmac --result-hmac-secret-file %d/result-hmac --upload-hmac-secret-file %d/upload-hmac
+Restart=always
+RestartSec=15s
+TimeoutStopSec=45s
+TasksMax=192
+LimitNOFILE=4096
+LimitCORE=0
+MemoryHigh=1610612736
+MemoryMax=2147483648
+OOMPolicy=stop
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/umi /opt/umi-public-pilot /home/sam/umi-coordinator/private/wallets
+ReadWritePaths=/var/lib/umi-public-pilot-controller /var/spool/umi-public-pilot/incoming
+InaccessiblePaths=/var/lib/umi-observer /var/lib/umi-public-pilot-spool
+
+[Install]
+WantedBy=multi-user.target

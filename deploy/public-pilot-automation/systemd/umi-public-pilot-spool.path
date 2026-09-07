@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for completed UMI public-pilot evidence archives
+
+[Path]
+PathExistsGlob=/var/spool/umi-public-pilot/incoming/*.tar.gz
+Unit=umi-public-pilot-spool.service
+
+[Install]
+WantedBy=multi-user.target

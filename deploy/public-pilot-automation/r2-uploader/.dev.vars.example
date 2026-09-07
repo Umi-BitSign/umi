@@ -1,0 +1,3 @@
+# Type-generation placeholder only. Local development must use a fresh 64-character
+# lowercase hexadecimal secret in an ignored .dev.vars file.
+UPLOAD_HMAC_SECRET=replace-with-64-lowercase-hex

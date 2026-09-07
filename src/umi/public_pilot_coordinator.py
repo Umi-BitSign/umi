@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
@@ -329,6 +330,9 @@ async def run_public_endpoint_pilot(
     network: str = "finney",
     request_timeout_seconds: float = 240.0,
     reveal_timeout_seconds: float | None = None,
+    expected_case_manifest_sha256: str | None = None,
+    expected_origin: str | None = None,
+    on_attempt_started: Callable[[Path], None] | None = None,
 ) -> Path:
     """Contact the finalized chain endpoint once and publish its replayable outcome."""
 
@@ -336,6 +340,13 @@ async def run_public_endpoint_pilot(
     if network != "finney":
         raise ValueError("public endpoint pilots are pinned to the Finney mainnet")
     campaign = load_public_pilot_campaign(case_root)
+    _case_manifest, case_manifest_bytes = EvidenceStore(case_root).load_manifest_with_bytes()
+    case_manifest_sha256 = hashlib.sha256(case_manifest_bytes).hexdigest()
+    if (
+        expected_case_manifest_sha256 is not None
+        and case_manifest_sha256 != expected_case_manifest_sha256
+    ):
+        raise ValueError("sealed case manifest does not match the authorized manifest digest")
     coordinator_hotkey = _wallet_hotkey(wallet)
     if account_id32(coordinator_hotkey) != account_id32(campaign.coordinator_hotkey):
         raise ValueError("coordinator wallet does not match the sealed campaign case")
@@ -350,11 +361,13 @@ async def run_public_endpoint_pilot(
         netuid=78,
     )
     if account_id32(endpoint.hotkey) != account_id32(campaign.expected_miner_hotkey):
-        raise RuntimeError("finalized chain discovery returned another miner hotkey")
+        raise ValueError("finalized chain discovery returned another miner hotkey")
     if endpoint.uid != campaign.expected_miner_uid:
-        raise RuntimeError("finalized chain UID does not match the sealed campaign case")
+        raise ValueError("finalized chain UID does not match the sealed campaign case")
     if endpoint.validator_permit:
-        raise RuntimeError("finalized chain identity has a validator permit")
+        raise ValueError("finalized chain identity has a validator permit")
+    if expected_origin is not None and endpoint.origin != expected_origin:
+        raise ValueError("finalized chain endpoint differs from the miner-authorized origin")
     response_headroom = _require_response_headroom(campaign.response_close_round)
     request_timeout = _validated_request_timeout(
         request_timeout_seconds,
@@ -389,6 +402,14 @@ async def run_public_endpoint_pilot(
             endpoint=endpoint,
             case_manifest_sha256=hashlib.sha256(case_manifest_bytes).hexdigest(),
         )
+        if on_attempt_started is not None:
+            try:
+                on_attempt_started(journal.root)
+            except BaseException:
+                journal = None
+                shutil.rmtree(incomplete, ignore_errors=True)
+                _fsync_directory(destination.parent)
+                raise
         outcome = await send_prepared_request(
             prepared_attempt,
             miner_url=endpoint.origin,
@@ -466,6 +487,7 @@ def replay_public_endpoint_pilot(bundle_root: Path) -> dict[str, Any]:
         "status": "public_endpoint_pilot_replay_ok",
         "campaign_id": CAMPAIGN_ID,
         "bundle_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "coordinator_hotkey": verified.attestation.coordinator_hotkey,
         "miner_uid": verified.attestation.expected_miner_uid,
         "miner_hotkey": verified.attestation.miner_hotkey,
         "announced_origin": verified.attestation.announced_origin,
@@ -474,6 +496,8 @@ def replay_public_endpoint_pilot(bundle_root: Path) -> dict[str, Any]:
         "finalized_block_number": verified.attestation.chain_observation.block_number,
         "finalized_block_hash": verified.attestation.chain_observation.block_hash,
         "outcome": verified.attestation.outcome_classification,
+        "failure_code": verified.attestation.failure_code,
+        "request_digest": verified.attestation.request_digest,
         "summary": score_summary(replay.scoring),
         "translation_weights_active": False,
         "protocol_conformance": False,
@@ -557,6 +581,16 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--network", choices=("finney",), default="finney")
     run.add_argument("--request-timeout", type=float, default=240.0)
     run.add_argument(
+        "--expected-case-manifest-sha256",
+        default=None,
+        help="optional exact case-manifest digest authorized by the miner",
+    )
+    run.add_argument(
+        "--expected-origin",
+        default=None,
+        help="optional exact chain-announced endpoint origin authorized by the miner",
+    )
+    run.add_argument(
         "--reveal-timeout",
         type=float,
         default=None,
@@ -633,6 +667,8 @@ def main() -> None:
                     network=args.network,
                     request_timeout_seconds=args.request_timeout,
                     reveal_timeout_seconds=args.reveal_timeout,
+                    expected_case_manifest_sha256=args.expected_case_manifest_sha256,
+                    expected_origin=args.expected_origin,
                 )
             )
             result = replay_public_endpoint_pilot(manifest.parent)
