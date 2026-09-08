@@ -23,6 +23,27 @@ _LOWER_HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK_BYTES = 1024 * 1024
 
 
+def _is_systemd_credential(path: Path, metadata: os.stat_result) -> bool:
+    """Recognize systemd's root-owned, service-scoped credential mount."""
+
+    credential_directory_value = os.environ.get("CREDENTIALS_DIRECTORY")
+    if not credential_directory_value:
+        return False
+    credential_directory_path = Path(credential_directory_value)
+    if not credential_directory_path.is_absolute():
+        return False
+    try:
+        credential_directory = credential_directory_path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return (
+        path.parent == credential_directory
+        and metadata.st_uid == 0
+        and metadata.st_gid == 0
+        and stat.S_IMODE(metadata.st_mode) in {0o400, 0o440}
+    )
+
+
 def _normalized_https_origin(value: str, *, label: str) -> str:
     if not isinstance(value, str) or len(value) > 512:
         raise ValueError(f"{label} must be a bounded HTTPS origin")
@@ -50,17 +71,17 @@ def _normalized_https_origin(value: str, *, label: str) -> str:
 
 
 def load_hex_secret(path: Path) -> bytes:
-    """Load one owner-only 32-byte HMAC key from a regular file."""
+    """Load one tightly permissioned 32-byte HMAC key from a regular file."""
 
     resolved = path.expanduser().resolve(strict=True)
     descriptor = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         metadata = os.fstat(descriptor)
+        owner_only = metadata.st_uid == os.geteuid() and not metadata.st_mode & 0o077
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_mode & 0o077
+            or not (owner_only or _is_systemd_credential(resolved, metadata))
             or metadata.st_size > MAX_UPLOAD_SECRET_FILE_BYTES
         ):
             raise ValueError("public-pilot secret file is unsafe")

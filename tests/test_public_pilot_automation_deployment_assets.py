@@ -71,6 +71,9 @@ def test_observer_drop_in_makes_spool_managed_paths_read_only() -> None:
     drop_in = (ASSETS / "umi-observer-public-pilot.conf").read_text()
 
     assert "[Service]" in drop_in
+    assert "ExecStart=\n" in drop_in
+    assert "ExecStart=/opt/umi-observer/.venv/bin/python -m umi.observer" in drop_in
+    assert "--pilot-feed-config ${UMI_OBSERVER_PILOT_FEED_CONFIG}" in drop_in
     assert "ReadOnlyPaths=/var/lib/umi-observer/pilot-feed /var/lib/umi-observer/pilots" in drop_in
 
 
@@ -83,8 +86,14 @@ def test_install_runbook_matches_the_actual_host_and_pinned_checkout() -> None:
     assert 'git -C "$release_checkout" checkout --detach "$umi_revision"' in runbook
     assert "uv==0.12.9" in runbook
     assert "UV_PROJECT_ENVIRONMENT=/opt/umi-public-pilot/.venv" in runbook
+    assert "observer_python=/opt/umi-observer/.venv/bin/python" in runbook
+    assert "observer_base_python=" in runbook
+    assert '--python "$observer_base_python"' in runbook
+    assert 'test "$observer_environment" = "$automation_environment"' in runbook
     assert "jq -cSj --arg revision" in runbook
     assert "/opt/umi-public-pilot/source/deploy/public-pilot-automation/systemd/" in runbook
     assert "/var/lib/umi-observer/pilot-feed/observer-pilot-feed.json" in runbook
     assert "UMI_OBSERVER_PILOT_FEED_CONFIG" in runbook
     assert "umi-observer-public-pilot.conf" in runbook
+    assert "grep -Fzxq -- '--pilot-feed-config'" in runbook
+    assert "https://api.umi.vision/api/v1/network" in runbook

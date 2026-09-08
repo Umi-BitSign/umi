@@ -67,10 +67,26 @@ python3 -m venv /home/sam/umi-uv-bootstrap
 test "$(/home/sam/umi-uv-bootstrap/bin/uv --version)" = 'uv 0.12.9'
 sudo install -o root -g root -m 0755 \
   /home/sam/umi-uv-bootstrap/bin/uv /usr/local/bin/uv
+observer_python=/opt/umi-observer/.venv/bin/python
+test -x "$observer_python"
+observer_base_python="$($observer_python -c \
+  'import sys; print(sys._base_executable)')"
+test -x "$observer_base_python"
 sudo env UV_PROJECT_ENVIRONMENT=/opt/umi-public-pilot/.venv \
-  /usr/local/bin/uv sync --project /opt/umi-public-pilot/source --locked --no-dev
+  /usr/local/bin/uv sync --project /opt/umi-public-pilot/source \
+  --python "$observer_base_python" --locked --no-dev
+observer_environment="$($observer_python -c \
+  'import json; from umi.scoring import scoring_environment; print(json.dumps(scoring_environment(), sort_keys=True, separators=(",", ":")))')"
+automation_environment="$(/opt/umi-public-pilot/.venv/bin/python -c \
+  'import json; from umi.scoring import scoring_environment; print(json.dumps(scoring_environment(), sort_keys=True, separators=(",", ":")))')"
+test "$observer_environment" = "$automation_environment"
 rm -rf /home/sam/umi-uv-bootstrap
 ```
+
+The observer replays every imported bundle and requires the bundle's complete
+scoring-environment fingerprint. Reusing its exact Python interpreter prevents a
+patch-version mismatch from passing the spool and then taking the public observer
+offline.
 
 Install the group and directories before starting either unit:
 
@@ -194,6 +210,18 @@ sudo systemd-analyze verify /etc/systemd/system/umi-public-pilot-controller.serv
 sudo systemctl daemon-reload
 sudo systemctl enable --now umi-public-pilot-spool.service umi-public-pilot-spool.path
 sudo systemctl enable --now umi-public-pilot-controller.service
+observer_pid="$(systemctl show umi-observer.service -p MainPID --value)"
+test "$observer_pid" -gt 1
+sudo grep -Fzxq -- '--pilot-feed-config' "/proc/$observer_pid/cmdline"
+sudo grep -Fzxq -- \
+  '/var/lib/umi-observer/pilot-feed/observer-pilot-feed.json' \
+  "/proc/$observer_pid/cmdline"
+systemctl show umi-observer.service -p ReadOnlyPaths --value | \
+  grep -Fq '/var/lib/umi-observer/pilot-feed /var/lib/umi-observer/pilots'
+curl --fail --silent --show-error --max-time 30 \
+  https://api.umi.vision/api/v1/network >/dev/null
+curl --fail --silent --show-error --max-time 30 \
+  'https://api.umi.vision/api/v1/pilots?limit=256' >/dev/null
 ```
 
 Start these services before adding the pilot label to any existing issue. Confirm

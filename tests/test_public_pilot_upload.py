@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -124,6 +125,57 @@ def test_public_pilot_secret_loader_requires_owner_only_regular_file(tmp_path: P
     os.link(secret_file, alias)
     with pytest.raises(ValueError, match="unsafe"):
         load_hex_secret(secret_file)
+
+
+def test_public_pilot_secret_loader_accepts_only_scoped_systemd_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential_directory = tmp_path / "credentials"
+    credential_directory.mkdir()
+    secret_file = credential_directory / "upload.secret"
+    secret_file.write_text("ab" * 32 + "\n")
+    secret_file.chmod(0o600)
+    original_fstat = os.fstat
+    systemd_metadata = {"mode": 0o440, "uid": 0, "gid": 0}
+
+    def systemd_fstat(descriptor: int) -> SimpleNamespace:
+        metadata = original_fstat(descriptor)
+        return SimpleNamespace(
+            st_mode=(metadata.st_mode & ~0o777) | systemd_metadata["mode"],
+            st_nlink=metadata.st_nlink,
+            st_uid=systemd_metadata["uid"],
+            st_gid=systemd_metadata["gid"],
+            st_size=metadata.st_size,
+        )
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credential_directory))
+    monkeypatch.setattr(os, "fstat", systemd_fstat)
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    assert load_hex_secret(secret_file) == bytes.fromhex("ab" * 32)
+
+    systemd_metadata["mode"] = 0o400
+    assert load_hex_secret(secret_file) == bytes.fromhex("ab" * 32)
+    systemd_metadata["mode"] = 0o440
+
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY")
+    with pytest.raises(ValueError, match="unsafe"):
+        load_hex_secret(secret_file)
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", "credentials")
+    with pytest.raises(ValueError, match="unsafe"):
+        load_hex_secret(secret_file)
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "other-credentials"))
+    with pytest.raises(ValueError, match="unsafe"):
+        load_hex_secret(secret_file)
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credential_directory))
+    for field, unsafe_value in (("mode", 0o640), ("mode", 0o444), ("uid", 1), ("gid", 1)):
+        original_value = systemd_metadata[field]
+        systemd_metadata[field] = unsafe_value
+        with pytest.raises(ValueError, match="unsafe"):
+            load_hex_secret(secret_file)
+        systemd_metadata[field] = original_value
 
 
 def test_result_upload_authenticates_envelope_and_path_binding() -> None:
