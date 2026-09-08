@@ -47,9 +47,8 @@ if scoring_environment() != expected:
 PY
 RUN printf '%s\n' "${UMI_GIT_REVISION}" > /opt/umi-image-revision \
     && chmod 0444 /opt/umi-image-revision \
-    && groupadd --gid 65532 umi \
-    && useradd --uid 65532 --gid 65532 --home-dir /home/umi --create-home \
-         --shell /usr/sbin/nologin umi
+    && mkdir -p /home/umi \
+    && chown 65532:65532 /home/umi
 
 LABEL org.opencontainers.image.source="https://github.com/Umi-BitSign/umi" \
       org.opencontainers.image.revision="${UMI_GIT_REVISION}" \
