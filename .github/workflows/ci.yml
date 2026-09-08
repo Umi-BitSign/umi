@@ -90,6 +90,7 @@ jobs:
 
       - name: Check console entry points
         run: |
+          .venv/bin/umi-bootstrap-weights --help
           .venv/bin/umi-component-pilot --help
           .venv/bin/umi-demo --help
           .venv/bin/umi-miner --help
@@ -330,6 +331,38 @@ jobs:
           test "$status" = 404
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --request POST "http://127.0.0.1:${UMI_AUDIT_ORIGIN_PORT}/not-a-public-route")" = 405
+
+  bootstrap-validator-container:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the revision-bound bootstrap validator
+        run: |
+          UMI_IMAGE="umi-bootstrap-validator:${GITHUB_SHA}"
+          docker build --pull --platform linux/amd64 \
+            --build-arg "UMI_GIT_REVISION=${GITHUB_SHA}" \
+            --file deploy/bootstrap-validator/Dockerfile \
+            --tag "$UMI_IMAGE" \
+            .
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$UMI_IMAGE")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ .Config.User }}' "$UMI_IMAGE")" = "65532:65532"
+
+      - name: Check the bootstrap operator entry point and revision marker
+        run: |
+          UMI_IMAGE="umi-bootstrap-validator:${GITHUB_SHA}"
+          docker run --rm --platform linux/amd64 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 64 \
+            --memory 1g \
+            --cpus 1 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777 \
+            "$UMI_IMAGE" --help
+          test "$(docker run --rm --platform linux/amd64 \
+            --entrypoint cat "$UMI_IMAGE" /opt/umi-image-revision)" = "$GITHUB_SHA"
 
   executable-conformance:
     runs-on: ubuntu-latest

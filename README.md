@@ -24,16 +24,21 @@ protocol extension.
 - [public validator audit-bundle publication](docs/AUDIT_BUNDLE_PUBLICATION_OPERATOR.md)
 - [inactive live-shadow release operator](docs/SHADOW_CALIBRATION_OPERATOR.md)
 - [inactive calibration launch checklist](docs/INACTIVE_LAUNCH_CHECKLIST.md)
+- [seven-day bootstrap service-weight addendum](docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
+- [bootstrap service-weight operator](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
 - [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
 ## Current status
 
-SN78 is active on mainnet, but UMI translation weights are not. The repository is
-ready to share for implementation review, miner integration, component tests, and
-offline shadow rehearsal. The calibration profile is published, but public
-calibration has not started and the repository is not ready for weight activation.
+SN78 is active on mainnet, but UMI translation weights are not. Public endpoint
+pilots are running and their signed, replayable results are available through the
+observer API. A separately labeled seven-day bootstrap service-weight path is
+implemented and awaiting policy publication and chain cutover. It becomes live
+only after a validator's exact equal service row is revealed, applied, and
+published with its chain evidence. The bootstrap is not a translation ranking and
+receives no credit toward translation-weight activation.
 
-There are three distinct executable paths:
+There are four distinct executable paths:
 
 ```text
 component test
@@ -64,9 +69,18 @@ signed, hash-pinned release + private operator bindings
   -> persistent spent, publisher-fault, rolling-score, and monitoring state
   -> exact projected row + signed calibration or incident bundle
   -> no weight-call capability
+
+temporary bootstrap service weights
+public endpoint pilots + post-publication miner opt-ins
+  -> current registration, UID, permit, serving, and health checks
+  -> coordinator-signed, declared-complete eligibility manifest
+  -> validator anchor of the exact manifest hash
+  -> equal max-upscaled u16 service row through raw CRv4
+  -> finalized reveal, applied-row verification, and public terminal evidence
+  -> hard commit cutoff and row inactivity within the seven-day policy
 ```
 
-All three paths target the `bittensor` v11 HTTP model. They do not use the removed
+All four paths target the `bittensor` v11 HTTP model. They do not use the removed
 Axon/Dendrite/Synapse classes.
 
 The repository also supplies the publisher batch builder, availability workflow,
@@ -105,14 +119,15 @@ enable or imply a host-native Darwin validator runtime. See the
 [macOS miner guide](docs/MACOS_MINER_OPERATOR.md) and
 [macOS validator guide](docs/MACOS_VALIDATOR_OPERATOR.md).
 
-The remaining weight-activation gates are external evidence and governance work,
-not missing inactive-validator code. They include independent publishers and
-validators, miner implementation diversity and positive utility, consented
-challenge supply, metric and canary studies, validator economics, the full shadow
-soak and drills, and a later governed policy with
-`translation_weights_active: true`. The shipped release schema fixes that field to
-`false`, and the installed live runtime has no weight-call builder, signer, or
-submitter.
+The remaining translation-weight activation gates are external evidence and
+governance work, not missing inactive-validator code. They include independent
+publishers and validators, miner implementation diversity and positive utility,
+consented challenge supply, metric and canary studies, validator economics, the
+full shadow soak and drills, and a later governed policy with
+`translation_weights_active: true`. The shipped shadow release schema fixes that
+field to `false`, and the installed live-shadow runtime has no weight-call builder,
+signer, or submitter. The temporary bootstrap operator is a separate, narrowly
+bounded path governed by the public addendum.
 
 `component_test_no_weight` and `shadow_rehearsal_no_weight` remain local engineering
 results; neither is activation evidence. A correctly deployed installed path may
