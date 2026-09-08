@@ -34,23 +34,28 @@ and does not reserve or deny pilot eligibility.
 2. The bot posts a random, issue-bound `READY FOR CASE` payload, the pinned UMI
    revision, and its expiration. Enrollment by itself starts no timer or request
    traffic.
-3. When ready to load a fresh case, the issue owner signs that exact payload with
+3. Before signing, the miner publishes the stable public IP and port that will
+   serve the case as its SN78 axon and waits until that exact origin is visible in
+   finalized chain state. The case-specific service may remain stopped at this
+   point, but the coordinator must be able to bind its origin during preparation.
+4. When ready to load a fresh case, the issue owner signs that exact payload with
    the enrolled miner hotkey and posts the command's single-line output without
    editing it.
-4. The coordinator verifies the signature and finalized SN78 registration. It
-   also proves that its local wallet controls the published coordinator hotkey,
-   then creates one fresh timed case bound to both hotkeys.
-5. The bot posts the sealed case URL, archive and manifest SHA-256 digests,
+5. The coordinator verifies the signature, finalized SN78 registration, and
+   finalized axon. It also proves that its local wallet controls the published
+   coordinator hotkey, then creates one fresh timed case bound to both hotkeys and
+   the announced origin.
+6. The bot posts the sealed case URL, archive and manifest SHA-256 digests,
    response-close round, reveal round, and a separate `READY TO ISSUE` payload.
    The archive contains no plaintext references.
-6. The miner verifies the archive, starts the exact-case service on loopback,
+7. The miner verifies the archive, starts the exact-case service on loopback,
    exposes it through the chain-announced TLS endpoint, and signs the exact
    `READY TO ISSUE` payload. This proof binds the case manifest, endpoint origin,
    and prior case authorization.
-7. UMI verifies the second hotkey signature and resolves the UID, hotkey, permit,
+8. UMI verifies the second hotkey signature and resolves the UID, hotkey, permit,
    and axon again from one finalized SDK snapshot. It sends one authenticated
    request to that exact origin. There is no URL override.
-8. After reveal, UMI publishes the successful response or ordinary canonical
+9. After reveal, UMI publishes the successful response or ordinary canonical
    request failure if the remaining local steps finish. An exceptional reveal,
    request-send, scoring, attachment, or publication failure leaves a verified
    non-feed attempt journal. UMI reports that incomplete state and does not rerun
@@ -399,6 +404,11 @@ The bot's challenge comment shows the exact UMI revision, campaign ID, expiratio
 and a `Challenge payload` token. Check those visible fields, then copy only the
 token into the command below. Use the wallet name and hotkey alias that resolve to
 the public miner hotkey in the enrollment issue.
+
+Do not sign this payload until the stable HTTPS IP and port are visible as this
+hotkey's axon in finalized SN78 state. The coordinator discovers and binds that
+origin before it creates the case. The case-specific process may remain stopped
+until the sealed archive is published.
 
 ```bash
 set -euo pipefail
