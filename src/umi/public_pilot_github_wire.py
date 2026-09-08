@@ -65,6 +65,11 @@ PUBLIC_PILOT_READINESS_CONFIRMATION_PROFILES = (
     PUBLIC_PILOT_READINESS_CONFIRMATIONS,
     (*PUBLIC_PILOT_READINESS_CONFIRMATIONS[:5], PUBLIC_PILOT_READINESS_CONFIRMATIONS[6]),
     (
+        *PUBLIC_PILOT_READINESS_CONFIRMATIONS[:5],
+        _LEGACY_SCHEDULED_READINESS_CONFIRMATION,
+        PUBLIC_PILOT_READINESS_CONFIRMATIONS[6],
+    ),
+    (
         "My hotkey is registered on SN78 and has no validator permit.",
         "My HTTPS endpoint is announced on chain and serves a publicly trusted certificate "
         "for the announced IP.",

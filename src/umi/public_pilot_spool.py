@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import logging
@@ -97,6 +98,17 @@ def _require_atomic_spool_filesystem(paths: tuple[Path, ...]) -> None:
         raise ValueError(
             "pilot spool claim, retention, and quarantine directories must share a filesystem"
         )
+
+
+def _atomic_spool_rename(source: Path, destination: Path) -> None:
+    try:
+        os.rename(source, destination)
+    except OSError as error:
+        if error.errno == errno.EXDEV:
+            raise ValueError(
+                "pilot spool claim, retention, and quarantine directories must share one mount"
+            ) from error
+        raise
 
 
 @contextmanager
@@ -243,7 +255,7 @@ def _quarantine_claimed_archive(path: Path, quarantine: Path, *, reason: str) ->
         while (quarantine / f"{path.name}.invalid-{suffix}").exists():
             suffix += 1
         destination = quarantine / f"{path.name}.invalid-{suffix}"
-    os.rename(path, destination)
+    _atomic_spool_rename(path, destination)
     _fsync_directory(path.parent)
     _fsync_directory(quarantine)
     LOGGER.warning(
@@ -421,7 +433,7 @@ def consume_public_pilot_spool(
                 raise ValueError("pilot spool retained archive conflicts with the receipt")
             claimed.unlink()
         else:
-            os.rename(claimed, retained)
+            _atomic_spool_rename(claimed, retained)
         _fsync_directory(processing)
         _fsync_directory(processed)
         results.append(
@@ -448,7 +460,7 @@ def consume_public_pilot_spool(
             if os.path.lexists(claimed):
                 raise ValueError("pilot spool contains a conflicting claimed archive")
             try:
-                os.rename(candidate, claimed)
+                _atomic_spool_rename(candidate, claimed)
             except FileNotFoundError:
                 continue
             _fsync_directory(incoming)

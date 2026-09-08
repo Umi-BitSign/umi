@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import os
@@ -93,6 +94,25 @@ def test_spool_rejects_overlapping_role_directories(tmp_path: Path) -> None:
             producer_uid=os.geteuid(),
             producer_gid=os.getegid(),
         )
+
+
+def test_spool_reports_cross_mount_claim_without_copying_or_removing_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "incoming.tar.gz"
+    destination = tmp_path / "processing.tar.gz"
+    source.write_bytes(b"bounded archive")
+
+    def cross_mount_rename(_source: str | Path, _destination: str | Path) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(spool_module.os, "rename", cross_mount_rename)
+    with pytest.raises(ValueError, match="must share one mount"):
+        spool_module._atomic_spool_rename(source, destination)
+
+    assert source.read_bytes() == b"bounded archive"
+    assert not destination.exists()
 
 
 @pytest.mark.asyncio

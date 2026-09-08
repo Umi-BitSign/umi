@@ -12,7 +12,7 @@ UMask=0077
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/umi/umi-public-pilot-spool.env
-ExecStart=/opt/umi-public-pilot/.venv/bin/umi-public-pilot-spool --incoming-dir /var/spool/umi-public-pilot/incoming --processing-dir /var/lib/umi-public-pilot-spool/processing --processed-dir /var/lib/umi-public-pilot-spool/processed --quarantine-dir /var/lib/umi-public-pilot-spool/quarantine --receipts-dir /var/lib/umi-public-pilot-spool/receipts --work-root /var/lib/umi-public-pilot-spool/work --publication-root /var/lib/umi-observer/pilots --config /var/lib/umi-observer/pilot-feed/observer-pilot-feed.json --lock /var/lib/umi-public-pilot-spool/publication.lock --spool-lock /var/lib/umi-public-pilot-spool/consumer.lock --public-origin https://api.umi.vision --expected-coordinator-hotkey ${UMI_PILOT_COORDINATOR_HOTKEY} --producer-uid ${UMI_PILOT_PRODUCER_UID} --producer-gid ${UMI_PILOT_PRODUCER_GID}
+ExecStart=/opt/umi-public-pilot/.venv/bin/umi-public-pilot-spool --incoming-dir /var/spool/umi-public-pilot/incoming --processing-dir /var/spool/umi-public-pilot/consumer/processing --processed-dir /var/spool/umi-public-pilot/consumer/processed --quarantine-dir /var/spool/umi-public-pilot/consumer/quarantine --receipts-dir /var/spool/umi-public-pilot/consumer/receipts --work-root /var/spool/umi-public-pilot/consumer/work --publication-root /var/lib/umi-observer/pilots --config /var/lib/umi-observer/pilot-feed/observer-pilot-feed.json --lock /var/spool/umi-public-pilot/consumer/publication.lock --spool-lock /var/spool/umi-public-pilot/consumer/consumer.lock --public-origin https://api.umi.vision --expected-coordinator-hotkey ${UMI_PILOT_COORDINATOR_HOTKEY} --producer-uid ${UMI_PILOT_PRODUCER_UID} --producer-gid ${UMI_PILOT_PRODUCER_GID}
 ExecStartPost=+/usr/bin/systemctl try-restart umi-observer.service
 TimeoutStartSec=10min
 TasksMax=128
@@ -43,7 +43,7 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/etc/umi /opt/umi-public-pilot
-ReadWritePaths=/var/spool/umi-public-pilot/incoming /var/lib/umi-public-pilot-spool /var/lib/umi-observer/pilots /var/lib/umi-observer/pilot-feed
+ReadWritePaths=/var/spool/umi-public-pilot /var/lib/umi-observer/pilots /var/lib/umi-observer/pilot-feed
 InaccessiblePaths=/home/sam/umi-coordinator/private /var/lib/umi-public-pilot-controller
 
 [Install]

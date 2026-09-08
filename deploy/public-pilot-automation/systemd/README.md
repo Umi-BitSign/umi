@@ -19,6 +19,11 @@ the setgid incoming spool. A durable attempt-started record is written before an
 miner contact; recovery publishes the preserved non-feed journal and never repeats
 that request.
 
+Keep `incoming` and the observer-owned `consumer` subtree beneath the single
+`/var/spool/umi-public-pilot` writable mount used by the spool service. Separate
+systemd writable-path mounts can make an otherwise same-disk rename non-atomic, so
+the spool fails closed if its claim or retention move crosses a mount boundary.
+
 The campaign treats the coordinator hotkey and public R2 origin as immutable.
 Drain every pending authorization and start a new declared campaign before either
 value changes; historical results are deliberately checked against those bindings.
@@ -27,9 +32,11 @@ value changes; historical results are deliberately checked against those binding
 
 Use a root-owned checkout at the exact Git revision configured in GitHub and in
 `public-pilot-automation.json`. Do not run a moving branch from systemd.
-The coordinator host needs at least 4 GiB of RAM. Check `free -h` before installing;
-the current 1 GiB Linode size is too small to run the observer, coordinator, and
-bounded spool consumer together.
+Four GiB of RAM is the recommended production size. The serialized pilot campaign
+can run on the current 1 GiB Linode with swap enabled, provided no model, test, or
+build workload runs on the host. Stop the controller and resize before continuing
+if available memory remains below 150 MiB, swap use exceeds 256 MiB, full memory
+PSI `avg10` exceeds `0.10`, an OOM event occurs, or either observer endpoint fails.
 
 Connect with agent forwarding enabled because the deployment checkout uses the
 GitHub SSH remote:

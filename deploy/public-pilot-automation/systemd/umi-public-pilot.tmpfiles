@@ -1,10 +1,10 @@
 d /var/spool/umi-public-pilot 0750 root umi-pilot -
 d /var/spool/umi-public-pilot/incoming 2770 sam umi-pilot -
+d /var/spool/umi-public-pilot/consumer 0700 umi-observer umi-observer -
+d /var/spool/umi-public-pilot/consumer/processing 0700 umi-observer umi-observer -
+d /var/spool/umi-public-pilot/consumer/processed 0700 umi-observer umi-observer -
+d /var/spool/umi-public-pilot/consumer/quarantine 0700 umi-observer umi-observer -
+d /var/spool/umi-public-pilot/consumer/receipts 0700 umi-observer umi-observer -
+d /var/spool/umi-public-pilot/consumer/work 0700 umi-observer umi-observer -
 d /var/lib/umi-public-pilot-controller 0700 sam sam -
-d /var/lib/umi-public-pilot-spool 0700 umi-observer umi-observer -
-d /var/lib/umi-public-pilot-spool/processing 0700 umi-observer umi-observer -
-d /var/lib/umi-public-pilot-spool/processed 0700 umi-observer umi-observer -
-d /var/lib/umi-public-pilot-spool/quarantine 0700 umi-observer umi-observer -
-d /var/lib/umi-public-pilot-spool/receipts 0700 umi-observer umi-observer -
-d /var/lib/umi-public-pilot-spool/work 0700 umi-observer umi-observer -
 d /var/lib/umi-observer/pilot-feed 0700 umi-observer umi-observer -

@@ -49,7 +49,7 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/etc/umi /opt/umi-public-pilot /home/sam/umi-coordinator/private/wallets
 ReadWritePaths=/var/lib/umi-public-pilot-controller /var/spool/umi-public-pilot/incoming
-InaccessiblePaths=/var/lib/umi-observer /var/lib/umi-public-pilot-spool
+InaccessiblePaths=/var/lib/umi-observer /var/spool/umi-public-pilot/consumer
 
 [Install]
 WantedBy=multi-user.target
