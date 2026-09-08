@@ -8,9 +8,10 @@ FROM python:3.12.14-slim-bookworm@sha256:9c47360a2a0355e2da18516d0b1c2126ec22c19
 ARG TARGETPLATFORM
 ARG UMI_GIT_REVISION
 RUN test "${TARGETPLATFORM}" = "linux/amd64" \
+    && test "${#UMI_GIT_REVISION}" -eq 40 \
     && case "${UMI_GIT_REVISION}" in \
-      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; \
-      *) echo "UMI_GIT_REVISION must be 40 lowercase hexadecimal characters" >&2; exit 2 ;; \
+      *[!0-9a-f]*) echo "UMI_GIT_REVISION must be 40 lowercase hexadecimal characters" >&2; exit 2 ;; \
+      *) ;; \
     esac
 
 ENV LANG=C.UTF-8 \

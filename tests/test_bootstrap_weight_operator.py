@@ -65,6 +65,18 @@ NOW_MS = int(NOW.timestamp() * 1_000)
 BLOCK_HASH = "0x" + "12" * 32
 
 
+def test_bootstrap_container_validates_revision_length_and_charset() -> None:
+    dockerfile = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "bootstrap-validator"
+        / "Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert 'test "${#UMI_GIT_REVISION}" -eq 40' in dockerfile
+    assert "*[!0-9a-f]*)" in dockerfile
+
+
 def _signed_manifest(*, count: int = 2):
     coordinator = dev_wallet("//BootstrapOperatorCoordinator")
     policy = BootstrapWeightPolicy(
