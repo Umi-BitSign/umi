@@ -140,7 +140,8 @@ jobs:
           test "$(jq -er '.manifests | length' <<<"${index_json}")" = "1"
           test "$(jq -er '.manifests[0].platform.os' <<<"${index_json}")" = "linux"
           test "$(jq -er '.manifests[0].platform.architecture' <<<"${index_json}")" = "${ARCHITECTURE}"
-          test "$(jq -er '.manifests[0].annotations["org.opencontainers.image.ref.name"]' <<<"${index_json}")" = "${IMAGE_TAG}"
+          test "$(jq -er '.manifests[0].annotations["io.containerd.image.name"]' <<<"${index_json}")" = "${IMAGE_TAG}"
+          test "$(jq -er '.manifests[0].annotations["org.opencontainers.image.ref.name"]' <<<"${index_json}")" = "supervisor-worker-${REVISION}-${ARCHITECTURE}"
           manifest_digest="$(jq -er '.manifests[0].digest' <<<"${index_json}")"
           [[ "${manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           manifest_blob="blobs/sha256/${manifest_digest#sha256:}"
