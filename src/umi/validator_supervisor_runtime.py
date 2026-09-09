@@ -775,7 +775,7 @@ def _validated_poll_seconds(value: float) -> float:
 async def _wait_for_stop(stop_event: asyncio.Event, delay: float) -> None:
     try:
         await asyncio.wait_for(stop_event.wait(), timeout=delay)
-    except TimeoutError:
+    except asyncio.TimeoutError:
         return
 
 

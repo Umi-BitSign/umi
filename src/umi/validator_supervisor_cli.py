@@ -396,7 +396,7 @@ async def _run(config_path: Path) -> int:
                     result=result,
                 )
             print(canonical_json_bytes(_result_json(result)).decode("utf-8"), flush=True)
-            with contextlib.suppress(TimeoutError):
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=config.poll_seconds)
         return 0
     finally:

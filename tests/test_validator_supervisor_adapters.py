@@ -13,6 +13,7 @@ import httpx
 import pytest
 from bittensor.keyfiles import serialized_keypair_to_keyfile_data
 
+import umi.validator_supervisor_cli as supervisor_cli
 from tests.factories import dev_wallet
 from umi.grandpa_finality import FINNEY_BOOTSTRAP_BLOCK_NUMBER
 from umi.protocol import canonical_json_bytes
@@ -261,10 +262,12 @@ async def test_finality_reader_rejects_stale_head_and_times_out_without_a_new_on
         SimpleNamespace(), observer=observer, timeout_seconds=0.05, clock=lambda: observed
     )
     observer.records.put(_attestation(FINNEY_BOOTSTRAP_BLOCK_NUMBER + 1, observed))
-    await reader.read_finalized_block()
-    with pytest.raises(ValidatorSupervisorAdapterError, match="finalized_block_timeout"):
+    try:
         await reader.read_finalized_block()
-    await reader.stop()
+        with pytest.raises(ValidatorSupervisorAdapterError, match="finalized_block_timeout"):
+            await reader.read_finalized_block()
+    finally:
+        await reader.stop()
 
 
 @pytest.mark.asyncio
@@ -385,6 +388,82 @@ def test_process_lock_exposes_only_the_current_live_holder_identity(tmp_path: Pa
     finally:
         first.close()
     assert SupervisorProcessLock(tmp_path).holder_identity() is None
+
+
+@pytest.mark.asyncio
+async def test_supervisor_run_survives_a_normal_poll_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path).model_copy(update={"poll_seconds": 0.01})
+    Path(config.state_root).mkdir(mode=0o700)
+    calls = 0
+    stopped: list[str] = []
+
+    class EndTest(RuntimeError):
+        pass
+
+    class Adapter:
+        def __init__(self, _config: ValidatorSupervisorConfig) -> None:
+            pass
+
+        async def check_host(self) -> None:
+            pass
+
+        async def stop_worker(self) -> None:
+            stopped.append("adapter")
+
+        async def start_hold(self, *, reason_code: str) -> None:
+            assert reason_code == "process_start"
+
+    class Finality:
+        def __init__(self, _config: ValidatorSupervisorConfig) -> None:
+            pass
+
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append("finality")
+
+    class Runtime:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def reconcile(self) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise EndTest
+            return SimpleNamespace(
+                accepted_directive_sha256=None,
+                accepted_sequence=None,
+                active_mode="hold",
+                finalized_block=None,
+                prior_worker_may_have_chain_effects=False,
+                reason_code="waiting",
+                status=SimpleNamespace(value="waiting_for_activation"),
+            )
+
+        async def stop(self) -> None:
+            stopped.append("runtime")
+
+    monkeypatch.setattr(supervisor_cli, "load_validator_supervisor_config", lambda _path: config)
+    monkeypatch.setattr(supervisor_cli, "_validate_linux_systemd_profile", lambda _config: None)
+    monkeypatch.setattr(supervisor_cli, "RootlessPodmanWorkerAdapter", Adapter)
+    monkeypatch.setattr(supervisor_cli, "FinneyFinalizedBlockReader", Finality)
+    monkeypatch.setattr(supervisor_cli, "ValidatorSupervisorRuntime", Runtime)
+    loop = asyncio.get_running_loop()
+
+    def reject_signal_handler(*_args: object) -> None:
+        raise NotImplementedError
+
+    monkeypatch.setattr(loop, "add_signal_handler", reject_signal_handler)
+
+    with pytest.raises(EndTest):
+        await supervisor_cli._run(tmp_path / "ignored.json")
+    assert calls == 2
+    assert stopped == ["adapter", "runtime", "finality"]
 
 
 def test_authoring_rejects_an_output_larger_than_the_consumer_limit(tmp_path: Path) -> None:

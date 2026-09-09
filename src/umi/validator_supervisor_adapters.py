@@ -287,7 +287,7 @@ class PinnedHTTPSClient:
                     ),
                     timeout=self.timeout_seconds,
                 )
-            except TimeoutError as error:
+            except asyncio.TimeoutError as error:
                 raise ValidatorSupervisorAdapterError("https_timeout") from error
             except ValidatorSupervisorAdapterError:
                 raise
@@ -477,7 +477,7 @@ class FinneyFinalizedBlockReader:
         if task is not None:
             try:
                 await asyncio.wait_for(task, timeout=self.timeout_seconds + 5)
-            except TimeoutError as error:
+            except asyncio.TimeoutError as error:
                 raise ValidatorSupervisorAdapterError("finality_stop_timeout") from error
         self._loop = None
 
@@ -533,7 +533,7 @@ class FinneyFinalizedBlockReader:
             raise
         except ValidatorSupervisorAdapterError:
             raise
-        except TimeoutError as error:
+        except asyncio.TimeoutError as error:
             raise ValidatorSupervisorAdapterError("finalized_block_timeout") from error
         except Exception as error:
             raise ValidatorSupervisorAdapterError("finalized_block_read_failed") from error
@@ -709,7 +709,7 @@ class RootlessPodmanWorkerAdapter:
                 process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=self.stop_timeout_seconds)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 with contextlib.suppress(ProcessLookupError):
                     process.kill()
                 with contextlib.suppress(Exception):
@@ -1225,7 +1225,7 @@ async def _run_bounded_command(
 
     try:
         return await asyncio.wait_for(collect(), timeout=timeout_seconds)
-    except TimeoutError as error:
+    except asyncio.TimeoutError as error:
         process.kill()
         with contextlib.suppress(Exception):
             await process.wait()
