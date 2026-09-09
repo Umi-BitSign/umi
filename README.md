@@ -26,6 +26,7 @@ protocol extension.
 - [inactive calibration launch checklist](docs/INACTIVE_LAUNCH_CHECKLIST.md)
 - [seven-day bootstrap service-weight addendum](docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
 - [bootstrap service-weight operator](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
+- [legacy validator transition hold](docs/LEGACY_VALIDATOR_TRANSITION.md)
 - [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
 ## Current status
