@@ -109,50 +109,33 @@ participant count is not 256, the starting `(WeightsVersionKey,
 MinAllowedWeights, CommitRevealWeightsEnabled)` tuple is not exactly
 `(1, 1, true)`, or a parameter change is rate-limited.
 
-Preview the three owner changes in their required atomic order. Start with the
-version fence:
+Use btcli 11.1.0's [`tx batch`](https://www.bittensor.com/docs/tx/batch)
+command. It constructs one `Utility.batch_all` extrinsic from three stock
+`set_hyperparameter` intents. Define the ordered intent list once:
 
 ```sh
-"$BTCLI" sudo set \
+OWNER_FENCE_INTENTS='[
+  {"op":"set_hyperparameter","netuid":78,"name":"weights_version","value":4294967296},
+  {"op":"set_hyperparameter","netuid":78,"name":"min_allowed_weights","value":256},
+  {"op":"set_hyperparameter","netuid":78,"name":"commit_reveal_weights_enabled","value":false}
+]'
+```
+
+Preview the complete batch. This command does not submit anything:
+
+```sh
+"$BTCLI" tx batch \
   --network finney \
-  --netuid 78 \
-  --name weights_version \
-  --value 4294967296 \
   --wallet "$OWNER_WALLET" \
   --wallet-path "$OWNER_WALLET_ROOT" \
+  --intents "$OWNER_FENCE_INTENTS" \
+  --proxy-for self \
+  --no-mev-shield \
   --dry-run
 ```
 
-Then preview the full-row minimum:
-
-```sh
-"$BTCLI" sudo set \
-  --network finney \
-  --netuid 78 \
-  --name min_allowed_weights \
-  --value 256 \
-  --wallet "$OWNER_WALLET" \
-  --wallet-path "$OWNER_WALLET_ROOT" \
-  --dry-run
-```
-
-Finally preview the commit-reveal fence:
-
-```sh
-"$BTCLI" sudo set \
-  --network finney \
-  --netuid 78 \
-  --name commit_reveal_weights_enabled \
-  --value false \
-  --wallet "$OWNER_WALLET" \
-  --wallet-path "$OWNER_WALLET_ROOT" \
-  --dry-run
-```
-
-These are inspection commands. Do not remove `--dry-run` or submit the changes as
-three extrinsics. A gap between standalone calls would leave an avoidable race.
-The live cutover uses the pinned UMI operator to compose one
-`Utility.batch_all`. Its inner calls must be exactly, and in this order:
+The preview must describe one all-or-nothing batch with these inner calls in
+this order:
 
 ```text
 AdminUtils.sudo_set_weights_version_key(78, 4294967296)
@@ -160,43 +143,77 @@ AdminUtils.sudo_set_min_allowed_weights(78, 256)
 AdminUtils.sudo_set_commit_reveal_weights_enabled(78, false)
 ```
 
-The command must preflight a coherent finalized snapshot, record the pending
-commit count before and after the call, sign with the SN78 owner coldkey, wait for
-finalized `batch_all` success, and verify all three storage values. A pending entry
-does not block the fence; it remains subject to the drain in Section 3. Retain the
-call material, extrinsic hash, inclusion block and hash, events, finalized receipt,
-and readback.
+Abort if btcli shows standalone calls, a different signer, another subnet, a
+different value, `Utility.batch` instead of `Utility.batch_all`, or any failed
+policy check. Never submit these parameters as three separate live commands.
+The values are public owner configuration. `--proxy-for self` bypasses any saved
+proxy default, and `--no-mev-shield` keeps the submitted outer call directly
+identifiable as `Utility.batch_all` for this cutover.
+
+After reviewing the preview, run this single live command. `--json` cannot open
+an interactive confirmation, so `--yes` is explicit. The file captures btcli's
+result and transaction identifier for the historical evidence archive:
+
+```sh
+"$BTCLI" tx batch \
+  --network finney \
+  --wallet "$OWNER_WALLET" \
+  --wallet-path "$OWNER_WALLET_ROOT" \
+  --intents "$OWNER_FENCE_INTENTS" \
+  --proxy-for self \
+  --no-mev-shield \
+  --json \
+  --yes \
+  > sn78-owner-fence-btcli-result.json
+
+test -s sn78-owner-fence-btcli-result.json
+```
+
+Stock btcli returns after inclusion rather than finalization. Its JSON records the
+including `block_hash` and `extrinsic_id`; it does not report the extrinsic hash.
+Do not run the live command a second time if btcli exits unexpectedly or the
+inclusion result is unclear. Preserve `sn78-owner-fence-btcli-result.json` and
+reconcile that exact `block_hash` and `extrinsic_id` before taking another action.
+A pending weight entry does not block the fence; it remains subject to the drain
+in Section 3.
+
+The stock btcli result establishes the submitted transaction history. UMI records
+a separate read-only finalized-state attestation. The attestation verifies the
+owner mapping and all three storage values in one finalized snapshot. It does not
+load the owner wallet, submit a call, or claim that it verified which external
+extrinsic applied the values.
+
 The preflight, material, receipt, and journal schemas are
 `umi-bootstrap-owner-fence-preflight/1`,
 `umi-bootstrap-owner-fence-call-material/1`,
 `umi-bootstrap-owner-fence-receipt/1`, and
 `umi-bootstrap-owner-fence-journal/1`.
 
-Build and inspect the unsigned atomic call first. `owner-coldkey` is the public
-SS58 address, not a seed or wallet path:
+After btcli reports successful inclusion, run the read-only attestation from a
+clean pinned UMI checkout. It waits for finalized chain state and is the
+authoritative finality check. `owner-coldkey` is the public SS58 address, not a
+seed or wallet path:
 
 ```sh
 DIRECT=.venv/bin/umi-bootstrap-direct-weights
 OWNER_COLDKEY=REPLACE_WITH_SN78_OWNER_COLDKEY_SS58
 
-"$DIRECT" build-owner-fence \
+"$DIRECT" attest-owner-fence \
   --owner-coldkey "$OWNER_COLDKEY" \
-  --output /absolute/private/path/to/owner-fence-preview.json
-```
-
-Submit with new output paths and a durable private state directory. The command
-resolves and signs with the named wallet's coldkey; there is no hotkey argument:
-
-```sh
-"$DIRECT" submit-owner-fence \
   --receipt-output /absolute/private/path/to/owner-fence-receipt.json \
-  --call-material-output /absolute/private/path/to/owner-fence-submitted-call.json \
-  --state-dir /absolute/private/path/to/owner-fence-state \
-  --live-submit \
-  --acknowledgement 'APPLY SN78 DIRECT BOOTSTRAP OWNER FENCE' \
-  --wallet-name "$OWNER_WALLET" \
-  --wallet-path "$OWNER_WALLET_ROOT"
+  --call-material-output /absolute/private/path/to/owner-fence-attested-call-material.json \
+  --state-dir /absolute/private/path/to/owner-fence-state
 ```
+
+The receipt must have `classification: "already_applied"`, `extrinsic: null`,
+and `batch_all_finalized_success: false`. Those fields state the evidence boundary:
+the UMI command verified the finalized owner and tuple, while Jack's retained
+btcli JSON `block_hash` and `extrinsic_id` identify the external batch inclusion.
+`source_snapshot_pending_commit_count` and `observed_pending_commit_count` both
+refer to that same read-only finalized attestation snapshot; neither claims a
+pre-submission observation.
+The journal must end at `phase: "already_applied"`. Any other result blocks the
+drain.
 
 Capture independent readbacks after the batch finalizes:
 
@@ -207,9 +224,9 @@ curl --fail --silent --show-error https://api.umi.vision/api/v1/network \
   > sn78-observer-fenced.json
 ```
 
-The `btcli` output is an operator readback, not the finalized evidence by itself.
-Do not declare the fence active until an independent finalized observation shows
-all three exact values at one block.
+The `btcli sudo get` output reads chain head and is an operator readback, not
+finalized evidence. Do not declare the fence active until the independent UMI
+attestation shows all three exact values at one finalized block.
 
 ## 3. Drain every legacy row once
 
@@ -353,8 +370,9 @@ set containing:
 
 - this addendum, the exact UMI revision, and their hashes;
 - the before, fenced, drain, preflight, and build observations;
-- all three owner-call dry-run previews, the atomic call material, its single
-  batch extrinsic, finalized block and events, terminal receipt, and readbacks;
+- the stock btcli batch preview, retained JSON result with its `block_hash` and
+  `extrinsic_id`, its independently verified finalized block and event record,
+  the read-only atomic call material, finalized-state receipt, and readbacks;
 - the signed direct-transition authorization and its independent verification;
 - the signed eligibility manifest, every included and excluded UID with its public
   reason, every public pilot replay, endpoint observation, and miner solution;
@@ -498,10 +516,11 @@ legacy-writer migration and re-enable procedure passes.
 
 ## Abort and recovery rules
 
-- If any owner dry run or the unsigned atomic material is wrong, submit nothing.
+- If the owner batch preview or the read-only atomic material is wrong, submit
+  nothing.
 - `Utility.batch_all` must apply all three changes or revert all three. If its
   terminal result is unknown, do not submit it again or attempt an individual
-  repair. Reconcile the original transaction and private state directory first.
+  repair. Reconcile the original btcli transaction first.
   Any observed partial state is an incident and blocks the direct row.
 - If all three fenced values finalize but the drain or direct-row preflight
   fails, leave the three fenced values in place. They are the safe stopped state.

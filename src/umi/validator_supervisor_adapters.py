@@ -87,6 +87,7 @@ _HOST_ARCHITECTURE = {
     "arm64": "linux/arm64",
 }
 _HEX32_RE = re.compile(r"^[0-9a-f]{64}$")
+_BLOCK_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 
 
 class ValidatorSupervisorAdapterError(RuntimeError):
@@ -95,6 +96,24 @@ class ValidatorSupervisorAdapterError(RuntimeError):
     def __init__(self, reason_code: str) -> None:
         self.reason_code = reason_code
         super().__init__(reason_code)
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedFinalizedBlock:
+    """Exact block identity accepted by the owned GRANDPA verifier."""
+
+    number: int
+    block_hash: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.number, bool)
+            or not isinstance(self.number, int)
+            or not 1 <= self.number <= (1 << 53) - 1
+            or not isinstance(self.block_hash, str)
+            or _BLOCK_HASH_RE.fullmatch(self.block_hash) is None
+        ):
+            raise ValueError("owned finalized block identity is invalid")
 
 
 class SupervisorReleaseManifest(StrictProtocolModel):
@@ -463,6 +482,13 @@ class FinneyFinalizedBlockReader:
         self._loop = None
 
     async def read_finalized_block(self) -> int:
+        """Return one new owned finalized height for the supervisor runtime."""
+
+        return (await self.read_finalized_identity()).number
+
+    async def read_finalized_identity(self) -> OwnedFinalizedBlock:
+        """Return one new owned finalized height and its exact block hash."""
+
         await self.start()
         try:
             loop = asyncio.get_running_loop()
@@ -500,8 +526,9 @@ class FinneyFinalizedBlockReader:
                 raise ValidatorSupervisorAdapterError("finality_acceptance_stale")
             if not FINNEY_BOOTSTRAP_BLOCK_NUMBER < block.number <= (1 << 53) - 1:
                 raise ValidatorSupervisorAdapterError("finalized_block_invalid")
-            self._last_returned_height = block.number
-            return block.number
+            identity = OwnedFinalizedBlock(number=block.number, block_hash=block.hash)
+            self._last_returned_height = identity.number
+            return identity
         except asyncio.CancelledError:
             raise
         except ValidatorSupervisorAdapterError:
@@ -823,8 +850,10 @@ class RootlessPodmanWorkerAdapter:
         environment = (
             f"UMI_SUPERVISOR_DIRECTIVE_SHA256={activation.directive_sha256}",
             f"UMI_SUPERVISOR_POLICY_SHA256={activation.policy_sha256}",
+            f"UMI_SUPERVISOR_SEQUENCE={activation.sequence}",
             f"UMI_SUPERVISOR_VALID_FROM_BLOCK={activation.valid_from_block}",
             f"UMI_SUPERVISOR_VALID_THROUGH_BLOCK={activation.valid_through_block}",
+            f"UMI_RELEASE_MANIFEST_SHA256={activation.release.release_manifest_sha256}",
             "UMI_NETWORK=finney",
             "UMI_NETUID=78",
             "UMI_MECHANISM_ID=0",
@@ -1518,6 +1547,7 @@ def _cpu_limit(value: int) -> str:
 __all__ = [
     "FinneyFinalizedBlockReader",
     "HTTPSDirectiveFetcher",
+    "OwnedFinalizedBlock",
     "PinnedHTTPSClient",
     "RootlessPodmanWorkerAdapter",
     "StagedSupervisorRelease",

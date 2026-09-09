@@ -20,7 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -460,7 +460,7 @@ class OwnerFenceReceipt(StrictProtocolModel):
     observed_weights_version_key: Literal[DIRECT_MINIMUM_WEIGHTS_VERSION_KEY]
     observed_min_allowed_weights: Literal[256]
     observed_commit_reveal_enabled: Literal[False]
-    pre_submit_pending_commit_count: Annotated[int, Field(ge=0, le=_MAX_JSON_SAFE_INTEGER)]
+    source_snapshot_pending_commit_count: Annotated[int, Field(ge=0, le=_MAX_JSON_SAFE_INTEGER)]
     observed_pending_commit_count: Annotated[int, Field(ge=0, le=_MAX_JSON_SAFE_INTEGER)]
     batch_all_finalized_success: bool
     all_storage_targets_verified: Literal[True]
@@ -474,13 +474,45 @@ class OwnerFenceReceipt(StrictProtocolModel):
             self.call_material_sha256
         ):
             raise ValueError("owner fence call material hash is invalid")
+        preflight = self.call_material.preflight
+        if self.source_snapshot_pending_commit_count != preflight.pending_commit_count:
+            raise ValueError("owner fence source pending count does not match its preflight")
         if self.extrinsic is not None and self.observation_block < self.extrinsic.block_number:
             raise ValueError("owner fence observation predates inclusion")
         if self.classification == "applied":
             if self.extrinsic is None or self.batch_all_finalized_success is not True:
                 raise ValueError("applied owner fence lacks a finalized batch")
+            if preflight.target_state_classification != "requires_submission":
+                raise ValueError("applied owner fence does not start from a submission preflight")
+            if preflight.block_number >= self.extrinsic.block_number:
+                raise ValueError("owner fence submission does not follow its source snapshot")
+            if (
+                self.observation_block == self.extrinsic.block_number
+                and self.observation_block_hash != self.extrinsic.block_hash
+            ):
+                raise ValueError("owner fence inclusion observation block hash is inconsistent")
         elif self.extrinsic is not None or self.batch_all_finalized_success:
             raise ValueError("already-applied owner fence claims a submitted batch")
+        else:
+            if preflight.target_state_classification != "already_applied":
+                raise ValueError("already-applied owner fence lacks a fenced-state preflight")
+            if (
+                self.observation_block != preflight.block_number
+                or self.observation_block_hash != preflight.block_hash
+            ):
+                raise ValueError("already-applied owner fence observation is not its preflight")
+            if (
+                self.observed_weights_version_key,
+                self.observed_min_allowed_weights,
+                self.observed_commit_reveal_enabled,
+            ) != (
+                preflight.current_weights_version_key,
+                preflight.current_min_allowed_weights,
+                preflight.current_commit_reveal_enabled,
+            ):
+                raise ValueError("already-applied owner fence tuple is not its preflight")
+            if self.observed_pending_commit_count != preflight.pending_commit_count:
+                raise ValueError("already-applied owner fence pending count is not its preflight")
         return self
 
 
@@ -520,6 +552,41 @@ class OwnerFenceJournal(StrictProtocolModel):
         if (self.receipt_sha256 is not None) != (rank >= 3):
             raise ValueError("owner fence journal receipt does not match its phase")
         return self
+
+
+def _owner_fence_state_paths(state_dir: Path, owner_account: bytes) -> tuple[Path, Path]:
+    stem = f"owner-fence-{NETUID}-{DIRECT_MINIMUM_WEIGHTS_VERSION_KEY}-{owner_account.hex()}"
+    return state_dir / f".{stem}.lock", state_dir / f"{stem}.json"
+
+
+def _validate_owner_fence_paths(
+    *,
+    receipt_output: Path,
+    call_material_output: Path,
+    state_dir: Path,
+    lock_path: Path,
+    journal_path: Path,
+) -> None:
+    """Reject output layouts that can turn reserved state files into directories."""
+
+    receipt = receipt_output.resolve()
+    material = call_material_output.resolve()
+    state = state_dir.resolve()
+    lock = lock_path.resolve()
+    journal = journal_path.resolve()
+
+    if (
+        len({receipt, material, state, lock, journal}) != 5
+        or receipt in material.parents
+        or material in receipt.parents
+        or receipt in state.parents
+        or material in state.parents
+        or lock in receipt.parents
+        or journal in receipt.parents
+        or lock in material.parents
+        or journal in material.parents
+    ):
+        raise BootstrapOperatorError("owner_fence_output_state_paths_overlap")
 
 
 def build_owner_fence_call(
@@ -829,6 +896,120 @@ async def collect_owner_fence_preflight(
         )
 
 
+async def attest_owner_fence(
+    *,
+    expected_owner_coldkey: str,
+    receipt_output: Path,
+    call_material_output: Path,
+    state_dir: Path,
+    client_factory: Callable[[str], Any] | None = None,
+    finalized_timeout_seconds: float = 20.0,
+    clock: Callable[[], datetime] | None = None,
+) -> OwnerFenceReceipt:
+    """Record finalized fenced state after a separately submitted stock btcli batch.
+
+    This command is read-only with respect to the chain.  It records no external
+    extrinsic claim because the finalized storage tuple alone cannot establish
+    which transaction applied it.
+    """
+
+    if receipt_output.exists() or call_material_output.exists():
+        raise BootstrapOperatorError("owner_fence_attestation_output_exists")
+    try:
+        owner_account = account_id32(expected_owner_coldkey)
+    except (TypeError, ValueError) as error:
+        raise BootstrapOperatorError("owner_fence_expected_coldkey_invalid") from error
+    lock_path, journal_path = _owner_fence_state_paths(state_dir, owner_account)
+    _validate_owner_fence_paths(
+        receipt_output=receipt_output,
+        call_material_output=call_material_output,
+        state_dir=state_dir,
+        lock_path=lock_path,
+        journal_path=journal_path,
+    )
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if journal_path.exists():
+        raise BootstrapOperatorError("owner_fence_claim_exists_reconcile_required")
+    try:
+        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as error:
+        raise BootstrapOperatorError("owner_fence_attestation_already_in_progress") from error
+    now = clock or (lambda: datetime.now(timezone.utc))
+    factory = client_factory or (lambda network: bt.Client(network))
+    try:
+        os.write(descriptor, f"pid={os.getpid()}\n".encode("ascii"))
+        os.fsync(descriptor)
+        async with factory("finney") as client:
+            preflight = await collect_owner_fence_preflight_with_client(
+                client,
+                expected_owner_coldkey=expected_owner_coldkey,
+                finalized_timeout_seconds=finalized_timeout_seconds,
+            )
+        if preflight.target_state_classification != "already_applied":
+            raise BootstrapOperatorError("owner_fence_external_batch_not_applied")
+        material, _ = build_owner_fence_call(preflight)
+        claimed = OwnerFenceJournal(
+            schema=OWNER_FENCE_JOURNAL_SCHEMA,
+            phase="claimed",
+            owner_coldkey_account_id32="0x" + owner_account.hex(),
+            updated_at=now(),
+        )
+        _write_new_canonical(journal_path, claimed, maximum_bytes=_MAX_RECEIPT_BYTES)
+        _write_new_canonical(
+            call_material_output,
+            material,
+            maximum_bytes=_MAX_INPUT_BYTES,
+        )
+        material_hash = hashlib.sha256(canonical_json_bytes(material)).hexdigest()
+        material_written = OwnerFenceJournal(
+            schema=OWNER_FENCE_JOURNAL_SCHEMA,
+            phase="material_written",
+            owner_coldkey_account_id32="0x" + owner_account.hex(),
+            call_material_sha256=material_hash,
+            updated_at=now(),
+        )
+        _replace_canonical(
+            journal_path,
+            material_written,
+            maximum_bytes=_MAX_RECEIPT_BYTES,
+        )
+        receipt = OwnerFenceReceipt(
+            schema=OWNER_FENCE_RECEIPT_SCHEMA,
+            classification="already_applied",
+            call_material_sha256=material_hash,
+            call_material=material,
+            extrinsic=None,
+            observation_block=preflight.block_number,
+            observation_block_hash=preflight.block_hash,
+            observed_weights_version_key=preflight.current_weights_version_key,
+            observed_min_allowed_weights=preflight.current_min_allowed_weights,
+            observed_commit_reveal_enabled=preflight.current_commit_reveal_enabled,
+            source_snapshot_pending_commit_count=preflight.pending_commit_count,
+            observed_pending_commit_count=preflight.pending_commit_count,
+            batch_all_finalized_success=False,
+            all_storage_targets_verified=True,
+            sdk_finalized_reads_verified=True,
+            storage_proofs_verified=False,
+            created_at=now(),
+        )
+        _write_new_canonical(receipt_output, receipt, maximum_bytes=_MAX_RECEIPT_BYTES)
+        receipt_hash = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+        terminal = OwnerFenceJournal(
+            schema=OWNER_FENCE_JOURNAL_SCHEMA,
+            phase="already_applied",
+            owner_coldkey_account_id32="0x" + owner_account.hex(),
+            call_material_sha256=material_hash,
+            receipt_sha256=receipt_hash,
+            updated_at=now(),
+        )
+        _replace_canonical(journal_path, terminal, maximum_bytes=_MAX_RECEIPT_BYTES)
+        return receipt
+    finally:
+        os.close(descriptor)
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+
+
 async def submit_owner_fence(
     *,
     wallet: Any,
@@ -847,15 +1028,18 @@ async def submit_owner_fence(
         raise BootstrapOperatorError("owner_fence_live_submit_acknowledgement_missing")
     if receipt_output.exists() or call_material_output.exists():
         raise BootstrapOperatorError("owner_fence_submission_output_exists")
-    if receipt_output.resolve() == call_material_output.resolve():
-        raise BootstrapOperatorError("owner_fence_submission_outputs_overlap")
     signer = bt.resolve_signer(wallet, role="coldkey")
     owner_coldkey = signer.ss58_address
     owner_account = account_id32(owner_coldkey)
+    lock_path, journal_path = _owner_fence_state_paths(state_dir, owner_account)
+    _validate_owner_fence_paths(
+        receipt_output=receipt_output,
+        call_material_output=call_material_output,
+        state_dir=state_dir,
+        lock_path=lock_path,
+        journal_path=journal_path,
+    )
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    stem = f"owner-fence-{NETUID}-{DIRECT_MINIMUM_WEIGHTS_VERSION_KEY}-{owner_account.hex()}"
-    lock_path = state_dir / f".{stem}.lock"
-    journal_path = state_dir / f"{stem}.json"
     if journal_path.exists():
         raise BootstrapOperatorError("owner_fence_claim_exists_reconcile_required")
     try:
@@ -908,7 +1092,7 @@ async def submit_owner_fence(
                     observed_weights_version_key=preflight.current_weights_version_key,
                     observed_min_allowed_weights=preflight.current_min_allowed_weights,
                     observed_commit_reveal_enabled=preflight.current_commit_reveal_enabled,
-                    pre_submit_pending_commit_count=preflight.pending_commit_count,
+                    source_snapshot_pending_commit_count=preflight.pending_commit_count,
                     observed_pending_commit_count=preflight.pending_commit_count,
                     batch_all_finalized_success=False,
                     all_storage_targets_verified=True,
@@ -967,7 +1151,7 @@ async def submit_owner_fence(
                 observed_weights_version_key=observation.current_weights_version_key,
                 observed_min_allowed_weights=observation.current_min_allowed_weights,
                 observed_commit_reveal_enabled=observation.current_commit_reveal_enabled,
-                pre_submit_pending_commit_count=preflight.pending_commit_count,
+                source_snapshot_pending_commit_count=preflight.pending_commit_count,
                 observed_pending_commit_count=observation.pending_commit_count,
                 batch_all_finalized_success=True,
                 all_storage_targets_verified=True,
@@ -1698,6 +1882,8 @@ async def submit_direct_bootstrap_weights(
     fetch_bytes: Callable[[str, int], Any] | None = None,
     health_request: Callable[[str], Any] | None = None,
     call_builder: Callable[..., Any] = bt.calls.SubtensorModule.set_mechanism_weights,
+    before_first_effect: Callable[[], None] | None = None,
+    finalized_snapshot_guard: Callable[[int, str, int], Awaitable[None]] | None = None,
 ) -> DirectBootstrapSubmissionReceipt:
     """Anchor, submit one raw direct row, and verify its finalized applied state."""
 
@@ -1732,6 +1918,14 @@ async def submit_direct_bootstrap_weights(
                 fetch_bytes=fetch_bytes,
                 health_request=health_request,
             )
+            if finalized_snapshot_guard is not None:
+                await finalized_snapshot_guard(
+                    before.chain.snapshot.block_number,
+                    before.chain.snapshot.block_hash,
+                    _SUBMISSION_ERA_PERIOD * 2,
+                )
+            if before_first_effect is not None:
+                before_first_effect()
             journal = DirectBootstrapSubmissionJournal(
                 schema=DIRECT_SUBMISSION_JOURNAL_SCHEMA,
                 transition_profile=DIRECT_TRANSITION_PROFILE,
@@ -1795,6 +1989,12 @@ async def submit_direct_bootstrap_weights(
                 manifest_anchor=anchor_observation,
                 call_builder=call_builder,
             )
+            if finalized_snapshot_guard is not None:
+                await finalized_snapshot_guard(
+                    after_anchor_chain.snapshot.block_number,
+                    after_anchor_chain.snapshot.block_hash,
+                    _SUBMISSION_ERA_PERIOD,
+                )
             _write_new_canonical(
                 call_material_output,
                 material,
@@ -1839,6 +2039,12 @@ async def submit_direct_bootstrap_weights(
                 validator_hotkey=validator_hotkey,
                 require_submission_ready=False,
             )
+            if finalized_snapshot_guard is not None:
+                await finalized_snapshot_guard(
+                    observation.snapshot.block_number,
+                    observation.snapshot.block_hash,
+                    0,
+                )
             if observation.snapshot.block_number < weight_call.block_number:
                 raise BootstrapOperatorError("direct_post_call_snapshot_not_finalized")
             receipt = classify_direct_bootstrap_application(
@@ -2001,6 +2207,13 @@ def _parser() -> argparse.ArgumentParser:
     submit_owner_fence.add_argument("--wallet-name", required=True)
     submit_owner_fence.add_argument("--wallet-path", default="~/.bittensor/wallets")
 
+    attest_owner_fence = commands.add_parser("attest-owner-fence")
+    attest_owner_fence.add_argument("--owner-coldkey", required=True)
+    attest_owner_fence.add_argument("--receipt-output", type=Path, required=True)
+    attest_owner_fence.add_argument("--call-material-output", type=Path, required=True)
+    attest_owner_fence.add_argument("--state-dir", type=Path, required=True)
+    attest_owner_fence.add_argument("--finalized-timeout", type=float, default=20.0)
+
     for name in ("preflight", "build-call"):
         command = commands.add_parser(name)
         command.add_argument("--manifest", type=Path, required=True)
@@ -2056,6 +2269,18 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
                     state_dir=args.state_dir,
                     live_submit=args.live_submit,
                     acknowledgement=args.acknowledgement,
+                    finalized_timeout_seconds=args.finalized_timeout,
+                )
+            )
+            _print_canonical(receipt)
+            return 0
+        if args.command == "attest-owner-fence":
+            receipt = asyncio.run(
+                attest_owner_fence(
+                    expected_owner_coldkey=args.owner_coldkey,
+                    receipt_output=args.receipt_output,
+                    call_material_output=args.call_material_output,
+                    state_dir=args.state_dir,
                     finalized_timeout_seconds=args.finalized_timeout,
                 )
             )
@@ -2153,6 +2378,11 @@ __all__ = [
     "DirectBootstrapOperationalPreflight",
     "DirectBootstrapPreflight",
     "DirectBootstrapSubmissionReceipt",
+    "OwnerFenceCallMaterial",
+    "OwnerFenceJournal",
+    "OwnerFencePreflight",
+    "OwnerFenceReceipt",
+    "attest_owner_fence",
     "build_direct_bootstrap_call_material",
     "build_direct_operational_preflight",
     "classify_direct_bootstrap_application",

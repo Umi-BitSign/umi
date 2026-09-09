@@ -61,6 +61,7 @@ the exact response body.
 | `GET /api/v1/pilots/{pilot_id}` | One replayed local or public-endpoint component pilot and its evidence boundary |
 | `GET /api/v1/pilots/{pilot_id}/solutions` | Replayed hypotheses, references, scores, failures, and evidence for one pilot |
 | `GET /api/v1/bootstrap-service` | Current fail-closed bootstrap service-weight status, exact eligible miners, and immutable evidence locators |
+| `GET /api/v1/validator-directives/{validator_account_id32}/after/{sequence}/{cursor}.json` | Exact cache-disabled supervisor directive page for one configured validator channel |
 | `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
 | `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
 | `GET /api/v1/incidents` | Reason records from fully replayed public incident bundles |
@@ -69,6 +70,67 @@ Incident records leave `published_at` null because the append-only publisher ind
 does not assert a wall-clock publication time. `observer_verified_at` is when this
 observer completed replay and durably accepted the bundle; it is not a publisher
 timestamp. `audit_release_block` is the protocol release boundary.
+
+## Validator supervisor directive feed
+
+The optional `--directive-feed-config` adds the public transport required by the
+permanent validator supervisor. It is independent of observer chain freshness and
+never authorizes a directive itself. Each response is read from the local
+publication tree, limited to 1 MiB, parsed as exact RFC 8785 JSON, bound to the
+requested cursor and validator AccountId32, and checked against the configured
+channel and threshold-signature set before any byte is returned. Validators repeat
+the checks against their stricter local consent configuration.
+
+File reads, JSON parsing, and signature verification run outside the FastAPI event
+loop behind a fixed four-operation public gate. A fifth concurrent public operation
+receives a 503 instead of entering an unbounded queue. `/readyz` has a separate
+single-operation gate, so public saturation cannot consume its capacity. Public
+reads have a five-second response watchdog and readiness has a thirty-second
+watchdog. A timed-out worker keeps its slot until its thread actually exits; the
+service never treats a still-running read as spare capacity.
+
+The canonical config uses
+`umi-observer-validator-directive-feed-config/1`; the checked example is
+`docs/examples/observer-validator-directive-feed-config.json`. It pins the exact
+sequence-1 hold directive and initial-page hashes plus a minimum reachable readiness
+head for every channel. Channels are sorted by `validator_account_id32`, and the
+AccountId32 must decode from the named validator hotkey. The route tree is:
+
+```text
+<route_root>/<validator_account_id32>/after/<sequence>/<cursor>.json
+```
+
+`cursor` is `initial` only at sequence zero and is otherwise the prior directive's
+lowercase SHA-256. The service rereads and revalidates the selected file on each
+request, so an authority can atomically replace affected cursor pages when it
+publishes a later signed directive without restarting the observer. Production
+installs use `root:root` ownership, `0444` files, and `0755` directories. The
+observer service receives the tree through a read-only systemd path and cannot
+publish or modify directives.
+
+Readiness rereads the exact startup-pinned config, verifies every initial hold, then
+walks signed, contiguous cursor pages beginning after sequence 1 until it reaches a
+terminal page. The configured readiness head must occur on that chain. A newer
+signed terminal head is allowed, so ordinary page publication needs no restart;
+raising the minimum readiness head requires a reviewed config replacement and
+observer restart. Missing or changed config, an absent or invalid cursor page, an
+unreachable pinned head, a chain longer than 256 pages, saturation, or watchdog
+expiry makes `/readyz` return 503.
+
+Successful responses preserve the exact file bytes and include
+`X-UMI-Directive-Page-SHA256`, `X-UMI-Directive-Head`, and
+`X-UMI-Directive-Sequence`. They use `Content-Encoding: identity` and
+`Cache-Control: no-cache, no-store, must-revalidate, no-transform`. Queries,
+redirects, transformed responses, unconfigured validators, unsafe files, invalid
+signatures, and cursor mismatches do not produce a directive body. Cloudflare must
+bypass cache and transformations for `/api/v1/validator-directives/*`.
+The deployment check in
+`deploy/first-public-result/check-directive-route.py` verifies the captured public
+body and response headers against hashes copied from the signed release record. A
+`DYNAMIC` or `BYPASS` response is only a behavioral sample; it does not prove which
+Cloudflare rules produced that result. The deployment runbook therefore also
+requires an exported Cloudflare Trace covering the active cache, compression,
+transformation, Worker/Page Rule, and rate-limit configuration.
 
 ## Released bundle feed
 

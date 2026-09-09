@@ -12,6 +12,20 @@
 !deploy/macos-validator/Caddy.Dockerfile
 !deploy/macos-validator/Dockerfile
 !deploy/macos-validator/container-entrypoint.sh
+!deploy/linux-validator-supervisor-worker/
+!deploy/linux-validator-supervisor-worker/Dockerfile
+!rust/
+!rust/grandpa-finality-observer/
+!rust/grandpa-finality-observer/Cargo.toml
+!rust/grandpa-finality-observer/Cargo.lock
+!rust/grandpa-finality-observer/build.rs
+!rust/grandpa-finality-observer/rust-toolchain.toml
+!rust/grandpa-finality-observer/src/
+!rust/grandpa-finality-observer/src/**
+!rust/grandpa-finality-observer/fixtures/
+!rust/grandpa-finality-observer/fixtures/**
+!rust/grandpa-finality-observer/vendor/
+!rust/grandpa-finality-observer/vendor/**
 
 # Defense in depth for ignored files accidentally placed below an allowed path.
 **/.env

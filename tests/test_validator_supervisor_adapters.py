@@ -209,6 +209,7 @@ def _attestation(number: int, observed: datetime) -> object:
     return SimpleNamespace(
         block=SimpleNamespace(
             number=number,
+            hash="0x" + f"{number:064x}",
             timestamp_ms=int(observed.timestamp() * 1_000),
         )
     )
@@ -226,7 +227,9 @@ async def test_finality_reader_requires_a_strictly_new_fresh_owned_head() -> Non
     )
     first = FINNEY_BOOTSTRAP_BLOCK_NUMBER + 1
     observer.records.put(_attestation(first, observed))
-    assert await reader.read_finalized_block() == first
+    identity = await reader.read_finalized_identity()
+    assert identity.number == first
+    assert identity.block_hash == "0x" + f"{first:064x}"
 
     pending = asyncio.create_task(reader.read_finalized_block())
     await asyncio.sleep(0.03)
@@ -324,6 +327,8 @@ def test_worker_arguments_are_fixed_digest_platform_and_lease_bound(tmp_path: Pa
     assert WORKER_ENTRYPOINT in arguments
     assert f"UMI_SUPERVISOR_VALID_FROM_BLOCK={activation.valid_from_block}" in arguments
     assert f"UMI_SUPERVISOR_VALID_THROUGH_BLOCK={activation.valid_through_block}" in arguments
+    assert f"UMI_SUPERVISOR_SEQUENCE={activation.sequence}" in arguments
+    assert f"UMI_RELEASE_MANIFEST_SHA256={activation.release.release_manifest_sha256}" in arguments
     assert f"UMI_EXPECTED_VALIDATOR_HOTKEY={config.validator_hotkey}" in arguments
     assert str(Path(config.state_root)) not in "\n".join(arguments)
     assert str(Path(config.release_root)) not in "\n".join(arguments)

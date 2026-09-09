@@ -53,6 +53,8 @@ and conformance tests.
 - `check-placeholders.py` rejects unresolved template tokens, the example release
   authority, and the example audit origin. With `--observer-feed`, it also checks
   every publication config named by the feed.
+- `check-directive-route.py` verifies exact initial-page bytes and the cache,
+  transformation, and identity headers captured from the public Cloudflare edge.
 
 The Caddy allowlist deliberately excludes raw media. Publish no raw video through
 this origin. A separate route may be added only for objects whose consent record
@@ -273,6 +275,72 @@ Install the feed config and every locally referenced publication definition as
 mode `0600`, owned by `umi-observer`; expose no validator-private credentials in
 those copies.
 
+For an existing `api.umi.vision` host, first complete the immutable observer
+release installation and CLI/import checks in
+[`PERMANENT_VALIDATOR_SUPERVISOR.md`](../../docs/PERMANENT_VALIDATOR_SUPERVISOR.md).
+Those checks must pass before installing the directive environment or systemd
+drop-in. Checking only `/healthz` can false-pass against an older observer that
+does not implement the directive route.
+
+For this rollout, create the separate root-owned permanent-supervisor route tree
+and materialize the canonical public-only config from
+`../../docs/examples/observer-validator-directive-feed-config.json`. Replace its
+single example channel with the complete AccountId32-sorted channel list. Each
+channel pins a minimum `readiness_head_sequence` and
+`readiness_head_directive_sha256`. At the initial hold these are sequence 1 and the
+initial directive hash.
+
+Before installing the config, install both exact pages produced by
+`assemble-directive-page` for every channel: the enrollment page and the caught-up
+page after sequence 1. Do not reserialize either page during installation:
+
+```sh
+set -euo pipefail
+UMI_VALIDATOR_ACCOUNT=REPLACE_WITH_VALIDATOR_ACCOUNT_ID32
+UMI_INITIAL_HEAD_SHA256=REPLACE_WITH_64_CHARACTER_INITIAL_DIRECTIVE_SHA256
+UMI_INITIAL_PAGE=/absolute/path/to/after-0-initial.json
+UMI_CAUGHT_UP_PAGE=/absolute/path/to/after-1-caught-up.json
+[[ "${UMI_VALIDATOR_ACCOUNT}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${UMI_INITIAL_HEAD_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+sudo install -d -o root -g root -m 0755 \
+  /srv/www/umi-validator-directives/"${UMI_VALIDATOR_ACCOUNT}"/after/0 \
+  /srv/www/umi-validator-directives/"${UMI_VALIDATOR_ACCOUNT}"/after/1
+sudo install -o root -g root -m 0444 "${UMI_INITIAL_PAGE}" \
+  /srv/www/umi-validator-directives/"${UMI_VALIDATOR_ACCOUNT}"/after/0/initial.json
+sudo install -o root -g root -m 0444 "${UMI_CAUGHT_UP_PAGE}" \
+  /srv/www/umi-validator-directives/"${UMI_VALIDATOR_ACCOUNT}"/after/1/"${UMI_INITIAL_HEAD_SHA256}".json
+sha256sum \
+  /srv/www/umi-validator-directives/"${UMI_VALIDATOR_ACCOUNT}"/after/0/initial.json \
+  /srv/www/umi-validator-directives/"${UMI_VALIDATOR_ACCOUNT}"/after/1/"${UMI_INITIAL_HEAD_SHA256}".json
+```
+
+Repeat that entire page-install block for every configured validator. If any page
+uses `more: true`, install each later cursor page in the same way before continuing.
+Only after all configured routes exist, install and validate the complete config:
+
+```sh
+set -euo pipefail
+UMI_DIRECTIVE_FEED=/absolute/path/to/observer-validator-directive-feed.json
+sudo install -o root -g root -m 0444 "${UMI_DIRECTIVE_FEED}" \
+  /etc/umi/observer-validator-directive-feed.json
+sha256sum /etc/umi/observer-validator-directive-feed.json
+sudo -u umi-observer /opt/umi-observer/.venv/bin/python -c \
+  'from umi.observer_directive_feed import build_observer_directive_feed; import sys; build_observer_directive_feed(sys.argv[1])' \
+  /etc/umi/observer-validator-directive-feed.json
+```
+
+Stage a replacement in the destination directory and use one root-owned atomic
+`mv` for later cursor-page updates. The observer account must not have write
+permission on the config, route tree, or any page. Raising a configured minimum
+readiness head requires replacing the config and restarting the observer; a newer
+signed head remains acceptable without a config change.
+
+After restart, run the exact public-edge initial-page check in
+[`PERMANENT_VALIDATOR_SUPERVISOR.md`](../../docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
+for every configured validator. Keep an external alert on `/readyz`; it rereads the
+pinned config, all initial pages, and every reachable current cursor page, and
+returns 503 after post-start drift, corruption, timeout, or verification failure.
+
 Use durable local paths for the SQLite database and temporary download root. At
 the default four-target concurrency, reserve more than `4 * 384 MiB` of temporary
 space plus database, release, log, and operating-system headroom. Back up the
@@ -314,6 +382,7 @@ sudo install -o root -g root -m 0600 \
   /etc/cloudflared/config.yml
 sudo python3 check-placeholders.py \
   --observer-feed /etc/umi/observer-bundle-feed.json \
+  --directive-feed /etc/umi/observer-validator-directive-feed.json \
   /etc/cloudflared/config.yml \
   /etc/umi/umi-observer.env \
   /etc/systemd/system/umi-observer.service

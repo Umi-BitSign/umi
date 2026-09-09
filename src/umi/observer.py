@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -47,6 +48,12 @@ from .observer_bundle_feed import (
     build_production_observer_bundle_feed,
 )
 from .observer_chain import BittensorChainCollector, ChainCollectionError, ChainCollector
+from .observer_directive_feed import (
+    ObserverDirectiveFeed,
+    ObserverDirectiveFeedError,
+    VerifiedDirectivePage,
+    build_observer_directive_feed,
+)
 from .observer_models import (
     OBSERVER_API_VERSION,
     PROTOCOL_VERSION,
@@ -834,6 +841,10 @@ def create_observer_app(
     bundle_feed: ObserverBundleFeed | None = None,
     pilot_feed: ObserverPilotFeed | None = None,
     bootstrap_service_feed: ObserverBootstrapServiceFeed | None = None,
+    directive_feed: ObserverDirectiveFeed | None = None,
+    directive_feed_read_concurrency: int = 4,
+    directive_feed_read_timeout_seconds: float = 5.0,
+    directive_feed_readiness_timeout_seconds: float = 30.0,
     bundle_feed_poll_seconds: float = 15,
     cors_origins: Sequence[str] = (),
     trusted_hosts: Sequence[str] = ("127.0.0.1", "localhost", "testserver"),
@@ -842,8 +853,71 @@ def create_observer_app(
 
     if bootstrap_service_feed is not None and pilot_feed is None:
         raise ValueError("bootstrap service feed requires the verified pilot feed")
+    if (
+        isinstance(directive_feed_read_concurrency, bool)
+        or not isinstance(directive_feed_read_concurrency, int)
+        or not 1 <= directive_feed_read_concurrency <= 16
+    ):
+        raise ValueError("directive feed read concurrency must be from 1 through 16")
+    for value, label in (
+        (directive_feed_read_timeout_seconds, "directive feed read timeout"),
+        (directive_feed_readiness_timeout_seconds, "directive feed readiness timeout"),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 < value <= 300
+        ):
+            raise ValueError(f"{label} must be finite and in (0, 300]")
     allowed_origins = _validate_cors_origins(cors_origins)
     allowed_hosts = _validate_trusted_hosts(trusted_hosts)
+
+    def build_directive_read_slots(count: int) -> asyncio.Queue[None]:
+        slots: asyncio.Queue[None] = asyncio.Queue(maxsize=count)
+        for _ in range(count):
+            slots.put_nowait(None)
+        return slots
+
+    directive_public_read_slots = build_directive_read_slots(directive_feed_read_concurrency)
+    directive_readiness_slots = build_directive_read_slots(1)
+
+    async def run_directive_read(
+        operation: Callable[[], Any],
+        *,
+        slots: asyncio.Queue[None],
+        timeout_seconds: float,
+    ) -> Any:
+        try:
+            slots.get_nowait()
+        except asyncio.QueueEmpty as error:
+            raise ObserverDirectiveFeedError("directive_feed_read_saturated") from error
+        try:
+            task = asyncio.create_task(asyncio.to_thread(operation))
+        except Exception:
+            slots.put_nowait(None)
+            raise
+
+        def release_slot(completed: asyncio.Task[Any]) -> None:
+            if completed.cancelled():
+                pass
+            else:
+                completed.exception()
+            try:
+                slots.put_nowait(None)
+            except asyncio.QueueFull:
+                _LOGGER.error("observer_directive_read_gate_overrelease")
+
+        task.add_done_callback(release_slot)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as error:
+            # The worker thread cannot be cancelled safely. Its slot remains held
+            # until the task actually exits and the callback above returns it.
+            raise ObserverDirectiveFeedError("directive_feed_read_timeout") from error
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -917,6 +991,25 @@ def create_observer_app(
         else:
             reason_code = "invalid_request"
         return _error(422, reason_code)
+
+    def directive_page_response(request: Request, page: VerifiedDirectivePage) -> Response:
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate, no-transform",
+            "Content-Encoding": "identity",
+            "Content-Length": str(len(page.data)),
+            "ETag": f'"{page.sha256}"',
+            "X-UMI-Directive-Head": page.head_directive_sha256,
+            "X-UMI-Directive-Page-SHA256": page.sha256,
+            "X-UMI-Directive-Sequence": str(page.head_sequence),
+        }
+        if request.method == "HEAD":
+            return Response(status_code=200, headers=headers, media_type="application/json")
+        return Response(
+            content=page.data,
+            status_code=200,
+            headers=headers,
+            media_type="application/json",
+        )
 
     def current() -> SnapshotView:
         return cache.current()
@@ -1399,11 +1492,67 @@ def create_observer_app(
             view = current()
         except ObserverUnavailable:
             return _error(503, "snapshot_unavailable")
+        if directive_feed is not None:
+            try:
+                await run_directive_read(
+                    directive_feed.verify_readiness,
+                    slots=directive_readiness_slots,
+                    timeout_seconds=directive_feed_readiness_timeout_seconds,
+                )
+            except ObserverDirectiveFeedError:
+                _LOGGER.warning("observer_directive_readiness_rejected")
+                return _error(503, "validator_directive_feed_unavailable")
         return JSONResponse(
             status_code=200,
             content={"status": view.freshness},
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.head(
+        "/api/v1/validator-directives/{validator_account_id32}/after/"
+        "{after_sequence}/{cursor}.json",
+        include_in_schema=False,
+    )
+    @app.get(
+        "/api/v1/validator-directives/{validator_account_id32}/after/"
+        "{after_sequence}/{cursor}.json",
+        responses={
+            **_COMMON_ERROR_RESPONSES,
+            404: {"model": ErrorResponse, "description": "Validator directive page not found"},
+        },
+    )
+    async def validator_directive_page(
+        request: Request,
+        validator_account_id32: Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")],
+        after_sequence: Annotated[int, Path(ge=0, le=(1 << 53) - 1)],
+        cursor: Annotated[str, Path(pattern=r"^(?:initial|[0-9a-f]{64})$")],
+    ) -> Response:
+        if request.url.query:
+            raise PublicAPIError(422, "validator_directive_query_not_allowed")
+        if (after_sequence == 0) != (cursor == "initial"):
+            raise PublicAPIError(422, "validator_directive_cursor_invalid")
+        if directive_feed is None:
+            raise PublicAPIError(404, "validator_directive_not_found")
+        try:
+            page = await run_directive_read(
+                lambda: directive_feed.read_page(
+                    validator_account_id32,
+                    after_sequence=after_sequence,
+                    cursor=cursor,
+                ),
+                slots=directive_public_read_slots,
+                timeout_seconds=directive_feed_read_timeout_seconds,
+            )
+        except ObserverDirectiveFeedError:
+            _LOGGER.warning(
+                "observer_directive_page_rejected validator_account_id32=%s after_sequence=%s",
+                validator_account_id32,
+                after_sequence,
+            )
+            raise PublicAPIError(503, "validator_directive_page_unavailable") from None
+        if page is None:
+            raise PublicAPIError(404, "validator_directive_not_found")
+        return directive_page_response(request, page)
 
     @app.head("/api/v1/status", include_in_schema=False)
     @app.get(
@@ -2119,6 +2268,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bundle-feed-config")
     parser.add_argument("--pilot-feed-config")
     parser.add_argument("--bootstrap-service-feed-config")
+    parser.add_argument(
+        "--directive-feed-config",
+        default=os.environ.get("UMI_OBSERVER_DIRECTIVE_FEED_CONFIG") or None,
+    )
     parser.add_argument("--cors-origin", action="append", default=[])
     parser.add_argument("--trusted-host", action="append", default=[])
     parser.add_argument("--fresh-for-seconds", type=float, default=24.0)
@@ -2176,11 +2329,17 @@ def main() -> None:
             pilot_feed=pilot_feed,
         )
     )
+    directive_feed = (
+        None
+        if args.directive_feed_config is None
+        else build_observer_directive_feed(args.directive_feed_config)
+    )
     app = create_observer_app(
         cache,
         bundle_feed=bundle_feed,
         pilot_feed=pilot_feed,
         bootstrap_service_feed=bootstrap_service_feed,
+        directive_feed=directive_feed,
         bundle_feed_poll_seconds=bundle_feed_poll_seconds,
         cors_origins=args.cors_origin,
         trusted_hosts=trusted_hosts,

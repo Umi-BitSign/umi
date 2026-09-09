@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -57,6 +58,15 @@ def test_systemd_units_are_unprivileged_and_have_no_wallet_capability() -> None:
     assert "InaccessiblePaths=/REPLACE_WITH_ABSOLUTE_WALLET_PARENT" in publisher
     assert "User=umi-audit-publisher" not in publisher
 
+    observer = (ROOT / "systemd" / "umi-observer.service").read_text()
+    observer_environment = (ROOT / "systemd" / "umi-observer.env.example").read_text()
+    assert "ProtectSystem=strict" in observer
+    assert "/srv/www/umi-validator-directives" in observer
+    assert (
+        "UMI_OBSERVER_DIRECTIVE_FEED_CONFIG="
+        "/etc/umi/observer-validator-directive-feed.json" in observer_environment
+    )
+
 
 def test_environment_examples_contain_no_secret_fields() -> None:
     environments = sorted((ROOT / "systemd").glob("*.env.example"))
@@ -107,10 +117,126 @@ def test_runbook_has_fail_closed_install_and_service_checks() -> None:
 
     assert "python3 check-placeholders.py" in runbook
     assert "--observer-feed /etc/umi/observer-bundle-feed.json" in runbook
+    assert "--directive-feed /etc/umi/observer-validator-directive-feed.json" in runbook
     assert "cloudflared --config /etc/cloudflared/config.yml service install" in runbook
     assert "systemctl is-active --quiet umi-observer.service" in runbook
     assert "systemctl is-active --quiet umi-validator-audit-publish.service" in runbook
     assert 'nsenter --mount="/proc/${UMI_PUBLISHER_PID}/ns/mnt"' in runbook
+
+
+def test_directive_rollout_pins_new_observer_and_checks_the_public_edge() -> None:
+    runbook = (ROOT.parents[1] / "docs" / "PERMANENT_VALIDATOR_SUPERVISOR.md").read_text()
+
+    assert "observer_revision=REPLACE_WITH_40_CHARACTER_OBSERVER_REVISION" in runbook
+    assert 'checkout --detach "${observer_revision}"' in runbook
+    assert 'test "$(/usr/local/bin/uv --version)" = "uv 0.12.9"' in runbook
+    assert "--locked --no-dev --no-editable" in runbook
+    assert "import umi.observer, umi.observer_directive_feed" in runbook
+    assert "grep -Fq -- '--directive-feed-config'" in runbook
+    assert "readlink -f /opt/umi-observer" in runbook
+    assert "umi-observer-validator-directives.conf" in runbook
+    assert "check-directive-route.py" in runbook
+    assert "--require-cloudflare-edge" in runbook
+    assert "https://api.umi.vision/readyz" in runbook
+    assert "request `/readyz` at least\nonce per minute" in runbook
+    assert "rate limit to that path and `/readyz`" in runbook
+    assert "set -euo pipefail\nobserver_revision=" in runbook
+    assert "set -euo pipefail\nsudo grep -q '^UMI_OBSERVER_DIRECTIVE_FEED_CONFIG='" in runbook
+    assert "set -euo pipefail\nUMI_DIRECTIVE_ACCOUNT=" in runbook
+    assert "Cloudflare Trace" in runbook
+    assert "Select **All configurations**" in runbook
+    assert "http_request_cache_settings" in runbook
+    assert "CF-Cache-Status: DYNAMIC" in runbook
+    assert "is not ruleset\nevidence" in runbook[runbook.index("CF-Cache-Status: DYNAMIC") :][:200]
+    assert runbook.index("observer_revision=REPLACE_WITH_40_CHARACTER_OBSERVER_REVISION") < (
+        runbook.index("sudo grep -q '^UMI_OBSERVER_DIRECTIVE_FEED_CONFIG='")
+    )
+
+
+def test_directive_routes_are_complete_before_the_feed_is_installed() -> None:
+    runbook = (ROOT / "README.md").read_text()
+
+    page_install = runbook.index("UMI_CAUGHT_UP_PAGE=/absolute/path/to/after-1-caught-up.json")
+    all_pages = runbook.index(
+        "Repeat that entire page-install block for every configured validator"
+    )
+    config_install = runbook.index(
+        "UMI_DIRECTIVE_FEED=/absolute/path/to/observer-validator-directive-feed.json"
+    )
+    validation = runbook.index("build_observer_directive_feed(sys.argv[1])")
+
+    assert page_install < all_pages < config_install < validation
+    assert "set -euo pipefail\nUMI_VALIDATOR_ACCOUNT=" in runbook
+    assert "set -euo pipefail\nUMI_DIRECTIVE_FEED=" in runbook
+    assert "readiness_head_sequence" in runbook
+    assert "readiness_head_directive_sha256" in runbook
+
+
+def test_public_directive_response_checker_enforces_exact_edge_contract(tmp_path: Path) -> None:
+    checker = ROOT / "check-directive-route.py"
+    body = b'{"schema":"umi-test-directive-page/1"}'
+    page_sha256 = hashlib.sha256(body).hexdigest()
+    head_sha256 = "ab" * 32
+    body_path = tmp_path / "body"
+    headers_path = tmp_path / "headers"
+    body_path.write_bytes(body)
+    header_bytes = (
+        "HTTP/2 200\r\n"
+        f"content-length: {len(body)}\r\n"
+        "content-encoding: identity\r\n"
+        "cache-control: no-cache, no-store, must-revalidate, no-transform\r\n"
+        f'etag: "{page_sha256}"\r\n'
+        f"x-umi-directive-page-sha256: {page_sha256}\r\n"
+        f"x-umi-directive-head: {head_sha256}\r\n"
+        "x-umi-directive-sequence: 1\r\n"
+        "cf-ray: 0123456789abcdef-IAD\r\n"
+        "cf-cache-status: DYNAMIC\r\n"
+        "\r\n"
+    ).encode("ascii")
+    headers_path.write_bytes(header_bytes)
+    command = [
+        sys.executable,
+        str(checker),
+        "--headers",
+        str(headers_path),
+        "--body",
+        str(body_path),
+        "--expected-page-sha256",
+        page_sha256,
+        "--expected-head-sha256",
+        head_sha256,
+        "--expected-sequence",
+        "1",
+        "--require-cloudflare-edge",
+    ]
+
+    passed = subprocess.run(command, check=False, capture_output=True, text=True)
+    headers_path.write_bytes(header_bytes.replace(b", no-transform", b""))
+    transformed = subprocess.run(command, check=False, capture_output=True, text=True)
+    headers_path.write_bytes(header_bytes.replace(b"identity", b"gzip"))
+    compressed = subprocess.run(command, check=False, capture_output=True, text=True)
+    headers_path.write_bytes(header_bytes.replace(b"DYNAMIC", b"HIT"))
+    cached = subprocess.run(command, check=False, capture_output=True, text=True)
+    wrong_body_bytes = body + b" "
+    headers_path.write_bytes(
+        header_bytes.replace(
+            f"content-length: {len(body)}".encode(),
+            f"content-length: {len(wrong_body_bytes)}".encode(),
+        )
+    )
+    body_path.write_bytes(wrong_body_bytes)
+    wrong_body = subprocess.run(command, check=False, capture_output=True, text=True)
+
+    assert passed.returncode == 0
+    assert passed.stdout.strip() == "validator_directive_route_ok"
+    assert transformed.returncode == 1
+    assert "response_cache_control_invalid" in transformed.stderr
+    assert compressed.returncode == 1
+    assert "response_content_encoding_invalid" in compressed.stderr
+    assert cached.returncode == 1
+    assert "response_cloudflare_cache_status_invalid" in cached.stderr
+    assert wrong_body.returncode == 1
+    assert "response_body_sha256_invalid" in wrong_body.stderr
 
 
 def test_runbook_static_probe_is_disposable_unindexed_and_exact() -> None:
@@ -192,6 +318,30 @@ def test_placeholder_checker_rejects_examples_and_expands_observer_targets(
     )
     assert passed.returncode == 0
     assert "deployment_files_resolved=3" in passed.stdout
+
+
+def test_placeholder_checker_includes_the_directive_feed(tmp_path: Path) -> None:
+    checker = ROOT / "check-placeholders.py"
+    directive_feed = tmp_path / "directive-feed.json"
+    directive_feed.write_text('{"channel":"REPLACE_WITH_CHANNEL"}')
+    installed = tmp_path / "installed.conf"
+    installed.write_text("tunnel: 00000000-0000-0000-0000-000000000001")
+
+    failed = subprocess.run(
+        [
+            sys.executable,
+            str(checker),
+            "--directive-feed",
+            str(directive_feed),
+            str(installed),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert failed.returncode == 1
+    assert "REPLACE_WITH" in failed.stderr
 
 
 def test_macos_launchd_assets_pass_their_self_test() -> None:

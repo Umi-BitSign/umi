@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from bittensor.intents import Batch
 
 from tests.factories import dev_wallet
 from umi.bootstrap_direct_weights import (
@@ -15,6 +17,7 @@ from umi.bootstrap_direct_weights import (
     DirectBootstrapSubmissionJournal,
     OwnerFenceJournal,
     OwnerFencePreflight,
+    attest_owner_fence,
     build_direct_bootstrap_call_material,
     build_owner_fence_call,
     classify_direct_bootstrap_application,
@@ -48,6 +51,7 @@ from umi.bootstrap_weights import (
 )
 from umi.encoding import account_id32
 from umi.grandpa_finality import FINNEY_GENESIS_HASH
+from umi.protocol import canonical_json_bytes
 
 NOW = datetime(2026, 9, 9, 15, 0, tzinfo=timezone.utc)
 NOW_MS = int(NOW.timestamp() * 1_000)
@@ -464,6 +468,80 @@ def test_owner_fence_is_one_atomic_ordered_call_and_allows_pending_commits() -> 
             OwnerFencePreflight.model_validate(values)
 
 
+@pytest.mark.asyncio
+async def test_stock_btcli_owner_fence_intents_build_one_coldkey_batch() -> None:
+    batch = Batch(
+        intents=[
+            {
+                "op": "set_hyperparameter",
+                "netuid": 78,
+                "name": "weights_version",
+                "value": DIRECT_WVK,
+            },
+            {
+                "op": "set_hyperparameter",
+                "netuid": 78,
+                "name": "min_allowed_weights",
+                "value": 256,
+            },
+            {
+                "op": "set_hyperparameter",
+                "netuid": 78,
+                "name": "commit_reveal_weights_enabled",
+                "value": False,
+            },
+        ]
+    )
+
+    assert batch.op == "batch"
+    assert batch.signer == "coldkey"
+    assert batch.intents == [
+        {
+            "op": "set_hyperparameter",
+            "netuid": 78,
+            "name": "weights_version",
+            "value": DIRECT_WVK,
+        },
+        {
+            "op": "set_hyperparameter",
+            "netuid": 78,
+            "name": "min_allowed_weights",
+            "value": 256,
+        },
+        {
+            "op": "set_hyperparameter",
+            "netuid": 78,
+            "name": "commit_reveal_weights_enabled",
+            "value": 0,
+        },
+    ]
+
+    class Substrate:
+        async def compose(self, call):
+            return call
+
+    raw = await batch.build(Substrate(), None)
+    assert raw.module == "Utility"
+    assert raw.function == "batch_all"
+    assert [(call.module, call.function, call.params) for call in raw.params["calls"]] == [
+        (
+            "AdminUtils",
+            "sudo_set_weights_version_key",
+            {"netuid": 78, "weights_version_key": DIRECT_WVK},
+        ),
+        (
+            "AdminUtils",
+            "sudo_set_min_allowed_weights",
+            {"netuid": 78, "min_allowed_weights": 256},
+        ),
+        (
+            "AdminUtils",
+            "sudo_set_commit_reveal_weights_enabled",
+            {"netuid": 78, "enabled": False},
+        ),
+    ]
+
+
 def test_direct_raw_call_retains_all_256_destinations_and_zero_weights() -> None:
     signed, _authorization, _owner, _participants, preflight = _preflight()
     material, raw = build_direct_bootstrap_call_material(_operational(signed, preflight))
@@ -723,6 +801,32 @@ async def test_owner_fence_submit_uses_coldkey_and_verifies_finalized_readback(
 
 
 @pytest.mark.asyncio
+async def test_owner_fence_submit_rejects_a_call_output_at_its_journal_path(
+    tmp_path: Path,
+) -> None:
+    _signed, _authorization, owner, _participants = _case()
+    owner_account = account_id32(owner.coldkeypub.ss58_address).hex()
+    state_dir = tmp_path / "state"
+    journal_path = state_dir / f"owner-fence-78-{DIRECT_WVK}-{owner_account}.json"
+
+    with pytest.raises(BootstrapOperatorError, match="output_state_paths_overlap"):
+        await submit_owner_fence(
+            wallet=owner,
+            receipt_output=tmp_path / "receipt.json",
+            call_material_output=journal_path,
+            state_dir=state_dir,
+            live_submit=True,
+            acknowledgement="APPLY SN78 DIRECT BOOTSTRAP OWNER FENCE",
+            client_factory=lambda _network: (_ for _ in ()).throw(
+                AssertionError("path rejection must precede network access")
+            ),
+            clock=lambda: NOW,
+        )
+
+    assert not state_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_owner_fence_ambiguous_submit_is_claimed_and_cannot_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -804,6 +908,175 @@ async def test_owner_fence_preflight_failure_leaves_no_claim_and_can_retry(
     receipt = await submit_owner_fence(**values)
     assert receipt.classification == "already_applied"
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_owner_fence_attestation_is_read_only_and_records_no_extrinsic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signed, _authorization, owner, _participants = _case()
+    expected_owner = owner.coldkeypub.ss58_address
+    seen_expected_owners: list[str] = []
+
+    async def collect(_client, **kwargs):
+        seen_expected_owners.append(kwargs["expected_owner_coldkey"])
+        return _owner_fence_preflight(owner, applied=True)
+
+    class ReadOnlyClient:
+        async def submit_call(self, *_args, **_kwargs):
+            raise AssertionError("read-only attestation must not submit a call")
+
+    monkeypatch.setattr(
+        "umi.bootstrap_direct_weights.collect_owner_fence_preflight_with_client", collect
+    )
+    monkeypatch.setattr(
+        "umi.bootstrap_direct_weights.bt.Wallet",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("wallet must not be loaded")),
+    )
+    receipt_path = tmp_path / "receipt.json"
+    material_path = tmp_path / "material.json"
+    receipt = await attest_owner_fence(
+        expected_owner_coldkey=expected_owner,
+        receipt_output=receipt_path,
+        call_material_output=material_path,
+        state_dir=tmp_path / "state",
+        client_factory=lambda _network: _ClientContext(ReadOnlyClient()),
+        clock=lambda: NOW,
+    )
+
+    assert seen_expected_owners == [expected_owner]
+    assert receipt.classification == "already_applied"
+    assert receipt.extrinsic is None
+    assert receipt.batch_all_finalized_success is False
+    assert receipt.all_storage_targets_verified is True
+    assert (
+        receipt.source_snapshot_pending_commit_count == receipt.observed_pending_commit_count == 3
+    )
+    assert receipt_path.read_bytes() == canonical_json_bytes(receipt)
+    assert material_path.read_bytes() == canonical_json_bytes(receipt.call_material)
+    journal_path = next((tmp_path / "state").glob("owner-fence-*.json"))
+    journal = OwnerFenceJournal.model_validate_json(journal_path.read_bytes())
+    assert journal.phase == "already_applied"
+    assert journal.extrinsic is None
+    assert journal.receipt_sha256 == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_owner_fence_attestation_receipt_cross_binds_its_finalized_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signed, _authorization, owner, _participants = _case()
+
+    async def collect(_client, **_kwargs):
+        return _owner_fence_preflight(owner, applied=True)
+
+    monkeypatch.setattr(
+        "umi.bootstrap_direct_weights.collect_owner_fence_preflight_with_client", collect
+    )
+    receipt = await attest_owner_fence(
+        expected_owner_coldkey=owner.coldkeypub.ss58_address,
+        receipt_output=tmp_path / "receipt.json",
+        call_material_output=tmp_path / "material.json",
+        state_dir=tmp_path / "state",
+        client_factory=lambda _network: _ClientContext(object()),
+        clock=lambda: NOW,
+    )
+
+    cases = (
+        ({"observation_block": receipt.observation_block + 1}, "observation is not its preflight"),
+        ({"observation_block_hash": BLOCK_HASH}, "observation is not its preflight"),
+        (
+            {
+                "source_snapshot_pending_commit_count": receipt.source_snapshot_pending_commit_count
+                + 1
+            },
+            "source pending count",
+        ),
+        (
+            {"observed_pending_commit_count": receipt.observed_pending_commit_count + 1},
+            "pending count",
+        ),
+    )
+    for updates, reason in cases:
+        values = receipt.model_dump(by_alias=True)
+        values.update(updates)
+        with pytest.raises(ValueError, match=reason):
+            type(receipt).model_validate(values)
+
+    legacy_material, _ = build_owner_fence_call(_owner_fence_preflight(owner))
+    values = receipt.model_dump(by_alias=True)
+    values["call_material"] = legacy_material.model_dump(by_alias=True)
+    values["call_material_sha256"] = hashlib.sha256(
+        canonical_json_bytes(legacy_material)
+    ).hexdigest()
+    with pytest.raises(ValueError, match="lacks a fenced-state preflight"):
+        type(receipt).model_validate(values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collision", ("journal", "lock", "state", "nested_outputs"))
+async def test_owner_fence_attestation_rejects_output_state_path_collisions(
+    tmp_path: Path,
+    collision: str,
+) -> None:
+    _signed, _authorization, owner, _participants = _case()
+    owner_account = account_id32(owner.coldkeypub.ss58_address).hex()
+    state_dir = tmp_path / "state"
+    stem = f"owner-fence-78-{DIRECT_WVK}-{owner_account}"
+    receipt_output = tmp_path / "receipt.json"
+    call_material_output = tmp_path / "material.json"
+    if collision == "journal":
+        call_material_output = state_dir / f"{stem}.json"
+    elif collision == "lock":
+        receipt_output = state_dir / f".{stem}.lock" / "receipt.json"
+    elif collision == "state":
+        receipt_output = state_dir
+    else:
+        call_material_output = receipt_output / "material.json"
+
+    with pytest.raises(BootstrapOperatorError, match="output_state_paths_overlap"):
+        await attest_owner_fence(
+            expected_owner_coldkey=owner.coldkeypub.ss58_address,
+            receipt_output=receipt_output,
+            call_material_output=call_material_output,
+            state_dir=state_dir,
+            client_factory=lambda _network: (_ for _ in ()).throw(
+                AssertionError("path rejection must precede network access")
+            ),
+            clock=lambda: NOW,
+        )
+
+    assert not state_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_owner_fence_attestation_rejects_unfenced_state_without_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _signed, _authorization, owner, _participants = _case()
+
+    async def collect(_client, **_kwargs):
+        return _owner_fence_preflight(owner)
+
+    monkeypatch.setattr(
+        "umi.bootstrap_direct_weights.collect_owner_fence_preflight_with_client", collect
+    )
+    with pytest.raises(BootstrapOperatorError, match="external_batch_not_applied"):
+        await attest_owner_fence(
+            expected_owner_coldkey=owner.coldkeypub.ss58_address,
+            receipt_output=tmp_path / "receipt.json",
+            call_material_output=tmp_path / "material.json",
+            state_dir=tmp_path / "state",
+            client_factory=lambda _network: _ClientContext(object()),
+            clock=lambda: NOW,
+        )
+
+    assert not (tmp_path / "receipt.json").exists()
+    assert not (tmp_path / "material.json").exists()
+    assert not list((tmp_path / "state").glob("owner-fence-*.json"))
 
 
 class _DirectSubmitClient:
@@ -913,6 +1186,19 @@ async def test_direct_submit_hotkey_readback_and_ambiguous_no_retry(
         return _operational(_signed, preflight).health
 
     monkeypatch.setattr("umi.bootstrap_direct_weights.probe_bootstrap_health", health)
+    callback_events: list[tuple[object, ...]] = []
+
+    def before_first_effect() -> None:
+        assert client.calls == []
+        callback_events.append(("intent",))
+
+    async def finalized_snapshot_guard(
+        block_number: int,
+        block_hash: str,
+        headroom: int,
+    ) -> None:
+        callback_events.append(("snapshot", block_number, block_hash, headroom))
+
     values = dict(
         authorization=authorization,
         wallet=owner,
@@ -922,6 +1208,8 @@ async def test_direct_submit_hotkey_readback_and_ambiguous_no_retry(
         state_dir=tmp_path / "state",
         live_submit=True,
         acknowledgement="SUBMIT SN78 DIRECT FULL BOOTSTRAP ROW",
+        before_first_effect=before_first_effect,
+        finalized_snapshot_guard=finalized_snapshot_guard,
     )
     if ambiguous:
         with pytest.raises(ConnectionError, match="ambiguous weight call"):
@@ -934,6 +1222,11 @@ async def test_direct_submit_hotkey_readback_and_ambiguous_no_retry(
         with pytest.raises(BootstrapOperatorError, match="claim_exists_reconcile_required"):
             await submit_direct_bootstrap_weights(signed, **values)
         assert len(client.calls) == 2
+        assert callback_events[:3] == [
+            ("snapshot", 125, BLOCK_HASH, 16),
+            ("intent",),
+            ("snapshot", 127, "0x" + "15" * 32, 8),
+        ]
         return
 
     receipt = await submit_direct_bootstrap_weights(signed, **values)
@@ -944,6 +1237,12 @@ async def test_direct_submit_hotkey_readback_and_ambiguous_no_retry(
     ]
     assert all(item[2]["signer"] == "hotkey" for item in client.calls)
     assert all(item[2]["wait_for_finalization"] is True for item in client.calls)
+    assert callback_events == [
+        ("snapshot", 125, BLOCK_HASH, 16),
+        ("intent",),
+        ("snapshot", 127, "0x" + "15" * 32, 8),
+        ("snapshot", 130, POST_BLOCK_HASH, 0),
+    ]
     journal_path = next((tmp_path / "state").glob("direct-*.json"))
     assert DirectBootstrapSubmissionJournal.model_validate_json(
         journal_path.read_bytes()

@@ -122,6 +122,7 @@ jobs:
           .venv/bin/umi-validator-live-configure --help
           .venv/bin/umi-validator-live-reconcile --help
           .venv/bin/umi-validator-supervisor --help
+          .venv/bin/umi-validator-supervisor-worker --help
 
   public-pilot-r2-uploader:
     runs-on: ubuntu-latest
@@ -367,6 +368,62 @@ jobs:
             --cpus 1 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777 \
             "$UMI_IMAGE" --help
+          test "$(docker run --rm --platform linux/amd64 \
+            --entrypoint cat "$UMI_IMAGE" /opt/umi-image-revision)" = "$GITHUB_SHA"
+
+  validator-supervisor-worker-container:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compute the exact UMI Python source-tree digest
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import hashlib
+          from pathlib import Path
+
+          root = Path("src/umi")
+          digest = hashlib.sha256(b"umi-source-tree-v1\0")
+          for path in sorted(root.rglob("*.py"), key=lambda item: item.relative_to(root).as_posix()):
+              relative = path.relative_to(root).as_posix().encode()
+              digest.update(len(relative).to_bytes(4, "big"))
+              digest.update(relative)
+              digest.update(hashlib.sha256(path.read_bytes()).digest())
+          print(f"UMI_SOURCE_TREE_SHA256={digest.hexdigest()}")
+          PY
+
+      - name: Build the linux amd64 validator supervisor worker
+        run: |
+          UMI_IMAGE="umi-validator-supervisor-worker:${GITHUB_SHA}"
+          docker build --pull --platform linux/amd64 \
+            --build-arg "UMI_GIT_REVISION=${GITHUB_SHA}" \
+            --build-arg "UMI_SOURCE_TREE_SHA256=${UMI_SOURCE_TREE_SHA256}" \
+            --file deploy/linux-validator-supervisor-worker/Dockerfile \
+            --tag "$UMI_IMAGE" \
+            .
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$UMI_IMAGE")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.source-tree-sha256" }}' "$UMI_IMAGE")" = "$UMI_SOURCE_TREE_SHA256"
+          test "$(docker image inspect --format '{{ .Config.User }}' "$UMI_IMAGE")" = "65532:65532"
+
+      - name: Smoke-test the fixed worker and owned finality binary
+        run: |
+          UMI_IMAGE="umi-validator-supervisor-worker:${GITHUB_SHA}"
+          docker run --rm --platform linux/amd64 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 64 \
+            --memory 1g \
+            --cpus 1 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777 \
+            "$UMI_IMAGE" --help
+          docker run --rm --platform linux/amd64 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --entrypoint /opt/umi/bin/umi-grandpa-finality-observer \
+            "$UMI_IMAGE" --conformance-self-test
           test "$(docker run --rm --platform linux/amd64 \
             --entrypoint cat "$UMI_IMAGE" /opt/umi-image-revision)" = "$GITHUB_SHA"
 

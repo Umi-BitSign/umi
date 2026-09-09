@@ -105,6 +105,12 @@ def test_observer_drop_in_makes_spool_managed_paths_read_only() -> None:
     assert "--bootstrap-service-feed-config" not in drop_in
 
 
+def test_directive_drop_in_keeps_the_public_tree_read_only() -> None:
+    drop_in = (ASSETS / "umi-observer-validator-directives.conf").read_text()
+
+    assert drop_in == "[Service]\nReadOnlyPaths=/srv/www/umi-validator-directives\n"
+
+
 def test_bootstrap_service_drop_in_is_enabled_only_after_evidence_install() -> None:
     drop_in = (ASSETS / "umi-observer-bootstrap-service.conf").read_text()
 

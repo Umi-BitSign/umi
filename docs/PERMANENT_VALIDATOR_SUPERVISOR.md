@@ -28,6 +28,13 @@ must verify the initial signed directive with the pinned supervisor before retir
 the old validator. Placeholder values in the example configuration are
 deliberately invalid.
 
+The observer implementation includes an optional file-backed publication route.
+That code is not evidence that a production channel exists. Before sharing an
+install command, UMI must publish the exact feed-config hash, each validator's
+configuration hash, sequence-1 directive hash, initial-page hash, and public
+URL, then verify that the public bytes match those hashes through the Cloudflare
+edge. See the directive-feed section of [`DASHBOARD_API.md`](DASHBOARD_API.md).
+
 ## Current capability
 
 The mode names have these meanings:
@@ -35,8 +42,8 @@ The mode names have these meanings:
 | Mode | Intended signed runner action | Current state |
 |---|---|---|
 | `hold` | No worker container or chain write | Available at installation |
-| `bootstrap_service_weights` | Manifest anchor and CRv4 bootstrap row described by the release | The existing bootstrap operator implements the chain operation; automatic dispatch requires its signed policy, cutover checkpoint, manifest, and release runner |
-| `inactive_shadow` | Three transcript anchors, no weight call | The existing live validator implements this mode; automatic dispatch also requires a validator-specific signed release and private window mirror headers |
+| `bootstrap_service_weights` | Manifest anchor and emergency direct UID 0 full row described by the release | The worker requires the signed manifest, direct-transition authorization, recorded drain preflight, and an independently repeated passing preflight |
+| `inactive_shadow` | Three transcript anchors, no weight call | The standalone live validator implements this mode, but this supervisor worker profile is not implemented and fails closed |
 | `translation_weights` | Future governed translation-weight calls | No translation-active runner exists in version 0.1; the current policy model and live validator reject this mode |
 
 Including `translation_weights` in `allowed_modes` records advance operator
@@ -669,3 +676,184 @@ sequence-1 hold required by `preflight-initial-hold` while initial enrollment is
 open. Close initial enrollment before sequence 2 is published. A validator that
 did not durably accept sequence 1 during that enrollment needs a separate reviewed
 state-bootstrap procedure; it must not synthesize or skip the first directive.
+
+For the production observer route, stage pages on the same filesystem as
+`/srv/www/umi-validator-directives`, set every page to `root:root` mode `0444`, and
+rename it into the exact route only after its canonical byte length and SHA-256
+match the release record. Direct writes into a live route are forbidden. In
+addition to `/after/0/initial.json`, install the caught-up page at
+`/after/1/<initial-directive-sha256>.json`; readiness begins at that cursor and
+walks every `more: true` page to a terminal signed head. Install the canonical
+public feed config as
+`/etc/umi/observer-validator-directive-feed.json`, owned by `root:root` at mode
+`0444`, and start the observer with:
+
+```sh
+--directive-feed-config /etc/umi/observer-validator-directive-feed.json
+```
+
+The production loader accepts only root-owned config, directory, and page paths
+with no group or world write bit. The observer service account therefore cannot
+alter its own directive feed. The observer refuses to start unless the config and
+every configured initial page exist, each initial page matches its pinned hashes,
+is a single sequence-1 hold, and passes threshold-signature and validator-channel
+verification. It also walks the live cursor chain from sequence 1 to a terminal
+page and requires the configured minimum readiness head to be reachable. It repeats
+file, canonicalization, signature, hash, and route-binding checks on every GET or
+HEAD. `/readyz` rereads the startup-pinned config, every initial page, and every
+reachable current cursor page. Public reads and readiness use separate bounded
+gates with five- and thirty-second watchdogs respectively. A timed-out worker keeps
+its slot until its thread exits; saturation, timeout, drift, and verification
+failure return 503. The public service never loads an authority wallet and cannot
+create or sign a directive.
+
+The current VPS observer starts through a systemd override that does not repeat
+every optional CLI argument. The CLI reads
+`UMI_OBSERVER_DIRECTIVE_FEED_CONFIG` when the explicit option is absent. Install and
+verify the new immutable observer release before changing that environment or
+installing the drop-in. Run these commands as `sam` from a directory outside the
+repository:
+
+```sh
+set -euo pipefail
+observer_revision=REPLACE_WITH_40_CHARACTER_OBSERVER_REVISION
+observer_checkout="/home/sam/umi-observer-source-${observer_revision}"
+observer_release="/opt/umi-observer-releases/${observer_revision}"
+[[ "${observer_revision}" =~ ^[0-9a-f]{40}$ ]]
+test ! -e "${observer_checkout}" && test ! -e "${observer_release}"
+test "$(/usr/local/bin/uv --version)" = "uv 0.12.9"
+git clone --no-checkout git@github.com:Umi-BitSign/umi.git "${observer_checkout}"
+git -C "${observer_checkout}" checkout --detach "${observer_revision}"
+test "$(git -C "${observer_checkout}" rev-parse HEAD)" = "${observer_revision}"
+test -z "$(git -C "${observer_checkout}" status --porcelain=v1 --untracked-files=all)"
+observer_base_python="$(/opt/umi-observer/.venv/bin/python -c \
+  'import sys; print(sys._base_executable)')"
+test -x "${observer_base_python}"
+sudo install -d -o root -g root -m 0755 /opt/umi-observer-releases
+sudo mv "${observer_checkout}" "${observer_release}"
+sudo chown -R root:root "${observer_release}"
+sudo env UV_PROJECT_ENVIRONMENT="${observer_release}/.venv" \
+  /usr/local/bin/uv sync --project "${observer_release}" \
+    --python "${observer_base_python}" --locked --no-dev --no-editable
+sudo chown -R root:root "${observer_release}"
+sudo chmod -R go-w "${observer_release}"
+test "$(sudo git -C "${observer_release}" rev-parse HEAD)" = "${observer_revision}"
+test -z "$(sudo git -C "${observer_release}" status --porcelain=v1 --untracked-files=all)"
+test -z "$(sudo find "${observer_release}" -xdev ! -type l \
+  \( ! -user root -o -perm /022 \) -print -quit)"
+sudo "${observer_release}/.venv/bin/python" -c \
+  'import umi.observer, umi.observer_directive_feed'
+sudo "${observer_release}/.venv/bin/python" -m umi.observer --help | \
+  grep -Fq -- '--directive-feed-config'
+observer_link="/opt/.umi-observer-${observer_revision}"
+test ! -e "${observer_link}" && test ! -L "${observer_link}"
+sudo ln -s "${observer_release}" "${observer_link}"
+sudo mv -Tf "${observer_link}" /opt/umi-observer
+test "$(readlink -f /opt/umi-observer)" = "${observer_release}"
+/opt/umi-observer/.venv/bin/python -c \
+  'import umi.observer, umi.observer_directive_feed'
+/opt/umi-observer/.venv/bin/python -m umi.observer --help | \
+  grep -Fq -- '--directive-feed-config'
+```
+
+Do not proceed if either import, help check, revision check, or ownership check
+fails. After those checks pass, install the environment value and read-only
+drop-in, then restart:
+
+```sh
+set -euo pipefail
+sudo grep -q '^UMI_OBSERVER_DIRECTIVE_FEED_CONFIG=' /etc/umi/umi-observer.env || \
+  printf '%s\n' \
+    'UMI_OBSERVER_DIRECTIVE_FEED_CONFIG=/etc/umi/observer-validator-directive-feed.json' | \
+    sudo tee -a /etc/umi/umi-observer.env >/dev/null
+sudo sed -i \
+  's#^UMI_OBSERVER_DIRECTIVE_FEED_CONFIG=.*#UMI_OBSERVER_DIRECTIVE_FEED_CONFIG=/etc/umi/observer-validator-directive-feed.json#' \
+  /etc/umi/umi-observer.env
+sudo install -d -o root -g root -m 0755 \
+  /etc/systemd/system/umi-observer.service.d
+sudo install -o root -g root -m 0644 \
+  /opt/umi-observer/deploy/public-pilot-automation/systemd/umi-observer-validator-directives.conf \
+  /etc/systemd/system/umi-observer.service.d/40-validator-directives-read-only.conf
+sudo systemctl daemon-reload
+sudo systemctl restart umi-observer.service
+test "$(systemctl show umi-observer.service -p ProtectSystem --value)" = strict
+systemctl show umi-observer.service -p ReadOnlyPaths --value | \
+  grep -Fq '/srv/www/umi-validator-directives'
+```
+
+At the Cloudflare zone, add a cache-bypass rule for
+`/api/v1/validator-directives/*` and exclude that path from compression, HTML,
+header, and body transformation rules. Keep the existing Tunnel origin. Apply a
+rate limit to that path and `/readyz` that permits the documented polling cadence
+while rejecting sustained public abuse. No Worker, KV, D1, R2, or new secret is
+involved.
+
+Before treating the edge as ready, use
+[Cloudflare Trace](https://developers.cloudflare.com/rules/trace-request/how-to/)
+in the Cloudflare dashboard for a `GET` of the exact initial-page URL with
+`Accept-Encoding: identity`. Select **All configurations** and export the trace
+JSON. Review the evaluated and executed steps and require all of the following:
+
+- the enabled path-specific bypass rule executes in `http_request_cache_settings`;
+- no later cache rule, Page Rule, or Worker makes the response cache-eligible;
+- no response-compression, configuration, body, or response-header transform
+  executes for the path;
+- the intended enabled rate-limit rule matches both the directive path and a
+  separate `/readyz` trace, with thresholds that permit the polling interval; and
+- no unexpected account-level rule overrides the zone result.
+
+Archive both trace exports with the release record and repeat them after any
+Cloudflare ruleset change. Trace is a configuration simulation, so retain the live
+byte/header probe below as the independent behavior check. Conversely,
+`CF-Cache-Status: DYNAMIC` or `BYPASS` from one live response is not ruleset
+evidence: Cloudflare documents that `DYNAMIC` can also mean default ineligibility
+or Development Mode, while `BYPASS` can result from origin response headers alone.
+The current read-only Rulesets API can also archive each relevant phase through
+`GET /zones/{zone_id}/rulesets/phases/{ruleset_phase}/entrypoint`; do not use the
+corresponding `PUT` operation during verification. See the
+[Rulesets phase API](https://developers.cloudflare.com/api/resources/rulesets/subresources/phases/methods/get/)
+and [cache-status troubleshooting](https://developers.cloudflare.com/cache/troubleshooting/investigating-uncached-responses/).
+
+Verify the exact initial page through the public edge. Copy the expected hashes
+from the signed release record, not from the HTTP response:
+
+```sh
+set -euo pipefail
+UMI_DIRECTIVE_ACCOUNT=REPLACE_WITH_VALIDATOR_ACCOUNT_ID32
+UMI_INITIAL_PAGE_SHA256=REPLACE_WITH_64_CHARACTER_INITIAL_PAGE_SHA256
+UMI_INITIAL_HEAD_SHA256=REPLACE_WITH_64_CHARACTER_INITIAL_DIRECTIVE_SHA256
+UMI_DIRECTIVE_PROBE="$(mktemp -d)"
+cleanup_umi_directive_probe() {
+  rm -f -- "${UMI_DIRECTIVE_PROBE}/headers" "${UMI_DIRECTIVE_PROBE}/body"
+  rmdir -- "${UMI_DIRECTIVE_PROBE}"
+}
+trap cleanup_umi_directive_probe EXIT
+UMI_INITIAL_URL="https://api.umi.vision/api/v1/validator-directives/${UMI_DIRECTIVE_ACCOUNT}/after/0/initial.json"
+status="$(curl --silent --show-error --raw --max-redirs 0 --proto '=https' \
+  --tlsv1.2 --header 'Accept-Encoding: identity' \
+  --header 'Cache-Control: no-cache, no-store' \
+  --dump-header "${UMI_DIRECTIVE_PROBE}/headers" \
+  --output "${UMI_DIRECTIVE_PROBE}/body" \
+  --write-out '%{http_code}' "${UMI_INITIAL_URL}")"
+test "${status}" = 200
+/opt/umi-observer/.venv/bin/python \
+  /opt/umi-observer/deploy/first-public-result/check-directive-route.py \
+  --headers "${UMI_DIRECTIVE_PROBE}/headers" \
+  --body "${UMI_DIRECTIVE_PROBE}/body" \
+  --expected-page-sha256 "${UMI_INITIAL_PAGE_SHA256}" \
+  --expected-head-sha256 "${UMI_INITIAL_HEAD_SHA256}" \
+  --expected-sequence 1 \
+  --require-cloudflare-edge
+curl --fail --silent --show-error --max-redirs 0 \
+  https://api.umi.vision/readyz >/dev/null
+```
+
+The checker rejects redirects, a transformed body, a wrong body or declared hash,
+compression, missing no-cache/no-store/no-transform controls, cached Cloudflare
+responses, and mismatched head or sequence headers. An absent `Content-Encoding`
+also means identity. Configure an external monitor to request `/readyz` at least
+once per minute and alert on any non-200 response. Because readiness revalidates
+the pinned config, all initial pages, and every cursor page needed to reach a
+terminal signed head, later removal, permission drift, malformed JSON, signature
+failure, unreachable configured head, hash mismatch, or read timeout becomes an
+alert instead of remaining a route-only failure.

@@ -26,6 +26,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="also inspect every publication_config_path named by this observer feed",
     )
+    parser.add_argument(
+        "--directive-feed",
+        type=Path,
+        help="also inspect the installed validator-directive feed config",
+    )
     parser.add_argument("files", nargs="+", type=Path)
     return parser
 
@@ -69,6 +74,9 @@ def main() -> int:
             paths.extend(_observer_publication_paths(args.observer_feed, feed))
         except (OSError, UnicodeError, ValueError) as error:
             errors.append(f"{args.observer_feed}: {error}")
+
+    if args.directive_feed is not None:
+        paths.append(args.directive_feed)
 
     unique_paths = tuple(dict.fromkeys(paths))
     for path in unique_paths:

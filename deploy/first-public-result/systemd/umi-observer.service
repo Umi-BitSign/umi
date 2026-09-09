@@ -50,7 +50,7 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadOnlyPaths=/etc/umi /opt/umi
+ReadOnlyPaths=/etc/umi /opt/umi /srv/www/umi-validator-directives
 ReadWritePaths=/var/lib/umi-observer /var/cache/umi-observer /run/umi-observer
 
 [Install]

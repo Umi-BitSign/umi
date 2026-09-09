@@ -882,7 +882,32 @@ def release_environment(
         (repository_root / "uv.lock").read_bytes(),
     )
     uv_binary = _fake_uv(artifact_root / "uv")
-    uv_binary_digest = hashlib.sha256(uv_binary.read_bytes()).hexdigest()
+    fixture_uv_bytes = uv_binary.read_bytes()
+    fixture_pyproject_bytes = (repository_root / "pyproject.toml").read_bytes()
+    fixture_lock_bytes = (repository_root / "uv.lock").read_bytes()
+    fixture_target_triple = target_triple
+
+    def run_fixture_uv_lock_check(
+        candidate_uv_bytes: bytes,
+        *,
+        target_triple: str,
+        pyproject_bytes: bytes,
+        lock_bytes: bytes,
+    ) -> None:
+        # macOS can quarantine-delay each freshly staged shell fixture. The
+        # dedicated uv test covers staged execution; release tests only need to
+        # preserve the exact fixture bindings after provenance validation.
+        assert candidate_uv_bytes == fixture_uv_bytes
+        assert target_triple == fixture_target_triple
+        assert pyproject_bytes == fixture_pyproject_bytes
+        assert lock_bytes == fixture_lock_bytes
+
+    monkeypatch.setattr(
+        shadow_release_module,
+        "_run_pinned_uv_lock_check",
+        run_fixture_uv_lock_check,
+    )
+    uv_binary_digest = hashlib.sha256(fixture_uv_bytes).hexdigest()
     uv_archive_digest = hashlib.sha256(
         b"uv 0.12.9 aarch64-unknown-linux-musl upstream archive"
     ).hexdigest()

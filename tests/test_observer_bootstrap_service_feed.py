@@ -163,7 +163,7 @@ def _terminal_records():
         observed_weights_version_key=1 << 32,
         observed_min_allowed_weights=256,
         observed_commit_reveal_enabled=False,
-        pre_submit_pending_commit_count=3,
+        source_snapshot_pending_commit_count=3,
         observed_pending_commit_count=3,
         batch_all_finalized_success=False,
         all_storage_targets_verified=True,
