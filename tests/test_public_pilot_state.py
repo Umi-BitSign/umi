@@ -7,7 +7,7 @@ from umi.public_pilot_authorization import verify_public_pilot_github_authorizat
 from umi.public_pilot_readiness import ReadyToIssuePayload
 from umi.public_pilot_state import PreparedCaseState, PublicPilotAutomationState
 
-from .test_public_pilot_authorization import _REVISION, _fixture
+from .test_public_pilot_authorization import _OBSERVED_AFTER_EXPIRY, _REVISION, _fixture
 
 
 def _ready_to_issue(verified: object, case: PreparedCaseState, *, suffix: int = 1):
@@ -59,7 +59,7 @@ def test_public_pilot_state_claims_and_expires_one_global_case(tmp_path: Path) -
         expected_repository_id=1_348_567_807,
         expected_repository_full_name="Umi-BitSign/umi",
         expected_umi_revision=_REVISION,
-        now_unix_s=1_788_700_000,
+        now_unix_s=_OBSERVED_AFTER_EXPIRY,
     )
     state_root = tmp_path / "state"
     state_root.mkdir(mode=0o700)
@@ -125,7 +125,7 @@ def test_issue_claim_requires_exact_active_case_and_is_single_writer(tmp_path: P
         expected_repository_id=1_348_567_807,
         expected_repository_full_name="Umi-BitSign/umi",
         expected_umi_revision=_REVISION,
-        now_unix_s=1_788_700_000,
+        now_unix_s=_OBSERVED_AFTER_EXPIRY,
     )
     root = tmp_path / "state"
     root.mkdir(mode=0o700)
@@ -203,7 +203,7 @@ def test_issue_claim_rejects_miner_signed_case_mismatch(tmp_path: Path) -> None:
         expected_repository_id=1_348_567_807,
         expected_repository_full_name="Umi-BitSign/umi",
         expected_umi_revision=_REVISION,
-        now_unix_s=1_788_700_000,
+        now_unix_s=_OBSERVED_AFTER_EXPIRY,
     )
     root = tmp_path / "state"
     root.mkdir(mode=0o700)

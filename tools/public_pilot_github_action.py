@@ -398,7 +398,11 @@ def readiness_payload_token(challenge: dict[str, Any]) -> str:
 def parse_readiness_marker(marker: Any, *, now_unix_s: int) -> ParsedReadiness:
     if not isinstance(marker, str) or len(marker.encode("utf-8")) > COMMENT_BODY_MAX_BYTES:
         raise BoundaryError("invalid_readiness_marker")
-    match = _READINESS_RE.fullmatch(marker)
+    # GitHub returns a pasted command with a terminal Enter as one LF. Accept
+    # that transport artifact while keeping every other prefix, suffix, blank
+    # line, and CRLF shape invalid. Preserve the raw body for its binding hash.
+    marker_for_parse = marker[:-1] if marker.endswith("\n") else marker
+    match = _READINESS_RE.fullmatch(marker_for_parse)
     if match is None:
         raise BoundaryError("invalid_readiness_marker")
     token = match.group("token")
@@ -917,7 +921,13 @@ def find_readiness_candidate(
         ):
             continue
         try:
-            readiness = parse_readiness_marker(body, now_unix_s=now_unix_s)
+            command_time = parse_utc(
+                _github_timestamp(comment.get("created_at"), "command_created_at"),
+                field="command_created_at",
+            )
+            if command_time > now_unix_s:
+                continue
+            readiness = parse_readiness_marker(body, now_unix_s=command_time)
         except BoundaryError:
             continue
         if readiness_matches_challenge(readiness, challenge):

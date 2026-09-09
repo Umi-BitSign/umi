@@ -101,7 +101,10 @@ def test_install_runbook_matches_the_actual_host_and_pinned_checkout() -> None:
     assert "available memory remains below 150 MiB" in runbook
     assert "ssh -A sam@172.239.57.201" in runbook
     assert "git@github.com:Umi-BitSign/umi.git" in runbook
-    assert 'git -C "$release_checkout" checkout --detach "$umi_revision"' in runbook
+    assert "PUBLIC_PILOT_AUTOMATION_REVISION" in runbook
+    assert "PUBLIC_PILOT_UMI_REVISION" in runbook
+    assert 'git -C "$release_checkout" checkout --detach "$automation_revision"' in runbook
+    assert 'jq -cSj --arg revision "$campaign_umi_revision"' in runbook
     assert "uv==0.12.9" in runbook
     assert "UV_PROJECT_ENVIRONMENT=/opt/umi-public-pilot/.venv" in runbook
     assert "observer_python=/opt/umi-observer/.venv/bin/python" in runbook
@@ -115,3 +118,8 @@ def test_install_runbook_matches_the_actual_host_and_pinned_checkout() -> None:
     assert "umi-observer-public-pilot.conf" in runbook
     assert "grep -Fzxq -- '--pilot-feed-config'" in runbook
     assert "https://api.umi.vision/api/v1/network" in runbook
+    assert "## Automation-only update" in runbook
+    assert "leave `PUBLIC_PILOT_UMI_REVISION`" in runbook
+    assert "cmp /opt/umi-public-pilot/source/uv.lock" in runbook
+    assert "WHERE state IN ('processing', 'attempt_started')" in runbook
+    assert "Never delete a state database" in runbook

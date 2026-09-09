@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hmac
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .encoding import account_id32
 from .public_pilot_campaign import CAMPAIGN_ID
@@ -30,6 +32,7 @@ PUBLIC_MINER_PILOT_LABEL = "public-miner-pilot"
 GITHUB_ACTIONS_BOT_ID = 41_898_282
 GITHUB_ACTIONS_BOT_LOGIN = "github-actions[bot]"
 _AUTHORIZATION_MARKER_START = "<!-- umi-public-pilot-authorization-v1:"
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +69,12 @@ def verify_public_pilot_github_authorization(
     expected_campaign_id: str = CAMPAIGN_ID,
     now_unix_s: int | None = None,
 ) -> VerifiedPublicPilotAuthorization:
-    """Re-fetch and verify every GitHub, enrollment, and miner-signature binding."""
+    """Re-fetch and verify every GitHub, enrollment, and miner-signature binding.
+
+    ``now_unix_s`` is the observation time used to reject a future-dated GitHub
+    command. Readiness expiry is evaluated at the command's immutable creation
+    time, so queueing cannot expire an authorization the bot already accepted.
+    """
 
     current_bot_comment = github.comment(bot_comment.id)
     if current_bot_comment != bot_comment:
@@ -116,10 +124,27 @@ def verify_public_pilot_github_authorization(
         readiness = parse_public_pilot_readiness_marker(command.body)
     except ValueError as error:
         raise ValueError("GitHub command comment is not one exact readiness proof") from error
+    command_created_unix_s = int(
+        datetime.strptime(command.created_at, "%Y-%m-%dT%H:%M:%SZ")
+        .replace(tzinfo=timezone.utc)
+        .timestamp()
+    )
+    if now_unix_s is None:
+        now_unix_s = int(time.time())
+    if (
+        isinstance(now_unix_s, bool)
+        or not isinstance(now_unix_s, int)
+        or not 0 <= now_unix_s <= _MAX_JSON_SAFE_INTEGER
+    ):
+        raise ValueError("now_unix_s must be a nonnegative JSON-safe integer")
+    if command_created_unix_s > now_unix_s:
+        raise ValueError("GitHub command comment was created after the observation time")
+    # The bot already bound this immutable GitHub timestamp into the
+    # authorization. A later queue claim must not make an accepted proof expire.
     verify_public_pilot_readiness(
         readiness,
         expected_payload=readiness.payload,
-        now_unix_s=now_unix_s,
+        now_unix_s=command_created_unix_s,
     )
     payload = readiness.payload
     if (

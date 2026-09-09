@@ -30,8 +30,15 @@ value changes; historical results are deliberately checked against those binding
 
 ## Install
 
-Use a root-owned checkout at the exact Git revision configured in GitHub and in
-`public-pilot-automation.json`. Do not run a moving branch from systemd.
+Use a root-owned checkout at the exact automation revision configured in GitHub as
+`PUBLIC_PILOT_AUTOMATION_REVISION`. Keep the campaign revision separately pinned
+as `PUBLIC_PILOT_UMI_REVISION` in GitHub and as `umi_revision` in
+`public-pilot-automation.json`. The campaign revision is carried by signed
+authorizations and public results. An automation revision may advance within an
+active campaign only for a reviewed, campaign-compatible fix to the GitHub or
+controller boundary. A change to a campaign object, request, response, timelock,
+score, or public evidence format requires a new campaign revision instead. Do not
+run a moving branch from systemd.
 Four GiB of RAM is the recommended production size. The serialized pilot campaign
 can run on the current 1 GiB Linode with swap enabled, provided no model, test, or
 build workload runs on the host. Stop the controller and resize before continuing
@@ -46,16 +53,17 @@ ssh -A sam@172.239.57.201
 ssh -T git@github.com
 ```
 
-Set the exact 40-character release revision, then clone as `sam`. Do not run the
-clone through `sudo`: root does not have the forwarded agent's GitHub host-key
-state.
+Set both exact 40-character revisions, then clone the automation revision as
+`sam`. They are normally equal for a new campaign. Do not run the clone through
+`sudo`: root does not have the forwarded agent's GitHub host-key state.
 
 ```sh
-umi_revision=REPLACE_WITH_40_CHARACTER_RELEASE_REVISION
-release_checkout="/home/sam/umi-public-pilot-source-$umi_revision"
+automation_revision=REPLACE_WITH_40_CHARACTER_AUTOMATION_REVISION
+campaign_umi_revision=REPLACE_WITH_40_CHARACTER_CAMPAIGN_REVISION
+release_checkout="/home/sam/umi-public-pilot-source-$automation_revision"
 git clone --no-checkout git@github.com:Umi-BitSign/umi.git "$release_checkout"
-git -C "$release_checkout" checkout --detach "$umi_revision"
-test "$(git -C "$release_checkout" rev-parse HEAD)" = "$umi_revision"
+git -C "$release_checkout" checkout --detach "$automation_revision"
+test "$(git -C "$release_checkout" rev-parse HEAD)" = "$automation_revision"
 sudo install -d -o root -g root -m 0755 /opt/umi-public-pilot
 sudo mv "$release_checkout" /opt/umi-public-pilot/source
 sudo chown -R root:root /opt/umi-public-pilot/source
@@ -113,9 +121,9 @@ configuration. The configured wallet must resolve to the published coordinator
 hotkey.
 
 ```sh
-umi_revision=REPLACE_WITH_40_CHARACTER_RELEASE_REVISION
+campaign_umi_revision=REPLACE_WITH_40_CHARACTER_CAMPAIGN_REVISION
 pilot_config_candidate=$(mktemp)
-jq -cSj --arg revision "$umi_revision" \
+jq -cSj --arg revision "$campaign_umi_revision" \
   '.umi_revision = $revision' \
   /opt/umi-public-pilot/source/deploy/public-pilot-automation/systemd/public-pilot-automation.json.example \
   >"$pilot_config_candidate"
@@ -241,3 +249,92 @@ Stopping the controller stops new case preparation and request issuance. Stoppin
 the spool does not lose an archive: files remain in `incoming` or `processing` and
 are recovered before the next item. Never delete a state database, attempt journal,
 processed archive, receipt, or quarantine item during the campaign.
+
+## Automation-only update
+
+A boundary or controller fix may use a later automation commit without changing
+the active campaign revision. Publish and test the commit first. Set
+`PUBLIC_PILOT_AUTOMATION_REVISION` to that exact commit for the GitHub workflow,
+but leave `PUBLIC_PILOT_UMI_REVISION` and the canonical JSON config's
+`umi_revision` unchanged. Record both revisions in the incident or deployment
+note.
+
+The service environment imports the editable package from
+`/opt/umi-public-pilot/source`. Replace that checkout as a unit; do not copy
+individual files into it. The dependency lock must remain unchanged for this
+short update path. If it changed, use a separately reviewed full deployment.
+Preserve the old source checkout as the rollback target.
+
+Before the swap, stop if the durable database contains `processing` or
+`attempt_started` work. An active `case_ready` record is safe because no request is
+in flight. Stop the controller, repeat that check, swap the checkout, verify the
+unchanged campaign config, and restart:
+
+```sh
+set -eu
+automation_revision=REPLACE_WITH_40_CHARACTER_AUTOMATION_REVISION
+release_checkout="/home/sam/umi-public-pilot-source-$automation_revision"
+git clone --no-checkout git@github.com:Umi-BitSign/umi.git "$release_checkout"
+git -C "$release_checkout" checkout --detach "$automation_revision"
+test "$(git -C "$release_checkout" rev-parse HEAD)" = "$automation_revision"
+test -z "$(git -C "$release_checkout" status --porcelain)"
+cmp /opt/umi-public-pilot/source/uv.lock "$release_checkout/uv.lock"
+
+busy_count=$(/opt/umi-public-pilot/.venv/bin/python - <<'PY'
+import sqlite3
+
+connection = sqlite3.connect(
+    "file:/var/lib/umi-public-pilot-controller/automation.sqlite3?mode=ro",
+    uri=True,
+)
+print(
+    connection.execute(
+        "SELECT count(*) FROM authorizations "
+        "WHERE state IN ('processing', 'attempt_started')"
+    ).fetchone()[0]
+)
+PY
+)
+test "$busy_count" = 0
+
+campaign_config_sha256=$(sudo sha256sum /etc/umi/public-pilot-automation.json)
+campaign_umi_revision=$(sudo jq -r .umi_revision /etc/umi/public-pilot-automation.json)
+old_automation_revision=$(sudo git -C /opt/umi-public-pilot/source rev-parse HEAD)
+source_backup="/opt/umi-public-pilot/source-$old_automation_revision"
+test ! -e "$source_backup"
+
+sudo systemctl stop umi-public-pilot-controller.service
+busy_count=$(/opt/umi-public-pilot/.venv/bin/python - <<'PY'
+import sqlite3
+
+connection = sqlite3.connect(
+    "file:/var/lib/umi-public-pilot-controller/automation.sqlite3?mode=ro",
+    uri=True,
+)
+print(
+    connection.execute(
+        "SELECT count(*) FROM authorizations "
+        "WHERE state IN ('processing', 'attempt_started')"
+    ).fetchone()[0]
+)
+PY
+)
+test "$busy_count" = 0
+sudo mv /opt/umi-public-pilot/source "$source_backup"
+sudo mv "$release_checkout" /opt/umi-public-pilot/source
+sudo chown -R root:root /opt/umi-public-pilot/source
+test "$(sudo git -C /opt/umi-public-pilot/source rev-parse HEAD)" = "$automation_revision"
+/opt/umi-public-pilot/.venv/bin/python -B -c \
+  'import umi.public_pilot_authorization, umi.public_pilot_controller'
+test "$(sudo jq -r .umi_revision /etc/umi/public-pilot-automation.json)" = \
+  "$campaign_umi_revision"
+test "$(sudo sha256sum /etc/umi/public-pilot-automation.json)" = \
+  "$campaign_config_sha256"
+sudo systemctl start umi-public-pilot-controller.service
+systemctl is-active --quiet umi-public-pilot-controller.service
+```
+
+If either post-swap check or service startup fails, stop the service, move the new
+checkout aside, restore `source_backup` to `/opt/umi-public-pilot/source`, and
+start the service from the preserved checkout. Do not modify or replace the state
+database during either path.

@@ -243,9 +243,12 @@ def parse_public_pilot_readiness_marker(marker: str) -> PublicPilotReadinessProo
 
     if not isinstance(marker, str):
         raise TypeError("public-pilot readiness marker must be text")
-    if len(marker) > MAX_PUBLIC_PILOT_READINESS_MARKER_CHARS:
+    # GitHub normalizes a terminal Enter in a comment body to one LF. Treat it
+    # as a transport artifact, but reject CRLF, blank lines, and other suffixes.
+    marker_for_parse = marker[:-1] if marker.endswith("\n") else marker
+    if len(marker_for_parse) > MAX_PUBLIC_PILOT_READINESS_MARKER_CHARS:
         raise ValueError("invalid public-pilot readiness marker")
-    match = _MARKER_RE.fullmatch(marker)
+    match = _MARKER_RE.fullmatch(marker_for_parse)
     if match is None:
         raise ValueError("invalid public-pilot readiness marker")
     payload = parse_public_pilot_readiness_payload_token(match.group("payload"))

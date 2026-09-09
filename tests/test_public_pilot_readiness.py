@@ -96,9 +96,10 @@ def test_readiness_marker_round_trip_is_exact_and_hotkey_signed(
     assert marker.isascii()
     assert "\n" not in marker
     assert parse_public_pilot_readiness_marker(marker) == proof
+    assert parse_public_pilot_readiness_marker(marker + "\n") == proof
     assert (
         parse_and_verify_public_pilot_readiness_marker(
-            marker,
+            marker + "\n",
             expected_payload=payload,
             now_unix_s=_NOW_UNIX_S,
         )
@@ -211,7 +212,10 @@ def test_payload_token_rejects_padding_noncanonical_json_duplicates_and_extra_ke
     "mutate",
     [
         lambda marker: " " + marker,
-        lambda marker: marker + "\n",
+        lambda marker: marker + "\n\n",
+        lambda marker: marker + "\r\n",
+        lambda marker: marker + " \n",
+        lambda marker: marker + "\n ",
         lambda marker: marker.replace(" ", "  ", 1),
         lambda marker: marker.replace(" sr25519 ", " Sr25519 "),
         lambda marker: marker[:-1] + "G",

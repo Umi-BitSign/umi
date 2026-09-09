@@ -36,10 +36,20 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Require pinned automation source
+        shell: bash
+        env:
+          AUTOMATION_REVISION: ${{ vars.PUBLIC_PILOT_AUTOMATION_REVISION }}
+        run: |
+          if [[ ! "$AUTOMATION_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "PUBLIC_PILOT_AUTOMATION_REVISION must be one 40-character commit"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}
+          ref: ${{ vars.PUBLIC_PILOT_AUTOMATION_REVISION }}
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

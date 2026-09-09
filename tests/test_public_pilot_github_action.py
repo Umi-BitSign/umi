@@ -138,13 +138,19 @@ class FakeAPI:
         self.comments.append(comment)
         return comment
 
-    def add_user_comment(self, body: str, *, user_id: int = 44) -> dict[str, Any]:
+    def add_user_comment(
+        self,
+        body: str,
+        *,
+        user_id: int = 44,
+        created_at_unix_s: int = _NOW,
+    ) -> dict[str, Any]:
         comment = {
             "id": self._next_id,
             "node_id": f"IC_{self._next_id}",
             "body": body,
-            "created_at": bot.format_utc(_NOW),
-            "updated_at": bot.format_utc(_NOW),
+            "created_at": bot.format_utc(created_at_unix_s),
+            "updated_at": bot.format_utc(created_at_unix_s),
             "user": _user(user_id, "miner-owner" if user_id == 44 else "attacker"),
         }
         self._next_id += 1
@@ -342,6 +348,48 @@ def test_only_exact_immutable_issue_author_proof_becomes_authorization() -> None
     tampered_marker = marker[:-5] + replacement + marker[-4:]
     with pytest.raises(PublicPilotWireError, match="HMAC"):
         parse_authorization_marker(tampered_marker, _AUTH_KEY)
+
+
+def test_proof_comment_created_at_challenge_expiry_is_not_authorized() -> None:
+    issue = _issue()
+    api = FakeAPI(issue)
+    results = FakeResults()
+    config = _config()
+    bot.run("issues", _event(issue), api=api, results=results, config=config, now_unix_s=_NOW)
+    challenge = _challenge_from_comment(api.comments[-1])
+    expires_at = bot.parse_utc(challenge["expires_at"], field="expires_at")
+    command = api.add_user_comment(
+        _proof(challenge),
+        created_at_unix_s=expires_at,
+    )
+    parsed_issue = bot.parse_issue(issue, config)
+    state = bot.collect_comment_state(parsed_issue, api.comments, config)
+    assert (
+        bot.find_readiness_candidate(
+            parsed_issue,
+            state,
+            state.challenges[-1],
+            now_unix_s=expires_at,
+        )
+        is None
+    )
+
+    outcome = bot.run(
+        "issue_comment",
+        {**_event(issue), "comment": command},
+        api=api,
+        results=results,
+        config=config,
+        now_unix_s=expires_at,
+    )
+
+    assert outcome[0].status == "awaiting_ready_for_case"
+    assert outcome[0].comments_posted == 1
+    assert not any(
+        "umi-public-pilot-authorization-v1" in comment["body"] for comment in api.comments
+    )
+    replacement = _challenge_from_comment(api.comments[-1])
+    assert replacement["challenge_nonce"] != challenge["challenge_nonce"]
 
 
 def test_case_result_is_authenticated_sanitized_and_advances_to_issue_challenge() -> None:
@@ -607,7 +655,7 @@ def test_incomplete_attempt_is_a_terminal_non_feed_envelope() -> None:
     assert "evidence_archive_url" not in parsed.payload.model_dump()
 
 
-def test_readiness_parser_rejects_noncanonical_or_expired_markers() -> None:
+def test_readiness_parser_accepts_one_github_terminal_lf_only() -> None:
     challenge = bot.new_challenge(
         bot.parse_issue(_issue(), _config()),
         _config(),
@@ -618,8 +666,12 @@ def test_readiness_parser_rejects_noncanonical_or_expired_markers() -> None:
     marker = _proof(challenge)
     parsed = bot.parse_readiness_marker(marker, now_unix_s=_NOW)
     assert parsed.payload == bot.build_readiness_payload(challenge)
-    with pytest.raises(bot.BoundaryError, match="invalid_readiness_marker"):
-        bot.parse_readiness_marker(marker + "\n", now_unix_s=_NOW)
+    parsed_with_lf = bot.parse_readiness_marker(marker + "\n", now_unix_s=_NOW)
+    assert parsed_with_lf.payload == parsed.payload
+    assert parsed_with_lf.marker == marker + "\n"
+    for invalid in (marker + "\n\n", marker + "\r\n", marker + " \n", marker + "\n "):
+        with pytest.raises(bot.BoundaryError, match="invalid_readiness_marker"):
+            bot.parse_readiness_marker(invalid, now_unix_s=_NOW)
     with pytest.raises(bot.BoundaryError, match="readiness_expired"):
         bot.parse_readiness_marker(marker, now_unix_s=_NOW + 60)
 
@@ -635,8 +687,10 @@ def test_workflow_has_bounded_permissions_and_reconciliation_triggers() -> None:
     assert "workflow_dispatch:" in workflow
     assert "run: python tools/public_pilot_github_action.py" in workflow
     assert "github.event.comment.body" not in workflow
+    assert "PUBLIC_PILOT_AUTOMATION_REVISION must be one 40-character commit" in workflow
+    assert "ref: ${{ vars.PUBLIC_PILOT_AUTOMATION_REVISION }}" in workflow
     assert "UMI_REVISION: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}" in workflow
-    assert "ref: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}" in workflow
+    assert "ref: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}" not in workflow
 
 
 def test_operator_surfaces_use_the_signed_two_stage_flow() -> None:

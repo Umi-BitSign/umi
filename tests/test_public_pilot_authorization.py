@@ -27,6 +27,7 @@ from umi.public_pilot_readiness import (
 from .factories import dev_wallet
 
 _REVISION = "ab" * 20
+_OBSERVED_AFTER_EXPIRY = 1_788_900_000
 _ISSUE_BODY_TEMPLATE = """### SN78 UID
 
 249
@@ -74,7 +75,11 @@ class _Github:
         raise AssertionError("unexpected comment ID")
 
 
-def _fixture() -> tuple[GithubComment, _Github, bytes]:
+def _fixture(
+    *,
+    command_created_at: str = "2026-09-07T20:00:00Z",
+    bot_created_at: str = "2026-09-07T20:00:02Z",
+) -> tuple[GithubComment, _Github, bytes]:
     wallet = dev_wallet("//PublicPilotGithubMiner")
     hotkey = wallet.hotkey.ss58_address
     issue_body = _ISSUE_BODY_TEMPLATE.format(
@@ -113,8 +118,8 @@ def _fixture() -> tuple[GithubComment, _Github, bytes]:
         id=5_678,
         node_id="IC_command",
         body=command_body,
-        created_at="2026-09-07T20:00:00Z",
-        updated_at="2026-09-07T20:00:00Z",
+        created_at=command_created_at,
+        updated_at=command_created_at,
         user=user,
     )
     authorization = create_public_pilot_github_authorization(
@@ -145,8 +150,8 @@ def _fixture() -> tuple[GithubComment, _Github, bytes]:
         id=9_999,
         node_id="IC_bot",
         body=f"Authorization accepted.\n\n{marker}",
-        created_at="2026-09-07T20:00:02Z",
-        updated_at="2026-09-07T20:00:02Z",
+        created_at=bot_created_at,
+        updated_at=bot_created_at,
         user=GithubActor(id=41_898_282, login="github-actions[bot]", type="Bot"),
     )
     return bot, _Github(issue, command, bot), key
@@ -161,7 +166,7 @@ def test_public_pilot_authorization_rechecks_github_and_hotkey_signature() -> No
         expected_repository_id=1_348_567_807,
         expected_repository_full_name="Umi-BitSign/umi",
         expected_umi_revision=_REVISION,
-        now_unix_s=1_788_700_000,
+        now_unix_s=_OBSERVED_AFTER_EXPIRY,
     )
     assert verified.authorization.action == "ready_for_case"
     assert verified.enrollment.uid == 249
@@ -178,7 +183,7 @@ def test_public_pilot_authorization_rechecks_github_and_hotkey_signature() -> No
         expected_repository_id=1_348_567_807,
         expected_repository_full_name="Umi-BitSign/umi",
         expected_umi_revision=_REVISION,
-        now_unix_s=1_788_700_000,
+        now_unix_s=_OBSERVED_AFTER_EXPIRY,
     )
     assert verified.command_comment.user.id == 77
 
@@ -191,5 +196,65 @@ def test_public_pilot_authorization_rechecks_github_and_hotkey_signature() -> No
             expected_repository_id=1_348_567_807,
             expected_repository_full_name="Umi-BitSign/umi",
             expected_umi_revision=_REVISION,
-            now_unix_s=1_788_700_000,
+            now_unix_s=_OBSERVED_AFTER_EXPIRY,
+        )
+
+
+def test_queued_authorization_remains_valid_after_readiness_expiry() -> None:
+    bot, github, key = _fixture()
+
+    verified = verify_public_pilot_github_authorization(
+        bot,
+        github=github,  # type: ignore[arg-type]
+        hmac_key=key,
+        expected_repository_id=1_348_567_807,
+        expected_repository_full_name="Umi-BitSign/umi",
+        expected_umi_revision=_REVISION,
+        now_unix_s=_OBSERVED_AFTER_EXPIRY,
+    )
+
+    assert verified.authorization.action == "ready_for_case"
+    assert verified.command_comment.created_at == "2026-09-07T20:00:00Z"
+
+
+def test_authorization_rejects_command_created_after_observation_time() -> None:
+    bot, github, key = _fixture()
+
+    with pytest.raises(ValueError, match="created after the observation time"):
+        verify_public_pilot_github_authorization(
+            bot,
+            github=github,  # type: ignore[arg-type]
+            hmac_key=key,
+            expected_repository_id=1_348_567_807,
+            expected_repository_full_name="Umi-BitSign/umi",
+            expected_umi_revision=_REVISION,
+            now_unix_s=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("command_created_at", "bot_created_at"),
+    [
+        ("2026-09-08T20:00:00Z", "2026-09-08T20:00:02Z"),
+        ("2026-09-08T20:00:01Z", "2026-09-08T20:00:03Z"),
+    ],
+)
+def test_authorization_rejects_command_created_at_or_after_readiness_expiry(
+    command_created_at: str,
+    bot_created_at: str,
+) -> None:
+    bot, github, key = _fixture(
+        command_created_at=command_created_at,
+        bot_created_at=bot_created_at,
+    )
+
+    with pytest.raises(ValueError, match="readiness proof is expired"):
+        verify_public_pilot_github_authorization(
+            bot,
+            github=github,  # type: ignore[arg-type]
+            hmac_key=key,
+            expected_repository_id=1_348_567_807,
+            expected_repository_full_name="Umi-BitSign/umi",
+            expected_umi_revision=_REVISION,
+            now_unix_s=_OBSERVED_AFTER_EXPIRY,
         )
