@@ -37,6 +37,8 @@ from umi.bootstrap_weight_operator import (
     BootstrapWeightCallMaterial,
     BootstrapWeightScheduleEvidence,
     BootstrapWeightSubmissionReceipt,
+    _private_pilot_bundle_directories,
+    _write_private_pilot_replay_file,
     build_bootstrap_weight_call_material,
     observe_bootstrap_sunset,
     observe_bootstrap_terminal,
@@ -458,6 +460,27 @@ def test_runtime_checkout_accepts_only_immutable_exact_image_marker(tmp_path: Pa
             repository=tmp_path,
             image_revision_path=marker,
         )
+
+
+@pytest.mark.parametrize("process_umask", [0o002, 0o777])
+def test_pilot_replay_directories_enforce_private_modes(
+    tmp_path: Path,
+    process_umask: int,
+) -> None:
+    previous = os.umask(process_umask)
+    try:
+        root, objects = _private_pilot_bundle_directories(tmp_path)
+        manifest = root / "manifest.json"
+        evidence = objects / ("11" * 32)
+        _write_private_pilot_replay_file(manifest, b"{}")
+        _write_private_pilot_replay_file(evidence, b"evidence")
+    finally:
+        os.umask(previous)
+
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert objects.stat().st_mode & 0o777 == 0o700
+    assert manifest.stat().st_mode & 0o777 == 0o600
+    assert evidence.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio

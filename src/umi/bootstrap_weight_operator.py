@@ -2593,10 +2593,8 @@ async def _download_and_replay_pilot(
         raise BootstrapOperatorError("pilot_bundle_size_limit")
 
     with tempfile.TemporaryDirectory(prefix="umi-bootstrap-pilot-") as temporary:
-        root = Path(temporary) / "bundle"
-        objects = root / "objects"
-        objects.mkdir(parents=True, mode=0o700)
-        (root / "manifest.json").write_bytes(manifest_bytes)
+        root, objects = _private_pilot_bundle_directories(temporary)
+        _write_private_pilot_replay_file(root / "manifest.json", manifest_bytes)
         for reference in references:
             object_url = (
                 f"{public_origin}/api/v1/pilots/{pilot_id}/bundle/objects/{reference.sha256}"
@@ -2606,11 +2604,33 @@ async def _download_and_replay_pilot(
                 raise BootstrapOperatorError("pilot_object_size_mismatch")
             if hashlib.sha256(body).hexdigest() != reference.sha256:
                 raise BootstrapOperatorError("pilot_object_hash_mismatch")
-            (objects / reference.sha256).write_bytes(body)
+            _write_private_pilot_replay_file(objects / reference.sha256, body)
         try:
             return _load_pilot(root, public_origin)
         except (OSError, TypeError, ValueError) as error:
             raise BootstrapOperatorError("pilot_deterministic_replay_failed") from error
+
+
+def _private_pilot_bundle_directories(temporary: str | Path) -> tuple[Path, Path]:
+    """Create replay paths with fixed permissions regardless of the process umask."""
+
+    root = Path(temporary) / "bundle"
+    objects = root / "objects"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    objects.mkdir(mode=0o700)
+    objects.chmod(0o700)
+    return root, objects
+
+
+def _write_private_pilot_replay_file(path: Path, data: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(data)
 
 
 def _pilot_replay_receipt(

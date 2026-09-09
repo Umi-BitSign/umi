@@ -84,7 +84,7 @@ jobs:
         run: uv run --locked ruff format --check src tests neurons tools
 
       - name: Test
-        run: uv run --locked pytest --basetemp="$PWD/.pytest-tmp"
+        run: uv run --locked pytest --basetemp="${RUNNER_TEMP}/pytest"
 
       - name: Build wheel
         run: |
