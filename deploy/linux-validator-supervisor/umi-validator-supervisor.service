@@ -1,0 +1,64 @@
+[Unit]
+Description=UMI signed-release validator supervisor
+Documentation=https://github.com/Umi-BitSign/umi/blob/main/docs/PERMANENT_VALIDATOR_SUPERVISOR.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=umi-validator
+Group=umi-validator
+UMask=0077
+WorkingDirectory=/var/lib/umi-validator-supervisor
+ExecStart=/usr/bin/env -i \
+  HOME=/var/lib/umi-validator-supervisor/home \
+  XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
+  XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
+  XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
+  LOGNAME=umi-validator \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  PYTHONDONTWRITEBYTECODE=1 \
+  PYTHONUNBUFFERED=1 \
+  PYTHONUTF8=1 \
+  USER=umi-validator \
+  /opt/umi-validator-supervisor/.venv/bin/umi-validator-supervisor run --config /etc/umi/validator-supervisor.json
+Restart=always
+RestartSec=15s
+TimeoutStopSec=180s
+KillMode=control-group
+TasksMax=640
+LimitNOFILE=8192
+LimitCORE=0
+MemoryHigh=15032385536
+MemoryMax=17179869184
+OOMPolicy=stop
+StateDirectory=umi-validator-supervisor
+StateDirectoryMode=0700
+RuntimeDirectory=umi-validator-supervisor
+RuntimeDirectoryMode=0700
+
+PrivateTmp=true
+KeyringMode=private
+RemoveIPC=true
+ProtectClock=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+AmbientCapabilities=
+# Rootless Podman needs the narrowly scoped setuid newuidmap/newgidmap helpers.
+# The fixed worker profile applies no-new-privileges inside the container.
+Delegate=true
+ReadOnlyPaths=/etc/umi /opt/umi-validator-supervisor /var/lib/umi-validator-operator-inputs /var/lib/umi-validator-runtime-wallets
+ReadWritePaths=/var/lib/umi-validator-supervisor /var/lib/umi-validator-worker-state /run/umi-validator-supervisor
+
+[Install]
+WantedBy=multi-user.target

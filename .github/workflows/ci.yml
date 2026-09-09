@@ -121,6 +121,7 @@ jobs:
           .venv/bin/umi-validator-live --help
           .venv/bin/umi-validator-live-configure --help
           .venv/bin/umi-validator-live-reconcile --help
+          .venv/bin/umi-validator-supervisor --help
 
   public-pilot-r2-uploader:
     runs-on: ubuntu-latest

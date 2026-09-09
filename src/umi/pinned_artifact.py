@@ -57,7 +57,7 @@ def _copy_verified(specification: PinnedArtifact, destination: Path) -> None:
         before = os.fstat(source_descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or before.st_uid != os.getuid()
+            or before.st_uid not in {0, os.getuid()}
             or before.st_nlink != 1
             or before.st_mode & 0o022
         ):

@@ -1,0 +1,49 @@
+{
+  "allowed_modes": [
+    "hold",
+    "inactive_shadow",
+    "bootstrap_service_weights",
+    "translation_weights"
+  ],
+  "allowed_oci_repositories": [
+    "ghcr.io/umi-bitsign/umi-validator"
+  ],
+  "channel_id": "REPLACE_WITH_64_CHARACTER_CHANNEL_ID",
+  "container_runtime": "/usr/bin/podman",
+  "directive_url": "https://api.umi.vision/api/v1/validator-directives/REPLACE_WITH_VALIDATOR_ACCOUNT_ID32",
+  "finality_chain_spec_path": "/opt/umi-validator-supervisor/artifacts/raw_spec_finney.json",
+  "finality_verifier_binary": "/opt/umi-validator-supervisor/artifacts/umi-grandpa-finality-observer",
+  "finality_verifier_sha256": "REPLACE_WITH_64_CHARACTER_FINALITY_VERIFIER_SHA256",
+  "mechanism_id": 0,
+  "network": "finney",
+  "netuid": 78,
+  "operator_input_root": "/var/lib/umi-validator-operator-inputs",
+  "poll_seconds": 30,
+  "release_origins": [
+    "https://api.umi.vision"
+  ],
+  "release_root": "/var/lib/umi-validator-supervisor/releases",
+  "schema": "umi-validator-supervisor-config/1",
+  "signature_threshold": 1,
+  "state_schema_version": 1,
+  "state_root": "/var/lib/umi-validator-supervisor/state",
+  "target_platform": "linux/amd64",
+  "trusted_authorities": [
+    {
+      "hotkey": "REPLACE_WITH_RELEASE_AUTHORITY_HOTKEY",
+      "signature_scheme": "sr25519"
+    }
+  ],
+  "validator_hotkey": "REPLACE_WITH_VALIDATOR_HOTKEY",
+  "wallet": {
+    "hotkey": "REPLACE_WITH_RUNTIME_HOTKEY_NAME",
+    "name": "REPLACE_WITH_RUNTIME_WALLET_NAME",
+    "path": "/var/lib/umi-validator-runtime-wallets"
+  },
+  "worker_cpu_millis": 8000,
+  "worker_gid": 65532,
+  "worker_memory_bytes": 12884901888,
+  "worker_pids_limit": 512,
+  "worker_state_root": "/var/lib/umi-validator-worker-state",
+  "worker_uid": 65532
+}

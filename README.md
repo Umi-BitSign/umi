@@ -28,6 +28,7 @@ protocol extension.
 - [bootstrap service-weight operator](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
 - [emergency direct-bootstrap cutover v1](docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md)
 - [legacy validator transition hold](docs/LEGACY_VALIDATOR_TRANSITION.md)
+- [prerequisite-gated permanent validator supervisor](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
 - [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
 ## Current status
