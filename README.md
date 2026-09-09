@@ -26,6 +26,7 @@ protocol extension.
 - [inactive calibration launch checklist](docs/INACTIVE_LAUNCH_CHECKLIST.md)
 - [seven-day bootstrap service-weight addendum](docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
 - [bootstrap service-weight operator](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
+- [emergency direct-bootstrap cutover v1](docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md)
 - [legacy validator transition hold](docs/LEGACY_VALIDATOR_TRANSITION.md)
 - [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
@@ -34,10 +35,12 @@ protocol extension.
 SN78 is active on mainnet, but UMI translation weights are not. Public endpoint
 pilots are running and their signed, replayable results are available through the
 observer API. A separately labeled seven-day bootstrap service-weight path is
-implemented and awaiting policy publication and chain cutover. It becomes live
-only after a validator's exact equal service row is revealed, applied, and
-published with its chain evidence. The bootstrap is not a translation ranking and
-receives no credit toward translation-weight activation.
+awaiting its signed transition and chain cutover. The emergency direct profile
+keeps commit-reveal disabled, fences legacy short rows, and lets owner validator
+UID 0 submit raw full-UID service rows through the original policy's hard sunset.
+It becomes live only after an exact row is finalized and published with its chain
+evidence. The bootstrap is not a translation ranking and receives no credit
+toward translation-weight activation.
 
 There are four distinct executable paths:
 
