@@ -8,3 +8,5 @@ d /var/spool/umi-public-pilot/consumer/receipts 0700 umi-observer umi-observer -
 d /var/spool/umi-public-pilot/consumer/work 0700 umi-observer umi-observer -
 d /var/lib/umi-public-pilot-controller 0700 sam sam -
 d /var/lib/umi-observer/pilot-feed 0700 umi-observer umi-observer -
+d /var/lib/umi-observer/bootstrap-service-feed 0700 umi-observer umi-observer -
+d /var/lib/umi-observer/bootstrap-service-publications 0700 umi-observer umi-observer -

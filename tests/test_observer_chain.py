@@ -53,6 +53,7 @@ class FakeSubnets:
 class FakeSnapshot:
     def __init__(self, *, metagraph_block: int = 99, info_state_root: str = STATE_ROOT) -> None:
         self.block = 99
+        self.weight_row: Any = [(0, 1), (255, 65_535)]
         neurons = [
             SimpleNamespace(
                 uid=0,
@@ -168,6 +169,7 @@ class FakeSnapshot:
             "CommitRevealWeightsVersion": 4,
             "MaxMechanismCount": 2,
             "NetworksAdded": True,
+            "Weights": self.weight_row,
         }
         return values[item.name]
 
@@ -231,6 +233,7 @@ async def test_collector_uses_one_finalized_snapshot_and_exact_public_values() -
     assert result.network.subnet_exists is True
     assert result.network.subnet_started is True
     assert result.network.subnet_emission_enabled is False
+    assert result.network.uid_zero_mechid0_row == ((0, 1), (255, 65_535))
     assert result.network.price is not None
     assert result.network.price.tao_reserve_rao == "2000000000"
     assert result.network.price.subnet_alpha_reserve_rao == "1000000000"
@@ -255,7 +258,9 @@ async def test_collector_uses_one_finalized_snapshot_and_exact_public_values() -
         "CommitRevealWeightsVersion",
         "MaxMechanismCount",
         "NetworksAdded",
+        "Weights",
     }
+    assert ("Weights", [78, 0]) in snapshot.query_calls
 
 
 @pytest.mark.asyncio
@@ -290,6 +295,33 @@ async def test_collector_rejects_missing_required_raw_metagraph_column() -> None
         await collector.collect()
 
     assert caught.value.reason_code == "missing_metagraph_raw_active"
+
+
+@pytest.mark.parametrize(
+    ("row", "reason_code"),
+    [
+        ([(2, 1), (1, 1)], "uid_zero_mechid0_row_not_unique_and_sorted"),
+        ([(1, 1), (1, 2)], "uid_zero_mechid0_row_not_unique_and_sorted"),
+        ([(1, 65_536)], "invalid_uid_zero_mechid0_weight"),
+        ([(65_536, 1)], "invalid_uid_zero_mechid0_destination_uid"),
+        ([(1, 1, 1)], "invalid_uid_zero_mechid0_weight_pair"),
+        ([(True, 1)], "invalid_uid_zero_mechid0_destination_uid"),
+        ([(uid, 1) for uid in range(257)], "uid_zero_mechid0_row_limit_exceeded"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_collector_rejects_invalid_uid_zero_mechid0_row(
+    row: list[tuple[int, ...]],
+    reason_code: str,
+) -> None:
+    snapshot = FakeSnapshot()
+    snapshot.weight_row = row
+    collector = BittensorChainCollector(client_factory=lambda _: FakeClient(snapshot))
+
+    with pytest.raises(ChainCollectionError) as caught:
+        await collector.collect()
+
+    assert caught.value.reason_code == reason_code
 
 
 @pytest.mark.asyncio

@@ -133,6 +133,7 @@ def _snapshot(
         subnet_exists=True,
         subnet_started=True,
         subnet_emission_enabled=False,
+        uid_zero_mechid0_row=(),
         price=None,
         epoch=EpochState(
             epoch_index="123",
@@ -225,7 +226,7 @@ def test_status_is_finalized_chain_observation_not_umi_evidence() -> None:
     assert response.headers["x-umi-finalized-block"] == "99"
     assert (
         response.headers["x-umi-contract-revision"]
-        == "bfd20ab3df0a7737361248f6c79fb14794a1fcc4b1cbc5d97854705e0b3df1ab"
+        == "208f6633186e391f8ae8b7505af2c4d86e15b7de7f9a94b9a30ad26c75a1f2a8"
     )
     assert set(_STATIC_PROTOCOL_FACTS) == (
         set(ProtocolState.model_fields) - {"chain_identity_matches_expected"}
@@ -739,6 +740,7 @@ def test_cors_is_absent_by_default_and_exact_when_configured() -> None:
         "x-umi-dataset-revision",
         "x-umi-finalized-block",
         "x-umi-pilot-bundle",
+        "x-umi-bootstrap-bundle",
     }
     assert "access-control-allow-origin" not in spoofed.headers
     with pytest.raises(ValueError, match="exact HTTPS origins"):

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+from umi.protocol import canonical_json_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "deploy" / "public-pilot-automation" / "systemd"
@@ -82,6 +85,14 @@ def test_spool_handoff_directories_have_exact_owners_and_modes() -> None:
     assert "d /var/lib/umi-public-pilot-controller 0700 sam sam -" in tmpfiles
     assert "/var/lib/umi-public-pilot-spool" not in tmpfiles
     assert "d /var/lib/umi-observer/pilot-feed 0700 umi-observer umi-observer -" in tmpfiles
+    assert (
+        "d /var/lib/umi-observer/bootstrap-service-feed 0700 umi-observer umi-observer -"
+        in tmpfiles
+    )
+    assert (
+        "d /var/lib/umi-observer/bootstrap-service-publications 0700 "
+        "umi-observer umi-observer -" in tmpfiles
+    )
 
 
 def test_observer_drop_in_makes_spool_managed_paths_read_only() -> None:
@@ -91,7 +102,41 @@ def test_observer_drop_in_makes_spool_managed_paths_read_only() -> None:
     assert "ExecStart=\n" in drop_in
     assert "ExecStart=/opt/umi-observer/.venv/bin/python -m umi.observer" in drop_in
     assert "--pilot-feed-config ${UMI_OBSERVER_PILOT_FEED_CONFIG}" in drop_in
-    assert "ReadOnlyPaths=/var/lib/umi-observer/pilot-feed /var/lib/umi-observer/pilots" in drop_in
+    assert "--bootstrap-service-feed-config" not in drop_in
+
+
+def test_bootstrap_service_drop_in_is_enabled_only_after_evidence_install() -> None:
+    drop_in = (ASSETS / "umi-observer-bootstrap-service.conf").read_text()
+
+    assert "ExecStart=\n" in drop_in
+    assert "--bundle-feed-config=${UMI_OBSERVER_BUNDLE_FEED_CONFIG}" in drop_in
+    assert "--pilot-feed-config ${UMI_OBSERVER_PILOT_FEED_CONFIG}" in drop_in
+    assert (
+        "--bootstrap-service-feed-config "
+        "/var/lib/umi-observer/bootstrap-service-feed/config.json" in drop_in
+    )
+    assert "/var/lib/umi-observer/bootstrap-service-feed" in drop_in
+    assert "/var/lib/umi-observer/bootstrap-service-publications" in drop_in
+
+    example_path = ROOT / "docs" / "examples" / "observer-bootstrap-service-feed-config.json"
+    example_bytes = example_path.read_bytes()
+    example = json.loads(example_bytes)
+    assert canonical_json_bytes(example) == example_bytes
+    assert example["mode"] == "bootstrap_service_binary"
+    assert example["public_origin"] == "https://api.umi.vision"
+    assert example["bundle_roots"] == [
+        "/var/lib/umi-observer/bootstrap-service-publications/REPLACE_WITH_PUBLICATION_SHA256"
+    ]
+
+    runbook = (ROOT / "docs" / "EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md").read_text()
+    assert "BootstrapServiceFeedConfig.model_validate" in runbook
+    assert "Path(sys.argv[2]).write_bytes(canonical_json_bytes" in runbook
+    assert 'sorted(set([*value["bundle_roots"],sys.argv[3]]))' in runbook
+    assert "build_observer_bootstrap_service_feed" in runbook
+    assert "build_observer_pilot_feed" in runbook
+    assert 'sudo mv -f -- "$feed_candidate" "$feed_config"' in runbook
+    assert "complete Section 6 archive" in runbook
+    assert "jq -cSj --arg root" not in runbook
 
 
 def test_install_runbook_matches_the_actual_host_and_pinned_checkout() -> None:

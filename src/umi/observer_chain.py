@@ -87,7 +87,7 @@ def _default_client_factory(network: str) -> Any:
     return ReadOnlyObserverClient(network)
 
 
-def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any]:
+def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any, Any]:
     """Descriptors pinned by the repository's exact Bittensor dependency."""
 
     from bittensor._generated import storage
@@ -97,6 +97,7 @@ def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any]:
         storage.SubtensorModule.CommitRevealWeightsVersion,
         storage.SubtensorModule.MaxMechanismCount,
         storage.SubtensorModule.NetworksAdded,
+        storage.SubtensorModule.Weights,
     )
 
 
@@ -329,6 +330,35 @@ def _count_pending_commits(value: Any) -> int:
     return total
 
 
+def _weight_row(value: Any) -> tuple[tuple[int, int], ...]:
+    """Parse one exact on-chain weight row without accepting coercions or reordering."""
+
+    items = _sequence(value, "uid_zero_mechid0_row")
+    if len(items) > 256:
+        raise ChainCollectionError("uid_zero_mechid0_row_limit_exceeded")
+    result: list[tuple[int, int]] = []
+    previous_uid = -1
+    for item in items:
+        pair = _sequence(item, "uid_zero_mechid0_weight_pair")
+        if len(pair) != 2:
+            raise ChainCollectionError("invalid_uid_zero_mechid0_weight_pair")
+        destination_uid = _integer(
+            pair[0],
+            "uid_zero_mechid0_destination_uid",
+            maximum=_PER_U16_DENOMINATOR,
+        )
+        weight = _integer(
+            pair[1],
+            "uid_zero_mechid0_weight",
+            maximum=_PER_U16_DENOMINATOR,
+        )
+        if destination_uid <= previous_uid:
+            raise ChainCollectionError("uid_zero_mechid0_row_not_unique_and_sorted")
+        result.append((destination_uid, weight))
+        previous_uid = destination_uid
+    return tuple(result)
+
+
 def _participant(metagraph: Any, neuron: Any, block_number: int) -> ChainParticipant:
     uid = _integer(getattr(neuron, "uid", None), "participant_uid", maximum=(1 << 32) - 1)
     participant_count = len(getattr(metagraph, "neurons", ()))
@@ -512,6 +542,7 @@ class BittensorChainCollector:
             commit_reveal_version_value,
             maximum_mechanism_count_value,
             subnet_exists_value,
+            uid_zero_mechid0_row_value,
         ) = await asyncio.gather(
             snapshot.subnets.metagraph(netuid=self.netuid, commitments=False),
             snapshot.read("subnet_hyperparameters", netuid=self.netuid),
@@ -575,6 +606,7 @@ class BittensorChainCollector:
             maximum=65_535,
         )
         subnet_exists = _boolean_flag(subnet_exists_value, "subnet_exists")
+        uid_zero_mechid0_row = _weight_row(uid_zero_mechid0_row_value)
 
         participants = tuple(
             sorted(
@@ -607,6 +639,7 @@ class BittensorChainCollector:
             runtime_spec_version=runtime_spec_version,
             subnet_exists=subnet_exists,
             subnet_emission_enabled=subnet_emission_enabled,
+            uid_zero_mechid0_row=uid_zero_mechid0_row,
             participants=participants,
             unavailable_fields=unavailable_fields,
         )
@@ -624,15 +657,20 @@ class BittensorChainCollector:
             participants=participants,
         )
 
-    def _storage_reads(self, snapshot: Any) -> tuple[Any, Any, Any, Any]:
-        runtime_upgrade, commit_reveal_version, max_mechanisms, networks_added = (
-            _pinned_storage_descriptors()
-        )
+    def _storage_reads(self, snapshot: Any) -> tuple[Any, Any, Any, Any, Any]:
+        (
+            runtime_upgrade,
+            commit_reveal_version,
+            max_mechanisms,
+            networks_added,
+            weights,
+        ) = _pinned_storage_descriptors()
         return (
             snapshot.query(runtime_upgrade),
             snapshot.query(commit_reveal_version),
             snapshot.query(max_mechanisms),
             snapshot.query(networks_added, [self.netuid]),
+            snapshot.query(weights, [self.netuid, 0]),
         )
 
     @staticmethod
@@ -830,6 +868,7 @@ class BittensorChainCollector:
         runtime_spec_version: int | None,
         subnet_exists: bool | None,
         subnet_emission_enabled: bool | None,
+        uid_zero_mechid0_row: tuple[tuple[int, int], ...],
         participants: tuple[ChainParticipant, ...],
         unavailable_fields: set[str],
     ) -> ChainNetworkSnapshot:
@@ -962,6 +1001,7 @@ class BittensorChainCollector:
             subnet_exists=subnet_exists,
             subnet_started=subnet_started,
             subnet_emission_enabled=subnet_emission_enabled,
+            uid_zero_mechid0_row=uid_zero_mechid0_row,
             price=price,
             epoch=epoch,
             counts=NetworkCounts(

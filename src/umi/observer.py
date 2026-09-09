@@ -31,6 +31,13 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .encoding import account_id32
+from .observer_bootstrap_service_feed import (
+    BOOTSTRAP_SERVICE_MECHANISM,
+    ObserverBootstrapServiceFeed,
+    VerifiedBootstrapServicePublication,
+    build_observer_bootstrap_service_feed,
+)
 from .observer_bundle_feed import (
     BundleFeedSnapshot,
     ObserverBundleFeed,
@@ -49,6 +56,10 @@ from .observer_models import (
     ActivationGate,
     ActivationGatesResponse,
     BenchmarksResponse,
+    BootstrapServiceEvidenceLocator,
+    BootstrapServiceMiner,
+    BootstrapServiceRecord,
+    BootstrapServiceResponse,
     BundleFeedHealthRecord,
     ChainEconomicLeaderboard,
     ChainEconomicLeaderboardEntry,
@@ -112,6 +123,10 @@ _STATIC_PROTOCOL_FACTS = {
     "protocol": PROTOCOL_VERSION,
     "scoring_policy_hash": None,
     "specification_version": SPECIFICATION_VERSION,
+    "service_weight_evidence_sha256": None,
+    "service_weight_kind": None,
+    "service_weights_active": False,
+    "section_14_gate_credit": False,
     "translation_weights_active": False,
     "validator_input_eligible": False,
 }
@@ -146,6 +161,10 @@ _WINDOW_ERROR_RESPONSES = {
 _PILOT_ERROR_RESPONSES = {
     **_COMMON_ERROR_RESPONSES,
     404: {"model": ErrorResponse, "description": "Verified component pilot not found"},
+}
+_BOOTSTRAP_ERROR_RESPONSES = {
+    **_COMMON_ERROR_RESPONSES,
+    404: {"model": ErrorResponse, "description": "Verified bootstrap publication not found"},
 }
 
 _ACTIVATION_GATE_IDS = (
@@ -433,9 +452,99 @@ def _sources(snapshot: ObserverSnapshot) -> tuple[SourceProvenance, ...]:
     return (*snapshot.sources, _STATIC_SOURCE)
 
 
+@dataclass(frozen=True)
+class BootstrapServiceSelection:
+    publication: VerifiedBootstrapServicePublication | None
+    reason_code: str
+
+
+def _select_bootstrap_service(
+    snapshot: ObserverSnapshot,
+    feed: ObserverBootstrapServiceFeed | None,
+) -> BootstrapServiceSelection:
+    """Match one verified publication against current finalized chain state."""
+
+    if feed is None or not feed.publications:
+        return BootstrapServiceSelection(None, "bootstrap_service_evidence_unavailable")
+    network = snapshot.network
+    block = int(_finalized_block(snapshot).number)
+    if network.runtime_spec_version != "455":
+        return BootstrapServiceSelection(None, "bootstrap_service_runtime_spec_mismatch")
+    if network.mechanism_count != 1:
+        return BootstrapServiceSelection(None, "bootstrap_service_mechanism_count_mismatch")
+    if network.counts.registered != 256 or network.counts.maximum_uids != 256:
+        return BootstrapServiceSelection(None, "bootstrap_service_uid_domain_mismatch")
+    if network.hyperparameters.weights_version_key != str(1 << 32):
+        return BootstrapServiceSelection(None, "bootstrap_service_weights_version_mismatch")
+    if network.hyperparameters.min_allowed_weights != 256:
+        return BootstrapServiceSelection(None, "bootstrap_service_minimum_weights_mismatch")
+    if network.commit_reveal_enabled is not False:
+        return BootstrapServiceSelection(None, "bootstrap_service_commit_reveal_not_disabled")
+    if network.pending_weight_commit_count != 0:
+        return BootstrapServiceSelection(None, "bootstrap_service_pending_commit_queue_not_empty")
+    if network.subnet_exists is not True or network.subnet_started is not True:
+        return BootstrapServiceSelection(None, "bootstrap_service_subnet_not_started")
+    uid_zero = [item for item in snapshot.participants if item.uid == 0]
+    if len(uid_zero) != 1:
+        return BootstrapServiceSelection(None, "bootstrap_service_uid_zero_unavailable")
+    owner = uid_zero[0]
+    if not owner.validator_permit or not owner.chain_active:
+        return BootstrapServiceSelection(None, "bootstrap_service_uid_zero_not_active_validator")
+
+    call_matches = [
+        item
+        for item in feed.publications
+        if item.receipt.weight_call.block_number == int(owner.last_update_block)
+        and account_id32(item.receipt.validator_hotkey) == account_id32(owner.hotkey)
+    ]
+    if len(call_matches) != 1:
+        return BootstrapServiceSelection(None, "bootstrap_service_uid_zero_row_unmatched")
+    publication = call_matches[0]
+    if block < publication.receipt.observation_block:
+        return BootstrapServiceSelection(None, "bootstrap_service_receipt_not_finalized_at_head")
+    if block > publication.manifest.active_through_block:
+        return BootstrapServiceSelection(None, "bootstrap_service_row_inactive")
+    expected_cutoff = (
+        publication.call_material.operational_preflight.chain.snapshot.activity_cutoff_blocks
+    )
+    if network.hyperparameters.activity_cutoff_blocks != str(expected_cutoff):
+        return BootstrapServiceSelection(None, "bootstrap_service_activity_cutoff_changed")
+    competing_validators = [
+        item
+        for item in snapshot.participants
+        if item.uid != 0
+        and item.validator_permit
+        and (item.chain_active or int(item.last_update_block) + expected_cutoff >= block)
+    ]
+    if competing_validators:
+        return BootstrapServiceSelection(
+            None,
+            "bootstrap_service_non_owner_validator_active",
+        )
+    participants_by_uid = {item.uid: item for item in snapshot.participants}
+    for entry in publication.signed_manifest.manifest.entries:
+        participant = participants_by_uid.get(entry.uid)
+        if (
+            participant is None
+            or account_id32(participant.hotkey) != account_id32(entry.miner_hotkey)
+            or participant.validator_permit
+            or not participant.serving_announced
+            or int(participant.registration_block) > publication.receipt.weight_call.block_number
+        ):
+            return BootstrapServiceSelection(
+                None,
+                "bootstrap_service_eligible_miner_mapping_changed",
+            )
+    expected_row = tuple(tuple(item) for item in publication.receipt.expected_applied_row)
+    if network.uid_zero_mechid0_row != expected_row:
+        return BootstrapServiceSelection(None, "bootstrap_service_applied_row_mismatch")
+    return BootstrapServiceSelection(publication, "bootstrap_service_active")
+
+
 def _protocol_state(
     snapshot: ObserverSnapshot,
     released_windows: Sequence[VerifiedFeedWindow] = (),
+    bootstrap_publication: VerifiedBootstrapServicePublication | None = None,
 ) -> ProtocolState:
     network = snapshot.network
     observed_names = tuple(
@@ -452,11 +561,27 @@ def _protocol_state(
         netuid=_STATIC_PROTOCOL_FACTS["netuid"],
         mechanism_id=_STATIC_PROTOCOL_FACTS["mechanism_id"],
         translation_weights_active=_STATIC_PROTOCOL_FACTS["translation_weights_active"],
+        service_weights_active=bootstrap_publication is not None,
+        service_weight_kind=(
+            BOOTSTRAP_SERVICE_MECHANISM if bootstrap_publication is not None else None
+        ),
+        service_weight_evidence_sha256=(
+            None if bootstrap_publication is None else bootstrap_publication.publication_id
+        ),
+        section_14_gate_credit=False,
         scoring_policy_hash=next(iter(policy_hashes)) if len(policy_hashes) == 1 else None,
         conformance_evidence_available=has_released,
         activation_evidence_available=_STATIC_PROTOCOL_FACTS["activation_evidence_available"],
-        economic_era=_STATIC_PROTOCOL_FACTS["economic_era"],
-        chain_result_classification=_STATIC_PROTOCOL_FACTS["chain_result_classification"],
+        economic_era=(
+            "legacy_bootstrap"
+            if bootstrap_publication is not None
+            else _STATIC_PROTOCOL_FACTS["economic_era"]
+        ),
+        chain_result_classification=(
+            "legacy_or_bootstrap"
+            if bootstrap_publication is not None
+            else _STATIC_PROTOCOL_FACTS["chain_result_classification"]
+        ),
         expected_chain_name=_STATIC_PROTOCOL_FACTS["expected_chain_name"],
         chain_identity_matches_expected=identity_matches,
         validator_input_eligible=_STATIC_PROTOCOL_FACTS["validator_input_eligible"],
@@ -635,7 +760,12 @@ def _render(request: Request, model: ObserverModel, view: SnapshotView) -> Respo
     released_artifacts = sorted(
         source.artifact_sha256
         for source in model.sources
-        if source.source_kind in {"released_audit_bundle", "component_pilot_bundle"}
+        if source.source_kind
+        in {
+            "released_audit_bundle",
+            "component_pilot_bundle",
+            "bootstrap_service_bundle",
+        }
         and source.artifact_sha256 is not None
     )
     dataset_revision = (
@@ -669,17 +799,18 @@ def _render_immutable_bytes(
     media_type: str,
     sha256: str,
     bundle_sha256: str,
+    bundle_header: str = "X-UMI-Pilot-Bundle",
 ) -> Response:
-    """Serve one startup-verified content-addressed pilot object."""
+    """Serve one startup-verified content-addressed evidence object."""
 
     if hashlib.sha256(data).hexdigest() != sha256:
-        raise RuntimeError("immutable pilot object no longer matches its digest")
+        raise RuntimeError("immutable evidence object no longer matches its digest")
     etag = f'"{sha256}"'
     headers = {
         "Cache-Control": "public, max-age=31536000, immutable",
         "Content-Length": str(len(data)),
         "ETag": etag,
-        "X-UMI-Pilot-Bundle": bundle_sha256,
+        bundle_header: bundle_sha256,
     }
     if _if_none_match_matches(request.headers.get("if-none-match"), etag):
         return Response(status_code=304, headers=headers)
@@ -702,12 +833,15 @@ def create_observer_app(
     *,
     bundle_feed: ObserverBundleFeed | None = None,
     pilot_feed: ObserverPilotFeed | None = None,
+    bootstrap_service_feed: ObserverBootstrapServiceFeed | None = None,
     bundle_feed_poll_seconds: float = 15,
     cors_origins: Sequence[str] = (),
     trusted_hosts: Sequence[str] = ("127.0.0.1", "localhost", "testserver"),
 ) -> FastAPI:
     """Build an API whose request handlers have no outbound network path."""
 
+    if bootstrap_service_feed is not None and pilot_feed is None:
+        raise ValueError("bootstrap service feed requires the verified pilot feed")
     allowed_origins = _validate_cors_origins(cors_origins)
     allowed_hosts = _validate_trusted_hosts(trusted_hosts)
 
@@ -747,6 +881,7 @@ def create_observer_app(
                 "X-UMI-Dataset-Revision",
                 "X-UMI-Finalized-Block",
                 "X-UMI-Pilot-Bundle",
+                "X-UMI-Bootstrap-Bundle",
             ],
             max_age=600,
         )
@@ -775,6 +910,8 @@ def create_observer_app(
             reason_code = "invalid_window_id"
         elif ("path", "pilot_id") in locations:
             reason_code = "invalid_pilot_id"
+        elif ("path", "publication_id") in locations:
+            reason_code = "invalid_bootstrap_publication_id"
         elif ("path", "object_sha256") in locations:
             reason_code = "invalid_object_sha256"
         else:
@@ -783,6 +920,19 @@ def create_observer_app(
 
     def current() -> SnapshotView:
         return cache.current()
+
+    def bootstrap_selection(view: SnapshotView) -> BootstrapServiceSelection:
+        return _select_bootstrap_service(view.snapshot, bootstrap_service_feed)
+
+    def current_protocol_state(
+        view: SnapshotView,
+        feed: BundleFeedSnapshot,
+    ) -> ProtocolState:
+        return _protocol_state(
+            view.snapshot,
+            feed.windows,
+            bootstrap_selection(view).publication,
+        )
 
     def released(view: SnapshotView) -> BundleFeedSnapshot:
         if bundle_feed is None:
@@ -800,6 +950,18 @@ def create_observer_app(
         view: SnapshotView, feed: BundleFeedSnapshot
     ) -> tuple[SourceProvenance, ...]:
         values = list(_sources(view.snapshot))
+        active_bootstrap = bootstrap_selection(view).publication
+        if active_bootstrap is not None:
+            values.append(
+                SourceProvenance(
+                    source_id=f"bootstrap-service-{active_bootstrap.publication_id}",
+                    source_kind="bootstrap_service_bundle",
+                    verification_status="bootstrap_current_state_verified",
+                    block=None,
+                    policy_hash=active_bootstrap.manifest.policy_sha256,
+                    artifact_sha256=active_bootstrap.publication_id,
+                )
+            )
         for item in feed.windows:
             values.append(
                 SourceProvenance(
@@ -979,6 +1141,18 @@ def create_observer_app(
         selected: Sequence[VerifiedComponentPilot],
     ) -> dict[str, Any]:
         sources = list(_sources(view.snapshot))
+        active_bootstrap = bootstrap_selection(view).publication
+        if active_bootstrap is not None:
+            sources.append(
+                SourceProvenance(
+                    source_id=f"bootstrap-service-{active_bootstrap.publication_id}",
+                    source_kind="bootstrap_service_bundle",
+                    verification_status="bootstrap_current_state_verified",
+                    block=None,
+                    policy_hash=active_bootstrap.manifest.policy_sha256,
+                    artifact_sha256=active_bootstrap.publication_id,
+                )
+            )
         sources.extend(
             SourceProvenance(
                 source_id=f"component-pilot-{pilot.pilot_id}",
@@ -1136,6 +1310,81 @@ def create_observer_app(
             ),
         )
 
+    def configured_bootstrap_publications() -> tuple[VerifiedBootstrapServicePublication, ...]:
+        return () if bootstrap_service_feed is None else bootstrap_service_feed.publications
+
+    def bootstrap_locator(
+        publication: VerifiedBootstrapServicePublication,
+    ) -> BootstrapServiceEvidenceLocator:
+        return BootstrapServiceEvidenceLocator(
+            publication_id=publication.publication_id,
+            public_origin=publication.public_origin,
+            manifest_sha256=publication.publication_id,
+            manifest_url=(
+                f"{publication.public_origin}/api/v1/bootstrap-service/"
+                f"{publication.publication_id}/bundle/manifest.json"
+            ),
+            expected_row_sha256=publication.manifest.expected_row_sha256,
+        )
+
+    def bootstrap_record(
+        publication: VerifiedBootstrapServicePublication,
+    ) -> BootstrapServiceRecord:
+        entries = sorted(
+            publication.signed_manifest.manifest.entries,
+            key=lambda item: item.uid,
+        )
+        return BootstrapServiceRecord(
+            mechanism=BOOTSTRAP_SERVICE_MECHANISM,
+            translation_weights_active=False,
+            section_14_gate_credit=False,
+            storage_proofs_verified=False,
+            policy_sha256=publication.manifest.policy_sha256,
+            eligibility_manifest_sha256=publication.manifest.eligibility_manifest_sha256,
+            submission_id=publication.manifest.submission_id,
+            umi_git_revision=publication.manifest.umi_git_revision,
+            validator_uid=0,
+            validator_hotkey=publication.receipt.validator_hotkey,
+            weight_call_block=str(publication.receipt.weight_call.block_number),
+            weight_call_block_hash=publication.receipt.weight_call.block_hash,
+            observation_block=str(publication.receipt.observation_block),
+            observation_block_hash=publication.receipt.observation_block_hash,
+            active_through_block=str(publication.manifest.active_through_block),
+            hard_sunset_block=str(publication.manifest.hard_sunset_block),
+            eligible_miners=tuple(
+                BootstrapServiceMiner(
+                    uid=entry.uid,
+                    miner_hotkey=entry.miner_hotkey,
+                    origin=entry.origin,
+                    pilot_id=entry.pilot_id,
+                    pilot_url=f"{publication.public_origin}/api/v1/pilots/{entry.pilot_id}",
+                    solutions_url=(
+                        f"{publication.public_origin}/api/v1/pilots/{entry.pilot_id}/solutions"
+                    ),
+                )
+                for entry in entries
+            ),
+            evidence=bootstrap_locator(publication),
+        )
+
+    def bootstrap_envelope(
+        view: SnapshotView,
+        publication: VerifiedBootstrapServicePublication | None,
+    ) -> dict[str, Any]:
+        sources = list(_sources(view.snapshot))
+        if publication is not None:
+            sources.append(
+                SourceProvenance(
+                    source_id=f"bootstrap-service-{publication.publication_id}",
+                    source_kind="bootstrap_service_bundle",
+                    verification_status="bootstrap_current_state_verified",
+                    block=None,
+                    policy_hash=publication.manifest.policy_sha256,
+                    artifact_sha256=publication.publication_id,
+                )
+            )
+        return _envelope(view) | {"sources": tuple(sources)}
+
     @app.get("/healthz", include_in_schema=False)
     async def health() -> JSONResponse:
         return JSONResponse(
@@ -1174,12 +1423,14 @@ def create_observer_app(
             gaps.discard("public_calibration_not_started")
         if len({item.scoring_policy_hash for item in public_solution_windows}) == 1:
             gaps.discard("active_scoring_policy_unavailable")
+        if bootstrap_selection(view).publication is not None:
+            gaps.discard("umi_weight_cutover_unverified")
         response = StatusResponse(
             **released_envelope(view, feed),
             service_status=(
                 "ready" if view.freshness == "fresh" and not feed_unhealthy else "degraded"
             ),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             finalized_block=_finalized_block(view.snapshot),
             outstanding_gap_codes=tuple(sorted(gaps)),
         )
@@ -1196,7 +1447,7 @@ def create_observer_app(
         feed = released(view)
         response = NetworkResponse(
             **released_envelope(view, feed),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             network=view.snapshot.network,
         )
         return _render(request, response, view)
@@ -1235,7 +1486,7 @@ def create_observer_app(
         )
         response = ParticipantsResponse(
             **released_envelope(view, feed),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             page=CursorPage(
                 role=query.role,
                 limit=query.limit,
@@ -1298,7 +1549,7 @@ def create_observer_app(
             ranking_reason = None
         response = LeaderboardResponse(
             **released_envelope(view, feed),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             chain_economics=ChainEconomicLeaderboard(
                 ranking_status=ranking_status,
                 reason_code=ranking_reason,
@@ -1359,7 +1610,7 @@ def create_observer_app(
         records = tuple(released_window(item) for item in selected)
         response = WindowsResponse(
             **released_envelope(view, feed, selected),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             availability="available" if feed.windows else "not_started",
             reason_code=None if feed.windows else "public_calibration_not_started",
             windows=records,
@@ -1406,7 +1657,7 @@ def create_observer_app(
             raise PublicAPIError(409, "released_window_validator_required")
         response = WindowResponse(
             **released_envelope(view, feed, matches),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             window=released_window(matches[0]),
         )
         return _render(request, response, view)
@@ -1461,7 +1712,7 @@ def create_observer_app(
         next_offset = offset + len(selected)
         response = WindowSolutionsResponse(
             **released_envelope(view, feed, (item,)),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             window=released_window(item),
             page=EvidenceCursorPage(
                 limit=query.limit,
@@ -1480,6 +1731,87 @@ def create_observer_app(
             solutions=tuple(released_solution(item, solution) for solution in selected),
         )
         return _render(request, response, view)
+
+    @app.head("/api/v1/bootstrap-service", include_in_schema=False)
+    @app.get(
+        "/api/v1/bootstrap-service",
+        response_model=BootstrapServiceResponse,
+        responses={503: _COMMON_ERROR_RESPONSES[503]},
+    )
+    async def bootstrap_service(request: Request) -> Response:
+        view = current()
+        releases = released(view)
+        publications = tuple(
+            sorted(configured_bootstrap_publications(), key=lambda item: item.publication_id)
+        )
+        selection = bootstrap_selection(view)
+        response = BootstrapServiceResponse(
+            **bootstrap_envelope(view, selection.publication),
+            protocol_state=current_protocol_state(view, releases),
+            availability="active" if selection.publication is not None else "inactive",
+            reason_code=None if selection.publication is not None else selection.reason_code,
+            current=(
+                None if selection.publication is None else bootstrap_record(selection.publication)
+            ),
+            verified_publications=tuple(bootstrap_locator(item) for item in publications),
+        )
+        return _render(request, response, view)
+
+    @app.head(
+        "/api/v1/bootstrap-service/{publication_id}/bundle/manifest.json",
+        include_in_schema=False,
+    )
+    @app.get(
+        "/api/v1/bootstrap-service/{publication_id}/bundle/manifest.json",
+        responses=_BOOTSTRAP_ERROR_RESPONSES,
+    )
+    async def bootstrap_service_manifest(
+        request: Request,
+        publication_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+    ) -> Response:
+        publication = (
+            None if bootstrap_service_feed is None else bootstrap_service_feed.get(publication_id)
+        )
+        if publication is None:
+            raise PublicAPIError(404, "bootstrap_service_publication_not_found")
+        return _render_immutable_bytes(
+            request,
+            publication.manifest_bytes,
+            media_type="application/json",
+            sha256=publication.publication_id,
+            bundle_sha256=publication.publication_id,
+            bundle_header="X-UMI-Bootstrap-Bundle",
+        )
+
+    @app.head(
+        "/api/v1/bootstrap-service/{publication_id}/bundle/objects/{object_sha256}",
+        include_in_schema=False,
+    )
+    @app.get(
+        "/api/v1/bootstrap-service/{publication_id}/bundle/objects/{object_sha256}",
+        responses=_BOOTSTRAP_ERROR_RESPONSES,
+    )
+    async def bootstrap_service_object(
+        request: Request,
+        publication_id: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+        object_sha256: Annotated[str, Path(pattern=_WINDOW_ID_RE.pattern)],
+    ) -> Response:
+        publication = (
+            None if bootstrap_service_feed is None else bootstrap_service_feed.get(publication_id)
+        )
+        if publication is None:
+            raise PublicAPIError(404, "bootstrap_service_publication_not_found")
+        evidence_object = publication.objects.get(object_sha256)
+        if evidence_object is None:
+            raise PublicAPIError(404, "bootstrap_service_object_not_found")
+        return _render_immutable_bytes(
+            request,
+            evidence_object.data,
+            media_type=evidence_object.media_type,
+            sha256=evidence_object.sha256,
+            bundle_sha256=publication.publication_id,
+            bundle_header="X-UMI-Bootstrap-Bundle",
+        )
 
     @app.head("/api/v1/pilots", include_in_schema=False)
     @app.get(
@@ -1506,7 +1838,7 @@ def create_observer_app(
         next_offset = offset + len(selected)
         response = PilotsResponse(
             **pilot_envelope(view, selected),
-            protocol_state=_protocol_state(view.snapshot, released(view).windows),
+            protocol_state=current_protocol_state(view, released(view)),
             availability="available" if all_pilots else "not_started",
             reason_code=None if all_pilots else "public_component_pilot_not_started",
             page=EvidenceCursorPage(
@@ -1543,7 +1875,7 @@ def create_observer_app(
             raise PublicAPIError(404, "component_pilot_not_found")
         response = PilotResponse(
             **pilot_envelope(view, (pilot,)),
-            protocol_state=_protocol_state(view.snapshot, released(view).windows),
+            protocol_state=current_protocol_state(view, released(view)),
             pilot=pilot_record(pilot),
         )
         return _render(request, response, view)
@@ -1579,7 +1911,7 @@ def create_observer_app(
         next_offset = offset + len(selected)
         response = PilotSolutionsResponse(
             **pilot_envelope(view, (pilot,)),
-            protocol_state=_protocol_state(view.snapshot, released(view).windows),
+            protocol_state=current_protocol_state(view, released(view)),
             pilot=pilot_record(pilot),
             page=EvidenceCursorPage(
                 limit=query.limit,
@@ -1660,7 +1992,7 @@ def create_observer_app(
         feed = released(view)
         response = ActivationGatesResponse(
             **released_envelope(view, feed),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             readiness="not_ready",
             gates=tuple(
                 ActivationGate(
@@ -1685,7 +2017,7 @@ def create_observer_app(
         feed = released(view)
         response = BenchmarksResponse(
             **released_envelope(view, feed),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             availability="not_started",
             reason_code="public_benchmark_feed_not_started",
             benchmarks=(),
@@ -1754,7 +2086,7 @@ def create_observer_app(
         )
         response = IncidentsResponse(
             **released_envelope(view, feed, selected_windows),
-            protocol_state=_protocol_state(view.snapshot, feed.windows),
+            protocol_state=current_protocol_state(view, feed),
             availability="available" if all_records else "not_started",
             reason_code=None if all_records else "public_incident_feed_not_started",
             incidents=records,
@@ -1786,6 +2118,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--network", choices=("finney",), default="finney")
     parser.add_argument("--bundle-feed-config")
     parser.add_argument("--pilot-feed-config")
+    parser.add_argument("--bootstrap-service-feed-config")
     parser.add_argument("--cors-origin", action="append", default=[])
     parser.add_argument("--trusted-host", action="append", default=[])
     parser.add_argument("--fresh-for-seconds", type=float, default=24.0)
@@ -1833,10 +2166,21 @@ def main() -> None:
         if args.pilot_feed_config is None
         else build_observer_pilot_feed(args.pilot_feed_config)
     )
+    if args.bootstrap_service_feed_config and pilot_feed is None:
+        raise SystemExit("--bootstrap-service-feed-config requires --pilot-feed-config")
+    bootstrap_service_feed = (
+        None
+        if args.bootstrap_service_feed_config is None
+        else build_observer_bootstrap_service_feed(
+            args.bootstrap_service_feed_config,
+            pilot_feed=pilot_feed,
+        )
+    )
     app = create_observer_app(
         cache,
         bundle_feed=bundle_feed,
         pilot_feed=pilot_feed,
+        bootstrap_service_feed=bootstrap_service_feed,
         bundle_feed_poll_seconds=bundle_feed_poll_seconds,
         cors_origins=args.cors_origin,
         trusted_hosts=trusted_hosts,

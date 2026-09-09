@@ -367,7 +367,9 @@ For every row, retain and publish the authorization's submission ID and the
 terminal journal classification. Do not publish wallet paths or other private
 operator state.
 
-Only after independent replay passes may public status change to:
+Only after the complete archive is published, the canonical terminal records pass
+validation, and the observer matches the row to current finalized chain state may
+public status change to:
 
 ```json
 {
@@ -379,6 +381,89 @@ Only after independent replay passes may public status change to:
 
 Never describe the equal binary row as ASL accuracy, a translation leaderboard,
 or completion of a whitepaper activation gate.
+
+The observer bundle below is deliberately narrower than the complete historical
+archive above. It publishes the canonical terminal records needed to bind the
+signed eligibility decision to the exact row, then the observer independently
+compares that row, `LastUpdate`, mappings, and fenced hyperparameters with current
+finalized chain state. It reports `storage_proofs_verified: false`. Raw SCALE call
+bytes, raw transaction events, dry-run previews, the addendum bytes, and the
+excluded-UID ledger remain part of the separate complete Section 6 archive and
+MUST be published before the launch announcement. The observer endpoint alone does
+not claim to satisfy complete historical replay.
+
+Build the current-state observer publication from the exact terminal files. The
+journal is the `direct-*.json` file created in the submission state directory for
+this authorization and UID 0 hotkey:
+
+```sh
+PUBLICATION_ROOT=/absolute/new/path/to/bootstrap-service-publication
+DIRECT_JOURNAL=/absolute/private/path/to/direct-submission-state/direct-REPLACE.json
+
+.venv/bin/umi-observer-bootstrap-service-publication \
+  --owner-fence-receipt /absolute/private/path/to/owner-fence-receipt.json \
+  --signed-manifest "$MANIFEST" \
+  --authorization "$AUTHORIZATION" \
+  --call-material /absolute/private/path/to/submitted-call-material.json \
+  --submission-receipt /absolute/private/path/to/direct-submission-receipt.json \
+  --submission-journal "$DIRECT_JOURNAL" \
+  --output-root "$PUBLICATION_ROOT"
+
+PUBLICATION_ID="$(sha256sum "$PUBLICATION_ROOT/manifest.json" | cut -d' ' -f1)"
+test "${#PUBLICATION_ID}" -eq 64
+```
+
+The output path must not already exist. A repeat invocation fails instead of
+replacing an immutable publication. Copy it into the observer-owned publication
+root and atomically install one canonical feed config:
+
+```sh
+OBSERVER_PUBLICATION="/var/lib/umi-observer/bootstrap-service-publications/$PUBLICATION_ID"
+sudo install -d -o umi-observer -g umi-observer -m 0700 \
+  /var/lib/umi-observer/bootstrap-service-feed \
+  /var/lib/umi-observer/bootstrap-service-publications \
+  "$OBSERVER_PUBLICATION"
+sudo cp -a "$PUBLICATION_ROOT/." "$OBSERVER_PUBLICATION/"
+sudo chown -R umi-observer:umi-observer "$OBSERVER_PUBLICATION"
+sudo find "$OBSERVER_PUBLICATION" -type d -exec chmod 0700 {} +
+sudo find "$OBSERVER_PUBLICATION" -type f -exec chmod 0400 {} +
+
+feed_config=/var/lib/umi-observer/bootstrap-service-feed/config.json
+feed_candidate="${feed_config}.${PUBLICATION_ID}.new"
+sudo test ! -e "$feed_candidate"
+sudo -u umi-observer .venv/bin/python -c \
+  'import sys; from pathlib import Path; from umi.observer_bootstrap_service_feed import BootstrapServiceFeedConfig; from umi.protocol import canonical_json_bytes; current=Path(sys.argv[1]); raw=current.read_bytes() if current.exists() else None; value={"schema":"umi-observer-bootstrap-service-feed-config/1","protocol":"umi-asl/0.1","mode":"bootstrap_service_binary","public_origin":"https://api.umi.vision","bundle_roots":[]} if raw is None else BootstrapServiceFeedConfig.model_validate_json(raw).model_dump(mode="json",by_alias=True); assert raw is None or canonical_json_bytes(value)==raw; value["bundle_roots"]=sorted(set([*value["bundle_roots"],sys.argv[3]])); Path(sys.argv[2]).write_bytes(canonical_json_bytes(BootstrapServiceFeedConfig.model_validate(value)))' \
+  "$feed_config" "$feed_candidate" "$OBSERVER_PUBLICATION"
+sudo -u umi-observer .venv/bin/python -c \
+  'import sys; from umi.observer_bootstrap_service_feed import build_observer_bootstrap_service_feed; from umi.observer_pilot_feed import build_observer_pilot_feed; build_observer_bootstrap_service_feed(sys.argv[1],pilot_feed=build_observer_pilot_feed(sys.argv[2]))' \
+  "$feed_candidate" \
+  /var/lib/umi-observer/pilot-feed/observer-pilot-feed.json
+sudo chmod 0400 "$feed_candidate"
+sudo mv -f -- "$feed_candidate" "$feed_config"
+```
+
+After installing the matching observer release and systemd drop-in, restart it and
+let the API independently compare the publication to a fresh finalized snapshot.
+The combined drop-in preserves `UMI_OBSERVER_BUNDLE_FEED_CONFIG` when it is set.
+An unset value passes an empty equals-form argument, which leaves that optional
+feed disabled:
+
+```sh
+sudo install -o root -g root -m 0644 \
+  deploy/public-pilot-automation/systemd/umi-observer-bootstrap-service.conf \
+  /etc/systemd/system/umi-observer.service.d/30-bootstrap-service-read-only.conf
+sudo systemctl daemon-reload
+sudo systemctl restart umi-observer.service
+curl --fail --silent --show-error https://api.umi.vision/api/v1/bootstrap-service \
+  | tee /tmp/umi-bootstrap-service.json \
+  | jq -e '.availability == "active" and
+      .protocol_state.service_weights_active == true and
+      .protocol_state.translation_weights_active == false and
+      .current.evidence.publication_id == "'"$PUBLICATION_ID"'"'
+```
+
+Any failed assertion leaves public status inactive. Do not edit JSON to force the
+flag; fix or publish the missing evidence and restart the observer.
 
 ## 7. Refresh without reopening the legacy path
 

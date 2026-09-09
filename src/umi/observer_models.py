@@ -37,6 +37,7 @@ WINDOW_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-window-solutions/1"
 PILOTS_RESPONSE_SCHEMA = "umi-observer-pilots/2"
 PILOT_RESPONSE_SCHEMA = "umi-observer-pilot/2"
 PILOT_SOLUTIONS_RESPONSE_SCHEMA = "umi-observer-pilot-solutions/2"
+BOOTSTRAP_SERVICE_RESPONSE_SCHEMA = "umi-observer-bootstrap-service/1"
 ACTIVATION_GATES_RESPONSE_SCHEMA = "umi-observer-activation-gates/1"
 BENCHMARKS_RESPONSE_SCHEMA = "umi-observer-benchmarks/1"
 INCIDENTS_RESPONSE_SCHEMA = "umi-observer-incidents/1"
@@ -117,6 +118,7 @@ UnsignedIntegerText = Annotated[str, AfterValidator(_validate_unsigned_integer_t
 PlainDecimalText = Annotated[str, AfterValidator(_validate_plain_decimal_text)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 PositiveInt = Annotated[int, Field(gt=0)]
+UnsignedU16 = Annotated[int, Field(ge=0, le=65_535)]
 
 
 class ObserverModel(BaseModel):
@@ -209,12 +211,14 @@ class SourceProvenance(ObserverModel):
         "dashboard_static",
         "released_audit_bundle",
         "component_pilot_bundle",
+        "bootstrap_service_bundle",
     ]
     verification_status: Literal[
         "finalized_read",
         "repository_static",
         "bundle_verified",
         "component_replay_verified",
+        "bootstrap_current_state_verified",
     ]
     block: FinalizedBlock | None
     policy_hash: Hex32 | None = None
@@ -228,6 +232,7 @@ class SourceProvenance(ObserverModel):
             "dashboard_static": "repository_static",
             "released_audit_bundle": "bundle_verified",
             "component_pilot_bundle": "component_replay_verified",
+            "bootstrap_service_bundle": "bootstrap_current_state_verified",
         }[self.source_kind]
         if self.verification_status != expected_status:
             raise ValueError("verification_status does not match source_kind")
@@ -235,7 +240,11 @@ class SourceProvenance(ObserverModel):
             raise ValueError("a finalized-chain source requires a block")
         if self.source_kind == "dashboard_static" and self.block is not None:
             raise ValueError("a static source must not claim a chain block")
-        if self.source_kind in {"released_audit_bundle", "component_pilot_bundle"}:
+        if self.source_kind in {
+            "released_audit_bundle",
+            "component_pilot_bundle",
+            "bootstrap_service_bundle",
+        }:
             if self.artifact_sha256 is None:
                 raise ValueError("a bundle source requires its artifact hash")
             if self.block is not None:
@@ -250,6 +259,10 @@ class ProtocolState(ObserverModel):
     netuid: Literal[SN78_NETUID] = SN78_NETUID
     mechanism_id: Literal[UMI_MECHANISM_ID] = UMI_MECHANISM_ID
     translation_weights_active: bool
+    service_weights_active: bool = False
+    service_weight_kind: Literal["bootstrap_service_binary"] | None = None
+    service_weight_evidence_sha256: Hex32 | None = None
+    section_14_gate_credit: Literal[False] = False
     scoring_policy_hash: Hex32 | None
     conformance_evidence_available: bool
     activation_evidence_available: bool
@@ -261,6 +274,23 @@ class ProtocolState(ObserverModel):
 
     @model_validator(mode="after")
     def validate_phase(self) -> Self:
+        if self.service_weights_active:
+            if self.translation_weights_active:
+                raise ValueError("bootstrap service and translation weights cannot both be active")
+            if self.service_weight_kind != "bootstrap_service_binary":
+                raise ValueError("active bootstrap service weights require their mechanism kind")
+            if self.service_weight_evidence_sha256 is None:
+                raise ValueError("active bootstrap service weights require public evidence")
+            if self.economic_era != "legacy_bootstrap":
+                raise ValueError("active service weights require the bootstrap economic era")
+            if self.chain_result_classification != "legacy_or_bootstrap":
+                raise ValueError("active service weights require bootstrap result classification")
+            if self.phase not in {"pre_public_calibration", "shadow_calibration"}:
+                raise ValueError("bootstrap service weights are valid only during calibration")
+        elif (
+            self.service_weight_kind is not None or self.service_weight_evidence_sha256 is not None
+        ):
+            raise ValueError("inactive service weights cannot claim a kind or current evidence")
         if self.phase in {"activation_probation", "active"}:
             if not self.translation_weights_active:
                 raise ValueError("an activated phase requires translation_weights_active")
@@ -342,11 +372,26 @@ class ChainNetworkSnapshot(ObserverModel):
     subnet_exists: bool | None
     subnet_started: bool | None
     subnet_emission_enabled: bool | None
+    uid_zero_mechid0_row: Annotated[
+        tuple[tuple[UnsignedU16, UnsignedU16], ...],
+        Field(max_length=256),
+    ]
     price: ExactExchangeRate | None
     epoch: EpochState
     counts: NetworkCounts
     hyperparameters: NetworkHyperparameters
     unavailable_fields: tuple[NonEmptyText, ...] = ()
+
+    @field_validator("uid_zero_mechid0_row")
+    @classmethod
+    def validate_uid_zero_mechid0_row(
+        cls,
+        value: tuple[tuple[int, int], ...],
+    ) -> tuple[tuple[int, int], ...]:
+        destination_uids = tuple(destination_uid for destination_uid, _ in value)
+        if destination_uids != tuple(sorted(set(destination_uids))):
+            raise ValueError("UID 0 MechId 0 row must be unique and sorted by destination UID")
+        return value
 
     @field_validator("unavailable_fields")
     @classmethod
@@ -1363,6 +1408,112 @@ class PilotSolutionsResponse(ResponseEnvelope):
             ):
                 if reference is not None and reference.url != prefix + reference.sha256:
                     raise ValueError("pilot solution object URL does not match its bundle")
+        return self
+
+
+class BootstrapServiceEvidenceLocator(ObserverModel):
+    publication_id: Hex32
+    public_origin: Annotated[str, Field(min_length=1, max_length=8_192)]
+    manifest_sha256: Hex32
+    manifest_url: Annotated[str, Field(min_length=1, max_length=8_192)]
+    expected_row_sha256: Hex32
+
+    @model_validator(mode="after")
+    def validate_locator(self) -> Self:
+        expected = (
+            f"{self.public_origin}/api/v1/bootstrap-service/{self.publication_id}"
+            "/bundle/manifest.json"
+        )
+        if self.manifest_sha256 != self.publication_id or self.manifest_url != expected:
+            raise ValueError("bootstrap evidence locator does not bind its publication")
+        return self
+
+
+class BootstrapServiceMiner(ObserverModel):
+    uid: Annotated[int, Field(ge=0, le=255)]
+    miner_hotkey: NonEmptyText
+    origin: Annotated[str, Field(min_length=1, max_length=128)]
+    pilot_id: Hex32
+    pilot_url: Annotated[str, Field(min_length=1, max_length=8_192)]
+    solutions_url: Annotated[str, Field(min_length=1, max_length=8_192)]
+
+    @model_validator(mode="after")
+    def validate_links(self) -> Self:
+        prefix = self.pilot_url.removesuffix(f"/api/v1/pilots/{self.pilot_id}")
+        if not prefix or self.pilot_url != f"{prefix}/api/v1/pilots/{self.pilot_id}":
+            raise ValueError("bootstrap miner pilot URL is invalid")
+        if self.solutions_url != self.pilot_url + "/solutions":
+            raise ValueError("bootstrap miner solutions URL is invalid")
+        return self
+
+
+class BootstrapServiceRecord(ObserverModel):
+    mechanism: Literal["bootstrap_service_binary"]
+    translation_weights_active: Literal[False]
+    section_14_gate_credit: Literal[False]
+    storage_proofs_verified: Literal[False]
+    policy_sha256: Hex32
+    eligibility_manifest_sha256: Hex32
+    submission_id: Hex32
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    validator_uid: Literal[0]
+    validator_hotkey: NonEmptyText
+    weight_call_block: UnsignedIntegerText
+    weight_call_block_hash: BlockHash
+    observation_block: UnsignedIntegerText
+    observation_block_hash: BlockHash
+    active_through_block: UnsignedIntegerText
+    hard_sunset_block: UnsignedIntegerText
+    eligible_miners: Annotated[
+        tuple[BootstrapServiceMiner, ...],
+        Field(min_length=1, max_length=256),
+    ]
+    evidence: BootstrapServiceEvidenceLocator
+
+    @model_validator(mode="after")
+    def validate_record(self) -> Self:
+        if not (
+            int(self.weight_call_block)
+            <= int(self.observation_block)
+            <= int(self.active_through_block)
+            < int(self.hard_sunset_block)
+        ):
+            raise ValueError("bootstrap service record has an invalid interval")
+        uids = [item.uid for item in self.eligible_miners]
+        if uids != sorted(set(uids)):
+            raise ValueError("bootstrap service miners must be unique and sorted by UID")
+        return self
+
+
+class BootstrapServiceResponse(ResponseEnvelope):
+    schema_: Literal[BOOTSTRAP_SERVICE_RESPONSE_SCHEMA] = Field(
+        default=BOOTSTRAP_SERVICE_RESPONSE_SCHEMA,
+        alias="schema",
+    )
+    protocol_state: ProtocolState
+    availability: Literal["inactive", "active"]
+    reason_code: NonEmptyText | None
+    current: BootstrapServiceRecord | None
+    verified_publications: tuple[BootstrapServiceEvidenceLocator, ...]
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        if self.availability == "active":
+            if (
+                self.reason_code is not None
+                or self.current is None
+                or not self.protocol_state.service_weights_active
+            ):
+                raise ValueError("active bootstrap response lacks current verified state")
+        elif (
+            self.reason_code is None
+            or self.current is not None
+            or self.protocol_state.service_weights_active
+        ):
+            raise ValueError("inactive bootstrap response has inconsistent current state")
+        ids = [item.publication_id for item in self.verified_publications]
+        if ids != sorted(set(ids)):
+            raise ValueError("bootstrap publications must be unique and sorted")
         return self
 
 

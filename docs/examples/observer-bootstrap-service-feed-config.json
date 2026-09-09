@@ -1,0 +1,1 @@
+{"bundle_roots":["/var/lib/umi-observer/bootstrap-service-publications/REPLACE_WITH_PUBLICATION_SHA256"],"mode":"bootstrap_service_binary","protocol":"umi-asl/0.1","public_origin":"https://api.umi.vision","schema":"umi-observer-bootstrap-service-feed-config/1"}

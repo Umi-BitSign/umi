@@ -31,7 +31,7 @@ the immutable API safety contract and its conservative default protocol state. T
 revision is SHA-256 of compact, key-sorted JSON for these facts:
 
 ```json
-{"activation_evidence_available":false,"api_version":"v1","chain_result_classification":"unverified","conformance_evidence_available":false,"economic_era":"unverified","expected_chain_name":"UMI","mechanism_id":0,"netuid":78,"phase":"pre_public_calibration","protocol":"umi-asl/0.1","scoring_policy_hash":null,"specification_version":"0.1","translation_weights_active":false,"validator_input_eligible":false}
+{"activation_evidence_available":false,"api_version":"v1","chain_result_classification":"unverified","conformance_evidence_available":false,"economic_era":"unverified","expected_chain_name":"UMI","mechanism_id":0,"netuid":78,"phase":"pre_public_calibration","protocol":"umi-asl/0.1","scoring_policy_hash":null,"section_14_gate_credit":false,"service_weight_evidence_sha256":null,"service_weight_kind":null,"service_weights_active":false,"specification_version":"0.1","translation_weights_active":false,"validator_input_eligible":false}
 ```
 
 That static revision is not a hash of the returned, evidence-derived
@@ -60,6 +60,7 @@ the exact response body.
 | `GET /api/v1/pilots` | Explicitly nonconforming, no-weight component pilots, separate from protocol windows |
 | `GET /api/v1/pilots/{pilot_id}` | One replayed local or public-endpoint component pilot and its evidence boundary |
 | `GET /api/v1/pilots/{pilot_id}/solutions` | Replayed hypotheses, references, scores, failures, and evidence for one pilot |
+| `GET /api/v1/bootstrap-service` | Current fail-closed bootstrap service-weight status, exact eligible miners, and immutable evidence locators |
 | `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
 | `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
 | `GET /api/v1/incidents` | Reason records from fully replayed public incident bundles |
@@ -162,6 +163,36 @@ The pilot list, detail, and solutions response schemas are
 `umi-observer-pilots/2`, `umi-observer-pilot/2`, and
 `umi-observer-pilot-solutions/2`. The HTTP route base remains `/api/v1`.
 
+## Bootstrap service-weight feed
+
+The optional `--bootstrap-service-feed-config` loads immutable terminal bundles
+created by `umi-observer-bootstrap-service-publication`. It requires the component
+pilot feed because every eligible miner is cross-checked against an independently
+replayed successful public-endpoint pilot. The observer verifies the owner-fence
+receipt, signed eligibility manifest, signed direct-transition authorization,
+exact call material, applied receipt, terminal journal, every content hash, and all
+cross-bindings before it listens. Its source status is
+`bootstrap_current_state_verified`: the observer independently matches the
+published row to current finalized chain state. It does not claim raw-event or
+storage-proof verification of the complete historical transaction. The full
+Section 6 archive remains a separate required launch artifact.
+
+`service_weights_active` becomes true only while the current finalized SN78 state
+still matches the publication. The observer requires runtime spec 455, one
+mechanism, all 256 UIDs registered, the direct-bootstrap version and minimum-weight
+fence, commit-reveal disabled, an empty pending queue, no active non-UID 0
+validator, current UID/hotkey/permit/serving bindings for every eligible miner,
+the exact UID 0 owner hotkey and `LastUpdate`, and a byte-identical 256-entry
+MechId 0 row. Expiry, UID reassignment, overwrite, or runtime and hyperparameter
+drift makes the status false on the next snapshot. The
+verified historical publication remains inspectable.
+
+The immutable routes are
+`/api/v1/bootstrap-service/{publication_id}/bundle/manifest.json` and
+`/api/v1/bootstrap-service/{publication_id}/bundle/objects/{sha256}`. This evidence
+class is `bootstrap_service_binary`; it never populates the UMI translation
+leaderboard, never becomes validator input, and receives no Section 14 gate credit.
+
 `/windows/{window_id}/solutions` is
 available only when that released bundle contains a fully replayed normal reveal
 result with a complete nonempty assignment set. It returns every successful
@@ -231,12 +262,12 @@ Values below are illustrative. Clients must use the returned block and timestamp
       "validator_input_eligible": false
     },
     {
-      "source_id": "umi-observer-contract-bfd20ab3df0a7737",
+      "source_id": "umi-observer-contract-208f6633186e391f",
       "source_kind": "dashboard_static",
       "verification_status": "repository_static",
       "block": null,
       "policy_hash": null,
-      "artifact_sha256": "bfd20ab3df0a7737361248f6c79fb14794a1fcc4b1cbc5d97854705e0b3df1ab",
+      "artifact_sha256": "208f6633186e391f8ae8b7505af2c4d86e15b7de7f9a94b9a30ad26c75a1f2a8",
       "validator_input_eligible": false
     }
   ],
@@ -250,6 +281,10 @@ Values below are illustrative. Clients must use the returned block and timestamp
     "netuid": 78,
     "mechanism_id": 0,
     "translation_weights_active": false,
+    "service_weights_active": false,
+    "service_weight_kind": null,
+    "service_weight_evidence_sha256": null,
+    "section_14_gate_credit": false,
     "scoring_policy_hash": null,
     "conformance_evidence_available": false,
     "activation_evidence_available": false,
@@ -466,7 +501,10 @@ the documented `/api/v1/windows/<window_id>`,
 `/api/v1/windows/<window_id>/solutions`, `/api/v1/pilots/<pilot_id>`,
 `/api/v1/pilots/<pilot_id>/solutions`,
 `/api/v1/pilots/<pilot_id>/bundle/manifest.json`, and
-`/api/v1/pilots/<pilot_id>/bundle/objects/<sha256>` forms on the server. Accept
+`/api/v1/pilots/<pilot_id>/bundle/objects/<sha256>`,
+`/api/v1/bootstrap-service`,
+`/api/v1/bootstrap-service/<publication_id>/bundle/manifest.json`, and
+`/api/v1/bootstrap-service/<publication_id>/bundle/objects/<sha256>` forms on the server. Accept
 only the documented query fields (`validator`, bounded `limit`, and an opaque
 returned `cursor`) and never forward an arbitrary browser-supplied path. Window
 solution pages allow 1 through 50 records; pilot solution pages allow 1 through
@@ -475,7 +513,8 @@ solution pages allow 1 through 50 records; pilot solution pages allow 1 through
 Pass only parsed, allowlisted query fields to the participant route. Preserve the
 upstream `ETag`, `Cache-Control`, `X-UMI-Contract-Revision`,
 `X-UMI-Dataset-Revision`, and `X-UMI-Finalized-Block` headers in the Vercel
-response. Preserve `X-UMI-Pilot-Bundle` on pilot manifest and object responses.
+response. Preserve `X-UMI-Pilot-Bundle` on pilot manifest and object responses,
+and `X-UMI-Bootstrap-Bundle` on bootstrap manifest and object responses.
 Render all returned strings as text; do not insert API values as HTML.
 
 If the browser must call the observer directly, configure exact origins:
@@ -489,7 +528,7 @@ Preview domains are not wildcarded. Add a particular preview origin only when it
 is intentionally trusted. CORS is browser policy, not API authentication.
 Direct browser responses expose `ETag`, `X-UMI-Contract-Revision`,
 `X-UMI-Dataset-Revision`, `X-UMI-Finalized-Block`, and
-`X-UMI-Pilot-Bundle` to allowed origins.
+`X-UMI-Pilot-Bundle` and `X-UMI-Bootstrap-Bundle` to allowed origins.
 
 ## Deployment
 
@@ -502,7 +541,8 @@ umi-observer \
   --network finney \
   --trusted-host api.umi.vision \
   --bundle-feed-config /etc/umi/observer-bundle-feed.json \
-  --pilot-feed-config /etc/umi/observer-pilot-feed.json
+  --pilot-feed-config /etc/umi/observer-pilot-feed.json \
+  --bootstrap-service-feed-config /etc/umi/observer-bootstrap-service-feed.json
 ```
 
 If the reverse proxy preserves an internal Host header, add that exact host with a
