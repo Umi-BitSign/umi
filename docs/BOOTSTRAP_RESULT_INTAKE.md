@@ -16,6 +16,11 @@ outputs:
 It does not submit a transaction, use a wallet, or change the c77 validator or
 Worker wire formats.
 
+The separate `umi-bootstrap-chain-capture` command produces the private chain
+capture consumed by intake. It has a fixed read-only JSON-RPC method allowlist
+and reads an existing coordinator-owned finality database. It has no
+wallet-aware SDK client, signing, composition, or submission surface.
+
 ## Pre-stage before the validator is asked to install
 
 Do all of this on the coordinator first:
@@ -91,6 +96,32 @@ hash. For owner block `9,032,509`, import the saved raw RPC file byte for byte,
 then supplement its target-block responses with a parent-header query and
 parent-state runtime metadata and version. The original capture queried the
 target-state runtime; intake will not accept that as execution-runtime evidence.
+
+After the signed validator result is downloaded, run the collector once. The
+finality recorder must already contain an accepted head at or after the weight
+block. Use the corrected observer binary installed for that recorder, not the
+c77 binary with the stale Rust release identity.
+
+```sh
+sudo /opt/umi-bootstrap-chain-capture/.venv/bin/umi-bootstrap-chain-capture \
+  --signed-result /var/lib/umi/bootstrap-intake/signed-result.json \
+  --owner-cli-result /home/sam/umi-validator-cutover-c77/owner-fence-source/sn78-owner-fence-btcli-result.json \
+  --owner-raw-rpc-capture /home/sam/umi-validator-cutover-c77/owner-fence-source/block-9032509-raw-rpc.json \
+  --state-db /var/lib/umi-bootstrap-finality-recorder/finality.sqlite3 \
+  --finality-verifier /opt/umi-bootstrap-finality-recorder/artifacts/umi-grandpa-finality-observer \
+  --chain-spec /opt/umi-bootstrap-finality-recorder/artifacts/raw_spec_finney.json \
+  --rpc-endpoint wss://entrypoint-finney.opentensor.ai:443 \
+  --bridge-concurrency 32 \
+  --output /var/lib/umi/bootstrap-intake/captured-chain-material.json
+```
+
+The output path is create-only and mode `0600`. A second run must use a new,
+empty path. The collector cross-checks every target and parent header against
+the canonical height-to-hash mapping, retains the complete ordered block body,
+derives `System.Events` from the parent runtime, and includes its exact value
+and read proof. The historical owner-fence bridge is capped at 16,384 headers.
+The RPC transcript stores the exact decoded results in canonical form and embeds
+the earlier owner RPC capture as opaque bytes with its SHA-256.
 
 ## Intake after the upload appears
 
