@@ -2,3 +2,5 @@
 # credentials in an ignored .dev.vars file.
 UPLOAD_HMAC_SECRET=replace-with-64-lowercase-hex
 VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST={"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb":"replace-with-another-64-lowercase-hex"}
+VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP={"cccccccccccccccccccccccccccccccc":"replace-with-the-validator-stable-64-lowercase-hex"}
+VALIDATOR_BOOTSTRAP_INPUT_UPLOAD_HMAC_SECRET=replace-with-a-coordinator-only-64-lowercase-hex

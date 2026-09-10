@@ -6,18 +6,26 @@ import worker from "../src/index";
 const TEST_SECRET = "11".repeat(32);
 const TEST_VALIDATOR_SECRET = "22".repeat(32);
 const TEST_OTHER_VALIDATOR_SECRET = "33".repeat(32);
+const TEST_BOOTSTRAP_INPUT_SECRET = "44".repeat(32);
 const TEST_VALIDATOR_SUBMISSION_ID = "bc".repeat(32);
+const TEST_VALIDATOR_NAMESPACE = "cd".repeat(16);
+const TEST_NAMESPACED_SUBMISSION_ID = `${TEST_VALIDATOR_NAMESPACE}${"ef".repeat(16)}`;
 const encoder = new TextEncoder();
 
 function testEnv(
   validatorAllowlist = JSON.stringify({
     [TEST_VALIDATOR_SUBMISSION_ID]: TEST_VALIDATOR_SECRET,
   }),
+  validatorNamespaceMap = JSON.stringify({
+    [TEST_VALIDATOR_NAMESPACE]: TEST_VALIDATOR_SECRET,
+  }),
 ): Env {
   return {
     EVIDENCE_BUCKET: env.EVIDENCE_BUCKET,
     UPLOAD_HMAC_SECRET: TEST_SECRET,
     VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST: validatorAllowlist,
+    VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP: validatorNamespaceMap,
+    VALIDATOR_BOOTSTRAP_INPUT_UPLOAD_HMAC_SECRET: TEST_BOOTSTRAP_INPUT_SECRET,
   };
 }
 
@@ -189,6 +197,46 @@ describe("public pilot R2 uploader", () => {
     expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
   });
 
+  it("accepts a result in a validator's stable submission namespace", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
+    const pathname = `/validator-bootstrap-results/${TEST_NAMESPACED_SUBMISSION_ID}.json`;
+    const response = await worker.fetch(
+      await makeUpload(pathname, body, "application/json", {}, TEST_VALIDATOR_SECRET),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(201);
+    expect(await env.EVIDENCE_BUCKET.get(pathname.slice(1)).then((object) => object?.text())).toBe(body);
+  });
+
+  it("denies another validator's credential in a stable submission namespace", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
+    const pathname = `/validator-bootstrap-results/${TEST_NAMESPACED_SUBMISSION_ID}.json`;
+    const response = await worker.fetch(
+      await makeUpload(pathname, body, "application/json", {}, TEST_OTHER_VALIDATOR_SECRET),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(401);
+    expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
+  });
+
+  it("fails closed when exact and namespace result mappings conflict", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
+    const pathname = `/validator-bootstrap-results/${TEST_NAMESPACED_SUBMISSION_ID}.json`;
+    const response = await worker.fetch(
+      await makeUpload(pathname, body, "application/json", {}, TEST_VALIDATOR_SECRET),
+      testEnv(
+        JSON.stringify({
+          [TEST_NAMESPACED_SUBMISSION_ID]: TEST_OTHER_VALIDATOR_SECRET,
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(500);
+    expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
+  });
+
   it.each([
     ["malformed JSON", "{"],
     ["non-object JSON", "[]"],
@@ -218,6 +266,114 @@ describe("public pilot R2 uploader", () => {
 
     expect(response.status).toBe(500);
     expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
+  });
+
+  it.each([
+    ["malformed JSON", "{"],
+    ["non-object JSON", "[]"],
+    [
+      "duplicate namespaces",
+      `{${JSON.stringify(TEST_VALIDATOR_NAMESPACE)}:${JSON.stringify(TEST_VALIDATOR_SECRET)},${JSON.stringify(TEST_VALIDATOR_NAMESPACE)}:${JSON.stringify(TEST_OTHER_VALIDATOR_SECRET)}}`,
+    ],
+    [
+      "noncanonical entry order",
+      JSON.stringify({
+        ["ff".repeat(16)]: TEST_OTHER_VALIDATOR_SECRET,
+        [TEST_VALIDATOR_NAMESPACE]: TEST_VALIDATOR_SECRET,
+      }),
+    ],
+    [
+      "invalid namespace",
+      JSON.stringify({ ["aa".repeat(15)]: TEST_VALIDATOR_SECRET }),
+    ],
+    ["oversized input", " ".repeat(4 * 1024 + 1)],
+  ])("fails closed for a %s validator credential namespace map", async (_label, namespaceMap) => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
+    const pathname = `/validator-bootstrap-results/${TEST_NAMESPACED_SUBMISSION_ID}.json`;
+    const response = await worker.fetch(
+      await makeUpload(pathname, body, "application/json", {}, TEST_VALIDATOR_SECRET),
+      testEnv("{}", namespaceMap),
+    );
+
+    expect(response.status).toBe(500);
+    expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
+  });
+
+  it("stores a canonical content-addressed validator bootstrap input bundle", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-input-bundle/1"}';
+    const sha256 = await digest(encoder.encode(body));
+    const pathname = `/validator-bootstrap-inputs/${sha256}.json`;
+    const response = await worker.fetch(
+      await makeUpload(pathname, body, "application/json", {}, TEST_BOOTSTRAP_INPUT_SECRET),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(201);
+    const stored = await env.EVIDENCE_BUCKET.get(pathname.slice(1));
+    expect(await stored?.text()).toBe(body);
+    expect(stored?.customMetadata?.uploadKind).toBe("validator_bootstrap_input");
+    expect(stored?.customMetadata?.sha256).toBe(sha256);
+  });
+
+  it("rejects malformed, noncanonical, and wrong-schema bootstrap input JSON", async () => {
+    const bodies = [
+      "{",
+      '{"schema": "umi-validator-supervisor-bootstrap-input-bundle/1"}',
+      '{"schema":"wrong"}',
+    ];
+    for (const body of bodies) {
+      const sha256 = await digest(encoder.encode(body));
+      const pathname = `/validator-bootstrap-inputs/${sha256}.json`;
+      const response = await worker.fetch(
+        await makeUpload(pathname, body, "application/json", {}, TEST_BOOTSTRAP_INPUT_SECRET),
+        testEnv(),
+      );
+      expect(response.status).toBe(400);
+      expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
+    }
+  });
+
+  it("denies pilot and validator credentials on the bootstrap input route", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-input-bundle/1"}';
+    const sha256 = await digest(encoder.encode(body));
+    const pathname = `/validator-bootstrap-inputs/${sha256}.json`;
+    for (const secret of [TEST_SECRET, TEST_VALIDATOR_SECRET]) {
+      const response = await worker.fetch(
+        await makeUpload(pathname, body, "application/json", {}, secret),
+        testEnv(),
+      );
+      expect(response.status).toBe(401);
+    }
+    expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
+  });
+
+  it("requires the bootstrap input path to match its declared digest", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-input-bundle/1"}';
+    const pathname = `/validator-bootstrap-inputs/${"45".repeat(32)}.json`;
+    const request = await makeUpload(
+      pathname,
+      body,
+      "application/json",
+      { "X-UMI-Content-SHA256": await digest(encoder.encode(body)) },
+      TEST_BOOTSTRAP_INPUT_SECRET,
+    );
+
+    expect((await worker.fetch(request, testEnv())).status).toBe(400);
+  });
+
+  it("enforces the validator bootstrap input size limit before reading the body", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-input-bundle/1"}';
+    const sha256 = await digest(encoder.encode(body));
+    const pathname = `/validator-bootstrap-inputs/${sha256}.json`;
+    const request = await makeUpload(
+      pathname,
+      body,
+      "application/json",
+      { "Content-Length": String(16 * 1024 * 1024 + 1) },
+      TEST_BOOTSTRAP_INPUT_SECRET,
+    );
+
+    expect((await worker.fetch(request, testEnv())).status).toBe(413);
   });
 
   it("stores a valid evidence archive with immutable attachment metadata", async () => {

@@ -1,7 +1,7 @@
 # Public pilot R2 upload Worker
 
 This Worker is the only write path from the public-pilot automation host to the
-`umi-public-evidence` R2 bucket. It accepts five immutable object classes:
+`umi-public-evidence` R2 bucket. It accepts six immutable object classes:
 
 - `PUT /public-pilot-cases/<archive-sha256>/sealed-case.tar.gz`, up to 96 MiB,
   with `Content-Type: application/gzip`;
@@ -13,12 +13,16 @@ This Worker is the only write path from the public-pilot automation host to the
   with `Content-Type: application/json`.
 - `PUT /validator-bootstrap-results/<submission-id>.json`, up to 4 MiB, with
   `Content-Type: application/json`.
+- `PUT /validator-bootstrap-inputs/<bundle-sha256>.json`, up to 16 MiB, with
+  `Content-Type: application/json`.
 
 Every hexadecimal identifier must contain exactly 64 lowercase characters. The
 case, evidence, and attempt-journal identifiers are their content SHA-256 values.
 A result identifier is the automation authorization ID; its content SHA-256 is
-supplied separately. Archive responses set the fixed attachment filename for
-their respective object class.
+supplied separately. A validator-bootstrap input identifier is the exact body
+SHA-256. Its body must be canonical JSON with schema
+`umi-validator-supervisor-bootstrap-input-bundle/1`. Archive responses set the
+fixed attachment filename for their respective object class.
 
 The Worker stores result JSON as opaque bytes. The automation result envelope has
 its own canonical-payload signature contract, separate from this upload-layer
@@ -34,20 +38,35 @@ must verify the already-published bytes rather than retrying with changed conten
 
 Set `UPLOAD_HMAC_SECRET` to one 32-byte random value encoded as 64 lowercase
 hexadecimal characters. Set `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST` to a
-canonical JSON object whose keys are authorized 64-character submission IDs and
-whose values are stable, per-validator 32-byte HMAC credentials. The object must
-contain no whitespace, its keys must be sorted, and it may contain at most 32
-entries in 4 KiB. This stays below Cloudflare's 5 KB per-variable limit. Unknown
-submission IDs are denied. Malformed, noncanonical,
-duplicate-key, or oversized maps fail closed.
+canonical JSON object whose keys are exceptional authorized 64-character
+submission IDs and whose values are stable, per-validator 32-byte HMAC
+credentials. Set `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP` to a canonical
+JSON object whose keys are unique 32-character validator namespaces and whose
+values are those same stable credentials. Both objects must contain no
+whitespace, their keys must be sorted, and each may contain at most 32 entries in
+4 KiB. This stays below Cloudflare's 5 KB per-variable limit. Unknown submission
+IDs are denied. Malformed, noncanonical, duplicate-key, conflicting, or oversized
+maps fail closed.
 
-The public-pilot secret authorizes only public-pilot paths. A mapped credential
-authorizes only its named validator-bootstrap result paths. The value installed on
-a validator must remain stable across that validator's later submissions. Add each
-new signed submission ID to the server-side map before publishing its directive.
-Another validator receives a different value. Keep every value out of Wrangler
-configuration, source control, process arguments, and logs. Generate each into an
-owner-only file and install secrets through standard input:
+Every routine submission ID is `<validator-namespace><128-bit-random-suffix>`.
+The Worker first checks the exceptional exact-ID map, then selects the credential
+from the first 32 characters. If an exact ID falls within a mapped namespace, both
+maps must name the same credential. This keeps one validator's stable key confined
+to its assigned namespace without a Worker secret update for each new directive.
+
+Set `VALIDATOR_BOOTSTRAP_INPUT_UPLOAD_HMAC_SECRET` to a separate stable 32-byte
+coordinator-only value. It authorizes only the content-addressed bootstrap-input
+route. The Worker verifies the HMAC, path/body digest, byte count, JSON schema,
+and canonical encoding before the atomic create-only write. Validators never
+receive this credential; they fetch the resulting immutable bundle through the
+public read origin using the directive-bound URL, size, and SHA-256.
+
+The public-pilot secret authorizes only public-pilot paths. A mapped validator
+credential authorizes only its exceptional exact IDs and assigned namespace. The
+value installed on a validator remains stable across later submissions. Another
+validator receives a different namespace and value. Keep every value out of
+Wrangler configuration, source control, process arguments, and logs. Generate
+each into an owner-only file and install secrets through standard input:
 
 ```sh
 umask 077
@@ -57,14 +76,17 @@ npx wrangler secret put UPLOAD_HMAC_SECRET < "$secret_file"
 rm -f "$secret_file"
 ```
 
-Build the validator map in an owner-only file without printing its values. Install
-it as `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST`, then retain the per-validator
-credentials in the approved secret store. Updating the map is a server-side
-operation and does not replace the validator's installed credential.
+Build both validator maps in owner-only files without printing their values.
+Install them as `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST` and
+`VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP`, then retain the per-validator
+credentials in the approved secret store. Reserve an exact ID only for an already
+published pre-namespace directive. Normal renewal only creates a new random suffix
+inside the assigned namespace and does not mutate Worker secrets or the
+validator's installed credential.
 
-Only currently authorized or imminently published submission IDs need to remain
-in the map. Remove an ID after its immutable result has been verified. This keeps
-the map bounded during a multi-day bootstrap cadence.
+Only legacy or otherwise exceptional exact IDs belong in the allowlist. Remove an
+exact ID after its immutable result has been verified. Namespace entries stay for
+the validator's approved service lifetime.
 
 Each request supplies:
 
@@ -129,6 +151,8 @@ secret interactively, and deploy from this directory:
 ```sh
 npx wrangler secret put UPLOAD_HMAC_SECRET
 npx wrangler secret put VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST
+npx wrangler secret put VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP
+npx wrangler secret put VALIDATOR_BOOTSTRAP_INPUT_UPLOAD_HMAC_SECRET
 npx wrangler deploy
 ```
 
@@ -138,8 +162,7 @@ root-owned automation configuration. Keep public R2 readback on its separate
 origin. After every upload, download the object without credentials and verify its
 length and SHA-256 before publishing its URL to GitHub.
 
-To revoke a submission, remove its ID from the server-side map. To revoke a
-validator credential, stop its supervisor, replace the value on that host, and
-replace every retained mapping for that validator before resuming. Normal
-submission refreshes only add a server-side ID and do not require validator action.
-No production secret value belongs in an environment file.
+To revoke an exceptional submission, remove its exact ID. To revoke a validator,
+remove its namespace before stopping its supervisor. Credential rotation requires
+a deliberate host migration, so normal renewal never rotates it. No production
+secret value belongs in an environment file.

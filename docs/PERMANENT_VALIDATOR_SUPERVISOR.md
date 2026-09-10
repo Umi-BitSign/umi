@@ -643,10 +643,23 @@ writes the exact `SupervisorOperatorInputTarget` object used by the directive:
   --target-output bootstrap-input-target.json
 ```
 
-Publish `bootstrap-inputs.json` unchanged. The validator downloads it once per
+Upload `bootstrap-inputs.json` unchanged to
+`PUT /validator-bootstrap-inputs/<bundle-sha256>.json` through the private upload
+origin. That route uses the coordinator-only HMAC credential, requires the path
+and body digest to match, validates the canonical bundle schema, and creates the
+object only if it does not already exist. Set `--bundle-url` to the corresponding
+HTTPS URL on the public read origin. The validator downloads it once per
 directive, verifies the signed URL, size, and SHA-256 binding, and materializes
 the four canonical files beneath that directive's immutable staging directory.
 The operator does not copy or replace bootstrap files after installation.
+
+Each validator receives one stable 32-lowercase-hex submission namespace and one
+stable result-upload credential during installation. New submission IDs are that
+namespace followed by a fresh 128-bit random lowercase-hex suffix. The result
+upload Worker maps the namespace to that validator's credential, so renewing a
+directive requires no validator-host edit and no Worker-secret change. Use the
+exceptional exact-ID allowlist only for a directive published before its validator
+namespace was assigned.
 
 Create sequence 1 as a hold. This is the complete directive source shape; replace
 the values, AccountId32-sort `validator_hotkeys`, then canonicalize it:

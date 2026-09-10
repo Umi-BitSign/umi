@@ -4,17 +4,25 @@ const MAX_CLOCK_SKEW_SECONDS = 300;
 const MAX_PUBLIC_ARCHIVE_BYTES = 96 * 1024 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024;
 const MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES = 4 * 1024 * 1024;
+const MAX_VALIDATOR_BOOTSTRAP_INPUT_BYTES = 16 * 1024 * 1024;
 const MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_BYTES = 4 * 1024;
 const MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_ENTRIES = 32;
+const MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP_BYTES = 4 * 1024;
+const MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP_ENTRIES = 32;
+const SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA =
+  "umi-validator-supervisor-bootstrap-input-bundle/1";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
+const LOWER_HEX_32 = /^[0-9a-f]{32}$/;
 const ARCHIVE_PATH = /^\/public-pilot-cases\/([0-9a-f]{64})\/sealed-case\.tar\.gz$/;
 const EVIDENCE_PATH = /^\/public-pilot-evidence\/([0-9a-f]{64})\/evidence\.tar\.gz$/;
 const ATTEMPT_PATH = /^\/public-pilot-attempts\/([0-9a-f]{64})\/attempt-journal\.tar\.gz$/;
 const RESULT_PATH = /^\/public-pilot-automation\/results\/([0-9a-f]{64})\.json$/;
 const VALIDATOR_BOOTSTRAP_RESULT_PATH =
   /^\/validator-bootstrap-results\/([0-9a-f]{64})\.json$/;
+const VALIDATOR_BOOTSTRAP_INPUT_PATH =
+  /^\/validator-bootstrap-inputs\/([0-9a-f]{64})\.json$/;
 
 type UploadRoute = Readonly<{
   key: string;
@@ -23,8 +31,9 @@ type UploadRoute = Readonly<{
     | "evidence_archive"
     | "attempt_journal"
     | "automation_result"
-    | "validator_bootstrap_result";
-  authentication: "pilot" | "validator_bootstrap";
+    | "validator_bootstrap_result"
+    | "validator_bootstrap_input";
+  authentication: "pilot" | "validator_bootstrap_result" | "validator_bootstrap_input";
   identifier: string;
   maximumBytes: number;
   contentType: "application/gzip" | "application/json";
@@ -109,11 +118,24 @@ function parseRoute(pathname: string): UploadRoute | null {
     return {
       key: pathname.slice(1),
       kind: "validator_bootstrap_result",
-      authentication: "validator_bootstrap",
+      authentication: "validator_bootstrap_result",
       identifier: validatorBootstrapResult[1],
       maximumBytes: MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES,
       contentType: "application/json",
       digestMustMatchIdentifier: false,
+    };
+  }
+
+  const validatorBootstrapInput = VALIDATOR_BOOTSTRAP_INPUT_PATH.exec(pathname);
+  if (validatorBootstrapInput?.[1] !== undefined) {
+    return {
+      key: pathname.slice(1),
+      kind: "validator_bootstrap_input",
+      authentication: "validator_bootstrap_input",
+      identifier: validatorBootstrapInput[1],
+      maximumBytes: MAX_VALIDATOR_BOOTSTRAP_INPUT_BYTES,
+      contentType: "application/json",
+      digestMustMatchIdentifier: true,
     };
   }
 
@@ -152,55 +174,90 @@ function bytesEqual(left: ArrayBuffer, right: Uint8Array): boolean {
   return crypto.subtle.timingSafeEqual(left, right);
 }
 
-function validatorBootstrapUploadSecret(
-  serializedAllowlist: string,
-  submissionId: string,
-): string | null {
+function parseCanonicalSecretMap(
+  serializedMap: string,
+  options: Readonly<{
+    keyPattern: RegExp;
+    maximumBytes: number;
+    maximumEntries: number;
+    description: string;
+  }>,
+): Readonly<Record<string, string>> {
   if (
-    new TextEncoder().encode(serializedAllowlist).byteLength
-      > MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_BYTES
+    new TextEncoder().encode(serializedMap).byteLength > options.maximumBytes
   ) {
-    throw new Error("validator bootstrap upload HMAC allowlist is too large");
+    throw new Error(`${options.description} is too large`);
   }
 
   let decoded: unknown;
   try {
-    decoded = JSON.parse(serializedAllowlist);
+    decoded = JSON.parse(serializedMap);
   } catch {
-    throw new Error("validator bootstrap upload HMAC allowlist is invalid");
+    throw new Error(`${options.description} is invalid`);
   }
   if (
     decoded === null
     || typeof decoded !== "object"
     || Array.isArray(decoded)
   ) {
-    throw new Error("validator bootstrap upload HMAC allowlist is invalid");
+    throw new Error(`${options.description} is invalid`);
   }
 
   const entries = Object.entries(decoded as Record<string, unknown>);
-  if (entries.length > MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_ENTRIES) {
-    throw new Error("validator bootstrap upload HMAC allowlist has too many entries");
+  if (entries.length > options.maximumEntries) {
+    throw new Error(`${options.description} has too many entries`);
   }
   const normalized: Record<string, string> = {};
-  let previousSubmissionId: string | null = null;
-  for (const [candidateSubmissionId, candidateSecret] of entries) {
+  let previousKey: string | null = null;
+  for (const [candidateKey, candidateSecret] of entries) {
     if (
-      !LOWER_HEX_64.test(candidateSubmissionId)
+      !options.keyPattern.test(candidateKey)
       || typeof candidateSecret !== "string"
       || !LOWER_HEX_64.test(candidateSecret)
-      || (previousSubmissionId !== null && candidateSubmissionId <= previousSubmissionId)
+      || (previousKey !== null && candidateKey <= previousKey)
     ) {
-      throw new Error("validator bootstrap upload HMAC allowlist is invalid");
+      throw new Error(`${options.description} is invalid`);
     }
-    normalized[candidateSubmissionId] = candidateSecret;
-    previousSubmissionId = candidateSubmissionId;
+    normalized[candidateKey] = candidateSecret;
+    previousKey = candidateKey;
   }
-  if (JSON.stringify(normalized) !== serializedAllowlist) {
+  if (JSON.stringify(normalized) !== serializedMap) {
     // Requiring exact canonical bytes also rejects duplicate object keys, which
     // JSON.parse would otherwise silently collapse to the final value.
-    throw new Error("validator bootstrap upload HMAC allowlist is noncanonical");
+    throw new Error(`${options.description} is noncanonical`);
   }
-  return Object.hasOwn(normalized, submissionId) ? normalized[submissionId] ?? null : null;
+  return normalized;
+}
+
+function validatorBootstrapUploadSecret(
+  serializedAllowlist: string,
+  serializedNamespaceMap: string,
+  submissionId: string,
+): string | null {
+  const allowlist = parseCanonicalSecretMap(serializedAllowlist, {
+    keyPattern: LOWER_HEX_64,
+    maximumBytes: MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_BYTES,
+    maximumEntries: MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_ENTRIES,
+    description: "validator bootstrap upload HMAC allowlist",
+  });
+  const namespaceMap = parseCanonicalSecretMap(serializedNamespaceMap, {
+    keyPattern: LOWER_HEX_32,
+    maximumBytes: MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP_BYTES,
+    maximumEntries: MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP_ENTRIES,
+    description: "validator bootstrap upload HMAC namespace map",
+  });
+  for (const [exactSubmissionId, exactSecret] of Object.entries(allowlist)) {
+    const namespaceSecret = namespaceMap[exactSubmissionId.slice(0, 32)];
+    if (namespaceSecret !== undefined && namespaceSecret !== exactSecret) {
+      throw new Error("validator bootstrap upload HMAC maps conflict");
+    }
+  }
+
+  const exactSecret = allowlist[submissionId];
+  if (exactSecret !== undefined) {
+    return exactSecret;
+  }
+  return namespaceMap[submissionId.slice(0, 32)] ?? null;
 }
 
 function canonicalAuthMessage(
@@ -304,12 +361,18 @@ async function authenticateUpload(
     return jsonResponse(400, { error: "path_digest_mismatch" });
   }
 
-  const uploadSecret = route.authentication === "pilot"
-    ? env.UPLOAD_HMAC_SECRET
-    : validatorBootstrapUploadSecret(
+  let uploadSecret: string | null;
+  if (route.authentication === "pilot") {
+    uploadSecret = env.UPLOAD_HMAC_SECRET;
+  } else if (route.authentication === "validator_bootstrap_result") {
+    uploadSecret = validatorBootstrapUploadSecret(
       env.VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST,
+      env.VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_NAMESPACE_MAP,
       route.identifier,
     );
+  } else {
+    uploadSecret = env.VALIDATOR_BOOTSTRAP_INPUT_UPLOAD_HMAC_SECRET;
+  }
   if (uploadSecret === null) {
     return jsonResponse(401, { error: "unauthorized" });
   }
@@ -328,6 +391,40 @@ async function authenticateUpload(
   return { route, contentLength, contentSha256 };
 }
 
+async function readAndValidateBootstrapInputBundle(
+  request: Request,
+  contentLength: number,
+  contentSha256: string,
+): Promise<Uint8Array | Response> {
+  const body = new Uint8Array(await request.arrayBuffer());
+  if (body.byteLength !== contentLength) {
+    return jsonResponse(400, { error: "content_length_mismatch" });
+  }
+  const actualSha256 = await crypto.subtle.digest("SHA-256", body);
+  if (!bytesEqual(actualSha256, hexToBytes(contentSha256))) {
+    return jsonResponse(422, { error: "content_sha256_mismatch" });
+  }
+
+  let bodyText: string;
+  let decoded: unknown;
+  try {
+    bodyText = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body);
+    decoded = JSON.parse(bodyText);
+  } catch {
+    return jsonResponse(400, { error: "invalid_json" });
+  }
+  if (
+    decoded === null
+    || typeof decoded !== "object"
+    || Array.isArray(decoded)
+    || (decoded as Record<string, unknown>).schema !== SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA
+    || JSON.stringify(decoded) !== bodyText
+  ) {
+    return jsonResponse(400, { error: "invalid_bootstrap_input_bundle" });
+  }
+  return body;
+}
+
 async function handlePut(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const authenticated = await authenticateUpload(request, env, url);
@@ -339,6 +436,18 @@ async function handlePut(request: Request, env: Env): Promise<Response> {
   }
 
   const { route, contentLength, contentSha256 } = authenticated;
+  let uploadBody: ReadableStream | Uint8Array = request.body;
+  if (route.kind === "validator_bootstrap_input") {
+    const validatedBody = await readAndValidateBootstrapInputBundle(
+      request,
+      contentLength,
+      contentSha256,
+    );
+    if (validatedBody instanceof Response) {
+      return validatedBody;
+    }
+    uploadBody = validatedBody;
+  }
   const existing = await env.EVIDENCE_BUCKET.head(route.key);
   if (existing !== null) {
     return jsonResponse(409, { error: "object_exists" });
@@ -346,7 +455,7 @@ async function handlePut(request: Request, env: Env): Promise<Response> {
 
   let stored: R2Object | null;
   try {
-    stored = await env.EVIDENCE_BUCKET.put(route.key, request.body, {
+    stored = await env.EVIDENCE_BUCKET.put(route.key, uploadBody, {
       onlyIf: { etagDoesNotMatch: "*" },
       sha256: hexToBytes(contentSha256),
       httpMetadata: {
