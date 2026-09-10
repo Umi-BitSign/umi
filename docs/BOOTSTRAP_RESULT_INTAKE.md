@@ -48,8 +48,8 @@ Do all of this on the coordinator first:
 For the current authorization:
 
 ```text
-submission id: 8479a1d8cbcafa897ac5e6cceba385ae76afcb7f9f71e467116f7de1a2a9294d
-result URL: https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/validator-bootstrap-results/8479a1d8cbcafa897ac5e6cceba385ae76afcb7f9f71e467116f7de1a2a9294d.json
+submission id: 3a3a007c6c1d2208688d18abff6e9b82ea51592b42231fb2dc87847e1ecc7e49
+result URL: https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/validator-bootstrap-results/3a3a007c6c1d2208688d18abff6e9b82ea51592b42231fb2dc87847e1ecc7e49.json
 ```
 
 The current owner-fence block predates coordinator finality retention. Its proof
@@ -133,8 +133,8 @@ umi-bootstrap-result-intake intake \
   --signed-result /var/lib/umi/bootstrap-intake/signed-result.json \
   --owner-cli-result /var/lib/umi/bootstrap-cutover/owner-fence-btcli-result.json \
   --chain-capture /var/lib/umi/bootstrap-intake/captured-chain-material.json \
-  --archive-root /var/lib/umi/bootstrap-archives/8479a1d8cbcafa897ac5e6cceba385ae76afcb7f9f71e467116f7de1a2a9294d \
-  --observer-publication-root /var/lib/umi/observer/bootstrap-publications/8479a1d8cbcafa897ac5e6cceba385ae76afcb7f9f71e467116f7de1a2a9294d \
+  --archive-root /var/lib/umi/bootstrap-archives/3a3a007c6c1d2208688d18abff6e9b82ea51592b42231fb2dc87847e1ecc7e49 \
+  --observer-publication-root /var/lib/umi/observer/bootstrap-publications/3a3a007c6c1d2208688d18abff6e9b82ea51592b42231fb2dc87847e1ecc7e49 \
   --proof-verifier /opt/umi/bin/umi-substrate-proof-verifier \
   --proof-verifier-sha256 "$PROOF_VERIFIER_SHA256" \
   --finality-verifier /opt/umi/bin/umi-grandpa-finality-observer \
@@ -163,7 +163,7 @@ Run the verifier independently against the completed archive:
 
 ```sh
 umi-bootstrap-result-intake verify \
-  --archive-root /var/lib/umi/bootstrap-archives/8479a1d8cbcafa897ac5e6cceba385ae76afcb7f9f71e467116f7de1a2a9294d \
+  --archive-root /var/lib/umi/bootstrap-archives/3a3a007c6c1d2208688d18abff6e9b82ea51592b42231fb2dc87847e1ecc7e49 \
   --proof-verifier /opt/umi/bin/umi-substrate-proof-verifier \
   --proof-verifier-sha256 "$PROOF_VERIFIER_SHA256" \
   --finality-verifier /opt/umi/bin/umi-grandpa-finality-observer \
