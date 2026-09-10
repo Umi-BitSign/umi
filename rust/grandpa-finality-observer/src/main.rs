@@ -19,7 +19,7 @@ const EVIDENCE_CLASS: &str = "verifier_attested_finality";
 const SOURCE_REVISION: &str = concat!(
     "subtensor-chain-spec:da06f033663896ef2fdbbfc3ecc68ca908fba0f5;",
     "subxt-lightclient:0.50.3@49ea25dcf81a6c764ed6d341679211a396191cc8+umi-database-input-v1;",
-    "smoldot-light:1.3.2@5fe9121f81a58454542ac69a44c4d73f00f30283+umi-database-bootstrap-v1;",
+    "smoldot-light:1.3.2@5fe9121f81a58454542ac69a44c4d73f00f30283+umi-database-bootstrap-v1+lru-0.18.4-rustsec-2026-0253;",
     "smoldot:2.2.0@90e94869a7fbd617d28990da3005eaa906bc3862+umi-header-consensus-disambiguation-v1"
 );
 const TRANSCRIPT_DOMAIN: &[u8] = b"umi-grandpa-finality-attestation-v1\0";

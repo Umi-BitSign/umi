@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,19 @@ from umi.grandpa_finality import (
 from umi.policy import FinalityVerifierPin
 
 _TRANSCRIPT_DOMAIN = b"umi-grandpa-finality-attestation-v1\0"
+
+
+def test_rust_observer_and_python_verifier_pin_the_same_source_revision() -> None:
+    source = (
+        Path(__file__).parents[1] / "rust" / "grandpa-finality-observer" / "src" / "main.rs"
+    ).read_text(encoding="utf-8")
+    match = re.search(
+        r"const SOURCE_REVISION: &str = concat!\((.*?)\n\);",
+        source,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    assert "".join(re.findall(r'"([^"]*)"', match.group(1))) == SOURCE_REVISION
 
 
 def _compact(value: int) -> bytes:
