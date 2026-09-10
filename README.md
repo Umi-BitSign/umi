@@ -17,6 +17,7 @@ protocol extension.
 - [public observer API contract](docs/DASHBOARD_API.md)
 - [miner model integration](docs/MINER_MODEL_INTEGRATION.md)
 - [Apple Silicon miner operator](docs/MACOS_MINER_OPERATOR.md)
+- [Linux x86_64 validator operator](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
 - [Apple Silicon validator operator](docs/MACOS_VALIDATOR_OPERATOR.md)
 - [publisher batch operator](docs/PUBLISHER_BATCH_OPERATOR.md)
 - [publisher availability operator](docs/PUBLISHER_AVAILABILITY_OPERATOR.md)
@@ -28,7 +29,6 @@ protocol extension.
 - [bootstrap service-weight operator](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
 - [emergency direct-bootstrap cutover v1](docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md)
 - [legacy validator transition hold](docs/LEGACY_VALIDATOR_TRANSITION.md)
-- [prerequisite-gated permanent validator supervisor](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
 - [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
 ## Current status
@@ -37,11 +37,11 @@ SN78 is active on mainnet, but UMI translation weights are not. Public endpoint
 pilots are running and their signed, replayable results are available through the
 observer API. A separately labeled seven-day bootstrap service-weight path is
 awaiting its signed transition and chain cutover. The emergency direct profile
-keeps commit-reveal disabled, fences legacy short rows, and lets owner validator
-UID 0 submit raw full-UID service rows through the original policy's hard sunset.
-It becomes live only after an exact row is finalized and published with its chain
-evidence. The bootstrap is not a translation ranking and receives no credit
-toward translation-weight activation.
+keeps commit-reveal disabled, fences legacy short rows, and authorizes one
+permit-bearing validator to submit each raw full-UID service row through the
+original policy's hard sunset. It becomes live only after an exact row is finalized
+and published with its chain evidence. The bootstrap is not a translation ranking
+and receives no credit toward translation-weight activation.
 
 There are four distinct executable paths:
 
