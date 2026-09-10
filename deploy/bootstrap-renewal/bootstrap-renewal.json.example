@@ -1,0 +1,53 @@
+{
+  "authorization_lifetime_blocks": 48,
+  "coordinator_hotkey": "5GsPXiSyzpK3rRoeAmjT4F5Cqa1RmP1CyBvNpwNDsDejyNZ4",
+  "coordinator_wallet": {
+    "hotkey": "coordinator-v2",
+    "name": "umi-public-pilot",
+    "path": "/home/sam/umi-coordinator/private/wallets"
+  },
+  "directive_route_root": "/srv/www/umi-validator-directives",
+  "input_public_origin": "https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev",
+  "input_upload_origin": "https://pilot-upload.umi.vision",
+  "input_upload_secret_path": "/home/sam/umi-validator-cutover-c77/private/validator-bootstrap-input-upload.key",
+  "maximum_checkpoint_age_blocks": 4,
+  "mechanism_id": 0,
+  "minimum_deadline_headroom_blocks": 48,
+  "netuid": 78,
+  "network": "finney",
+  "owner_fence_receipt": {
+    "path": "REPLACE_WITH_ABSOLUTE_OWNER_FENCE_RECEIPT_PATH",
+    "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
+  },
+  "poll_seconds": 12,
+  "release_target": {
+    "path": "REPLACE_WITH_ABSOLUTE_C77_RELEASE_TARGET_PATH",
+    "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
+  },
+  "result_public_origin": "https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev",
+  "schema": "umi-bootstrap-renewal-config/1",
+  "seed_directives": [
+    {
+      "path": "REPLACE_WITH_ABSOLUTE_SEQUENCE_1_SIGNED_DIRECTIVE_PATH",
+      "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
+    },
+    {
+      "path": "REPLACE_WITH_ABSOLUTE_SEQUENCE_2_SIGNED_DIRECTIVE_PATH",
+      "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
+    }
+  ],
+  "seed_result_submission_id": "REPLACE_WITH_64_CHARACTER_INITIAL_SUBMISSION_ID",
+  "signed_manifest": {
+    "path": "REPLACE_WITH_ABSOLUTE_SIGNED_MANIFEST_PATH",
+    "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
+  },
+  "state_root": "/var/lib/umi-bootstrap-renewal",
+  "submission_id_prefix": "3a3a007c6c1d2208688d18abff6e9b82",
+  "validator_hotkey": "REPLACE_WITH_UID_200_VALIDATOR_HOTKEY",
+  "validator_supervisor_config": {
+    "path": "REPLACE_WITH_ABSOLUTE_UID_200_SUPERVISOR_CONFIG_PATH",
+    "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
+  },
+  "validator_uid": 200,
+  "worker_umi_git_revision": "8b09045ba4384a0eb698c1222d6d6a0340b84861"
+}

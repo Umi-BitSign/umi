@@ -1782,6 +1782,27 @@ class BittensorDirectBootstrapChain(BittensorBootstrapChain):
             require_submission_ready=require_submission_ready,
         )
 
+    async def direct_snapshot(
+        self,
+        signed: SignedBootstrapEligibilityManifest,
+        *,
+        validator_hotkey: str,
+    ) -> BootstrapChainSnapshot:
+        """Read one coherent finalized snapshot without creating an authorization.
+
+        Coordinator-side renewal scheduling needs ``LastUpdate`` before the next
+        single-use authorization exists.  Exposing the already shared snapshot
+        collector avoids a second, subtly different set of chain reads while
+        keeping all submission gates in :func:`validate_direct_bootstrap_preflight`.
+        """
+
+        async with self.client_factory("finney") as client:
+            return await self._snapshot(
+                client,
+                signed,
+                validator_hotkey=validator_hotkey,
+            )
+
     async def direct_operational_preflight_with_client(
         self,
         client: Any,
