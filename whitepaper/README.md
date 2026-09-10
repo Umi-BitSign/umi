@@ -2301,11 +2301,13 @@ only exception to this section's prohibition on a weight call while
 equal, binary service-eligibility row, under its published policy hash,
 coordinator-signed manifest and common lease, and fixed block interval. The common
 lease permits any currently permitted SN78 validator to run the exact release. A
-local configuration binds that validator's hotkey. The policy and lease bind the
-exact clean 40-character UMI revision used for bootstrap verification, replay,
-and row construction. This path does not activate translation scoring, change a
-score or activation gate, or receive Section 14 gate credit. No other service row
-or translation row is permitted under a policy with
+local configuration binds that validator's hotkey. The frozen eligibility policy
+retains the original 40-character UMI revision that governed manifest
+construction. The common lease separately binds the exact clean 40-character
+worker revision used for current bootstrap verification, replay, and row
+construction. This path does not activate translation scoring, change a score or
+activation gate, or receive Section 14 gate credit. No other service row or
+translation row is permitted under a policy with
 `translation_weights_active: false`.
 
 For this bootstrap only, the addendum replaces this whitepaper's portable

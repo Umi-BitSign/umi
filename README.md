@@ -36,9 +36,10 @@ protocol extension.
 
 SN78 is active on mainnet, but UMI translation weights are not. Public endpoint
 pilots are running and their signed, replayable results are available through the
-observer API. A separately labeled seven-day bootstrap service-weight release is
-awaiting its signed lease, shared release directive, and first finalized row. The
-owner fence keeps commit-reveal disabled and rejects legacy short rows. Any
+observer API. The separately labeled seven-day bootstrap service-weight release
+has published its signed lease and shared release directive and is awaiting its
+first finalized matching row. The owner fence keeps commit-reveal disabled and
+rejects legacy short rows. Any
 currently permitted SN78 validator may install the signed supervisor release and
 submit the same raw full-UID service row through the original policy's hard
 sunset. Finalized chain state records each validator's exact row, `LastUpdate`,

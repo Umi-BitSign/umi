@@ -1,6 +1,6 @@
 # SN78 shared-validator bootstrap supersession
 
-Status: release profile awaiting publication of its signed artifacts
+Status: signed release artifacts published; awaiting the first finalized matching row
 
 Scope: Finney SN78, MechId 0, `bootstrap_service_binary`
 
