@@ -93,7 +93,7 @@ BOOTSTRAP_RENEWAL_STATUS_SCHEMA = "umi-bootstrap-renewal-status/1"
 
 # The temporary service-weight worker was reviewed and released at this revision.
 # A later worker requires an explicit new controller release and operator review.
-PINNED_BOOTSTRAP_WORKER_REVISION = "8b09045ba4384a0eb698c1222d6d6a0340b84861"
+PINNED_BOOTSTRAP_WORKER_REVISION = "57857fce807d8ebecdf491718886b67e6d216196"
 UID200_SUBMISSION_NAMESPACE = "3a3a007c6c1d2208688d18abff6e9b82"
 EXPECTED_RATE_LIMIT_BLOCKS = 100
 EXPECTED_ACTIVITY_CUTOFF_BLOCKS = 360

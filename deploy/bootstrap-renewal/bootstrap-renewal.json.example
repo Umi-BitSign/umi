@@ -49,5 +49,5 @@
     "sha256": "REPLACE_WITH_64_CHARACTER_SHA256"
   },
   "validator_uid": 200,
-  "worker_umi_git_revision": "8b09045ba4384a0eb698c1222d6d6a0340b84861"
+  "worker_umi_git_revision": "57857fce807d8ebecdf491718886b67e6d216196"
 }

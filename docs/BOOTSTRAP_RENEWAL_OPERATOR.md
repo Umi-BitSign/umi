@@ -20,7 +20,7 @@ The controller is intentionally fixed to:
 - Finney netuid 78, MechId 0, validator UID 200;
 - weights version `4294967296`, `MinAllowedWeights = 256`, direct weights, tempo
   360, rate limit 100, and activity cutoff 360;
-- worker revision `8b09045ba4384a0eb698c1222d6d6a0340b84861`, compiled into
+- worker revision `57857fce807d8ebecdf491718886b67e6d216196`, compiled into
   this controller release;
 - submission namespace `3a3a007c6c1d2208688d18abff6e9b82` plus a fresh
   random 32-hex suffix; and
