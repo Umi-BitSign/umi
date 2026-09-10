@@ -353,8 +353,7 @@ class _Runtime:
                             "fields": [
                                 {
                                     "Sha256": (
-                                        "0x"
-                                        + self.signed.result.signed_manifest.manifest_sha256
+                                        "0x" + self.signed.result.signed_manifest.manifest_sha256
                                     )
                                 }
                             ]
@@ -637,11 +636,7 @@ def test_finality_descendant_bridge_is_hash_linked_to_owned_attested_head() -> N
     _verify_finality(bridged, AttestedHead())
     unrelated = _header(head.number, salt=70)
     broken = bridged.model_copy(
-        update={
-            "finality": bridged.finality.model_copy(
-                update={"descendant_headers": [unrelated]}
-            )
-        }
+        update={"finality": bridged.finality.model_copy(update={"descendant_headers": [unrelated]})}
     )
     with pytest.raises(ValueError, match="bridge is not contiguous"):
         _verify_finality(broken, AttestedHead())

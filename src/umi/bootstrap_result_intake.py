@@ -628,10 +628,7 @@ def _verify_finality(
         previous_number = block.header.number
         previous_hash = block.header.block_hash
         for header in bridge:
-            if (
-                header.number != previous_number + 1
-                or header.parent_hash != previous_hash
-            ):
+            if header.number != previous_number + 1 or header.parent_hash != previous_hash:
                 raise ValueError("finality descendant bridge is not contiguous")
             previous_number = header.number
             previous_hash = header.block_hash
