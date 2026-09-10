@@ -135,7 +135,8 @@ class FakeSnapshot:
                 "weights_version": 0,
                 "weights_rate_limit": 100,
                 "immunity_period": 5_000,
-                "activity_cutoff": 360,
+                # This legacy helper field is not the runtime's effective cutoff.
+                "activity_cutoff": 5_000,
                 "max_weights_limit": 65_535,
                 "commit_reveal_weights_enabled": True,
                 "commit_reveal_period": 1,
@@ -170,6 +171,7 @@ class FakeSnapshot:
             "MaxMechanismCount": 2,
             "NetworksAdded": True,
             "SubnetOwnerHotkey": b"\x55" * 32,
+            "ActivityCutoffFactorMilli": 1_000,
             "Weights": self.weight_row,
         }
         return values[item.name]
@@ -235,6 +237,7 @@ async def test_collector_uses_one_finalized_snapshot_and_exact_public_values() -
     assert result.network.subnet_started is True
     assert result.network.subnet_emission_enabled is False
     assert result.network.subnet_owner_hotkey_account_id32 == "0x" + "55" * 32
+    assert result.network.hyperparameters.activity_cutoff_blocks == "360"
     assert result.network.uid_zero_mechid0_row == ((0, 1), (255, 65_535))
     assert result.network.price is not None
     assert result.network.price.tao_reserve_rao == "2000000000"
@@ -262,6 +265,7 @@ async def test_collector_uses_one_finalized_snapshot_and_exact_public_values() -
         "MaxMechanismCount",
         "NetworksAdded",
         "SubnetOwnerHotkey",
+        "ActivityCutoffFactorMilli",
         "Weights",
     }
     assert ("Weights", [78, 0]) in snapshot.query_calls

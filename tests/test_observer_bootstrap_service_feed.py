@@ -26,6 +26,8 @@ from umi.bootstrap_weight_operator import (
     BootstrapExtrinsicReference,
     BootstrapManifestAnchorObservation,
 )
+from umi.bootstrap_weights import SignedBootstrapEligibilityManifest
+from umi.encoding import account_id32
 from umi.observer import create_observer_app
 from umi.observer_bootstrap_service_feed import (
     ObserverBootstrapServiceFeed,
@@ -35,6 +37,12 @@ from umi.observer_bootstrap_service_feed import (
 from umi.observer_models import ChainValidatorWeightRow, ObserverSnapshot
 from umi.observer_pilot_feed import ObserverPilotFeed, VerifiedComponentPilot
 from umi.protocol import canonical_json_bytes
+from umi.simple_bootstrap_validator import (
+    SIMPLE_BOOTSTRAP_LEASE_SCHEMA,
+    SIMPLE_BOOTSTRAP_RUNTIME_SPEC_VERSION,
+    SignedSimpleBootstrapLease,
+    build_simple_bootstrap_lease_body,
+)
 
 from .test_bootstrap_direct_weights import (
     NOW,
@@ -279,7 +287,7 @@ def _active_snapshot(feed, owner, participants, *, block_number: int = 130) -> O
     expected_row = tuple(tuple(item) for item in publication.receipt.expected_applied_row)
     network = base.network.model_copy(
         update={
-            "runtime_spec_version": "455",
+            "runtime_spec_version": str(SIMPLE_BOOTSTRAP_RUNTIME_SPEC_VERSION),
             "commit_reveal_enabled": False,
             "pending_weight_commit_count": 0,
             "subnet_owner_hotkey_account_id32": (
@@ -308,6 +316,122 @@ def _active_snapshot(feed, owner, participants, *, block_number: int = 130) -> O
         }
     )
     return base.model_copy(update={"network": network, "participants": active_rows})
+
+
+def _write_simple_feed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> ObserverBootstrapServiceFeed:
+    manifest_path = (
+        Path(__file__).parents[1]
+        / "deploy"
+        / "linux-validator-supervisor"
+        / "bootstrap-manifest.json"
+    )
+    signed = SignedBootstrapEligibilityManifest.model_validate_json(manifest_path.read_bytes())
+    body = build_simple_bootstrap_lease_body(
+        signed,
+        umi_git_revision="ab" * 20,
+        valid_from_block=9_039_000,
+    )
+    lease = SignedSimpleBootstrapLease(
+        schema=SIMPLE_BOOTSTRAP_LEASE_SCHEMA,
+        body=body,
+        signature_scheme="sr25519",
+        signature="0x" + "11" * 64,
+    )
+    local_manifest = tmp_path / "bootstrap-manifest.json"
+    local_lease = tmp_path / "bootstrap-lease.json"
+    local_manifest.write_bytes(canonical_json_bytes(signed))
+    local_lease.write_bytes(canonical_json_bytes(lease))
+    config = tmp_path / "simple-feed.json"
+    config.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema": "umi-observer-simple-bootstrap-feed-config/1",
+                "protocol": "umi-asl/0.1",
+                "mode": "bootstrap_service_binary",
+                "public_origin": "https://api.umi.vision",
+                "bundle_roots": [],
+                "simple_bootstrap_signed_manifest_path": str(local_manifest),
+                "simple_bootstrap_lease_path": str(local_lease),
+            }
+        )
+    )
+    monkeypatch.setattr(
+        bootstrap_feed_module,
+        "verify_simple_bootstrap_lease",
+        lambda *args, **kwargs: lease,
+    )
+    return build_observer_bootstrap_service_feed(
+        config,
+        pilot_feed=_fake_pilot_feed(signed),
+    )
+
+
+def _simple_active_snapshot(
+    feed: ObserverBootstrapServiceFeed,
+    *,
+    exact_validator_uids: tuple[int, ...] = (200,),
+    mismatched_validator_uids: tuple[int, ...] = (),
+    subnet_emission_enabled: bool = False,
+) -> ObserverSnapshot:
+    configuration = feed.simple_bootstrap
+    assert configuration is not None
+    block_number = 9_040_000
+    validator_uids = set(exact_validator_uids) | set(mismatched_validator_uids)
+    entries = {entry.uid: entry for entry in configuration.signed_manifest.manifest.entries}
+    owner_hotkey = dev_wallet("//SimpleObserverOwner").hotkey.ss58_address
+    participants = []
+    for uid in range(256):
+        participant = _participant(uid, validator=uid in validator_uids)
+        updates: dict[str, object] = {
+            "last_update_block": str(block_number - 10 if uid in validator_uids else 90),
+            "last_update_age_blocks": str(10 if uid in validator_uids else block_number - 90),
+        }
+        if uid == 0:
+            updates["hotkey"] = owner_hotkey
+        if uid in entries:
+            entry = entries[uid]
+            updates.update(
+                {
+                    "hotkey": entry.miner_hotkey,
+                    "serving_announced": True,
+                    "serving_origin": entry.origin,
+                }
+            )
+        participants.append(participant.model_copy(update=updates))
+    base = _snapshot(block_number=block_number, participants=participants)
+    expected_row = configuration.expected_row
+    rows = [
+        ChainValidatorWeightRow(validator_uid=uid, weights=expected_row)
+        for uid in exact_validator_uids
+    ]
+    rows.extend(
+        ChainValidatorWeightRow(validator_uid=uid, weights=((0, 1),))
+        for uid in mismatched_validator_uids
+    )
+    network = base.network.model_copy(
+        update={
+            "runtime_spec_version": "455",
+            "commit_reveal_enabled": False,
+            "commit_reveal_version": "4",
+            "reveal_period_epochs": "1",
+            "pending_weight_commit_count": 0,
+            "subnet_emission_enabled": subnet_emission_enabled,
+            "subnet_owner_hotkey_account_id32": "0x" + account_id32(owner_hotkey).hex(),
+            "uid_zero_mechid0_row": (expected_row if 0 in exact_validator_uids else ()),
+            "validator_mechid0_rows": tuple(sorted(rows, key=lambda item: item.validator_uid)),
+            "hyperparameters": base.network.hyperparameters.model_copy(
+                update={
+                    "min_allowed_weights": 256,
+                    "weights_version_key": str(1 << 32),
+                    "activity_cutoff_blocks": "360",
+                }
+            ),
+        }
+    )
+    return base.model_copy(update={"network": network})
 
 
 def test_applied_direct_bundle_is_replayed_and_served_immutably(tmp_path: Path) -> None:
@@ -378,6 +502,165 @@ def test_permitted_nonowner_bundle_is_verified_against_its_own_chain_row(
     assert authorization_hotkey == publication.receipt.validator_hotkey
 
 
+def test_common_lease_uses_finalized_exact_row_as_the_public_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed = _write_simple_feed(tmp_path, monkeypatch)
+    configuration = feed.simple_bootstrap
+    assert configuration is not None
+    snapshot = _simple_active_snapshot(feed, subnet_emission_enabled=False)
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(configuration.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        service = client.get("/api/v1/bootstrap-service")
+        status = client.get("/api/v1/status")
+        manifest = client.get(
+            f"/api/v1/bootstrap-service/{configuration.publication_id}/bundle/manifest.json"
+        )
+        lease_ref = configuration.manifest.signed_lease
+        lease = client.get(
+            f"/api/v1/bootstrap-service/{configuration.publication_id}"
+            f"/bundle/objects/{lease_ref.sha256}"
+        )
+
+    body = service.json()
+    assert body["availability"] == "active"
+    assert body["warning_codes"] == []
+    assert body["current"]["evidence_class"] == "finalized_chain_state"
+    assert body["current"]["subnet_emission_enabled"] is False
+    assert body["current"]["translation_weights_active"] is False
+    assert [item["uid"] for item in body["current"]["exact_validator_rows"]] == [200]
+    assert [item["uid"] for item in body["current"]["eligible_miners"]] == [6, 247]
+    assert body["current"]["observation_block"] == "9040000"
+    assert status.json()["protocol_state"]["service_weights_active"] is True
+    assert status.json()["protocol_state"]["translation_weights_active"] is False
+    assert snapshot.network.subnet_emission_enabled is False
+    assert manifest.content == configuration.manifest_bytes
+    assert lease.content == configuration.objects[lease_ref.sha256].data
+
+
+def test_common_lease_accepts_multiple_exact_rows_and_warns_on_foreign_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed = _write_simple_feed(tmp_path, monkeypatch)
+    configuration = feed.simple_bootstrap
+    assert configuration is not None
+    snapshot = _simple_active_snapshot(
+        feed,
+        exact_validator_uids=(110, 200),
+        mismatched_validator_uids=(198,),
+        subnet_emission_enabled=True,
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(configuration.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+
+    body = response.json()
+    assert body["availability"] == "active"
+    assert [item["uid"] for item in body["current"]["exact_validator_rows"]] == [110, 200]
+    assert body["current"]["subnet_emission_enabled"] is True
+    assert body["warning_codes"] == ["bootstrap_service_mismatched_active_row_uid_198"]
+
+
+def test_common_lease_remains_inactive_without_an_exact_active_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed = _write_simple_feed(tmp_path, monkeypatch)
+    configuration = feed.simple_bootstrap
+    assert configuration is not None
+    snapshot = _simple_active_snapshot(
+        feed,
+        exact_validator_uids=(),
+        mismatched_validator_uids=(198,),
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(configuration.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+
+    assert response.json()["availability"] == "inactive"
+    assert response.json()["reason_code"] == "bootstrap_service_exact_active_row_unavailable"
+    assert response.json()["current"] is None
+
+
+def test_common_lease_fails_closed_when_the_weight_rate_limit_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed = _write_simple_feed(tmp_path, monkeypatch)
+    active = _simple_active_snapshot(feed)
+    snapshot = active.model_copy(
+        update={
+            "network": active.network.model_copy(
+                update={
+                    "hyperparameters": active.network.hyperparameters.model_copy(
+                        update={"weights_rate_limit_blocks": "241"}
+                    )
+                }
+            )
+        }
+    )
+    configuration = feed.simple_bootstrap
+    assert configuration is not None
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(configuration.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+
+    assert response.json()["availability"] == "inactive"
+    assert response.json()["reason_code"] == "bootstrap_service_weights_rate_limit_changed"
+
+
+def test_common_lease_fails_closed_on_runtime_upgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed = _write_simple_feed(tmp_path, monkeypatch)
+    active = _simple_active_snapshot(feed)
+    snapshot = active.model_copy(
+        update={
+            "network": active.network.model_copy(
+                update={"runtime_spec_version": str(SIMPLE_BOOTSTRAP_RUNTIME_SPEC_VERSION + 1)}
+            )
+        }
+    )
+    configuration = feed.simple_bootstrap
+    assert configuration is not None
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(configuration.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+        status = client.get("/api/v1/status")
+
+    assert response.json()["availability"] == "inactive"
+    assert response.json()["reason_code"] == "bootstrap_service_runtime_spec_mismatch"
+    assert status.json()["protocol_state"]["service_weights_active"] is False
+
+
 def test_bootstrap_service_requires_the_verified_pilot_feed(tmp_path: Path) -> None:
     feed, owner, participants = _write_feed(tmp_path)
     snapshot = _active_snapshot(feed, owner, participants)
@@ -442,12 +725,12 @@ def test_bootstrap_service_state_fails_closed_on_chain_drift(
     assert status.json()["protocol_state"]["service_weights_active"] is False
 
 
-def test_bootstrap_service_rejects_active_non_owner_validator(tmp_path: Path) -> None:
+def test_bootstrap_service_warns_about_other_active_validator(tmp_path: Path) -> None:
     feed, owner, participants = _write_feed(tmp_path)
     active = _active_snapshot(feed, owner, participants)
-    competing = active.participants[1].model_copy(
+    competing = active.participants[3].model_copy(
         update={
-            "chain_active": False,
+            "chain_active": True,
             "validator_permit": True,
             "role": "validator",
             "last_update_block": "129",
@@ -455,7 +738,19 @@ def test_bootstrap_service_rejects_active_non_owner_validator(tmp_path: Path) ->
         }
     )
     snapshot = active.model_copy(
-        update={"participants": (active.participants[0], competing, *active.participants[2:])}
+        update={
+            "participants": (*active.participants[:3], competing, *active.participants[4:]),
+            "network": active.network.model_copy(
+                update={
+                    "counts": active.network.counts.model_copy(
+                        update={
+                            "miners": active.network.counts.miners - 1,
+                            "validators": active.network.counts.validators + 1,
+                        }
+                    )
+                }
+            ),
+        }
     )
     app = create_observer_app(
         _cache(SequenceCollector([snapshot])),
@@ -464,8 +759,9 @@ def test_bootstrap_service_rejects_active_non_owner_validator(tmp_path: Path) ->
     )
     with TestClient(app) as client:
         response = client.get("/api/v1/bootstrap-service")
-    assert response.json()["availability"] == "inactive"
-    assert response.json()["reason_code"] == "bootstrap_service_other_validator_active"
+    assert response.json()["availability"] == "active"
+    assert response.json()["reason_code"] is None
+    assert response.json()["warning_codes"] == ["bootstrap_service_other_active_validator_uid_3"]
 
 
 def test_bootstrap_service_rejects_eligible_uid_reassignment(tmp_path: Path) -> None:

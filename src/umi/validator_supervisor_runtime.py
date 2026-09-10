@@ -50,9 +50,11 @@ CHAIN_CAPABLE_MODES = frozenset(
 )
 _WORKER_MODES = frozenset({"inactive_shadow", "bootstrap_service_weights", "translation_weights"})
 _EXPECTED_ENTRYPOINT = {
-    "inactive_shadow": "umi-live-shadow-validator/1",
-    "bootstrap_service_weights": "umi-bootstrap-weight-validator/2",
-    "translation_weights": "umi-translation-validator/1",
+    "inactive_shadow": frozenset({"umi-live-shadow-validator/1"}),
+    "bootstrap_service_weights": frozenset(
+        {"umi-bootstrap-weight-validator/2", "umi-simple-bootstrap-validator/1"}
+    ),
+    "translation_weights": frozenset({"umi-translation-validator/1"}),
 }
 
 
@@ -108,11 +110,17 @@ class SupervisorWorkerActivation:
             raise ValueError("worker activation block interval is inverted")
         if not isinstance(self.release, SupervisorReleaseTarget):
             raise TypeError("worker activation release must be a SupervisorReleaseTarget")
-        if self.release.entrypoint_profile != _EXPECTED_ENTRYPOINT[self.mode]:
+        if self.release.entrypoint_profile not in _EXPECTED_ENTRYPOINT[self.mode]:
             raise ValueError("worker activation mode and entrypoint profile disagree")
         if self.mode == "bootstrap_service_weights":
             if not isinstance(self.operator_inputs, SupervisorOperatorInputTarget):
                 raise TypeError("bootstrap worker activation requires immutable operator inputs")
+            expected_input_profile = {
+                "umi-bootstrap-weight-validator/2": "umi-bootstrap-direct-inputs/2",
+                "umi-simple-bootstrap-validator/1": "umi-simple-bootstrap-common-inputs/1",
+            }[self.release.entrypoint_profile]
+            if self.operator_inputs.profile != expected_input_profile:
+                raise ValueError("worker release and operator-input profiles disagree")
         elif self.operator_inputs is not None:
             raise ValueError("only bootstrap worker activation may name operator inputs")
 

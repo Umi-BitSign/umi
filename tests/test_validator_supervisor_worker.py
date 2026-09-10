@@ -1001,9 +1001,9 @@ def test_supervisor_worker_image_is_fixed_immutable_and_owns_finality() -> None:
     ) in dockerfile
     assert "ADD --checksum=sha256:f280b687" in dockerfile
     assert "/opt/umi/bin/umi-grandpa-finality-observer --conformance-self-test" in dockerfile
-    assert 'ENTRYPOINT ["/usr/local/bin/umi-validator-supervisor-worker"]' in dockerfile
+    assert 'ENTRYPOINT ["/usr/local/bin/umi-simple-bootstrap-validator"]' in dockerfile
     assert "USER 65532:65532" in dockerfile
-    assert 'vision.umi.entrypoint-profile="umi-bootstrap-weight-validator/2"' in dockerfile
+    assert 'vision.umi.entrypoint-profile="umi-simple-bootstrap-validator/1"' in dockerfile
     assert "linux/amd64|linux/arm64" in dockerfile
     assert 'test "${TARGETPLATFORM}" = "linux/amd64"' not in dockerfile
 
@@ -1050,7 +1050,7 @@ def test_supervisor_worker_release_workflow_is_manual_pinned_and_artifact_only()
     assert "uv_sha256" in workflow
     assert "uv_size_bytes" in workflow
     assert "docker cp" in workflow
-    assert "umi-validator-supervisor-host-artifacts/1" in workflow
+    assert "umi-validator-supervisor-host-artifact-build/1" in workflow
     assert "f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105" in workflow
     assert '"out/${FINALITY_BASE}" --conformance-self-test' in workflow
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow

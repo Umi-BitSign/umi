@@ -1,5 +1,10 @@
 # Bootstrap result intake and archival
 
+Historical runbook. The
+[shared-validator bootstrap supersession](SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
+uses finalized chain state as the receipt and requires no per-validator result
+upload.
+
 This is the coordinator-side handoff after the permitted validator publishes an
 applied direct-bootstrap result. The validator operator does not run these steps
 and does not need to send another file or command output.

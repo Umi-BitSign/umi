@@ -233,29 +233,32 @@ The pilot list, detail, and solutions response schemas are
 
 ## Bootstrap service-weight feed
 
-The optional `--bootstrap-service-feed-config` loads immutable terminal bundles
-created by `umi-observer-bootstrap-service-publication`. It requires the component
-pilot feed because every eligible miner is cross-checked against an independently
-replayed successful public-endpoint pilot. The observer verifies the owner-fence
-receipt, signed eligibility manifest, signed direct-transition authorization,
-exact call material, applied receipt, terminal journal, every content hash, and all
-cross-bindings before it listens. Its source status is
-`bootstrap_current_state_verified`: the observer independently matches the
-published row to current finalized chain state. It does not claim raw-event or
-storage-proof verification of the complete historical transaction. The full
-Section 6 archive remains a separate required launch artifact.
+The optional `--bootstrap-service-feed-config` accepts the current
+`umi-observer-simple-bootstrap-feed-config/1` shape. It loads the frozen signed
+eligibility manifest and coordinator-signed common lease from immutable local
+paths. It requires the component pilot feed because every eligible miner is
+cross-checked against an independently replayed successful public-endpoint pilot.
+The source status is `bootstrap_current_state_verified`.
 
-`service_weights_active` becomes true only while the current finalized SN78 state
-still matches the publication. The observer requires runtime spec 455, one
-mechanism, all 256 UIDs registered, the direct-bootstrap version and minimum-weight
-fence, commit-reveal disabled, an empty pending queue, no active validator other
-than the authorization target, current UID/hotkey/permit/exact HTTPS-origin bindings for
-every eligible miner, the exact authorized validator hotkey, UID, permit, and
-`LastUpdate`, the unchanged subnet-owner mapping, and a byte-identical 256-entry
-MechId 0 row read from that validator's storage entry. Expiry, UID reassignment,
-overwrite, or runtime and hyperparameter
-drift makes the status false on the next snapshot. The
-verified historical publication remains inspectable.
+`service_weights_active` becomes true only while the signed lease is active and
+one or more currently permitted validators have the exact authorized row in one
+finalized SN78 snapshot. The observer verifies the lease's mechanism count,
+256-UID domain, owner fence, tempo, effective activity cutoff, empty pending
+queue, subnet-owner mapping, miner UID and endpoint mappings, validator permits,
+`LastUpdate` values, and byte-identical 256-entry MechId 0 rows. A different
+active row from another validator is reported in `warning_codes` and does not
+invalidate an exact row. Lease expiry, UID reassignment, row expiry, overwrite,
+or required chain-tuple drift makes the status false on the next snapshot.
+
+The current record carries `evidence_class: "finalized_chain_state"` and lists
+every validator whose exact row is active. There is no validator-uploaded terminal
+bundle in this profile. The signed manifest and lease bind the authorized row;
+the current finalized permit, row, and `LastUpdate` are its public receipt. This
+evidence does not claim raw-event or portable storage-proof verification.
+
+The historical `umi-observer-bootstrap-service-feed-config/1` shape and its
+`umi-bootstrap-direct-publication/2` terminal bundles remain readable. They do
+not take precedence over a configured current shared-bootstrap lease.
 
 The immutable routes are
 `/api/v1/bootstrap-service/{publication_id}/bundle/manifest.json` and

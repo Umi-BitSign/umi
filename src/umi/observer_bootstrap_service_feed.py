@@ -35,9 +35,15 @@ from .bootstrap_weights import (
 from .encoding import account_id32
 from .observer_pilot_feed import ObserverPilotFeed
 from .protocol import PROTOCOL_VERSION, Hex32, StrictProtocolModel, canonical_json_bytes
+from .simple_bootstrap_validator import (
+    SignedSimpleBootstrapLease,
+    verify_simple_bootstrap_lease,
+)
 
 BOOTSTRAP_SERVICE_FEED_CONFIG_SCHEMA = "umi-observer-bootstrap-service-feed-config/1"
+SIMPLE_BOOTSTRAP_FEED_CONFIG_SCHEMA = "umi-observer-simple-bootstrap-feed-config/1"
 BOOTSTRAP_SERVICE_PUBLICATION_SCHEMA = "umi-bootstrap-direct-publication/2"
+SIMPLE_BOOTSTRAP_PUBLICATION_SCHEMA = "umi-simple-bootstrap-observer-publication/1"
 BOOTSTRAP_SERVICE_MECHANISM = "bootstrap_service_binary"
 MAX_BOOTSTRAP_PUBLICATIONS = 256
 MAX_BOOTSTRAP_CONFIG_BYTES = 64 * 1024
@@ -98,6 +104,39 @@ class BootstrapServicePublicationManifest(StrictProtocolModel):
         )
 
 
+class SimpleBootstrapPublicationManifest(StrictProtocolModel):
+    """Public, immutable inputs used to recognize a bootstrap row on chain."""
+
+    schema_: Literal[SIMPLE_BOOTSTRAP_PUBLICATION_SCHEMA] = Field(alias="schema")
+    protocol: Literal[PROTOCOL_VERSION]
+    mechanism: Literal[BOOTSTRAP_SERVICE_MECHANISM]
+    chain_state_required: Literal[True]
+    service_weights_active_claimed: Literal[False]
+    translation_weights_active: Literal[False]
+    activation_evidence: Literal[False]
+    validator_input_eligible: Literal[False]
+    storage_proofs_verified: Literal[False]
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    policy_sha256: Hex32
+    eligibility_manifest_sha256: Hex32
+    valid_from_block: Annotated[int, Field(gt=0)]
+    hard_sunset_block: Annotated[int, Field(gt=0)]
+    expected_row_sha256: Hex32
+    signed_eligibility_manifest: BootstrapServiceObjectRef
+    signed_lease: BootstrapServiceObjectRef
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> Self:
+        if self.valid_from_block >= self.hard_sunset_block:
+            raise ValueError("simple bootstrap publication interval is invalid")
+        if self.signed_eligibility_manifest.sha256 == self.signed_lease.sha256:
+            raise ValueError("simple bootstrap publication roles must name distinct objects")
+        return self
+
+    def object_references(self) -> tuple[BootstrapServiceObjectRef, ...]:
+        return (self.signed_eligibility_manifest, self.signed_lease)
+
+
 class BootstrapServiceFeedConfig(StrictProtocolModel):
     schema_: Literal[BOOTSTRAP_SERVICE_FEED_CONFIG_SCHEMA] = Field(alias="schema")
     protocol: Literal[PROTOCOL_VERSION]
@@ -118,6 +157,36 @@ class BootstrapServiceFeedConfig(StrictProtocolModel):
             paths.append(path)
         if len(paths) != len(set(paths)):
             raise ValueError("bootstrap bundle roots must be unique")
+        return self
+
+
+class SimpleBootstrapServiceFeedConfig(StrictProtocolModel):
+    schema_: Literal[SIMPLE_BOOTSTRAP_FEED_CONFIG_SCHEMA] = Field(alias="schema")
+    protocol: Literal[PROTOCOL_VERSION]
+    mode: Literal[BOOTSTRAP_SERVICE_MECHANISM]
+    public_origin: Annotated[str, Field(min_length=1, max_length=8_192)]
+    bundle_roots: Annotated[list[str], Field(max_length=MAX_BOOTSTRAP_PUBLICATIONS)]
+    simple_bootstrap_signed_manifest_path: str
+    simple_bootstrap_lease_path: str
+
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
+        _normalized_https_origin(self.public_origin)
+        raw_paths = (
+            *self.bundle_roots,
+            self.simple_bootstrap_signed_manifest_path,
+            self.simple_bootstrap_lease_path,
+        )
+        paths: list[Path] = []
+        for raw in raw_paths:
+            path = Path(raw)
+            if not path.is_absolute() or os.path.normpath(raw) != str(path):
+                raise ValueError("bootstrap evidence paths must be normalized absolute paths")
+            if len(raw.encode("utf-8")) > 4_096:
+                raise ValueError("bootstrap evidence path is too long")
+            paths.append(path)
+        if len(paths) != len(set(paths)):
+            raise ValueError("bootstrap evidence paths must be unique")
         return self
 
 
@@ -148,14 +217,45 @@ class VerifiedBootstrapServicePublication:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedSimpleBootstrapConfiguration:
+    publication_id: str
+    public_origin: str
+    manifest: SimpleBootstrapPublicationManifest
+    manifest_bytes: bytes
+    objects: Mapping[str, VerifiedBootstrapServiceObject]
+    signed_manifest: SignedBootstrapEligibilityManifest
+    signed_lease: SignedSimpleBootstrapLease
+    expected_row: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ObserverBootstrapServiceFeed:
     publications: tuple[VerifiedBootstrapServicePublication, ...]
+    simple_bootstrap: VerifiedSimpleBootstrapConfiguration | None = None
 
-    def get(self, publication_id: str) -> VerifiedBootstrapServicePublication | None:
-        return next(
+    def get(
+        self,
+        publication_id: str,
+    ) -> VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration | None:
+        publication = next(
             (item for item in self.publications if item.publication_id == publication_id),
             None,
         )
+        if publication is not None:
+            return publication
+        if (
+            self.simple_bootstrap is not None
+            and self.simple_bootstrap.publication_id == publication_id
+        ):
+            return self.simple_bootstrap
+        return None
+
+    def evidence_items(
+        self,
+    ) -> tuple[VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration, ...]:
+        if self.simple_bootstrap is None:
+            return self.publications
+        return (*self.publications, self.simple_bootstrap)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,12 +325,26 @@ def _load_canonical_model(
     return value
 
 
-def _parse_config(path: Path) -> BootstrapServiceFeedConfig:
+def _parse_config(
+    path: Path,
+) -> BootstrapServiceFeedConfig | SimpleBootstrapServiceFeedConfig:
     if not path.is_absolute():
         raise ValueError("bootstrap feed config path must be absolute")
     _require_safe_owned_path(path, directory=False, require_single_link=True)
     data = _read_bounded_regular_file(path, MAX_BOOTSTRAP_CONFIG_BYTES)
-    return _load_canonical_model(data, BootstrapServiceFeedConfig, label="feed config")
+    try:
+        decoded = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("bootstrap feed config is invalid") from error
+    schema = decoded.get("schema") if isinstance(decoded, dict) else None
+    model: type[StrictProtocolModel]
+    if schema == BOOTSTRAP_SERVICE_FEED_CONFIG_SCHEMA:
+        model = BootstrapServiceFeedConfig
+    elif schema == SIMPLE_BOOTSTRAP_FEED_CONFIG_SCHEMA:
+        model = SimpleBootstrapServiceFeedConfig
+    else:
+        raise ValueError("bootstrap feed config schema is unsupported")
+    return _load_canonical_model(data, model, label="feed config")
 
 
 def _as_object_ref(value: BootstrapServiceObjectRef) -> ObjectRef:
@@ -460,6 +574,106 @@ def _load_publication(
     )
 
 
+def _load_simple_bootstrap_configuration(
+    config: BootstrapServiceFeedConfig | SimpleBootstrapServiceFeedConfig,
+    pilot_feed: ObserverPilotFeed,
+    *,
+    remaining_bytes: int,
+) -> VerifiedSimpleBootstrapConfiguration | None:
+    if not isinstance(config, SimpleBootstrapServiceFeedConfig):
+        return None
+    manifest_name = config.simple_bootstrap_signed_manifest_path
+    lease_name = config.simple_bootstrap_lease_path
+
+    manifest_path = Path(manifest_name)
+    lease_path = Path(lease_name)
+    for path in (manifest_path, lease_path):
+        _require_safe_owned_path(path, directory=False, require_single_link=True)
+    signed_manifest_bytes = _read_bounded_regular_file(
+        manifest_path,
+        MAX_BOOTSTRAP_OBJECT_BYTES,
+    )
+    signed_lease_bytes = _read_bounded_regular_file(
+        lease_path,
+        MAX_BOOTSTRAP_OBJECT_BYTES,
+    )
+    signed_manifest = _load_canonical_model(
+        signed_manifest_bytes,
+        SignedBootstrapEligibilityManifest,
+        label="simple signed eligibility manifest",
+    )
+    signed_lease = _load_canonical_model(
+        signed_lease_bytes,
+        SignedSimpleBootstrapLease,
+        label="simple bootstrap lease",
+    )
+    verify_simple_bootstrap_lease(
+        signed_lease,
+        signed_manifest=signed_manifest,
+        expected_revision=signed_lease.body.umi_git_revision,
+        current_block=signed_lease.body.valid_from_block,
+    )
+    if config.public_origin != signed_manifest.manifest.policy.public_evidence_origin:
+        raise ValueError("simple bootstrap public origin does not match the signed policy")
+    _validate_pilot_bindings(signed_manifest, pilot_feed)
+
+    eligible_uids = {entry.uid for entry in signed_manifest.manifest.entries}
+    expected_row = tuple((uid, U16_MAX if uid in eligible_uids else 0) for uid in range(256))
+    expected_row_sha256 = hashlib.sha256(canonical_json_bytes(expected_row)).hexdigest()
+    objects: dict[str, VerifiedBootstrapServiceObject] = {}
+    references: dict[str, BootstrapServiceObjectRef] = {}
+    for name, data in (
+        ("signed_eligibility_manifest", signed_manifest_bytes),
+        ("signed_lease", signed_lease_bytes),
+    ):
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in objects:
+            raise ValueError("simple bootstrap evidence roles must name distinct objects")
+        objects[digest] = VerifiedBootstrapServiceObject(
+            sha256=digest,
+            media_type="application/json",
+            data=data,
+        )
+        references[name] = BootstrapServiceObjectRef(
+            sha256=digest,
+            media_type="application/json",
+            size_bytes=len(data),
+        )
+    publication_manifest = SimpleBootstrapPublicationManifest(
+        schema=SIMPLE_BOOTSTRAP_PUBLICATION_SCHEMA,
+        protocol=PROTOCOL_VERSION,
+        mechanism=BOOTSTRAP_SERVICE_MECHANISM,
+        chain_state_required=True,
+        service_weights_active_claimed=False,
+        translation_weights_active=False,
+        activation_evidence=False,
+        validator_input_eligible=False,
+        storage_proofs_verified=False,
+        umi_git_revision=signed_lease.body.umi_git_revision,
+        policy_sha256=signed_lease.body.policy_sha256,
+        eligibility_manifest_sha256=signed_manifest.manifest_sha256,
+        valid_from_block=signed_lease.body.valid_from_block,
+        hard_sunset_block=signed_lease.body.hard_sunset_block,
+        expected_row_sha256=expected_row_sha256,
+        signed_eligibility_manifest=references["signed_eligibility_manifest"],
+        signed_lease=references["signed_lease"],
+    )
+    publication_bytes = canonical_json_bytes(publication_manifest)
+    declared_bytes = len(publication_bytes) + sum(len(item.data) for item in objects.values())
+    if declared_bytes > remaining_bytes:
+        raise ValueError("bootstrap feed exceeds its aggregate byte ceiling")
+    return VerifiedSimpleBootstrapConfiguration(
+        publication_id=hashlib.sha256(publication_bytes).hexdigest(),
+        public_origin=config.public_origin,
+        manifest=publication_manifest,
+        manifest_bytes=publication_bytes,
+        objects=MappingProxyType(objects),
+        signed_manifest=signed_manifest,
+        signed_lease=signed_lease,
+        expected_row=expected_row,
+    )
+
+
 def build_observer_bootstrap_service_feed(
     config_path: str | Path,
     *,
@@ -483,6 +697,11 @@ def build_observer_bootstrap_service_feed(
             obj.size_bytes for obj in publication.objects.values()
         )
         loaded.append(publication)
+    simple_bootstrap = _load_simple_bootstrap_configuration(
+        config,
+        pilot_feed,
+        remaining_bytes=MAX_BOOTSTRAP_FEED_BYTES - total,
+    )
     publications = tuple(
         sorted(
             loaded,
@@ -506,7 +725,15 @@ def build_observer_bootstrap_service_feed(
     ]
     if len(set(calls)) != len(calls):
         raise ValueError("bootstrap feed contains ambiguous publications for one weight call")
-    return ObserverBootstrapServiceFeed(publications=publications)
+    evidence_ids = [item.publication_id for item in publications]
+    if simple_bootstrap is not None:
+        evidence_ids.append(simple_bootstrap.publication_id)
+    if len(set(evidence_ids)) != len(evidence_ids):
+        raise ValueError("bootstrap feed contains an ambiguous evidence identifier")
+    return ObserverBootstrapServiceFeed(
+        publications=publications,
+        simple_bootstrap=simple_bootstrap,
+    )
 
 
 def build_bootstrap_service_publication(
@@ -611,10 +838,15 @@ __all__ = [
     "BOOTSTRAP_SERVICE_FEED_CONFIG_SCHEMA",
     "BOOTSTRAP_SERVICE_MECHANISM",
     "BOOTSTRAP_SERVICE_PUBLICATION_SCHEMA",
+    "SIMPLE_BOOTSTRAP_FEED_CONFIG_SCHEMA",
+    "SIMPLE_BOOTSTRAP_PUBLICATION_SCHEMA",
     "BootstrapServiceFeedConfig",
     "BootstrapServicePublicationManifest",
     "ObserverBootstrapServiceFeed",
+    "SimpleBootstrapPublicationManifest",
+    "SimpleBootstrapServiceFeedConfig",
     "VerifiedBootstrapServicePublication",
+    "VerifiedSimpleBootstrapConfiguration",
     "build_bootstrap_service_publication",
     "build_observer_bootstrap_service_feed",
 ]

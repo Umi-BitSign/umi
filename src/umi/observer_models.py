@@ -1555,6 +1555,65 @@ class BootstrapServiceRecord(ObserverModel):
         return self
 
 
+class BootstrapServiceChainValidator(ObserverModel):
+    uid: Annotated[int, Field(ge=0, le=255)]
+    hotkey: NonEmptyText
+    last_update_block: UnsignedIntegerText
+    active_through_block: UnsignedIntegerText
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> Self:
+        if int(self.last_update_block) > int(self.active_through_block):
+            raise ValueError("bootstrap chain validator has an invalid active interval")
+        return self
+
+
+class BootstrapServiceChainReceiptRecord(ObserverModel):
+    evidence_class: Literal["finalized_chain_state"]
+    mechanism: Literal["bootstrap_service_binary"]
+    translation_weights_active: Literal[False]
+    section_14_gate_credit: Literal[False]
+    storage_proofs_verified: Literal[False]
+    subnet_emission_enabled: bool | None
+    policy_sha256: Hex32
+    eligibility_manifest_sha256: Hex32
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    observation_block: UnsignedIntegerText
+    observation_block_hash: BlockHash
+    hard_sunset_block: UnsignedIntegerText
+    exact_validator_rows: Annotated[
+        tuple[BootstrapServiceChainValidator, ...],
+        Field(min_length=1, max_length=256),
+    ]
+    eligible_miners: Annotated[
+        tuple[BootstrapServiceMiner, ...],
+        Field(min_length=1, max_length=256),
+    ]
+    evidence: BootstrapServiceEvidenceLocator
+
+    @model_validator(mode="after")
+    def validate_record(self) -> Self:
+        observation = int(self.observation_block)
+        sunset = int(self.hard_sunset_block)
+        if observation >= sunset:
+            raise ValueError("bootstrap chain receipt is at or after hard sunset")
+        validator_uids = [item.uid for item in self.exact_validator_rows]
+        if validator_uids != sorted(set(validator_uids)):
+            raise ValueError("bootstrap chain validators must be unique and sorted by UID")
+        for validator in self.exact_validator_rows:
+            if (
+                not int(validator.last_update_block)
+                <= observation
+                <= int(validator.active_through_block)
+                < sunset
+            ):
+                raise ValueError("bootstrap chain validator is not active at observation")
+        miner_uids = [item.uid for item in self.eligible_miners]
+        if miner_uids != sorted(set(miner_uids)):
+            raise ValueError("bootstrap service miners must be unique and sorted by UID")
+        return self
+
+
 class BootstrapServiceResponse(ResponseEnvelope):
     schema_: Literal[BOOTSTRAP_SERVICE_RESPONSE_SCHEMA] = Field(
         default=BOOTSTRAP_SERVICE_RESPONSE_SCHEMA,
@@ -1563,7 +1622,8 @@ class BootstrapServiceResponse(ResponseEnvelope):
     protocol_state: ProtocolState
     availability: Literal["inactive", "active"]
     reason_code: NonEmptyText | None
-    current: BootstrapServiceRecord | None
+    warning_codes: Annotated[tuple[NonEmptyText, ...], Field(max_length=256)] = ()
+    current: BootstrapServiceRecord | BootstrapServiceChainReceiptRecord | None
     verified_publications: tuple[BootstrapServiceEvidenceLocator, ...]
 
     @model_validator(mode="after")
@@ -1584,6 +1644,8 @@ class BootstrapServiceResponse(ResponseEnvelope):
         ids = [item.publication_id for item in self.verified_publications]
         if ids != sorted(set(ids)):
             raise ValueError("bootstrap publications must be unique and sorted")
+        if self.warning_codes != tuple(sorted(set(self.warning_codes))):
+            raise ValueError("bootstrap warning codes must be unique and sorted")
         return self
 
 

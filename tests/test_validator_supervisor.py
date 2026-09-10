@@ -222,6 +222,57 @@ def test_directive_digest_is_domain_separated_and_signed_threshold_verifies() ->
     assert parse_canonical_signed_supervisor_directive(canonical_json_bytes(signed)) == signed
 
 
+def test_common_directive_authorizes_any_locally_bound_validator() -> None:
+    common = _directive(
+        validator_scope="any_permitted_sn78",
+        validator_hotkeys=[],
+        release=_release(entrypoint_profile="umi-simple-bootstrap-validator/1"),
+        operator_inputs=_operator_inputs(profile="umi-simple-bootstrap-common-inputs/1"),
+    )
+    signed = _signed(common)
+    first_config = _config()
+    second_config = _config(
+        validator_hotkey=dev_wallet("//SecondSupervisorValidator").hotkey.ss58_address
+    )
+
+    first = advance_supervisor_directive_state(
+        signed,
+        config=first_config,
+        finalized_block=120,
+        prior_state=None,
+    )
+    second = advance_supervisor_directive_state(
+        signed,
+        config=second_config,
+        finalized_block=120,
+        prior_state=None,
+    )
+
+    assert first.accepted_directive_sha256 == second.accepted_directive_sha256
+    assert common.validator_hotkeys == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"validator_scope": "explicit_hotkeys", "validator_hotkeys": []},
+        {
+            "validator_scope": "any_permitted_sn78",
+            "validator_hotkeys": [_validator_hotkey()],
+        },
+        {
+            "validator_scope": "any_permitted_sn78",
+            "validator_hotkeys": [],
+            "release": _release(entrypoint_profile="umi-bootstrap-weight-validator/2"),
+            "operator_inputs": _operator_inputs(profile="umi-bootstrap-direct-inputs/2"),
+        },
+    ],
+)
+def test_common_and_explicit_validator_scopes_cannot_be_mixed(changes) -> None:
+    with pytest.raises(ValidationError):
+        _directive(**changes)
+
+
 def test_canonical_parsers_reject_whitespace_duplicates_oversize_and_extra_fields() -> None:
     signed = _signed()
     canonical = canonical_json_bytes(signed)

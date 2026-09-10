@@ -4,12 +4,14 @@ Canonical public whitepaper and conformance specification
 
 Protocol version: 0.1
 
-Status: SN78 active on mainnet; UMI translation weights inactive; public endpoint pilots active; temporary service-weight bootstrap pending
+Status: SN78 active on mainnet; UMI translation weights inactive; public endpoint pilots active; shared-validator service bootstrap pending its first verified row
 
 This document supersedes earlier UMI mechanism and whitepaper drafts.
 
-Temporary operational addendum: the
+Temporary operational addenda: the
 [seven-day bootstrap service-weight profile](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
+and its
+[shared-validator supersession](../docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
 may authorize one equal, binary service-eligibility row while translation weights
 remain inactive. It is deliberately centralized, Sybil-prone, and based on a known
 public pilot. It MUST NOT be described as ASL quality, a model ranking, or evidence
@@ -2290,18 +2292,21 @@ runtime safety floor. Section 14 applies the stricter `2 * M_gate` activation te
 
 ### 10.3 Weight submission
 
-The temporary
-[`bootstrap_service_binary` addendum](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) is the
+The temporary `bootstrap_service_binary` documents, consisting of the
+[original policy addendum](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and its
+[shared-validator supersession](../docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md),
+are the
 only exception to this section's prohibition on a weight call while
-`translation_weights_active` is false. It may authorize only the addendum's exact
+`translation_weights_active` is false. They may authorize only the addendum's exact
 equal, binary service-eligibility row, under its published policy hash,
-coordinator-signed manifest, and fixed block interval. The policy binds the exact
-clean 40-character UMI revision used for bootstrap verification, replay, and row
-construction. It does not activate translation scoring, does not change any
-score or activation gate, and receives no Section 14 gate credit. All other
-chain-mapping, CRv4, terminal-state, evidence-release, incident, and hard-sunset
-requirements remain in force. No other service row or translation row is permitted
-under a policy with `translation_weights_active: false`.
+coordinator-signed manifest and common lease, and fixed block interval. The common
+lease permits any currently permitted SN78 validator to run the exact release. A
+local configuration binds that validator's hotkey. The policy and lease bind the
+exact clean 40-character UMI revision used for bootstrap verification, replay,
+and row construction. This path does not activate translation scoring, change a
+score or activation gate, or receive Section 14 gate credit. No other service row
+or translation row is permitted under a policy with
+`translation_weights_active: false`.
 
 For this bootstrap only, the addendum replaces this whitepaper's portable
 storage-proof requirements with coherent finalized Bittensor SDK observations.
@@ -2312,13 +2317,16 @@ read at the named block. Bootstrap evidence declares
 reduced-trust boundary. This exception does not weaken the storage-proof
 requirements for translation-weight activation or operation.
 
-Because that addendum's binary eligibility and equal expected service row are
-public inputs, it also permits pre-reveal publication only of its signed
-eligibility manifest and expected service row. CRv4 remains the required
-chain-conforming, anti-front-run commit path; it is not claimed to conceal this
-already-known row. The exception does not permit early publication of miner
-hypotheses, translation outcomes, scores, translation-derived vectors, the CRv4
-ciphertext, or terminal evidence.
+Because the binary eligibility and equal expected service row are public inputs,
+the bootstrap permits pre-submission publication of its signed eligibility
+manifest, common lease, and expected row. Under the temporary owner fence,
+commit-reveal is disabled and a validator submits the exact direct 256-entry row.
+Finalized chain state supplies the public receipt: the observer checks each
+validator's permit, exact stored row, and `LastUpdate` against the public signed
+manifest and lease. The validator's manifest commitment remains independently
+auditable on chain.
+Translation weights still require the chain-native commit-reveal path and all
+ordinary evidence-release rules.
 
 At the addendum's commit stop, its coordinator MUST ask the authorized Const/root
 operator to disable SN78 `subnet_emission_enabled` by the fixed hard sunset. The
@@ -2632,7 +2640,8 @@ alpha distributed during this phase is identified as bootstrap emission, not as
 evidence that UMI translation scoring passed its gates.
 
 The sole temporary exception is the separately published
-[`bootstrap_service_binary` addendum](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md), which
+[`bootstrap_service_binary` policy](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and its
+[shared-validator supersession](../docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md), which
 may authorize its exact equal service-eligibility row during its fixed block
 interval. A row under that addendum is not a translation score or ranking, does not
 activate UMI translation weights, and counts toward none of the gates in this
@@ -3070,9 +3079,9 @@ Except for the exact temporary `bootstrap_service_binary` path incorporated in
 Section 10.3, under `translation_weights_active: false` a conforming shadow
 validator follows the same rules through deterministic weight build, emits no UMI
 translation-weight commit, and publishes the `calibration_no_weight` bundle
-defined in Section 10.3. The addendum's service validator follows that addendum's
-separate conformance and evidence rules and MUST NOT present its row as translation
-scoring.
+defined in Section 10.3. A bootstrap service validator follows the shared
+supersession's separate conformance and chain-receipt rules and MUST NOT present
+its row as translation scoring.
 
 A conforming publisher:
 

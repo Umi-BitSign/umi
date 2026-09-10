@@ -26,8 +26,9 @@ protocol extension.
 - [inactive live-shadow release operator](docs/SHADOW_CALIBRATION_OPERATOR.md)
 - [inactive calibration launch checklist](docs/INACTIVE_LAUNCH_CHECKLIST.md)
 - [seven-day bootstrap service-weight addendum](docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
-- [bootstrap service-weight operator](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
-- [emergency direct-bootstrap cutover v1](docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md)
+- [shared-validator bootstrap supersession](docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
+- [bootstrap service-weight operator, historical](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
+- [emergency direct-bootstrap cutover, historical](docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md)
 - [legacy validator transition hold](docs/LEGACY_VALIDATOR_TRANSITION.md)
 - [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
@@ -35,13 +36,14 @@ protocol extension.
 
 SN78 is active on mainnet, but UMI translation weights are not. Public endpoint
 pilots are running and their signed, replayable results are available through the
-observer API. A separately labeled seven-day bootstrap service-weight path is
-awaiting its signed transition and chain cutover. The emergency direct profile
-keeps commit-reveal disabled, fences legacy short rows, and authorizes one
-permit-bearing validator to submit each raw full-UID service row through the
-original policy's hard sunset. It becomes live only after an exact row is finalized
-and published with its chain evidence. The bootstrap is not a translation ranking
-and receives no credit toward translation-weight activation.
+observer API. A separately labeled seven-day bootstrap service-weight release is
+awaiting its signed lease, shared release directive, and first finalized row. The
+owner fence keeps commit-reveal disabled and rejects legacy short rows. Any
+currently permitted SN78 validator may install the signed supervisor release and
+submit the same raw full-UID service row through the original policy's hard
+sunset. Finalized chain state records each validator's exact row, `LastUpdate`,
+permit, and manifest commitment. The bootstrap is not a translation ranking and
+receives no credit toward translation-weight activation.
 
 There are four distinct executable paths:
 
@@ -79,10 +81,11 @@ temporary bootstrap service weights
 public endpoint pilots + post-publication miner opt-ins
   -> current registration, UID, permit, serving, and health checks
   -> coordinator-signed, declared-complete eligibility manifest
+  -> one coordinator-signed common lease and shared release directive
   -> validator anchor of the exact manifest hash
-  -> equal max-upscaled u16 service row through raw CRv4
-  -> finalized reveal, applied-row verification, and public terminal evidence
-  -> hard commit cutoff and row inactivity within the seven-day policy
+  -> exact direct 256-entry row from any currently permitted validator
+  -> finalized row and LastUpdate as the public receipt
+  -> automatic renewal before the activity cutoff, ending at hard sunset
 ```
 
 All four paths target the `bittensor` v11 HTTP model. They do not use the removed
@@ -132,7 +135,8 @@ full shadow soak and drills, and a later governed policy with
 `translation_weights_active: true`. The shipped shadow release schema fixes that
 field to `false`, and the installed live-shadow runtime has no weight-call builder,
 signer, or submitter. The temporary bootstrap operator is a separate, narrowly
-bounded path governed by the public addendum.
+bounded path governed by the original policy addendum and its
+[shared-validator supersession](docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md).
 
 `component_test_no_weight` and `shadow_rehearsal_no_weight` remain local engineering
 results; neither is activation evidence. A correctly deployed installed path may
@@ -199,7 +203,8 @@ umi-observer \
   --port 8092 \
   --trusted-host api.umi.vision \
   --bundle-feed-config /etc/umi/observer-bundle-feed.json \
-  --pilot-feed-config /etc/umi/observer-pilot-feed.json
+  --pilot-feed-config /etc/umi/observer-pilot-feed.json \
+  --bootstrap-service-feed-config /etc/umi/observer-bootstrap-service-feed.json
 ```
 
 It collects one internally consistent finalized block in the background and

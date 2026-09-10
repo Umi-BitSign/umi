@@ -91,7 +91,7 @@ def _default_client_factory(network: str) -> Any:
     return ReadOnlyObserverClient(network)
 
 
-def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any, Any, Any]:
+def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     """Descriptors pinned by the repository's exact Bittensor dependency."""
 
     from bittensor._generated import storage
@@ -102,6 +102,7 @@ def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any, Any, Any]:
         storage.SubtensorModule.MaxMechanismCount,
         storage.SubtensorModule.NetworksAdded,
         storage.SubtensorModule.SubnetOwnerHotkey,
+        storage.SubtensorModule.ActivityCutoffFactorMilli,
         storage.SubtensorModule.Weights,
     )
 
@@ -633,6 +634,7 @@ class BittensorChainCollector:
             maximum_mechanism_count_value,
             subnet_exists_value,
             subnet_owner_hotkey_value,
+            activity_cutoff_factor_value,
             uid_zero_mechid0_row_value,
         ) = await asyncio.gather(
             snapshot.subnets.metagraph(netuid=self.netuid, commitments=False),
@@ -740,6 +742,10 @@ class BittensorChainCollector:
             subnet_exists=subnet_exists,
             subnet_emission_enabled=subnet_emission_enabled,
             subnet_owner_hotkey_account_id32=subnet_owner_hotkey_account_id32,
+            activity_cutoff_factor_milli=_integer(
+                activity_cutoff_factor_value,
+                "activity_cutoff_factor_milli",
+            ),
             uid_zero_mechid0_row=uid_zero_mechid0_row,
             validator_mechid0_rows=validator_mechid0_rows,
             participants=participants,
@@ -759,13 +765,14 @@ class BittensorChainCollector:
             participants=participants,
         )
 
-    def _storage_reads(self, snapshot: Any) -> tuple[Any, Any, Any, Any, Any, Any]:
+    def _storage_reads(self, snapshot: Any) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
         (
             runtime_upgrade,
             commit_reveal_version,
             max_mechanisms,
             networks_added,
             subnet_owner_hotkey,
+            activity_cutoff_factor,
             weights,
         ) = _pinned_storage_descriptors()
         return (
@@ -774,6 +781,7 @@ class BittensorChainCollector:
             snapshot.query(max_mechanisms),
             snapshot.query(networks_added, [self.netuid]),
             snapshot.query(subnet_owner_hotkey, [self.netuid]),
+            snapshot.query(activity_cutoff_factor, [self.netuid]),
             snapshot.query(weights, [self.netuid, 0]),
         )
 
@@ -999,6 +1007,7 @@ class BittensorChainCollector:
         subnet_exists: bool | None,
         subnet_emission_enabled: bool | None,
         subnet_owner_hotkey_account_id32: str,
+        activity_cutoff_factor_milli: int,
         uid_zero_mechid0_row: tuple[tuple[int, int], ...],
         validator_mechid0_rows: tuple[ChainValidatorWeightRow, ...],
         participants: tuple[ChainParticipant, ...],
@@ -1085,11 +1094,12 @@ class BittensorChainCollector:
             unavailable_fields,
             public_name="immunity_period_blocks",
         )
-        activity_cutoff = _hyperparameter_integer(
-            hyperparameters,
-            "activity_cutoff",
-            unavailable_fields,
-            public_name="activity_cutoff_blocks",
+        # Runtime spec 455 derives activity in blocks from the factor and tempo.
+        # The legacy `activity_cutoff` field returned by the high-level helper can
+        # remain at 5000 and is not the value Yuma applies.
+        activity_cutoff = max(
+            1,
+            activity_cutoff_factor_milli * int(epoch.tempo_blocks) // 1_000,
         )
         maximum_weight_raw = _optional_integer(
             hyperparameters.get("max_weights_limit"),

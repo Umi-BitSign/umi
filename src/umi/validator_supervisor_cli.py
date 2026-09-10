@@ -20,18 +20,25 @@ from typing import Any
 
 from .protocol import canonical_json_bytes
 from .validator_supervisor import (
+    COMMON_SUPERVISOR_AUTHORITY_HOTKEY,
+    COMMON_SUPERVISOR_CHANNELS,
+    COMMON_SUPERVISOR_RELEASE_ORIGIN,
     MAX_SUPERVISOR_DOCUMENT_BYTES,
     MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES,
     SUPERVISOR_DIRECTIVE_PAGE_SCHEMA,
     SUPERVISOR_DIRECTIVE_SCHEMA,
     SUPERVISOR_SIGNED_DIRECTIVE_SCHEMA,
     SignedSupervisorDirective,
+    SupervisorAuthority,
     SupervisorDirective,
     SupervisorDirectivePage,
     SupervisorDirectiveSignature,
     SupervisorOperatorInputTarget,
     SupervisorReleaseTarget,
+    SupervisorWalletBinding,
+    ValidatorSupervisorConfig,
     ValidatorSupervisorError,
+    advance_supervisor_directive_history_state,
     advance_supervisor_directive_state,
     load_supervisor_directive_state,
     load_validator_supervisor_config,
@@ -46,15 +53,24 @@ from .validator_supervisor_adapters import (
     SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
     SUPERVISOR_RELEASE_BUNDLE_MAGIC,
     SUPERVISOR_RELEASE_SIGNATURE_DOMAIN,
+    SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
+    SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
     FinneyFinalizedBlockReader,
     HTTPSDirectiveFetcher,
+    PinnedHTTPSClient,
     RootlessPodmanWorkerAdapter,
+    SignedSupervisorHostArtifactManifest,
     SupervisorBootstrapInputBundle,
+    SupervisorHostArtifact,
+    SupervisorHostArtifactManifest,
     SupervisorReleaseManifest,
+    SupervisorSimpleBootstrapInputBundle,
     ValidatorSupervisorAdapterError,
+    parse_canonical_signed_supervisor_host_artifact_manifest,
 )
 from .validator_supervisor_runtime import (
     DIRECTIVE_STATE_FILENAME,
+    SupervisorWorkerActivation,
     ValidatorSupervisorRuntime,
     ValidatorSupervisorRuntimeError,
 )
@@ -192,11 +208,63 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--config", type=Path, required=True)
     check.add_argument("--profile", choices=["linux-systemd-v1"], default="linux-systemd-v1")
 
+    common_config = commands.add_parser(
+        "build-common-config",
+        help="build one local config for the shared signed UMI release channel",
+    )
+    common_config.add_argument("--wallet-name", required=True)
+    common_config.add_argument("--wallet-hotkey", required=True)
+    common_config.add_argument(
+        "--target-platform",
+        choices=sorted(COMMON_SUPERVISOR_CHANNELS),
+        required=True,
+    )
+    common_config.add_argument("--finality-verifier-sha256", required=True)
+    common_config.add_argument("--output", type=Path, required=True)
+
+    host_manifest = commands.add_parser(
+        "build-common-host-artifacts",
+        help="sign the immutable platform artifacts used to start the shared supervisor",
+    )
+    host_manifest.add_argument(
+        "--target-platform",
+        choices=sorted(COMMON_SUPERVISOR_CHANNELS),
+        required=True,
+    )
+    host_manifest.add_argument("--umi-git-revision", required=True)
+    host_manifest.add_argument("--uv", type=Path, required=True)
+    host_manifest.add_argument("--uv-url", required=True)
+    host_manifest.add_argument("--finality-verifier", type=Path, required=True)
+    host_manifest.add_argument("--finality-verifier-url", required=True)
+    host_manifest.add_argument("--finney-chain-spec", type=Path, required=True)
+    host_manifest.add_argument("--finney-chain-spec-url", required=True)
+    _wallet_arguments(host_manifest)
+    host_manifest.add_argument("--output", type=Path, required=True)
+
+    install_host = commands.add_parser(
+        "install-common-host-artifacts",
+        help="verify and install the signed common supervisor host artifacts",
+    )
+    install_host.add_argument("--manifest", type=Path, required=True)
+    install_host.add_argument(
+        "--target-platform",
+        choices=sorted(COMMON_SUPERVISOR_CHANNELS),
+        required=True,
+    )
+    install_host.add_argument("--expected-revision", required=True)
+    install_host.add_argument("--destination", type=Path, required=True)
+
     initial = commands.add_parser(
         "preflight-initial-hold",
         help="verify the current signed sequence-1 hold before legacy retirement",
     )
     initial.add_argument("--config", type=Path, required=True)
+
+    common_switch = commands.add_parser(
+        "preflight-common-switch",
+        help="verify the shared hold, current worker release, wallet, and host before cutover",
+    )
+    common_switch.add_argument("--config", type=Path, required=True)
 
     run = commands.add_parser("run", help="run the permanent fail-closed supervisor")
     run.add_argument("--config", type=Path, required=True)
@@ -226,6 +294,16 @@ def _parser() -> argparse.ArgumentParser:
     inputs.add_argument("--bundle-url", required=True)
     inputs.add_argument("--output", type=Path, required=True)
     inputs.add_argument("--target-output", type=Path, required=True)
+
+    common_inputs = commands.add_parser(
+        "build-common-bootstrap-input-bundle",
+        help="bind the common signed bootstrap manifest and lease",
+    )
+    common_inputs.add_argument("--signed-manifest", type=Path, required=True)
+    common_inputs.add_argument("--signed-lease", type=Path, required=True)
+    common_inputs.add_argument("--bundle-url", required=True)
+    common_inputs.add_argument("--output", type=Path, required=True)
+    common_inputs.add_argument("--target-output", type=Path, required=True)
 
     sign = commands.add_parser("sign-directive", help="sign one canonical typed directive")
     sign.add_argument("--directive", type=Path, required=True)
@@ -258,6 +336,178 @@ def _wallet_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wallet-name", required=True)
     parser.add_argument("--wallet-hotkey", required=True)
     parser.add_argument("--expected-hotkey", required=True)
+
+
+def _build_common_config(args: argparse.Namespace) -> dict[str, object]:
+    import bittensor as bt
+
+    try:
+        wallet = bt.Wallet(
+            name=args.wallet_name,
+            hotkey=args.wallet_hotkey,
+            path=LINUX_SYSTEMD_V1["wallet_path"],
+        )
+        signer = bt.resolve_signer(wallet, role="hotkey")
+    except Exception as error:
+        raise ValidatorSupervisorAdapterError("common_config_wallet_unavailable") from error
+    channel_id = COMMON_SUPERVISOR_CHANNELS[args.target_platform]
+    config = ValidatorSupervisorConfig(
+        schema="umi-validator-supervisor-config/1",
+        network="finney",
+        netuid=78,
+        mechanism_id=0,
+        validator_hotkey=signer.ss58_address,
+        channel_id=channel_id,
+        signature_threshold=1,
+        trusted_authorities=[
+            SupervisorAuthority(
+                hotkey=COMMON_SUPERVISOR_AUTHORITY_HOTKEY,
+                signature_scheme="sr25519",
+            )
+        ],
+        allowed_oci_repositories=["ghcr.io/umi-bitsign/umi-validator"],
+        release_origins=[COMMON_SUPERVISOR_RELEASE_ORIGIN],
+        target_platform=args.target_platform,
+        state_schema_version=1,
+        directive_url=(
+            f"{COMMON_SUPERVISOR_RELEASE_ORIGIN}/validator-supervisor/channels/"
+            f"{channel_id}/{args.target_platform.replace('/', '-')}"
+        ),
+        poll_seconds=30,
+        container_runtime="/usr/bin/podman",
+        state_root=LINUX_SYSTEMD_V1["state_root"],
+        worker_state_root=LINUX_SYSTEMD_V1["worker_state_root"],
+        release_root=LINUX_SYSTEMD_V1["release_root"],
+        operator_input_root=LINUX_SYSTEMD_V1["operator_input_root"],
+        finality_verifier_binary=LINUX_SYSTEMD_V1["finality_verifier_binary"],
+        finality_verifier_sha256=args.finality_verifier_sha256,
+        finality_chain_spec_path=LINUX_SYSTEMD_V1["finality_chain_spec_path"],
+        worker_cpu_millis=8_000,
+        worker_memory_bytes=12 * 1024**3,
+        worker_pids_limit=512,
+        worker_uid=65_532,
+        worker_gid=65_532,
+        wallet=SupervisorWalletBinding(
+            path=LINUX_SYSTEMD_V1["wallet_path"],
+            name=args.wallet_name,
+            hotkey=args.wallet_hotkey,
+        ),
+        allowed_modes=[
+            "hold",
+            "inactive_shadow",
+            "bootstrap_service_weights",
+            "translation_weights",
+        ],
+    )
+    _write_new_canonical(args.output, config)
+    return {
+        "channel_id": channel_id,
+        "status": "common_config_built",
+        "target_platform": args.target_platform,
+        "validator_hotkey": config.validator_hotkey,
+    }
+
+
+def _host_artifact(path: Path, url: str) -> SupervisorHostArtifact:
+    size, digest = _file_identity(path, 256 * 1024 * 1024)
+    return SupervisorHostArtifact(url=url, sha256=digest, size_bytes=size)
+
+
+def _build_common_host_artifacts(args: argparse.Namespace) -> dict[str, object]:
+    signer, scheme = _load_signer(args)
+    if signer.ss58_address != COMMON_SUPERVISOR_AUTHORITY_HOTKEY:
+        raise ValidatorSupervisorAdapterError("common_host_artifact_authority_mismatch")
+    manifest = SupervisorHostArtifactManifest(
+        schema="umi-validator-supervisor-host-artifacts/1",
+        channel_id=COMMON_SUPERVISOR_CHANNELS[args.target_platform],
+        authority_hotkey=signer.ss58_address,
+        target_platform=args.target_platform,
+        umi_git_revision=args.umi_git_revision,
+        uv=_host_artifact(args.uv, args.uv_url),
+        finality_verifier=_host_artifact(
+            args.finality_verifier,
+            args.finality_verifier_url,
+        ),
+        finney_chain_spec=_host_artifact(
+            args.finney_chain_spec,
+            args.finney_chain_spec_url,
+        ),
+    )
+    manifest_bytes = canonical_json_bytes(manifest)
+    digest = hashlib.sha256(
+        b"umi-validator-supervisor-host-artifacts-v1\0" + manifest_bytes
+    ).digest()
+    signature = bytes(signer.sign(digest))
+    if len(signature) != 64:
+        raise ValidatorSupervisorAdapterError("common_host_artifact_signature_invalid")
+    signed = SignedSupervisorHostArtifactManifest(
+        schema="umi-validator-supervisor-signed-host-artifacts/1",
+        manifest=manifest,
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        manifest_digest=digest.hex(),
+        signature_scheme=scheme,
+        signature="0x" + signature.hex(),
+    )
+    _write_new_canonical(args.output, signed)
+    return {
+        "channel_id": manifest.channel_id,
+        "manifest_sha256": signed.manifest_sha256,
+        "status": "common_host_artifacts_built",
+        "target_platform": manifest.target_platform,
+    }
+
+
+async def _install_common_host_artifacts(args: argparse.Namespace) -> dict[str, object]:
+    payload = _read_bounded(args.manifest, MAX_SUPERVISOR_DOCUMENT_BYTES)
+    signed = parse_canonical_signed_supervisor_host_artifact_manifest(payload)
+    manifest = signed.manifest
+    if (
+        manifest.target_platform != args.target_platform
+        or manifest.channel_id != COMMON_SUPERVISOR_CHANNELS[args.target_platform]
+        or manifest.umi_git_revision != args.expected_revision
+    ):
+        raise ValidatorSupervisorAdapterError("common_host_artifact_binding_mismatch")
+    destination = args.destination
+    if not destination.is_absolute() or destination != Path(os.path.normpath(destination)):
+        raise ValidatorSupervisorAdapterError("common_host_artifact_destination_invalid")
+    try:
+        metadata = destination.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise ValidatorSupervisorAdapterError("common_host_artifact_destination_unsafe")
+        if any(destination.iterdir()):
+            raise ValidatorSupervisorAdapterError("common_host_artifact_destination_not_empty")
+    except OSError as error:
+        raise ValidatorSupervisorAdapterError("common_host_artifact_destination_unsafe") from error
+    client = PinnedHTTPSClient()
+    targets = (
+        ("uv", manifest.uv, 0o555),
+        ("umi-grandpa-finality-observer", manifest.finality_verifier, 0o555),
+        ("raw_spec_finney.json", manifest.finney_chain_spec, 0o444),
+    )
+    installed: list[Path] = []
+    try:
+        for filename, target, mode in targets:
+            destination_path = destination / filename
+            await client.download_file(
+                target.url,
+                destination=destination_path,
+                maximum_bytes=target.size_bytes,
+                expected_size_bytes=target.size_bytes,
+                expected_sha256=target.sha256,
+            )
+            destination_path.chmod(mode)
+            installed.append(destination_path)
+    except Exception:
+        for path in installed:
+            with contextlib.suppress(OSError):
+                path.unlink()
+        raise
+    return {
+        "finality_verifier_sha256": manifest.finality_verifier.sha256,
+        "status": "common_host_artifacts_installed",
+        "target_platform": manifest.target_platform,
+        "uv_sha256": manifest.uv.sha256,
+    }
 
 
 async def _check_config(config_path: Path) -> dict[str, object]:
@@ -330,6 +580,149 @@ async def _preflight_initial_hold(config_path: Path) -> dict[str, object]:
         "finalized_block": finalized_block,
         "sequence": state.accepted_sequence,
         "status": "initial_hold_preflight_ok",
+        "validator_hotkey": config.validator_hotkey,
+    }
+
+
+async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
+    """Verify the complete common chain and stage its current worker without executing it."""
+
+    config = load_validator_supervisor_config(config_path)
+    _validate_linux_systemd_profile(config)
+    adapter = RootlessPodmanWorkerAdapter(config)
+    await adapter.check_host()
+    local_status = await adapter.public_status()
+    if local_status["managed_container_present"] is not False:
+        raise ValidatorSupervisorAdapterError("common_switch_managed_container_present")
+
+    fetcher = HTTPSDirectiveFetcher(config)
+    finality = FinneyFinalizedBlockReader(config)
+    cursor_sequence = 0
+    cursor_digest: str | None = None
+    state = None
+    first_seen = False
+    current_signed: SignedSupervisorDirective | None = None
+    directive_count = 0
+    try:
+        finalized_block = await finality.read_finalized_block()
+        while True:
+            payload = await fetcher.fetch_directive_page(
+                after_sequence=cursor_sequence,
+                after_directive_sha256=cursor_digest,
+            )
+            if payload is None:
+                raise ValidatorSupervisorAdapterError("common_switch_directive_missing")
+            try:
+                page = parse_canonical_supervisor_directive_page(payload)
+            except Exception as error:
+                raise ValidatorSupervisorAdapterError("common_switch_directive_invalid") from error
+            if (
+                page.after_sequence != cursor_sequence
+                or page.after_directive_sha256 != cursor_digest
+            ):
+                raise ValidatorSupervisorAdapterError("common_switch_cursor_mismatch")
+            if not page.directives:
+                raise ValidatorSupervisorAdapterError("common_switch_directive_missing")
+
+            history = page.directives if page.more else page.directives[:-1]
+            for signed in history:
+                directive_count += 1
+                if directive_count > 4_096:
+                    raise ValidatorSupervisorAdapterError("common_switch_history_limit")
+                directive = signed.directive
+                if directive.validator_scope != "any_permitted_sn78" or directive.validator_hotkeys:
+                    raise ValidatorSupervisorAdapterError("common_switch_scope_invalid")
+                if not first_seen:
+                    if (
+                        directive.sequence != 1
+                        or directive.previous_directive_sha256 is not None
+                        or directive.mode != "hold"
+                    ):
+                        raise ValidatorSupervisorAdapterError("common_switch_initial_hold_required")
+                    first_seen = True
+                try:
+                    state = advance_supervisor_directive_history_state(
+                        signed,
+                        config=config,
+                        finalized_block=finalized_block,
+                        prior_state=state,
+                    )
+                except Exception as error:
+                    raise ValidatorSupervisorAdapterError(
+                        "common_switch_directive_rejected"
+                    ) from error
+
+            if page.more:
+                cursor_sequence = page.directives[-1].directive.sequence
+                cursor_digest = page.directives[-1].directive_sha256
+                continue
+
+            current_signed = page.head
+            directive_count += 1
+            if directive_count > 4_096:
+                raise ValidatorSupervisorAdapterError("common_switch_history_limit")
+            directive = current_signed.directive
+            if directive.validator_scope != "any_permitted_sn78" or directive.validator_hotkeys:
+                raise ValidatorSupervisorAdapterError("common_switch_scope_invalid")
+            if not first_seen:
+                if (
+                    directive.sequence != 1
+                    or directive.previous_directive_sha256 is not None
+                    or directive.mode != "hold"
+                ):
+                    raise ValidatorSupervisorAdapterError("common_switch_initial_hold_required")
+                first_seen = True
+            try:
+                state = advance_supervisor_directive_state(
+                    current_signed,
+                    config=config,
+                    finalized_block=finalized_block,
+                    prior_state=state,
+                )
+            except Exception as error:
+                raise ValidatorSupervisorAdapterError("common_switch_directive_rejected") from error
+            break
+
+        directive = current_signed.directive
+        release = directive.release
+        operator_inputs = directive.operator_inputs
+        if (
+            directive.mode != "bootstrap_service_weights"
+            or release is None
+            or release.entrypoint_profile != "umi-simple-bootstrap-validator/1"
+            or operator_inputs is None
+            or operator_inputs.profile != SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE
+            or directive.policy_sha256 is None
+        ):
+            raise ValidatorSupervisorAdapterError("common_switch_release_required")
+        activation = SupervisorWorkerActivation(
+            mode=directive.mode,
+            sequence=directive.sequence,
+            directive_sha256=current_signed.directive_sha256,
+            policy_sha256=directive.policy_sha256,
+            valid_from_block=directive.valid_from_block,
+            valid_through_block=directive.valid_through_block,
+            release=release,
+            operator_inputs=operator_inputs,
+        )
+        await adapter.preflight_activation(activation=activation)
+        refreshed_finalized_block = await finality.read_finalized_block()
+        if (
+            refreshed_finalized_block <= finalized_block
+            or refreshed_finalized_block > directive.valid_through_block
+            or directive.valid_through_block - refreshed_finalized_block < 2
+        ):
+            raise ValidatorSupervisorAdapterError("common_switch_release_headroom_invalid")
+    finally:
+        await finality.stop()
+
+    return {
+        "directive_sha256": state.accepted_directive_sha256,
+        "finalized_block": refreshed_finalized_block,
+        "initial_hold_verified": True,
+        "sequence": state.accepted_sequence,
+        "status": "common_switch_preflight_ok",
+        "target_platform": config.target_platform,
         "validator_hotkey": config.validator_hotkey,
     }
 
@@ -710,6 +1103,48 @@ def _build_bootstrap_input_bundle(args: argparse.Namespace) -> dict[str, object]
     }
 
 
+def _build_common_bootstrap_input_bundle(args: argparse.Namespace) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for field, path in (
+        ("signed_manifest", args.signed_manifest),
+        ("signed_lease", args.signed_lease),
+    ):
+        payload = _read_bounded(path, MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)
+        try:
+            value = json.loads(payload)
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise ValidatorSupervisorAdapterError("operator_input_document_invalid") from error
+        if canonical_json_bytes(value) != payload:
+            raise ValidatorSupervisorAdapterError("operator_input_document_noncanonical")
+        values[field] = value
+    try:
+        bundle = SupervisorSimpleBootstrapInputBundle.model_validate(
+            {
+                "schema": SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
+                "profile": SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
+                **values,
+            }
+        )
+    except Exception as error:
+        raise ValidatorSupervisorAdapterError("operator_input_bundle_invalid") from error
+    bundle_bytes = canonical_json_bytes(bundle)
+    _write_new_bytes(args.output, bundle_bytes, MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)
+    target = SupervisorOperatorInputTarget(
+        artifact_type="canonical_json",
+        profile=SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
+        bundle_url=args.bundle_url,
+        bundle_sha256=hashlib.sha256(bundle_bytes).hexdigest(),
+        bundle_size_bytes=len(bundle_bytes),
+    )
+    _write_new_canonical(args.target_output, target)
+    return {
+        "bundle_sha256": target.bundle_sha256,
+        "bundle_size_bytes": target.bundle_size_bytes,
+        "profile": target.profile,
+        "status": "common_bootstrap_input_bundle_built",
+    }
+
+
 def _sign_directive(args: argparse.Namespace) -> dict[str, object]:
     directive = _load_directive(args.directive)
     signer, scheme = _load_signer(args)
@@ -963,8 +1398,17 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         if args.command == "check-config":
             result = asyncio.run(_check_config(args.config))
             code = 0
+        elif args.command == "build-common-config":
+            result, code = _build_common_config(args), 0
+        elif args.command == "build-common-host-artifacts":
+            result, code = _build_common_host_artifacts(args), 0
+        elif args.command == "install-common-host-artifacts":
+            result, code = asyncio.run(_install_common_host_artifacts(args)), 0
         elif args.command == "preflight-initial-hold":
             result = asyncio.run(_preflight_initial_hold(args.config))
+            code = 0
+        elif args.command == "preflight-common-switch":
+            result = asyncio.run(_preflight_common_switch(args.config))
             code = 0
         elif args.command == "status":
             result, code = asyncio.run(_status(args.config, require_hold=args.require_hold))
@@ -974,6 +1418,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             result, code = _build_release_bundle(args), 0
         elif args.command == "build-bootstrap-input-bundle":
             result, code = _build_bootstrap_input_bundle(args), 0
+        elif args.command == "build-common-bootstrap-input-bundle":
+            result, code = _build_common_bootstrap_input_bundle(args), 0
         elif args.command == "sign-directive":
             result, code = _sign_directive(args), 0
         elif args.command == "assemble-directive":

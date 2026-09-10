@@ -57,7 +57,7 @@ AmbientCapabilities=
 # Rootless Podman needs the narrowly scoped setuid newuidmap/newgidmap helpers.
 # The fixed worker profile applies no-new-privileges inside the container.
 Delegate=true
-ReadOnlyPaths=/etc/umi /opt/umi-validator-supervisor /var/lib/umi-validator-bootstrap-upload /var/lib/umi-validator-operator-inputs /var/lib/umi-validator-runtime-wallets
+ReadOnlyPaths=/etc/umi /opt/umi-validator-supervisor /var/lib/umi-validator-operator-inputs /var/lib/umi-validator-runtime-wallets
 ReadWritePaths=/var/lib/umi-validator-supervisor /var/lib/umi-validator-worker-state /run/umi-validator-supervisor
 
 [Install]

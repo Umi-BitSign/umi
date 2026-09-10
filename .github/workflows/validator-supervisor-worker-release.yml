@@ -106,13 +106,13 @@ jobs:
             --file deploy/linux-validator-supervisor-worker/Dockerfile \
             .
 
-      - name: Verify the loaded image and smoke-test both fixed entry points
+      - name: Verify the loaded image and smoke-test fixed entry points
         shell: bash
         run: |
           set -euo pipefail
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMAGE_TAG}")" = "${REVISION}"
           test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.source-tree-sha256" }}' "${IMAGE_TAG}")" = "${SOURCE_TREE_SHA256}"
-          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.entrypoint-profile" }}' "${IMAGE_TAG}")" = "umi-bootstrap-weight-validator/2"
+          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.entrypoint-profile" }}' "${IMAGE_TAG}")" = "umi-simple-bootstrap-validator/1"
           test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "${IMAGE_TAG}")" = "${PLATFORM}"
           test "$(docker image inspect --format '{{ .Config.User }}' "${IMAGE_TAG}")" = "65532:65532"
           docker run --rm --platform "${PLATFORM}" \
@@ -180,7 +180,7 @@ jobs:
               finality_binary_sha256:$finality_sha256,
               finality_binary_size_bytes:$finality_size_bytes,
               revision:$revision,
-              schema:"umi-validator-supervisor-host-artifacts/1",
+              schema:"umi-validator-supervisor-host-artifact-build/1",
               source_tree_sha256:$source_tree_sha256,
               target_platform:$target_platform,
               uv_binary:$uv_binary,
@@ -218,10 +218,10 @@ jobs:
             '.os == "linux" and
              .architecture == $architecture and
              .config.User == "65532:65532" and
-             .config.Entrypoint == ["/usr/local/bin/umi-validator-supervisor-worker"] and
+             .config.Entrypoint == ["/usr/local/bin/umi-simple-bootstrap-validator"] and
              .config.Labels["org.opencontainers.image.revision"] == $revision and
              .config.Labels["vision.umi.source-tree-sha256"] == $source_tree_sha256 and
-             .config.Labels["vision.umi.entrypoint-profile"] == "umi-bootstrap-weight-validator/2"' \
+             .config.Labels["vision.umi.entrypoint-profile"] == "umi-simple-bootstrap-validator/1"' \
             <<<"${config_json}" >/dev/null
           archive_sha256="$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)"
           archive_size_bytes="$(stat -c '%s' "${ARCHIVE}")"

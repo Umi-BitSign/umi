@@ -1,5 +1,13 @@
 # SN78 emergency direct-bootstrap cutover, version 2
 
+Current transport note: the
+[shared-validator bootstrap supersession](SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
+replaces target-specific transition authorizations, manual renewals, and
+validator-uploaded terminal evidence. The owner fence, exact row, and hard sunset
+below remain in force. The recorded legacy-state drain is historical; an active
+foreign row is now public warning telemetry and does not change the authorized
+row.
+
 Status: temporary permit-bound service bootstrap
 
 Scope: Finney SN78, MechId 0, `bootstrap_service_binary`

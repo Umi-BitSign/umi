@@ -1,5 +1,10 @@
 # UID 200 bootstrap renewal controller
 
+Historical runbook. The
+[shared-validator bootstrap supersession](SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
+replaces this UID-specific controller with the common signed lease and shared
+supervisor release.
+
 This is the coordinator-side continuity procedure for the temporary SN78 service
 row. Dan installs the reviewed c77 supervisor with its corrected finality binary
 and configuration, plus the worker release pinned below, once. Signed directives

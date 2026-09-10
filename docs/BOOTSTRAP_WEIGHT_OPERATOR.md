@@ -1,5 +1,10 @@
 # Operate the seven-day SN78 bootstrap service row
 
+Historical runbook. Use the
+[shared-validator bootstrap supersession](SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
+and the release operator guide named there. The CRv4, per-validator
+authorization, renewal, and terminal-publication steps below are superseded.
+
 This runbook covers the temporary `bootstrap_service_binary` path in
 [BOOTSTRAP_WEIGHT_ADDENDUM.md](BOOTSTRAP_WEIGHT_ADDENDUM.md). It does not start
 translation scoring. A successful public endpoint pilot and a post-publication

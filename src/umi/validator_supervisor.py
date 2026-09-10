@@ -29,12 +29,12 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 SUPERVISOR_CONFIG_SCHEMA = "umi-validator-supervisor-config/1"
 SUPERVISOR_TRUST_POLICY_SCHEMA = "umi-validator-supervisor-trust-policy/1"
-SUPERVISOR_DIRECTIVE_SCHEMA = "umi-validator-supervisor-directive/2"
-SUPERVISOR_SIGNED_DIRECTIVE_SCHEMA = "umi-validator-supervisor-signed-directive/2"
-SUPERVISOR_DIRECTIVE_PAGE_SCHEMA = "umi-validator-supervisor-directive-page/2"
-SUPERVISOR_DIRECTIVE_STATE_SCHEMA = "umi-validator-supervisor-directive-state/2"
+SUPERVISOR_DIRECTIVE_SCHEMA = "umi-validator-supervisor-directive/3"
+SUPERVISOR_SIGNED_DIRECTIVE_SCHEMA = "umi-validator-supervisor-signed-directive/3"
+SUPERVISOR_DIRECTIVE_PAGE_SCHEMA = "umi-validator-supervisor-directive-page/3"
+SUPERVISOR_DIRECTIVE_STATE_SCHEMA = "umi-validator-supervisor-directive-state/3"
 
-SUPERVISOR_DIRECTIVE_SIGNATURE_DOMAIN = b"umi-validator-supervisor-directive-v2\0"
+SUPERVISOR_DIRECTIVE_SIGNATURE_DOMAIN = b"umi-validator-supervisor-directive-v3\0"
 MAX_SUPERVISOR_DOCUMENT_BYTES = 1024 * 1024
 MAX_SUPERVISOR_AUTHORITIES = 16
 MAX_SUPERVISOR_VALIDATORS = 65_536
@@ -42,6 +42,12 @@ MAX_SUPERVISOR_DIRECTIVES_PER_PAGE = 64
 MAX_SUPERVISOR_RELEASE_BUNDLE_BYTES = 1024 * 1024 * 1024
 MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
+COMMON_SUPERVISOR_AUTHORITY_HOTKEY = "5GsPXiSyzpK3rRoeAmjT4F5Cqa1RmP1CyBvNpwNDsDejyNZ4"
+COMMON_SUPERVISOR_RELEASE_ORIGIN = "https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev"
+COMMON_SUPERVISOR_CHANNELS = {
+    "linux/amd64": "a3ca19a108fe7d1a8e53a2db76f480ebe237b7942595f23135d6e11889ed40c0",
+    "linux/arm64": "85ea6ef2c7e4f24d9d0eefa367425119b509e8604ce1675443efcbacc7bb4461",
+}
 
 SupervisorMode = Literal[
     "hold",
@@ -52,8 +58,10 @@ SupervisorMode = Literal[
 SupervisorEntrypointProfile = Literal[
     "umi-live-shadow-validator/1",
     "umi-bootstrap-weight-validator/2",
+    "umi-simple-bootstrap-validator/1",
     "umi-translation-validator/1",
 ]
+SupervisorValidatorScope = Literal["explicit_hotkeys", "any_permitted_sn78"]
 
 _GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _OCI_REPOSITORY_RE = re.compile(
@@ -281,7 +289,10 @@ class SupervisorOperatorInputTarget(StrictProtocolModel):
     """One immutable canonical input bundle selected by a signed directive."""
 
     artifact_type: Literal["canonical_json"]
-    profile: Literal["umi-bootstrap-direct-inputs/2"]
+    profile: Literal[
+        "umi-bootstrap-direct-inputs/2",
+        "umi-simple-bootstrap-common-inputs/1",
+    ]
     bundle_url: Annotated[str, Field(min_length=1, max_length=2_048)]
     bundle_sha256: Hex32
     bundle_size_bytes: Annotated[int, Field(gt=0, le=MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)]
@@ -306,9 +317,8 @@ class SupervisorDirective(StrictProtocolModel):
     netuid: Literal[78]
     mechanism_id: Literal[0]
     mode: SupervisorMode
-    validator_hotkeys: Annotated[
-        list[str], Field(min_length=1, max_length=MAX_SUPERVISOR_VALIDATORS)
-    ]
+    validator_scope: SupervisorValidatorScope = "explicit_hotkeys"
+    validator_hotkeys: Annotated[list[str], Field(max_length=MAX_SUPERVISOR_VALIDATORS)]
     policy_sha256: Hex32 | None
     release: SupervisorReleaseTarget | None
     operator_inputs: SupervisorOperatorInputTarget | None = None
@@ -322,6 +332,10 @@ class SupervisorDirective(StrictProtocolModel):
         accounts = [account_id32(item) for item in self.validator_hotkeys]
         if accounts != sorted(accounts) or len(set(accounts)) != len(accounts):
             raise ValueError("supervisor validator hotkeys must be unique and AccountId32-sorted")
+        if self.validator_scope == "explicit_hotkeys" and not accounts:
+            raise ValueError("an explicit validator scope requires at least one hotkey")
+        if self.validator_scope == "any_permitted_sn78" and accounts:
+            raise ValueError("a common validator scope cannot contain validator hotkeys")
         if self.mode == "hold":
             if (
                 self.policy_sha256 is not None
@@ -334,7 +348,10 @@ class SupervisorDirective(StrictProtocolModel):
                 raise ValueError("a worker directive requires a policy and release")
             expected_profile = {
                 "inactive_shadow": "umi-live-shadow-validator/1",
-                "bootstrap_service_weights": "umi-bootstrap-weight-validator/2",
+                "bootstrap_service_weights": {
+                    "explicit_hotkeys": "umi-bootstrap-weight-validator/2",
+                    "any_permitted_sn78": "umi-simple-bootstrap-validator/1",
+                }[self.validator_scope],
                 "translation_weights": "umi-translation-validator/1",
             }[self.mode]
             if self.release.entrypoint_profile != expected_profile:
@@ -342,6 +359,12 @@ class SupervisorDirective(StrictProtocolModel):
             if self.mode == "bootstrap_service_weights":
                 if self.operator_inputs is None:
                     raise ValueError("bootstrap mode requires an immutable operator-input bundle")
+                expected_input_profile = {
+                    "explicit_hotkeys": "umi-bootstrap-direct-inputs/2",
+                    "any_permitted_sn78": "umi-simple-bootstrap-common-inputs/1",
+                }[self.validator_scope]
+                if self.operator_inputs.profile != expected_input_profile:
+                    raise ValueError("validator scope and bootstrap input profile disagree")
             elif self.operator_inputs is not None:
                 raise ValueError("only bootstrap mode may name an operator-input bundle")
         return self
@@ -616,8 +639,11 @@ def _verify_signed_supervisor_directive(
     if directive.channel_id != trust_policy.channel_id:
         raise ValidatorSupervisorError("directive_channel_mismatch")
     directive_validators = [account_id32(item) for item in directive.validator_hotkeys]
-    if directive_validators != [validator_account]:
-        raise ValidatorSupervisorError("directive_validator_not_authorized")
+    if directive.validator_scope == "explicit_hotkeys":
+        if directive_validators != [validator_account]:
+            raise ValidatorSupervisorError("directive_validator_not_authorized")
+    elif directive.validator_scope != "any_permitted_sn78":  # pragma: no cover
+        raise ValidatorSupervisorError("directive_validator_scope_invalid")
     if directive.mode not in set(config.allowed_modes):
         raise ValidatorSupervisorError("directive_mode_not_locally_allowed")
     if finalized_block < directive.issued_at_block:
@@ -1078,6 +1104,9 @@ def _open_state_lock(path: Path) -> Any:
 
 
 __all__ = [
+    "COMMON_SUPERVISOR_AUTHORITY_HOTKEY",
+    "COMMON_SUPERVISOR_CHANNELS",
+    "COMMON_SUPERVISOR_RELEASE_ORIGIN",
     "MAX_SUPERVISOR_DIRECTIVES_PER_PAGE",
     "MAX_SUPERVISOR_DOCUMENT_BYTES",
     "MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES",
@@ -1100,6 +1129,7 @@ __all__ = [
     "SupervisorOperatorInputTarget",
     "SupervisorReleaseTarget",
     "SupervisorTrustPolicy",
+    "SupervisorValidatorScope",
     "SupervisorWalletBinding",
     "ValidatorSupervisorConfig",
     "ValidatorSupervisorError",

@@ -42,6 +42,7 @@ from .bootstrap_direct_weights import (
 )
 from .bootstrap_weights import SignedBootstrapEligibilityManifest
 from .crypto import verify_response_signature
+from .encoding import account_id32
 from .grandpa_finality import (
     FINNEY_BOOTSTRAP_BLOCK_HASH,
     FINNEY_BOOTSTRAP_BLOCK_NUMBER,
@@ -50,7 +51,14 @@ from .grandpa_finality import (
     GrandpaFinalityObserver,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .simple_bootstrap_validator import (
+    SignedSimpleBootstrapLease,
+    verify_simple_bootstrap_lease,
+)
 from .validator_supervisor import (
+    COMMON_SUPERVISOR_AUTHORITY_HOTKEY,
+    COMMON_SUPERVISOR_CHANNELS,
+    COMMON_SUPERVISOR_RELEASE_ORIGIN,
     MAX_SUPERVISOR_DOCUMENT_BYTES,
     MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES,
     SupervisorEntrypointProfile,
@@ -65,6 +73,13 @@ SUPERVISOR_RELEASE_BUNDLE_MAGIC = b"UMI-VALIDATOR-OCI-BUNDLE-V1\0"
 SUPERVISOR_RELEASE_SIGNATURE_DOMAIN = b"umi-validator-supervisor-release-manifest-v1\0"
 SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA = "umi-validator-supervisor-bootstrap-input-bundle/1"
 SUPERVISOR_BOOTSTRAP_INPUT_PROFILE = "umi-bootstrap-direct-inputs/2"
+SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA = (
+    "umi-validator-supervisor-simple-bootstrap-input-bundle/1"
+)
+SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE = "umi-simple-bootstrap-common-inputs/1"
+SUPERVISOR_HOST_ARTIFACT_MANIFEST_SCHEMA = "umi-validator-supervisor-host-artifacts/1"
+SUPERVISOR_SIGNED_HOST_ARTIFACT_MANIFEST_SCHEMA = "umi-validator-supervisor-signed-host-artifacts/1"
+SUPERVISOR_HOST_ARTIFACT_SIGNATURE_DOMAIN = b"umi-validator-supervisor-host-artifacts-v1\0"
 
 MAX_HTTPS_HEADER_BYTES = 64 * 1024
 MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024
@@ -78,6 +93,7 @@ MAX_FINALIZED_FUTURE_SKEW_SECONDS = 30.0
 
 WORKER_CONTAINER_NAME = "umi-validator-supervised-worker"
 WORKER_ENTRYPOINT = "/usr/local/bin/umi-validator-supervisor-worker"
+SIMPLE_BOOTSTRAP_WORKER_ENTRYPOINT = "/usr/local/bin/umi-simple-bootstrap-validator"
 WORKER_RELEASE_MANIFEST_PATH = "/run/umi/release/release-manifest.json"
 WORKER_OPERATOR_INPUT_PATH = "/run/umi/operator-inputs"
 WORKER_WALLET_PATH = "/run/umi/wallets"
@@ -187,6 +203,93 @@ class SupervisorBootstrapInputBundle(StrictProtocolModel):
             != self.drain_checkpoint.chain.subnet_owner_hotkey_account_id32
         ):
             raise ValueError("bootstrap owner-fence receipt binds another subnet owner")
+        return self
+
+
+class SupervisorSimpleBootstrapInputBundle(StrictProtocolModel):
+    """Common manifest and lease used by every permitted bootstrap validator."""
+
+    schema_: Literal[SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA] = Field(alias="schema")
+    profile: Literal[SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE]
+    signed_manifest: SignedBootstrapEligibilityManifest
+    signed_lease: SignedSimpleBootstrapLease
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> Self:
+        verify_simple_bootstrap_lease(
+            self.signed_lease,
+            signed_manifest=self.signed_manifest,
+            expected_revision=self.signed_lease.body.umi_git_revision,
+            current_block=self.signed_lease.body.valid_from_block,
+        )
+        return self
+
+
+class SupervisorHostArtifact(StrictProtocolModel):
+    """One immutable host-side file needed before the first directive fetch."""
+
+    url: Annotated[str, Field(min_length=1, max_length=2_048)]
+    sha256: Hex32
+    size_bytes: Annotated[int, Field(gt=0, le=256 * 1024 * 1024)]
+
+    @model_validator(mode="after")
+    def validate_url(self) -> Self:
+        target = _canonical_https_url(self.url)
+        parts = urlsplit(target)
+        if f"https://{parts.netloc}" != COMMON_SUPERVISOR_RELEASE_ORIGIN:
+            raise ValueError("host artifact uses an untrusted origin")
+        return self
+
+
+class SupervisorHostArtifactManifest(StrictProtocolModel):
+    """Platform-specific host bootstrap selected by a fixed common channel."""
+
+    schema_: Literal[SUPERVISOR_HOST_ARTIFACT_MANIFEST_SCHEMA] = Field(alias="schema")
+    channel_id: Hex32
+    authority_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
+    target_platform: Literal["linux/amd64", "linux/arm64"]
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    uv: SupervisorHostArtifact
+    finality_verifier: SupervisorHostArtifact
+    finney_chain_spec: SupervisorHostArtifact
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> Self:
+        account_id32(self.authority_hotkey)
+        if self.authority_hotkey != COMMON_SUPERVISOR_AUTHORITY_HOTKEY:
+            raise ValueError("host artifact authority is not the common UMI authority")
+        if self.channel_id != COMMON_SUPERVISOR_CHANNELS[self.target_platform]:
+            raise ValueError("host artifact channel does not match its platform")
+        return self
+
+
+class SignedSupervisorHostArtifactManifest(StrictProtocolModel):
+    """Coordinator signature over one host-artifact manifest."""
+
+    schema_: Literal[SUPERVISOR_SIGNED_HOST_ARTIFACT_MANIFEST_SCHEMA] = Field(alias="schema")
+    manifest: SupervisorHostArtifactManifest
+    manifest_sha256: Hex32
+    manifest_digest: Hex32
+    signature_scheme: Literal["sr25519", "ed25519"]
+    signature: Annotated[str, Field(pattern=r"^0x[0-9a-f]{128}$")]
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> Self:
+        payload = canonical_json_bytes(self.manifest)
+        digest = hashlib.sha256(SUPERVISOR_HOST_ARTIFACT_SIGNATURE_DOMAIN + payload).digest()
+        if self.signature_scheme != "sr25519":
+            raise ValueError("host artifact manifest signature scheme is invalid")
+        if not hmac.compare_digest(self.manifest_sha256, hashlib.sha256(payload).hexdigest()):
+            raise ValueError("host artifact manifest hash is invalid")
+        if not hmac.compare_digest(self.manifest_digest, digest.hex()):
+            raise ValueError("host artifact manifest digest is invalid")
+        if not verify_response_signature(
+            digest,
+            hotkey_ss58=self.manifest.authority_hotkey,
+            scheme=self.signature_scheme,
+            signature=self.signature,
+        ):
+            raise ValueError("host artifact manifest signature is invalid")
         return self
 
 
@@ -864,7 +967,7 @@ class RootlessPodmanWorkerAdapter:
         _require_directory(
             Path(self.config.worker_state_root), "worker_state_root_unsafe", private=True
         )
-        if activation.mode == "bootstrap_service_weights":
+        if activation.release.entrypoint_profile == "umi-bootstrap-weight-validator/2":
             _require_bootstrap_result_upload_credential(
                 BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL,
             )
@@ -908,7 +1011,13 @@ class RootlessPodmanWorkerAdapter:
             ),
             _bind_mount(worker_state, WORKER_STATE_PATH, read_only=False),
         ]
-        if activation.mode == "bootstrap_service_weights":
+        legacy_bootstrap = (
+            activation.release.entrypoint_profile == "umi-bootstrap-weight-validator/2"
+        )
+        simple_bootstrap = (
+            activation.release.entrypoint_profile == "umi-simple-bootstrap-validator/1"
+        )
+        if legacy_bootstrap:
             mounts.append(
                 _bind_mount(
                     BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL,
@@ -916,7 +1025,7 @@ class RootlessPodmanWorkerAdapter:
                     read_only=True,
                 )
             )
-        environment = (
+        environment = [
             f"UMI_SUPERVISOR_DIRECTIVE_SHA256={activation.directive_sha256}",
             f"UMI_SUPERVISOR_POLICY_SHA256={activation.policy_sha256}",
             f"UMI_SUPERVISOR_SEQUENCE={activation.sequence}",
@@ -933,7 +1042,22 @@ class RootlessPodmanWorkerAdapter:
             f"UMI_OPERATOR_INPUT_ROOT={WORKER_OPERATOR_INPUT_PATH}",
             f"UMI_WORKER_STATE_ROOT={WORKER_STATE_PATH}",
             f"UMI_RELEASE_MANIFEST={WORKER_RELEASE_MANIFEST_PATH}",
-        )
+        ]
+        entrypoint = WORKER_ENTRYPOINT
+        worker_arguments = [_MODE_ARGUMENT[activation.mode]]
+        if simple_bootstrap:
+            entrypoint = SIMPLE_BOOTSTRAP_WORKER_ENTRYPOINT
+            environment.extend(
+                (
+                    f"UMI_MANIFEST_PATH={WORKER_OPERATOR_INPUT_PATH}/bootstrap/signed-manifest.json",
+                    f"UMI_LEASE_PATH={WORKER_OPERATOR_INPUT_PATH}/bootstrap/bootstrap-lease.json",
+                    f"UMI_HOTKEY={self.config.wallet.hotkey}",
+                    f"UMI_GIT_REVISION={activation.release.umi_git_revision}",
+                    "UMI_IMAGE_REVISION_PATH=/opt/umi-image-revision",
+                    f"UMI_IMAGE_SOURCE_TREE_SHA256={activation.release.umi_source_tree_sha256}",
+                )
+            )
+            worker_arguments = ["run", "--state-dir", WORKER_STATE_PATH]
         arguments: list[str] = [
             self.config.container_runtime,
             "run",
@@ -960,7 +1084,7 @@ class RootlessPodmanWorkerAdapter:
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,nodev,size=268435456",
             "--entrypoint",
-            WORKER_ENTRYPOINT,
+            entrypoint,
             "--label",
             f"vision.umi.supervisor.directive-sha256={activation.directive_sha256}",
             "--label",
@@ -970,7 +1094,8 @@ class RootlessPodmanWorkerAdapter:
             arguments.extend(("--mount", mount))
         for value in environment:
             arguments.extend(("--env", value))
-        arguments.extend((staged.image_reference, _MODE_ARGUMENT[activation.mode]))
+        arguments.append(staged.image_reference)
+        arguments.extend(worker_arguments)
         return tuple(arguments)
 
     async def _stage_release(
@@ -1043,6 +1168,24 @@ class RootlessPodmanWorkerAdapter:
         if _sha256_file(staged.archive_path) != manifest.oci_archive_sha256:
             raise ValidatorSupervisorAdapterError("oci_archive_sha256_mismatch")
         await self._verify_staged_operator_inputs(staged, activation.operator_inputs)
+        if (
+            activation.operator_inputs is not None
+            and activation.operator_inputs.profile == SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE
+        ):
+            bundle = _parse_bootstrap_input_bundle(
+                _read_regular_file_bounded(
+                    staged.root / "operator-input-bundle.json",
+                    MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES,
+                    "operator_input_bundle_unsafe",
+                )
+            )
+            if not isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
+                raise ValidatorSupervisorAdapterError("operator_input_profile_mismatch")
+            if (
+                bundle.signed_lease.body.umi_git_revision != activation.release.umi_git_revision
+                or bundle.signed_lease.body.policy_sha256 != activation.policy_sha256
+            ):
+                raise ValidatorSupervisorAdapterError("operator_input_release_binding_mismatch")
 
     async def _stage_operator_inputs(
         self,
@@ -1074,18 +1217,24 @@ class RootlessPodmanWorkerAdapter:
             bootstrap_root / "signed-manifest.json",
             canonical_json_bytes(bundle.signed_manifest),
         )
-        _write_private_bytes(
-            bootstrap_root / "direct-transition-authorization.json",
-            canonical_json_bytes(bundle.transition_authorization),
-        )
-        _write_private_bytes(
-            bootstrap_root / "drain-checkpoint.json",
-            canonical_json_bytes(bundle.drain_checkpoint),
-        )
-        _write_private_bytes(
-            bootstrap_root / "owner-fence-receipt.json",
-            canonical_json_bytes(bundle.owner_fence_receipt),
-        )
+        if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
+            _write_private_bytes(
+                bootstrap_root / "bootstrap-lease.json",
+                canonical_json_bytes(bundle.signed_lease),
+            )
+        else:
+            _write_private_bytes(
+                bootstrap_root / "direct-transition-authorization.json",
+                canonical_json_bytes(bundle.transition_authorization),
+            )
+            _write_private_bytes(
+                bootstrap_root / "drain-checkpoint.json",
+                canonical_json_bytes(bundle.drain_checkpoint),
+            )
+            _write_private_bytes(
+                bootstrap_root / "owner-fence-receipt.json",
+                canonical_json_bytes(bundle.owner_fence_receipt),
+            )
         bundle_path.chmod(0o400)
         for item in bootstrap_root.iterdir():
             item.chmod(0o400)
@@ -1127,14 +1276,19 @@ class RootlessPodmanWorkerAdapter:
             private=True,
             modes={0o500},
         )
-        expected = {
-            "signed-manifest.json": canonical_json_bytes(bundle.signed_manifest),
-            "direct-transition-authorization.json": canonical_json_bytes(
-                bundle.transition_authorization
-            ),
-            "drain-checkpoint.json": canonical_json_bytes(bundle.drain_checkpoint),
-            "owner-fence-receipt.json": canonical_json_bytes(bundle.owner_fence_receipt),
-        }
+        expected = {"signed-manifest.json": canonical_json_bytes(bundle.signed_manifest)}
+        if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
+            expected["bootstrap-lease.json"] = canonical_json_bytes(bundle.signed_lease)
+        else:
+            expected.update(
+                {
+                    "direct-transition-authorization.json": canonical_json_bytes(
+                        bundle.transition_authorization
+                    ),
+                    "drain-checkpoint.json": canonical_json_bytes(bundle.drain_checkpoint),
+                    "owner-fence-receipt.json": canonical_json_bytes(bundle.owner_fence_receipt),
+                }
+            )
         try:
             names = {item.name for item in bootstrap_root.iterdir()}
         except OSError as error:
@@ -1338,16 +1492,45 @@ def _parse_release_manifest(payload: bytes) -> SupervisorReleaseManifest:
     return manifest
 
 
-def _parse_bootstrap_input_bundle(payload: bytes) -> SupervisorBootstrapInputBundle:
-    if not payload or len(payload) > MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES:
-        raise ValidatorSupervisorAdapterError("operator_input_bundle_size_invalid")
+def parse_canonical_signed_supervisor_host_artifact_manifest(
+    payload: bytes,
+) -> SignedSupervisorHostArtifactManifest:
+    if not payload or len(payload) > MAX_SUPERVISOR_DOCUMENT_BYTES:
+        raise ValidatorSupervisorAdapterError("host_artifact_manifest_size_invalid")
     try:
         json.loads(
             payload,
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
         )
-        bundle = SupervisorBootstrapInputBundle.model_validate_json(payload)
+        signed = SignedSupervisorHostArtifactManifest.model_validate_json(payload)
+    except Exception as error:
+        raise ValidatorSupervisorAdapterError("host_artifact_manifest_invalid") from error
+    if canonical_json_bytes(signed) != payload:
+        raise ValidatorSupervisorAdapterError("host_artifact_manifest_noncanonical")
+    return signed
+
+
+def _parse_bootstrap_input_bundle(
+    payload: bytes,
+) -> SupervisorBootstrapInputBundle | SupervisorSimpleBootstrapInputBundle:
+    if not payload or len(payload) > MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES:
+        raise ValidatorSupervisorAdapterError("operator_input_bundle_size_invalid")
+    try:
+        value = json.loads(
+            payload,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(value, Mapping):
+            raise ValueError("operator input bundle must be an object")
+        model = {
+            SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA: SupervisorBootstrapInputBundle,
+            SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA: (SupervisorSimpleBootstrapInputBundle),
+        }.get(value.get("schema"))
+        if model is None:
+            raise ValueError("operator input bundle schema is unsupported")
+        bundle = model.model_validate_json(payload)
     except Exception as error:
         raise ValidatorSupervisorAdapterError("operator_input_bundle_invalid") from error
     if canonical_json_bytes(bundle) != payload:
@@ -1789,13 +1972,20 @@ def _cpu_limit(value: int) -> str:
 __all__ = [
     "SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA",
     "SUPERVISOR_BOOTSTRAP_INPUT_PROFILE",
+    "SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA",
+    "SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE",
     "FinneyFinalizedBlockReader",
     "HTTPSDirectiveFetcher",
     "OwnedFinalizedBlock",
     "PinnedHTTPSClient",
     "RootlessPodmanWorkerAdapter",
+    "SignedSupervisorHostArtifactManifest",
     "StagedSupervisorRelease",
     "SupervisorBootstrapInputBundle",
+    "SupervisorHostArtifact",
+    "SupervisorHostArtifactManifest",
     "SupervisorReleaseManifest",
+    "SupervisorSimpleBootstrapInputBundle",
     "ValidatorSupervisorAdapterError",
+    "parse_canonical_signed_supervisor_host_artifact_manifest",
 ]

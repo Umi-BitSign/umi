@@ -124,33 +124,19 @@ def test_runbook_has_fail_closed_install_and_service_checks() -> None:
     assert 'nsenter --mount="/proc/${UMI_PUBLISHER_PID}/ns/mnt"' in runbook
 
 
-def test_directive_rollout_pins_new_observer_and_checks_the_public_edge() -> None:
+def test_shared_validator_rollout_is_one_pinned_install_and_signed_channel() -> None:
     runbook = (ROOT.parents[1] / "docs" / "PERMANENT_VALIDATOR_SUPERVISOR.md").read_text()
 
-    assert "observer_revision=REPLACE_WITH_40_CHARACTER_OBSERVER_REVISION" in runbook
-    assert 'checkout --detach "${observer_revision}"' in runbook
-    assert 'test "$(/usr/local/bin/uv --version)" = "uv 0.12.9"' in runbook
-    assert "--locked --no-dev --no-editable" in runbook
-    assert "import umi.observer, umi.observer_directive_feed" in runbook
-    assert "grep -Fq -- '--directive-feed-config'" in runbook
-    assert "readlink -f /opt/umi-observer" in runbook
-    assert "umi-observer-validator-directives.conf" in runbook
-    assert "check-directive-route.py" in runbook
-    assert "--require-cloudflare-edge" in runbook
-    assert "https://api.umi.vision/readyz" in runbook
-    assert "request `/readyz` at least\nonce per minute" in runbook
-    assert "rate limit to that path and `/readyz`" in runbook
-    assert "set -euo pipefail\nobserver_revision=" in runbook
-    assert "set -euo pipefail\nsudo grep -q '^UMI_OBSERVER_DIRECTIVE_FEED_CONFIG='" in runbook
-    assert "set -euo pipefail\nUMI_DIRECTIVE_ACCOUNT=" in runbook
-    assert "Cloudflare Trace" in runbook
-    assert "Select **All configurations**" in runbook
-    assert "http_request_cache_settings" in runbook
-    assert "CF-Cache-Status: DYNAMIC" in runbook
-    assert "is not ruleset\nevidence" in runbook[runbook.index("CF-Cache-Status: DYNAMIC") :][:200]
-    assert runbook.index("observer_revision=REPLACE_WITH_40_CHARACTER_OBSERVER_REVISION") < (
-        runbook.index("sudo grep -q '^UMI_OBSERVER_DIRECTIVE_FEED_CONFIG='")
-    )
+    assert "revision=REPLACE_WITH_PUBLISHED_40_CHARACTER_REVISION" in runbook
+    assert 'checkout --detach "$revision"' in runbook
+    assert "--wallet-name YOUR_WALLET" in runbook
+    assert "--hotkey-name YOUR_HOTKEY" in runbook
+    assert "--wallet-path /ABSOLUTE/PATH/TO/WALLETS" in runbook
+    assert "--legacy-unit YOUR_OLD_SN78_VALIDATOR.service" in runbook
+    assert "There is no validator-specific" in runbook
+    assert "result-upload credential" in runbook
+    assert "cannot provide a shell command" in runbook
+    assert "Cache-Control: no-store" in runbook
 
 
 def test_directive_routes_are_complete_before_the_feed_is_installed() -> None:

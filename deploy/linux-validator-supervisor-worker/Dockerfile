@@ -50,7 +50,9 @@ RUN uv sync --locked --no-dev \
     && chmod 0444 /opt/umi-image-revision \
     && install -d -o 65532 -g 65532 -m 0700 /home/umi \
     && ln -s /opt/umi/.venv/bin/umi-validator-supervisor-worker \
-      /usr/local/bin/umi-validator-supervisor-worker
+      /usr/local/bin/umi-validator-supervisor-worker \
+    && ln -s /opt/umi/.venv/bin/umi-simple-bootstrap-validator \
+      /usr/local/bin/umi-simple-bootstrap-validator
 
 COPY --from=finality-builder \
   /build/finality/target/release/umi-grandpa-finality-observer \
@@ -64,14 +66,15 @@ RUN chmod 0555 /opt/umi/bin/umi-grandpa-finality-observer \
       f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105 \
       /opt/umi/finney.json | sha256sum --check \
     && /opt/umi/bin/umi-grandpa-finality-observer --conformance-self-test \
-    && /usr/local/bin/umi-validator-supervisor-worker --help >/dev/null
+    && /usr/local/bin/umi-validator-supervisor-worker --help >/dev/null \
+    && /usr/local/bin/umi-simple-bootstrap-validator --help >/dev/null
 
 LABEL org.opencontainers.image.source="https://github.com/Umi-BitSign/umi" \
       org.opencontainers.image.revision="${UMI_GIT_REVISION}" \
       vision.umi.source-tree-sha256="${UMI_SOURCE_TREE_SHA256}" \
-      vision.umi.entrypoint-profile="umi-bootstrap-weight-validator/2" \
-      vision.umi.role="validator-supervisor-bootstrap-worker"
+      vision.umi.entrypoint-profile="umi-simple-bootstrap-validator/1" \
+      vision.umi.role="validator-supervisor-common-bootstrap-worker"
 
 USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/umi-validator-supervisor-worker"]
+ENTRYPOINT ["/usr/local/bin/umi-simple-bootstrap-validator"]
 CMD ["--help"]

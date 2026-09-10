@@ -1,5 +1,11 @@
 # SN78 seven-day bootstrap service-weight addendum
 
+Current transport note: the
+[shared-validator bootstrap supersession](SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
+replaces this document's validator authorization, CRv4 submission, renewal, and
+terminal-publication procedures. This document remains authoritative for the
+frozen eligibility policy and hard sunset.
+
 Status: temporary public bootstrap profile
 
 Scope: Finney SN78, MechId 0

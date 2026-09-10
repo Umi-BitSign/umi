@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import bittensor as bt
 import httpx
 import pytest
 from bittensor.keyfiles import serialized_keypair_to_keyfile_data
@@ -27,9 +28,18 @@ from umi.bootstrap_direct_weights import (
     OwnerFenceReceipt,
     build_owner_fence_call,
 )
+from umi.bootstrap_weights import SignedBootstrapEligibilityManifest
 from umi.grandpa_finality import FINNEY_BOOTSTRAP_BLOCK_NUMBER
 from umi.protocol import canonical_json_bytes
+from umi.simple_bootstrap_validator import (
+    SIMPLE_BOOTSTRAP_LEASE_SCHEMA,
+    SignedSimpleBootstrapLease,
+    build_simple_bootstrap_lease_body,
+)
 from umi.validator_supervisor import (
+    COMMON_SUPERVISOR_AUTHORITY_HOTKEY,
+    COMMON_SUPERVISOR_CHANNELS,
+    COMMON_SUPERVISOR_RELEASE_ORIGIN,
     SUPERVISOR_CONFIG_SCHEMA,
     SUPERVISOR_DIRECTIVE_STATE_SCHEMA,
     SupervisorDirectiveState,
@@ -40,8 +50,10 @@ from umi.validator_supervisor import (
 )
 from umi.validator_supervisor_adapters import (
     BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL,
+    SIMPLE_BOOTSTRAP_WORKER_ENTRYPOINT,
     SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
     SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
+    SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
     WORKER_BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL_PATH,
     WORKER_CONTAINER_NAME,
     WORKER_ENTRYPOINT,
@@ -52,6 +64,7 @@ from umi.validator_supervisor_adapters import (
     StagedSupervisorRelease,
     SupervisorBootstrapInputBundle,
     SupervisorReleaseManifest,
+    SupervisorSimpleBootstrapInputBundle,
     ValidatorSupervisorAdapterError,
     _parse_bootstrap_input_bundle,
     _require_bootstrap_result_upload_credential,
@@ -235,6 +248,54 @@ def test_bootstrap_input_bundle_is_canonical_and_cross_bound() -> None:
         _parse_bootstrap_input_bundle(canonical_json_bytes(changed))
 
 
+def test_common_bootstrap_input_bundle_contains_no_validator_specific_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = Path(__file__).resolve().parents[1] / "deploy" / "linux-validator-supervisor"
+    manifest_path /= "bootstrap-manifest.json"
+    if not manifest_path.exists():
+        manifest_path = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "simple-bootstrap-validator"
+            / "bootstrap-manifest.json"
+        )
+    signed_manifest = SignedBootstrapEligibilityManifest.model_validate_json(
+        manifest_path.read_bytes()
+    )
+    body = build_simple_bootstrap_lease_body(
+        signed_manifest,
+        umi_git_revision="ab" * 20,
+        valid_from_block=9_040_000,
+    )
+    signed_lease = SignedSimpleBootstrapLease(
+        schema=SIMPLE_BOOTSTRAP_LEASE_SCHEMA,
+        body=body,
+        signature_scheme="sr25519",
+        signature="0x" + "00" * 64,
+    )
+    monkeypatch.setattr(
+        "umi.validator_supervisor_adapters.verify_simple_bootstrap_lease",
+        lambda value, **_kwargs: value,
+    )
+    bundle = SupervisorSimpleBootstrapInputBundle(
+        schema="umi-validator-supervisor-simple-bootstrap-input-bundle/1",
+        profile=SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
+        signed_manifest=signed_manifest,
+        signed_lease=signed_lease,
+    )
+
+    parsed = _parse_bootstrap_input_bundle(canonical_json_bytes(bundle))
+
+    assert parsed == bundle
+    assert set(bundle.model_dump(mode="json", by_alias=True)) == {
+        "schema",
+        "profile",
+        "signed_manifest",
+        "signed_lease",
+    }
+
+
 def test_cli_builds_bootstrap_input_bundle_and_hash_target(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -281,6 +342,41 @@ def test_cli_builds_bootstrap_input_bundle_and_hash_target(
     assert result["bundle_sha256"] == target.bundle_sha256
     assert target.bundle_sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
     assert target.bundle_size_bytes == output.stat().st_size
+
+
+def test_common_config_is_generated_from_platform_and_local_hotkey_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = dev_wallet("//GeneratedCommonSupervisorConfig")
+    monkeypatch.setattr(bt, "Wallet", lambda **_kwargs: wallet)
+    monkeypatch.setattr(bt, "resolve_signer", lambda _wallet, role: wallet.hotkey)
+    output = tmp_path / "validator-supervisor.json"
+    args = SimpleNamespace(
+        wallet_name="validator",
+        wallet_hotkey="default",
+        target_platform="linux/amd64",
+        finality_verifier_sha256="12" * 32,
+        output=output,
+    )
+
+    result = supervisor_cli._build_common_config(args)
+    config = ValidatorSupervisorConfig.model_validate_json(output.read_bytes())
+
+    assert result["validator_hotkey"] == wallet.hotkey.ss58_address
+    assert config.channel_id == COMMON_SUPERVISOR_CHANNELS["linux/amd64"]
+    assert config.validator_hotkey == wallet.hotkey.ss58_address
+    assert config.trusted_authorities[0].hotkey == COMMON_SUPERVISOR_AUTHORITY_HOTKEY
+    assert config.release_origins == [COMMON_SUPERVISOR_RELEASE_ORIGIN]
+    assert config.directive_url.endswith("/linux-amd64")
+    assert config.wallet.name == "validator"
+    assert config.wallet.hotkey == "default"
+    assert config.allowed_modes == [
+        "hold",
+        "inactive_shadow",
+        "bootstrap_service_weights",
+        "translation_weights",
+    ]
 
 
 @pytest.mark.asyncio
@@ -532,6 +628,69 @@ def test_worker_arguments_are_fixed_digest_platform_and_lease_bound(tmp_path: Pa
     assert arguments[-2:] == (
         staged.image_reference,
         "run-bootstrap-service-weights",
+    )
+
+
+def test_common_bootstrap_dispatch_has_fixed_entrypoint_and_no_upload_key(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    release = _release(config).model_copy(
+        update={"entrypoint_profile": "umi-simple-bootstrap-validator/1"}
+    )
+    manifest = SupervisorReleaseManifest(
+        schema="umi-validator-supervisor-release-manifest/1",
+        oci_repository=release.oci_repository,
+        oci_manifest_sha256=release.oci_manifest_sha256,
+        oci_archive_sha256="88" * 32,
+        oci_archive_size_bytes=100,
+        target_platform=release.target_platform,
+        umi_git_revision=release.umi_git_revision,
+        umi_source_tree_sha256=release.umi_source_tree_sha256,
+        entrypoint_profile=release.entrypoint_profile,
+        state_schema_minimum=1,
+        state_schema_maximum=1,
+    )
+    staged = StagedSupervisorRelease(
+        root=tmp_path / "staged",
+        manifest_path=tmp_path / "staged" / "release-manifest.json",
+        archive_path=tmp_path / "staged" / "image.oci.tar",
+        image_reference=f"{release.oci_repository}@sha256:{release.oci_manifest_sha256}",
+        manifest=manifest,
+        operator_input_root=tmp_path / "staged" / "operator-inputs",
+    )
+    operator_inputs = SupervisorOperatorInputTarget(
+        artifact_type="canonical_json",
+        profile=SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
+        bundle_url="https://api.umi.vision/releases/common-bootstrap-inputs.json",
+        bundle_sha256="89" * 32,
+        bundle_size_bytes=1_024,
+    )
+    activation = SupervisorWorkerActivation(
+        mode="bootstrap_service_weights",
+        sequence=2,
+        directive_sha256="99" * 32,
+        policy_sha256="aa" * 32,
+        valid_from_block=1_000,
+        valid_through_block=2_000,
+        release=release,
+        operator_inputs=operator_inputs,
+    )
+
+    arguments = RootlessPodmanWorkerAdapter(config)._worker_arguments(staged, activation)
+    encoded = "\n".join(arguments)
+
+    assert arguments[arguments.index("--entrypoint") + 1] == SIMPLE_BOOTSTRAP_WORKER_ENTRYPOINT
+    assert str(BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL) not in encoded
+    assert WORKER_BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL_PATH not in encoded
+    assert f"UMI_HOTKEY={config.wallet.hotkey}" in arguments
+    assert "UMI_IMAGE_REVISION_PATH=/opt/umi-image-revision" in arguments
+    assert f"UMI_IMAGE_SOURCE_TREE_SHA256={release.umi_source_tree_sha256}" in arguments
+    assert arguments[-4:] == (
+        staged.image_reference,
+        "run",
+        "--state-dir",
+        "/var/lib/umi-worker",
     )
 
 

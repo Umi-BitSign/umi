@@ -37,6 +37,7 @@ from .observer_bootstrap_service_feed import (
     BOOTSTRAP_SERVICE_MECHANISM,
     ObserverBootstrapServiceFeed,
     VerifiedBootstrapServicePublication,
+    VerifiedSimpleBootstrapConfiguration,
     build_observer_bootstrap_service_feed,
 )
 from .observer_bundle_feed import (
@@ -63,6 +64,8 @@ from .observer_models import (
     ActivationGate,
     ActivationGatesResponse,
     BenchmarksResponse,
+    BootstrapServiceChainReceiptRecord,
+    BootstrapServiceChainValidator,
     BootstrapServiceEvidenceLocator,
     BootstrapServiceMiner,
     BootstrapServiceRecord,
@@ -461,8 +464,108 @@ def _sources(snapshot: ObserverSnapshot) -> tuple[SourceProvenance, ...]:
 
 @dataclass(frozen=True)
 class BootstrapServiceSelection:
-    publication: VerifiedBootstrapServicePublication | None
+    publication: VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration | None
     reason_code: str
+    validator_uids: tuple[int, ...] = ()
+    warning_codes: tuple[str, ...] = ()
+
+
+def _select_simple_bootstrap_service(
+    snapshot: ObserverSnapshot,
+    configuration: VerifiedSimpleBootstrapConfiguration,
+) -> BootstrapServiceSelection:
+    """Recognize the common lease's exact row from one finalized snapshot."""
+
+    network = snapshot.network
+    body = configuration.signed_lease.body
+    block = int(_finalized_block(snapshot).number)
+    if not body.valid_from_block <= block < body.hard_sunset_block:
+        return BootstrapServiceSelection(None, "bootstrap_service_lease_inactive")
+    if network.runtime_spec_version != str(body.required_runtime_spec_version):
+        return BootstrapServiceSelection(None, "bootstrap_service_runtime_spec_mismatch")
+    if network.mechanism_count != body.required_mechanism_count:
+        return BootstrapServiceSelection(None, "bootstrap_service_mechanism_count_mismatch")
+    if (
+        network.counts.registered != body.required_max_allowed_uids
+        or network.counts.maximum_uids != body.required_max_allowed_uids
+    ):
+        return BootstrapServiceSelection(None, "bootstrap_service_uid_domain_mismatch")
+    if network.hyperparameters.weights_version_key != str(body.weights_version_key):
+        return BootstrapServiceSelection(None, "bootstrap_service_weights_version_mismatch")
+    if network.hyperparameters.min_allowed_weights != body.required_min_allowed_weights:
+        return BootstrapServiceSelection(None, "bootstrap_service_minimum_weights_mismatch")
+    if network.commit_reveal_enabled is not body.required_commit_reveal_enabled:
+        return BootstrapServiceSelection(None, "bootstrap_service_commit_reveal_mismatch")
+    if network.commit_reveal_version != str(body.required_commit_reveal_version):
+        return BootstrapServiceSelection(None, "bootstrap_service_commit_reveal_version_mismatch")
+    if network.reveal_period_epochs != str(body.required_reveal_period_epochs):
+        return BootstrapServiceSelection(None, "bootstrap_service_reveal_period_mismatch")
+    if network.epoch.tempo_blocks != str(body.required_tempo):
+        return BootstrapServiceSelection(None, "bootstrap_service_tempo_mismatch")
+    if network.hyperparameters.activity_cutoff_blocks != str(body.required_activity_cutoff_blocks):
+        return BootstrapServiceSelection(None, "bootstrap_service_activity_cutoff_changed")
+    if network.hyperparameters.weights_rate_limit_blocks != str(
+        body.required_weights_set_rate_limit
+    ):
+        return BootstrapServiceSelection(None, "bootstrap_service_weights_rate_limit_changed")
+    if network.pending_weight_commit_count != 0:
+        return BootstrapServiceSelection(None, "bootstrap_service_pending_commit_queue_not_empty")
+    if network.subnet_exists is not True or network.subnet_started is not True:
+        return BootstrapServiceSelection(None, "bootstrap_service_subnet_not_started")
+
+    participants_by_uid = {item.uid: item for item in snapshot.participants}
+    owner = participants_by_uid.get(0)
+    if owner is None or account_id32(owner.hotkey) != bytes.fromhex(
+        network.subnet_owner_hotkey_account_id32[2:]
+    ):
+        return BootstrapServiceSelection(None, "bootstrap_service_subnet_owner_mapping_changed")
+    for entry in configuration.signed_manifest.manifest.entries:
+        participant = participants_by_uid.get(entry.uid)
+        if (
+            participant is None
+            or account_id32(participant.hotkey) != account_id32(entry.miner_hotkey)
+            or participant.validator_permit
+            or not participant.serving_announced
+        ):
+            return BootstrapServiceSelection(
+                None,
+                "bootstrap_service_eligible_miner_mapping_changed",
+            )
+        if participant.serving_origin != entry.origin:
+            return BootstrapServiceSelection(
+                None,
+                "bootstrap_service_eligible_miner_origin_changed",
+            )
+
+    expected_row = configuration.expected_row
+    rows_by_validator = {
+        item.validator_uid: item.weights for item in network.validator_mechid0_rows
+    }
+    exact: list[int] = []
+    mismatched: list[int] = []
+    cutoff = body.required_activity_cutoff_blocks
+    for participant in snapshot.participants:
+        if not participant.validator_permit:
+            continue
+        row = rows_by_validator.get(participant.uid, ())
+        active = participant.chain_active and int(participant.last_update_block) + cutoff >= block
+        if not active:
+            continue
+        if row == expected_row:
+            exact.append(participant.uid)
+        elif row:
+            mismatched.append(participant.uid)
+    if not exact:
+        return BootstrapServiceSelection(None, "bootstrap_service_exact_active_row_unavailable")
+    warnings = tuple(
+        f"bootstrap_service_mismatched_active_row_uid_{uid}" for uid in sorted(mismatched)
+    )
+    return BootstrapServiceSelection(
+        configuration,
+        "bootstrap_service_active",
+        validator_uids=tuple(sorted(exact)),
+        warning_codes=warnings,
+    )
 
 
 def _select_bootstrap_service(
@@ -471,8 +574,10 @@ def _select_bootstrap_service(
 ) -> BootstrapServiceSelection:
     """Match one verified publication against current finalized chain state."""
 
-    if feed is None or not feed.publications:
+    if (feed is None or not feed.publications) and (feed is None or feed.simple_bootstrap is None):
         return BootstrapServiceSelection(None, "bootstrap_service_evidence_unavailable")
+    if feed.simple_bootstrap is not None:
+        return _select_simple_bootstrap_service(snapshot, feed.simple_bootstrap)
     network = snapshot.network
     block = int(_finalized_block(snapshot).number)
     if network.runtime_spec_version != "455":
@@ -531,11 +636,6 @@ def _select_bootstrap_service(
         and item.validator_permit
         and (item.chain_active or int(item.last_update_block) + expected_cutoff >= block)
     ]
-    if competing_validators:
-        return BootstrapServiceSelection(
-            None,
-            "bootstrap_service_other_validator_active",
-        )
     for entry in publication.signed_manifest.manifest.entries:
         participant = participants_by_uid.get(entry.uid)
         if (
@@ -560,13 +660,24 @@ def _select_bootstrap_service(
     }
     if rows_by_validator.get(validator.uid) != expected_row:
         return BootstrapServiceSelection(None, "bootstrap_service_applied_row_mismatch")
-    return BootstrapServiceSelection(publication, "bootstrap_service_active")
+    warning_codes = tuple(
+        f"bootstrap_service_other_active_validator_uid_{item.uid}"
+        for item in sorted(competing_validators, key=lambda candidate: candidate.uid)
+    )
+    return BootstrapServiceSelection(
+        publication,
+        "bootstrap_service_active",
+        validator_uids=(validator.uid,),
+        warning_codes=warning_codes,
+    )
 
 
 def _protocol_state(
     snapshot: ObserverSnapshot,
     released_windows: Sequence[VerifiedFeedWindow] = (),
-    bootstrap_publication: VerifiedBootstrapServicePublication | None = None,
+    bootstrap_publication: (
+        VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration | None
+    ) = None,
 ) -> ProtocolState:
     network = snapshot.network
     observed_names = tuple(
@@ -1418,11 +1529,14 @@ def create_observer_app(
             ),
         )
 
-    def configured_bootstrap_publications() -> tuple[VerifiedBootstrapServicePublication, ...]:
-        return () if bootstrap_service_feed is None else bootstrap_service_feed.publications
+    def configured_bootstrap_publications() -> tuple[
+        VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration,
+        ...,
+    ]:
+        return () if bootstrap_service_feed is None else bootstrap_service_feed.evidence_items()
 
     def bootstrap_locator(
-        publication: VerifiedBootstrapServicePublication,
+        publication: VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration,
     ) -> BootstrapServiceEvidenceLocator:
         return BootstrapServiceEvidenceLocator(
             publication_id=publication.publication_id,
@@ -1435,13 +1549,69 @@ def create_observer_app(
             expected_row_sha256=publication.manifest.expected_row_sha256,
         )
 
-    def bootstrap_record(
-        publication: VerifiedBootstrapServicePublication,
-    ) -> BootstrapServiceRecord:
+    def bootstrap_miners(
+        publication: VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration,
+    ) -> tuple[BootstrapServiceMiner, ...]:
         entries = sorted(
             publication.signed_manifest.manifest.entries,
             key=lambda item: item.uid,
         )
+        return tuple(
+            BootstrapServiceMiner(
+                uid=entry.uid,
+                miner_hotkey=entry.miner_hotkey,
+                origin=entry.origin,
+                pilot_id=entry.pilot_id,
+                pilot_url=f"{publication.public_origin}/api/v1/pilots/{entry.pilot_id}",
+                solutions_url=(
+                    f"{publication.public_origin}/api/v1/pilots/{entry.pilot_id}/solutions"
+                ),
+            )
+            for entry in entries
+        )
+
+    def bootstrap_record(
+        view: SnapshotView,
+        selection: BootstrapServiceSelection,
+    ) -> BootstrapServiceRecord | BootstrapServiceChainReceiptRecord:
+        publication = selection.publication
+        if publication is None:  # pragma: no cover - caller invariant
+            raise ValueError("inactive bootstrap selection has no record")
+        if isinstance(publication, VerifiedSimpleBootstrapConfiguration):
+            block = _finalized_block(view.snapshot)
+            by_uid = {item.uid: item for item in view.snapshot.participants}
+            cutoff = publication.signed_lease.body.required_activity_cutoff_blocks
+            validators = tuple(
+                BootstrapServiceChainValidator(
+                    uid=uid,
+                    hotkey=by_uid[uid].hotkey,
+                    last_update_block=by_uid[uid].last_update_block,
+                    active_through_block=str(
+                        min(
+                            int(by_uid[uid].last_update_block) + cutoff,
+                            publication.signed_lease.body.hard_sunset_block - 1,
+                        )
+                    ),
+                )
+                for uid in selection.validator_uids
+            )
+            return BootstrapServiceChainReceiptRecord(
+                evidence_class="finalized_chain_state",
+                mechanism=BOOTSTRAP_SERVICE_MECHANISM,
+                translation_weights_active=False,
+                section_14_gate_credit=False,
+                storage_proofs_verified=False,
+                subnet_emission_enabled=view.snapshot.network.subnet_emission_enabled,
+                policy_sha256=publication.manifest.policy_sha256,
+                eligibility_manifest_sha256=(publication.manifest.eligibility_manifest_sha256),
+                umi_git_revision=publication.manifest.umi_git_revision,
+                observation_block=block.number,
+                observation_block_hash=block.hash,
+                hard_sunset_block=str(publication.manifest.hard_sunset_block),
+                exact_validator_rows=validators,
+                eligible_miners=bootstrap_miners(publication),
+                evidence=bootstrap_locator(publication),
+            )
         return BootstrapServiceRecord(
             mechanism=BOOTSTRAP_SERVICE_MECHANISM,
             translation_weights_active=False,
@@ -1459,25 +1629,15 @@ def create_observer_app(
             observation_block_hash=publication.receipt.observation_block_hash,
             active_through_block=str(publication.manifest.active_through_block),
             hard_sunset_block=str(publication.manifest.hard_sunset_block),
-            eligible_miners=tuple(
-                BootstrapServiceMiner(
-                    uid=entry.uid,
-                    miner_hotkey=entry.miner_hotkey,
-                    origin=entry.origin,
-                    pilot_id=entry.pilot_id,
-                    pilot_url=f"{publication.public_origin}/api/v1/pilots/{entry.pilot_id}",
-                    solutions_url=(
-                        f"{publication.public_origin}/api/v1/pilots/{entry.pilot_id}/solutions"
-                    ),
-                )
-                for entry in entries
-            ),
+            eligible_miners=bootstrap_miners(publication),
             evidence=bootstrap_locator(publication),
         )
 
     def bootstrap_envelope(
         view: SnapshotView,
-        publication: VerifiedBootstrapServicePublication | None,
+        publication: (
+            VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration | None
+        ),
     ) -> dict[str, Any]:
         sources = list(_sources(view.snapshot))
         if publication is not None:
@@ -1914,9 +2074,8 @@ def create_observer_app(
             protocol_state=current_protocol_state(view, releases),
             availability="active" if selection.publication is not None else "inactive",
             reason_code=None if selection.publication is not None else selection.reason_code,
-            current=(
-                None if selection.publication is None else bootstrap_record(selection.publication)
-            ),
+            warning_codes=selection.warning_codes,
+            current=(None if selection.publication is None else bootstrap_record(view, selection)),
             verified_publications=tuple(bootstrap_locator(item) for item in publications),
         )
         return _render(request, response, view)
