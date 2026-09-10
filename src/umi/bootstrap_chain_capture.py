@@ -20,7 +20,7 @@ import stat
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
@@ -364,7 +364,7 @@ class _PreservedOwnerRpcCapture:
             timestamp = datetime.fromisoformat(captured_at[:-1] + "+00:00")
         except ValueError as error:
             raise BootstrapChainCaptureError("owner_rpc_capture_timestamp_invalid") from error
-        if timestamp.tzinfo is None or timestamp.astimezone(UTC).utcoffset() is None:
+        if timestamp.tzinfo is None or timestamp.astimezone(timezone.utc).utcoffset() is None:
             raise BootstrapChainCaptureError("owner_rpc_capture_timestamp_invalid")
         block_number = value.get("block_number")
         extrinsic_index = value.get("extrinsic_index")

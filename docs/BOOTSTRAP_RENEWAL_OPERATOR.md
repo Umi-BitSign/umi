@@ -2,10 +2,11 @@
 
 This is the coordinator-side continuity procedure for the temporary SN78 service
 row. Dan installs the reviewed c77 supervisor with its corrected finality binary
-and configuration, plus the worker release pinned below, once. The first sequence-2
-directive and its applied signed result are produced manually. After that result
-is public, this controller renews the exact same UID 200 row without routine
-access to Dan's host or validator hotkey.
+and configuration, plus the worker release pinned below, once. Signed directives
+1, 2, and 3 are the preserved manual history. The applied sequence-3 result is the
+controller's seed. After that result is public, the controller publishes sequence
+4 as its first automatic renewal and renews the exact same UID 200 row without
+routine access to Dan's host or validator hotkey.
 
 The controller cannot submit weights. It holds only UMI's coordinator hotkey. On
 each cycle it waits for the finalized UID 200 `LastUpdate + 100` rate-limit
@@ -36,29 +37,31 @@ precomputed.
 
 ## Adoption boundary
 
-Do not start this controller before the initial sequence-2 result exists. Its
+Do not start this controller before the applied sequence-3 result exists. Its
 configuration must pin all of these exact local canonical files:
 
 1. the signed frozen eligibility manifest;
 2. the owner-fence receipt;
 3. the pinned worker's `SupervisorReleaseTarget` JSON object;
 4. Dan's installed validator-supervisor configuration;
-5. signed directives 1 and 2; and
-6. the submission ID of the validator-signed applied result for directive 2.
+5. signed directives 1, 2, and 3; and
+6. the submission ID of the validator-signed applied result for directive 3.
 
-The sequence-2 operator-input URL must already be the immutable R2 path
+The sequence-3 operator-input URL must already be the immutable R2 path
 `/validator-bootstrap-inputs/<bundle-sha256>.json`. Dan's installed supervisor
 configuration must allow both `https://api.umi.vision` and
 `https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev` as release origins. The
-controller verifies that directive 2's hash and size identify the four records in
+controller verifies that directive 3's hash and size identify the four records in
 the signed result and that the result's applied `LastUpdate` is still the exact
-current chain value. It will not synthesize, replace, or race sequence 2.
+current chain value. It will not synthesize, replace, or race any manual seed
+directive.
 
-Before adoption, verify that the public feed contains both cursor pages:
+Before adoption, verify that the public feed contains all three seed cursor pages:
 
 ```text
 /api/v1/validator-directives/<UID200_ACCOUNT_ID32>/after/1/<SEQ1_SHA256>.json
 /api/v1/validator-directives/<UID200_ACCOUNT_ID32>/after/2/<SEQ2_SHA256>.json
+/api/v1/validator-directives/<UID200_ACCOUNT_ID32>/after/3/<SEQ3_SHA256>.json
 ```
 
 The controller retains every signed directive under its private state root. A
@@ -117,7 +120,7 @@ sudo install -o root -g root -m 0400 "$candidate" \
 rm -f "$candidate"
 ```
 
-The route root, initial sequence-1 page, sequence-2 cursor pages, and observer feed
+The route root, cursor pages through sequence 3, and observer feed
 must already be root-owned and non-writable by group or world. Run the local
 checks before enabling the daemon:
 
@@ -131,7 +134,7 @@ sudo /opt/umi-bootstrap-renewal/.venv/bin/umi-bootstrap-renewal \
 ```
 
 `initialize` must report `renewal_initialized`. If the seed result is not public,
-does not match directive 2, is no longer the current UID 200 result, or the row is
+does not match directive 3, is no longer the current UID 200 result, or the row is
 not the sole active exact row, stop. Do not delete state and try again.
 
 ## Enable and monitor

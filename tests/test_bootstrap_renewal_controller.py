@@ -264,10 +264,30 @@ def _make_case(tmp_path: Path) -> RenewalCase:
         ),
         coordinator,
     )
+    third = _sign_directive(
+        SupervisorDirective(
+            schema=SUPERVISOR_DIRECTIVE_SCHEMA,
+            channel_id=CHANNEL_ID,
+            sequence=3,
+            previous_directive_sha256=second.directive_sha256,
+            issued_at_block=128,
+            valid_from_block=128,
+            valid_through_block=155,
+            network="finney",
+            netuid=78,
+            mechanism_id=0,
+            mode="bootstrap_service_weights",
+            validator_hotkeys=[validator.hotkey.ss58_address],
+            policy_sha256=signed.manifest.policy_sha256,
+            release=release,
+            operator_inputs=input_target,
+        ),
+        coordinator,
+    )
     seed_result = sign_supervisor_bootstrap_result(
         SupervisorBootstrapResult(
             schema=SUPERVISOR_BOOTSTRAP_RESULT_SCHEMA,
-            directive_sha256=second.directive_sha256,
+            directive_sha256=third.directive_sha256,
             release_manifest_sha256=release.release_manifest_sha256,
             validator_hotkey=validator.hotkey.ss58_address,
             submission_id=seed_submission_id,
@@ -342,9 +362,9 @@ def _make_case(tmp_path: Path) -> RenewalCase:
         route_root,
         trusted_owner_uid=os.geteuid(),
     )
-    history = [first, second]
+    history = [first, second, third]
     account = account_id32(validator.hotkey.ss58_address).hex()
-    for sequence in (1, 2):
+    for sequence in (1, 2, 3):
         path = (
             route_root
             / account
@@ -374,6 +394,7 @@ def _make_case(tmp_path: Path) -> RenewalCase:
         seed_directives=[
             _pin(static_root, "directive-1.json", first),
             _pin(static_root, "directive-2.json", second),
+            _pin(static_root, "directive-3.json", third),
         ],
         seed_result_submission_id=seed_submission_id,
         coordinator_wallet=CoordinatorWalletBinding(
@@ -533,7 +554,7 @@ async def test_controller_recovers_each_phase_and_renews_only_after_rate_limit(
     controller = _controller(case)
     state = await controller.initialize()
     assert state is not None
-    assert state.head_sequence == 2
+    assert state.head_sequence == 3
 
     waiting = await controller.step()
     assert waiting.status == "waiting_for_rate_limit"
@@ -564,7 +585,7 @@ async def test_controller_recovers_each_phase_and_renews_only_after_rate_limit(
     verified = await controller.step()
     assert verified.status == "result_verified"
     final = controller._load_state()
-    assert final.head_sequence == 3
+    assert final.head_sequence == 4
     assert final.transaction is None
     assert final.last_update_block == state.last_update_block + 104
 
@@ -588,14 +609,14 @@ async def test_expired_directive_without_effect_advances_history_but_never_reuse
     expired = await controller.step()
     assert expired.status == "retry_after_no_effect"
     recovered = controller._load_state()
-    assert recovered.head_sequence == 3
+    assert recovered.head_sequence == 4
     assert recovered.transaction is None
     assert recovered.abandoned_submission_count == 1
 
     retry_controller = _controller(case, suffix="02" * 16)
     retry = await retry_controller.step()
     assert retry.status == "prepared"
-    assert retry_controller._load_state().transaction.directive_sequence == 4
+    assert retry_controller._load_state().transaction.directive_sequence == 5
 
 
 @pytest.mark.asyncio
@@ -687,7 +708,7 @@ def test_feed_publication_rejects_a_concurrent_page_change(tmp_path: Path) -> No
     next_directive = _sign_directive(
         history[-1].directive.model_copy(
             update={
-                "sequence": 3,
+                "sequence": 4,
                 "previous_directive_sha256": history[-1].directive_sha256,
             }
         ),
