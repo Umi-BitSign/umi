@@ -29,17 +29,18 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 SUPERVISOR_CONFIG_SCHEMA = "umi-validator-supervisor-config/1"
 SUPERVISOR_TRUST_POLICY_SCHEMA = "umi-validator-supervisor-trust-policy/1"
-SUPERVISOR_DIRECTIVE_SCHEMA = "umi-validator-supervisor-directive/1"
-SUPERVISOR_SIGNED_DIRECTIVE_SCHEMA = "umi-validator-supervisor-signed-directive/1"
-SUPERVISOR_DIRECTIVE_PAGE_SCHEMA = "umi-validator-supervisor-directive-page/1"
-SUPERVISOR_DIRECTIVE_STATE_SCHEMA = "umi-validator-supervisor-directive-state/1"
+SUPERVISOR_DIRECTIVE_SCHEMA = "umi-validator-supervisor-directive/2"
+SUPERVISOR_SIGNED_DIRECTIVE_SCHEMA = "umi-validator-supervisor-signed-directive/2"
+SUPERVISOR_DIRECTIVE_PAGE_SCHEMA = "umi-validator-supervisor-directive-page/2"
+SUPERVISOR_DIRECTIVE_STATE_SCHEMA = "umi-validator-supervisor-directive-state/2"
 
-SUPERVISOR_DIRECTIVE_SIGNATURE_DOMAIN = b"umi-validator-supervisor-directive-v1\0"
+SUPERVISOR_DIRECTIVE_SIGNATURE_DOMAIN = b"umi-validator-supervisor-directive-v2\0"
 MAX_SUPERVISOR_DOCUMENT_BYTES = 1024 * 1024
 MAX_SUPERVISOR_AUTHORITIES = 16
 MAX_SUPERVISOR_VALIDATORS = 65_536
 MAX_SUPERVISOR_DIRECTIVES_PER_PAGE = 64
 MAX_SUPERVISOR_RELEASE_BUNDLE_BYTES = 1024 * 1024 * 1024
+MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 
 SupervisorMode = Literal[
@@ -50,7 +51,7 @@ SupervisorMode = Literal[
 ]
 SupervisorEntrypointProfile = Literal[
     "umi-live-shadow-validator/1",
-    "umi-bootstrap-weight-validator/1",
+    "umi-bootstrap-weight-validator/2",
     "umi-translation-validator/1",
 ]
 
@@ -276,6 +277,21 @@ class SupervisorReleaseTarget(StrictProtocolModel):
         return self
 
 
+class SupervisorOperatorInputTarget(StrictProtocolModel):
+    """One immutable canonical input bundle selected by a signed directive."""
+
+    artifact_type: Literal["canonical_json"]
+    profile: Literal["umi-bootstrap-direct-inputs/2"]
+    bundle_url: Annotated[str, Field(min_length=1, max_length=2_048)]
+    bundle_sha256: Hex32
+    bundle_size_bytes: Annotated[int, Field(gt=0, le=MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)]
+
+    @model_validator(mode="after")
+    def validate_target(self) -> Self:
+        _release_url_origin(self.bundle_url)
+        return self
+
+
 class SupervisorDirective(StrictProtocolModel):
     """One ordered, expiring hold or worker-activation decision."""
 
@@ -295,6 +311,7 @@ class SupervisorDirective(StrictProtocolModel):
     ]
     policy_sha256: Hex32 | None
     release: SupervisorReleaseTarget | None
+    operator_inputs: SupervisorOperatorInputTarget | None = None
 
     @model_validator(mode="after")
     def validate_directive(self) -> Self:
@@ -306,18 +323,27 @@ class SupervisorDirective(StrictProtocolModel):
         if accounts != sorted(accounts) or len(set(accounts)) != len(accounts):
             raise ValueError("supervisor validator hotkeys must be unique and AccountId32-sorted")
         if self.mode == "hold":
-            if self.policy_sha256 is not None or self.release is not None:
-                raise ValueError("a hold directive cannot name a policy or release")
+            if (
+                self.policy_sha256 is not None
+                or self.release is not None
+                or self.operator_inputs is not None
+            ):
+                raise ValueError("a hold directive cannot name a policy, release, or input bundle")
         else:
             if self.policy_sha256 is None or self.release is None:
                 raise ValueError("a worker directive requires a policy and release")
             expected_profile = {
                 "inactive_shadow": "umi-live-shadow-validator/1",
-                "bootstrap_service_weights": "umi-bootstrap-weight-validator/1",
+                "bootstrap_service_weights": "umi-bootstrap-weight-validator/2",
                 "translation_weights": "umi-translation-validator/1",
             }[self.mode]
             if self.release.entrypoint_profile != expected_profile:
                 raise ValueError("worker mode and entrypoint profile disagree")
+            if self.mode == "bootstrap_service_weights":
+                if self.operator_inputs is None:
+                    raise ValueError("bootstrap mode requires an immutable operator-input bundle")
+            elif self.operator_inputs is not None:
+                raise ValueError("only bootstrap mode may name an operator-input bundle")
         return self
 
 
@@ -428,11 +454,18 @@ class SupervisorDirectiveState(StrictProtocolModel):
     accepted_at_finalized_block: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
     accepted_mode: SupervisorMode
     accepted_oci_manifest_sha256: Hex32 | None
+    accepted_operator_input_sha256: Hex32 | None = None
 
     @model_validator(mode="after")
     def validate_worker_fence(self) -> Self:
         if (self.accepted_mode == "hold") != (self.accepted_oci_manifest_sha256 is None):
             raise ValueError("accepted OCI manifest digest must be null exactly when mode is hold")
+        if (self.accepted_mode == "bootstrap_service_weights") != (
+            self.accepted_operator_input_sha256 is not None
+        ):
+            raise ValueError(
+                "accepted operator-input digest must exist exactly when mode is bootstrap"
+            )
         return self
 
 
@@ -617,6 +650,11 @@ def _verify_signed_supervisor_directive(
             <= directive.release.state_schema_maximum
         ):
             raise ValidatorSupervisorError("directive_state_schema_incompatible")
+    if (
+        directive.operator_inputs is not None
+        and _release_url_origin(directive.operator_inputs.bundle_url) not in config.release_origins
+    ):
+        raise ValidatorSupervisorError("directive_operator_input_origin_not_allowed")
 
     authority_by_account = {account_id32(item.hotkey): item for item in trust_policy.authorities}
     verified = 0
@@ -734,9 +772,15 @@ def _advance_supervisor_directive_state(
             expected_manifest = (
                 None if directive.release is None else directive.release.oci_manifest_sha256
             )
+            expected_operator_input = (
+                None
+                if directive.operator_inputs is None
+                else directive.operator_inputs.bundle_sha256
+            )
             if (
                 prior_state.accepted_mode != directive.mode
                 or prior_state.accepted_oci_manifest_sha256 != expected_manifest
+                or prior_state.accepted_operator_input_sha256 != expected_operator_input
             ):
                 raise ValidatorSupervisorError("directive_state_execution_binding_mismatch")
             return prior_state
@@ -758,6 +802,9 @@ def _advance_supervisor_directive_state(
         accepted_mode=directive.mode,
         accepted_oci_manifest_sha256=(
             None if directive.release is None else directive.release.oci_manifest_sha256
+        ),
+        accepted_operator_input_sha256=(
+            None if directive.operator_inputs is None else directive.operator_inputs.bundle_sha256
         ),
     )
 
@@ -1033,6 +1080,7 @@ def _open_state_lock(path: Path) -> Any:
 __all__ = [
     "MAX_SUPERVISOR_DIRECTIVES_PER_PAGE",
     "MAX_SUPERVISOR_DOCUMENT_BYTES",
+    "MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES",
     "MAX_SUPERVISOR_RELEASE_BUNDLE_BYTES",
     "SUPERVISOR_CONFIG_SCHEMA",
     "SUPERVISOR_DIRECTIVE_PAGE_SCHEMA",
@@ -1049,6 +1097,7 @@ __all__ = [
     "SupervisorDirectiveState",
     "SupervisorEntrypointProfile",
     "SupervisorMode",
+    "SupervisorOperatorInputTarget",
     "SupervisorReleaseTarget",
     "SupervisorTrustPolicy",
     "SupervisorWalletBinding",

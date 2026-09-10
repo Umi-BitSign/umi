@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import ipaddress
 import math
 import os
 import re
@@ -19,10 +20,13 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from typing import Any, Protocol
 
+from .chain import _public_axon_origin
+from .encoding import account_id32
 from .observer_models import (
     ChainNetworkSnapshot,
     ChainParticipant,
     ChainParticipantMetrics,
+    ChainValidatorWeightRow,
     EpochState,
     ExactExchangeRate,
     ExactNormalizedMetric,
@@ -87,7 +91,7 @@ def _default_client_factory(network: str) -> Any:
     return ReadOnlyObserverClient(network)
 
 
-def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any, Any]:
+def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any, Any, Any]:
     """Descriptors pinned by the repository's exact Bittensor dependency."""
 
     from bittensor._generated import storage
@@ -97,6 +101,7 @@ def _pinned_storage_descriptors() -> tuple[Any, Any, Any, Any, Any]:
         storage.SubtensorModule.CommitRevealWeightsVersion,
         storage.SubtensorModule.MaxMechanismCount,
         storage.SubtensorModule.NetworksAdded,
+        storage.SubtensorModule.SubnetOwnerHotkey,
         storage.SubtensorModule.Weights,
     )
 
@@ -179,6 +184,77 @@ def _hotkey(value: Any) -> str:
     if not value.isascii() or any(character.isspace() for character in value):
         raise ChainCollectionError("invalid_participant_hotkey")
     return value
+
+
+def _account_id32_hex(value: Any, field: str) -> str:
+    candidate = getattr(value, "value", value)
+    try:
+        if isinstance(candidate, str) and candidate.startswith("0x"):
+            raw = bytes.fromhex(candidate[2:])
+            account = account_id32(raw)
+        else:
+            account = account_id32(candidate)
+    except (TypeError, ValueError) as error:
+        raise ChainCollectionError(f"invalid_{field}") from error
+    return "0x" + account.hex()
+
+
+def _axon_announced(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value)
+    raw_ip = value.get("ip") if isinstance(value, Mapping) else getattr(value, "ip", None)
+    if isinstance(raw_ip, bool) or not isinstance(raw_ip, (int, str)):
+        return False
+    if isinstance(raw_ip, int):
+        return raw_ip != 0
+    if raw_ip.isdecimal():
+        return int(raw_ip) != 0
+    try:
+        return not ipaddress.ip_address(raw_ip).is_unspecified
+    except ValueError:
+        return False
+
+
+def _axon_origin(value: Any) -> str | None:
+    """Return one exact public HTTPS origin, or None for an unusable announcement."""
+
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            return _public_axon_origin(value)
+        if isinstance(value, Mapping):
+            raw_ip = value.get("ip")
+            raw_port = value.get("port")
+            raw_type = value.get("ip_type")
+        else:
+            raw_ip = getattr(value, "ip", None)
+            raw_port = getattr(value, "port", None)
+            raw_type = getattr(value, "ip_type", None)
+        port = _integer(raw_port, "participant_axon_port", minimum=1, maximum=65_535)
+        if isinstance(raw_ip, bool) or not isinstance(raw_ip, (int, str)):
+            raise ValueError("invalid axon IP")
+        try:
+            address = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            if not isinstance(raw_ip, str) or not raw_ip.isdecimal():
+                raise
+            address = ipaddress.ip_address(int(raw_ip))
+        if raw_type is not None:
+            ip_type = _integer(
+                raw_type,
+                "participant_axon_ip_type",
+                minimum=4,
+                maximum=6,
+            )
+            if ip_type not in (4, 6) or ip_type != address.version:
+                raise ValueError("inconsistent axon IP version")
+        host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+        return _public_axon_origin(f"{host}:{port}")
+    except (ChainCollectionError, TypeError, ValueError):
+        return None
 
 
 def _utc_datetime(value: Any, field: str) -> datetime:
@@ -330,30 +406,35 @@ def _count_pending_commits(value: Any) -> int:
     return total
 
 
-def _weight_row(value: Any) -> tuple[tuple[int, int], ...]:
+def _weight_row(
+    value: Any,
+    *,
+    label: str = "uid_zero_mechid0_row",
+) -> tuple[tuple[int, int], ...]:
     """Parse one exact on-chain weight row without accepting coercions or reordering."""
 
-    items = _sequence(value, "uid_zero_mechid0_row")
+    items = _sequence(value, label)
+    field = "uid_zero_mechid0" if label == "uid_zero_mechid0_row" else label
     if len(items) > 256:
-        raise ChainCollectionError("uid_zero_mechid0_row_limit_exceeded")
+        raise ChainCollectionError(f"{label}_limit_exceeded")
     result: list[tuple[int, int]] = []
     previous_uid = -1
     for item in items:
-        pair = _sequence(item, "uid_zero_mechid0_weight_pair")
+        pair = _sequence(item, f"{field}_weight_pair")
         if len(pair) != 2:
-            raise ChainCollectionError("invalid_uid_zero_mechid0_weight_pair")
+            raise ChainCollectionError(f"invalid_{field}_weight_pair")
         destination_uid = _integer(
             pair[0],
-            "uid_zero_mechid0_destination_uid",
+            f"{field}_destination_uid",
             maximum=_PER_U16_DENOMINATOR,
         )
         weight = _integer(
             pair[1],
-            "uid_zero_mechid0_weight",
+            f"{field}_weight",
             maximum=_PER_U16_DENOMINATOR,
         )
         if destination_uid <= previous_uid:
-            raise ChainCollectionError("uid_zero_mechid0_row_not_unique_and_sorted")
+            raise ChainCollectionError(f"{label}_not_unique_and_sorted")
         result.append((destination_uid, weight))
         previous_uid = destination_uid
     return tuple(result)
@@ -404,6 +485,14 @@ def _participant(metagraph: Any, neuron: Any, block_number: int) -> ChainPartici
     if registration_block > block_number or last_update_block > block_number:
         raise ChainCollectionError("participant_block_after_snapshot")
 
+    typed_axon = getattr(neuron, "axon", None)
+    raw_axon = _required_raw_column(metagraph, "axons", participant_count)[uid]
+    if _axon_announced(typed_axon) != _axon_announced(raw_axon):
+        raise ChainCollectionError("participant_axon_raw_mismatch")
+    serving_origin = _axon_origin(typed_axon)
+    if serving_origin != _axon_origin(raw_axon):
+        raise ChainCollectionError("participant_axon_raw_mismatch")
+
     metric_keys = {
         "rank": "rank",
         "trust": "trust",
@@ -446,7 +535,8 @@ def _participant(metagraph: Any, neuron: Any, block_number: int) -> ChainPartici
         registration_block=str(registration_block),
         last_update_block=str(last_update_block),
         last_update_age_blocks=str(block_number - last_update_block),
-        serving_announced=getattr(neuron, "axon", None) is not None,
+        serving_announced=_axon_announced(typed_axon),
+        serving_origin=serving_origin,
         chain_metrics=ChainParticipantMetrics.model_validate(metrics, strict=True),
         umi_translation=UmiTranslationMetrics(
             availability="unavailable",
@@ -542,6 +632,7 @@ class BittensorChainCollector:
             commit_reveal_version_value,
             maximum_mechanism_count_value,
             subnet_exists_value,
+            subnet_owner_hotkey_value,
             uid_zero_mechid0_row_value,
         ) = await asyncio.gather(
             snapshot.subnets.metagraph(netuid=self.netuid, commitments=False),
@@ -606,6 +697,10 @@ class BittensorChainCollector:
             maximum=65_535,
         )
         subnet_exists = _boolean_flag(subnet_exists_value, "subnet_exists")
+        subnet_owner_hotkey_account_id32 = _account_id32_hex(
+            subnet_owner_hotkey_value,
+            "subnet_owner_hotkey",
+        )
         uid_zero_mechid0_row = _weight_row(uid_zero_mechid0_row_value)
 
         participants = tuple(
@@ -623,6 +718,11 @@ class BittensorChainCollector:
             raise ChainCollectionError("duplicate_participant_uid")
         if len({participant.hotkey for participant in participants}) != len(participants):
             raise ChainCollectionError("duplicate_participant_hotkey")
+        validator_mechid0_rows = await self._validator_weight_rows(
+            snapshot,
+            participants,
+            uid_zero_mechid0_row,
+        )
 
         unavailable_fields: set[str] = {"epoch.seconds_remaining"}
         network = self._build_network(
@@ -639,7 +739,9 @@ class BittensorChainCollector:
             runtime_spec_version=runtime_spec_version,
             subnet_exists=subnet_exists,
             subnet_emission_enabled=subnet_emission_enabled,
+            subnet_owner_hotkey_account_id32=subnet_owner_hotkey_account_id32,
             uid_zero_mechid0_row=uid_zero_mechid0_row,
+            validator_mechid0_rows=validator_mechid0_rows,
             participants=participants,
             unavailable_fields=unavailable_fields,
         )
@@ -657,12 +759,13 @@ class BittensorChainCollector:
             participants=participants,
         )
 
-    def _storage_reads(self, snapshot: Any) -> tuple[Any, Any, Any, Any, Any]:
+    def _storage_reads(self, snapshot: Any) -> tuple[Any, Any, Any, Any, Any, Any]:
         (
             runtime_upgrade,
             commit_reveal_version,
             max_mechanisms,
             networks_added,
+            subnet_owner_hotkey,
             weights,
         ) = _pinned_storage_descriptors()
         return (
@@ -670,8 +773,35 @@ class BittensorChainCollector:
             snapshot.query(commit_reveal_version),
             snapshot.query(max_mechanisms),
             snapshot.query(networks_added, [self.netuid]),
+            snapshot.query(subnet_owner_hotkey, [self.netuid]),
             snapshot.query(weights, [self.netuid, 0]),
         )
+
+    async def _validator_weight_rows(
+        self,
+        snapshot: Any,
+        participants: tuple[ChainParticipant, ...],
+        uid_zero_row: tuple[tuple[int, int], ...],
+    ) -> tuple[ChainValidatorWeightRow, ...]:
+        weights = _pinned_storage_descriptors()[-1]
+        validators = tuple(item for item in participants if item.validator_permit)
+        other_validators = tuple(item for item in validators if item.uid != 0)
+        other_values = await asyncio.gather(
+            *(snapshot.query(weights, [self.netuid, item.uid]) for item in other_validators)
+        )
+        rows = [
+            ChainValidatorWeightRow(validator_uid=0, weights=uid_zero_row)
+            for item in validators
+            if item.uid == 0
+        ]
+        rows.extend(
+            ChainValidatorWeightRow(
+                validator_uid=item.uid,
+                weights=_weight_row(value, label=f"validator_{item.uid}_mechid0_row"),
+            )
+            for item, value in zip(other_validators, other_values, strict=True)
+        )
+        return tuple(sorted(rows, key=lambda item: item.validator_uid))
 
     @staticmethod
     def _validate_finalized_block(
@@ -868,7 +998,9 @@ class BittensorChainCollector:
         runtime_spec_version: int | None,
         subnet_exists: bool | None,
         subnet_emission_enabled: bool | None,
+        subnet_owner_hotkey_account_id32: str,
         uid_zero_mechid0_row: tuple[tuple[int, int], ...],
+        validator_mechid0_rows: tuple[ChainValidatorWeightRow, ...],
         participants: tuple[ChainParticipant, ...],
         unavailable_fields: set[str],
     ) -> ChainNetworkSnapshot:
@@ -1001,7 +1133,9 @@ class BittensorChainCollector:
             subnet_exists=subnet_exists,
             subnet_started=subnet_started,
             subnet_emission_enabled=subnet_emission_enabled,
+            subnet_owner_hotkey_account_id32=subnet_owner_hotkey_account_id32,
             uid_zero_mechid0_row=uid_zero_mechid0_row,
+            validator_mechid0_rows=validator_mechid0_rows,
             price=price,
             epoch=epoch,
             counts=NetworkCounts(

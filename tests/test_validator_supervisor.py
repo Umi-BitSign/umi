@@ -129,9 +129,21 @@ def _release(**changes) -> dict[str, object]:
         "target_platform": "linux/amd64",
         "umi_git_revision": REVISION,
         "umi_source_tree_sha256": SOURCE_TREE_SHA256,
-        "entrypoint_profile": "umi-bootstrap-weight-validator/1",
+        "entrypoint_profile": "umi-bootstrap-weight-validator/2",
         "state_schema_minimum": 1,
         "state_schema_maximum": 1,
+    }
+    values.update(changes)
+    return values
+
+
+def _operator_inputs(**changes) -> dict[str, object]:
+    values: dict[str, object] = {
+        "artifact_type": "canonical_json",
+        "profile": "umi-bootstrap-direct-inputs/2",
+        "bundle_url": "https://releases.umi.vision/validator/bootstrap-inputs.json",
+        "bundle_sha256": "88" * 32,
+        "bundle_size_bytes": 1_000_000,
     }
     values.update(changes)
     return values
@@ -153,6 +165,7 @@ def _directive(**changes) -> SupervisorDirective:
         "validator_hotkeys": [_validator_hotkey()],
         "policy_sha256": POLICY_SHA256,
         "release": _release(),
+        "operator_inputs": _operator_inputs(),
     }
     values.update(changes)
     return SupervisorDirective.model_validate(values)
@@ -217,10 +230,10 @@ def test_canonical_parsers_reject_whitespace_duplicates_oversize_and_extra_field
         parse_canonical_signed_supervisor_directive(pretty)
     assert _reason(noncanonical) == "directive_noncanonical"
 
+    encoded_schema = SUPERVISOR_SIGNED_DIRECTIVE_SCHEMA.encode("ascii")
     duplicate = canonical.replace(
-        b'"schema":"umi-validator-supervisor-signed-directive/1"',
-        b'"schema":"umi-validator-supervisor-signed-directive/1",'
-        b'"schema":"umi-validator-supervisor-signed-directive/1"',
+        b'"schema":"' + encoded_schema + b'"',
+        b'"schema":"' + encoded_schema + b'","schema":"' + encoded_schema + b'"',
         1,
     )
     with pytest.raises(ValidatorSupervisorError) as duplicated:
@@ -413,6 +426,24 @@ def test_local_config_pins_release_repository_origin_platform_and_state_schema(
     assert _reason(raised) == reason
 
 
+def test_local_config_pins_operator_input_origin() -> None:
+    signed = _signed(
+        _directive(
+            operator_inputs=_operator_inputs(
+                bundle_url="https://other.example/bootstrap-inputs.json"
+            )
+        )
+    )
+    with pytest.raises(ValidatorSupervisorError) as raised:
+        advance_supervisor_directive_state(
+            signed,
+            config=_config(),
+            finalized_block=105,
+            prior_state=None,
+        )
+    assert _reason(raised) == "directive_operator_input_origin_not_allowed"
+
+
 @pytest.mark.parametrize(
     "release_change",
     [
@@ -439,15 +470,23 @@ def test_directive_shape_binds_predecessor_blocks_order_and_entrypoint() -> None
         {"mode": "hold"},
         {
             "mode": "inactive_shadow",
-            "release": _release(entrypoint_profile="umi-bootstrap-weight-validator/1"),
+            "release": _release(entrypoint_profile="umi-bootstrap-weight-validator/2"),
         },
     ]
     for changes in invalid:
         with pytest.raises(ValidationError):
             _directive(**changes)
 
-    hold = _directive(mode="hold", policy_sha256=None, release=None)
+    hold = _directive(mode="hold", policy_sha256=None, release=None, operator_inputs=None)
     assert hold.mode == "hold"
+
+    with pytest.raises(ValidationError, match="immutable operator-input bundle"):
+        _directive(operator_inputs=None)
+    with pytest.raises(ValidationError, match="only bootstrap mode"):
+        _directive(
+            mode="inactive_shadow",
+            release=_release(entrypoint_profile="umi-live-shadow-validator/1"),
+        )
 
 
 def test_authority_validator_and_signature_sets_are_unique_and_account_sorted() -> None:
@@ -599,6 +638,7 @@ def test_monotonic_directive_chain_allows_exact_replay_and_next_record() -> None
     assert first.accepted_sequence == 1
     assert first.accepted_mode == "bootstrap_service_weights"
     assert first.accepted_oci_manifest_sha256 == "55" * 32
+    assert first.accepted_operator_input_sha256 == "88" * 32
     assert (
         advance_supervisor_directive_state(
             first_signed,
@@ -652,6 +692,13 @@ def test_directive_state_requires_mode_and_immutable_release_binding() -> None:
             **base,
             accepted_mode="translation_weights",
             accepted_oci_manifest_sha256=None,
+        )
+    with pytest.raises(ValidationError, match="operator-input digest"):
+        SupervisorDirectiveState(
+            **base,
+            accepted_mode="bootstrap_service_weights",
+            accepted_oci_manifest_sha256="55" * 32,
+            accepted_operator_input_sha256=None,
         )
 
 

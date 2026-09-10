@@ -56,7 +56,7 @@ curl --fail --silent --show-error \
   --header 'Accept-Encoding: identity' \
   https://api.umi.vision/api/v1/network |
   jq -e '
-    .schema == "umi-observer-network/1" and
+    .schema == "umi-observer-network/2" and
     .freshness == "fresh" and
     .protocol_state.chain_identity_matches_expected == true and
     .network.netuid == 78 and

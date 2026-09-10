@@ -102,7 +102,7 @@ def _expect_equal(
 
 
 def verify_document(document: dict[str, Any]) -> dict[str, Any]:
-    _expect_equal(document.get("schema"), "umi-observer-network/1", "observer_schema_mismatch")
+    _expect_equal(document.get("schema"), "umi-observer-network/2", "observer_schema_mismatch")
     _expect_equal(document.get("freshness"), "fresh", "observer_snapshot_not_fresh")
 
     protocol_state = document.get("protocol_state")

@@ -1,10 +1,10 @@
-# SN78 emergency direct-bootstrap cutover, version 1
+# SN78 emergency direct-bootstrap cutover, version 2
 
-Status: temporary owner-controlled service bootstrap
+Status: temporary permit-bound service bootstrap
 
 Scope: Finney SN78, MechId 0, `bootstrap_service_binary`
 
-Operational profile: `umi-bootstrap-direct-cutover/1`
+Operational profile: `direct_full_row/2`
 
 This addendum replaces only the CRv4 submission and clean-cutover procedure in
 the seven-day bootstrap addendum. It does not activate UMI translation weights,
@@ -20,7 +20,7 @@ MinAllowedWeights = 256
 CommitRevealWeightsEnabled = false
 ```
 
-The designated owner validator at UID 0 then submits one raw
+One coordinator-authorized validator with a live SN78 permit then submits one raw
 `SubtensorModule.set_mechanism_weights` call for MechId 0. Its destination list is
 exactly UIDs `0..255`. Eligible public-pilot miners receive `65535`; every other
 UID receives `0`. Zero entries remain in the encoded call. This is a full
@@ -28,8 +28,9 @@ UID receives `0`. Zero entries remain in the encoded call. This is a full
 
 The target version is `4294967296`, which is outside the 32-bit range used by
 legacy validator clients. Each direct row uses a new, single-use,
-coordinator-signed transition authorization that binds the target to the original
-signed manifest and policy. It authorizes only this direct transport change; it
+coordinator-signed transition authorization that binds the target validator hotkey
+and UID to the original signed manifest and policy. It authorizes only this direct
+transport change; it
 does not amend miner consent or turn the original manifest into a translation
 policy. Commit-reveal must stay disabled and the minimum must stay at 256 while
 un-migrated stock validators can still write SN78 weights. The later translation
@@ -43,20 +44,22 @@ This cutover is allowed only when all of these facts hold at one finalized block
 - the chain is Finney, the subnet is 78, and `MechanismCountCurrent` is 1;
 - `MaxAllowedUids` is 256 and the participant snapshot contains each UID `0..255`
   exactly once;
-- the designated signer resolves to UID 0 and has a validator permit;
+- the designated signer resolves to the hotkey and UID in the authorization and
+  has a validator permit;
 - the live `WeightsVersionKey` is `4294967296` and equals the signed transition
   authorization;
 - the transition authorization has schema
-  `umi-bootstrap-direct-transition-authorization/1`, is signed by the original
+  `umi-bootstrap-direct-transition-authorization/2`, is signed by the original
   manifest's coordinator, binds the exact manifest and original policy hashes,
-  names the running UMI revision, has a fresh 32-byte submission ID, declares
+  names the validator hotkey and UID, names the running UMI revision, has a fresh
+  32-byte submission ID, declares
   `single_use: true`, and is active at the finalized block;
 - the signed manifest and every included public pilot replay successfully;
 - the exact endpoint-health observations are current under the bootstrap policy;
 - `eligible_count * MaxWeightsLimit >= 65535`, so the raw row can encode a valid
   positive allocation without changing eligibility;
-- no validator has a pending timelocked weight entry, and UID 0's weight rate has
-  elapsed;
+- no validator has a pending timelocked weight entry, and the authorized
+  validator's weight rate has elapsed;
   and
 - all old validator rows have completed the drain in Section 3.
 
@@ -241,7 +244,7 @@ pending queue, and weight event. For this cutover the audited activity cutoff is
 360 blocks. Derive the clean-height lower bound as:
 
 ```text
-legacy_expiry_height = max(non-UID-0 legacy LastUpdate) + 360
+legacy_expiry_height = max(other permitted-validator LastUpdate) + 360
 ```
 
 The clean finalized height must be strictly greater than
@@ -251,17 +254,19 @@ the atomic fence can still auto-reveal afterward. The 256-entry minimum makes it
 short row fail, and its queue entry clears, but its earlier acceptance may have
 advanced `LastUpdate`.
 
-The drain passes only when one finalized snapshot proves that no non-UID 0
-permitted validator has an active `LastUpdate`, even when its stored row is empty;
-no non-UID 0 row is active; every old pending entry has cleared; the finalized
-height is strictly above the bound; and all three fenced values remain unchanged.
+The drain passes only when one finalized snapshot proves that no permitted
+validator other than the authorized target has an active `LastUpdate`, even when
+its stored row is empty; no other row is active; every old pending entry has
+cleared; the finalized height is strictly above the bound; and all three fenced
+values remain unchanged. The target's own prior row must be empty, inactive, or an
+exact copy of the authorized bootstrap row.
 Publish the snapshot, the calculation, the complete event range, and the resulting
 drain block. A local process stop report is supporting evidence, not a substitute
 for this chain observation.
 
 ## 4. Authorize the narrow transition and build the row
 
-The original manifest coordinator, not the owner or UID 0 validator, signs a new
+The original manifest coordinator, rather than the validator, signs a new
 transition authorization for each row. The authorization explicitly overrides
 the original manifest TTL and commit-stop block for this direct transport only.
 It does not override the original policy's hard sunset. The exact original signed
@@ -281,6 +286,8 @@ AUTHORIZATION=/absolute/path/to/direct-transition-authorization.json
 CURRENT_FINALIZED_BLOCK=REPLACE_WITH_CURRENT_FINALIZED_BLOCK
 AUTHORIZATION_EXPIRY_BLOCK=REPLACE_WITH_BLOCK_BEFORE_ORIGINAL_HARD_SUNSET
 SUBMISSION_ID="$(openssl rand -hex 32)"
+VALIDATOR_HOTKEY=REPLACE_WITH_AUTHORIZED_VALIDATOR_HOTKEY_SS58
+VALIDATOR_UID=REPLACE_WITH_AUTHORIZED_VALIDATOR_UID
 
 "$DIRECT" authorize-transition \
   --manifest "$MANIFEST" \
@@ -290,6 +297,8 @@ SUBMISSION_ID="$(openssl rand -hex 32)"
   --signed-at-block "$CURRENT_FINALIZED_BLOCK" \
   --valid-from-block "$CURRENT_FINALIZED_BLOCK" \
   --expires-at-block "$AUTHORIZATION_EXPIRY_BLOCK" \
+  --validator-hotkey "$VALIDATOR_HOTKEY" \
+  --validator-uid "$VALIDATOR_UID" \
   --output "$AUTHORIZATION" \
   --wallet-name REPLACE_WITH_COORDINATOR_WALLET_NAME \
   --hotkey REPLACE_WITH_COORDINATOR_HOTKEY_NAME \
@@ -302,20 +311,18 @@ SUBMISSION_ID="$(openssl rand -hex 32)"
 ```
 
 Check that `SUBMISSION_ID` is exactly 64 lowercase hexadecimal characters. Publish
-the authorization before UID 0 signs a weight call. Its signature and contents
-are public; the wallet path and names are not.
+the authorization before the named validator signs a weight call. Its signature
+and contents are public; the wallet path and names are not.
 
-Use the final signed bootstrap eligibility manifest and the public UID 0 validator
+Use the final signed bootstrap eligibility manifest and the target-bound validator
 hotkey. The read-only preflight independently checks finalized chain state, pilot
 evidence, endpoints, the fence, the signer mapping, and the complete UID set:
 
 ```sh
-UID0_HOTKEY=REPLACE_WITH_UID0_VALIDATOR_HOTKEY_SS58
-
 "$DIRECT" preflight \
   --manifest "$MANIFEST" \
   --authorization "$AUTHORIZATION" \
-  --validator-hotkey "$UID0_HOTKEY" \
+  --validator-hotkey "$VALIDATOR_HOTKEY" \
   --output /absolute/private/path/to/direct-preflight.json
 ```
 
@@ -325,7 +332,7 @@ Build the unsigned raw call material:
 "$DIRECT" build-call \
   --manifest "$MANIFEST" \
   --authorization "$AUTHORIZATION" \
-  --validator-hotkey "$UID0_HOTKEY" \
+  --validator-hotkey "$VALIDATOR_HOTKEY" \
   --output /absolute/private/path/to/direct-call-preview.json
 ```
 
@@ -335,10 +342,11 @@ zero, and every eligible value must be `65535`. Confirm Finney, netuid 78, MechI
 0, version key `4294967296`, both signed-input hashes, the finalized build block,
 and the raw `set_mechanism_weights` call before making the hotkey available.
 
-## 5. Submit one authorized row from UID 0
+## 5. Submit one authorized row from the target validator
 
 The submit command repeats every preflight, anchors the signed manifest, rebuilds
-the raw call from finalized state, signs with the UID 0 hotkey, submits it, and
+the raw call from finalized state, signs with the authorized validator hotkey, and
+submits it. The command
 waits for finalized inclusion. It then verifies the exact stored row and
 `LastUpdate`. Use new output paths and one durable private state directory:
 
@@ -346,8 +354,8 @@ waits for finalized inclusion. It then verifies the exact stored row and
 "$DIRECT" submit \
   --manifest "$MANIFEST" \
   --authorization "$AUTHORIZATION" \
-  --wallet-name REPLACE_WITH_UID0_WALLET_NAME \
-  --hotkey REPLACE_WITH_UID0_HOTKEY_NAME \
+  --wallet-name REPLACE_WITH_VALIDATOR_WALLET_NAME \
+  --hotkey REPLACE_WITH_VALIDATOR_HOTKEY_NAME \
   --wallet-path /absolute/path/to/restricted-validator-wallets \
   --call-material-output /absolute/private/path/to/submitted-call-material.json \
   --receipt-output /absolute/private/path/to/direct-submission-receipt.json \
@@ -412,7 +420,7 @@ not claim to satisfy complete historical replay.
 
 Build the current-state observer publication from the exact terminal files. The
 journal is the `direct-*.json` file created in the submission state directory for
-this authorization and UID 0 hotkey:
+this authorization and target validator hotkey:
 
 ```sh
 PUBLICATION_ROOT=/absolute/new/path/to/bootstrap-service-publication
@@ -498,11 +506,13 @@ pending-queue drain check, public-pilot replay, fresh HTTPS health checks,
 authorization verification, call build, submission, finalized comparison, and
 publication. Use new call-material and receipt paths. Keep the durable state
 directory and all prior journals; the command keys each journal by the new
-authorization hash and UID 0 hotkey. Never reuse an authorization, submission ID,
+authorization hash and target validator hotkey. Never reuse an authorization,
+submission ID,
 journal, or raw call. Never delete a journal to make a retry possible.
 
 Schedule a refresh only after `WeightsSetRateLimit` has elapsed and with enough
-headroom that the UID 0 row cannot cross `activity_cutoff_blocks` before the next
+headroom that the target validator's row cannot cross `activity_cutoff_blocks`
+before the next
 finalized update. This emergency profile does not change either chain cadence.
 If a fresh authorization or verified update is unavailable, let the row become
 inactive and set `service_weights_active` back to false. Do not improvise a

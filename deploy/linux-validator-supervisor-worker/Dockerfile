@@ -69,7 +69,7 @@ RUN chmod 0555 /opt/umi/bin/umi-grandpa-finality-observer \
 LABEL org.opencontainers.image.source="https://github.com/Umi-BitSign/umi" \
       org.opencontainers.image.revision="${UMI_GIT_REVISION}" \
       vision.umi.source-tree-sha256="${UMI_SOURCE_TREE_SHA256}" \
-      vision.umi.entrypoint-profile="umi-bootstrap-weight-validator/1" \
+      vision.umi.entrypoint-profile="umi-bootstrap-weight-validator/2" \
       vision.umi.role="validator-supervisor-bootstrap-worker"
 
 USER 65532:65532

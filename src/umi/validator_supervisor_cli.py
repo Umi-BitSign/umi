@@ -21,6 +21,7 @@ from typing import Any
 from .protocol import canonical_json_bytes
 from .validator_supervisor import (
     MAX_SUPERVISOR_DOCUMENT_BYTES,
+    MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES,
     SUPERVISOR_DIRECTIVE_PAGE_SCHEMA,
     SUPERVISOR_DIRECTIVE_SCHEMA,
     SUPERVISOR_SIGNED_DIRECTIVE_SCHEMA,
@@ -28,6 +29,7 @@ from .validator_supervisor import (
     SupervisorDirective,
     SupervisorDirectivePage,
     SupervisorDirectiveSignature,
+    SupervisorOperatorInputTarget,
     SupervisorReleaseTarget,
     ValidatorSupervisorError,
     advance_supervisor_directive_state,
@@ -40,11 +42,14 @@ from .validator_supervisor import (
     verify_signed_supervisor_directive_history,
 )
 from .validator_supervisor_adapters import (
+    SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
+    SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
     SUPERVISOR_RELEASE_BUNDLE_MAGIC,
     SUPERVISOR_RELEASE_SIGNATURE_DOMAIN,
     FinneyFinalizedBlockReader,
     HTTPSDirectiveFetcher,
     RootlessPodmanWorkerAdapter,
+    SupervisorBootstrapInputBundle,
     SupervisorReleaseManifest,
     ValidatorSupervisorAdapterError,
 )
@@ -209,6 +214,18 @@ def _parser() -> argparse.ArgumentParser:
     _wallet_arguments(bundle)
     bundle.add_argument("--output", type=Path, required=True)
     bundle.add_argument("--target-output", type=Path, required=True)
+
+    inputs = commands.add_parser(
+        "build-bootstrap-input-bundle",
+        help="bind canonical bootstrap inputs into one immutable directive artifact",
+    )
+    inputs.add_argument("--signed-manifest", type=Path, required=True)
+    inputs.add_argument("--authorization", type=Path, required=True)
+    inputs.add_argument("--drain-checkpoint", type=Path, required=True)
+    inputs.add_argument("--owner-fence-receipt", type=Path, required=True)
+    inputs.add_argument("--bundle-url", required=True)
+    inputs.add_argument("--output", type=Path, required=True)
+    inputs.add_argument("--target-output", type=Path, required=True)
 
     sign = commands.add_parser("sign-directive", help="sign one canonical typed directive")
     sign.add_argument("--directive", type=Path, required=True)
@@ -645,6 +662,54 @@ def _build_release_bundle(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _build_bootstrap_input_bundle(args: argparse.Namespace) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for field, path in (
+        ("signed_manifest", args.signed_manifest),
+        ("transition_authorization", args.authorization),
+        ("drain_checkpoint", args.drain_checkpoint),
+        ("owner_fence_receipt", args.owner_fence_receipt),
+    ):
+        payload = _read_bounded(path, MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)
+        try:
+            value = json.loads(payload)
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise ValidatorSupervisorAdapterError("operator_input_document_invalid") from error
+        if canonical_json_bytes(value) != payload:
+            raise ValidatorSupervisorAdapterError("operator_input_document_noncanonical")
+        values[field] = value
+    try:
+        bundle = SupervisorBootstrapInputBundle.model_validate_json(
+            canonical_json_bytes(
+                {
+                    "schema": SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
+                    "profile": SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
+                    **values,
+                }
+            )
+        )
+    except Exception as error:
+        raise ValidatorSupervisorAdapterError("operator_input_bundle_invalid") from error
+    bundle_bytes = canonical_json_bytes(bundle)
+    if len(bundle_bytes) > MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES:
+        raise ValidatorSupervisorAdapterError("operator_input_bundle_size_invalid")
+    _write_new_bytes(args.output, bundle_bytes, MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)
+    target = SupervisorOperatorInputTarget(
+        artifact_type="canonical_json",
+        profile=SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
+        bundle_url=args.bundle_url,
+        bundle_sha256=hashlib.sha256(bundle_bytes).hexdigest(),
+        bundle_size_bytes=len(bundle_bytes),
+    )
+    _write_new_canonical(args.target_output, target)
+    return {
+        "bundle_sha256": target.bundle_sha256,
+        "bundle_size_bytes": target.bundle_size_bytes,
+        "profile": target.profile,
+        "status": "bootstrap_input_bundle_built",
+    }
+
+
 def _sign_directive(args: argparse.Namespace) -> dict[str, object]:
     directive = _load_directive(args.directive)
     signer, scheme = _load_signer(args)
@@ -877,7 +942,11 @@ def _new_private_file(path: Path) -> Any:
 
 def _write_new_canonical(path: Path, value: Any) -> None:
     payload = canonical_json_bytes(value)
-    if not payload or len(payload) > MAX_SUPERVISOR_DOCUMENT_BYTES:
+    _write_new_bytes(path, payload, MAX_SUPERVISOR_DOCUMENT_BYTES)
+
+
+def _write_new_bytes(path: Path, payload: bytes, maximum_bytes: int) -> None:
+    if not payload or len(payload) > maximum_bytes:
         raise ValidatorSupervisorAdapterError("authoring_output_size_limit")
     handle = _new_private_file(path)
     try:
@@ -903,6 +972,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_run(args.config))
         elif args.command == "build-release-bundle":
             result, code = _build_release_bundle(args), 0
+        elif args.command == "build-bootstrap-input-bundle":
+            result, code = _build_bootstrap_input_bundle(args), 0
         elif args.command == "sign-directive":
             result, code = _sign_directive(args), 0
         elif args.command == "assemble-directive":

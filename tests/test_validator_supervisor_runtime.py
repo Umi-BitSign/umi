@@ -17,6 +17,7 @@ from umi.validator_supervisor import (
     SupervisorAuthority,
     SupervisorDirective,
     SupervisorDirectiveSignature,
+    SupervisorOperatorInputTarget,
     SupervisorReleaseTarget,
     SupervisorWalletBinding,
     ValidatorSupervisorConfig,
@@ -41,7 +42,7 @@ REPOSITORY = "ghcr.io/umi-bitsign/umi-validator"
 
 PROFILE_BY_MODE = {
     "inactive_shadow": "umi-live-shadow-validator/1",
-    "bootstrap_service_weights": "umi-bootstrap-weight-validator/1",
+    "bootstrap_service_weights": "umi-bootstrap-weight-validator/2",
     "translation_weights": "umi-translation-validator/1",
 }
 
@@ -260,6 +261,16 @@ def _release(mode: str, *, repository: str = REPOSITORY) -> SupervisorReleaseTar
     )
 
 
+def _operator_inputs() -> SupervisorOperatorInputTarget:
+    return SupervisorOperatorInputTarget(
+        artifact_type="canonical_json",
+        profile="umi-bootstrap-direct-inputs/2",
+        bundle_url="https://releases.umi.vision/bundles/bootstrap-inputs.json",
+        bundle_sha256="88" * 32,
+        bundle_size_bytes=1_024,
+    )
+
+
 def _signed_directive(
     *,
     sequence: int,
@@ -285,6 +296,7 @@ def _signed_directive(
         validator_hotkeys=[VALIDATOR_HOTKEY],
         policy_sha256=None if mode == "hold" else POLICY_SHA256,
         release=None if mode == "hold" else (release or _release(mode)),
+        operator_inputs=_operator_inputs() if mode == "bootstrap_service_weights" else None,
     )
     digest = supervisor_directive_sha256(directive)
     signed = supervisor_models.SignedSupervisorDirective(

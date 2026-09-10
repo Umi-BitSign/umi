@@ -72,6 +72,7 @@ def _participant(uid: int, *, validator: bool = False) -> ChainParticipant:
         last_update_block="90",
         last_update_age_blocks="9",
         serving_announced=True,
+        serving_origin=None,
         chain_metrics=ChainParticipantMetrics(
             rank=None,
             trust=None,
@@ -133,6 +134,7 @@ def _snapshot(
         subnet_exists=True,
         subnet_started=True,
         subnet_emission_enabled=False,
+        subnet_owner_hotkey_account_id32="0x" + "00" * 32,
         uid_zero_mechid0_row=(),
         price=None,
         epoch=EpochState(
@@ -150,7 +152,7 @@ def _snapshot(
             chain_active=len(rows),
             miners=sum(not row.validator_permit for row in rows),
             validators=sum(row.validator_permit for row in rows),
-            serving_announced=len(rows),
+            serving_announced=sum(row.serving_announced for row in rows),
             maximum_uids=256,
         ),
         hyperparameters=NetworkHyperparameters(
@@ -238,6 +240,8 @@ def test_status_is_finalized_chain_observation_not_umi_evidence() -> None:
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["strict-transport-security"] == "max-age=2592000"
     assert network.status_code == 200
+    assert network.json()["schema"] == "umi-observer-network/2"
+    assert network.json()["network"]["subnet_owner_hotkey_account_id32"] == "0x" + "00" * 32
     assert collector.calls == 1, "request handlers must not trigger chain refreshes"
 
 
@@ -249,6 +253,7 @@ def test_participants_use_exact_numbers_and_omit_sensitive_chain_fields() -> Non
 
     assert response.status_code == 200
     body = response.json()
+    assert body["schema"] == "umi-observer-participants/2"
     assert body["page"] == {
         "role": "miner",
         "limit": 1,
@@ -257,6 +262,7 @@ def test_participants_use_exact_numbers_and_omit_sensitive_chain_fields() -> Non
         "next_cursor": None,
     }
     row = body["participants"][0]
+    assert row["serving_origin"] is None
     assert row["chain_metrics"]["incentive"] == {
         "raw_numerator": "32767",
         "raw_denominator": "65535",

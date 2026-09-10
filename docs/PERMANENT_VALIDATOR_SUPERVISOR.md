@@ -1,11 +1,13 @@
 # Install the permanent UMI validator supervisor on Linux
 
-The permanent supervisor lets an existing SN78 validator retire its legacy
-writer once and accept later UMI assignments through a signed release channel.
+The permanent supervisor lets an SN78 validator accept UMI assignments through a
+signed release channel. An existing operator can retire one legacy writer during
+installation; a clean host can explicitly install without naming or changing any
+legacy service.
 The operator chooses the allowed modes during installation. A directive cannot
 enable a mode that is absent from that local list.
 
-Version 1 starts with no managed worker and never restores the legacy process.
+Version 2 starts with no managed worker and never restores the legacy process.
 Invalid, expired, rolled-back, or unsupported directives also leave the managed
 worker in `hold`.
 Finalized chain observations, rather than a local supervisor receipt, determine
@@ -42,7 +44,7 @@ The mode names have these meanings:
 | Mode | Intended signed runner action | Current state |
 |---|---|---|
 | `hold` | No worker container or chain write | Available at installation |
-| `bootstrap_service_weights` | Manifest anchor and emergency direct UID 0 full row described by the release | The worker requires the signed manifest, direct-transition authorization, recorded drain preflight, and an independently repeated passing preflight |
+| `bootstrap_service_weights` | Manifest anchor and permit-bound emergency direct full row described by the release | The directive binds one immutable bundle containing the signed manifest, target-bound transition authorization, drain preflight, and owner-fence receipt. The worker repeats the preflight before submission. |
 | `inactive_shadow` | Three transcript anchors, no weight call | The standalone live validator implements this mode, but this supervisor worker profile is not implemented and fails closed |
 | `translation_weights` | Future governed translation-weight calls | No translation-active runner exists in version 0.1; the current policy model and live validator reject this mode |
 
@@ -73,10 +75,10 @@ The checked-in example reserves a validator-specific URL base under
 confirm the live publication route before installation. The installed configuration
 pins the base without a trailing slash. Every accepted directive is canonical JSON
 signed by the configured threshold of release-authority hotkeys. It binds the channel,
-validator, sequence, previous directive hash, mode, immutable release digest and
-role, and activation bounds.
+validator, sequence, previous directive hash, mode, immutable release and input-bundle
+digests, worker role, and activation bounds.
 
-Version 1 uses one independent channel and sequence chain per validator. Every
+Version 2 uses one independent channel and sequence chain per validator. Every
 directive on that channel must contain exactly the configured validator hotkey as
 its sole `validator_hotkeys` entry. A shared sequence across a changing validator
 cohort is unsupported: omitting a validator from any intermediate signed directive
@@ -88,8 +90,9 @@ hash mismatch all fail closed. A directive cannot carry a shell command or
 arbitrary arguments. That restriction applies to the directive envelope, not to
 the behavior of an authority-approved image. HTTPS transports the object; its
 signatures authorize it.
-The record also binds the accepted mode and immutable OCI manifest digest. The
-digest is null only for `hold`. After a process restart, any existing record
+The record also binds the accepted mode, immutable OCI manifest digest, and
+bootstrap input-bundle digest. The OCI digest is null only for `hold`; the input
+digest exists only for bootstrap mode. After a process restart, any existing record
 forces one stop-and-hold reconciliation before a later poll may verify, preflight,
 and resume the same signed directive.
 
@@ -123,12 +126,13 @@ releases and images under a published retention procedure.
 
 This installer targets a Linux host booted with systemd and unified cgroup v2. It
 uses GNU `stat`, `readlink`, `find`, `install`, `getent`, `runuser`, `awk`, and
-rootless Podman at `/usr/bin/podman`. Podman's `newuidmap` and `newgidmap` helpers
-must come from the host distribution. The host also needs Git, `jq`, and the pinned
-`uv` release used below. Finality freshness also depends on a sane host clock;
+rootless Podman at `/usr/bin/podman`, and `slirp4netns` at
+`/usr/bin/slirp4netns`. Podman's `newuidmap` and `newgidmap` helpers must come from
+the host distribution. The host also needs Git, `jq`, and the pinned `uv` release
+used below. Finality freshness also depends on a sane host clock;
 confirm `timedatectl show --property=NTPSynchronized --value` reports `yes`. Run
-the migration on a console that will remain connected until the final service and
-legacy-unit checks finish.
+the installation on a console that will remain connected until the final service
+checks finish.
 
 The checked-in resource profile requires at least 8 CPU cores, 16 GiB RAM, and
 100 GiB of local storage. The validator does not need a GPU. Outbound HTTPS, OCI
@@ -312,6 +316,25 @@ from `validator_hotkey`. The container receives the complete restricted wallet
 root as a read-only bind. Because the file is plaintext, protect the host and treat
 every authority-approved worker image as fully trusted with that hotkey.
 
+UMI also supplies one 32-byte result-upload key to each validator through a
+private channel. This is a narrowly scoped transport credential, not a wallet or
+R2 account credential. It permits create-only writes under the validator bootstrap
+result route; the published body must still carry the validator-hotkey signature.
+Never reuse one validator's key on another host. Save the supplied 64-character
+lowercase hexadecimal value in an owner-only file without printing it:
+
+```sh
+bootstrap_result_upload_key=/absolute/private/path/bootstrap-result-upload.key
+chmod 0600 "$bootstrap_result_upload_key"
+credential_size=$(wc -c <"$bootstrap_result_upload_key")
+test "$credential_size" -eq 64 -o "$credential_size" -eq 65
+LC_ALL=C grep -Eq '^[0-9a-f]{64}$' "$bootstrap_result_upload_key"
+```
+
+The installer copies it to a fixed service-only path. A bootstrap worker mounts
+only that file read-only. It does not receive the general pilot credential or any
+Cloudflare API token.
+
 ## 3. Create the one-time configuration
 
 After UMI has published the rollout prerequisites above, copy
@@ -341,10 +364,13 @@ The first contains registry repository names without a tag or digest. The second
 contains canonical HTTPS origins without a path. `target_platform`, worker UID and
 GID, CPU, memory, and PID ceilings constrain every selected worker. The checked-in
 Linux example uses `linux/amd64`, container UID/GID `65532`, 8 CPUs, 12 GiB, and
-512 PIDs. `operator_input_root` is a separate read-only tree for validator-local
-inputs; never place it beneath the wallet, release, supervisor state, or worker
-state root. `worker_state_root` is the only persistent read-write container bind.
-Keep the example memory and PID ceilings in version 1: the system service reserves
+512 PIDs. `release_origins` applies to release bundles and canonical input bundles.
+Bootstrap inputs are downloaded, hash-checked, and staged beneath the
+directive-specific release directory. The mutable `operator_input_root` is not
+mounted in bootstrap mode. Keep it empty and never place it beneath the wallet,
+release, supervisor state, or worker state root. `worker_state_root` is the only
+persistent read-write container bind. Keep the example memory and PID ceilings in
+version 2: the system service reserves
 the remaining headroom within its 16 GiB and 640-task aggregate limits.
 
 `finality_verifier_binary` and `finality_chain_spec_path` must retain the fixed
@@ -378,7 +404,31 @@ The supervisor directive-state and worker-state directories must both be empty o
 this first installation. The installer fails on old contents instead of deleting
 or adopting them; inspect and archive unexpected state before trying again.
 
-## 4. Retire one exact legacy system service and start the supervisor
+## 4. Start the supervisor
+
+Choose exactly one installation mode. Do not create a dummy unit to satisfy the
+legacy mode.
+
+### Clean host
+
+Use `--fresh-install` only when the host has no existing SN78 weight writer under
+systemd, a container runtime, PM2, cron, a user service, or another supervisor.
+This is an explicit operator assertion; the installer does not try to discover
+those launch paths. It performs the same configuration, signed-hold, finality,
+wallet, and rootless-container checks as the legacy path, then installs the UMI
+service without inspecting, stopping, disabling, masking, or inventing a legacy
+service.
+
+```sh
+canonical_config=/absolute/private/path/validator-supervisor.json.canonical
+bootstrap_result_upload_key=/absolute/private/path/bootstrap-result-upload.key
+sudo /opt/umi-validator-supervisor/deploy/linux-validator-supervisor/install.sh \
+  --config "$canonical_config" \
+  --bootstrap-result-upload-key "$bootstrap_result_upload_key" \
+  --fresh-install
+```
+
+### Existing systemd validator
 
 Version 1 accepts exactly one systemd system service. It does not search process
 names or touch Docker, PM2, cron, user services, or another supervisor. If the old
@@ -399,23 +449,28 @@ Run the pinned installer:
 
 ```sh
 canonical_config=/absolute/private/path/validator-supervisor.json.canonical
+bootstrap_result_upload_key=/absolute/private/path/bootstrap-result-upload.key
 sudo /opt/umi-validator-supervisor/deploy/linux-validator-supervisor/install.sh \
   --config "$canonical_config" \
+  --bootstrap-result-upload-key "$bootstrap_result_upload_key" \
   --legacy-unit "$legacy_unit"
 ```
 
-The installer creates the service account and private state paths, verifies the
-new configuration and initial hold, then disables and stops the exact old service
-and permanently masks it. A locally defined unit at `/etc/systemd/system/UNIT` is
-moved into the root-only `/var/lib/umi-validator-retired-units` archive before the
-`/dev/null` mask is created. The wallet and old checkout are not deleted. The
-installer then enables the permanent supervisor. Before reporting success, it
-requires the daemon singleton lock, no managed worker container, and a durably
-accepted signed `hold` directive for five consecutive checks. The daemon obtains a
-fresh owned-finality result again during that reconciliation and writes a receipt
-whose nonce must match the live lock holder; it does not rely on the installer's
-earlier preflight observation. This bounded readiness check may take up to three
-minutes while the owned finality verifier connects.
+In legacy mode the installer creates the service account and private state paths,
+verifies the new configuration and initial hold, then disables and stops the exact
+old service and permanently masks it. A locally defined unit at
+`/etc/systemd/system/UNIT` is moved into the root-only
+`/var/lib/umi-validator-retired-units` archive before the `/dev/null` mask is
+created. The wallet and old checkout are not deleted.
+
+In either mode the installer then enables the permanent supervisor. Before
+reporting success, it requires the daemon singleton lock, no managed worker
+container, and a durably accepted signed `hold` directive for five consecutive
+checks. The daemon obtains a fresh owned-finality result again during that
+reconciliation and writes a receipt whose nonce must match the live lock holder;
+it does not rely on the installer's earlier preflight observation. This bounded
+readiness check may take up to three minutes while the owned finality verifier
+connects.
 
 It will not unmask or restart the legacy writer if the new service fails. Inspect
 the new unit and correct its configuration while the old writer remains retired.
@@ -424,15 +479,26 @@ the new unit and correct its configuration while the old writer remains retired.
 
 ```sh
 sudo systemctl is-active --quiet umi-validator-supervisor.service
-test "$(systemctl is-enabled "$legacy_unit" 2>/dev/null || :)" = masked
-if systemctl is-active --quiet "$legacy_unit"; then exit 1; fi
 sudo systemctl --no-pager --full status umi-validator-supervisor.service
 sudo journalctl -u umi-validator-supervisor.service -n 100 --no-pager
+```
+
+For a legacy installation, also verify the retired unit:
+
+```sh
+test "$(systemctl is-enabled "$legacy_unit" 2>/dev/null || :)" = masked
+if systemctl is-active --quiet "$legacy_unit"; then exit 1; fi
 ```
 
 Post only the supervisor's bounded public enrollment or status receipt when the
 migration notice asks for it. Do not post the configuration, wallet tree, process
 list, unit file, retired-unit archive, journal, or environment.
+
+After an applied bootstrap row, the worker publishes its signed terminal result
+automatically and verifies the public bytes. A failed upload cannot cause another
+chain submission: the durable completed journal is recovered first and only the
+publication is retried. The operator does not need to send receipts or upload an
+evidence bundle manually.
 
 UMI will independently watch finalized chain state. The first bootstrap commit
 remains blocked until all old pending entries are absent and old rows are inactive.
@@ -519,14 +585,14 @@ For a worker release, start with this complete
   "target_platform": "linux/amd64",
   "umi_git_revision": "40-lowercase-hex",
   "umi_source_tree_sha256": "64-lowercase-hex",
-  "entrypoint_profile": "umi-bootstrap-weight-validator/1",
+  "entrypoint_profile": "umi-bootstrap-weight-validator/2",
   "state_schema_minimum": 1,
   "state_schema_maximum": 1
 }
 ```
 
 The entrypoint profile must be `umi-live-shadow-validator/1`,
-`umi-bootstrap-weight-validator/1`, or `umi-translation-validator/1` for its
+`umi-bootstrap-weight-validator/2`, or `umi-translation-validator/1` for its
 corresponding mode. Derive the archive digest and size from the final OCI archive,
 and derive the UMI tree digest from the exact pinned environment:
 
@@ -560,12 +626,32 @@ The release bundle URL must use an origin in every target validator's
 `release_origins`. Publish the bundle bytes unchanged. Do not hand-edit
 `release-target.json`.
 
+For bootstrap mode, build one canonical input bundle from the four reviewed
+records. The command validates each typed record and its cross-bindings, then
+writes the exact `SupervisorOperatorInputTarget` object used by the directive:
+
+```sh
+"$supervisor_cli" build-bootstrap-input-bundle \
+  --signed-manifest signed-manifest.json \
+  --authorization direct-transition-authorization.json \
+  --drain-checkpoint drain-checkpoint.json \
+  --owner-fence-receipt owner-fence-receipt.json \
+  --bundle-url https://REPLACE_WITH_ALLOWED_ORIGIN/path/bootstrap-inputs.json \
+  --output bootstrap-inputs.json \
+  --target-output bootstrap-input-target.json
+```
+
+Publish `bootstrap-inputs.json` unchanged. The validator downloads it once per
+directive, verifies the signed URL, size, and SHA-256 binding, and materializes
+the four canonical files beneath that directive's immutable staging directory.
+The operator does not copy or replace bootstrap files after installation.
+
 Create sequence 1 as a hold. This is the complete directive source shape; replace
 the values, AccountId32-sort `validator_hotkeys`, then canonicalize it:
 
 ```json
 {
-  "schema": "umi-validator-supervisor-directive/1",
+  "schema": "umi-validator-supervisor-directive/2",
   "channel_id": "64-lowercase-hex",
   "sequence": 1,
   "previous_directive_sha256": null,
@@ -578,7 +664,8 @@ the values, AccountId32-sort `validator_hotkeys`, then canonicalize it:
   "mode": "hold",
   "validator_hotkeys": ["validator-ss58"],
   "policy_sha256": null,
-  "release": null
+  "release": null,
+  "operator_inputs": null
 }
 ```
 
@@ -590,8 +677,13 @@ the generated target without re-encoding it by hand:
 ```sh
 jq -cSj . directive.source.json >directive.base.json
 jq -cSj --slurpfile release release-target.json \
-  '.release = $release[0]' directive.base.json >directive.json
+  --slurpfile inputs bootstrap-input-target.json \
+  '.release = $release[0] | .operator_inputs = $inputs[0]' \
+  directive.base.json >directive.json
 ```
+
+Use the input-target injection only for `bootstrap_service_weights`. Set
+`operator_inputs` to null for every other mode.
 
 For a hold, canonicalize the source directly. Each participating configured
 directive authority signs the same canonical bytes on its own host. The signature
@@ -615,7 +707,7 @@ output has the exact `SupervisorDirectiveSignature` fields `hotkey`,
 
 Repeat `--signature FILE` for every participating authority. The assembler sorts
 them by AccountId32 and produces the canonical
-`umi-validator-supervisor-signed-directive/1` object. Use at least the configured
+`umi-validator-supervisor-signed-directive/2` object. Use at least the configured
 threshold and publish only after every target validator's local trust policy is
 confirmed.
 
@@ -673,9 +765,10 @@ be unable to persist the expired terminal entry and advance to the next cursor.
 
 The special `/after/0/initial.json` response must remain exactly the current,
 sequence-1 hold required by `preflight-initial-hold` while initial enrollment is
-open. Close initial enrollment before sequence 2 is published. A validator that
-did not durably accept sequence 1 during that enrollment needs a separate reviewed
-state-bootstrap procedure; it must not synthesize or skip the first directive.
+open. The sequence-2 cursor page may already exist, so a new installation can
+accept the hold and advance on its first normal poll. A validator that cannot
+verify and persist sequence 1 needs a separate reviewed state-bootstrap procedure;
+it must not synthesize or skip the first directive.
 
 For the production observer route, stage pages on the same filesystem as
 `/srv/www/umi-validator-directives`, set every page to `root:root` mode `0444`, and

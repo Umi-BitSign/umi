@@ -28,6 +28,7 @@ from .validator_supervisor import (
     SignedSupervisorDirective,
     SupervisorDirectiveState,
     SupervisorMode,
+    SupervisorOperatorInputTarget,
     SupervisorReleaseTarget,
     ValidatorSupervisorConfig,
     ValidatorSupervisorError,
@@ -50,7 +51,7 @@ CHAIN_CAPABLE_MODES = frozenset(
 _WORKER_MODES = frozenset({"inactive_shadow", "bootstrap_service_weights", "translation_weights"})
 _EXPECTED_ENTRYPOINT = {
     "inactive_shadow": "umi-live-shadow-validator/1",
-    "bootstrap_service_weights": "umi-bootstrap-weight-validator/1",
+    "bootstrap_service_weights": "umi-bootstrap-weight-validator/2",
     "translation_weights": "umi-translation-validator/1",
 }
 
@@ -88,6 +89,7 @@ class SupervisorWorkerActivation:
     valid_from_block: int
     valid_through_block: int
     release: SupervisorReleaseTarget
+    operator_inputs: SupervisorOperatorInputTarget | None
 
     def __post_init__(self) -> None:
         if self.mode not in _WORKER_MODES:
@@ -108,6 +110,11 @@ class SupervisorWorkerActivation:
             raise TypeError("worker activation release must be a SupervisorReleaseTarget")
         if self.release.entrypoint_profile != _EXPECTED_ENTRYPOINT[self.mode]:
             raise ValueError("worker activation mode and entrypoint profile disagree")
+        if self.mode == "bootstrap_service_weights":
+            if not isinstance(self.operator_inputs, SupervisorOperatorInputTarget):
+                raise TypeError("bootstrap worker activation requires immutable operator inputs")
+        elif self.operator_inputs is not None:
+            raise ValueError("only bootstrap worker activation may name operator inputs")
 
     @property
     def may_have_chain_effects(self) -> bool:
@@ -717,6 +724,7 @@ def _worker_activation(signed: SignedSupervisorDirective) -> SupervisorWorkerAct
         valid_from_block=directive.valid_from_block,
         valid_through_block=directive.valid_through_block,
         release=directive.release,
+        operator_inputs=directive.operator_inputs,
     )
 
 

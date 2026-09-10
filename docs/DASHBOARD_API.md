@@ -26,6 +26,12 @@ The chain source carries `storage_proofs_verified: false`. The collector pins ev
 read to a finalized block and cross-checks the block header, but this API does not
 claim to verify Substrate storage proofs.
 
+The current chain snapshot, network, and participant schemas are
+`umi-observer-snapshot/2`, `umi-observer-network/2`, and
+`umi-observer-participants/2`. Version 2 adds the finalized subnet-owner AccountId32,
+all permitted-validator MechId 0 rows, and each participant's normalized public
+HTTPS serving origin. The HTTP route base remains `/api/v1`.
+
 `X-UMI-Contract-Revision` and the `dashboard_static` source artifact hash identify
 the immutable API safety contract and its conservative default protocol state. The
 revision is SHA-256 of compact, key-sorted JSON for these facts:
@@ -51,8 +57,8 @@ the exact response body.
 | Endpoint | Initial contents |
 |---|---|
 | `GET /api/v1/status` | Service readiness, UMI phase, finalized block, and outstanding gap codes |
-| `GET /api/v1/network` | SN78 topology, epoch, runtime, commit-reveal state, emission flags, counts, and selected hyperparameters |
-| `GET /api/v1/participants` | Public UID, hotkey, role, serving announcement, chain economics, and explicit UMI-score unavailability |
+| `GET /api/v1/network` | SN78 topology, owner AccountId32, validator rows, epoch, runtime, commit-reveal state, emission flags, counts, and selected hyperparameters |
+| `GET /api/v1/participants` | Public UID, hotkey, role, normalized chain-announced serving origin, chain economics, and explicit UMI-score unavailability |
 | `GET /api/v1/leaderboard` | Separate native chain-economics ranking and empty UMI translation leaderboard |
 | `GET /api/v1/windows` | Fully replayed validator-local calibration and incident windows |
 | `GET /api/v1/windows/{window_id}` | One released validator window; add `?validator=<AccountId32 hex>` when several validators published the same window |
@@ -242,10 +248,12 @@ Section 6 archive remains a separate required launch artifact.
 `service_weights_active` becomes true only while the current finalized SN78 state
 still matches the publication. The observer requires runtime spec 455, one
 mechanism, all 256 UIDs registered, the direct-bootstrap version and minimum-weight
-fence, commit-reveal disabled, an empty pending queue, no active non-UID 0
-validator, current UID/hotkey/permit/serving bindings for every eligible miner,
-the exact UID 0 owner hotkey and `LastUpdate`, and a byte-identical 256-entry
-MechId 0 row. Expiry, UID reassignment, overwrite, or runtime and hyperparameter
+fence, commit-reveal disabled, an empty pending queue, no active validator other
+than the authorization target, current UID/hotkey/permit/exact HTTPS-origin bindings for
+every eligible miner, the exact authorized validator hotkey, UID, permit, and
+`LastUpdate`, the unchanged subnet-owner mapping, and a byte-identical 256-entry
+MechId 0 row read from that validator's storage entry. Expiry, UID reassignment,
+overwrite, or runtime and hyperparameter
 drift makes the status false on the next snapshot. The
 verified historical publication remains inspectable.
 
@@ -434,10 +442,12 @@ cursor binds the role and finalized block, so a page cannot be mixed with a newe
 snapshot. A changed snapshot returns `409 cursor_snapshot_changed`; start again
 without a cursor.
 
-Participant rows intentionally omit coldkeys, serving IP addresses, personal
-identity data, commitments, hypotheses, references, signatures, and video URLs.
-`serving_announced` means an endpoint is registered on chain. It does not claim the
-endpoint was probed or is reachable.
+Participant rows intentionally omit coldkeys, personal identity data, commitments,
+hypotheses, references, signatures, and video URLs. `serving_origin` is the exact
+normalized public HTTPS origin derived from the finalized chain announcement, or
+null when no usable public origin can be derived. `serving_announced` means a
+nonzero endpoint is registered on chain. Neither field claims the endpoint was
+probed or is reachable.
 `chain_active` is the metagraph's chain-state flag. It must not be rendered as
 "online," "healthy," or "reachable."
 

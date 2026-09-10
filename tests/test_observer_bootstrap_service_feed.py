@@ -9,14 +9,17 @@ from types import MappingProxyType, SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.factories import dev_wallet
 from umi import observer_bootstrap_service_feed as bootstrap_feed_module
 from umi.bootstrap_direct_weights import (
+    DIRECT_SUBMISSION_JOURNAL_SCHEMA,
     DIRECT_TRANSITION_PROFILE,
     DirectBootstrapSubmissionJournal,
     OwnerFenceReceipt,
     build_direct_bootstrap_call_material,
     build_owner_fence_call,
     classify_direct_bootstrap_application,
+    sign_direct_transition_authorization,
     validate_direct_bootstrap_preflight,
 )
 from umi.bootstrap_weight_operator import (
@@ -29,11 +32,17 @@ from umi.observer_bootstrap_service_feed import (
     build_bootstrap_service_publication,
     build_observer_bootstrap_service_feed,
 )
-from umi.observer_models import ObserverSnapshot
+from umi.observer_models import ChainValidatorWeightRow, ObserverSnapshot
 from umi.observer_pilot_feed import ObserverPilotFeed, VerifiedComponentPilot
 from umi.protocol import canonical_json_bytes
 
-from .test_bootstrap_direct_weights import NOW, _operational, _owner_fence_preflight, _preflight
+from .test_bootstrap_direct_weights import (
+    NOW,
+    _operational,
+    _owner_fence_preflight,
+    _permitted_case,
+    _preflight,
+)
 from .test_bootstrap_direct_weights import _snapshot as _bootstrap_snapshot
 from .test_observer import SequenceCollector, _cache, _participant, _snapshot
 
@@ -65,20 +74,47 @@ def _fake_pilot_feed(signed) -> ObserverPilotFeed:
     return ObserverPilotFeed(pilots=tuple(pilots))
 
 
-def _terminal_records():
-    signed, authorization, owner, participants, _ = _preflight()
+def _terminal_records(
+    *,
+    permitted: bool = False,
+    block_offset: int = 0,
+    authorization_variant: bool = False,
+    base_case=None,
+):
+    if base_case is not None:
+        signed, authorization, owner, participants = base_case
+    elif permitted:
+        signed, authorization, owner, _validator, participants, _ = _permitted_case()
+    else:
+        signed, authorization, owner, participants, _ = _preflight()
+    if authorization_variant:
+        authorization = sign_direct_transition_authorization(
+            signed,
+            weights_version_key=authorization.weights_version_key,
+            submission_id=authorization.submission_id,
+            umi_git_revision=authorization.umi_git_revision,
+            signed_at_block=authorization.signed_at_block,
+            valid_from_block=authorization.valid_from_block + 1,
+            expires_at_block=authorization.expires_at_block,
+            validator_hotkey=authorization.validator_hotkey,
+            validator_uid=authorization.validator_uid,
+            wallet=dev_wallet("//DirectBootstrapCoordinator"),
+        )
+    anchor_block = 126 + block_offset
+    preflight_block = 127 + block_offset
+    weight_block = 130 + block_offset
     anchor = BootstrapExtrinsicReference(
-        extrinsic_id="126-0001",
-        block_number=126,
+        extrinsic_id=f"{anchor_block}-0001",
+        block_number=anchor_block,
         extrinsic_index=1,
-        block_hash="0x" + "14" * 32,
+        block_hash="0x" + f"{0x14 + block_offset:02x}" * 32,
     )
     anchor_observation = BootstrapManifestAnchorObservation(
         manifest_sha256=signed.manifest_sha256,
         anchor=anchor,
-        observation_block=127,
-        observation_block_hash="0x" + "15" * 32,
-        stored_commitment_block=126,
+        observation_block=preflight_block,
+        observation_block_hash="0x" + f"{0x15 + block_offset:02x}" * 32,
+        stored_commitment_block=anchor_block,
         field_count=1,
         field_type="Data::Sha256",
         field_sha256=signed.manifest_sha256,
@@ -89,13 +125,13 @@ def _terminal_records():
         signed,
         _bootstrap_snapshot(
             participants,
-            block_number=127,
-            block_hash="0x" + "15" * 32,
-            blocks_since_last_step=27,
+            block_number=preflight_block,
+            block_hash="0x" + f"{0x15 + block_offset:02x}" * 32,
+            blocks_since_last_step=27 + block_offset,
         ),
         authorization=authorization,
         subnet_owner_hotkey=owner.hotkey.ss58_address,
-        validator_hotkey=owner.hotkey.ss58_address,
+        validator_hotkey=authorization.validator_hotkey,
         now=NOW,
     )
     material, _ = build_direct_bootstrap_call_material(
@@ -103,28 +139,30 @@ def _terminal_records():
         manifest_anchor=anchor_observation,
     )
     weight_call = BootstrapExtrinsicReference(
-        extrinsic_id="130-0002",
-        block_number=130,
+        extrinsic_id=f"{weight_block}-0002",
+        block_number=weight_block,
         extrinsic_index=2,
-        block_hash="0x" + "16" * 32,
+        block_hash="0x" + f"{0x16 + block_offset:02x}" * 32,
     )
     updated = [
-        item.model_copy(update={"last_update": 130}) if item.uid == 0 else item
+        item.model_copy(update={"last_update": weight_block})
+        if item.uid == authorization.validator_uid
+        else item
         for item in participants
     ]
     observation = validate_direct_bootstrap_preflight(
         signed,
         _bootstrap_snapshot(
             updated,
-            block_number=130,
-            block_hash="0x" + "13" * 32,
+            block_number=weight_block,
+            block_hash="0x" + f"{0x17 + block_offset:02x}" * 32,
             validator_mechid0_row=material.expected_applied_row,
-            active_mechid0_row_hotkeys=[owner.hotkey.ss58_address],
-            blocks_since_last_step=30,
+            active_mechid0_row_hotkeys=[authorization.validator_hotkey],
+            blocks_since_last_step=30 + block_offset,
         ),
         authorization=authorization,
         subnet_owner_hotkey=owner.hotkey.ss58_address,
-        validator_hotkey=owner.hotkey.ss58_address,
+        validator_hotkey=authorization.validator_hotkey,
         now=NOW,
     )
     receipt = classify_direct_bootstrap_application(
@@ -138,13 +176,13 @@ def _terminal_records():
     receipt_sha256 = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
     authorization_sha256 = hashlib.sha256(canonical_json_bytes(authorization)).hexdigest()
     journal = DirectBootstrapSubmissionJournal(
-        schema="umi-bootstrap-direct-submission-journal/1",
+        schema=DIRECT_SUBMISSION_JOURNAL_SCHEMA,
         transition_profile=DIRECT_TRANSITION_PROFILE,
         submission_id=authorization.submission_id,
         phase="applied",
         manifest_sha256=signed.manifest_sha256,
         transition_authorization_sha256=authorization_sha256,
-        validator_hotkey=owner.hotkey.ss58_address,
+        validator_hotkey=authorization.validator_hotkey,
         anchor=anchor,
         call_material_sha256=material_sha256,
         weight_call=weight_call,
@@ -174,9 +212,9 @@ def _terminal_records():
     return owner_receipt, signed, authorization, material, receipt, journal, owner, participants
 
 
-def _write_feed(tmp_path: Path):
+def _write_feed(tmp_path: Path, *, permitted: bool = False):
     owner_fence, signed, authorization, material, receipt, journal, owner, participants = (
-        _terminal_records()
+        _terminal_records(permitted=permitted)
     )
     root = tmp_path / "publication"
     build_bootstrap_service_publication(
@@ -208,39 +246,68 @@ def _write_feed(tmp_path: Path):
 
 
 def _active_snapshot(feed, owner, participants, *, block_number: int = 130) -> ObserverSnapshot:
+    publication = feed.publications[0]
+    validator_uid = publication.receipt.validator_uid
+    activity_cutoff_blocks = (
+        publication.call_material.operational_preflight.chain.snapshot.activity_cutoff_blocks
+    )
     rows = tuple(
         _participant(item.uid, validator=item.validator_permit).model_copy(
             update={
                 "hotkey": item.hotkey,
-                "last_update_block": "130" if item.uid == 0 else str(item.last_update),
-                "last_update_age_blocks": str(
-                    block_number - (130 if item.uid == 0 else item.last_update)
+                "last_update_block": (
+                    "130" if item.uid == validator_uid else str(item.last_update)
                 ),
+                "last_update_age_blocks": str(
+                    block_number - (130 if item.uid == validator_uid else item.last_update)
+                ),
+                "serving_announced": item.origin is not None,
+                "serving_origin": item.origin,
             }
         )
         for item in participants
     )
     base = _snapshot(block_number=block_number, participants=rows)
-    publication = feed.publications[0]
+    active_rows = tuple(
+        item.model_copy(
+            update={
+                "chain_active": not item.validator_permit or item.uid == validator_uid,
+            }
+        )
+        for item in rows
+    )
+    expected_row = tuple(tuple(item) for item in publication.receipt.expected_applied_row)
     network = base.network.model_copy(
         update={
             "runtime_spec_version": "455",
             "commit_reveal_enabled": False,
             "pending_weight_commit_count": 0,
-            "uid_zero_mechid0_row": tuple(
-                tuple(item) for item in publication.receipt.expected_applied_row
+            "subnet_owner_hotkey_account_id32": (
+                publication.call_material.operational_preflight.chain.subnet_owner_hotkey_account_id32
             ),
-            "counts": base.network.counts.model_copy(update={"maximum_uids": 256}),
+            "uid_zero_mechid0_row": expected_row if validator_uid == 0 else (),
+            "validator_mechid0_rows": (
+                ChainValidatorWeightRow(
+                    validator_uid=validator_uid,
+                    weights=expected_row,
+                ),
+            ),
+            "counts": base.network.counts.model_copy(
+                update={
+                    "chain_active": sum(item.chain_active for item in active_rows),
+                    "maximum_uids": 256,
+                }
+            ),
             "hyperparameters": base.network.hyperparameters.model_copy(
                 update={
                     "min_allowed_weights": 256,
                     "weights_version_key": str(1 << 32),
-                    "activity_cutoff_blocks": "360",
+                    "activity_cutoff_blocks": str(activity_cutoff_blocks),
                 }
             ),
         }
     )
-    return base.model_copy(update={"network": network})
+    return base.model_copy(update={"network": network, "participants": active_rows})
 
 
 def test_applied_direct_bundle_is_replayed_and_served_immutably(tmp_path: Path) -> None:
@@ -288,6 +355,29 @@ def test_applied_direct_bundle_is_replayed_and_served_immutably(tmp_path: Path) 
     assert evidence_object.headers["etag"] == f'"{first_object.sha256}"'
 
 
+def test_permitted_nonowner_bundle_is_verified_against_its_own_chain_row(
+    tmp_path: Path,
+) -> None:
+    feed, owner, participants = _write_feed(tmp_path, permitted=True)
+    publication = feed.publications[0]
+    snapshot = _active_snapshot(feed, owner, participants)
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(publication.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+
+    authorization_hotkey = publication.authorization.validator_hotkey
+    assert response.status_code == 200
+    assert response.json()["availability"] == "active"
+    assert response.json()["current"]["validator_uid"] == 200
+    assert response.json()["current"]["validator_hotkey"] == authorization_hotkey
+    assert authorization_hotkey == publication.receipt.validator_hotkey
+
+
 def test_bootstrap_service_requires_the_verified_pilot_feed(tmp_path: Path) -> None:
     feed, owner, participants = _write_feed(tmp_path)
     snapshot = _active_snapshot(feed, owner, participants)
@@ -323,7 +413,7 @@ def test_bootstrap_service_response_sorts_account_order_by_uid(tmp_path: Path) -
     (
         ({"runtime_spec_version": "456"}, "bootstrap_service_runtime_spec_mismatch"),
         ({"pending_weight_commit_count": 1}, "bootstrap_service_pending_commit_queue_not_empty"),
-        ({"uid_zero_mechid0_row": ()}, "bootstrap_service_applied_row_mismatch"),
+        ({"validator_mechid0_rows": ()}, "bootstrap_service_applied_row_mismatch"),
     ),
 )
 def test_bootstrap_service_state_fails_closed_on_chain_drift(
@@ -375,7 +465,7 @@ def test_bootstrap_service_rejects_active_non_owner_validator(tmp_path: Path) ->
     with TestClient(app) as client:
         response = client.get("/api/v1/bootstrap-service")
     assert response.json()["availability"] == "inactive"
-    assert response.json()["reason_code"] == "bootstrap_service_non_owner_validator_active"
+    assert response.json()["reason_code"] == "bootstrap_service_other_validator_active"
 
 
 def test_bootstrap_service_rejects_eligible_uid_reassignment(tmp_path: Path) -> None:
@@ -396,6 +486,47 @@ def test_bootstrap_service_rejects_eligible_uid_reassignment(tmp_path: Path) -> 
         response = client.get("/api/v1/bootstrap-service")
     assert response.json()["availability"] == "inactive"
     assert response.json()["reason_code"] == "bootstrap_service_eligible_miner_mapping_changed"
+
+
+def test_bootstrap_service_rejects_subnet_owner_rotation(tmp_path: Path) -> None:
+    feed, owner, participants = _write_feed(tmp_path)
+    active = _active_snapshot(feed, owner, participants)
+    snapshot = active.model_copy(
+        update={
+            "network": active.network.model_copy(
+                update={"subnet_owner_hotkey_account_id32": "0x" + "99" * 32}
+            )
+        }
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(feed.publications[0].signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+
+    assert response.json()["availability"] == "inactive"
+    assert response.json()["reason_code"] == "bootstrap_service_subnet_owner_mapping_changed"
+
+
+def test_bootstrap_service_rejects_eligible_miner_origin_change(tmp_path: Path) -> None:
+    feed, owner, participants = _write_feed(tmp_path)
+    active = _active_snapshot(feed, owner, participants)
+    changed = active.participants[1].model_copy(update={"serving_origin": "https://9.9.9.9:443"})
+    snapshot = active.model_copy(
+        update={"participants": (active.participants[0], changed, *active.participants[2:])}
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(feed.publications[0].signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+
+    assert response.json()["availability"] == "inactive"
+    assert response.json()["reason_code"] == "bootstrap_service_eligible_miner_origin_changed"
 
 
 def test_builder_refuses_to_replace_an_existing_publication(tmp_path: Path) -> None:
@@ -486,4 +617,53 @@ def test_feed_rejects_aggregate_limit_before_loading_another_root(
         build_observer_bootstrap_service_feed(
             config,
             pilot_feed=_fake_pilot_feed(publication.signed_manifest),
+        )
+
+
+@pytest.mark.parametrize(
+    ("authorization_variant", "reason"),
+    (
+        (False, "reuses a direct transition authorization"),
+        (True, "reuses a direct transition submission ID"),
+    ),
+)
+def test_feed_rejects_reused_single_use_authority_across_distinct_weight_calls(
+    tmp_path: Path,
+    authorization_variant: bool,
+    reason: str,
+) -> None:
+    first = _terminal_records()
+    second = _terminal_records(
+        block_offset=4,
+        authorization_variant=authorization_variant,
+        base_case=(first[1], first[2], first[6], first[7]),
+    )
+    roots = (tmp_path / "first", tmp_path / "second")
+    for root, records in zip(roots, (first, second), strict=True):
+        build_bootstrap_service_publication(
+            owner_fence_receipt=records[0],
+            signed_manifest=records[1],
+            authorization=records[2],
+            call_material=records[3],
+            submission_receipt=records[4],
+            submission_journal=records[5],
+            output_root=root,
+        )
+    config = tmp_path / "reused-authority-feed.json"
+    config.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema": "umi-observer-bootstrap-service-feed-config/1",
+                "protocol": "umi-asl/0.1",
+                "mode": "bootstrap_service_binary",
+                "public_origin": "https://api.umi.vision",
+                "bundle_roots": [str(root) for root in roots],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=reason):
+        build_observer_bootstrap_service_feed(
+            config,
+            pilot_feed=_fake_pilot_feed(first[1]),
         )

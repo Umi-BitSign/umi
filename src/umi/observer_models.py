@@ -26,10 +26,10 @@ from .grandpa_finality import FINNEY_GENESIS_HASH
 from .public_pilot_campaign import CAMPAIGN_ID
 
 OBSERVER_API_VERSION = "v1"
-OBSERVER_SNAPSHOT_SCHEMA = "umi-observer-snapshot/1"
+OBSERVER_SNAPSHOT_SCHEMA = "umi-observer-snapshot/2"
 STATUS_RESPONSE_SCHEMA = "umi-observer-status/1"
-NETWORK_RESPONSE_SCHEMA = "umi-observer-network/1"
-PARTICIPANTS_RESPONSE_SCHEMA = "umi-observer-participants/1"
+NETWORK_RESPONSE_SCHEMA = "umi-observer-network/2"
+PARTICIPANTS_RESPONSE_SCHEMA = "umi-observer-participants/2"
 LEADERBOARD_RESPONSE_SCHEMA = "umi-observer-leaderboard/1"
 WINDOWS_RESPONSE_SCHEMA = "umi-observer-windows/1"
 WINDOW_RESPONSE_SCHEMA = "umi-observer-window/1"
@@ -355,6 +355,25 @@ class NetworkHyperparameters(ObserverModel):
     maximum_weight: ExactNormalizedMetric | None
 
 
+class ChainValidatorWeightRow(ObserverModel):
+    validator_uid: UnsignedU16
+    weights: Annotated[
+        tuple[tuple[UnsignedU16, UnsignedU16], ...],
+        Field(max_length=256),
+    ]
+
+    @field_validator("weights")
+    @classmethod
+    def validate_weights(
+        cls,
+        value: tuple[tuple[int, int], ...],
+    ) -> tuple[tuple[int, int], ...]:
+        destination_uids = tuple(destination_uid for destination_uid, _ in value)
+        if destination_uids != tuple(sorted(set(destination_uids))):
+            raise ValueError("validator MechId 0 row must be unique and sorted by destination UID")
+        return value
+
+
 class ChainNetworkSnapshot(ObserverModel):
     netuid: Literal[SN78_NETUID] = SN78_NETUID
     name: str | None
@@ -372,10 +391,18 @@ class ChainNetworkSnapshot(ObserverModel):
     subnet_exists: bool | None
     subnet_started: bool | None
     subnet_emission_enabled: bool | None
+    subnet_owner_hotkey_account_id32: Annotated[
+        str,
+        Field(pattern=r"^0x[0-9a-f]{64}$"),
+    ]
     uid_zero_mechid0_row: Annotated[
         tuple[tuple[UnsignedU16, UnsignedU16], ...],
         Field(max_length=256),
     ]
+    validator_mechid0_rows: Annotated[
+        tuple[ChainValidatorWeightRow, ...],
+        Field(max_length=256),
+    ] = ()
     price: ExactExchangeRate | None
     epoch: EpochState
     counts: NetworkCounts
@@ -391,6 +418,17 @@ class ChainNetworkSnapshot(ObserverModel):
         destination_uids = tuple(destination_uid for destination_uid, _ in value)
         if destination_uids != tuple(sorted(set(destination_uids))):
             raise ValueError("UID 0 MechId 0 row must be unique and sorted by destination UID")
+        return value
+
+    @field_validator("validator_mechid0_rows")
+    @classmethod
+    def validate_validator_mechid0_rows(
+        cls,
+        value: tuple[ChainValidatorWeightRow, ...],
+    ) -> tuple[ChainValidatorWeightRow, ...]:
+        uids = tuple(item.validator_uid for item in value)
+        if uids != tuple(sorted(set(uids))):
+            raise ValueError("validator MechId 0 rows must be unique and sorted by validator UID")
         return value
 
     @field_validator("unavailable_fields")
@@ -466,14 +504,46 @@ class ChainParticipant(ObserverModel):
     last_update_block: UnsignedIntegerText
     last_update_age_blocks: UnsignedIntegerText
     serving_announced: bool
+    serving_origin: Annotated[str, Field(min_length=1, max_length=128)] | None
     chain_metrics: ChainParticipantMetrics
     umi_translation: UmiTranslationMetrics
+
+    @field_validator("serving_origin")
+    @classmethod
+    def validate_serving_origin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            raise ValueError("serving origin contains a control character")
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+            address = ipaddress.ip_address(parsed.hostname or "")
+        except ValueError as error:
+            raise ValueError("serving origin is invalid") from error
+        host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+        if (
+            parsed.scheme != "https"
+            or not address.is_global
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or port is None
+            or not 1 <= port <= 65_535
+            or value != f"https://{host}:{port}"
+        ):
+            raise ValueError("serving origin must be a normalized HTTPS global IP and port")
+        return value
 
     @model_validator(mode="after")
     def validate_role(self) -> Self:
         expected_role = "validator" if self.validator_permit else "miner"
         if self.role != expected_role:
             raise ValueError("role must follow validator_permit")
+        if self.serving_origin is not None and not self.serving_announced:
+            raise ValueError("a serving origin requires an on-chain serving announcement")
         return self
 
 
@@ -528,7 +598,7 @@ class ObserverSnapshot(ObserverModel):
             participant.umi_translation.availability == "available"
             for participant in self.participants
         ):
-            raise ValueError("snapshot schema v1 cannot publish released UMI translation scores")
+            raise ValueError("snapshot schema v2 cannot publish released UMI translation scores")
         return self
 
 
@@ -1456,7 +1526,7 @@ class BootstrapServiceRecord(ObserverModel):
     eligibility_manifest_sha256: Hex32
     submission_id: Hex32
     umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    validator_uid: Literal[0]
+    validator_uid: Annotated[int, Field(ge=0, le=255)]
     validator_hotkey: NonEmptyText
     weight_call_block: UnsignedIntegerText
     weight_call_block_hash: BlockHash

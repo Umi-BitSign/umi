@@ -1,7 +1,7 @@
 # Public pilot R2 upload Worker
 
 This Worker is the only write path from the public-pilot automation host to the
-`umi-public-evidence` R2 bucket. It accepts four immutable object classes:
+`umi-public-evidence` R2 bucket. It accepts five immutable object classes:
 
 - `PUT /public-pilot-cases/<archive-sha256>/sealed-case.tar.gz`, up to 96 MiB,
   with `Content-Type: application/gzip`;
@@ -11,6 +11,8 @@ This Worker is the only write path from the public-pilot automation host to the
   96 MiB, with `Content-Type: application/gzip`;
 - `PUT /public-pilot-automation/results/<authorization-id>.json`, up to 256 KiB,
   with `Content-Type: application/json`.
+- `PUT /validator-bootstrap-results/<submission-id>.json`, up to 4 MiB, with
+  `Content-Type: application/json`.
 
 Every hexadecimal identifier must contain exactly 64 lowercase characters. The
 case, evidence, and attempt-journal identifiers are their content SHA-256 values.
@@ -30,10 +32,13 @@ must verify the already-published bytes rather than retrying with changed conten
 
 ## Authentication contract
 
-Set `UPLOAD_HMAC_SECRET` to 32 random bytes encoded as 64 lowercase hexadecimal
-characters. Keep it out of Wrangler configuration, source control, process
-arguments, and logs. Generate it into an owner-only file, install it through
-standard input, and then remove the temporary file:
+Set `UPLOAD_HMAC_SECRET` and `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET` to separate
+32-byte random values encoded as 64 lowercase hexadecimal characters. The first
+authorizes only public-pilot paths. The second authorizes only validator-bootstrap
+result paths and is the credential installed on the validator host. Keep both out
+of Wrangler configuration, source control, process arguments, and logs. Generate
+each into an owner-only file, install it through standard input, and then remove
+the temporary file:
 
 ```sh
 umask 077
@@ -42,6 +47,9 @@ openssl rand -hex 32 > "$secret_file"
 npx wrangler secret put UPLOAD_HMAC_SECRET < "$secret_file"
 rm -f "$secret_file"
 ```
+
+Repeat with a different value and the secret name
+`VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET`.
 
 Each request supplies:
 
@@ -71,9 +79,12 @@ R2 verifies the declared SHA-256 while consuming the request stream. The Worker
 also requires the returned object size and SHA-256 metadata to match before it
 returns `201`.
 
-Use a different upload HMAC secret from the result-envelope HMAC, GitHub,
-coordinator-wallet, observer, tunnel, and direct R2 credentials. The automation
-host needs only this Worker secret and URL. It must not receive an R2 API token.
+Use different HMAC values for pilot automation and validator-bootstrap results.
+Both must also differ from the result-envelope HMAC, GitHub, coordinator-wallet,
+observer, tunnel, and direct R2 credentials. Neither uploader needs an R2 API
+token. A validator receives only its bootstrap-result transport credential; the
+result object is separately signed by its validator hotkey and fully replayed
+before it can enter the observer feed.
 
 ## Local verification
 
@@ -102,6 +113,7 @@ secret interactively, and deploy from this directory:
 
 ```sh
 npx wrangler secret put UPLOAD_HMAC_SECRET
+npx wrangler secret put VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET
 npx wrangler deploy
 ```
 

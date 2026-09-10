@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
 
 const TEST_SECRET = "11".repeat(32);
+const TEST_VALIDATOR_SECRET = "22".repeat(32);
 const encoder = new TextEncoder();
 
 function toHex(value: ArrayBuffer): string {
@@ -30,10 +31,11 @@ async function authorization(
   contentLength: number,
   contentType: string,
   contentSha256: string,
+  secret = TEST_SECRET,
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    hexToBytes(TEST_SECRET),
+    hexToBytes(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -55,6 +57,7 @@ async function makeUpload(
   bodyText: string,
   contentType: "application/gzip" | "application/json",
   overrides: Readonly<Record<string, string>> = {},
+  secret = TEST_SECRET,
 ): Promise<Request> {
   const body = encoder.encode(bodyText);
   const contentSha256 = overrides["X-UMI-Content-SHA256"] ?? await digest(body);
@@ -66,6 +69,7 @@ async function makeUpload(
     Number(contentLength),
     contentType,
     contentSha256,
+    secret,
   );
   return new Request(`https://uploader.example${pathname}`, {
     method: "PUT",
@@ -131,6 +135,32 @@ describe("public pilot R2 uploader", () => {
     const stored = await env.EVIDENCE_BUCKET.get(pathname.slice(1));
     expect(await stored?.text()).toBe(body);
     expect(stored?.httpMetadata?.contentType).toBe("application/json");
+  });
+
+  it("stores a validator bootstrap result only with its separate credential", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
+    const submissionId = "bc".repeat(32);
+    const pathname = `/validator-bootstrap-results/${submissionId}.json`;
+    const wrongCredential = await worker.fetch(
+      await makeUpload(pathname, body, "application/json"),
+      env,
+    );
+    const accepted = await worker.fetch(
+      await makeUpload(
+        pathname,
+        body,
+        "application/json",
+        {},
+        TEST_VALIDATOR_SECRET,
+      ),
+      env,
+    );
+
+    expect(wrongCredential.status).toBe(401);
+    expect(accepted.status).toBe(201);
+    const stored = await env.EVIDENCE_BUCKET.get(pathname.slice(1));
+    expect(await stored?.text()).toBe(body);
+    expect(stored?.customMetadata?.uploadKind).toBe("validator_bootstrap_result");
   });
 
   it("stores a valid evidence archive with immutable attachment metadata", async () => {

@@ -122,6 +122,8 @@ def _case():
         signed_at_block=125,
         valid_from_block=125,
         expires_at_block=155,
+        validator_hotkey=owner.hotkey.ss58_address,
+        validator_uid=0,
         wallet=coordinator,
     )
     participants = [
@@ -154,6 +156,41 @@ def _case():
         for uid in range(3, 256)
     )
     return signed, authorization, owner, participants
+
+
+def _permitted_case():
+    signed, _authorization, owner, participants = _case()
+    validator = dev_wallet("//DirectBootstrapPermittedValidator")
+    updated = list(participants)
+    updated[0] = updated[0].model_copy(update={"validator_permit": False})
+    updated[200] = updated[200].model_copy(
+        update={
+            "hotkey": validator.hotkey.ss58_address,
+            "validator_permit": True,
+            "last_update": 100,
+        }
+    )
+    authorization = sign_direct_transition_authorization(
+        signed,
+        weights_version_key=DIRECT_WVK,
+        submission_id="66" * 32,
+        umi_git_revision=DIRECT_REVISION,
+        signed_at_block=125,
+        valid_from_block=125,
+        expires_at_block=155,
+        validator_hotkey=validator.hotkey.ss58_address,
+        validator_uid=200,
+        wallet=dev_wallet("//DirectBootstrapCoordinator"),
+    )
+    preflight = validate_direct_bootstrap_preflight(
+        signed,
+        _snapshot(updated),
+        authorization=authorization,
+        subnet_owner_hotkey=owner.hotkey.ss58_address,
+        validator_hotkey=validator.hotkey.ss58_address,
+        now=NOW,
+    )
+    return signed, authorization, owner, validator, updated, preflight
 
 
 def _snapshot(participants, **changes):
@@ -333,10 +370,34 @@ def test_direct_authorization_binds_original_consent_and_new_release() -> None:
         verify_direct_transition_authorization(signed, changed, current_block=130)
 
 
+def test_direct_preflight_accepts_the_exact_authorized_permitted_nonowner() -> None:
+    signed, authorization, owner, validator, updated, preflight = _permitted_case()
+
+    assert preflight.validator_uid == 200
+    assert preflight.validator_hotkey == validator.hotkey.ss58_address
+    assert preflight.transition_authorization.validator_uid == 200
+    assert preflight.full_row_weights[200] == 0
+
+    with pytest.raises(BootstrapOperatorError, match="authorized_validator_hotkey_mismatch"):
+        validate_direct_bootstrap_preflight(
+            signed,
+            _snapshot(updated),
+            authorization=authorization,
+            subnet_owner_hotkey=owner.hotkey.ss58_address,
+            validator_hotkey=owner.hotkey.ss58_address,
+            now=NOW,
+        )
+
+
 @pytest.mark.parametrize(
     ("changes", "reason"),
     [
         ({"commit_reveal_enabled": True}, "direct_requires_commit_reveal_disabled"),
+        ({"commit_reveal_version": 3}, "direct_commit_reveal_version_mismatch"),
+        ({"reveal_period_epochs": 2}, "direct_reveal_period_mismatch"),
+        ({"tempo": 361}, "direct_tempo_mismatch"),
+        ({"activity_cutoff_blocks": 359}, "direct_activity_cutoff_mismatch"),
+        ({"block_time_seconds": 11.9}, "direct_block_time_mismatch"),
         ({"min_allowed_weights": 255}, "direct_requires_min_allowed_weights_256"),
         ({"max_allowed_uids": 255}, "direct_requires_max_allowed_uids_256"),
         ({"weights_version_key": 1}, "direct_weights_version_key_mismatch"),
@@ -380,6 +441,8 @@ def test_direct_authorization_explicitly_bridges_expired_manifest_ttl() -> None:
         signed_at_block=49_070,
         valid_from_block=49_080,
         expires_at_block=50_500,
+        validator_hotkey=owner.hotkey.ss58_address,
+        validator_uid=0,
         wallet=dev_wallet("//DirectBootstrapCoordinator"),
     )
     preflight = validate_direct_bootstrap_preflight(
@@ -614,7 +677,7 @@ def test_direct_drain_includes_fresh_permitted_validator_with_empty_row() -> Non
 
     with pytest.raises(
         BootstrapOperatorError,
-        match="pre_direct_active_permitted_validators_not_drained",
+        match="pre_direct_other_active_permitted_validators_not_drained",
     ):
         validate_direct_bootstrap_preflight(
             signed,
@@ -1098,33 +1161,51 @@ class _DirectSubmitClient:
 
 
 class _DirectSubmitChain:
-    def __init__(self, client, signed, authorization, owner, participants):
+    def __init__(
+        self,
+        client,
+        signed,
+        authorization,
+        owner,
+        participants,
+        *,
+        owner_after_anchor=None,
+    ):
         self.client_factory = lambda _network: _ClientContext(client)
         self.clock = lambda: NOW
+        validator_hotkey = authorization.validator_hotkey
         self.before = validate_direct_bootstrap_preflight(
             signed,
             _snapshot(participants),
             authorization=authorization,
             subnet_owner_hotkey=owner.hotkey.ss58_address,
-            validator_hotkey=owner.hotkey.ss58_address,
+            validator_hotkey=validator_hotkey,
             now=NOW,
         )
+        after_anchor_participants = list(participants)
+        observed_owner = owner_after_anchor or owner
+        if owner_after_anchor is not None:
+            after_anchor_participants[0] = after_anchor_participants[0].model_copy(
+                update={"hotkey": owner_after_anchor.hotkey.ss58_address}
+            )
         self.after_anchor = validate_direct_bootstrap_preflight(
             signed,
             _snapshot(
-                participants,
+                after_anchor_participants,
                 block_number=127,
                 block_hash="0x" + "15" * 32,
                 blocks_since_last_step=27,
             ),
             authorization=authorization,
-            subnet_owner_hotkey=owner.hotkey.ss58_address,
-            validator_hotkey=owner.hotkey.ss58_address,
+            subnet_owner_hotkey=observed_owner.hotkey.ss58_address,
+            validator_hotkey=validator_hotkey,
             now=NOW,
         )
         updated = [
-            item.model_copy(update={"last_update": 130}) if item.uid == 0 else item
-            for item in participants
+            item.model_copy(update={"last_update": 130})
+            if item.uid == authorization.validator_uid
+            else item
+            for item in after_anchor_participants
         ]
         self.after_weight = validate_direct_bootstrap_preflight(
             signed,
@@ -1133,12 +1214,12 @@ class _DirectSubmitChain:
                 block_number=130,
                 block_hash=POST_BLOCK_HASH,
                 validator_mechid0_row=self.before.expected_applied_row,
-                active_mechid0_row_hotkeys=[owner.hotkey.ss58_address],
+                active_mechid0_row_hotkeys=[validator_hotkey],
                 blocks_since_last_step=30,
             ),
             authorization=authorization,
-            subnet_owner_hotkey=owner.hotkey.ss58_address,
-            validator_hotkey=owner.hotkey.ss58_address,
+            subnet_owner_hotkey=observed_owner.hotkey.ss58_address,
+            validator_hotkey=validator_hotkey,
             now=NOW,
             require_submission_ready=False,
         )
@@ -1247,3 +1328,82 @@ async def test_direct_submit_hotkey_readback_and_ambiguous_no_retry(
     assert DirectBootstrapSubmissionJournal.model_validate_json(
         journal_path.read_bytes()
     ).phase == ("applied")
+
+
+@pytest.mark.asyncio
+async def test_direct_submit_orchestrates_the_authorized_uid_200_hotkey(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signed, authorization, owner, validator, participants, _preflight = _permitted_case()
+    client = _DirectSubmitClient()
+    chain = _DirectSubmitChain(client, signed, authorization, owner, participants)
+
+    async def health(_signed, preflight, **_kwargs):
+        return _operational(_signed, preflight).health
+
+    monkeypatch.setattr("umi.bootstrap_direct_weights.probe_bootstrap_health", health)
+    receipt = await submit_direct_bootstrap_weights(
+        signed,
+        authorization=authorization,
+        wallet=validator,
+        chain=chain,
+        receipt_output=tmp_path / "receipt.json",
+        call_material_output=tmp_path / "material.json",
+        state_dir=tmp_path / "state",
+        live_submit=True,
+        acknowledgement="SUBMIT SN78 DIRECT FULL BOOTSTRAP ROW",
+    )
+
+    assert receipt.classification == "applied"
+    assert receipt.validator_uid == 200
+    assert receipt.validator_hotkey == validator.hotkey.ss58_address
+    assert receipt.observed_last_update == 130
+    assert all(call[1] is validator for call in client.calls)
+    assert all(call[2]["signer"] == "hotkey" for call in client.calls)
+    assert client.calls[1][0].params["dests"] == list(range(256))
+    assert client.calls[1][0].params["weights"][200] == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_submit_rejects_owner_rotation_after_anchor_before_weight_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signed, authorization, owner, validator, participants, _preflight = _permitted_case()
+    client = _DirectSubmitClient()
+    rotated_owner = dev_wallet("//DirectBootstrapRotatedOwner")
+    chain = _DirectSubmitChain(
+        client,
+        signed,
+        authorization,
+        owner,
+        participants,
+        owner_after_anchor=rotated_owner,
+    )
+
+    async def health(_signed, preflight, **_kwargs):
+        return _operational(_signed, preflight).health
+
+    monkeypatch.setattr("umi.bootstrap_direct_weights.probe_bootstrap_health", health)
+    with pytest.raises(BootstrapOperatorError, match="direct_subnet_owner_changed_after_anchor"):
+        await submit_direct_bootstrap_weights(
+            signed,
+            authorization=authorization,
+            wallet=validator,
+            chain=chain,
+            receipt_output=tmp_path / "receipt.json",
+            call_material_output=tmp_path / "material.json",
+            state_dir=tmp_path / "state",
+            live_submit=True,
+            acknowledgement="SUBMIT SN78 DIRECT FULL BOOTSTRAP ROW",
+        )
+
+    assert [call[0].function for call in client.calls] == ["set_commitment"]
+    assert not (tmp_path / "material.json").exists()
+    assert not (tmp_path / "receipt.json").exists()
+    journal_path = next((tmp_path / "state").glob("direct-*.json"))
+    assert (
+        DirectBootstrapSubmissionJournal.model_validate_json(journal_path.read_bytes()).phase
+        == "anchor_finalized"
+    )

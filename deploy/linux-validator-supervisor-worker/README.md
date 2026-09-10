@@ -5,22 +5,31 @@ This image provides the fixed
 validator supervisor. It supports `linux/amd64` and `linux/arm64` as separate,
 digest-pinned release artifacts.
 
-The current bootstrap profile implements only the emergency direct UID 0 path in
-`docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md`. It submits the full 256-entry
+The current bootstrap profile implements the permit-bound emergency direct path in
+`docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md`. A coordinator authorization binds
+one exact validator hotkey and UID, which must still hold a live SN78 permit at
+submission. The worker submits the full 256-entry
 `SubtensorModule.set_mechanism_weights` row with `WeightsVersionKey = 4294967296`,
 `MinAllowedWeights = 256`, and commit-reveal disabled. It does not use the older
 CRv4 bootstrap submission path.
 
-The read-only bootstrap input mount must contain these canonical files:
+The supervisor constructs the read-only bootstrap input mount from one
+directive-bound canonical bundle. It contains these files:
 
 ```text
 bootstrap/signed-manifest.json
 bootstrap/direct-transition-authorization.json
 bootstrap/drain-checkpoint.json
+bootstrap/owner-fence-receipt.json
 ```
 
+The worker consumes all four files. After a terminal applied result it signs one
+self-contained result with the validator hotkey and publishes it through the
+create-only UMI evidence route. The owner-fence receipt is therefore included in
+public evidence without a later operator upload.
+
 `drain-checkpoint.json` is the complete
-`umi-bootstrap-direct-operational-preflight/1` output produced by the pinned
+`umi-bootstrap-direct-operational-preflight/2` output produced by the pinned
 `umi-bootstrap-direct-weights preflight` command after the owner fence and legacy
 row drain. The worker validates that checkpoint, repeats the complete preflight,
 and requires the fresh snapshot to preserve the drained state before it writes a

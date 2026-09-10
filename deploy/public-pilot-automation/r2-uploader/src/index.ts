@@ -3,6 +3,7 @@ const AUTH_DOMAIN = "umi-r2-upload-v1";
 const MAX_CLOCK_SKEW_SECONDS = 300;
 const MAX_PUBLIC_ARCHIVE_BYTES = 96 * 1024 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024;
+const MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES = 4 * 1024 * 1024;
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
@@ -10,10 +11,18 @@ const ARCHIVE_PATH = /^\/public-pilot-cases\/([0-9a-f]{64})\/sealed-case\.tar\.g
 const EVIDENCE_PATH = /^\/public-pilot-evidence\/([0-9a-f]{64})\/evidence\.tar\.gz$/;
 const ATTEMPT_PATH = /^\/public-pilot-attempts\/([0-9a-f]{64})\/attempt-journal\.tar\.gz$/;
 const RESULT_PATH = /^\/public-pilot-automation\/results\/([0-9a-f]{64})\.json$/;
+const VALIDATOR_BOOTSTRAP_RESULT_PATH =
+  /^\/validator-bootstrap-results\/([0-9a-f]{64})\.json$/;
 
 type UploadRoute = Readonly<{
   key: string;
-  kind: "sealed_case" | "evidence_archive" | "attempt_journal" | "automation_result";
+  kind:
+    | "sealed_case"
+    | "evidence_archive"
+    | "attempt_journal"
+    | "automation_result"
+    | "validator_bootstrap_result";
+  authentication: "pilot" | "validator_bootstrap";
   identifier: string;
   maximumBytes: number;
   contentType: "application/gzip" | "application/json";
@@ -43,6 +52,7 @@ function parseRoute(pathname: string): UploadRoute | null {
     return {
       key: pathname.slice(1),
       kind: "sealed_case",
+      authentication: "pilot",
       identifier: archive[1],
       maximumBytes: MAX_PUBLIC_ARCHIVE_BYTES,
       contentType: "application/gzip",
@@ -56,6 +66,7 @@ function parseRoute(pathname: string): UploadRoute | null {
     return {
       key: pathname.slice(1),
       kind: "evidence_archive",
+      authentication: "pilot",
       identifier: evidence[1],
       maximumBytes: MAX_PUBLIC_ARCHIVE_BYTES,
       contentType: "application/gzip",
@@ -69,6 +80,7 @@ function parseRoute(pathname: string): UploadRoute | null {
     return {
       key: pathname.slice(1),
       kind: "attempt_journal",
+      authentication: "pilot",
       identifier: attempt[1],
       maximumBytes: MAX_PUBLIC_ARCHIVE_BYTES,
       contentType: "application/gzip",
@@ -82,8 +94,22 @@ function parseRoute(pathname: string): UploadRoute | null {
     return {
       key: pathname.slice(1),
       kind: "automation_result",
+      authentication: "pilot",
       identifier: result[1],
       maximumBytes: MAX_RESULT_BYTES,
+      contentType: "application/json",
+      digestMustMatchIdentifier: false,
+    };
+  }
+
+  const validatorBootstrapResult = VALIDATOR_BOOTSTRAP_RESULT_PATH.exec(pathname);
+  if (validatorBootstrapResult?.[1] !== undefined) {
+    return {
+      key: pathname.slice(1),
+      kind: "validator_bootstrap_result",
+      authentication: "validator_bootstrap",
+      identifier: validatorBootstrapResult[1],
+      maximumBytes: MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES,
       contentType: "application/json",
       digestMustMatchIdentifier: false,
     };
@@ -227,7 +253,9 @@ async function authenticateUpload(
 
   const authorized = await verifyAuthorization(
     request,
-    env.UPLOAD_HMAC_SECRET,
+    route.authentication === "pilot"
+      ? env.UPLOAD_HMAC_SECRET
+      : env.VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET,
     url.pathname,
     contentLength,
     contentType,

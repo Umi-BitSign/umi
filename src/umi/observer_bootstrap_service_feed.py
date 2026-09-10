@@ -37,7 +37,7 @@ from .observer_pilot_feed import ObserverPilotFeed
 from .protocol import PROTOCOL_VERSION, Hex32, StrictProtocolModel, canonical_json_bytes
 
 BOOTSTRAP_SERVICE_FEED_CONFIG_SCHEMA = "umi-observer-bootstrap-service-feed-config/1"
-BOOTSTRAP_SERVICE_PUBLICATION_SCHEMA = "umi-bootstrap-direct-publication/1"
+BOOTSTRAP_SERVICE_PUBLICATION_SCHEMA = "umi-bootstrap-direct-publication/2"
 BOOTSTRAP_SERVICE_MECHANISM = "bootstrap_service_binary"
 MAX_BOOTSTRAP_PUBLICATIONS = 256
 MAX_BOOTSTRAP_CONFIG_BYTES = 64 * 1024
@@ -298,21 +298,38 @@ def _verify_terminal_bindings(
     owner_hotkey = bytes.fromhex(
         owner_fence.call_material.preflight.subnet_owner_hotkey_account_id32[2:]
     )
+    direct_owner_hotkey = bytes.fromhex(
+        material.operational_preflight.chain.subnet_owner_hotkey_account_id32[2:]
+    )
+    expected_active_before = (
+        {account_id32(authorization.validator_hotkey)}
+        if material.operational_preflight.chain.prior_row_classification
+        == "active_exact_direct_row"
+        else set()
+    )
+    observed_active_before = {
+        account_id32(hotkey) for hotkey in direct_snapshot.active_mechid0_row_hotkeys
+    }
     if (
         owner_fence.observation_block > direct_snapshot.block_number
         or owner_fence.observed_weights_version_key != DIRECT_MINIMUM_WEIGHTS_VERSION_KEY
         or owner_fence.observed_min_allowed_weights != 256
         or owner_fence.observed_commit_reveal_enabled is not False
-        or owner_hotkey != account_id32(receipt.validator_hotkey)
+        or owner_hotkey != direct_owner_hotkey
     ):
         raise ValueError("bootstrap owner fence does not establish the direct-call precondition")
     if (
         material.operational_preflight.signed_manifest != signed
         or material.manifest_sha256 != signed.manifest_sha256
         or material.operational_preflight.chain.transition_authorization != authorization
+        or direct_snapshot.commit_reveal_version != 4
+        or direct_snapshot.reveal_period_epochs != 1
+        or direct_snapshot.tempo != 360
+        or direct_snapshot.activity_cutoff_blocks != 360
+        or direct_snapshot.block_time_seconds != 12.0
         or direct_snapshot.total_pending_commit_count != 0
         or direct_snapshot.validator_has_pending_commit
-        or direct_snapshot.active_mechid0_row_hotkeys
+        or observed_active_before != expected_active_before
         or receipt.classification != "applied"
         or receipt.observation_block < receipt.weight_call.block_number
         or receipt.observation_block > expected_active_through
@@ -332,7 +349,8 @@ def _verify_terminal_bindings(
         or journal.call_material_sha256 != material_sha256
         or journal.weight_call != receipt.weight_call
         or journal.receipt_sha256 != receipt_sha256
-        or receipt.validator_uid != 0
+        or receipt.validator_uid != authorization.validator_uid
+        or account_id32(receipt.validator_hotkey) != account_id32(authorization.validator_hotkey)
     ):
         raise ValueError("bootstrap terminal evidence is not consistently cross-bound")
     return _VerifiedTerminalBindings(
@@ -473,6 +491,15 @@ def build_observer_bootstrap_service_feed(
     )
     if len({item.publication_id for item in publications}) != len(publications):
         raise ValueError("bootstrap feed contains the same publication more than once")
+    authorization_hashes = [
+        hashlib.sha256(canonical_json_bytes(item.authorization)).hexdigest()
+        for item in publications
+    ]
+    if len(set(authorization_hashes)) != len(authorization_hashes):
+        raise ValueError("bootstrap feed reuses a direct transition authorization")
+    submission_ids = [item.authorization.submission_id for item in publications]
+    if len(set(submission_ids)) != len(submission_ids):
+        raise ValueError("bootstrap feed reuses a direct transition submission ID")
     calls = [
         (item.receipt.weight_call.block_number, account_id32(item.receipt.validator_hotkey))
         for item in publications

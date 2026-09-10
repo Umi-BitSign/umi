@@ -1,4 +1,4 @@
-"""Owner-only direct full-row bootstrap weight transition for SN78.
+"""Permit-bound direct full-row bootstrap weight transition for SN78.
 
 This module is deliberately separate from the CRv4 bootstrap operator.  It is
 usable only while commit-reveal is disabled and ``MinAllowedWeights`` and
@@ -69,27 +69,27 @@ from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 
-DIRECT_PREFLIGHT_SCHEMA = "umi-bootstrap-direct-preflight/1"
-DIRECT_OPERATIONAL_PREFLIGHT_SCHEMA = "umi-bootstrap-direct-operational-preflight/1"
-DIRECT_CALL_MATERIAL_SCHEMA = "umi-bootstrap-direct-call-material/1"
-DIRECT_SUBMISSION_RECEIPT_SCHEMA = "umi-bootstrap-direct-submission-receipt/1"
-DIRECT_TRANSITION_AUTHORIZATION_SCHEMA = "umi-bootstrap-direct-transition-authorization/1"
-DIRECT_SUBMISSION_JOURNAL_SCHEMA = "umi-bootstrap-direct-submission-journal/1"
+DIRECT_PREFLIGHT_SCHEMA = "umi-bootstrap-direct-preflight/2"
+DIRECT_OPERATIONAL_PREFLIGHT_SCHEMA = "umi-bootstrap-direct-operational-preflight/2"
+DIRECT_CALL_MATERIAL_SCHEMA = "umi-bootstrap-direct-call-material/2"
+DIRECT_SUBMISSION_RECEIPT_SCHEMA = "umi-bootstrap-direct-submission-receipt/2"
+DIRECT_TRANSITION_AUTHORIZATION_SCHEMA = "umi-bootstrap-direct-transition-authorization/2"
+DIRECT_SUBMISSION_JOURNAL_SCHEMA = "umi-bootstrap-direct-submission-journal/2"
 OWNER_FENCE_PREFLIGHT_SCHEMA = "umi-bootstrap-owner-fence-preflight/1"
 OWNER_FENCE_CALL_MATERIAL_SCHEMA = "umi-bootstrap-owner-fence-call-material/1"
 OWNER_FENCE_RECEIPT_SCHEMA = "umi-bootstrap-owner-fence-receipt/1"
 OWNER_FENCE_JOURNAL_SCHEMA = "umi-bootstrap-owner-fence-journal/1"
-DIRECT_TRANSITION_PROFILE = "direct_full_row/1"
+DIRECT_TRANSITION_PROFILE = "direct_full_row/2"
 DIRECT_LIVE_SUBMIT_ACKNOWLEDGEMENT = "SUBMIT SN78 DIRECT FULL BOOTSTRAP ROW"
 OWNER_FENCE_LIVE_SUBMIT_ACKNOWLEDGEMENT = "APPLY SN78 DIRECT BOOTSTRAP OWNER FENCE"
 DIRECT_FULL_ROW_SIZE = 256
 DIRECT_MINIMUM_WEIGHTS_VERSION_KEY = 1 << 32
-_DIRECT_AUTHORIZATION_DOMAIN = b"umi-bootstrap-direct-transition-authorization-v1\0"
+_DIRECT_AUTHORIZATION_DOMAIN = b"umi-bootstrap-direct-transition-authorization-v2\0"
 _GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class DirectBootstrapTransitionAuthorization(StrictProtocolModel):
-    """Coordinator-signed transport override for one original signed manifest."""
+    """Coordinator-signed authorization for one validator and one manifest."""
 
     schema_: Literal[DIRECT_TRANSITION_AUTHORIZATION_SCHEMA] = Field(alias="schema")
     transition_profile: Literal[DIRECT_TRANSITION_PROFILE]
@@ -99,6 +99,8 @@ class DirectBootstrapTransitionAuthorization(StrictProtocolModel):
     original_commit_stop_block: Annotated[int, Field(ge=0, le=_MAX_JSON_SAFE_INTEGER)]
     original_hard_sunset_block: Annotated[int, Field(ge=0, le=_MAX_JSON_SAFE_INTEGER)]
     coordinator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
+    validator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
+    validator_uid: Annotated[int, Field(ge=0, le=255)]
     umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
     weights_version_key: Literal[DIRECT_MINIMUM_WEIGHTS_VERSION_KEY]
     signed_at_block: Annotated[int, Field(ge=0, le=_MAX_JSON_SAFE_INTEGER)]
@@ -108,13 +110,14 @@ class DirectBootstrapTransitionAuthorization(StrictProtocolModel):
     required_mechanism_count: Literal[1]
     required_min_allowed_weights: Literal[256]
     required_max_allowed_uids: Literal[256]
+    required_validator_permit: Literal[True]
     overrides_manifest_ttl_for_direct_transport: Literal[True]
     overrides_original_commit_stop_for_direct_transport: Literal[True]
     single_use: Literal[True]
     signature_scheme: Literal["sr25519", "ed25519"]
     signature: Annotated[str, Field(pattern=r"^0x[0-9a-f]{128}$")]
 
-    @field_validator("coordinator_hotkey")
+    @field_validator("coordinator_hotkey", "validator_hotkey")
     @classmethod
     def validate_coordinator_hotkey(cls, value: str) -> str:
         account_id32(value)
@@ -139,6 +142,8 @@ def _direct_authorization_unsigned(
         "original_commit_stop_block": authorization.original_commit_stop_block,
         "original_hard_sunset_block": authorization.original_hard_sunset_block,
         "coordinator_hotkey": authorization.coordinator_hotkey,
+        "validator_hotkey": authorization.validator_hotkey,
+        "validator_uid": authorization.validator_uid,
         "umi_git_revision": authorization.umi_git_revision,
         "weights_version_key": authorization.weights_version_key,
         "signed_at_block": authorization.signed_at_block,
@@ -148,6 +153,7 @@ def _direct_authorization_unsigned(
         "required_mechanism_count": 1,
         "required_min_allowed_weights": 256,
         "required_max_allowed_uids": 256,
+        "required_validator_permit": True,
         "overrides_manifest_ttl_for_direct_transport": True,
         "overrides_original_commit_stop_for_direct_transport": True,
         "single_use": True,
@@ -172,6 +178,8 @@ def sign_direct_transition_authorization(
     signed_at_block: int,
     valid_from_block: int,
     expires_at_block: int,
+    validator_hotkey: str,
+    validator_uid: int,
     wallet: Any,
 ) -> DirectBootstrapTransitionAuthorization:
     """Authorize only the direct transport change while preserving miner consent."""
@@ -199,6 +207,8 @@ def sign_direct_transition_authorization(
         original_commit_stop_block=signed.manifest.policy.commit_stop_block,
         original_hard_sunset_block=signed.manifest.policy.hard_sunset_block,
         coordinator_hotkey=signer.ss58_address,
+        validator_hotkey=validator_hotkey,
+        validator_uid=validator_uid,
         umi_git_revision=umi_git_revision,
         weights_version_key=weights_version_key,
         signed_at_block=signed_at_block,
@@ -208,6 +218,7 @@ def sign_direct_transition_authorization(
         required_mechanism_count=1,
         required_min_allowed_weights=256,
         required_max_allowed_uids=256,
+        required_validator_permit=True,
         overrides_manifest_ttl_for_direct_transport=True,
         overrides_original_commit_stop_for_direct_transport=True,
         single_use=True,
@@ -269,6 +280,12 @@ def _validate_direct_authorization_bounds(
         raise ValueError("direct transition authorization policy interval is invalid")
     if account_id32(authorization.coordinator_hotkey) != account_id32(policy.coordinator_hotkey):
         raise ValueError("direct transition authorization signer is not the coordinator")
+    if any(
+        entry.uid == authorization.validator_uid
+        or account_id32(entry.miner_hotkey) == account_id32(authorization.validator_hotkey)
+        for entry in manifest.entries
+    ):
+        raise ValueError("direct transition validator is also an eligible miner")
     if authorization.weights_version_key <= policy.weights_version_key:
         raise ValueError("direct transition version key does not supersede the original policy")
     if not (manifest.frozen_at_block <= authorization.signed_at_block < policy.hard_sunset_block):
@@ -1179,7 +1196,7 @@ async def submit_owner_fence(
 
 
 class DirectBootstrapPreflight(StrictProtocolModel):
-    """One finalized owner, mapping, runtime-gate, and exact-row observation."""
+    """One finalized validator, mapping, runtime-gate, and exact-row observation."""
 
     schema_: Literal[DIRECT_PREFLIGHT_SCHEMA] = Field(alias="schema")
     transition_profile: Literal[DIRECT_TRANSITION_PROFILE]
@@ -1225,10 +1242,12 @@ class DirectBootstrapPreflight(StrictProtocolModel):
         if any(value not in {0, U16_MAX} for value in self.full_row_weights):
             raise ValueError("direct bootstrap row contains a non-binary weight")
         owner = bytes.fromhex(self.subnet_owner_hotkey_account_id32[2:])
-        if owner != account_id32(self.validator_hotkey):
-            raise ValueError("direct bootstrap signer is not the subnet owner hotkey")
-        if self.validator_uid != 0:
-            raise ValueError("direct bootstrap signer is not UID 0")
+        owner_participant = next(
+            (item for item in self.snapshot.participants if account_id32(item.hotkey) == owner),
+            None,
+        )
+        if owner_participant is None or owner_participant.uid != 0:
+            raise ValueError("direct bootstrap subnet owner is not registered at UID 0")
         validator = next(
             (
                 item
@@ -1237,8 +1256,12 @@ class DirectBootstrapPreflight(StrictProtocolModel):
             ),
             None,
         )
-        if validator is None or validator.uid != 0 or not validator.validator_permit:
-            raise ValueError("direct bootstrap UID 0 signer lacks a validator permit")
+        if (
+            validator is None
+            or validator.uid != self.validator_uid
+            or not validator.validator_permit
+        ):
+            raise ValueError("direct bootstrap signer mapping or validator permit is invalid")
         authorization_bytes = canonical_json_bytes(self.transition_authorization)
         if hashlib.sha256(authorization_bytes).hexdigest() != self.transition_authorization_sha256:
             raise ValueError("direct transition authorization hash is invalid")
@@ -1247,6 +1270,9 @@ class DirectBootstrapPreflight(StrictProtocolModel):
             or self.transition_authorization.original_policy_sha256 != self.policy_sha256
             or self.transition_authorization.weights_version_key
             != self.snapshot.weights_version_key
+            or account_id32(self.transition_authorization.validator_hotkey)
+            != account_id32(self.validator_hotkey)
+            or self.transition_authorization.validator_uid != self.validator_uid
         ):
             raise ValueError("direct transition authorization is not bound to the preflight")
         return self
@@ -1381,8 +1407,10 @@ class DirectBootstrapSubmissionReceipt(StrictProtocolModel):
     observed_applied_row: Annotated[list[list[int]], Field(max_length=256)]
     observed_last_update: Annotated[int, Field(ge=0, le=_MAX_JSON_SAFE_INTEGER)]
     finalized_inclusion_verified: Literal[True]
-    owner_mapping_verified: bool
-    owner_uid_verified: bool
+    subnet_owner_mapping_verified: bool
+    subnet_owner_uid_verified: bool
+    validator_mapping_verified: bool
+    validator_uid_verified: bool
     validator_permit_verified: bool
     destination_mappings_verified: bool
     applied_row_verified: bool
@@ -1400,8 +1428,10 @@ class DirectBootstrapSubmissionReceipt(StrictProtocolModel):
     @model_validator(mode="after")
     def validate_classification(self) -> Self:
         checks = (
-            self.owner_mapping_verified,
-            self.owner_uid_verified,
+            self.subnet_owner_mapping_verified,
+            self.subnet_owner_uid_verified,
+            self.validator_mapping_verified,
+            self.validator_uid_verified,
             self.validator_permit_verified,
             self.destination_mappings_verified,
             self.applied_row_verified,
@@ -1485,9 +1515,7 @@ def validate_direct_bootstrap_preflight(
         owner_account = _account_bytes(subnet_owner_hotkey)
         validator_account = account_id32(validator_hotkey)
     except ValueError as error:
-        raise BootstrapOperatorError("subnet_owner_hotkey_invalid") from error
-    if owner_account != validator_account:
-        raise BootstrapOperatorError("direct_signer_is_not_subnet_owner_hotkey")
+        raise BootstrapOperatorError("direct_validator_or_owner_hotkey_invalid") from error
     if snapshot.manifest_frozen_block_hash != signed.manifest.frozen_at_block_hash:
         raise BootstrapOperatorError("manifest_frozen_block_hash_mismatch")
     try:
@@ -1514,6 +1542,11 @@ def validate_direct_bootstrap_preflight(
     gates = (
         (snapshot.mechanism_count, 1, "mechanism_count_mismatch"),
         (snapshot.commit_reveal_enabled, False, "direct_requires_commit_reveal_disabled"),
+        (snapshot.commit_reveal_version, 4, "direct_commit_reveal_version_mismatch"),
+        (snapshot.reveal_period_epochs, 1, "direct_reveal_period_mismatch"),
+        (snapshot.tempo, 360, "direct_tempo_mismatch"),
+        (snapshot.activity_cutoff_blocks, 360, "direct_activity_cutoff_mismatch"),
+        (snapshot.block_time_seconds, 12.0, "direct_block_time_mismatch"),
         (
             snapshot.weights_version_key,
             authorization.weights_version_key,
@@ -1526,23 +1559,33 @@ def validate_direct_bootstrap_preflight(
         if actual != expected:
             raise BootstrapOperatorError(reason)
     if snapshot.validator_has_pending_commit:
-        raise BootstrapOperatorError("owner_pending_commit_exists")
+        raise BootstrapOperatorError("validator_pending_commit_exists")
     if snapshot.total_pending_commit_count:
         raise BootstrapOperatorError("direct_pending_commits_not_drained")
 
     by_uid = {item.uid: item for item in snapshot.participants}
     if sorted(by_uid) != list(range(DIRECT_FULL_ROW_SIZE)):
         raise BootstrapOperatorError("direct_uid_domain_is_not_exactly_0_through_255")
+    owner = next(
+        (item for item in snapshot.participants if account_id32(item.hotkey) == owner_account),
+        None,
+    )
+    if owner is None:
+        raise BootstrapOperatorError("subnet_owner_hotkey_not_registered")
+    if owner.uid != 0:
+        raise BootstrapOperatorError("subnet_owner_hotkey_is_not_uid_0")
     validator = next(
         (item for item in snapshot.participants if account_id32(item.hotkey) == validator_account),
         None,
     )
     if validator is None:
-        raise BootstrapOperatorError("subnet_owner_hotkey_not_registered")
-    if validator.uid != 0:
-        raise BootstrapOperatorError("subnet_owner_hotkey_is_not_uid_0")
+        raise BootstrapOperatorError("authorized_validator_hotkey_not_registered")
+    if account_id32(authorization.validator_hotkey) != validator_account:
+        raise BootstrapOperatorError("authorized_validator_hotkey_mismatch")
+    if authorization.validator_uid != validator.uid:
+        raise BootstrapOperatorError("authorized_validator_uid_mismatch")
     if not validator.validator_permit:
-        raise BootstrapOperatorError("subnet_owner_hotkey_lacks_validator_permit")
+        raise BootstrapOperatorError("authorized_validator_lacks_validator_permit")
     if (
         require_submission_ready
         and validator.last_update + snapshot.weights_set_rate_limit > snapshot.block_number
@@ -1564,7 +1607,7 @@ def validate_direct_bootstrap_preflight(
         if participant.origin != entry.origin:
             raise BootstrapOperatorError("eligible_miner_origin_mismatch")
     if full_weights[validator.uid] != 0:
-        raise BootstrapOperatorError("subnet_owner_is_eligible_miner")
+        raise BootstrapOperatorError("authorized_validator_is_eligible_miner")
     positives = len(signed.manifest.entries)
     if snapshot.max_weights_limit == 0 or positives * snapshot.max_weights_limit < U16_MAX:
         raise BootstrapOperatorError("row_exceeds_max_weight_ratio")
@@ -1576,20 +1619,20 @@ def validate_direct_bootstrap_preflight(
     elif snapshot.validator_mechid0_row == expected_row:
         prior = "active_exact_direct_row"
     else:
-        raise BootstrapOperatorError("owner_previous_row_active_and_not_exact")
+        raise BootstrapOperatorError("validator_previous_row_active_and_not_exact")
     active_accounts = {account_id32(hotkey) for hotkey in snapshot.active_mechid0_row_hotkeys}
-    active_permitted_nonowners = {
+    active_permitted_others = {
         account_id32(item.hotkey)
         for item in snapshot.participants
-        if item.uid != 0
+        if account_id32(item.hotkey) != validator_account
         and item.validator_permit
         and item.last_update + snapshot.activity_cutoff_blocks >= snapshot.block_number
     }
-    if active_permitted_nonowners:
-        raise BootstrapOperatorError("pre_direct_active_permitted_validators_not_drained")
+    if active_permitted_others:
+        raise BootstrapOperatorError("pre_direct_other_active_permitted_validators_not_drained")
     if prior == "active_exact_direct_row":
         if active_accounts != {validator_account}:
-            raise BootstrapOperatorError("non_owner_active_rows_not_drained")
+            raise BootstrapOperatorError("other_active_rows_not_drained")
     elif active_accounts:
         raise BootstrapOperatorError("pre_direct_active_rows_not_drained")
 
@@ -1697,7 +1740,7 @@ def build_direct_bootstrap_call_material(
 
 
 class BittensorDirectBootstrapChain(BittensorBootstrapChain):
-    """Collect coherent finalized state for the direct owner transition."""
+    """Collect coherent finalized state for a permit-bound direct transition."""
 
     def __init__(
         self,
@@ -1800,12 +1843,11 @@ def classify_direct_bootstrap_application(
         raise BootstrapOperatorError("direct_result_anchor_mismatch")
     if material.manifest_sha256 != observation.manifest_sha256:
         raise BootstrapOperatorError("direct_result_manifest_mismatch")
-    owner_ok = (
-        account_id32(material.operational_preflight.chain.validator_hotkey)
-        == account_id32(observation.validator_hotkey)
-        and material.operational_preflight.chain.validator_uid == observation.validator_uid
-        and bytes.fromhex(observation.subnet_owner_hotkey_account_id32[2:])
-        == account_id32(observation.validator_hotkey)
+    before = material.operational_preflight.chain
+    authorization = before.transition_authorization
+    observed_owner_account = bytes.fromhex(observation.subnet_owner_hotkey_account_id32[2:])
+    owner_mapping_ok = (
+        before.subnet_owner_hotkey_account_id32 == observation.subnet_owner_hotkey_account_id32
     )
     mappings_ok = _manifest_mappings_match(
         material.operational_preflight.signed_manifest,
@@ -1820,17 +1862,40 @@ def classify_direct_bootstrap_application(
         ),
         None,
     )
+    owner_participant = next(
+        (
+            item
+            for item in observation.snapshot.participants
+            if account_id32(item.hotkey) == observed_owner_account
+        ),
+        None,
+    )
     observed_last_update = 0 if participant is None else participant.last_update
-    owner_uid_ok = (
-        observation.validator_uid == 0 and participant is not None and participant.uid == 0
+    owner_uid_ok = owner_participant is not None and owner_participant.uid == 0
+    validator_mapping_ok = (
+        account_id32(before.validator_hotkey) == account_id32(observation.validator_hotkey)
+        and account_id32(authorization.validator_hotkey)
+        == account_id32(observation.validator_hotkey)
+        and participant is not None
+        and account_id32(participant.hotkey) == account_id32(observation.validator_hotkey)
+    )
+    validator_uid_ok = (
+        before.validator_uid == observation.validator_uid
+        and authorization.validator_uid == observation.validator_uid
+        and participant is not None
+        and participant.uid == observation.validator_uid
     )
     permit_ok = participant is not None and participant.validator_permit
     last_update_ok = observed_last_update == weight_call.block_number
     reasons: list[str] = []
-    if not owner_ok:
-        reasons.append("owner_mapping_changed")
+    if not owner_mapping_ok:
+        reasons.append("subnet_owner_mapping_changed")
     if not owner_uid_ok:
-        reasons.append("owner_uid_changed")
+        reasons.append("subnet_owner_uid_changed")
+    if not validator_mapping_ok:
+        reasons.append("validator_mapping_changed")
+    if not validator_uid_ok:
+        reasons.append("validator_uid_changed")
     if not permit_ok:
         reasons.append("validator_permit_missing")
     if not mappings_ok:
@@ -1856,8 +1921,10 @@ def classify_direct_bootstrap_application(
         observed_applied_row=observation.snapshot.validator_mechid0_row,
         observed_last_update=observed_last_update,
         finalized_inclusion_verified=True,
-        owner_mapping_verified=owner_ok,
-        owner_uid_verified=owner_uid_ok,
+        subnet_owner_mapping_verified=owner_mapping_ok,
+        subnet_owner_uid_verified=owner_uid_ok,
+        validator_mapping_verified=validator_mapping_ok,
+        validator_uid_verified=validator_uid_ok,
         validator_permit_verified=permit_ok,
         destination_mappings_verified=mappings_ok,
         applied_row_verified=row_ok,
@@ -1963,6 +2030,11 @@ async def submit_direct_bootstrap_weights(
                 authorization=authorization,
                 validator_hotkey=validator_hotkey,
             )
+            if (
+                after_anchor_chain.subnet_owner_hotkey_account_id32
+                != before.chain.subnet_owner_hotkey_account_id32
+            ):
+                raise BootstrapOperatorError("direct_subnet_owner_changed_after_anchor")
             anchor_observation = await chain.verify_manifest_anchor_with_client(
                 client,
                 signed,
@@ -2165,7 +2237,7 @@ def _replace_canonical(path: Path, value: Any, *, maximum_bytes: int) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="umi-bootstrap-direct-weights",
-        description="Build and submit the owner-only SN78 direct full bootstrap row",
+        description="Build and submit a permit-bound SN78 direct full bootstrap row",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -2177,6 +2249,8 @@ def _parser() -> argparse.ArgumentParser:
     authorize.add_argument("--signed-at-block", type=int, required=True)
     authorize.add_argument("--valid-from-block", type=int, required=True)
     authorize.add_argument("--expires-at-block", type=int, required=True)
+    authorize.add_argument("--validator-hotkey", required=True)
+    authorize.add_argument("--validator-uid", type=int, required=True)
     authorize.add_argument("--output", type=Path, required=True)
     authorize.add_argument("--wallet-name", required=True)
     authorize.add_argument("--hotkey", required=True)
@@ -2297,6 +2371,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
                 signed_at_block=args.signed_at_block,
                 valid_from_block=args.valid_from_block,
                 expires_at_block=args.expires_at_block,
+                validator_hotkey=args.validator_hotkey,
+                validator_uid=args.validator_uid,
                 wallet=wallet,
             )
             _write_new_canonical(args.output, result, maximum_bytes=_MAX_INPUT_BYTES)

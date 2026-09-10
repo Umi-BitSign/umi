@@ -18,6 +18,7 @@ UPLOAD_AUTHORIZATION_SCHEME = "UMI-HMAC-SHA256"
 UPLOAD_AUTHENTICATION_DOMAIN = b"umi-r2-upload-v1"
 MAX_UPLOAD_SECRET_FILE_BYTES = 256
 MAX_AUTOMATION_RESULT_BYTES = 256 * 1024
+MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES = 4 * 1024 * 1024
 
 _LOWER_HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK_BYTES = 1024 * 1024
@@ -324,12 +325,73 @@ def upload_public_pilot_result(
         path.unlink(missing_ok=True)
 
 
+def upload_validator_bootstrap_result(
+    body: bytes,
+    *,
+    submission_id: str,
+    upload_origin: str,
+    public_origin: str,
+    secret: bytes,
+    client: httpx.Client | None = None,
+    timestamp: int | None = None,
+) -> tuple[str, int, str]:
+    """Publish one signed validator result at its immutable submission path."""
+
+    if _LOWER_HEX_64.fullmatch(submission_id) is None:
+        raise ValueError("validator bootstrap submission ID is invalid")
+    if not body or len(body) > MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES:
+        raise ValueError("validator bootstrap result body has an invalid size")
+    from .validator_supervisor_publication import (
+        parse_canonical_signed_supervisor_bootstrap_result,
+    )
+
+    signed = parse_canonical_signed_supervisor_bootstrap_result(body)
+    if not hmac.compare_digest(signed.result.submission_id, submission_id):
+        raise ValueError("validator bootstrap result binds another submission ID")
+    temporary_directory = Path(os.environ.get("TMPDIR", "/tmp")).resolve()
+    import tempfile
+
+    descriptor, name = tempfile.mkstemp(
+        prefix="umi-validator-bootstrap-result-",
+        dir=temporary_directory,
+    )
+    path = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        offset = 0
+        while offset < len(body):
+            written = os.write(descriptor, body[offset:])
+            if written <= 0:
+                raise OSError("validator bootstrap result write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        return upload_public_pilot_file(
+            path,
+            path=f"/validator-bootstrap-results/{submission_id}.json",
+            content_type="application/json",
+            maximum_bytes=MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES,
+            upload_origin=upload_origin,
+            public_origin=public_origin,
+            secret=secret,
+            client=client,
+            timestamp=timestamp,
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        path.unlink(missing_ok=True)
+
+
 __all__ = [
     "MAX_AUTOMATION_RESULT_BYTES",
+    "MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES",
     "UPLOAD_AUTHENTICATION_DOMAIN",
     "UPLOAD_AUTHORIZATION_SCHEME",
     "load_hex_secret",
     "upload_authentication_message",
     "upload_public_pilot_file",
     "upload_public_pilot_result",
+    "upload_validator_bootstrap_result",
 ]

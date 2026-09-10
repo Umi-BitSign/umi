@@ -43,6 +43,7 @@ from .bootstrap_direct_weights import (
     DirectBootstrapSubmissionJournal,
     DirectBootstrapSubmissionReceipt,
     DirectBootstrapTransitionAuthorization,
+    OwnerFenceReceipt,
     submit_direct_bootstrap_weights,
     validate_direct_bootstrap_preflight,
     verify_direct_transition_authorization,
@@ -61,15 +62,26 @@ from .grandpa_finality import (
     GrandpaFinalityObserver,
 )
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
+from .public_pilot_upload import load_hex_secret, upload_validator_bootstrap_result
 from .validator_supervisor import MAX_JSON_SAFE_INTEGER
 from .validator_supervisor_adapters import (
     FinneyFinalizedBlockReader,
     OwnedFinalizedBlock,
     SupervisorReleaseManifest,
 )
+from .validator_supervisor_publication import (
+    MAX_SUPERVISOR_BOOTSTRAP_RESULT_BYTES,
+    SUPERVISOR_BOOTSTRAP_RESULT_SCHEMA,
+    SupervisorBootstrapResult,
+    parse_canonical_signed_supervisor_bootstrap_result,
+    sign_supervisor_bootstrap_result,
+)
 
 WORKER_JOURNAL_SCHEMA = "umi-validator-supervisor-worker-journal/1"
 WORKER_AUTHORIZATION_CLAIM_SCHEMA = "umi-validator-supervisor-authorization-claim/1"
+WORKER_BOOTSTRAP_PUBLICATION_RECEIPT_SCHEMA = (
+    "umi-validator-supervisor-bootstrap-publication-receipt/1"
+)
 WORKER_STATE_SCHEMA_VERSION = 1
 
 WORKER_RELEASE_MANIFEST = Path("/run/umi/release/release-manifest.json")
@@ -80,11 +92,15 @@ WORKER_STATE_ROOT = Path("/var/lib/umi-worker")
 WORKER_IMAGE_REVISION = Path("/opt/umi-image-revision")
 WORKER_FINALITY_BINARY = Path("/opt/umi/bin/umi-grandpa-finality-observer")
 WORKER_FINALITY_CHAIN_SPEC = Path("/opt/umi/finney.json")
+WORKER_BOOTSTRAP_RESULT_UPLOAD_SECRET = Path("/run/umi/credentials/bootstrap-result-upload.key")
+WORKER_BOOTSTRAP_RESULT_UPLOAD_ORIGIN = "https://pilot-upload.umi.vision"
+WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN = "https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev"
 
 BOOTSTRAP_INPUT_ROOT = WORKER_OPERATOR_INPUT_ROOT / "bootstrap"
 BOOTSTRAP_SIGNED_MANIFEST = BOOTSTRAP_INPUT_ROOT / "signed-manifest.json"
 BOOTSTRAP_TRANSITION_AUTHORIZATION = BOOTSTRAP_INPUT_ROOT / "direct-transition-authorization.json"
 BOOTSTRAP_DRAIN_CHECKPOINT = BOOTSTRAP_INPUT_ROOT / "drain-checkpoint.json"
+BOOTSTRAP_OWNER_FENCE_RECEIPT = BOOTSTRAP_INPUT_ROOT / "owner-fence-receipt.json"
 
 MAX_WORKER_INPUT_BYTES = 4 * 1024 * 1024
 MAX_WORKER_JOURNAL_BYTES = 1024 * 1024
@@ -263,6 +279,41 @@ class SupervisorBootstrapAuthorizationClaim(StrictProtocolModel):
         return value
 
 
+class SupervisorBootstrapPublicationReceipt(StrictProtocolModel):
+    """Durable local proof that the exact signed result passed public readback."""
+
+    schema_: Literal[WORKER_BOOTSTRAP_PUBLICATION_RECEIPT_SCHEMA] = Field(alias="schema")
+    submission_id: Hex32
+    directive_sha256: Hex32
+    validator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
+    signed_result_sha256: Hex32
+    signed_result_size_bytes: Annotated[
+        int,
+        Field(gt=0, le=MAX_SUPERVISOR_BOOTSTRAP_RESULT_BYTES),
+    ]
+    public_url: Annotated[str, Field(min_length=1, max_length=1_024)]
+    transport: Literal["cloudflare_r2_hmac_v1"]
+    published_at: datetime
+
+    @field_validator("validator_hotkey")
+    @classmethod
+    def validate_validator_hotkey(cls, value: str) -> str:
+        account_id32(value)
+        return value
+
+    @model_validator(mode="after")
+    def validate_public_path(self) -> Self:
+        expected = (
+            f"{WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN}"
+            f"/validator-bootstrap-results/{self.submission_id}.json"
+        )
+        if self.public_url != expected:
+            raise ValueError("bootstrap publication receipt URL is invalid")
+        if self.published_at.tzinfo is None or self.published_at.utcoffset() is None:
+            raise ValueError("bootstrap publication receipt timestamp is naive")
+        return self
+
+
 @dataclass(frozen=True, slots=True)
 class BootstrapWorkerInputs:
     signed_manifest: SignedBootstrapEligibilityManifest
@@ -279,6 +330,8 @@ class BootstrapWorkerOutputs:
     receipt: Path
     call_material: Path
     operator_state: Path
+    signed_result: Path
+    publication_receipt: Path
 
 
 class WorkerFinalizedBlockReader(Protocol):
@@ -438,6 +491,18 @@ BootstrapPreflighter = Callable[
     Awaitable[DirectBootstrapOperationalPreflight],
 ]
 
+BootstrapResultPublisher = Callable[
+    [
+        SupervisorWorkerEnvironment,
+        BootstrapWorkerInputs,
+        BootstrapWorkerOutputs,
+        SupervisorWorkerJournal,
+        Any,
+        Path,
+    ],
+    Awaitable[None],
+]
+
 
 async def run_bootstrap_worker(
     environment: SupervisorWorkerEnvironment,
@@ -450,6 +515,7 @@ async def run_bootstrap_worker(
     wallet_loader: Callable[[SupervisorWorkerEnvironment], Any] | None = None,
     preflighter: BootstrapPreflighter | None = None,
     submitter: BootstrapSubmitter | None = None,
+    result_publisher: BootstrapResultPublisher | None = None,
     remain_until_expiry: bool = True,
 ) -> SupervisorWorkerJournal:
     """Run or recover the one bootstrap submission authorized by a directive."""
@@ -596,6 +662,18 @@ async def run_bootstrap_worker(
                     raise SupervisorWorkerError("worker_effect_ambiguous") from error
                 raise SupervisorWorkerError(_stable_effect_reason(error)) from error
             _replace_canonical(outputs.root / "journal.json", journal)
+
+        if journal.phase != "completed":
+            raise SupervisorWorkerError("worker_result_publication_before_completion")
+        publisher = result_publisher or _publish_completed_bootstrap_result
+        await publisher(
+            environment,
+            inputs,
+            outputs,
+            journal,
+            wallet,
+            operator_input_root,
+        )
 
         if remain_until_expiry:
             reason = await lease.wait_terminal()
@@ -787,6 +865,10 @@ def _validate_bootstrap_inputs(
     _validate_bootstrap_policy_bounds(environment, signed, authorization)
     if authorization.umi_git_revision != worker_revision:
         raise SupervisorWorkerError("worker_transition_revision_mismatch")
+    if account_id32(authorization.validator_hotkey) != account_id32(
+        environment.expected_validator_hotkey
+    ):
+        raise SupervisorWorkerError("worker_transition_validator_mismatch")
     try:
         verify_direct_transition_authorization(
             signed,
@@ -903,6 +985,7 @@ def _validate_drain_continuity(
     if (
         fresh.signed_manifest != inputs.signed_manifest
         or after.transition_authorization != inputs.transition_authorization
+        or after.subnet_owner_hotkey_account_id32 != before.subnet_owner_hotkey_account_id32
         or account_id32(after.validator_hotkey) != account_id32(before.validator_hotkey)
         or after.snapshot.block_number < before.snapshot.block_number
         or after.snapshot.block_number > owned_finalized_block
@@ -974,7 +1057,9 @@ def _validate_completed_output(
     if (
         receipt.classification != "applied"
         or receipt.manifest_sha256 != inputs.signed_manifest.manifest_sha256
-        or receipt.validator_uid != 0
+        or receipt.validator_uid != inputs.transition_authorization.validator_uid
+        or account_id32(receipt.validator_hotkey)
+        != account_id32(inputs.transition_authorization.validator_hotkey)
         or account_id32(receipt.validator_hotkey) != account_id32(journal.validator_hotkey)
         or receipt.call_material_sha256
         != hashlib.sha256(canonical_json_bytes(material)).hexdigest()
@@ -994,6 +1079,184 @@ def _validate_completed_output(
         or direct_journal.receipt_sha256 != receipt_sha256
     ):
         raise SupervisorWorkerError("worker_completed_output_invalid")
+
+
+def _load_direct_submission_journal(
+    journal: SupervisorWorkerJournal,
+    inputs: BootstrapWorkerInputs,
+    outputs: BootstrapWorkerOutputs,
+) -> DirectBootstrapSubmissionJournal:
+    authorization_hash = hashlib.sha256(
+        canonical_json_bytes(inputs.transition_authorization)
+    ).hexdigest()
+    return _load_canonical(
+        outputs.operator_state
+        / f"direct-{authorization_hash}-{account_id32(journal.validator_hotkey).hex()}.json",
+        DirectBootstrapSubmissionJournal,
+    )
+
+
+def _expected_signed_result(
+    environment: SupervisorWorkerEnvironment,
+    inputs: BootstrapWorkerInputs,
+    outputs: BootstrapWorkerOutputs,
+    journal: SupervisorWorkerJournal,
+    *,
+    owner_fence_receipt: OwnerFenceReceipt,
+    created_at: datetime,
+) -> SupervisorBootstrapResult:
+    receipt = _load_canonical(outputs.receipt, DirectBootstrapSubmissionReceipt)
+    material = _load_canonical(outputs.call_material, DirectBootstrapCallMaterial)
+    _validate_completed_output(journal, inputs, receipt, material, outputs.operator_state)
+    return SupervisorBootstrapResult(
+        schema=SUPERVISOR_BOOTSTRAP_RESULT_SCHEMA,
+        directive_sha256=environment.directive_sha256,
+        release_manifest_sha256=environment.release_manifest_sha256,
+        validator_hotkey=environment.expected_validator_hotkey,
+        submission_id=inputs.transition_authorization.submission_id,
+        owner_fence_receipt=owner_fence_receipt,
+        signed_manifest=inputs.signed_manifest,
+        transition_authorization=inputs.transition_authorization,
+        drain_checkpoint=inputs.drain_checkpoint,
+        call_material=material,
+        submission_receipt=receipt,
+        submission_journal=_load_direct_submission_journal(journal, inputs, outputs),
+        created_at=created_at,
+    )
+
+
+def _require_publication_receipt_binding(
+    receipt: SupervisorBootstrapPublicationReceipt,
+    *,
+    environment: SupervisorWorkerEnvironment,
+    submission_id: str,
+    signed_result_bytes: bytes,
+) -> None:
+    expected_sha256 = hashlib.sha256(signed_result_bytes).hexdigest()
+    expected_url = (
+        f"{WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN}/validator-bootstrap-results/{submission_id}.json"
+    )
+    if (
+        receipt.submission_id != submission_id
+        or receipt.directive_sha256 != environment.directive_sha256
+        or account_id32(receipt.validator_hotkey)
+        != account_id32(environment.expected_validator_hotkey)
+        or receipt.signed_result_sha256 != expected_sha256
+        or receipt.signed_result_size_bytes != len(signed_result_bytes)
+        or receipt.public_url != expected_url
+    ):
+        raise SupervisorWorkerError("worker_result_publication_receipt_invalid")
+
+
+async def _publish_completed_bootstrap_result(
+    environment: SupervisorWorkerEnvironment,
+    inputs: BootstrapWorkerInputs,
+    outputs: BootstrapWorkerOutputs,
+    journal: SupervisorWorkerJournal,
+    wallet: Any,
+    operator_input_root: Path,
+) -> None:
+    """Persist, sign, and create-only publish one completed terminal result."""
+
+    if journal.phase != "completed":
+        raise SupervisorWorkerError("worker_result_publication_before_completion")
+    try:
+        owner_fence = _load_canonical(
+            operator_input_root / "bootstrap" / "owner-fence-receipt.json",
+            OwnerFenceReceipt,
+        )
+        if outputs.signed_result.exists():
+            signed_result_bytes = _read_bounded_file(
+                outputs.signed_result,
+                MAX_SUPERVISOR_BOOTSTRAP_RESULT_BYTES,
+            )
+            signed_result = parse_canonical_signed_supervisor_bootstrap_result(signed_result_bytes)
+            expected_result = _expected_signed_result(
+                environment,
+                inputs,
+                outputs,
+                journal,
+                owner_fence_receipt=owner_fence,
+                created_at=signed_result.result.created_at,
+            )
+            if signed_result.result != expected_result:
+                raise SupervisorWorkerError("worker_signed_result_binding_invalid")
+        else:
+            terminal_receipt = _load_canonical(
+                outputs.receipt,
+                DirectBootstrapSubmissionReceipt,
+            )
+            result = _expected_signed_result(
+                environment,
+                inputs,
+                outputs,
+                journal,
+                owner_fence_receipt=owner_fence,
+                created_at=terminal_receipt.created_at,
+            )
+            signed_result = sign_supervisor_bootstrap_result(result, wallet=wallet)
+            signed_result_bytes = canonical_json_bytes(signed_result)
+            if len(signed_result_bytes) > MAX_SUPERVISOR_BOOTSTRAP_RESULT_BYTES:
+                raise SupervisorWorkerError("worker_signed_result_size_invalid")
+            _write_new_bytes(outputs.signed_result, signed_result_bytes)
+    except SupervisorWorkerError:
+        raise
+    except Exception as error:
+        raise SupervisorWorkerError("worker_signed_result_invalid") from error
+
+    if outputs.publication_receipt.exists():
+        publication = _load_canonical(
+            outputs.publication_receipt,
+            SupervisorBootstrapPublicationReceipt,
+        )
+        _require_publication_receipt_binding(
+            publication,
+            environment=environment,
+            submission_id=inputs.transition_authorization.submission_id,
+            signed_result_bytes=signed_result_bytes,
+        )
+        return
+
+    try:
+        upload_secret = load_hex_secret(WORKER_BOOTSTRAP_RESULT_UPLOAD_SECRET)
+    except Exception as error:
+        raise SupervisorWorkerError("worker_result_publication_credential_invalid") from error
+    try:
+        uploaded_sha256, uploaded_size, public_url = await asyncio.to_thread(
+            upload_validator_bootstrap_result,
+            signed_result_bytes,
+            submission_id=inputs.transition_authorization.submission_id,
+            upload_origin=WORKER_BOOTSTRAP_RESULT_UPLOAD_ORIGIN,
+            public_origin=WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN,
+            secret=upload_secret,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        raise SupervisorWorkerError("worker_result_publication_failed") from error
+    expected_sha256 = hashlib.sha256(signed_result_bytes).hexdigest()
+    expected_url = (
+        f"{WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN}/validator-bootstrap-results/"
+        f"{inputs.transition_authorization.submission_id}.json"
+    )
+    if (
+        uploaded_sha256 != expected_sha256
+        or uploaded_size != len(signed_result_bytes)
+        or public_url != expected_url
+    ):
+        raise SupervisorWorkerError("worker_result_publication_response_invalid")
+    publication = SupervisorBootstrapPublicationReceipt(
+        schema=WORKER_BOOTSTRAP_PUBLICATION_RECEIPT_SCHEMA,
+        submission_id=inputs.transition_authorization.submission_id,
+        directive_sha256=environment.directive_sha256,
+        validator_hotkey=environment.expected_validator_hotkey,
+        signed_result_sha256=uploaded_sha256,
+        signed_result_size_bytes=uploaded_size,
+        public_url=public_url,
+        transport="cloudflare_r2_hmac_v1",
+        published_at=datetime.now(timezone.utc),
+    )
+    _write_new_canonical(outputs.publication_receipt, publication)
 
 
 def _mark_ambiguous(
@@ -1139,6 +1402,8 @@ def _bootstrap_outputs(
         receipt=transaction_root / "submission-receipt.json",
         call_material=transaction_root / "call-material.json",
         operator_state=authorization_root / "operator-state",
+        signed_result=transaction_root / "signed-bootstrap-result.json",
+        publication_receipt=transaction_root / "publication-receipt.json",
     )
 
 
@@ -1178,7 +1443,7 @@ def _verify_release(
 ) -> None:
     if hashlib.sha256(release_manifest_bytes).hexdigest() != environment.release_manifest_sha256:
         raise SupervisorWorkerError("worker_release_manifest_mismatch")
-    if release.entrypoint_profile != "umi-bootstrap-weight-validator/1":
+    if release.entrypoint_profile != "umi-bootstrap-weight-validator/2":
         raise SupervisorWorkerError("worker_release_profile_mismatch")
     if (
         not release.state_schema_minimum
@@ -1469,7 +1734,12 @@ def main() -> None:
 
 __all__ = [
     "BOOTSTRAP_DIRECTIVE_HEADROOM_BLOCKS",
+    "WORKER_BOOTSTRAP_PUBLICATION_RECEIPT_SCHEMA",
+    "WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN",
+    "WORKER_BOOTSTRAP_RESULT_UPLOAD_ORIGIN",
+    "WORKER_BOOTSTRAP_RESULT_UPLOAD_SECRET",
     "OwnedFinalityLease",
+    "SupervisorBootstrapPublicationReceipt",
     "SupervisorWorkerEnvironment",
     "SupervisorWorkerError",
     "SupervisorWorkerJournal",

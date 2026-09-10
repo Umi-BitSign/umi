@@ -14,6 +14,9 @@ archive_root=/var/lib/umi-validator-retired-units
 supervisor_root=/opt/umi-validator-supervisor
 supervisor_executable=/opt/umi-validator-supervisor/.venv/bin/umi-validator-supervisor
 container_runtime=/usr/bin/podman
+slirp4netns_binary=/usr/bin/slirp4netns
+bootstrap_upload_root=/var/lib/umi-validator-bootstrap-upload
+bootstrap_upload_credential="$bootstrap_upload_root/bootstrap-result-upload.key"
 
 fail() {
   printf 'umi-validator-supervisor-install: %s\n' "$*" >&2
@@ -98,17 +101,23 @@ require_immutable_supervisor_tree() {
 usage() {
   cat <<'EOF'
 Usage: sudo ./install.sh --config /absolute/path/validator-supervisor.json \
-  --legacy-unit EXACT_SYSTEM_SERVICE.service
+  --bootstrap-result-upload-key /absolute/path/bootstrap-result-upload.key \
+  (--fresh-install | --legacy-unit EXACT_SYSTEM_SERVICE.service)
 
-This version accepts one exact systemd system service. It does not inspect or
-stop containers, PM2 applications, user services, cron jobs, or matched process
-names.
+Use --fresh-install only when this host has no existing SN78 weight writer.
+That mode does not inspect, stop, disable, mask, or invent a legacy service.
+
+The legacy mode accepts one exact systemd system service. It does not inspect
+or stop containers, PM2 applications, user services, cron jobs, or matched
+process names.
 EOF
 }
 
 [ "$(id -u)" -eq 0 ] || fail "run this installer as root"
 
 config_source=
+bootstrap_upload_credential_source=
+install_mode=
 legacy_unit=
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -117,10 +126,24 @@ while [ "$#" -gt 0 ]; do
       config_source=$2
       shift 2
       ;;
+    --bootstrap-result-upload-key)
+      [ "$#" -ge 2 ] || fail "--bootstrap-result-upload-key requires one absolute path"
+      bootstrap_upload_credential_source=$2
+      shift 2
+      ;;
     --legacy-unit)
       [ "$#" -ge 2 ] || fail "--legacy-unit requires one service name"
+      [ -z "$install_mode" ] \
+        || fail "choose exactly one of --fresh-install or --legacy-unit"
+      install_mode=legacy
       legacy_unit=$2
       shift 2
+      ;;
+    --fresh-install)
+      [ -z "$install_mode" ] \
+        || fail "choose exactly one of --fresh-install or --legacy-unit"
+      install_mode=fresh
+      shift
       ;;
     -h|--help)
       usage
@@ -133,19 +156,28 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$config_source" ] || fail "--config is required"
-[ -n "$legacy_unit" ] || fail "--legacy-unit is required"
+[ -n "$bootstrap_upload_credential_source" ] \
+  || fail "--bootstrap-result-upload-key is required"
+[ -n "$install_mode" ] \
+  || fail "choose exactly one of --fresh-install or --legacy-unit"
 case "$config_source" in
   /*) ;;
   *) fail "--config must be an absolute path" ;;
 esac
-case "$legacy_unit" in
-  *.service) ;;
-  *) fail "legacy unit must include the .service suffix" ;;
+case "$bootstrap_upload_credential_source" in
+  /*) ;;
+  *) fail "--bootstrap-result-upload-key must be an absolute path" ;;
 esac
-case "$legacy_unit" in
-  ''|*/*|*[!A-Za-z0-9_.@-]*) fail "legacy unit name is invalid" ;;
-esac
-[ "$legacy_unit" != "$service_name" ] || fail "refusing to retire the UMI supervisor"
+if [ "$install_mode" = legacy ]; then
+  case "$legacy_unit" in
+    *.service) ;;
+    *) fail "legacy unit must include the .service suffix" ;;
+  esac
+  case "$legacy_unit" in
+    ''|*/*|*[!A-Za-z0-9_.@-]*) fail "legacy unit name is invalid" ;;
+  esac
+  [ "$legacy_unit" != "$service_name" ] || fail "refusing to retire the UMI supervisor"
+fi
 
 [ -f "$config_source" ] || fail "config source is not a regular file"
 [ ! -L "$config_source" ] || fail "config source must not be a symlink"
@@ -153,6 +185,23 @@ case "$(stat -c '%a' "$config_source")" in
   400|440|600|640) ;;
   *) fail "config source mode must be 0400, 0440, 0600, or 0640" ;;
 esac
+[ -f "$bootstrap_upload_credential_source" ] \
+  || fail "bootstrap result upload key source is not a regular file"
+[ ! -L "$bootstrap_upload_credential_source" ] \
+  || fail "bootstrap result upload key source must not be a symlink"
+[ "$(stat -c '%h' "$bootstrap_upload_credential_source")" -eq 1 ] \
+  || fail "bootstrap result upload key source must not be hard-linked"
+case "$(stat -c '%a' "$bootstrap_upload_credential_source")" in
+  400|600) ;;
+  *) fail "bootstrap result upload key source mode must be 0400 or 0600" ;;
+esac
+credential_source_size=$(stat -c '%s' "$bootstrap_upload_credential_source")
+case "$credential_source_size" in
+  64|65) ;;
+  *) fail "bootstrap result upload key must encode exactly 32 bytes" ;;
+esac
+LC_ALL=C grep -Eq '^[0-9a-f]{64}$' "$bootstrap_upload_credential_source" \
+  || fail "bootstrap result upload key must be 64 lowercase hexadecimal characters"
 [ -f "$service_source" ] || fail "checked-in service unit is missing"
 [ ! -L "$service_source" ] || fail "checked-in service unit must not be a symlink"
 [ -f "$subordinate_range_checker" ] \
@@ -183,31 +232,35 @@ executable_mode=$(stat -c '%a' "$supervisor_executable")
 [ "$((0$executable_mode & 07000))" -eq 0 ] \
   || fail "supervisor executable has special permission bits"
 [ -x "$container_runtime" ] || fail "rootless Podman is not installed at /usr/bin/podman"
+[ -x "$slirp4netns_binary" ] \
+  || fail "rootless Podman networking is not installed at /usr/bin/slirp4netns"
 
-load_state=$(systemctl show "$legacy_unit" --property=LoadState --value)
-[ "$load_state" = loaded ] || fail "legacy unit is not one loaded system service"
-legacy_fragment=$(systemctl show "$legacy_unit" --property=FragmentPath --value)
-case "$legacy_fragment" in
-  /*) ;;
-  *) fail "legacy unit fragment path is missing or non-absolute" ;;
-esac
-legacy_control_group=$(systemctl show "$legacy_unit" --property=ControlGroup --value)
-case "$legacy_control_group" in
-  ''|/*) ;;
-  *) fail "legacy unit control group is invalid" ;;
-esac
-[ -f "$legacy_fragment" ] || fail "legacy unit fragment is not a regular file"
-[ ! -L "$legacy_fragment" ] || fail "legacy unit fragment must not be a symlink"
-case "$legacy_fragment" in
-  "/etc/systemd/system/$legacy_unit")
-    archive_path="$archive_root/$legacy_unit"
-    [ ! -e "$archive_path" ] && [ ! -L "$archive_path" ] \
-      || fail "retired-unit archive already exists"
-    ;;
-  /etc/systemd/system/*)
-    fail "legacy unit uses an unexpected local fragment path"
-    ;;
-esac
+if [ "$install_mode" = legacy ]; then
+  load_state=$(systemctl show "$legacy_unit" --property=LoadState --value)
+  [ "$load_state" = loaded ] || fail "legacy unit is not one loaded system service"
+  legacy_fragment=$(systemctl show "$legacy_unit" --property=FragmentPath --value)
+  case "$legacy_fragment" in
+    /*) ;;
+    *) fail "legacy unit fragment path is missing or non-absolute" ;;
+  esac
+  legacy_control_group=$(systemctl show "$legacy_unit" --property=ControlGroup --value)
+  case "$legacy_control_group" in
+    ''|/*) ;;
+    *) fail "legacy unit control group is invalid" ;;
+  esac
+  [ -f "$legacy_fragment" ] || fail "legacy unit fragment is not a regular file"
+  [ ! -L "$legacy_fragment" ] || fail "legacy unit fragment must not be a symlink"
+  case "$legacy_fragment" in
+    "/etc/systemd/system/$legacy_unit")
+      archive_path="$archive_root/$legacy_unit"
+      [ ! -e "$archive_path" ] && [ ! -L "$archive_path" ] \
+        || fail "retired-unit archive already exists"
+      ;;
+    /etc/systemd/system/*)
+      fail "legacy unit uses an unexpected local fragment path"
+      ;;
+  esac
+fi
 
 if ! getent group "$service_account" >/dev/null 2>&1; then
   groupadd --system "$service_account"
@@ -233,11 +286,14 @@ esac
   || fail "installed supervisor config already exists"
 [ ! -e "$service_destination" ] && [ ! -L "$service_destination" ] \
   || fail "installed supervisor service already exists"
+[ ! -e "$bootstrap_upload_credential" ] && [ ! -L "$bootstrap_upload_credential" ] \
+  || fail "installed bootstrap result upload key already exists"
 
 for managed_directory in \
   /etc/umi \
   /var/lib/umi-validator-runtime-wallets \
   /var/lib/umi-validator-operator-inputs \
+  "$bootstrap_upload_root" \
   /var/lib/umi-validator-supervisor \
   /var/lib/umi-validator-supervisor/container-config \
   /var/lib/umi-validator-supervisor/container-data \
@@ -253,6 +309,8 @@ done
 
 install -d -o root -g root -m 0755 /etc/umi
 install -d -o root -g "$service_account" -m 0750 /var/lib/umi-validator-runtime-wallets
+install -d -o "$service_account" -g "$service_account" -m 0700 \
+  "$bootstrap_upload_root"
 install -d -o "$service_account" -g "$service_account" -m 0700 \
   /var/lib/umi-validator-operator-inputs \
   /var/lib/umi-validator-supervisor \
@@ -283,11 +341,14 @@ done
   || fail "service account must not belong to supplementary groups"
 
 config_stage="/etc/umi/.validator-supervisor.json.installing.$$"
+credential_stage="$bootstrap_upload_root/.bootstrap-result-upload.key.installing.$$"
 cleanup_stage() {
-  rm -f -- "$config_stage"
+  rm -f -- "$config_stage" "$credential_stage"
 }
 trap cleanup_stage EXIT HUP INT TERM
 install -o root -g "$service_account" -m 0640 "$config_source" "$config_stage"
+install -o "$service_account" -g "$service_account" -m 0400 \
+  "$bootstrap_upload_credential_source" "$credential_stage"
 
 supervisor() {
   runuser -u "$service_account" -- env -i \
@@ -334,44 +395,47 @@ esac
 podman unshare /usr/bin/true \
   || fail "rootless Podman user-namespace preflight failed"
 
-# This is the last preflight before the irreversible migration boundary. It
+# This is the last preflight before the installation boundary. It
 # fetches and authenticates the validator-bound sequence-1 hold directive and
 # reads a fresh finalized Finney head through the owned verifier. It does not
 # write supervisor state or start a worker.
 supervisor preflight-initial-hold --config "$config_stage"
 
-systemctl disable --now "$legacy_unit"
-if systemctl is-active --quiet "$legacy_unit"; then
-  fail "legacy unit remained active after stop"
+if [ "$install_mode" = legacy ]; then
+  systemctl disable --now "$legacy_unit"
+  if systemctl is-active --quiet "$legacy_unit"; then
+    fail "legacy unit remained active after stop"
+  fi
+
+  case "$legacy_fragment" in
+    "/etc/systemd/system/$legacy_unit")
+      install -d -o root -g root -m 0700 "$archive_root"
+      mv -- "$legacy_fragment" "$archive_path"
+      chmod 0600 "$archive_path"
+      systemctl daemon-reload
+      ;;
+  esac
+
+  systemctl mask "$legacy_unit"
+  masked_state=$(systemctl is-enabled "$legacy_unit" 2>/dev/null || :)
+  [ "$masked_state" = masked ] || fail "legacy unit is not permanently masked"
+  # KillMode=process and KillMode=mixed can leave children behind after a clean
+  # stop. The unit is masked before this exact-cgroup kill, so it cannot restart
+  # while the installer checks every descendant cgroup.
+  systemctl kill --kill-whom=all --signal=SIGKILL "$legacy_unit" >/dev/null 2>&1 || :
+  if systemctl is-active --quiet "$legacy_unit"; then
+    fail "legacy unit became active after masking"
+  fi
+  legacy_main_pid=$(systemctl show "$legacy_unit" --property=MainPID --value)
+  [ "$legacy_main_pid" = 0 ] || fail "legacy unit still has a main process after masking"
+  require_empty_unit_control_group "$legacy_control_group"
+  current_legacy_control_group=$(
+    systemctl show "$legacy_unit" --property=ControlGroup --value
+  )
+  require_empty_unit_control_group "$current_legacy_control_group"
 fi
 
-case "$legacy_fragment" in
-  "/etc/systemd/system/$legacy_unit")
-    install -d -o root -g root -m 0700 "$archive_root"
-    mv -- "$legacy_fragment" "$archive_path"
-    chmod 0600 "$archive_path"
-    systemctl daemon-reload
-    ;;
-esac
-
-systemctl mask "$legacy_unit"
-masked_state=$(systemctl is-enabled "$legacy_unit" 2>/dev/null || :)
-[ "$masked_state" = masked ] || fail "legacy unit is not permanently masked"
-# KillMode=process and KillMode=mixed can leave children behind after a clean
-# stop. The unit is masked before this exact-cgroup kill, so it cannot restart
-# while the installer checks every descendant cgroup.
-systemctl kill --kill-whom=all --signal=SIGKILL "$legacy_unit" >/dev/null 2>&1 || :
-if systemctl is-active --quiet "$legacy_unit"; then
-  fail "legacy unit became active after masking"
-fi
-legacy_main_pid=$(systemctl show "$legacy_unit" --property=MainPID --value)
-[ "$legacy_main_pid" = 0 ] || fail "legacy unit still has a main process after masking"
-require_empty_unit_control_group "$legacy_control_group"
-current_legacy_control_group=$(
-  systemctl show "$legacy_unit" --property=ControlGroup --value
-)
-require_empty_unit_control_group "$current_legacy_control_group"
-
+mv -- "$credential_stage" "$bootstrap_upload_credential"
 mv -- "$config_stage" "$config_destination"
 install -o root -g root -m 0644 "$service_source" "$service_destination"
 trap - EXIT HUP INT TERM
@@ -397,8 +461,13 @@ while [ "$readiness_attempt" -lt 180 ]; do
   sleep 1
 done
 [ "$supervisor_ready" = true ] \
-  || fail "UMI supervisor did not establish its singleton hold; legacy unit remains retired"
+  || fail "UMI supervisor did not establish its singleton hold"
 
-printf 'legacy_unit=%s\n' "$legacy_unit"
-printf 'legacy_unit_state=masked_inactive\n'
+printf 'install_mode=%s\n' "$install_mode"
+if [ "$install_mode" = legacy ]; then
+  printf 'legacy_unit=%s\n' "$legacy_unit"
+  printf 'legacy_unit_state=masked_inactive\n'
+else
+  printf 'legacy_action=none\n'
+fi
 printf 'supervisor_state=durable_hold\n'

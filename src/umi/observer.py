@@ -491,22 +491,30 @@ def _select_bootstrap_service(
         return BootstrapServiceSelection(None, "bootstrap_service_pending_commit_queue_not_empty")
     if network.subnet_exists is not True or network.subnet_started is not True:
         return BootstrapServiceSelection(None, "bootstrap_service_subnet_not_started")
-    uid_zero = [item for item in snapshot.participants if item.uid == 0]
-    if len(uid_zero) != 1:
-        return BootstrapServiceSelection(None, "bootstrap_service_uid_zero_unavailable")
-    owner = uid_zero[0]
-    if not owner.validator_permit or not owner.chain_active:
-        return BootstrapServiceSelection(None, "bootstrap_service_uid_zero_not_active_validator")
-
+    participants_by_uid = {item.uid: item for item in snapshot.participants}
     call_matches = [
         item
         for item in feed.publications
-        if item.receipt.weight_call.block_number == int(owner.last_update_block)
-        and account_id32(item.receipt.validator_hotkey) == account_id32(owner.hotkey)
+        if (
+            (validator := participants_by_uid.get(item.receipt.validator_uid)) is not None
+            and validator.validator_permit
+            and validator.chain_active
+            and item.receipt.weight_call.block_number == int(validator.last_update_block)
+            and account_id32(item.receipt.validator_hotkey) == account_id32(validator.hotkey)
+            and item.receipt.validator_uid == item.authorization.validator_uid
+            and account_id32(item.receipt.validator_hotkey)
+            == account_id32(item.authorization.validator_hotkey)
+        )
     ]
     if len(call_matches) != 1:
-        return BootstrapServiceSelection(None, "bootstrap_service_uid_zero_row_unmatched")
+        return BootstrapServiceSelection(None, "bootstrap_service_validator_row_unmatched")
     publication = call_matches[0]
+    validator = participants_by_uid[publication.receipt.validator_uid]
+    expected_owner = (
+        publication.call_material.operational_preflight.chain.subnet_owner_hotkey_account_id32
+    )
+    if network.subnet_owner_hotkey_account_id32 != expected_owner:
+        return BootstrapServiceSelection(None, "bootstrap_service_subnet_owner_mapping_changed")
     if block < publication.receipt.observation_block:
         return BootstrapServiceSelection(None, "bootstrap_service_receipt_not_finalized_at_head")
     if block > publication.manifest.active_through_block:
@@ -519,16 +527,15 @@ def _select_bootstrap_service(
     competing_validators = [
         item
         for item in snapshot.participants
-        if item.uid != 0
+        if item.uid != validator.uid
         and item.validator_permit
         and (item.chain_active or int(item.last_update_block) + expected_cutoff >= block)
     ]
     if competing_validators:
         return BootstrapServiceSelection(
             None,
-            "bootstrap_service_non_owner_validator_active",
+            "bootstrap_service_other_validator_active",
         )
-    participants_by_uid = {item.uid: item for item in snapshot.participants}
     for entry in publication.signed_manifest.manifest.entries:
         participant = participants_by_uid.get(entry.uid)
         if (
@@ -542,8 +549,16 @@ def _select_bootstrap_service(
                 None,
                 "bootstrap_service_eligible_miner_mapping_changed",
             )
+        if participant.serving_origin != entry.origin:
+            return BootstrapServiceSelection(
+                None,
+                "bootstrap_service_eligible_miner_origin_changed",
+            )
     expected_row = tuple(tuple(item) for item in publication.receipt.expected_applied_row)
-    if network.uid_zero_mechid0_row != expected_row:
+    rows_by_validator = {
+        item.validator_uid: item.weights for item in network.validator_mechid0_rows
+    }
+    if rows_by_validator.get(validator.uid) != expected_row:
         return BootstrapServiceSelection(None, "bootstrap_service_applied_row_mismatch")
     return BootstrapServiceSelection(publication, "bootstrap_service_active")
 
@@ -1436,7 +1451,7 @@ def create_observer_app(
             eligibility_manifest_sha256=publication.manifest.eligibility_manifest_sha256,
             submission_id=publication.manifest.submission_id,
             umi_git_revision=publication.manifest.umi_git_revision,
-            validator_uid=0,
+            validator_uid=publication.receipt.validator_uid,
             validator_hotkey=publication.receipt.validator_hotkey,
             weight_call_block=str(publication.receipt.weight_call.block_number),
             weight_call_block_hash=publication.receipt.weight_call.block_hash,

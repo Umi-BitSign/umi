@@ -76,10 +76,12 @@ jobs:
           PY
           )"
           artifact_base="umi-validator-supervisor-worker-${REVISION}-linux-${ARCHITECTURE}"
+          finality_base="umi-grandpa-finality-observer-${REVISION}-linux-${ARCHITECTURE}"
           image_tag="${OCI_REPOSITORY}:supervisor-worker-${REVISION}-${ARCHITECTURE}"
           {
             echo "ARTIFACT_BASE=${artifact_base}"
             echo "ARCHIVE=out/${artifact_base}.oci.tar"
+            echo "FINALITY_BASE=${finality_base}"
             echo "IMAGE_TAG=${image_tag}"
             echo "SOURCE_TREE_SHA256=${source_tree_sha256}"
           } >> "${GITHUB_ENV}"
@@ -110,7 +112,7 @@ jobs:
           set -euo pipefail
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMAGE_TAG}")" = "${REVISION}"
           test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.source-tree-sha256" }}' "${IMAGE_TAG}")" = "${SOURCE_TREE_SHA256}"
-          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.entrypoint-profile" }}' "${IMAGE_TAG}")" = "umi-bootstrap-weight-validator/1"
+          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.entrypoint-profile" }}' "${IMAGE_TAG}")" = "umi-bootstrap-weight-validator/2"
           test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "${IMAGE_TAG}")" = "${PLATFORM}"
           test "$(docker image inspect --format '{{ .Config.User }}' "${IMAGE_TAG}")" = "65532:65532"
           docker run --rm --platform "${PLATFORM}" \
@@ -128,6 +130,63 @@ jobs:
             --security-opt no-new-privileges \
             --entrypoint /opt/umi/bin/umi-grandpa-finality-observer \
             "${IMAGE_TAG}" --conformance-self-test
+
+      - name: Extract the host finality verifier and pinned Finney chain spec
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_id="$(docker create --platform "${PLATFORM}" "${IMAGE_TAG}")"
+          cleanup() { docker rm --force "${container_id}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker cp \
+            "${container_id}:/opt/umi/bin/umi-grandpa-finality-observer" \
+            "out/${FINALITY_BASE}"
+          docker cp "${container_id}:/usr/local/bin/uv" "out/uv-${REVISION}-linux-${ARCHITECTURE}"
+          docker cp "${container_id}:/opt/umi/finney.json" "out/raw_spec_finney.json"
+          cleanup
+          trap - EXIT
+          chmod 0555 "out/${FINALITY_BASE}"
+          chmod 0555 "out/uv-${REVISION}-linux-${ARCHITECTURE}"
+          chmod 0444 "out/raw_spec_finney.json"
+          "out/${FINALITY_BASE}" --conformance-self-test
+          test "$("out/uv-${REVISION}-linux-${ARCHITECTURE}" --version | cut -d' ' -f1-2)" = \
+            "uv 0.12.9"
+          test "$(sha256sum out/raw_spec_finney.json | cut -d' ' -f1)" = \
+            "f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105"
+          finality_sha256="$(sha256sum "out/${FINALITY_BASE}" | cut -d' ' -f1)"
+          finality_size_bytes="$(stat -c '%s' "out/${FINALITY_BASE}")"
+          uv_sha256="$(sha256sum "out/uv-${REVISION}-linux-${ARCHITECTURE}" | cut -d' ' -f1)"
+          uv_size_bytes="$(stat -c '%s' "out/uv-${REVISION}-linux-${ARCHITECTURE}")"
+          printf '%s  %s\n' "${finality_sha256}" "${FINALITY_BASE}" \
+            > "out/${FINALITY_BASE}.sha256"
+          printf '%s\n' "${finality_size_bytes}" > "out/${FINALITY_BASE}.size"
+          printf '%s  %s\n' "${uv_sha256}" "uv-${REVISION}-linux-${ARCHITECTURE}" \
+            > "out/uv-${REVISION}-linux-${ARCHITECTURE}.sha256"
+          printf '%s\n' "${uv_size_bytes}" \
+            > "out/uv-${REVISION}-linux-${ARCHITECTURE}.size"
+          jq -cn \
+            --arg finality_binary "${FINALITY_BASE}" \
+            --arg finality_sha256 "${finality_sha256}" \
+            --argjson finality_size_bytes "${finality_size_bytes}" \
+            --arg revision "${REVISION}" \
+            --arg source_tree_sha256 "${SOURCE_TREE_SHA256}" \
+            --arg target_platform "${PLATFORM}" \
+            --arg uv_binary "uv-${REVISION}-linux-${ARCHITECTURE}" \
+            --arg uv_sha256 "${uv_sha256}" \
+            --argjson uv_size_bytes "${uv_size_bytes}" \
+            '{chain_spec:"raw_spec_finney.json",
+              chain_spec_sha256:"f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105",
+              finality_binary:$finality_binary,
+              finality_binary_sha256:$finality_sha256,
+              finality_binary_size_bytes:$finality_size_bytes,
+              revision:$revision,
+              schema:"umi-validator-supervisor-host-artifacts/1",
+              source_tree_sha256:$source_tree_sha256,
+              target_platform:$target_platform,
+              uv_binary:$uv_binary,
+              uv_sha256:$uv_sha256,
+              uv_size_bytes:$uv_size_bytes}' \
+            > "out/${FINALITY_BASE}.json"
 
       - name: Verify and record the exact OCI archive
         shell: bash
@@ -162,7 +221,7 @@ jobs:
              .config.Entrypoint == ["/usr/local/bin/umi-validator-supervisor-worker"] and
              .config.Labels["org.opencontainers.image.revision"] == $revision and
              .config.Labels["vision.umi.source-tree-sha256"] == $source_tree_sha256 and
-             .config.Labels["vision.umi.entrypoint-profile"] == "umi-bootstrap-weight-validator/1"' \
+             .config.Labels["vision.umi.entrypoint-profile"] == "umi-bootstrap-weight-validator/2"' \
             <<<"${config_json}" >/dev/null
           archive_sha256="$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)"
           archive_size_bytes="$(stat -c '%s' "${ARCHIVE}")"

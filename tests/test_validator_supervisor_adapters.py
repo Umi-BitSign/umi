@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import queue
 import sys
@@ -15,17 +16,33 @@ from bittensor.keyfiles import serialized_keypair_to_keyfile_data
 
 import umi.validator_supervisor_cli as supervisor_cli
 from tests.factories import dev_wallet
+from tests.test_bootstrap_direct_weights import (
+    NOW,
+    _operational,
+    _owner_fence_preflight,
+    _preflight,
+)
+from umi.bootstrap_direct_weights import (
+    OWNER_FENCE_RECEIPT_SCHEMA,
+    OwnerFenceReceipt,
+    build_owner_fence_call,
+)
 from umi.grandpa_finality import FINNEY_BOOTSTRAP_BLOCK_NUMBER
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor import (
     SUPERVISOR_CONFIG_SCHEMA,
     SUPERVISOR_DIRECTIVE_STATE_SCHEMA,
     SupervisorDirectiveState,
+    SupervisorOperatorInputTarget,
     SupervisorReleaseTarget,
     ValidatorSupervisorConfig,
     store_supervisor_directive_state,
 )
 from umi.validator_supervisor_adapters import (
+    BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL,
+    SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
+    SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
+    WORKER_BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL_PATH,
     WORKER_CONTAINER_NAME,
     WORKER_ENTRYPOINT,
     FinneyFinalizedBlockReader,
@@ -33,8 +50,11 @@ from umi.validator_supervisor_adapters import (
     PinnedHTTPSClient,
     RootlessPodmanWorkerAdapter,
     StagedSupervisorRelease,
+    SupervisorBootstrapInputBundle,
     SupervisorReleaseManifest,
     ValidatorSupervisorAdapterError,
+    _parse_bootstrap_input_bundle,
+    _require_bootstrap_result_upload_credential,
     _require_wallet_tree,
     _run_bounded_command,
 )
@@ -116,9 +136,43 @@ def _release(config: ValidatorSupervisorConfig) -> SupervisorReleaseTarget:
         target_platform="linux/amd64",
         umi_git_revision="66" * 20,
         umi_source_tree_sha256="77" * 32,
-        entrypoint_profile="umi-bootstrap-weight-validator/1",
+        entrypoint_profile="umi-bootstrap-weight-validator/2",
         state_schema_minimum=1,
         state_schema_maximum=1,
+    )
+
+
+def _bootstrap_bundle() -> SupervisorBootstrapInputBundle:
+    signed, authorization, owner, _participants, preflight = _preflight()
+    drain = _operational(signed, preflight)
+    fence_preflight = _owner_fence_preflight(owner, applied=True)
+    material, _call = build_owner_fence_call(fence_preflight)
+    receipt = OwnerFenceReceipt(
+        schema=OWNER_FENCE_RECEIPT_SCHEMA,
+        classification="already_applied",
+        call_material_sha256=hashlib.sha256(canonical_json_bytes(material)).hexdigest(),
+        call_material=material,
+        extrinsic=None,
+        observation_block=fence_preflight.block_number,
+        observation_block_hash=fence_preflight.block_hash,
+        observed_weights_version_key=fence_preflight.current_weights_version_key,
+        observed_min_allowed_weights=fence_preflight.current_min_allowed_weights,
+        observed_commit_reveal_enabled=fence_preflight.current_commit_reveal_enabled,
+        source_snapshot_pending_commit_count=fence_preflight.pending_commit_count,
+        observed_pending_commit_count=fence_preflight.pending_commit_count,
+        batch_all_finalized_success=False,
+        all_storage_targets_verified=True,
+        sdk_finalized_reads_verified=True,
+        storage_proofs_verified=False,
+        created_at=NOW,
+    )
+    return SupervisorBootstrapInputBundle(
+        schema=SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
+        profile=SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
+        signed_manifest=signed,
+        transition_authorization=authorization,
+        drain_checkpoint=drain,
+        owner_fence_receipt=receipt,
     )
 
 
@@ -165,6 +219,133 @@ async def test_https_client_rejects_redirect_and_oversize_body() -> None:
     client = PinnedHTTPSClient(transport=httpx.MockTransport(oversized))
     with pytest.raises(ValidatorSupervisorAdapterError, match="https_body_limit"):
         await client.fetch_bytes("https://api.umi.vision/object", maximum_bytes=32)
+
+
+def test_bootstrap_input_bundle_is_canonical_and_cross_bound() -> None:
+    bundle = _bootstrap_bundle()
+    payload = canonical_json_bytes(bundle)
+
+    assert _parse_bootstrap_input_bundle(payload) == bundle
+    changed = bundle.model_dump(mode="json", by_alias=True)
+    changed["transition_authorization"]["manifest_sha256"] = "99" * 32
+    with pytest.raises(
+        ValidatorSupervisorAdapterError,
+        match="operator_input_bundle_invalid",
+    ):
+        _parse_bootstrap_input_bundle(canonical_json_bytes(changed))
+
+
+def test_cli_builds_bootstrap_input_bundle_and_hash_target(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = _bootstrap_bundle()
+    paths: dict[str, Path] = {}
+    for name, value in (
+        ("signed-manifest", bundle.signed_manifest),
+        ("authorization", bundle.transition_authorization),
+        ("drain-checkpoint", bundle.drain_checkpoint),
+        ("owner-fence-receipt", bundle.owner_fence_receipt),
+    ):
+        path = tmp_path / f"{name}.json"
+        path.write_bytes(canonical_json_bytes(value))
+        paths[name] = path
+    output = tmp_path / "bootstrap-inputs.json"
+    target_output = tmp_path / "bootstrap-input-target.json"
+
+    assert (
+        supervisor_cli.run_cli(
+            [
+                "build-bootstrap-input-bundle",
+                "--signed-manifest",
+                str(paths["signed-manifest"]),
+                "--authorization",
+                str(paths["authorization"]),
+                "--drain-checkpoint",
+                str(paths["drain-checkpoint"]),
+                "--owner-fence-receipt",
+                str(paths["owner-fence-receipt"]),
+                "--bundle-url",
+                "https://api.umi.vision/releases/bootstrap-inputs.json",
+                "--output",
+                str(output),
+                "--target-output",
+                str(target_output),
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    target = SupervisorOperatorInputTarget.model_validate_json(target_output.read_bytes())
+    assert output.read_bytes() == canonical_json_bytes(bundle)
+    assert result["bundle_sha256"] == target.bundle_sha256
+    assert target.bundle_sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert target.bundle_size_bytes == output.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_adapter_stages_and_reverifies_directive_bound_bootstrap_inputs(
+    tmp_path: Path,
+) -> None:
+    bundle = _bootstrap_bundle()
+    payload = canonical_json_bytes(bundle)
+    target = SupervisorOperatorInputTarget(
+        artifact_type="canonical_json",
+        profile=SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
+        bundle_url="https://api.umi.vision/releases/bootstrap-inputs.json",
+        bundle_sha256=hashlib.sha256(payload).hexdigest(),
+        bundle_size_bytes=len(payload),
+    )
+
+    class HTTPS:
+        async def download_file(self, _url, *, destination, **_kwargs):
+            destination.write_bytes(payload)
+
+    release_root = tmp_path / "release"
+    release_root.mkdir(mode=0o700)
+    config = _config(tmp_path)
+    adapter = RootlessPodmanWorkerAdapter(config, https=HTTPS())
+    await adapter._stage_operator_inputs(release_root, target)
+    release = _release(config)
+    manifest = SupervisorReleaseManifest(
+        schema="umi-validator-supervisor-release-manifest/1",
+        oci_repository=release.oci_repository,
+        oci_manifest_sha256=release.oci_manifest_sha256,
+        oci_archive_sha256="88" * 32,
+        oci_archive_size_bytes=100,
+        target_platform=release.target_platform,
+        umi_git_revision=release.umi_git_revision,
+        umi_source_tree_sha256=release.umi_source_tree_sha256,
+        entrypoint_profile=release.entrypoint_profile,
+        state_schema_minimum=1,
+        state_schema_maximum=1,
+    )
+    staged = StagedSupervisorRelease(
+        root=release_root,
+        manifest_path=release_root / "release-manifest.json",
+        archive_path=release_root / "image.oci.tar",
+        image_reference=f"{release.oci_repository}@sha256:{release.oci_manifest_sha256}",
+        manifest=manifest,
+        operator_input_root=release_root / "operator-inputs",
+    )
+    await adapter._verify_staged_operator_inputs(staged, target)
+    extracted = staged.operator_input_root / "bootstrap"
+    assert (extracted / "signed-manifest.json").read_bytes() == canonical_json_bytes(
+        bundle.signed_manifest
+    )
+    assert (extracted / "owner-fence-receipt.json").read_bytes() == canonical_json_bytes(
+        bundle.owner_fence_receipt
+    )
+
+    manifest_path = extracted / "signed-manifest.json"
+    manifest_path.chmod(0o600)
+    manifest_path.write_bytes(b"{}")
+    manifest_path.chmod(0o400)
+    with pytest.raises(
+        ValidatorSupervisorAdapterError,
+        match="operator_input_file_binding_mismatch",
+    ):
+        await adapter._verify_staged_operator_inputs(staged, target)
 
 
 @pytest.mark.asyncio
@@ -310,6 +491,14 @@ def test_worker_arguments_are_fixed_digest_platform_and_lease_bound(tmp_path: Pa
         archive_path=tmp_path / "staged" / "image.oci.tar",
         image_reference=f"{release.oci_repository}@sha256:{release.oci_manifest_sha256}",
         manifest=manifest,
+        operator_input_root=tmp_path / "staged" / "operator-inputs",
+    )
+    operator_inputs = SupervisorOperatorInputTarget(
+        artifact_type="canonical_json",
+        profile="umi-bootstrap-direct-inputs/2",
+        bundle_url="https://api.umi.vision/releases/bootstrap-inputs.json",
+        bundle_sha256="89" * 32,
+        bundle_size_bytes=1_024,
     )
     activation = SupervisorWorkerActivation(
         mode="bootstrap_service_weights",
@@ -319,6 +508,7 @@ def test_worker_arguments_are_fixed_digest_platform_and_lease_bound(tmp_path: Pa
         valid_from_block=1_000,
         valid_through_block=2_000,
         release=release,
+        operator_inputs=operator_inputs,
     )
     arguments = RootlessPodmanWorkerAdapter(config)._worker_arguments(staged, activation)
 
@@ -335,10 +525,30 @@ def test_worker_arguments_are_fixed_digest_platform_and_lease_bound(tmp_path: Pa
     assert f"UMI_EXPECTED_VALIDATOR_HOTKEY={config.validator_hotkey}" in arguments
     assert str(Path(config.state_root)) not in "\n".join(arguments)
     assert str(Path(config.release_root)) not in "\n".join(arguments)
+    assert str(staged.operator_input_root) in "\n".join(arguments)
+    assert str(Path(config.operator_input_root)) not in "\n".join(arguments)
+    assert str(BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL) in "\n".join(arguments)
+    assert WORKER_BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL_PATH in "\n".join(arguments)
     assert arguments[-2:] == (
         staged.image_reference,
         "run-bootstrap-service-weights",
     )
+
+
+def test_bootstrap_result_upload_credential_is_exact_and_private(tmp_path: Path) -> None:
+    credential = tmp_path / "bootstrap-result-upload.key"
+    credential.write_text("ab" * 32 + "\n", encoding="ascii")
+    credential.chmod(0o400)
+    _require_bootstrap_result_upload_credential(credential)
+
+    credential.chmod(0o600)
+    credential.write_text("AB" * 32, encoding="ascii")
+    credential.chmod(0o400)
+    with pytest.raises(
+        ValidatorSupervisorAdapterError,
+        match="bootstrap_result_upload_credential_unsafe",
+    ):
+        _require_bootstrap_result_upload_credential(credential)
 
 
 def test_wallet_tree_binds_exact_plaintext_hotkey_and_rejects_broken_coldkey_symlink(

@@ -47,7 +47,7 @@ def _document(*, cutoff: str = "360", tempo: str = "360") -> dict[str, object]:
             "mechanism_id": 0,
             "netuid": 78,
         },
-        "schema": "umi-observer-network/1",
+        "schema": "umi-observer-network/2",
         "sources": [
             {
                 "block": block,

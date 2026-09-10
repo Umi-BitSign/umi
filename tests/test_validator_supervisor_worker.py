@@ -8,8 +8,19 @@ from pathlib import Path
 import pytest
 
 from tests.factories import dev_wallet
-from tests.test_bootstrap_direct_weights import BLOCK_HASH, NOW, _operational, _preflight, _snapshot
+from tests.test_bootstrap_direct_weights import (
+    BLOCK_HASH,
+    NOW,
+    _operational,
+    _permitted_case,
+    _preflight,
+    _snapshot,
+)
+from tests.test_observer_bootstrap_service_feed import _terminal_records
+from umi import validator_supervisor_worker as worker_module
 from umi.bootstrap_direct_weights import (
+    DIRECT_SUBMISSION_JOURNAL_SCHEMA,
+    DIRECT_TRANSITION_PROFILE,
     DirectBootstrapSubmissionJournal,
     build_direct_bootstrap_call_material,
     classify_direct_bootstrap_application,
@@ -23,13 +34,31 @@ from umi.bootstrap_weight_operator import (
 from umi.encoding import account_id32
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor_adapters import OwnedFinalizedBlock, SupervisorReleaseManifest
+from umi.validator_supervisor_publication import (
+    parse_canonical_signed_supervisor_bootstrap_result,
+)
 from umi.validator_supervisor_worker import (
     WORKER_JOURNAL_SCHEMA,
+    SupervisorBootstrapPublicationReceipt,
     SupervisorWorkerEnvironment,
     SupervisorWorkerError,
     SupervisorWorkerJournal,
     run_bootstrap_worker,
 )
+
+_PRODUCTION_RESULT_PUBLISHER = worker_module._publish_completed_bootstrap_result
+
+
+@pytest.fixture(autouse=True)
+def _isolate_result_publication(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def skip_publication(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        worker_module,
+        "_publish_completed_bootstrap_result",
+        skip_publication,
+    )
 
 
 class _FinalityReader:
@@ -91,7 +120,7 @@ def _worker_files(tmp_path: Path, signed, authorization, drain):
         target_platform="linux/amd64",
         umi_git_revision=authorization.umi_git_revision,
         umi_source_tree_sha256="44" * 32,
-        entrypoint_profile="umi-bootstrap-weight-validator/1",
+        entrypoint_profile="umi-bootstrap-weight-validator/2",
         state_schema_minimum=1,
         state_schema_maximum=1,
     )
@@ -108,7 +137,14 @@ def _worker_files(tmp_path: Path, signed, authorization, drain):
     return release_path, input_root, state_root, hashlib.sha256(release_bytes).hexdigest()
 
 
-def _terminal_artifacts(signed, authorization, owner, participants):
+def _terminal_artifacts(
+    signed,
+    authorization,
+    owner,
+    participants,
+    *,
+    activity_cutoff_blocks: int = 360,
+):
     anchor = BootstrapExtrinsicReference(
         extrinsic_id="126-0001",
         block_number=126,
@@ -134,10 +170,11 @@ def _terminal_artifacts(signed, authorization, owner, participants):
             block_number=127,
             block_hash="0x" + "15" * 32,
             blocks_since_last_step=27,
+            activity_cutoff_blocks=activity_cutoff_blocks,
         ),
         authorization=authorization,
         subnet_owner_hotkey=owner.hotkey.ss58_address,
-        validator_hotkey=owner.hotkey.ss58_address,
+        validator_hotkey=authorization.validator_hotkey,
         now=NOW,
     )
     material, _call = build_direct_bootstrap_call_material(
@@ -150,7 +187,9 @@ def _terminal_artifacts(signed, authorization, owner, participants):
         block_hash="0x" + "16" * 32,
     )
     updated = [
-        item.model_copy(update={"last_update": 130}) if item.uid == 0 else item
+        item.model_copy(update={"last_update": 130})
+        if item.uid == authorization.validator_uid
+        else item
         for item in participants
     ]
     observed = validate_direct_bootstrap_preflight(
@@ -160,12 +199,13 @@ def _terminal_artifacts(signed, authorization, owner, participants):
             block_number=130,
             block_hash="0x" + "13" * 32,
             validator_mechid0_row=material.expected_applied_row,
-            active_mechid0_row_hotkeys=[owner.hotkey.ss58_address],
+            active_mechid0_row_hotkeys=[authorization.validator_hotkey],
             blocks_since_last_step=30,
+            activity_cutoff_blocks=activity_cutoff_blocks,
         ),
         authorization=authorization,
         subnet_owner_hotkey=owner.hotkey.ss58_address,
-        validator_hotkey=owner.hotkey.ss58_address,
+        validator_hotkey=authorization.validator_hotkey,
         now=NOW,
         require_submission_ready=False,
     )
@@ -185,8 +225,8 @@ def _write_terminal_outputs(outputs, authorization, material, receipt) -> None:
     outputs.operator_state.mkdir(mode=0o700, exist_ok=True)
     authorization_sha256 = hashlib.sha256(canonical_json_bytes(authorization)).hexdigest()
     direct_journal = DirectBootstrapSubmissionJournal(
-        schema="umi-bootstrap-direct-submission-journal/1",
-        transition_profile="direct_full_row/1",
+        schema=DIRECT_SUBMISSION_JOURNAL_SCHEMA,
+        transition_profile=DIRECT_TRANSITION_PROFILE,
         submission_id=authorization.submission_id,
         phase="applied",
         manifest_sha256=receipt.manifest_sha256,
@@ -299,6 +339,217 @@ async def test_direct_worker_completes_once_and_reboot_recovers_without_retry(
             remain_until_expiry=False,
         )
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_worker_accepts_a_target_bound_nonowner_validator(
+    tmp_path: Path,
+) -> None:
+    signed, authorization, owner, validator, participants, preflight = _permitted_case()
+    drain = _operational(signed, preflight)
+    material, receipt = _terminal_artifacts(
+        signed,
+        authorization,
+        owner,
+        participants,
+        activity_cutoff_blocks=360,
+    )
+    release, inputs, state, release_sha256 = _worker_files(
+        tmp_path,
+        signed,
+        authorization,
+        drain,
+    )
+    environment = _environment(
+        validator.hotkey.ss58_address,
+        policy_sha256=signed.manifest.policy_sha256,
+        release_manifest_sha256=release_sha256,
+    )
+
+    async def preflighter(*_args):
+        return drain
+
+    async def submitter(
+        _inputs,
+        _environment,
+        outputs,
+        _wallet,
+        before_first_effect,
+        finalized_snapshot_guard,
+    ):
+        await finalized_snapshot_guard(
+            drain.chain.snapshot.block_number,
+            drain.chain.snapshot.block_hash,
+            16,
+        )
+        before_first_effect()
+        _write_terminal_outputs(outputs, authorization, material, receipt)
+        return receipt
+
+    result = await run_bootstrap_worker(
+        environment,
+        release_manifest_path=release,
+        operator_input_root=inputs,
+        state_root=state,
+        image_revision_path=tmp_path / "image-revision",
+        finality_reader=_FinalityReader(126),
+        wallet_loader=lambda _environment: validator,
+        preflighter=preflighter,
+        submitter=submitter,
+        remain_until_expiry=False,
+    )
+
+    assert result.phase == "completed"
+    assert receipt.validator_uid == 200
+    assert receipt.validator_hotkey == validator.hotkey.ss58_address
+
+
+@pytest.mark.asyncio
+async def test_completed_worker_persists_and_retries_terminal_result_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        owner_fence,
+        signed,
+        authorization,
+        material,
+        receipt,
+        _direct_journal,
+        _owner,
+        _participants,
+    ) = _terminal_records(permitted=True)
+    validator = dev_wallet("//DirectBootstrapPermittedValidator")
+    drain = material.operational_preflight
+    release, inputs, state, release_sha256 = _worker_files(
+        tmp_path,
+        signed,
+        authorization,
+        drain,
+    )
+    (inputs / "bootstrap" / "owner-fence-receipt.json").write_bytes(
+        canonical_json_bytes(owner_fence)
+    )
+    environment = _environment(
+        validator.hotkey.ss58_address,
+        policy_sha256=signed.manifest.policy_sha256,
+        release_manifest_sha256=release_sha256,
+    )
+    secret_path = tmp_path / "bootstrap-result-upload.key"
+    secret_path.write_text("41" * 32 + "\n", encoding="ascii")
+    secret_path.chmod(0o600)
+    chain_calls = 0
+    upload_bodies: list[bytes] = []
+
+    async def preflighter(*_args):
+        return drain
+
+    async def submitter(
+        _inputs,
+        _environment,
+        outputs,
+        _wallet,
+        before_first_effect,
+        finalized_snapshot_guard,
+    ):
+        nonlocal chain_calls
+        chain_calls += 1
+        await finalized_snapshot_guard(
+            drain.chain.snapshot.block_number,
+            drain.chain.snapshot.block_hash,
+            16,
+        )
+        before_first_effect()
+        _write_terminal_outputs(outputs, authorization, material, receipt)
+        return receipt
+
+    def uploader(body: bytes, **kwargs):
+        upload_bodies.append(body)
+        assert kwargs == {
+            "submission_id": authorization.submission_id,
+            "upload_origin": worker_module.WORKER_BOOTSTRAP_RESULT_UPLOAD_ORIGIN,
+            "public_origin": worker_module.WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN,
+            "secret": b"A" * 32,
+        }
+        if len(upload_bodies) == 1:
+            raise RuntimeError("transient upload failure")
+        digest = hashlib.sha256(body).hexdigest()
+        return (
+            digest,
+            len(body),
+            f"{worker_module.WORKER_BOOTSTRAP_RESULT_PUBLIC_ORIGIN}"
+            f"/validator-bootstrap-results/{authorization.submission_id}.json",
+        )
+
+    monkeypatch.setattr(
+        worker_module,
+        "_publish_completed_bootstrap_result",
+        _PRODUCTION_RESULT_PUBLISHER,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "WORKER_BOOTSTRAP_RESULT_UPLOAD_SECRET",
+        secret_path,
+    )
+    monkeypatch.setattr(worker_module, "upload_validator_bootstrap_result", uploader)
+    finalized = OwnedFinalizedBlock(
+        drain.chain.snapshot.block_number,
+        drain.chain.snapshot.block_hash,
+    )
+    common = {
+        "release_manifest_path": release,
+        "operator_input_root": inputs,
+        "state_root": state,
+        "image_revision_path": tmp_path / "image-revision",
+        "wallet_loader": lambda _environment: validator,
+        "preflighter": preflighter,
+        "submitter": submitter,
+        "remain_until_expiry": False,
+    }
+
+    with pytest.raises(SupervisorWorkerError, match="worker_result_publication_failed"):
+        await run_bootstrap_worker(
+            environment,
+            finality_reader=_FinalityReader(finalized),
+            **common,
+        )
+    transaction = state / "bootstrap-transactions" / environment.directive_sha256
+    journal = SupervisorWorkerJournal.model_validate_json(
+        (transaction / "journal.json").read_bytes()
+    )
+    assert journal.phase == "completed"
+    assert chain_calls == 1
+    assert len(upload_bodies) == 1
+    signed_result_path = transaction / "signed-bootstrap-result.json"
+    signed_result_bytes = signed_result_path.read_bytes()
+    signed_result = parse_canonical_signed_supervisor_bootstrap_result(signed_result_bytes)
+    assert signed_result.result.directive_sha256 == environment.directive_sha256
+    assert signed_result.result.submission_id == authorization.submission_id
+    assert signed_result.signer_hotkey == validator.hotkey.ss58_address
+    assert not (transaction / "publication-receipt.json").exists()
+
+    second = await run_bootstrap_worker(
+        environment,
+        finality_reader=_FinalityReader(finalized),
+        **common,
+    )
+    assert second.phase == "completed"
+    assert chain_calls == 1
+    assert upload_bodies == [signed_result_bytes, signed_result_bytes]
+    publication_path = transaction / "publication-receipt.json"
+    publication_bytes = publication_path.read_bytes()
+    publication = SupervisorBootstrapPublicationReceipt.model_validate_json(publication_bytes)
+    assert publication_bytes == canonical_json_bytes(publication)
+    assert publication.signed_result_sha256 == hashlib.sha256(signed_result_bytes).hexdigest()
+
+    third = await run_bootstrap_worker(
+        environment,
+        finality_reader=_FinalityReader(finalized),
+        **common,
+    )
+    assert third.phase == "completed"
+    assert chain_calls == 1
+    assert len(upload_bodies) == 2
 
 
 @pytest.mark.asyncio
@@ -602,6 +853,60 @@ async def test_direct_worker_rejects_fresh_state_ahead_of_owned_finality(
 
 
 @pytest.mark.asyncio
+async def test_direct_worker_rejects_subnet_owner_rotation_after_drain_checkpoint(
+    tmp_path: Path,
+) -> None:
+    signed, authorization, _owner, validator, participants, preflight = _permitted_case()
+    drain = _operational(signed, preflight)
+    release, inputs, state, release_sha256 = _worker_files(
+        tmp_path,
+        signed,
+        authorization,
+        drain,
+    )
+    environment = _environment(
+        validator.hotkey.ss58_address,
+        policy_sha256=signed.manifest.policy_sha256,
+        release_manifest_sha256=release_sha256,
+    )
+    new_owner = dev_wallet("//RotatedDirectBootstrapOwner")
+    rotated = list(participants)
+    rotated[0] = rotated[0].model_copy(update={"hotkey": new_owner.hotkey.ss58_address})
+    fresh_chain = validate_direct_bootstrap_preflight(
+        signed,
+        _snapshot(rotated),
+        authorization=authorization,
+        subnet_owner_hotkey=new_owner.hotkey.ss58_address,
+        validator_hotkey=validator.hotkey.ss58_address,
+        now=NOW,
+    )
+    fresh = _operational(signed, fresh_chain)
+    called = False
+
+    async def preflighter(*_args):
+        return fresh
+
+    async def submitter(*_args):
+        nonlocal called
+        called = True
+
+    with pytest.raises(SupervisorWorkerError, match="worker_drain_checkpoint_changed"):
+        await run_bootstrap_worker(
+            environment,
+            release_manifest_path=release,
+            operator_input_root=inputs,
+            state_root=state,
+            image_revision_path=tmp_path / "image-revision",
+            finality_reader=_FinalityReader(126),
+            wallet_loader=lambda _environment: validator,
+            preflighter=preflighter,
+            submitter=submitter,
+            remain_until_expiry=False,
+        )
+    assert not called
+
+
+@pytest.mark.asyncio
 async def test_direct_worker_rejects_sdk_snapshot_hash_not_owned_by_grandpa(
     tmp_path: Path,
 ) -> None:
@@ -698,7 +1003,7 @@ def test_supervisor_worker_image_is_fixed_immutable_and_owns_finality() -> None:
     assert "/opt/umi/bin/umi-grandpa-finality-observer --conformance-self-test" in dockerfile
     assert 'ENTRYPOINT ["/usr/local/bin/umi-validator-supervisor-worker"]' in dockerfile
     assert "USER 65532:65532" in dockerfile
-    assert 'vision.umi.entrypoint-profile="umi-bootstrap-weight-validator/1"' in dockerfile
+    assert 'vision.umi.entrypoint-profile="umi-bootstrap-weight-validator/2"' in dockerfile
     assert "linux/amd64|linux/arm64" in dockerfile
     assert 'test "${TARGETPLATFORM}" = "linux/amd64"' not in dockerfile
 
@@ -740,6 +1045,14 @@ def test_supervisor_worker_release_workflow_is_manual_pinned_and_artifact_only()
     assert "oci_archive_sha256" in workflow
     assert "oci_archive_size_bytes" in workflow
     assert "/opt/umi/bin/umi-grandpa-finality-observer" in workflow
+    assert 'docker cp "${container_id}:/usr/local/bin/uv"' in workflow
+    assert '"uv 0.12.9"' in workflow
+    assert "uv_sha256" in workflow
+    assert "uv_size_bytes" in workflow
+    assert "docker cp" in workflow
+    assert "umi-validator-supervisor-host-artifacts/1" in workflow
+    assert "f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105" in workflow
+    assert '"out/${FINALITY_BASE}" --conformance-self-test' in workflow
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "compression-level: 0" in workflow
     action_references = [

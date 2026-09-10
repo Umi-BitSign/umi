@@ -62,7 +62,7 @@ class FakeSnapshot:
                 validator_permit=False,
                 block_at_registration=10,
                 last_update=90,
-                axon="198.51.100.10:8091",
+                axon="8.8.8.8:8091",
             ),
             SimpleNamespace(
                 uid=1,
@@ -93,7 +93,7 @@ class FakeSnapshot:
                 "validator_permit": [False, True],
                 "block_at_registration": [10, 11],
                 "last_update": [90, 91],
-                "axons": ["198.51.100.10:8091", None],
+                "axons": [{"ip": 134744072, "port": 8091, "ip_type": 4}, None],
                 "rank": [],
                 "trust": [],
                 "consensus": [10, 20],
@@ -169,6 +169,7 @@ class FakeSnapshot:
             "CommitRevealWeightsVersion": 4,
             "MaxMechanismCount": 2,
             "NetworksAdded": True,
+            "SubnetOwnerHotkey": b"\x55" * 32,
             "Weights": self.weight_row,
         }
         return values[item.name]
@@ -233,6 +234,7 @@ async def test_collector_uses_one_finalized_snapshot_and_exact_public_values() -
     assert result.network.subnet_exists is True
     assert result.network.subnet_started is True
     assert result.network.subnet_emission_enabled is False
+    assert result.network.subnet_owner_hotkey_account_id32 == "0x" + "55" * 32
     assert result.network.uid_zero_mechid0_row == ((0, 1), (255, 65_535))
     assert result.network.price is not None
     assert result.network.price.tao_reserve_rao == "2000000000"
@@ -250,17 +252,32 @@ async def test_collector_uses_one_finalized_snapshot_and_exact_public_values() -
     assert result.participants[0].chain_metrics.tao_stake is not None
     assert result.participants[0].chain_metrics.tao_stake.asset == "tao"
     assert result.participants[0].serving_announced is True
+    assert result.participants[0].serving_origin == "https://8.8.8.8:8091"
     serialized = result.model_dump_json()
-    assert "198.51.100.10" not in serialized
+    assert "https://8.8.8.8:8091" in serialized
     assert "private-value" not in serialized
     assert {name for name, _ in snapshot.query_calls} == {
         "LastRuntimeUpgrade",
         "CommitRevealWeightsVersion",
         "MaxMechanismCount",
         "NetworksAdded",
+        "SubnetOwnerHotkey",
         "Weights",
     }
     assert ("Weights", [78, 0]) in snapshot.query_calls
+    assert ("SubnetOwnerHotkey", [78]) in snapshot.query_calls
+
+
+@pytest.mark.asyncio
+async def test_collector_rejects_typed_and_raw_axon_origin_mismatch() -> None:
+    snapshot = FakeSnapshot()
+    snapshot.metagraph.raw["axons"][0]["ip"] = 134744073
+    collector = BittensorChainCollector(client_factory=lambda _: FakeClient(snapshot))
+
+    with pytest.raises(ChainCollectionError) as caught:
+        await collector.collect()
+
+    assert caught.value.reason_code == "participant_axon_raw_mismatch"
 
 
 @pytest.mark.asyncio
