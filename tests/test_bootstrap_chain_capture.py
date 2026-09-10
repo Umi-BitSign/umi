@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_bootstrap_result_intake import _finality, _signed_result
+from tests.test_bootstrap_result_intake import (
+    _finality,
+    _FinalityVerifier,
+    _Runtime,
+    _signed_result,
+)
 from tests.test_grandpa_finality_supervisor import _attestation, _header
 from umi.bootstrap_chain_capture import (
     BootstrapChainCaptureError,
@@ -19,7 +24,12 @@ from umi.bootstrap_chain_capture import (
     collect_bootstrap_chain_capture,
     write_new_chain_capture,
 )
-from umi.bootstrap_result_intake import parse_canonical_chain_capture
+from umi.bootstrap_result_intake import (
+    BootstrapResultIntakePorts,
+    build_bootstrap_result_archive,
+    parse_canonical_chain_capture,
+    verify_bootstrap_result_archive,
+)
 from umi.chain import _header_hash
 from umi.grandpa_finality import (
     CARGO_LOCK_SHA256,
@@ -74,9 +84,14 @@ class _Rpc:
         self,
         hashes: dict[int, str],
         headers: dict[str, dict[str, object]],
+        *,
+        bodies: dict[str, list[str]] | None = None,
+        events: dict[str, bytes] | None = None,
     ) -> None:
         self.hashes = hashes
         self.headers = headers
+        self.bodies = bodies or {}
+        self.events = events or {}
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def request(self, method: str, params):
@@ -90,7 +105,10 @@ class _Rpc:
             return {
                 "block": {
                     "header": self.headers[params[0]],
-                    "extrinsics": ["0x01", "0x0203", "0x040506"],
+                    "extrinsics": self.bodies.get(
+                        params[0],
+                        ["0x01", "0x0203", "0x040506"],
+                    ),
                 },
                 "justifications": None,
             }
@@ -99,9 +117,9 @@ class _Rpc:
         if method == "state_getMetadata":
             return "0x6d65746164617461"
         if method == "state_getStorageAt":
-            return "0x6576656e7473"
+            return "0x" + self.events.get(params[1], b"events").hex()
         if method == "state_getReadProof":
-            return {"at": params[1], "proof": ["0x0102", "0x0304"]}
+            return {"at": params[1], "proof": ["0xaabb", "0xccdd"]}
         raise AssertionError(method)
 
 
@@ -130,6 +148,47 @@ class _Finality:
         return self.evidence
 
 
+class _PerTargetFinality:
+    def __init__(self, hashes, headers) -> None:
+        self.hashes = hashes
+        self.headers = headers
+
+    async def evidence_at_or_after(self, minimum_height: int, maximum_height: int):
+        assert minimum_height in {120, 126, 130}
+        assert minimum_height <= maximum_height
+        role = {120: "owner_fence", 126: "manifest_anchor", 130: "weight_call"}[minimum_height]
+        header = _captured(minimum_height, self.hashes, self.headers)
+        carried = _finality(header, role)
+        return OwnedFinalityEvidence(
+            attested_header=header,
+            ancestry=((header.number, header.block_hash, header.parent_hash),),
+            attestation=bytes.fromhex(carried.attestation_hex[2:]),
+            replay_binding=FinalityAttestationReplayBinding(
+                minimum_finalized_block=1,
+                maximum_records=1,
+                startup_timeout_seconds=10,
+                expected_sequence=0,
+                previous_number=None,
+                previous_timestamp_ms=None,
+            ),
+            acceptance_receipt=bytes.fromhex(carried.acceptance_receipt_hex[2:]),
+        )
+
+
+class _CountingProofVerifier:
+    def __init__(self) -> None:
+        self.extrinsics_root_calls = 0
+        self.storage_proof_calls = 0
+
+    def verify_extrinsics_root(self, **_kwargs) -> bool:
+        self.extrinsics_root_calls += 1
+        return True
+
+    def __call__(self, **_kwargs) -> bool:
+        self.storage_proof_calls += 1
+        return True
+
+
 def _captured(number: int, hashes, headers):
     return _captured_header(
         headers[hashes[number]],
@@ -137,6 +196,51 @@ def _captured(number: int, hashes, headers):
         expected_hash=hashes[number],
         reason_prefix="test",
     )
+
+
+def _preserved_owner_capture(
+    hashes: dict[int, str],
+    headers: dict[str, dict[str, object]],
+    *,
+    body: list[str] | None = None,
+    events: bytes = b"events",
+) -> bytes:
+    extrinsics = body or ["0x01", "0x0203", "0x040506"]
+    value = {
+        "schema": "umi-owner-fence-raw-rpc-capture/1",
+        "network": "finney",
+        "netuid": 78,
+        "captured_at": "2026-09-10T17:49:31.338021Z",
+        "block_number": 120,
+        "block_hash": hashes[120],
+        "extrinsic_index": 0,
+        "extrinsic": extrinsics[0],
+        "system_events_storage_key": "0x0102",
+        "responses": {
+            "chain_getBlockHash": hashes[120],
+            "chain_getHeader": headers[hashes[120]],
+            "chain_getBlock": {
+                "block": {
+                    "header": headers[hashes[120]],
+                    "extrinsics": extrinsics,
+                },
+                "justifications": None,
+            },
+            "state_getRuntimeVersion": {
+                "specVersion": 455,
+                "stateVersion": 1,
+                "transactionVersion": 1,
+            },
+            "state_getMetadata": "0x6d65746164617461",
+            "state_getStorage.System.Events": "0x" + events.hex(),
+            "state_getReadProof.System.Events": {
+                "at": hashes[120],
+                "proof": ["0xaabb", "0xccdd"],
+            },
+        },
+    }
+    # The production capture writer emits exactly one trailing newline.
+    return canonical_json_bytes(value) + b"\n"
 
 
 @pytest.mark.asyncio
@@ -149,6 +253,8 @@ async def test_collects_three_complete_blocks_with_parent_runtime_and_finality_b
             "message": "Success",
             "block_hash": hashes[120],
             "extrinsic_id": "120-0000",
+            "explorer_url": "https://example.test/extrinsics/120-0000",
+            "fee_tao": "0.0001",
         }
     )
     attested = _captured(132, hashes, headers)
@@ -157,12 +263,13 @@ async def test_collects_three_complete_blocks_with_parent_runtime_and_finality_b
         ((attested.number, attested.block_hash, attested.parent_hash),),
     )
     rpc = _Rpc(hashes, headers)
+    preserved = _preserved_owner_capture(hashes, headers)
     capture = await collect_bootstrap_chain_capture(
         signed_result_bytes=canonical_json_bytes(signed),
         owner_cli_response_bytes=owner,
         rpc=rpc,
         finality=finality,
-        preserved_owner_rpc_capture=b"original owner RPC bytes\n",
+        preserved_owner_rpc_capture=preserved,
         runtime_key_factory=lambda _metadata, _version: b"\x01\x02",
         bridge_concurrency=3,
     )
@@ -181,9 +288,7 @@ async def test_collects_three_complete_blocks_with_parent_runtime_and_finality_b
         for block in capture.blocks
     )
     raw_owner = json.loads(bytes.fromhex(capture.blocks[0].raw_rpc_capture_hex[2:]))
-    assert bytes.fromhex(raw_owner["preserved_source"]["bytes_hex"][2:]) == (
-        b"original owner RPC bytes\n"
-    )
+    assert bytes.fromhex(raw_owner["preserved_source"]["bytes_hex"][2:]) == preserved
     assert [item["method"] for item in raw_owner["rpc_calls"]] == [
         "chain_getBlockHash",
         "chain_getHeader",
@@ -197,6 +302,115 @@ async def test_collects_three_complete_blocks_with_parent_runtime_and_finality_b
     ]
     assert raw_owner["rpc_calls"][5]["params"] == [hashes[119]]
     assert raw_owner["rpc_calls"][7]["params"] == ["0x0102", hashes[120]]
+    assert not any(
+        method.startswith("state_")
+        and any(isinstance(item, str) and item in {hashes[119], hashes[120]} for item in params)
+        for method, params in rpc.calls
+    )
+    assert ("chain_getBlock", (hashes[120],)) not in rpc.calls
+
+
+@pytest.mark.asyncio
+async def test_rejects_tampered_preserved_owner_capture_before_any_rpc() -> None:
+    hashes, headers = _header_chain(119, 132)
+    signed = _signed_result(hashes[126], hashes[130])
+    owner = canonical_json_bytes(
+        {
+            "success": True,
+            "message": "Success",
+            "block_hash": hashes[120],
+            "extrinsic_id": "120-0000",
+        }
+    )
+    value = json.loads(_preserved_owner_capture(hashes, headers))
+    value["responses"]["state_getReadProof.System.Events"]["at"] = hashes[119]
+    rpc = _Rpc(hashes, headers)
+    with pytest.raises(BootstrapChainCaptureError, match="owner_rpc_capture_proof_invalid"):
+        await collect_bootstrap_chain_capture(
+            signed_result_bytes=canonical_json_bytes(signed),
+            owner_cli_response_bytes=owner,
+            rpc=rpc,
+            finality=_PerTargetFinality(hashes, headers),
+            preserved_owner_rpc_capture=canonical_json_bytes(value),
+            runtime_key_factory=lambda _metadata, _version: b"\x01\x02",
+        )
+    assert rpc.calls == []
+
+
+@pytest.mark.asyncio
+async def test_preserved_owner_capture_replays_through_proofs_and_semantic_calls(
+    tmp_path: Path,
+) -> None:
+    hashes, headers = _header_chain(119, 130)
+    signed = _signed_result(hashes[126], hashes[130])
+    signed_bytes = canonical_json_bytes(signed)
+    owner = canonical_json_bytes(
+        {
+            "success": True,
+            "message": "Success",
+            "block_hash": hashes[120],
+            "extrinsic_id": "120-0000",
+            "explorer_url": "https://example.test/extrinsics/120-0000",
+            "fee_tao": "0.0001",
+        }
+    )
+    owner_body = ["0x" + b"owner".hex()]
+    rpc = _Rpc(
+        hashes,
+        headers,
+        bodies={
+            hashes[126]: ["0x" + b"dummy-a".hex(), "0x" + b"anchor".hex()],
+            hashes[130]: [
+                "0x" + b"dummy-a".hex(),
+                "0x" + b"dummy-b".hex(),
+                "0x" + b"weight".hex(),
+            ],
+        },
+        events={
+            hashes[126]: b"manifest_anchor",
+            hashes[130]: b"weight_call",
+        },
+    )
+    preserved = _preserved_owner_capture(
+        hashes,
+        headers,
+        body=owner_body,
+        events=b"owner_fence",
+    )
+    capture = await collect_bootstrap_chain_capture(
+        signed_result_bytes=signed_bytes,
+        owner_cli_response_bytes=owner,
+        rpc=rpc,
+        finality=_PerTargetFinality(hashes, headers),
+        preserved_owner_rpc_capture=preserved,
+        runtime_key_factory=lambda _metadata, _version: b"\x01\x02",
+    )
+    proof = _CountingProofVerifier()
+    ports = BootstrapResultIntakePorts(
+        proof_verifier=proof,
+        finality_observer=_FinalityVerifier(),
+        runtime_factory=lambda _metadata, _pin: _Runtime(signed),
+    )
+    archive = tmp_path / "archive"
+    publication = tmp_path / "publication"
+    build_bootstrap_result_archive(
+        signed_result_bytes=signed_bytes,
+        owner_cli_response_bytes=owner,
+        captured_chain_material_bytes=canonical_json_bytes(capture),
+        archive_root=archive,
+        observer_publication_root=publication,
+        ports=ports,
+    )
+    verified = verify_bootstrap_result_archive(archive, ports=ports)
+
+    assert [item.semantic_call for item in verified.blocks] == [
+        "Utility.batch_all(owner_fence)",
+        "Commitments.set_commitment",
+        "SubtensorModule.set_mechanism_weights",
+    ]
+    assert proof.extrinsics_root_calls == 9
+    assert proof.storage_proof_calls == 9
+    assert not any(method.startswith("state_") for method, _params in rpc.calls[:2])
 
 
 @pytest.mark.asyncio

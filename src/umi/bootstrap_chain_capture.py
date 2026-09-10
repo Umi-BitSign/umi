@@ -20,6 +20,7 @@ import stat
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
@@ -81,6 +82,7 @@ from .validator_supervisor_publication import (
 
 DEFAULT_FINNEY_RPC_ENDPOINT = "wss://entrypoint-finney.opentensor.ai:443"
 BOOTSTRAP_RAW_RPC_CAPTURE_SCHEMA = "umi-bootstrap-raw-rpc-capture/1"
+OWNER_FENCE_RAW_RPC_CAPTURE_SCHEMA = "umi-owner-fence-raw-rpc-capture/1"
 
 _APPLICATION_ID = 0x554D4946
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -93,6 +95,15 @@ _MAX_RECORDED_RPC_CALLS = 16
 _MAX_RPC_TRANSCRIPT_BYTES = 72 * 1024 * 1024
 _DEFAULT_BRIDGE_CONCURRENCY = 8
 _MAX_BRIDGE_CONCURRENCY = 32
+_OWNER_CAPTURE_RESPONSE_KEYS = {
+    "chain_getBlock",
+    "chain_getBlockHash",
+    "chain_getHeader",
+    "state_getMetadata",
+    "state_getReadProof.System.Events",
+    "state_getRuntimeVersion",
+    "state_getStorage.System.Events",
+}
 
 
 class BootstrapChainCaptureError(RuntimeError):
@@ -295,6 +306,206 @@ class _RecordingRpc:
             raise BootstrapChainCaptureError("rpc_transcript_size_limit")
         self.records.append(record)
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class _PreservedOwnerRpcCapture:
+    encoded: bytes
+    block_number: int
+    block_hash: str
+    parent_hash: str
+    extrinsic_index: int
+    storage_key_hex: str
+    responses: Mapping[str, Any]
+
+    @classmethod
+    def parse(cls, encoded: bytes, target: _Target) -> _PreservedOwnerRpcCapture:
+        try:
+            value = json.loads(
+                encoded,
+                object_pairs_hook=_unique_object,
+                parse_constant=lambda _value: (_ for _ in ()).throw(
+                    ValueError("non-finite JSON number")
+                ),
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise BootstrapChainCaptureError("owner_rpc_capture_invalid") from error
+        value = _strict_mapping(value, "owner_rpc_capture_invalid")
+        canonical = canonical_json_bytes(value)
+        if encoded not in {canonical, canonical + b"\n"}:
+            raise BootstrapChainCaptureError("owner_rpc_capture_not_canonical")
+        if set(value) != {
+            "schema",
+            "network",
+            "netuid",
+            "captured_at",
+            "block_number",
+            "block_hash",
+            "extrinsic_index",
+            "extrinsic",
+            "system_events_storage_key",
+            "responses",
+        }:
+            raise BootstrapChainCaptureError("owner_rpc_capture_invalid")
+        if (
+            value.get("schema") != OWNER_FENCE_RAW_RPC_CAPTURE_SCHEMA
+            or value.get("network") != "finney"
+            or value.get("netuid") != 78
+        ):
+            raise BootstrapChainCaptureError("owner_rpc_capture_context_mismatch")
+        captured_at = value.get("captured_at")
+        if (
+            not isinstance(captured_at, str)
+            or not captured_at.endswith("Z")
+            or len(captured_at) > 64
+        ):
+            raise BootstrapChainCaptureError("owner_rpc_capture_timestamp_invalid")
+        try:
+            timestamp = datetime.fromisoformat(captured_at[:-1] + "+00:00")
+        except ValueError as error:
+            raise BootstrapChainCaptureError("owner_rpc_capture_timestamp_invalid") from error
+        if timestamp.tzinfo is None or timestamp.astimezone(UTC).utcoffset() is None:
+            raise BootstrapChainCaptureError("owner_rpc_capture_timestamp_invalid")
+        block_number = value.get("block_number")
+        extrinsic_index = value.get("extrinsic_index")
+        if (
+            isinstance(block_number, bool)
+            or not isinstance(block_number, int)
+            or block_number <= 0
+            or isinstance(extrinsic_index, bool)
+            or not isinstance(extrinsic_index, int)
+            or extrinsic_index < 0
+            or extrinsic_index >= MAX_EXTRINSICS
+        ):
+            raise BootstrapChainCaptureError("owner_rpc_capture_target_invalid")
+        block_hash = _hash(value.get("block_hash"), "owner_rpc_capture_target_invalid")
+        if (
+            target.role != "owner_fence"
+            or block_number != target.block_number
+            or block_hash != target.block_hash
+            or extrinsic_index != target.extrinsic_index
+        ):
+            raise BootstrapChainCaptureError("owner_rpc_capture_target_mismatch")
+        extrinsic = _hex_bytes(
+            value.get("extrinsic"),
+            "owner_rpc_capture_extrinsic_invalid",
+            MAX_EXTRINSIC_BYTES,
+        )
+        storage_key = _hex_bytes(
+            value.get("system_events_storage_key"),
+            "owner_rpc_capture_storage_key_invalid",
+            512,
+        )
+        responses = _strict_mapping(value.get("responses"), "owner_rpc_capture_invalid")
+        if set(responses) != _OWNER_CAPTURE_RESPONSE_KEYS:
+            raise BootstrapChainCaptureError("owner_rpc_capture_responses_invalid")
+        if (
+            _hash(
+                responses.get("chain_getBlockHash"),
+                "owner_rpc_capture_target_invalid",
+            )
+            != block_hash
+        ):
+            raise BootstrapChainCaptureError("owner_rpc_capture_target_mismatch")
+        header = _captured_header(
+            responses.get("chain_getHeader"),
+            expected_number=block_number,
+            expected_hash=block_hash,
+            reason_prefix="preserved_owner",
+        )
+        if "0x08" in header.digest_logs:
+            raise BootstrapChainCaptureError("owner_rpc_capture_runtime_transition_unsupported")
+        block_response = _strict_mapping(
+            responses.get("chain_getBlock"),
+            "owner_rpc_capture_block_invalid",
+        )
+        block = _strict_mapping(
+            block_response.get("block"),
+            "owner_rpc_capture_block_invalid",
+        )
+        block_extrinsics = _strict_sequence(
+            block.get("extrinsics"),
+            "owner_rpc_capture_block_invalid",
+        )
+        if extrinsic_index >= len(block_extrinsics):
+            raise BootstrapChainCaptureError("owner_rpc_capture_extrinsic_invalid")
+        captured_extrinsic = _hex_bytes(
+            block_extrinsics[extrinsic_index],
+            "owner_rpc_capture_extrinsic_invalid",
+            MAX_EXTRINSIC_BYTES,
+        )
+        if captured_extrinsic != extrinsic:
+            raise BootstrapChainCaptureError("owner_rpc_capture_extrinsic_mismatch")
+        _strict_mapping(
+            responses.get("state_getRuntimeVersion"),
+            "owner_rpc_capture_runtime_invalid",
+        )
+        _hex_bytes(
+            responses.get("state_getMetadata"),
+            "owner_rpc_capture_runtime_invalid",
+            MAX_METADATA_BYTES,
+        )
+        _hex_bytes(
+            responses.get("state_getStorage.System.Events"),
+            "owner_rpc_capture_events_invalid",
+            MAX_EVENTS_BYTES,
+        )
+        proof = _strict_mapping(
+            responses.get("state_getReadProof.System.Events"),
+            "owner_rpc_capture_proof_invalid",
+        )
+        if (
+            set(proof) != {"at", "proof"}
+            or proof.get("at") != block_hash
+            or not _strict_sequence(proof.get("proof"), "owner_rpc_capture_proof_invalid")
+        ):
+            raise BootstrapChainCaptureError("owner_rpc_capture_proof_invalid")
+        return cls(
+            encoded=encoded,
+            block_number=block_number,
+            block_hash=block_hash,
+            parent_hash=header.parent_hash,
+            extrinsic_index=extrinsic_index,
+            storage_key_hex="0x" + storage_key.hex(),
+            responses=responses,
+        )
+
+
+class _PreservedOwnerRpc:
+    """Serve the pruned owner block from its immutable capture only."""
+
+    def __init__(self, live: RawJsonRpc, capture: _PreservedOwnerRpcCapture) -> None:
+        self._live = live
+        self._capture = capture
+
+    async def request(self, method: str, params: Sequence[Any]) -> Any:
+        params = tuple(params)
+        capture = self._capture
+        if method == "chain_getBlockHash" and params == (capture.block_number,):
+            return capture.responses["chain_getBlockHash"]
+        if method == "chain_getHeader" and params == (capture.block_hash,):
+            return capture.responses["chain_getHeader"]
+        if method == "chain_getBlock" and params == (capture.block_hash,):
+            return capture.responses["chain_getBlock"]
+        if method == "state_getRuntimeVersion" and params == (capture.parent_hash,):
+            return capture.responses["state_getRuntimeVersion"]
+        if method == "state_getMetadata" and params == (capture.parent_hash,):
+            return capture.responses["state_getMetadata"]
+        if method == "state_getStorageAt" and params == (
+            capture.storage_key_hex,
+            capture.block_hash,
+        ):
+            return capture.responses["state_getStorage.System.Events"]
+        if method == "state_getReadProof" and params == (
+            [capture.storage_key_hex],
+            capture.block_hash,
+        ):
+            return capture.responses["state_getReadProof.System.Events"]
+        if method == "chain_getBlockHash" and params == (capture.block_number - 1,):
+            return await self._live.request(method, params)
+        if method == "chain_getHeader" and params == (capture.parent_hash,):
+            return await self._live.request(method, params)
+        raise BootstrapChainCaptureError("owner_rpc_capture_request_mismatch")
 
 
 class DurableOwnedFinalityReader:
@@ -796,7 +1007,11 @@ class BootstrapChainCollector:
         *,
         preserved_source: bytes | None,
     ) -> CapturedBootstrapBlock:
-        recorder = _RecordingRpc(self._rpc)
+        block_rpc: RawJsonRpc = self._rpc
+        if preserved_source is not None:
+            preserved = _PreservedOwnerRpcCapture.parse(preserved_source, target)
+            block_rpc = _PreservedOwnerRpc(self._rpc, preserved)
+        recorder = _RecordingRpc(block_rpc)
         canonical_hash = _hash(
             await recorder.request("chain_getBlockHash", (target.block_number,)),
             "target_block_hash_invalid",
