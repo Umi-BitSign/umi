@@ -1,0 +1,41 @@
+[Unit]
+Description=UMI UID 200 bootstrap row renewal controller
+Documentation=https://github.com/Umi-BitSign/umi/blob/main/docs/BOOTSTRAP_RENEWAL_OPERATOR.md
+Wants=network-online.target
+After=network-online.target umi-observer.service
+ConditionPathIsReadWrite=/srv/www/umi-validator-directives
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/opt/umi-bootstrap-renewal/.venv/bin/umi-bootstrap-renewal run --config /etc/umi/bootstrap-renewal.json
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+StateDirectory=umi-bootstrap-renewal
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/umi-bootstrap-renewal /srv/www/umi-validator-directives
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
