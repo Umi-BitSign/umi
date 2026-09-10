@@ -319,7 +319,9 @@ every authority-approved worker image as fully trusted with that hotkey.
 UMI also supplies one 32-byte result-upload key to each validator through a
 private channel. This is a narrowly scoped transport credential, not a wallet or
 R2 account credential. It permits create-only writes under the validator bootstrap
-result route; the published body must still carry the validator-hotkey signature.
+result routes whose signed submission IDs UMI maps to that validator; the published
+body must still carry the validator-hotkey signature. The key remains stable across
+later directives, while UMI authorizes each new submission ID at the upload service.
 Never reuse one validator's key on another host. Save the supplied 64-character
 lowercase hexadecimal value in an owner-only file without printing it:
 

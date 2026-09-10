@@ -32,13 +32,22 @@ must verify the already-published bytes rather than retrying with changed conten
 
 ## Authentication contract
 
-Set `UPLOAD_HMAC_SECRET` and `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET` to separate
-32-byte random values encoded as 64 lowercase hexadecimal characters. The first
-authorizes only public-pilot paths. The second authorizes only validator-bootstrap
-result paths and is the credential installed on the validator host. Keep both out
-of Wrangler configuration, source control, process arguments, and logs. Generate
-each into an owner-only file, install it through standard input, and then remove
-the temporary file:
+Set `UPLOAD_HMAC_SECRET` to one 32-byte random value encoded as 64 lowercase
+hexadecimal characters. Set `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST` to a
+canonical JSON object whose keys are authorized 64-character submission IDs and
+whose values are stable, per-validator 32-byte HMAC credentials. The object must
+contain no whitespace, its keys must be sorted, and it may contain at most 32
+entries in 4 KiB. This stays below Cloudflare's 5 KB per-variable limit. Unknown
+submission IDs are denied. Malformed, noncanonical,
+duplicate-key, or oversized maps fail closed.
+
+The public-pilot secret authorizes only public-pilot paths. A mapped credential
+authorizes only its named validator-bootstrap result paths. The value installed on
+a validator must remain stable across that validator's later submissions. Add each
+new signed submission ID to the server-side map before publishing its directive.
+Another validator receives a different value. Keep every value out of Wrangler
+configuration, source control, process arguments, and logs. Generate each into an
+owner-only file and install secrets through standard input:
 
 ```sh
 umask 077
@@ -48,8 +57,14 @@ npx wrangler secret put UPLOAD_HMAC_SECRET < "$secret_file"
 rm -f "$secret_file"
 ```
 
-Repeat with a different value and the secret name
-`VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET`.
+Build the validator map in an owner-only file without printing its values. Install
+it as `VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST`, then retain the per-validator
+credentials in the approved secret store. Updating the map is a server-side
+operation and does not replace the validator's installed credential.
+
+Only currently authorized or imminently published submission IDs need to remain
+in the map. Remove an ID after its immutable result has been verified. This keeps
+the map bounded during a multi-day bootstrap cadence.
 
 Each request supplies:
 
@@ -79,12 +94,12 @@ R2 verifies the declared SHA-256 while consuming the request stream. The Worker
 also requires the returned object size and SHA-256 metadata to match before it
 returns `201`.
 
-Use different HMAC values for pilot automation and validator-bootstrap results.
-Both must also differ from the result-envelope HMAC, GitHub, coordinator-wallet,
-observer, tunnel, and direct R2 credentials. Neither uploader needs an R2 API
-token. A validator receives only its bootstrap-result transport credential; the
-result object is separately signed by its validator hotkey and fully replayed
-before it can enter the observer feed.
+Use different HMAC values for pilot automation and each validator's bootstrap
+results. They must also differ from the result-envelope HMAC, GitHub,
+coordinator-wallet, observer, tunnel, and direct R2 credentials. Neither uploader
+needs an R2 API token. A validator receives only its own stable bootstrap-result
+transport credential; the result object is separately signed by its validator
+hotkey and fully replayed before it can enter the observer feed.
 
 ## Local verification
 
@@ -113,7 +128,7 @@ secret interactively, and deploy from this directory:
 
 ```sh
 npx wrangler secret put UPLOAD_HMAC_SECRET
-npx wrangler secret put VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET
+npx wrangler secret put VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST
 npx wrangler deploy
 ```
 
@@ -123,6 +138,8 @@ root-owned automation configuration. Keep public R2 readback on its separate
 origin. After every upload, download the object without credentials and verify its
 length and SHA-256 before publishing its URL to GitHub.
 
-Rotate the HMAC secret by stopping the VPS controller, replacing the Worker secret,
-replacing the VPS systemd credential, and then restarting the uploader. No secret
-value belongs in an environment file.
+To revoke a submission, remove its ID from the server-side map. To revoke a
+validator credential, stop its supervisor, replace the value on that host, and
+replace every retained mapping for that validator before resuming. Normal
+submission refreshes only add a server-side ID and do not require validator action.
+No production secret value belongs in an environment file.

@@ -4,6 +4,8 @@ const MAX_CLOCK_SKEW_SECONDS = 300;
 const MAX_PUBLIC_ARCHIVE_BYTES = 96 * 1024 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024;
 const MAX_VALIDATOR_BOOTSTRAP_RESULT_BYTES = 4 * 1024 * 1024;
+const MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_BYTES = 4 * 1024;
+const MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_ENTRIES = 32;
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
@@ -150,6 +152,57 @@ function bytesEqual(left: ArrayBuffer, right: Uint8Array): boolean {
   return crypto.subtle.timingSafeEqual(left, right);
 }
 
+function validatorBootstrapUploadSecret(
+  serializedAllowlist: string,
+  submissionId: string,
+): string | null {
+  if (
+    new TextEncoder().encode(serializedAllowlist).byteLength
+      > MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_BYTES
+  ) {
+    throw new Error("validator bootstrap upload HMAC allowlist is too large");
+  }
+
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(serializedAllowlist);
+  } catch {
+    throw new Error("validator bootstrap upload HMAC allowlist is invalid");
+  }
+  if (
+    decoded === null
+    || typeof decoded !== "object"
+    || Array.isArray(decoded)
+  ) {
+    throw new Error("validator bootstrap upload HMAC allowlist is invalid");
+  }
+
+  const entries = Object.entries(decoded as Record<string, unknown>);
+  if (entries.length > MAX_VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST_ENTRIES) {
+    throw new Error("validator bootstrap upload HMAC allowlist has too many entries");
+  }
+  const normalized: Record<string, string> = {};
+  let previousSubmissionId: string | null = null;
+  for (const [candidateSubmissionId, candidateSecret] of entries) {
+    if (
+      !LOWER_HEX_64.test(candidateSubmissionId)
+      || typeof candidateSecret !== "string"
+      || !LOWER_HEX_64.test(candidateSecret)
+      || (previousSubmissionId !== null && candidateSubmissionId <= previousSubmissionId)
+    ) {
+      throw new Error("validator bootstrap upload HMAC allowlist is invalid");
+    }
+    normalized[candidateSubmissionId] = candidateSecret;
+    previousSubmissionId = candidateSubmissionId;
+  }
+  if (JSON.stringify(normalized) !== serializedAllowlist) {
+    // Requiring exact canonical bytes also rejects duplicate object keys, which
+    // JSON.parse would otherwise silently collapse to the final value.
+    throw new Error("validator bootstrap upload HMAC allowlist is noncanonical");
+  }
+  return Object.hasOwn(normalized, submissionId) ? normalized[submissionId] ?? null : null;
+}
+
 function canonicalAuthMessage(
   pathname: string,
   timestamp: string,
@@ -177,7 +230,7 @@ async function verifyAuthorization(
   contentSha256: string,
 ): Promise<boolean> {
   if (!LOWER_HEX_64.test(secretHex)) {
-    throw new Error("UPLOAD_HMAC_SECRET must encode exactly 32 bytes");
+    throw new Error("upload HMAC secret must encode exactly 32 bytes");
   }
 
   const authorization = request.headers.get("Authorization");
@@ -251,11 +304,18 @@ async function authenticateUpload(
     return jsonResponse(400, { error: "path_digest_mismatch" });
   }
 
+  const uploadSecret = route.authentication === "pilot"
+    ? env.UPLOAD_HMAC_SECRET
+    : validatorBootstrapUploadSecret(
+      env.VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST,
+      route.identifier,
+    );
+  if (uploadSecret === null) {
+    return jsonResponse(401, { error: "unauthorized" });
+  }
   const authorized = await verifyAuthorization(
     request,
-    route.authentication === "pilot"
-      ? env.UPLOAD_HMAC_SECRET
-      : env.VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET,
+    uploadSecret,
     url.pathname,
     contentLength,
     contentType,

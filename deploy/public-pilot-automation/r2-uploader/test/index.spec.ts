@@ -5,7 +5,21 @@ import worker from "../src/index";
 
 const TEST_SECRET = "11".repeat(32);
 const TEST_VALIDATOR_SECRET = "22".repeat(32);
+const TEST_OTHER_VALIDATOR_SECRET = "33".repeat(32);
+const TEST_VALIDATOR_SUBMISSION_ID = "bc".repeat(32);
 const encoder = new TextEncoder();
+
+function testEnv(
+  validatorAllowlist = JSON.stringify({
+    [TEST_VALIDATOR_SUBMISSION_ID]: TEST_VALIDATOR_SECRET,
+  }),
+): Env {
+  return {
+    EVIDENCE_BUCKET: env.EVIDENCE_BUCKET,
+    UPLOAD_HMAC_SECRET: TEST_SECRET,
+    VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST: validatorAllowlist,
+  };
+}
 
 function toHex(value: ArrayBuffer): string {
   return [...new Uint8Array(value)]
@@ -139,11 +153,10 @@ describe("public pilot R2 uploader", () => {
 
   it("stores a validator bootstrap result only with its separate credential", async () => {
     const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
-    const submissionId = "bc".repeat(32);
-    const pathname = `/validator-bootstrap-results/${submissionId}.json`;
+    const pathname = `/validator-bootstrap-results/${TEST_VALIDATOR_SUBMISSION_ID}.json`;
     const wrongCredential = await worker.fetch(
-      await makeUpload(pathname, body, "application/json"),
-      env,
+      await makeUpload(pathname, body, "application/json", {}, TEST_OTHER_VALIDATOR_SECRET),
+      testEnv(),
     );
     const accepted = await worker.fetch(
       await makeUpload(
@@ -153,7 +166,7 @@ describe("public pilot R2 uploader", () => {
         {},
         TEST_VALIDATOR_SECRET,
       ),
-      env,
+      testEnv(),
     );
 
     expect(wrongCredential.status).toBe(401);
@@ -161,6 +174,50 @@ describe("public pilot R2 uploader", () => {
     const stored = await env.EVIDENCE_BUCKET.get(pathname.slice(1));
     expect(await stored?.text()).toBe(body);
     expect(stored?.customMetadata?.uploadKind).toBe("validator_bootstrap_result");
+  });
+
+  it("rejects an unmapped validator bootstrap submission id", async () => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
+    const unknownSubmissionId = "bd".repeat(32);
+    const pathname = `/validator-bootstrap-results/${unknownSubmissionId}.json`;
+    const response = await worker.fetch(
+      await makeUpload(pathname, body, "application/json", {}, TEST_VALIDATOR_SECRET),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(401);
+    expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
+  });
+
+  it.each([
+    ["malformed JSON", "{"],
+    ["non-object JSON", "[]"],
+    [
+      "duplicate submission ids",
+      `{${JSON.stringify(TEST_VALIDATOR_SUBMISSION_ID)}:${JSON.stringify(TEST_VALIDATOR_SECRET)},${JSON.stringify(TEST_VALIDATOR_SUBMISSION_ID)}:${JSON.stringify(TEST_OTHER_VALIDATOR_SECRET)}}`,
+    ],
+    [
+      "noncanonical entry order",
+      JSON.stringify({
+        ["ff".repeat(32)]: TEST_OTHER_VALIDATOR_SECRET,
+        [TEST_VALIDATOR_SUBMISSION_ID]: TEST_VALIDATOR_SECRET,
+      }),
+    ],
+    [
+      "invalid credential",
+      JSON.stringify({ [TEST_VALIDATOR_SUBMISSION_ID]: "not-a-credential" }),
+    ],
+    ["oversized input", " ".repeat(4 * 1024 + 1)],
+  ])("fails closed for a %s validator credential allowlist", async (_label, allowlist) => {
+    const body = '{"schema":"umi-validator-supervisor-bootstrap-result/1"}';
+    const pathname = `/validator-bootstrap-results/${TEST_VALIDATOR_SUBMISSION_ID}.json`;
+    const response = await worker.fetch(
+      await makeUpload(pathname, body, "application/json", {}, TEST_VALIDATOR_SECRET),
+      testEnv(allowlist),
+    );
+
+    expect(response.status).toBe(500);
+    expect(await env.EVIDENCE_BUCKET.head(pathname.slice(1))).toBeNull();
   });
 
   it("stores a valid evidence archive with immutable attachment metadata", async () => {

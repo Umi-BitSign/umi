@@ -1,4 +1,4 @@
-# Type-generation placeholder only. Local development must use a fresh 64-character
-# lowercase hexadecimal secret in an ignored .dev.vars file.
+# Type-generation placeholders only. Local development must use fresh test-only
+# credentials in an ignored .dev.vars file.
 UPLOAD_HMAC_SECRET=replace-with-64-lowercase-hex
-VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_SECRET=replace-with-another-64-lowercase-hex
+VALIDATOR_BOOTSTRAP_UPLOAD_HMAC_ALLOWLIST={"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb":"replace-with-another-64-lowercase-hex"}
