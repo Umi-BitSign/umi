@@ -823,6 +823,171 @@ def test_worker_arguments_are_fixed_digest_platform_and_lease_bound(tmp_path: Pa
     )
 
 
+@pytest.mark.asyncio
+async def test_stop_worker_removes_container_before_reaping_foreground_process(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class Process:
+        returncode: int | None = None
+
+        async def wait(self) -> int:
+            events.append("wait")
+            assert self.returncode is not None
+            return self.returncode
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+    process = Process()
+    commands: list[tuple[tuple[str, ...], float]] = []
+
+    async def run_command(arguments, *, timeout_seconds, maximum_output_bytes):
+        del maximum_output_bytes
+        commands.append((arguments, timeout_seconds))
+        if arguments[1] == "rm":
+            events.append(f"rm:{arguments[arguments.index('--time') + 1]}")
+            if arguments[arguments.index("--time") + 1] != "0":
+                process.returncode = 0
+            return b""
+        assert arguments[1] == "ps"
+        events.append("ps")
+        return b"[]"
+
+    adapter = RootlessPodmanWorkerAdapter(_config(tmp_path), command_runner=run_command)
+    adapter._process = process
+
+    await adapter.stop_worker()
+
+    assert events == ["rm:30", "rm:0", "ps"]
+    assert adapter._process is None
+    assert "--ignore" in commands[0][0]
+    assert commands[0][1] > float(commands[0][0][commands[0][0].index("--time") + 1])
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_terminates_only_after_container_first_removal(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class Process:
+        returncode: int | None = None
+        terminated = False
+
+        async def wait(self) -> int:
+            events.append("wait")
+            if self.terminated:
+                self.returncode = -15
+                return self.returncode
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        def terminate(self) -> None:
+            events.append("terminate")
+            self.terminated = True
+
+        def kill(self) -> None:
+            events.append("kill")
+
+    process = Process()
+
+    async def run_command(arguments, *, timeout_seconds, maximum_output_bytes):
+        del timeout_seconds, maximum_output_bytes
+        if arguments[1] == "rm":
+            events.append(f"rm:{arguments[arguments.index('--time') + 1]}")
+            return b""
+        assert arguments[1] == "ps"
+        events.append("ps")
+        return b"[]"
+
+    adapter = RootlessPodmanWorkerAdapter(
+        _config(tmp_path),
+        command_runner=run_command,
+        stop_timeout_seconds=0.01,
+    )
+    adapter._process = process
+
+    await adapter.stop_worker()
+
+    assert events == ["rm:1", "wait", "terminate", "wait", "rm:0", "ps"]
+    assert adapter._process is None
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_retries_removal_and_requires_container_absence(tmp_path: Path) -> None:
+    removal_attempts = 0
+    container_present = True
+
+    async def run_command(arguments, *, timeout_seconds, maximum_output_bytes):
+        nonlocal removal_attempts, container_present
+        del timeout_seconds, maximum_output_bytes
+        if arguments[1] == "rm":
+            removal_attempts += 1
+            if removal_attempts == 1:
+                raise ValidatorSupervisorAdapterError("podman_command_timeout")
+            container_present = False
+            return b""
+        assert arguments[1] == "ps"
+        return (
+            json.dumps([{"Names": WORKER_CONTAINER_NAME}]).encode() if container_present else b"[]"
+        )
+
+    adapter = RootlessPodmanWorkerAdapter(_config(tmp_path), command_runner=run_command)
+    await adapter.stop_worker()
+    assert removal_attempts == 2
+
+    async def stubborn_command(arguments, *, timeout_seconds, maximum_output_bytes):
+        del timeout_seconds, maximum_output_bytes
+        if arguments[1] == "rm":
+            return b""
+        assert arguments[1] == "ps"
+        return json.dumps([{"Names": WORKER_CONTAINER_NAME}]).encode()
+
+    adapter = RootlessPodmanWorkerAdapter(_config(tmp_path), command_runner=stubborn_command)
+    with pytest.raises(ValidatorSupervisorAdapterError, match="podman_worker_stop_failed"):
+        await adapter.stop_worker()
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_does_not_forget_a_surviving_foreground_process(tmp_path: Path) -> None:
+    class Process:
+        returncode: int | None = None
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    async def run_command(arguments, *, timeout_seconds, maximum_output_bytes):
+        del timeout_seconds, maximum_output_bytes
+        if arguments[1] == "rm":
+            return b""
+        assert arguments[1] == "ps"
+        return b"[]"
+
+    process = Process()
+    adapter = RootlessPodmanWorkerAdapter(
+        _config(tmp_path),
+        command_runner=run_command,
+        stop_timeout_seconds=0.01,
+    )
+    adapter._process = process
+
+    with pytest.raises(ValidatorSupervisorAdapterError, match="podman_worker_stop_failed"):
+        await adapter.stop_worker()
+    assert adapter._process is process
+
+
 def test_common_bootstrap_dispatch_has_fixed_entrypoint_and_no_upload_key(
     tmp_path: Path,
 ) -> None:

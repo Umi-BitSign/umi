@@ -857,33 +857,67 @@ class RootlessPodmanWorkerAdapter:
         self._staged[activation.directive_sha256] = staged
 
     async def stop_worker(self) -> None:
-        process, self._process = self._process, None
+        process = self._process
         self._expected_activation = None
         self._hold = False
+
+        # The foreground ``podman run`` process proxies signals into the
+        # container.  Ask Podman to stop and remove the named container before
+        # touching that launcher so conmon, networking, and ``--rm`` cleanup
+        # remain under one Podman lifecycle operation.
+        grace_seconds = max(1, min(30, math.ceil(self.stop_timeout_seconds)))
+        with contextlib.suppress(ValidatorSupervisorAdapterError):
+            await self._remove_worker_container(
+                grace_seconds=grace_seconds,
+                timeout_seconds=float(grace_seconds) + 10.0,
+            )
+
+        process_wait_seconds = min(5.0, self.stop_timeout_seconds)
         if process is not None and process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=self.stop_timeout_seconds)
+                await asyncio.wait_for(process.wait(), timeout=process_wait_seconds)
             except asyncio.TimeoutError:
                 with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                    process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=process_wait_seconds)
+                except asyncio.TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(process.wait(), timeout=process_wait_seconds)
+
+        # Close the race where a partially started foreground command created
+        # the named container after the first idempotent removal.
+        with contextlib.suppress(ValidatorSupervisorAdapterError):
+            await self._remove_worker_container(grace_seconds=0, timeout_seconds=10.0)
+
+        container_exists = await self._container_exists()
+        process_alive = process is not None and process.returncode is None
+        if not process_alive:
+            self._process = None
+        if process_alive or container_exists:
+            raise ValidatorSupervisorAdapterError("podman_worker_stop_failed")
+
+    async def _remove_worker_container(
+        self,
+        *,
+        grace_seconds: int,
+        timeout_seconds: float,
+    ) -> None:
         await self._command(
             (
                 self.config.container_runtime,
                 "rm",
                 "--force",
+                "--ignore",
                 "--time",
-                str(max(1, min(30, math.ceil(self.stop_timeout_seconds)))),
+                str(grace_seconds),
                 WORKER_CONTAINER_NAME,
             ),
-            self.stop_timeout_seconds,
+            timeout_seconds,
             allow_failure=True,
         )
-        if await self._container_exists():
-            raise ValidatorSupervisorAdapterError("podman_worker_stop_failed")
 
     async def worker_is_healthy(self) -> bool:
         if self._hold:
