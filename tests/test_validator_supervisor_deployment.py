@@ -52,12 +52,17 @@ def test_linux_supervisor_installer_has_valid_shell_and_safe_transition_order() 
         == 2
     )
     assert source.count("-- env -i \\\n") == 2
+    assert "/usr/bin/timeout --signal=TERM --kill-after=5s 30s" in source
     assert 'while [ "$readiness_attempt" -lt 180 ]' in source
     assert 'find "$supervisor_root" -xdev ! -type l' in source
     assert 'find "$supervisor_root" -xdev -type l ! -user root' in source
     assert 'target=$(readlink -f -- "$link")' in source
     assert '"$root"/*' in source
     assert "apt-get install -y --no-install-recommends" in source
+    assert "--no-upgrade" in source
+    assert "--no-remove" in source
+    assert " util-linux systemd " not in source
+    assert "tar timeout useradd" in source
     assert "podman --version | awk '{print $3}'" in source
     assert 'fail "Podman 4.3.0 or later is required; found $podman_version"' in source
     assert source.index("podman_version=") < source.index("script_directory=")
@@ -158,14 +163,19 @@ def test_operator_guide_requires_supported_podman_and_distributions() -> None:
 
 def test_podman_runtime_configuration_and_service_smoke_are_fixed() -> None:
     containers_conf = (DEPLOYMENT / "containers.conf").read_text()
+    assert '[engine]\ncgroup_manager = "cgroupfs"' in containers_conf
     assert containers_conf.splitlines()[-2:] == ["[containers]", "default_sysctls = []"]
 
     smoke = DEPLOYMENT / "podman-runtime-smoke.sh"
     subprocess.run(["sh", "-n", str(smoke)], check=True)
     smoke_source = smoke.read_text()
     assert "CONTAINERS_CONF_OVERRIDE=" in smoke_source
+    assert "/usr/bin/timeout --signal=TERM --kill-after=5s 60s" in smoke_source
     assert "--network slirp4netns:allow_host_loopback=false" in smoke_source
-    assert "--entrypoint /usr/bin/true" in smoke_source
+    assert "--entrypoint /bin/sh" in smoke_source
+    assert "/sys/fs/cgroup/memory.max" in smoke_source
+    assert "/sys/fs/cgroup/pids.max" in smoke_source
+    assert "/sys/fs/cgroup/cpu.max" in smoke_source
     mount_lines = [
         line.strip() for line in smoke_source.splitlines() if line.strip().startswith("--mount")
     ]
@@ -203,6 +213,8 @@ def test_podman_runtime_configuration_and_service_smoke_are_fixed() -> None:
     assert "ProtectKernelModules=true\n" in service
     assert "ProtectProc=invisible\n" in service
     assert "RuntimeDirectoryPreserve=yes\n" in service
+    assert "TimeoutStartSec=180s\n" in service
+    assert "Delegate=true\n" in service
     assert "/var/lib/umi-validator-runtime-smoke/readonly" in service
     assert "/var/lib/umi-validator-runtime-smoke/readwrite" in service
 

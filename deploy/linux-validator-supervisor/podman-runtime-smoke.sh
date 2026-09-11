@@ -13,6 +13,7 @@ podman() {
     LOGNAME=umi-validator \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     USER=umi-validator \
+    /usr/bin/timeout --signal=TERM --kill-after=5s 60s \
     /usr/bin/podman "$@"
 }
 
@@ -47,6 +48,8 @@ require_empty_dummy_mounts() {
 # this isolated store. Pick one only as a root filesystem for an inert runtime
 # check. The fixed dummy binds and production network driver contain no secrets;
 # no image entrypoint, wallet, operator input, worker state, or signing path runs.
+# The fixed shell expression proves that rootless cgroupfs actually enforces the
+# three per-container limits rather than silently accepting and ignoring them.
 require_empty_dummy_mounts
 image_id=$(podman image list --no-trunc --format '{{.ID}}' | /usr/bin/sed -n '1p')
 case "$image_id" in
@@ -74,7 +77,13 @@ podman run --rm \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 \
   --mount "type=bind,src=$readonly_mount,dst=/run/umi-smoke-readonly,ro=true,bind-propagation=private" \
   --mount "type=bind,src=$readwrite_mount,dst=/run/umi-smoke-readwrite,ro=false,bind-propagation=private" \
-  --entrypoint /usr/bin/true \
-  "$image_id"
+  --entrypoint /bin/sh \
+  "$image_id" -eu -c '
+    [ "$(cat /sys/fs/cgroup/memory.max)" = 268435456 ]
+    [ "$(cat /sys/fs/cgroup/pids.max)" = 16 ]
+    set -- $(cat /sys/fs/cgroup/cpu.max)
+    [ "$1" != max ]
+    [ "$1" = "$2" ]
+  '
 
 require_empty_dummy_mounts

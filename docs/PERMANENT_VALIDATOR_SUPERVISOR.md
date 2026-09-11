@@ -51,7 +51,9 @@ sudo ./umi-validator/deploy/linux-validator-supervisor/install.sh \
 Do not run an old writer and the UMI supervisor at the same time.
 
 On supported Ubuntu and Debian hosts, the installer adds missing distribution
-packages for rootless Podman. It selects the correct amd64 or arm64 stream,
+packages for rootless Podman. It does not explicitly request upgrades for
+packages already present and refuses any package removal. It selects the
+correct amd64 or arm64 stream,
 installs the locked Python environment and signed host artifacts, creates an
 isolated service account, and copies only the selected plaintext hotkey. It does
 not read or copy a coldkey.
@@ -93,16 +95,18 @@ sudo systemctl status --no-pager umi-validator-supervisor.service
 )
 ```
 
-The release includes an immutable root-owned Podman override that clears
-Podman's default container sysctls. The worker does not require them, and this
-keeps rootless container startup compatible with hosts where the service
-sandbox makes `/proc/sys` read-only. Before each supervisor start, systemd also
-runs an inert container smoke test under that same sandbox. It exercises the
-production slirp4netns mode and two empty, fixed dummy bind mounts—one read-only
-and one read-write—but mounts no wallet, operator input, or worker state. Its
-entrypoint is `/usr/bin/true`, so it makes no network request and exercises no
-signing path. Installation cannot report success if rootless container
-execution is broken.
+The release includes an immutable root-owned Podman override. It selects
+`cgroupfs` for the delegated rootless system service, avoiding any dependency
+on a user login-manager or D-Bus session, and clears Podman's default container
+sysctls. The worker does not require those sysctls, which keeps startup
+compatible with hosts where the service sandbox makes `/proc/sys` read-only.
+Before each supervisor start, systemd also runs a fixed container smoke test
+under that same sandbox. It exercises the production slirp4netns mode and two
+empty dummy bind mounts, one read-only and one read-write, but mounts no wallet,
+operator input, or worker state. A fixed `/bin/sh` expression only reads the
+container's cgroup files and verifies the CPU, memory, and process limits. It
+makes no network request and exercises no signing path. Installation cannot
+report success if rootless execution or resource enforcement is broken.
 
 Rootless Podman normally keeps one unprivileged pause process alive to retain
 its user and mount namespaces. The unit preserves only its dedicated

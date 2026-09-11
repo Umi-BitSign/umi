@@ -206,7 +206,9 @@ podman_as_service() {
       XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
       LOGNAME="$service_account" \
       PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-      USER="$service_account" /usr/bin/podman "$@"
+      USER="$service_account" \
+      /usr/bin/timeout --signal=TERM --kill-after=5s 30s \
+      /usr/bin/podman "$@"
   )
 }
 
@@ -258,7 +260,7 @@ if [ -n "$legacy_unit" ]; then
   [ "$legacy_unit" != "$service_name" ] || fail "refusing to retire the UMI supervisor"
 fi
 
-package_commands='awk chmod chown curl cut find getent git groupadd install mkdir mktemp mv newgidmap newuidmap podman readlink rmdir rm runuser sed sha256sum slirp4netns stat systemctl systemd-analyze tar useradd usermod'
+package_commands='awk chmod chown curl cut find getent git groupadd install mkdir mktemp mv newgidmap newuidmap podman readlink rmdir rm runuser sed sha256sum slirp4netns stat systemctl systemd-analyze tar timeout useradd usermod'
 missing_package_command=false
 for command_name in $package_commands; do
   command -v "$command_name" >/dev/null 2>&1 || missing_package_command=true
@@ -274,7 +276,8 @@ if [ "$missing_package_command" = true ]; then
   esac
   DEBIAN_FRONTEND=noninteractive apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl git podman slirp4netns uidmap util-linux systemd \
+    --no-upgrade --no-remove \
+    ca-certificates curl git podman slirp4netns uidmap util-linux \
     coreutils findutils gawk tar
 fi
 for command_name in $package_commands; do require_command "$command_name"; done
@@ -580,6 +583,8 @@ systemd-analyze verify "$service_source"
   || fail "Podman did not report a rootless service context"
 [ "$(podman_as_service info --format '{{.Host.CgroupsVersion}}')" = v2 ] \
   || fail "rootless Podman requires cgroup v2"
+[ "$(podman_as_service info --format '{{.Host.CgroupManager}}')" = cgroupfs ] \
+  || fail "rootless Podman did not use the signed cgroupfs configuration"
 case "$(podman_as_service info --format '{{.Store.GraphRoot}}')" in
   /var/lib/umi-validator-supervisor/container-data/*) ;;
   *) fail "rootless Podman graph root escaped the supervisor state tree" ;;

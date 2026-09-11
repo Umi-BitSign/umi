@@ -26,6 +26,7 @@ ExecStart=/usr/bin/env -i \
   /opt/umi-validator-supervisor/.venv/bin/umi-validator-supervisor run --config /etc/umi/validator-supervisor.json
 Restart=always
 RestartSec=15s
+TimeoutStartSec=180s
 TimeoutStopSec=180s
 KillMode=control-group
 TasksMax=640
