@@ -34,9 +34,9 @@ protocol extension.
 
 ## Current status
 
-SN78 is active on mainnet, but UMI translation weights are not. Public endpoint
-pilots are running and their signed, replayable results are available through the
-observer API. The separately labeled seven-day bootstrap service-weight release
+SN78 is active on mainnet, but UMI translation weights are not. The public endpoint
+pilot campaign is closed; its signed, replayable results remain available through
+the observer API. The separately labeled seven-day bootstrap service-weight release
 has published its signed lease and shared release directive and is awaiting its
 first finalized matching row. The owner fence keeps commit-reveal disabled and
 rejects legacy short rows. Any
@@ -79,7 +79,7 @@ signed, hash-pinned release + private operator bindings
   -> no weight-call capability
 
 temporary bootstrap service weights
-public endpoint pilots + post-publication miner opt-ins
+completed public endpoint pilots + post-publication miner opt-ins
   -> current registration, UID, permit, serving, and health checks
   -> coordinator-signed, declared-complete eligibility manifest
   -> one coordinator-signed common lease and shared release directive
@@ -239,11 +239,11 @@ cannot be presented as protocol conformance or activation evidence. The
 [external-miner component pilot](docs/EXTERNAL_MINER_COMPONENT_PILOT.md) provides
 the one-command path for the pinned public S1 model and licensed `ASL BOOK` asset;
 it runs locally and explicitly does not prove the miner's public axon.
-The [public-endpoint miner pilot](docs/PUBLIC_ENDPOINT_MINER_PILOT.md) tests one
-registered miner through its finalized SN78 serving announcement and publishes the
-coordinator-signed endpoint evidence with the replayable bundle. It remains a
-component test: it does not create a protocol window, submit weights, or satisfy an
-activation gate.
+The [public-endpoint miner pilot](docs/PUBLIC_ENDPOINT_MINER_PILOT.md) is closed.
+Its historical evidence remains replayable, but miners should not enroll, sign
+readiness challenges, or keep a pilot endpoint running. The pilot was a component
+test only. It did not create a protocol window, submit weights, satisfy an
+activation gate, or become validator input.
 
 ## Run the certified mirror data plane
 

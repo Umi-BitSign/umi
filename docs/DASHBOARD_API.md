@@ -188,6 +188,11 @@ reached, the exact reveal-stage manifest and reveal result.
 
 ## Component pilot feed
 
+The public SN78 endpoint campaign closed on 2026-09-11. These routes retain its
+completed evidence for audit and replay. Their availability does not reopen
+enrollment or authorize another public-endpoint challenge, case, or request. Local
+component-pilot records continue to use the same read-only namespace.
+
 The optional `--pilot-feed-config` reads completed `umi-component-bundle/1`
 directories from local disk. This is a separate evidence class and namespace. It
 never adds a `/windows` record, changes `protocol_state`, supplies activation

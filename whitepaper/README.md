@@ -4,7 +4,7 @@ Canonical public whitepaper and conformance specification
 
 Protocol version: 0.1
 
-Status: SN78 active on mainnet; UMI translation weights inactive; public endpoint pilots active; shared-validator service bootstrap pending its first verified row
+Status: SN78 active on mainnet; UMI translation weights inactive; public endpoint pilot campaign closed with historical evidence retained; shared-validator service bootstrap pending its first verified row
 
 This document supersedes earlier UMI mechanism and whitepaper drafts.
 

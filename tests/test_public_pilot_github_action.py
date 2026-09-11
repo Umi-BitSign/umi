@@ -676,36 +676,21 @@ def test_readiness_parser_accepts_one_github_terminal_lf_only() -> None:
         bot.parse_readiness_marker(marker, now_unix_s=_NOW + 60)
 
 
-def test_workflow_has_bounded_permissions_and_reconciliation_triggers() -> None:
-    workflow = (_ROOT / ".github" / "workflows" / "public-pilot-bot.yml").read_text()
-    assert "issues: write" in workflow
-    assert "contents: read" in workflow
-    assert "pull-requests: write" not in workflow
-    assert "types: [opened, edited, reopened, labeled]" in workflow
-    assert "types: [created]" in workflow
-    assert 'cron: "*/5 * * * *"' in workflow
-    assert "workflow_dispatch:" in workflow
-    assert "run: python tools/public_pilot_github_action.py" in workflow
-    assert "github.event.comment.body" not in workflow
-    assert "PUBLIC_PILOT_AUTOMATION_REVISION must be one 40-character commit" in workflow
-    assert "ref: ${{ vars.PUBLIC_PILOT_AUTOMATION_REVISION }}" in workflow
-    assert "UMI_REVISION: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}" in workflow
-    assert "ref: ${{ vars.PUBLIC_PILOT_UMI_REVISION }}" not in workflow
+def test_retired_campaign_has_no_github_workflow() -> None:
+    assert not (_ROOT / ".github" / "workflows" / "public-pilot-bot.yml").exists()
 
 
-def test_operator_surfaces_use_the_signed_two_stage_flow() -> None:
-    issue_template = (_ROOT / ".github" / "ISSUE_TEMPLATE" / "public-miner-pilot.yml").read_text()
+def test_retired_campaign_has_no_enrollment_form() -> None:
+    assert not (_ROOT / ".github" / "ISSUE_TEMPLATE" / "public-miner-pilot.yml").exists()
     operator_guide = (_ROOT / "docs" / "PUBLIC_ENDPOINT_MINER_PILOT.md").read_text()
     with (_ROOT / "pyproject.toml").open("rb") as handle:
         scripts = tomllib.load(handle)["project"]["scripts"]
 
-    assert 'labels: ["public-miner-pilot"]' in issue_template
-    issue_confirmation_labels = tuple(
-        re.findall(r"^        - label: (.+)$", issue_template, flags=re.MULTILINE)
-    )
-    assert issue_confirmation_labels == PUBLIC_PILOT_READINESS_CONFIRMATIONS
-    assert "umi-public-pilot-miner authorize" in issue_template
-    assert "Bare `READY FOR CASE` and `READY TO ISSUE` comments do not" in operator_guide
+    assert "This campaign closed on 2026-09-11" in operator_guide
+    assert "Enrollment is closed" in operator_guide
+    assert "The enrollment issue form has been removed" in operator_guide
+    assert "outstanding" in operator_guide
+    assert "challenges authorize no work" in operator_guide
     assert operator_guide.count('umi-public-pilot-miner" authorize') == 2
     assert scripts["umi-public-pilot-miner"] == "umi.public_pilot_miner:main"
     assert scripts["umi-public-pilot-controller"] == "umi.public_pilot_controller:main"

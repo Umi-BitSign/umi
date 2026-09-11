@@ -12,11 +12,10 @@ wrapper generates the inputs and future Quicknet rounds, verifies the signed mod
 release, produces the bundle, and replays it. It still runs the miner in-process and
 does not prove the miner's public axon.
 
-To test a registered miner through the HTTPS origin in its finalized SN78 serving
-record, use [`PUBLIC_ENDPOINT_MINER_PILOT.md`](PUBLIC_ENDPOINT_MINER_PILOT.md).
-That profile adds a signed coordinator attestation and uses the public-pilot replay
-verifier. It has the same no-weight and nonconformance boundary as the local
-profile.
+The retired [public endpoint miner pilot](PUBLIC_ENDPOINT_MINER_PILOT.md) tested a
+registered miner through the HTTPS origin in its finalized SN78 serving record.
+Its historical records remain replayable, but the campaign no longer accepts
+enrollments or readiness proofs.
 
 The observer publishes these results only under `/api/v1/pilots`. It does not put
 them under `/api/v1/windows`, advance the reported protocol phase, or populate the

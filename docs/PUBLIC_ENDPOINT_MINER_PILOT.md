@@ -1,10 +1,22 @@
 # Public SN78 miner endpoint pilot
 
-This is the public onboarding path for a registered SN78 miner before UMI's
-translation weights activate. It sends one `btauth/1`-authenticated request with
-a known ASL clip to the miner's chain-announced HTTPS axon and verifies any returned
-miner response-envelope signature. When reveal, scoring, attestation, and
-publication finish, UMI publishes the complete replayable bundle at
+> [!CAUTION]
+> This campaign closed on 2026-09-11. Do not open a pilot enrollment, sign a
+> `READY FOR CASE` or `READY TO ISSUE` challenge, change an axon for this pilot,
+> or keep pilot compute online. Unissued cases and outstanding challenges are
+> cancelled. Existing evidence remains available at `api.umi.vision` for replay.
+>
+> The initial temporary bootstrap manifest is already frozen and signed. A pilot
+> completed now could not change that row. Public-pilot history is not a
+> prerequisite or validator input for the planned live translation mechanism.
+> Final live miner instructions will be published separately.
+
+Everything below documents the retired campaign for auditors and operators who
+need to replay its evidence. It is not an active onboarding runbook.
+
+The campaign sent one `btauth/1`-authenticated request with a known ASL clip to a
+miner's chain-announced HTTPS axon and verified any returned miner
+response-envelope signature. Completed evidence was published at
 `api.umi.vision`.
 
 The pilot proves endpoint and protocol interoperability. It is not a production
@@ -12,22 +24,17 @@ scoring window, model-quality benchmark, activation gate, validator input, or
 weight result. The clip and references are public, so its score has no ranking
 meaning.
 
-Enrollment is open to every verified registered SN78 miner hotkey without a
-validator permit. There is no exclusive pilot slot, and one miner does not wait
-for another miner's offer to expire. The coordinator does not poll miners or send
-ongoing requests. The issue bot posts a fresh payload for each readiness step.
-The miner starts its pilot by signing the `READY FOR CASE` payload with the enrolled
-hotkey when it is available. Each miner may complete at most one pilot in this
-campaign, and each case sends at most one request after the two signed readiness
-proofs described below. Bare `READY FOR CASE` and `READY TO ISSUE` comments do not
-authorize the coordinator.
+Enrollment is closed. The issue bot and coordinator are disabled, outstanding
+challenges authorize no work, and no more cases will be prepared or issued under
+this campaign. Existing issue records remain public so operators can audit the
+campaign history.
 
 The coordinator issues one live request at a time. Signed issuance authorizations
 for already prepared cases take priority; within the same stage, miners are
 processed in authorization order. This bounded order protects the coordinator host
 and does not reserve or deny pilot eligibility.
 
-## Public workflow
+## Historical public workflow
 
 1. The miner opens the public pilot issue form with its SN78 UID, hotkey,
    platform, inference device, and model revision.
@@ -62,12 +69,9 @@ and does not reserve or deny pilot eligibility.
    the case. A missing result never creates a retry authorization: the coordinator
    must recover and publish a terminal or incomplete result first.
 
-Open a request at:
-
-`https://github.com/Umi-BitSign/umi/issues/new?template=public-miner-pilot.yml`
-
-Never post a seed phrase, private key, wallet file, password, private model URL,
-or credential in the issue or case handoff.
+The enrollment issue form has been removed. Never post a seed phrase, private key,
+wallet file, password, private model URL, or credential in a historical issue or
+case handoff.
 
 The issue owner must post each signed proof from the same GitHub account that
 opened the enrollment. That account check prevents another GitHub user from
@@ -76,14 +80,12 @@ verifies independently. Do not edit the issue or a signed proof comment while it
 authorization is pending. If the issue body changes, the bot will not reuse the
 old binding.
 
-## Manual coordinator procedure (disabled during bot automation)
+## Historical manual coordinator procedure
 
 > [!WARNING]
-> Do not run the `prepare` or `run` commands in this section for an issue handled
-> by the public-pilot bot and automation controller. The controller is the sole
-> execution path for that deployment. Running this manual path at the same time
-> could create a second case or request path. This section is retained only for a
-> deliberately declared manual fallback after the bot and controller are stopped.
+> Do not run the `prepare` or `run` commands in this section. The campaign is
+> closed. These commands are retained only to make the historical procedure
+> auditable.
 
 Only the UMI coordinator operator uses this fallback. Use a clean checkout at the
 revision that will be announced and a coordinator hotkey whose public SS58 address

@@ -1,5 +1,17 @@
 # Public-pilot automation services
 
+> [!CAUTION]
+> The public endpoint campaign closed on 2026-09-11. Do not install, enable, or
+> restart the controller for this campaign, announce enrollment, add the
+> `public-miner-pilot` label, or accept another readiness proof. The install and
+> update sections remain below as a historical deployment record. Follow the
+> retirement procedure before taking down the automation host.
+>
+> Keep the observer pilot-feed configuration, published bundles, R2 objects,
+> controller state, spool receipts, and retained archives. The frozen bootstrap
+> feed still verifies its signed eligibility row against completed public-pilot
+> evidence.
+
 These units keep the GitHub and wallet trust boundaries separate:
 
 - GitHub Actions validates issue state, emits authenticated authorization markers,
@@ -27,6 +39,96 @@ the spool fails closed if its claim or retention move crosses a mount boundary.
 The campaign treats the coordinator hotkey and public R2 origin as immutable.
 Drain every pending authorization and start a new declared campaign before either
 value changes; historical results are deliberately checked against those bindings.
+
+## Campaign retirement and evidence drain
+
+Retire the GitHub boundary first. Disable
+`.github/workflows/public-pilot-bot.yml`, cancel any queued or running instance,
+post one closure notice, and close every issue carrying `public-miner-pilot`.
+Closing the issues makes outstanding authorization markers fail the controller's
+pre-contact issue-state verification. Confirm that no open enrollment remains:
+
+```sh
+gh workflow disable public-pilot-bot.yml --repo Umi-BitSign/umi
+gh run list --repo Umi-BitSign/umi --workflow public-pilot-bot.yml \
+  --status in_progress
+gh run list --repo Umi-BitSign/umi --workflow public-pilot-bot.yml \
+  --status queued
+gh issue list --repo Umi-BitSign/umi --label public-miner-pilot \
+  --state open --limit 200
+```
+
+Cancel every run returned by the first two `gh run list` commands with
+`gh run cancel RUN_ID --repo Umi-BitSign/umi`. Close the issues returned by the
+last command, then repeat it and require an empty result before continuing.
+
+Wait for any request that already crossed the durable contact boundary. A record
+in `attempt_started` may already have contacted a miner and must reach a terminal
+or preserved incomplete result. Treat `processing` as busy until its state and
+local journal have been reviewed. An active `case_ready` record is pre-contact and
+may be left in place as cancelled history. Read the database without modifying it:
+
+```sh
+busy_count=$(/opt/umi-public-pilot/.venv/bin/python - <<'PY'
+import sqlite3
+
+connection = sqlite3.connect(
+    "file:/var/lib/umi-public-pilot-controller/automation.sqlite3?mode=ro",
+    uri=True,
+)
+print(
+    connection.execute(
+        "SELECT count(*) FROM authorizations "
+        "WHERE state IN ('processing', 'attempt_started')"
+    ).fetchone()[0]
+)
+PY
+)
+test "$busy_count" = 0
+sudo systemctl disable --now umi-public-pilot-controller.service
+test "$(systemctl is-active umi-public-pilot-controller.service)" = inactive
+test "$(systemctl is-enabled umi-public-pilot-controller.service)" = disabled
+```
+
+The spool is the publication boundary for completed evidence. Verify its exact
+installed entry point as the service user, clear any prior start-limit failure,
+and run one final pass after the controller has stopped:
+
+```sh
+test -x /opt/umi-public-pilot/.venv/bin/umi-public-pilot-spool
+sudo -u umi-observer \
+  /opt/umi-public-pilot/.venv/bin/umi-public-pilot-spool --help >/dev/null
+sudo systemd-analyze verify \
+  /etc/systemd/system/umi-public-pilot-spool.service \
+  /etc/systemd/system/umi-public-pilot-spool.path
+sudo systemctl reset-failed \
+  umi-public-pilot-spool.service umi-public-pilot-spool.path
+sudo systemctl start umi-public-pilot-spool.service
+test "$(systemctl show umi-public-pilot-spool.service -p Result --value)" = success
+test -z "$(sudo find \
+  /var/spool/umi-public-pilot/incoming \
+  /var/spool/umi-public-pilot/consumer/processing \
+  -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+sudo systemctl disable --now \
+  umi-public-pilot-spool.path umi-public-pilot-spool.service
+```
+
+Leave the observer and its public-pilot drop-in running. Verify both retained
+evidence namespaces after the final spool pass:
+
+```sh
+systemctl is-active --quiet umi-observer.service
+curl --fail --silent --show-error --max-time 30 \
+  'https://api.umi.vision/api/v1/pilots?limit=256' >/dev/null
+curl --fail --silent --show-error --max-time 30 \
+  https://api.umi.vision/api/v1/bootstrap-service >/dev/null
+```
+
+Do not delete `/var/lib/umi-public-pilot-controller`,
+`/var/spool/umi-public-pilot`, `/var/lib/umi-observer/pilots`,
+`/var/lib/umi-observer/pilot-feed`, or any published object. Preserve the
+campaign configuration according to the evidence-retention policy. Revoke its
+runtime credentials only after the final result and archive checks pass.
 
 ## Install
 
