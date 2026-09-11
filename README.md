@@ -15,6 +15,7 @@ protocol extension.
 - [Plain-text protocol source](whitepaper/README.md)
 - [bitsign product MVP](roadmap/bitsign-mvp/README.md)
 - [public observer API contract](docs/DASHBOARD_API.md)
+- [what miners should run now](docs/CURRENT_MINER_OPERATION.md)
 - [miner model integration](docs/MINER_MODEL_INTEGRATION.md)
 - [Apple Silicon miner operator](docs/MACOS_MINER_OPERATOR.md)
 - [Linux x86_64 validator operator](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
@@ -37,14 +38,21 @@ protocol extension.
 SN78 is active on mainnet, but UMI translation weights are not. The public endpoint
 pilot campaign is closed; its signed, replayable results remain available through
 the observer API. The separately labeled seven-day bootstrap service-weight release
-has published its signed lease and shared release directive and is awaiting its
-first finalized matching row. The owner fence keeps commit-reveal disabled and
-rejects legacy short rows. Any
-currently permitted SN78 validator may install the signed supervisor release and
+has published its signed lease, shared release directive, and a matching finalized
+row. See [public bootstrap status](https://api.umi.vision/api/v1/bootstrap-service)
+for its current activity and economic effect. The owner fence keeps commit-reveal
+disabled and rejects legacy short rows. Any currently permitted SN78 validator
+may install the signed supervisor release and
 submit the same raw full-UID service row through the original policy's hard
 sunset. Finalized chain state records each validator's exact row, `LastUpdate`,
 permit, and manifest commitment. The bootstrap is not a translation ranking and
 receives no credit toward translation-weight activation.
+
+The current bootstrap worker checks endpoint health and replays existing evidence;
+it does not issue fresh translation requests. Frozen bootstrap participants must
+keep their announced HTTPS health endpoint online. Other miners do not need pilot
+compute. See [what miners should run now](docs/CURRENT_MINER_OPERATION.md) before
+starting or stopping a miner service.
 
 There are four distinct executable paths:
 
@@ -243,9 +251,12 @@ cannot be presented as protocol conformance or activation evidence. The
 the one-command path for the pinned public S1 model and licensed `ASL BOOK` asset;
 it runs locally and explicitly does not prove the miner's public axon.
 The [public-endpoint miner pilot](docs/PUBLIC_ENDPOINT_MINER_PILOT.md) is closed.
-Its historical evidence remains replayable, but miners should not enroll, sign
-readiness challenges, or keep a pilot endpoint running. The pilot was a component
-test only. It did not create a protocol window, submit weights, satisfy an
+Its historical evidence remains replayable, but miners should not enroll or sign
+readiness challenges. Frozen bootstrap participants must keep the HTTPS health
+endpoint required for row renewal, as explained in the
+[current miner instructions](docs/CURRENT_MINER_OPERATION.md). Other miners can
+retire their pilot services. The pilot was a component test only. It did not
+create a protocol window, submit weights, satisfy an
 activation gate, or become validator input.
 
 ## Run the certified mirror data plane

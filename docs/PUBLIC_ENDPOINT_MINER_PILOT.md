@@ -2,14 +2,21 @@
 
 > [!CAUTION]
 > This campaign closed on 2026-09-11. Do not open a pilot enrollment, sign a
-> `READY FOR CASE` or `READY TO ISSUE` challenge, change an axon for this pilot,
-> or keep pilot compute online. Unissued cases and outstanding challenges are
-> cancelled. Existing evidence remains available at `api.umi.vision` for replay.
+> `READY FOR CASE` or `READY TO ISSUE` challenge, or change an axon for this pilot.
+> No timed-case inference compute is needed. Unissued cases and outstanding
+> challenges are cancelled. Existing evidence remains available at `api.umi.vision`
+> for replay.
 >
 > The initial temporary bootstrap manifest is already frozen and signed. A pilot
 > completed now could not change that row. Public-pilot history is not a
 > prerequisite or validator input for the planned live translation mechanism.
 > Final live miner instructions will be published separately.
+>
+> Exception to shutting down the endpoint: miners already in the frozen bootstrap
+> manifest must keep their recorded HTTPS `/healthz` endpoint available for
+> validator health checks. A lightweight keepalive is sufficient for that check;
+> no new translation request is issued by the bootstrap worker. See
+> [current miner operation](CURRENT_MINER_OPERATION.md).
 
 Everything below documents the retired campaign for auditors and operators who
 need to replay its evidence. It is not an active onboarding runbook.
@@ -980,6 +987,10 @@ fixed non-feed summary and attempt-journal URL. That summary does not appear und
 `/pilots`, carries no replayable score, and does not permit a retry.
 
 ## Restore or clear the serving record
+
+This historical cleanup instruction does not apply to a miner that subsequently
+joined the frozen bootstrap manifest while that service interval is still open.
+Its recorded axon and HTTPS health endpoint remain required for bootstrap renewal.
 
 Keep the miner and TLS proxy available until UMI confirms that it received the
 response. After that confirmation, restore the hotkey's previous production axon

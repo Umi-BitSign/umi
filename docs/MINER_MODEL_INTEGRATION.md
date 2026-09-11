@@ -1,5 +1,11 @@
 # Miner model integration
 
+For current deployment requirements, first read
+[what miners should run now](CURRENT_MINER_OPERATION.md). The bootstrap validator
+checks endpoint health and replays old pilot evidence; it does not run fresh
+translation challenges. The integration below is for a miner that serves actual
+translation requests under the corresponding release and policy.
+
 The miner accepts a model through either an in-process async callable or an
 owner-private Unix socket. Both paths receive the verified MP4 bytes and the
 validated `TranslationRequest`. They return English text. UMI handles fetching,

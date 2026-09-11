@@ -1,6 +1,8 @@
 # SN78 shared-validator bootstrap supersession
 
-Status: signed release artifacts published; awaiting the first finalized matching row
+Status: signed release and matching finalized row published; check
+[public status](https://api.umi.vision/api/v1/bootstrap-service) for current activity
+and economic effect
 
 Scope: Finney SN78, MechId 0, `bootstrap_service_binary`
 
@@ -78,6 +80,14 @@ state. It anchors the exact manifest hash under its own hotkey, replays the
 eligible public pilots, checks their announced endpoints, and submits only the
 full row defined above. It verifies the stored row and `LastUpdate` after
 finalized inclusion.
+
+Pilot replay reads the previously published evidence. The bootstrap worker does
+not send new `POST /v1/translate` requests or evaluate a miner's current model.
+Before each row submission or renewal, it requires fresh HTTPS `/healthz` checks
+for every frozen participant. Those miners must keep their exact announced
+endpoints available even though the timed pilot campaign is closed. See
+[current miner operation](CURRENT_MINER_OPERATION.md) for the keepalive and
+translation-runtime requirements.
 
 The worker renews the same row before the effective 360-block activity cutoff.
 It stops before the signed hard sunset. It records uncertain transactions in a

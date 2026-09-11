@@ -9,6 +9,13 @@ x86_64 or arm64. It requires Podman 4.3.0 or later with `crun`; the installer
 installs or verifies both. The host should have at least 8 CPU cores, 16 GiB RAM,
 and 100 GiB of local storage. A GPU is not required.
 
+The current signed worker runs bootstrap service weights: it replays existing
+pilot evidence and checks the frozen miners' HTTPS `/healthz` endpoints before
+submitting or renewing the row. It does not send new translation requests.
+Installing this release alone does not start translation scoring. Miner operators
+should follow [current miner operation](CURRENT_MINER_OPERATION.md); frozen
+bootstrap participants still need their health endpoints online.
+
 ## Install
 
 Clone the current `main` branch into a new directory and keep the checkout
