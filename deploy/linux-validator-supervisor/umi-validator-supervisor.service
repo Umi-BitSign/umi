@@ -28,7 +28,9 @@ Restart=always
 RestartSec=15s
 TimeoutStartSec=180s
 TimeoutStopSec=180s
-KillMode=control-group
+# Let the supervisor stop its foreground Podman worker cleanly. systemd still
+# kills the complete delegated cgroup if the supervisor misses TimeoutStopSec.
+KillMode=mixed
 CPUQuota=800%
 TasksMax=512
 LimitNOFILE=8192

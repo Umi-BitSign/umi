@@ -299,3 +299,5 @@ def test_systemd_unit_keeps_wallet_read_only_and_worker_state_separate() -> None
     assert "CPUQuota=800%\n" in source
     assert "TasksMax=512\n" in source
     assert "TimeoutStopSec=180s\n" in source
+    assert "KillMode=mixed\n" in source
+    assert "KillMode=control-group\n" not in source
