@@ -127,9 +127,9 @@ def test_runtime_smoke_unit_is_exact_inert_and_always_cleaned() -> None:
     stop = cleanup_function.index('systemctl stop "$service_name"')
     remove_dropin = cleanup_function.index('rm -f -- "$runtime_service_dropin_destination"')
     remove_unit = cleanup_function.index('rm -f -- "$runtime_service_destination"')
-    reset = cleanup_function.index('systemctl reset-failed "$service_name"')
     reload = cleanup_function.index("systemctl daemon-reload")
-    assert stop < reset < remove_dropin < remove_unit < reload
+    assert stop < remove_dropin < remove_unit < reload
+    assert "reset-failed" not in cleanup_function
 
     stage = source.split("# Rehearse the exact production unit name", 1)[1].split(
         'if [ -n "$legacy_unit" ]', 1

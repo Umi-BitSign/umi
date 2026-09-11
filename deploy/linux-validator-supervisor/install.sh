@@ -166,10 +166,6 @@ cleanup_runtime_smoke_unit() {
 remove_runtime_smoke_unit() {
   systemctl stop "$service_name" \
     || fail "could not stop the production-unit runtime smoke"
-  # Reset while the transient fragment is still loaded. On a first install,
-  # systemd may forget the unit as soon as its final fragment is removed.
-  systemctl reset-failed "$service_name" \
-    || fail "could not reset the production-unit runtime smoke state"
   rm -f -- "$runtime_service_dropin_destination"
   rmdir -- "$runtime_service_dropin_directory" \
     || fail "could not remove the production-unit runtime smoke drop-in directory"
