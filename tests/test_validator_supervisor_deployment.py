@@ -63,6 +63,9 @@ def test_linux_supervisor_installer_has_valid_shell_and_safe_transition_order() 
     assert "--no-remove" in source
     assert " util-linux systemd " not in source
     assert "tar timeout useradd" in source
+    assert "ca-certificates crun curl" in source
+    assert "{{.Host.OCIRuntime.Name}}" in source
+    assert 'fail "rootless Podman must use crun"' in source
     assert "podman --version | awk '{print $3}'" in source
     assert 'fail "Podman 4.3.0 or later is required; found $podman_version"' in source
     assert source.index("podman_version=") < source.index("script_directory=")
@@ -159,11 +162,12 @@ def test_operator_guide_requires_supported_podman_and_distributions() -> None:
     assert "Ubuntu 24.04 or later" in source
     assert "Debian 12 or later" in source
     assert "Podman 4.3.0 or later" in source
+    assert "with `crun`" in source
 
 
 def test_podman_runtime_configuration_and_service_smoke_are_fixed() -> None:
     containers_conf = (DEPLOYMENT / "containers.conf").read_text()
-    assert '[engine]\ncgroup_manager = "cgroupfs"' in containers_conf
+    assert '[engine]\ncgroup_manager = "cgroupfs"\nruntime = "crun"' in containers_conf
     assert containers_conf.splitlines()[-2:] == ["[containers]", "default_sysctls = []"]
 
     smoke = DEPLOYMENT / "podman-runtime-smoke.sh"
@@ -172,10 +176,17 @@ def test_podman_runtime_configuration_and_service_smoke_are_fixed() -> None:
     assert "CONTAINERS_CONF_OVERRIDE=" in smoke_source
     assert "/usr/bin/timeout --signal=TERM --kill-after=5s 60s" in smoke_source
     assert "--network slirp4netns:allow_host_loopback=false" in smoke_source
+    assert "--cgroups=disabled" in smoke_source
+    assert "--cgroupns=private" in smoke_source
+    assert "--cpus" not in smoke_source
+    assert "--memory " not in smoke_source
+    assert "--pids-limit" not in smoke_source
     assert "--entrypoint /bin/sh" in smoke_source
+    assert "/sys/fs/cgroup/memory.high" in smoke_source
     assert "/sys/fs/cgroup/memory.max" in smoke_source
     assert "/sys/fs/cgroup/pids.max" in smoke_source
     assert "/sys/fs/cgroup/cpu.max" in smoke_source
+    assert '[ ! -w "/sys/fs/cgroup/$control" ]' in smoke_source
     mount_lines = [
         line.strip() for line in smoke_source.splitlines() if line.strip().startswith("--mount")
     ]
@@ -215,6 +226,7 @@ def test_podman_runtime_configuration_and_service_smoke_are_fixed() -> None:
     assert "RuntimeDirectoryPreserve=yes\n" in service
     assert "TimeoutStartSec=180s\n" in service
     assert "Delegate=true\n" in service
+    assert "CPUQuota=800%\n" in service
     assert "/var/lib/umi-validator-runtime-smoke/readonly" in service
     assert "/var/lib/umi-validator-runtime-smoke/readwrite" in service
 
@@ -274,6 +286,8 @@ def test_systemd_unit_keeps_wallet_read_only_and_worker_state_separate() -> None
     read_write = source.split("ReadWritePaths=", 1)[1].splitlines()[0]
     assert "/var/lib/umi-validator-worker-state" in read_write
     assert "/var/lib/umi-validator-runtime-wallets" not in read_write
-    assert "MemoryMax=17179869184\n" in source
-    assert "TasksMax=640\n" in source
+    assert "MemoryHigh=11811160064\n" in source
+    assert "MemoryMax=12884901888\n" in source
+    assert "CPUQuota=800%\n" in source
+    assert "TasksMax=512\n" in source
     assert "TimeoutStopSec=180s\n" in source

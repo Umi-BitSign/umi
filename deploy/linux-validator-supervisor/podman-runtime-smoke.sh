@@ -48,8 +48,10 @@ require_empty_dummy_mounts() {
 # this isolated store. Pick one only as a root filesystem for an inert runtime
 # check. The fixed dummy binds and production network driver contain no secrets;
 # no image entrypoint, wallet, operator input, worker state, or signing path runs.
-# The fixed shell expression proves that rootless cgroupfs actually enforces the
-# three per-container limits rather than silently accepting and ignoring them.
+# The fixed shell expression proves that the inert container inherits the
+# production systemd service's CPU, memory, and task envelope. Rootless Podman
+# is not allowed to create a second cgroup boundary: cgroupfs silently ignores
+# OCI resource flags for this system-account topology on supported hosts.
 require_empty_dummy_mounts
 image_id=$(podman image list --no-trunc --format '{{.ID}}' | /usr/bin/sed -n '1p')
 case "$image_id" in
@@ -68,22 +70,25 @@ podman run --rm \
   --security-opt=no-new-privileges \
   --image-volume=ignore \
   --pull=never \
+  --cgroups=disabled \
+  --cgroupns=private \
   --userns keep-id:uid=65532,gid=65532 \
   --user 65532:65532 \
-  --cpus 1 \
-  --memory 268435456 \
-  --pids-limit 16 \
   --network slirp4netns:allow_host_loopback=false \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 \
   --mount "type=bind,src=$readonly_mount,dst=/run/umi-smoke-readonly,ro=true,bind-propagation=private" \
   --mount "type=bind,src=$readwrite_mount,dst=/run/umi-smoke-readwrite,ro=false,bind-propagation=private" \
   --entrypoint /bin/sh \
   "$image_id" -eu -c '
-    [ "$(cat /sys/fs/cgroup/memory.max)" = 268435456 ]
-    [ "$(cat /sys/fs/cgroup/pids.max)" = 16 ]
+    [ "$(cat /sys/fs/cgroup/memory.high)" = 11811160064 ]
+    [ "$(cat /sys/fs/cgroup/memory.max)" = 12884901888 ]
+    [ "$(cat /sys/fs/cgroup/pids.max)" = 512 ]
     set -- $(cat /sys/fs/cgroup/cpu.max)
     [ "$1" != max ]
-    [ "$1" = "$2" ]
+    [ "$1" -eq "$((8 * $2))" ]
+    for control in cpu.max memory.high memory.max pids.max; do
+      [ ! -w "/sys/fs/cgroup/$control" ]
+    done
   '
 
 require_empty_dummy_mounts

@@ -260,7 +260,7 @@ if [ -n "$legacy_unit" ]; then
   [ "$legacy_unit" != "$service_name" ] || fail "refusing to retire the UMI supervisor"
 fi
 
-package_commands='awk chmod chown curl cut find getent git groupadd install mkdir mktemp mv newgidmap newuidmap podman readlink rmdir rm runuser sed sha256sum slirp4netns stat systemctl systemd-analyze tar timeout useradd usermod'
+package_commands='awk chmod chown crun curl cut find getent git groupadd install mkdir mktemp mv newgidmap newuidmap podman readlink rmdir rm runuser sed sha256sum slirp4netns stat systemctl systemd-analyze tar timeout useradd usermod'
 missing_package_command=false
 for command_name in $package_commands; do
   command -v "$command_name" >/dev/null 2>&1 || missing_package_command=true
@@ -277,7 +277,7 @@ if [ "$missing_package_command" = true ]; then
   DEBIAN_FRONTEND=noninteractive apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     --no-upgrade --no-remove \
-    ca-certificates curl git podman slirp4netns uidmap util-linux \
+    ca-certificates crun curl git podman slirp4netns uidmap util-linux \
     coreutils findutils gawk tar
 fi
 for command_name in $package_commands; do require_command "$command_name"; done
@@ -585,6 +585,8 @@ systemd-analyze verify "$service_source"
   || fail "rootless Podman requires cgroup v2"
 [ "$(podman_as_service info --format '{{.Host.CgroupManager}}')" = cgroupfs ] \
   || fail "rootless Podman did not use the signed cgroupfs configuration"
+[ "$(podman_as_service info --format '{{.Host.OCIRuntime.Name}}')" = crun ] \
+  || fail "rootless Podman must use crun"
 case "$(podman_as_service info --format '{{.Store.GraphRoot}}')" in
   /var/lib/umi-validator-supervisor/container-data/*) ;;
   *) fail "rootless Podman graph root escaped the supervisor state tree" ;;

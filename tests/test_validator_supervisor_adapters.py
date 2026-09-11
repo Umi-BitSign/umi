@@ -372,12 +372,55 @@ def test_common_config_is_generated_from_platform_and_local_hotkey_only(
     assert config.directive_url.endswith("/linux-amd64")
     assert config.wallet.name == "validator"
     assert config.wallet.hotkey == "default"
+    assert config.worker_cpu_millis == 8_000
+    assert config.worker_memory_bytes == 12 * 1024**3
+    assert config.worker_pids_limit == 512
     assert config.allowed_modes == [
         "hold",
         "inactive_shadow",
         "bootstrap_service_weights",
         "translation_weights",
     ]
+    supervisor_cli._validate_linux_systemd_profile(config)
+    for field, value, reason in (
+        ("worker_cpu_millis", 7_999, "linux_systemd_profile_cpu_limit"),
+        ("worker_memory_bytes", 12 * 1024**3 - 1, "linux_systemd_profile_memory_limit"),
+        ("worker_pids_limit", 511, "linux_systemd_profile_pids_limit"),
+    ):
+        with pytest.raises(ValidatorSupervisorAdapterError, match=reason):
+            supervisor_cli._validate_linux_systemd_profile(config.model_copy(update={field: value}))
+
+
+def test_linux_systemd_runtime_cgroup_must_match_fixed_profile(tmp_path: Path) -> None:
+    cgroup_root = tmp_path / "cgroup"
+    service = cgroup_root / "system.slice" / "umi-validator-supervisor.service"
+    service.mkdir(parents=True)
+    proc_self_cgroup = tmp_path / "proc-self-cgroup"
+    proc_self_cgroup.write_text("0::/system.slice/umi-validator-supervisor.service\n")
+    (service / "memory.high").write_text(f"{11 * 1024**3}\n")
+    (service / "memory.max").write_text(f"{12 * 1024**3}\n")
+    (service / "pids.max").write_text("512\n")
+    (service / "cpu.max").write_text("800000 100000\n")
+
+    supervisor_cli._validate_linux_systemd_runtime_cgroup(
+        proc_self_cgroup=proc_self_cgroup,
+        cgroup_root=cgroup_root,
+    )
+
+    for filename, value, reason in (
+        ("memory.high", str(11 * 1024**3 - 1), "linux_systemd_cgroup_memory_high_invalid"),
+        ("memory.max", str(12 * 1024**3 + 1), "linux_systemd_cgroup_memory_max_invalid"),
+        ("pids.max", "513", "linux_systemd_cgroup_pids_max_invalid"),
+        ("cpu.max", "max 100000", "linux_systemd_cgroup_cpu_max_invalid"),
+    ):
+        original = (service / filename).read_text()
+        (service / filename).write_text(f"{value}\n")
+        with pytest.raises(ValidatorSupervisorAdapterError, match=reason):
+            supervisor_cli._validate_linux_systemd_runtime_cgroup(
+                proc_self_cgroup=proc_self_cgroup,
+                cgroup_root=cgroup_root,
+            )
+        (service / filename).write_text(original)
 
 
 @pytest.mark.asyncio
@@ -635,6 +678,10 @@ def test_worker_arguments_are_fixed_digest_platform_and_lease_bound(tmp_path: Pa
     assert "--pull=never" in arguments
     assert "--image-volume=ignore" in arguments
     assert "--cap-drop=all" in arguments
+    assert "--cgroups=disabled" in arguments
+    assert "--cgroupns=private" in arguments
+    for unsupported_nested_limit in ("--cpus", "--memory", "--pids-limit"):
+        assert unsupported_nested_limit not in arguments
     assert WORKER_ENTRYPOINT in arguments
     assert f"UMI_SUPERVISOR_VALID_FROM_BLOCK={activation.valid_from_block}" in arguments
     assert f"UMI_SUPERVISOR_VALID_THROUGH_BLOCK={activation.valid_through_block}" in arguments
@@ -841,6 +888,7 @@ async def test_supervisor_run_survives_a_normal_poll_timeout(
 
     monkeypatch.setattr(supervisor_cli, "load_validator_supervisor_config", lambda _path: config)
     monkeypatch.setattr(supervisor_cli, "_validate_linux_systemd_profile", lambda _config: None)
+    monkeypatch.setattr(supervisor_cli, "_validate_linux_systemd_runtime_cgroup", lambda: None)
     monkeypatch.setattr(supervisor_cli, "RootlessPodmanWorkerAdapter", Adapter)
     monkeypatch.setattr(supervisor_cli, "FinneyFinalizedBlockReader", Finality)
     monkeypatch.setattr(supervisor_cli, "ValidatorSupervisorRuntime", Runtime)

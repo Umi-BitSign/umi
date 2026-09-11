@@ -89,8 +89,10 @@ LINUX_SYSTEMD_V1 = {
         "/opt/umi-validator-supervisor/artifacts/umi-grandpa-finality-observer"
     ),
     "finality_chain_spec_path": ("/opt/umi-validator-supervisor/artifacts/raw_spec_finney.json"),
-    "maximum_worker_memory_bytes": 12 * 1024**3,
-    "maximum_worker_pids": 512,
+    "worker_cpu_millis": 8_000,
+    "worker_memory_bytes": 12 * 1024**3,
+    "worker_pids_limit": 512,
+    "service_memory_high_bytes": 11 * 1024**3,
 }
 
 
@@ -766,6 +768,7 @@ async def _status(config_path: Path, *, require_hold: bool) -> tuple[dict[str, o
 async def _run(config_path: Path) -> int:
     config = load_validator_supervisor_config(config_path)
     _validate_linux_systemd_profile(config)
+    _validate_linux_systemd_runtime_cgroup()
     lock = SupervisorProcessLock(config.state_root)
     lock.acquire()
     finality: FinneyFinalizedBlockReader | None = None
@@ -990,10 +993,72 @@ def _validate_linux_systemd_profile(config: Any) -> None:
     }
     if any(expected[key] != LINUX_SYSTEMD_V1[key] for key in expected):
         raise ValidatorSupervisorAdapterError("linux_systemd_profile_path_mismatch")
-    if config.worker_memory_bytes > LINUX_SYSTEMD_V1["maximum_worker_memory_bytes"]:
+    if config.worker_cpu_millis != LINUX_SYSTEMD_V1["worker_cpu_millis"]:
+        raise ValidatorSupervisorAdapterError("linux_systemd_profile_cpu_limit")
+    if config.worker_memory_bytes != LINUX_SYSTEMD_V1["worker_memory_bytes"]:
         raise ValidatorSupervisorAdapterError("linux_systemd_profile_memory_limit")
-    if config.worker_pids_limit > LINUX_SYSTEMD_V1["maximum_worker_pids"]:
+    if config.worker_pids_limit != LINUX_SYSTEMD_V1["worker_pids_limit"]:
         raise ValidatorSupervisorAdapterError("linux_systemd_profile_pids_limit")
+
+
+def _read_cgroup_value(path: Path, reason: str) -> str:
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            payload = os.read(descriptor, 129)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise ValidatorSupervisorAdapterError(reason) from error
+    if not payload or len(payload) > 128:
+        raise ValidatorSupervisorAdapterError(reason)
+    try:
+        value = payload.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise ValidatorSupervisorAdapterError(reason) from error
+    if not value or "\x00" in value:
+        raise ValidatorSupervisorAdapterError(reason)
+    return value
+
+
+def _validate_linux_systemd_runtime_cgroup(
+    *,
+    proc_self_cgroup: Path = Path("/proc/self/cgroup"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> None:
+    identity = _read_cgroup_value(proc_self_cgroup, "linux_systemd_cgroup_identity_invalid")
+    lines = identity.splitlines()
+    if len(lines) != 1 or not lines[0].startswith("0::/"):
+        raise ValidatorSupervisorAdapterError("linux_systemd_cgroup_identity_invalid")
+    relative = lines[0][3:]
+    parts = Path(relative).parts
+    if not relative or relative == "/" or any(part in {"", ".", ".."} for part in parts):
+        raise ValidatorSupervisorAdapterError("linux_systemd_cgroup_identity_invalid")
+    control_root = cgroup_root.joinpath(*parts[1:])
+    expected = {
+        "memory.high": str(LINUX_SYSTEMD_V1["service_memory_high_bytes"]),
+        "memory.max": str(LINUX_SYSTEMD_V1["worker_memory_bytes"]),
+        "pids.max": str(LINUX_SYSTEMD_V1["worker_pids_limit"]),
+    }
+    for filename, value in expected.items():
+        actual = _read_cgroup_value(
+            control_root / filename, f"linux_systemd_cgroup_{filename.replace('.', '_')}_invalid"
+        )
+        if actual != value:
+            raise ValidatorSupervisorAdapterError(
+                f"linux_systemd_cgroup_{filename.replace('.', '_')}_invalid"
+            )
+    cpu = _read_cgroup_value(control_root / "cpu.max", "linux_systemd_cgroup_cpu_max_invalid")
+    fields = cpu.split()
+    try:
+        quota, period = (int(field, 10) for field in fields)
+    except (TypeError, ValueError) as error:
+        raise ValidatorSupervisorAdapterError("linux_systemd_cgroup_cpu_max_invalid") from error
+    if len(fields) != 2 or quota <= 0 or period <= 0 or quota != 8 * period:
+        raise ValidatorSupervisorAdapterError("linux_systemd_cgroup_cpu_max_invalid")
 
 
 def _build_release_bundle(args: argparse.Namespace) -> dict[str, object]:

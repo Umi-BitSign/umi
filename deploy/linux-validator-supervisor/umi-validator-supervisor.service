@@ -29,11 +29,12 @@ RestartSec=15s
 TimeoutStartSec=180s
 TimeoutStopSec=180s
 KillMode=control-group
-TasksMax=640
+CPUQuota=800%
+TasksMax=512
 LimitNOFILE=8192
 LimitCORE=0
-MemoryHigh=15032385536
-MemoryMax=17179869184
+MemoryHigh=11811160064
+MemoryMax=12884901888
 OOMPolicy=stop
 StateDirectory=umi-validator-supervisor
 StateDirectoryMode=0700
@@ -56,7 +57,8 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 AmbientCapabilities=
 # Rootless Podman needs the narrowly scoped setuid newuidmap/newgidmap helpers.
-# The fixed worker profile applies no-new-privileges inside the container.
+# Delegation keeps pre-fix Podman releases from moving a cgroups-disabled worker
+# outside this service. The root-owned limits above still cap the whole subtree.
 Delegate=true
 ReadOnlyPaths=/etc/umi /opt/umi-validator-supervisor /var/lib/umi-validator-operator-inputs /var/lib/umi-validator-runtime-wallets /var/lib/umi-validator-runtime-smoke/readonly
 ReadWritePaths=/var/lib/umi-validator-supervisor /var/lib/umi-validator-worker-state /var/lib/umi-validator-runtime-smoke/readwrite /run/umi-validator-supervisor

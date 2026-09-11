@@ -988,7 +988,6 @@ class RootlessPodmanWorkerAdapter:
     def _worker_arguments(
         self, staged: StagedSupervisorRelease, activation: SupervisorWorkerActivation
     ) -> tuple[str, ...]:
-        cpu = _cpu_limit(self.config.worker_cpu_millis)
         worker_state = Path(self.config.worker_state_root)
         wallet_directory = Path(self.config.wallet.path) / self.config.wallet.name
         operator_input_root = staged.operator_input_root
@@ -1069,16 +1068,12 @@ class RootlessPodmanWorkerAdapter:
             "--security-opt=no-new-privileges",
             "--image-volume=ignore",
             "--pull=never",
+            "--cgroups=disabled",
+            "--cgroupns=private",
             "--userns",
             f"keep-id:uid={self.config.worker_uid},gid={self.config.worker_gid}",
             "--user",
             f"{self.config.worker_uid}:{self.config.worker_gid}",
-            "--cpus",
-            cpu,
-            "--memory",
-            str(self.config.worker_memory_bytes),
-            "--pids-limit",
-            str(self.config.worker_pids_limit),
             "--network",
             "slirp4netns:allow_host_loopback=false",
             "--tmpfs",
@@ -1961,12 +1956,6 @@ def _require_path_below(value: object, root: Path, reason: str) -> None:
     path = Path(value)
     if not path.is_absolute() or (path != root and root not in path.parents):
         raise ValidatorSupervisorAdapterError(reason)
-
-
-def _cpu_limit(value: int) -> str:
-    _positive_bound(value, "worker CPU millis")
-    whole, remainder = divmod(value, 1000)
-    return str(whole) if remainder == 0 else f"{whole}.{remainder:03d}".rstrip("0")
 
 
 __all__ = [
