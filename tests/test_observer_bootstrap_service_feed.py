@@ -34,7 +34,12 @@ from umi.observer_bootstrap_service_feed import (
     build_bootstrap_service_publication,
     build_observer_bootstrap_service_feed,
 )
-from umi.observer_models import ChainValidatorWeightRow, ObserverSnapshot
+from umi.observer_models import (
+    BootstrapServiceEconomicEffect,
+    BootstrapServiceResponse,
+    ChainValidatorWeightRow,
+    ObserverSnapshot,
+)
 from umi.observer_pilot_feed import ObserverPilotFeed, VerifiedComponentPilot
 from umi.protocol import canonical_json_bytes
 from umi.simple_bootstrap_validator import (
@@ -374,6 +379,10 @@ def _simple_active_snapshot(
     *,
     exact_validator_uids: tuple[int, ...] = (200,),
     mismatched_validator_uids: tuple[int, ...] = (),
+    zero_consensus_eligible_uids: tuple[int, ...] = (),
+    unavailable_consensus_eligible_uids: tuple[int, ...] = (),
+    zero_incentive_eligible_uids: tuple[int, ...] = (),
+    unavailable_incentive_eligible_uids: tuple[int, ...] = (),
     subnet_emission_enabled: bool = False,
 ) -> ObserverSnapshot:
     configuration = feed.simple_bootstrap
@@ -400,6 +409,23 @@ def _simple_active_snapshot(
                     "serving_origin": entry.origin,
                 }
             )
+        metrics_updates: dict[str, object] = {}
+        if uid in zero_consensus_eligible_uids:
+            assert participant.chain_metrics.consensus is not None
+            metrics_updates["consensus"] = participant.chain_metrics.consensus.model_copy(
+                update={"raw_numerator": "0", "display_decimal": "0"}
+            )
+        elif uid in unavailable_consensus_eligible_uids:
+            metrics_updates["consensus"] = None
+        if uid in zero_incentive_eligible_uids:
+            assert participant.chain_metrics.incentive is not None
+            metrics_updates["incentive"] = participant.chain_metrics.incentive.model_copy(
+                update={"raw_numerator": "0", "display_decimal": "0"}
+            )
+        elif uid in unavailable_incentive_eligible_uids:
+            metrics_updates["incentive"] = None
+        if metrics_updates:
+            updates["chain_metrics"] = participant.chain_metrics.model_copy(update=metrics_updates)
         participants.append(participant.model_copy(update=updates))
     base = _snapshot(block_number=block_number, participants=participants)
     expected_row = configuration.expected_row
@@ -531,6 +557,15 @@ def test_common_lease_uses_finalized_exact_row_as_the_public_receipt(
     body = service.json()
     assert body["availability"] == "active"
     assert body["warning_codes"] == []
+    assert body["economic_effect"] == {
+        "economically_effective": True,
+        "reason_codes": [],
+        "mismatched_active_validator_uids": [],
+        "zero_consensus_eligible_miner_uids": [],
+        "unavailable_consensus_eligible_miner_uids": [],
+        "zero_incentive_eligible_miner_uids": [],
+        "unavailable_incentive_eligible_miner_uids": [],
+    }
     assert body["current"]["evidence_class"] == "finalized_chain_state"
     assert body["current"]["subnet_emission_enabled"] is False
     assert body["current"]["translation_weights_active"] is False
@@ -538,15 +573,39 @@ def test_common_lease_uses_finalized_exact_row_as_the_public_receipt(
     assert [item["uid"] for item in body["current"]["eligible_miners"]] == [6, 247]
     assert body["current"]["observation_block"] == "9040000"
     assert status.json()["protocol_state"]["service_weights_active"] is True
+    assert status.json()["protocol_state"]["service_weights_economically_effective"] is True
     assert status.json()["protocol_state"]["translation_weights_active"] is False
     assert snapshot.network.subnet_emission_enabled is False
     assert manifest.content == configuration.manifest_bytes
     assert lease.content == configuration.objects[lease_ref.sha256].data
+    invalid_active_body = {
+        **body,
+        "protocol_state": {
+            **body["protocol_state"],
+            "service_weights_economically_effective": False,
+        },
+        "economic_effect": {
+            "economically_effective": False,
+            "reason_codes": ["bootstrap_service_inactive"],
+            "mismatched_active_validator_uids": [],
+            "zero_consensus_eligible_miner_uids": [],
+            "unavailable_consensus_eligible_miner_uids": [],
+            "zero_incentive_eligible_miner_uids": [],
+            "unavailable_incentive_eligible_miner_uids": [],
+        },
+    }
+    with pytest.raises(
+        ValueError,
+        match="active bootstrap response cannot have an inactive effect",
+    ):
+        BootstrapServiceResponse.model_validate_json(canonical_json_bytes(invalid_active_body))
 
 
-def test_common_lease_accepts_multiple_exact_rows_and_warns_on_foreign_row(
+@pytest.mark.parametrize("mismatched_chain_active", [True, False])
+def test_common_lease_keeps_service_active_but_fails_economic_effect_on_foreign_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mismatched_chain_active: bool,
 ) -> None:
     feed = _write_simple_feed(tmp_path, monkeypatch)
     configuration = feed.simple_bootstrap
@@ -557,6 +616,25 @@ def test_common_lease_accepts_multiple_exact_rows_and_warns_on_foreign_row(
         mismatched_validator_uids=(198,),
         subnet_emission_enabled=True,
     )
+    if not mismatched_chain_active:
+        participants = tuple(
+            participant.model_copy(update={"chain_active": False})
+            if participant.uid == 198
+            else participant
+            for participant in snapshot.participants
+        )
+        snapshot = snapshot.model_copy(
+            update={
+                "participants": participants,
+                "network": snapshot.network.model_copy(
+                    update={
+                        "counts": snapshot.network.counts.model_copy(
+                            update={"chain_active": snapshot.network.counts.chain_active - 1}
+                        )
+                    }
+                ),
+            }
+        )
     app = create_observer_app(
         _cache(SequenceCollector([snapshot])),
         pilot_feed=_fake_pilot_feed(configuration.signed_manifest),
@@ -565,12 +643,106 @@ def test_common_lease_accepts_multiple_exact_rows_and_warns_on_foreign_row(
 
     with TestClient(app) as client:
         response = client.get("/api/v1/bootstrap-service")
+        status = client.get("/api/v1/status")
 
     body = response.json()
     assert body["availability"] == "active"
     assert [item["uid"] for item in body["current"]["exact_validator_rows"]] == [110, 200]
     assert body["current"]["subnet_emission_enabled"] is True
     assert body["warning_codes"] == ["bootstrap_service_mismatched_active_row_uid_198"]
+    assert body["economic_effect"] == {
+        "economically_effective": False,
+        "reason_codes": ["bootstrap_service_mismatched_active_row_present"],
+        "mismatched_active_validator_uids": [198],
+        "zero_consensus_eligible_miner_uids": [],
+        "unavailable_consensus_eligible_miner_uids": [],
+        "zero_incentive_eligible_miner_uids": [],
+        "unavailable_incentive_eligible_miner_uids": [],
+    }
+    assert body["protocol_state"]["service_weights_active"] is True
+    assert body["protocol_state"]["service_weights_economically_effective"] is False
+    assert "umi_weight_cutover_unverified" in status.json()["outstanding_gap_codes"]
+
+
+def test_bootstrap_economic_effect_rejects_overlapping_zero_and_unavailable_uids() -> None:
+    with pytest.raises(
+        ValueError,
+        match="eligible miner consensus cannot be both zero and unavailable",
+    ):
+        BootstrapServiceEconomicEffect(
+            economically_effective=False,
+            reason_codes=(
+                "bootstrap_service_eligible_miner_consensus_unavailable",
+                "bootstrap_service_eligible_miner_consensus_zero",
+            ),
+            mismatched_active_validator_uids=(),
+            zero_consensus_eligible_miner_uids=(6,),
+            unavailable_consensus_eligible_miner_uids=(6,),
+            zero_incentive_eligible_miner_uids=(),
+            unavailable_incentive_eligible_miner_uids=(),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="eligible miner incentive cannot be both zero and unavailable",
+    ):
+        BootstrapServiceEconomicEffect(
+            economically_effective=False,
+            reason_codes=(
+                "bootstrap_service_eligible_miner_incentive_unavailable",
+                "bootstrap_service_eligible_miner_incentive_zero",
+            ),
+            mismatched_active_validator_uids=(),
+            zero_consensus_eligible_miner_uids=(),
+            unavailable_consensus_eligible_miner_uids=(),
+            zero_incentive_eligible_miner_uids=(247,),
+            unavailable_incentive_eligible_miner_uids=(247,),
+        )
+
+
+def test_common_lease_fails_economic_effect_on_zero_or_unavailable_economics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed = _write_simple_feed(tmp_path, monkeypatch)
+    configuration = feed.simple_bootstrap
+    assert configuration is not None
+    snapshot = _simple_active_snapshot(
+        feed,
+        unavailable_consensus_eligible_uids=(6,),
+        zero_consensus_eligible_uids=(247,),
+        zero_incentive_eligible_uids=(6,),
+        unavailable_incentive_eligible_uids=(247,),
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(configuration.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+        status = client.get("/api/v1/status")
+
+    body = response.json()
+    assert body["availability"] == "active"
+    assert body["economic_effect"] == {
+        "economically_effective": False,
+        "reason_codes": [
+            "bootstrap_service_eligible_miner_consensus_unavailable",
+            "bootstrap_service_eligible_miner_consensus_zero",
+            "bootstrap_service_eligible_miner_incentive_unavailable",
+            "bootstrap_service_eligible_miner_incentive_zero",
+        ],
+        "mismatched_active_validator_uids": [],
+        "zero_consensus_eligible_miner_uids": [247],
+        "unavailable_consensus_eligible_miner_uids": [6],
+        "zero_incentive_eligible_miner_uids": [6],
+        "unavailable_incentive_eligible_miner_uids": [247],
+    }
+    assert body["protocol_state"]["service_weights_active"] is True
+    assert body["protocol_state"]["service_weights_economically_effective"] is False
+    assert "umi_weight_cutover_unverified" in status.json()["outstanding_gap_codes"]
 
 
 def test_common_lease_remains_inactive_without_an_exact_active_row(
@@ -594,9 +766,37 @@ def test_common_lease_remains_inactive_without_an_exact_active_row(
     with TestClient(app) as client:
         response = client.get("/api/v1/bootstrap-service")
 
-    assert response.json()["availability"] == "inactive"
-    assert response.json()["reason_code"] == "bootstrap_service_exact_active_row_unavailable"
-    assert response.json()["current"] is None
+    body = response.json()
+    assert body["availability"] == "inactive"
+    assert body["reason_code"] == "bootstrap_service_exact_active_row_unavailable"
+    assert body["economic_effect"] == {
+        "economically_effective": False,
+        "reason_codes": ["bootstrap_service_inactive"],
+        "mismatched_active_validator_uids": [],
+        "zero_consensus_eligible_miner_uids": [],
+        "unavailable_consensus_eligible_miner_uids": [],
+        "zero_incentive_eligible_miner_uids": [],
+        "unavailable_incentive_eligible_miner_uids": [],
+    }
+    assert body["protocol_state"]["service_weights_economically_effective"] is False
+    assert body["current"] is None
+    invalid_inactive_body = {
+        **body,
+        "economic_effect": {
+            "economically_effective": False,
+            "reason_codes": ["bootstrap_service_mismatched_active_row_present"],
+            "mismatched_active_validator_uids": [198],
+            "zero_consensus_eligible_miner_uids": [],
+            "unavailable_consensus_eligible_miner_uids": [],
+            "zero_incentive_eligible_miner_uids": [],
+            "unavailable_incentive_eligible_miner_uids": [],
+        },
+    }
+    with pytest.raises(
+        ValueError,
+        match="inactive bootstrap response requires an inactive effect",
+    ):
+        BootstrapServiceResponse.model_validate_json(canonical_json_bytes(invalid_inactive_body))
 
 
 def test_common_lease_fails_closed_when_the_weight_rate_limit_changes(
@@ -762,6 +962,67 @@ def test_bootstrap_service_warns_about_other_active_validator(tmp_path: Path) ->
     assert response.json()["availability"] == "active"
     assert response.json()["reason_code"] is None
     assert response.json()["warning_codes"] == ["bootstrap_service_other_active_validator_uid_3"]
+    assert response.json()["economic_effect"]["economically_effective"] is True
+
+
+@pytest.mark.parametrize("chain_active", [True, False])
+def test_direct_publication_fails_economic_effect_on_mismatched_recent_row(
+    tmp_path: Path,
+    chain_active: bool,
+) -> None:
+    feed, owner, participants = _write_feed(tmp_path)
+    publication = feed.publications[0]
+    active = _active_snapshot(feed, owner, participants)
+    competing = active.participants[3].model_copy(
+        update={
+            "chain_active": chain_active,
+            "validator_permit": True,
+            "role": "validator",
+            "last_update_block": "129",
+            "last_update_age_blocks": "1",
+        }
+    )
+    mismatched_row = ChainValidatorWeightRow(validator_uid=3, weights=((0, 65_535),))
+    snapshot = active.model_copy(
+        update={
+            "participants": (*active.participants[:3], competing, *active.participants[4:]),
+            "network": active.network.model_copy(
+                update={
+                    "counts": active.network.counts.model_copy(
+                        update={
+                            "chain_active": active.network.counts.chain_active
+                            - int(not chain_active),
+                            "miners": active.network.counts.miners - 1,
+                            "validators": active.network.counts.validators + 1,
+                        }
+                    ),
+                    "validator_mechid0_rows": (
+                        *active.network.validator_mechid0_rows,
+                        mismatched_row,
+                    ),
+                }
+            ),
+        }
+    )
+    app = create_observer_app(
+        _cache(SequenceCollector([snapshot])),
+        pilot_feed=_fake_pilot_feed(publication.signed_manifest),
+        bootstrap_service_feed=feed,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/bootstrap-service")
+        status = client.get("/api/v1/status")
+
+    body = response.json()
+    assert body["availability"] == "active"
+    assert body["warning_codes"] == ["bootstrap_service_other_active_validator_uid_3"]
+    assert body["economic_effect"]["economically_effective"] is False
+    assert body["economic_effect"]["reason_codes"] == [
+        "bootstrap_service_mismatched_active_row_present"
+    ]
+    assert body["economic_effect"]["mismatched_active_validator_uids"] == [3]
+    assert "umi_weight_cutover_unverified" in status.json()["outstanding_gap_codes"]
 
 
 def test_bootstrap_service_rejects_eligible_uid_reassignment(tmp_path: Path) -> None:

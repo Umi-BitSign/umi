@@ -225,6 +225,9 @@ replayed, a bounded solution feed exposes every assignment with hypotheses,
 references, exact scores or failure reasons, and content-addressed evidence
 locators. It never exposes raw video or private consent data. Feeds without conforming evidence
 remain explicit empty states.
+Bootstrap status distinguishes an authorized active service row from observed
+economic effect. The latter stays false if another active validator has a different
+row or any frozen eligible miner lacks nonzero native consensus or incentive.
 See the [dashboard API contract](docs/DASHBOARD_API.md) for endpoint schemas,
 Vercel integration, exact number handling, and deployment controls. The
 [first-result deployment runbook](deploy/first-public-result/README.md) provides

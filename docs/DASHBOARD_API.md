@@ -37,7 +37,7 @@ the immutable API safety contract and its conservative default protocol state. T
 revision is SHA-256 of compact, key-sorted JSON for these facts:
 
 ```json
-{"activation_evidence_available":false,"api_version":"v1","chain_result_classification":"unverified","conformance_evidence_available":false,"economic_era":"unverified","expected_chain_name":"UMI","mechanism_id":0,"netuid":78,"phase":"pre_public_calibration","protocol":"umi-asl/0.1","scoring_policy_hash":null,"section_14_gate_credit":false,"service_weight_evidence_sha256":null,"service_weight_kind":null,"service_weights_active":false,"specification_version":"0.1","translation_weights_active":false,"validator_input_eligible":false}
+{"activation_evidence_available":false,"api_version":"v1","chain_result_classification":"unverified","conformance_evidence_available":false,"economic_era":"unverified","expected_chain_name":"UMI","mechanism_id":0,"netuid":78,"phase":"pre_public_calibration","protocol":"umi-asl/0.1","scoring_policy_hash":null,"section_14_gate_credit":false,"service_weight_evidence_sha256":null,"service_weight_kind":null,"service_weights_active":false,"service_weights_economically_effective":false,"specification_version":"0.1","translation_weights_active":false,"validator_input_eligible":false}
 ```
 
 That static revision is not a hash of the returned, evidence-derived
@@ -255,6 +255,38 @@ active row from another validator is reported in `warning_codes` and does not
 invalidate an exact row. Lease expiry, UID reassignment, row expiry, overwrite,
 or required chain-tuple drift makes the status false on the next snapshot.
 
+`service_weights_economically_effective` is a separate, conservative current-state
+check. It becomes true only when `service_weights_active` is true, every miner in
+the frozen manifest has nonzero native consensus and incentive in the same
+finalized snapshot, and no active validator has a nonempty MechId 0 row that differs
+from the authorized row. It does not attribute a particular economic value to one
+validator. A true value establishes only the observable conditions above.
+
+`GET /api/v1/bootstrap-service` includes the same boolean inside `protocol_state`
+and adds an `economic_effect` object. Failed checks list the mismatched validator
+UIDs and the eligible miner UIDs whose consensus or incentive is zero or unavailable:
+
+```json
+{
+  "economically_effective": false,
+  "reason_codes": [
+    "bootstrap_service_eligible_miner_consensus_zero",
+    "bootstrap_service_eligible_miner_incentive_zero",
+    "bootstrap_service_mismatched_active_row_present"
+  ],
+  "mismatched_active_validator_uids": [200],
+  "zero_consensus_eligible_miner_uids": [6, 247],
+  "unavailable_consensus_eligible_miner_uids": [],
+  "zero_incentive_eligible_miner_uids": [6, 247],
+  "unavailable_incentive_eligible_miner_uids": []
+}
+```
+
+When the authorized service row is inactive, the object fails closed with
+`bootstrap_service_inactive`. The existing `service_weights_active` field keeps its
+signed lease meaning; clients must not use it alone as evidence that the bootstrap
+row controls current incentives.
+
 The current record carries `evidence_class: "finalized_chain_state"` and lists
 every validator whose exact row is active. There is no validator-uploaded terminal
 bundle in this profile. The signed manifest and lease bind the authorized row;
@@ -340,12 +372,12 @@ Values below are illustrative. Clients must use the returned block and timestamp
       "validator_input_eligible": false
     },
     {
-      "source_id": "umi-observer-contract-208f6633186e391f",
+      "source_id": "umi-observer-contract-2e246ab90349c8b4",
       "source_kind": "dashboard_static",
       "verification_status": "repository_static",
       "block": null,
       "policy_hash": null,
-      "artifact_sha256": "208f6633186e391f8ae8b7505af2c4d86e15b7de7f9a94b9a30ad26c75a1f2a8",
+      "artifact_sha256": "2e246ab90349c8b4892d203cf64eaae36a92a8c9c84bfb1c31173ecdfb4ad0d5",
       "validator_input_eligible": false
     }
   ],
@@ -360,6 +392,7 @@ Values below are illustrative. Clients must use the returned block and timestamp
     "mechanism_id": 0,
     "translation_weights_active": false,
     "service_weights_active": false,
+    "service_weights_economically_effective": false,
     "service_weight_kind": null,
     "service_weight_evidence_sha256": null,
     "section_14_gate_credit": false,

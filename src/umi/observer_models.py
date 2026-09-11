@@ -260,6 +260,7 @@ class ProtocolState(ObserverModel):
     mechanism_id: Literal[UMI_MECHANISM_ID] = UMI_MECHANISM_ID
     translation_weights_active: bool
     service_weights_active: bool = False
+    service_weights_economically_effective: bool = False
     service_weight_kind: Literal["bootstrap_service_binary"] | None = None
     service_weight_evidence_sha256: Hex32 | None = None
     section_14_gate_credit: Literal[False] = False
@@ -274,6 +275,8 @@ class ProtocolState(ObserverModel):
 
     @model_validator(mode="after")
     def validate_phase(self) -> Self:
+        if self.service_weights_economically_effective and not self.service_weights_active:
+            raise ValueError("economic bootstrap effect requires active service weights")
         if self.service_weights_active:
             if self.translation_weights_active:
                 raise ValueError("bootstrap service and translation weights cannot both be active")
@@ -1614,6 +1617,90 @@ class BootstrapServiceChainReceiptRecord(ObserverModel):
         return self
 
 
+BootstrapServiceEconomicEffectReason = Literal[
+    "bootstrap_service_inactive",
+    "bootstrap_service_mismatched_active_row_present",
+    "bootstrap_service_eligible_miner_consensus_zero",
+    "bootstrap_service_eligible_miner_consensus_unavailable",
+    "bootstrap_service_eligible_miner_incentive_zero",
+    "bootstrap_service_eligible_miner_incentive_unavailable",
+]
+
+
+class BootstrapServiceEconomicEffect(ObserverModel):
+    """Conservative current-chain evidence that the service row affects incentives."""
+
+    economically_effective: bool
+    reason_codes: tuple[BootstrapServiceEconomicEffectReason, ...]
+    mismatched_active_validator_uids: tuple[Annotated[int, Field(ge=0, le=255)], ...]
+    zero_consensus_eligible_miner_uids: tuple[Annotated[int, Field(ge=0, le=255)], ...]
+    unavailable_consensus_eligible_miner_uids: tuple[Annotated[int, Field(ge=0, le=255)], ...]
+    zero_incentive_eligible_miner_uids: tuple[Annotated[int, Field(ge=0, le=255)], ...]
+    unavailable_incentive_eligible_miner_uids: tuple[Annotated[int, Field(ge=0, le=255)], ...]
+
+    @model_validator(mode="after")
+    def validate_effect(self) -> Self:
+        for name in (
+            "reason_codes",
+            "mismatched_active_validator_uids",
+            "zero_consensus_eligible_miner_uids",
+            "unavailable_consensus_eligible_miner_uids",
+            "zero_incentive_eligible_miner_uids",
+            "unavailable_incentive_eligible_miner_uids",
+        ):
+            values = getattr(self, name)
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"{name} must be unique and sorted")
+
+        if not set(self.zero_consensus_eligible_miner_uids).isdisjoint(
+            self.unavailable_consensus_eligible_miner_uids
+        ):
+            raise ValueError("eligible miner consensus cannot be both zero and unavailable")
+        if not set(self.zero_incentive_eligible_miner_uids).isdisjoint(
+            self.unavailable_incentive_eligible_miner_uids
+        ):
+            raise ValueError("eligible miner incentive cannot be both zero and unavailable")
+
+        if self.economically_effective:
+            if (
+                self.reason_codes
+                or self.mismatched_active_validator_uids
+                or self.zero_consensus_eligible_miner_uids
+                or self.unavailable_consensus_eligible_miner_uids
+                or self.zero_incentive_eligible_miner_uids
+                or self.unavailable_incentive_eligible_miner_uids
+            ):
+                raise ValueError("verified economic effect cannot contain failure details")
+            return self
+
+        reasons = set(self.reason_codes)
+        if reasons == {"bootstrap_service_inactive"}:
+            if (
+                self.mismatched_active_validator_uids
+                or self.zero_consensus_eligible_miner_uids
+                or self.unavailable_consensus_eligible_miner_uids
+                or self.zero_incentive_eligible_miner_uids
+                or self.unavailable_incentive_eligible_miner_uids
+            ):
+                raise ValueError("inactive bootstrap effect cannot contain current-row details")
+            return self
+
+        expected: set[str] = set()
+        if self.mismatched_active_validator_uids:
+            expected.add("bootstrap_service_mismatched_active_row_present")
+        if self.zero_consensus_eligible_miner_uids:
+            expected.add("bootstrap_service_eligible_miner_consensus_zero")
+        if self.unavailable_consensus_eligible_miner_uids:
+            expected.add("bootstrap_service_eligible_miner_consensus_unavailable")
+        if self.zero_incentive_eligible_miner_uids:
+            expected.add("bootstrap_service_eligible_miner_incentive_zero")
+        if self.unavailable_incentive_eligible_miner_uids:
+            expected.add("bootstrap_service_eligible_miner_incentive_unavailable")
+        if reasons != expected or not expected:
+            raise ValueError("bootstrap economic-effect reasons do not match their details")
+        return self
+
+
 class BootstrapServiceResponse(ResponseEnvelope):
     schema_: Literal[BOOTSTRAP_SERVICE_RESPONSE_SCHEMA] = Field(
         default=BOOTSTRAP_SERVICE_RESPONSE_SCHEMA,
@@ -1623,11 +1710,20 @@ class BootstrapServiceResponse(ResponseEnvelope):
     availability: Literal["inactive", "active"]
     reason_code: NonEmptyText | None
     warning_codes: Annotated[tuple[NonEmptyText, ...], Field(max_length=256)] = ()
+    economic_effect: BootstrapServiceEconomicEffect
     current: BootstrapServiceRecord | BootstrapServiceChainReceiptRecord | None
     verified_publications: tuple[BootstrapServiceEvidenceLocator, ...]
 
     @model_validator(mode="after")
     def validate_state(self) -> Self:
+        if (
+            self.protocol_state.service_weights_economically_effective
+            != self.economic_effect.economically_effective
+        ):
+            raise ValueError("bootstrap economic effect does not match protocol state")
+        economic_effect_is_inactive = self.economic_effect.reason_codes == (
+            "bootstrap_service_inactive",
+        )
         if self.availability == "active":
             if (
                 self.reason_code is not None
@@ -1635,12 +1731,16 @@ class BootstrapServiceResponse(ResponseEnvelope):
                 or not self.protocol_state.service_weights_active
             ):
                 raise ValueError("active bootstrap response lacks current verified state")
+            if economic_effect_is_inactive:
+                raise ValueError("active bootstrap response cannot have an inactive effect")
         elif (
             self.reason_code is None
             or self.current is not None
             or self.protocol_state.service_weights_active
         ):
             raise ValueError("inactive bootstrap response has inconsistent current state")
+        elif not economic_effect_is_inactive:
+            raise ValueError("inactive bootstrap response requires an inactive effect")
         ids = [item.publication_id for item in self.verified_publications]
         if ids != sorted(set(ids)):
             raise ValueError("bootstrap publications must be unique and sorted")

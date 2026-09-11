@@ -114,6 +114,14 @@ and required chain tuple. It must continue to report:
 }
 ```
 
+This field reports the existence of an authorized active row. It does not assert
+that the row controls consensus incentives. The observer separately reports
+`service_weights_economically_effective`. That field remains false when any active
+validator has a different nonempty row, or when an eligible miner's native
+consensus or incentive is zero or unavailable. It becomes true only when every
+frozen eligible miner has nonzero observed consensus and incentive and no
+mismatched active row exists.
+
 ## Precedence
 
 This document supersedes these earlier procedures:

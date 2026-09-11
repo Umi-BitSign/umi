@@ -220,6 +220,7 @@ def test_status_is_finalized_chain_observation_not_umi_evidence() -> None:
     assert body["protocol_state"]["economic_era"] == "unverified"
     assert body["protocol_state"]["chain_result_classification"] == "unverified"
     assert body["protocol_state"]["translation_weights_active"] is False
+    assert body["protocol_state"]["service_weights_economically_effective"] is False
     assert body["protocol_state"]["scoring_policy_hash"] is None
     assert body["protocol_state"]["validator_input_eligible"] is False
     assert body["finalized_block"]["number"] == "99"
@@ -228,7 +229,7 @@ def test_status_is_finalized_chain_observation_not_umi_evidence() -> None:
     assert response.headers["x-umi-finalized-block"] == "99"
     assert (
         response.headers["x-umi-contract-revision"]
-        == "208f6633186e391f8ae8b7505af2c4d86e15b7de7f9a94b9a30ad26c75a1f2a8"
+        == "2e246ab90349c8b4892d203cf64eaae36a92a8c9c84bfb1c31173ecdfb4ad0d5"
     )
     assert set(_STATIC_PROTOCOL_FACTS) == (
         set(ProtocolState.model_fields) - {"chain_identity_matches_expected"}

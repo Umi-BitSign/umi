@@ -66,6 +66,7 @@ from .observer_models import (
     BenchmarksResponse,
     BootstrapServiceChainReceiptRecord,
     BootstrapServiceChainValidator,
+    BootstrapServiceEconomicEffect,
     BootstrapServiceEvidenceLocator,
     BootstrapServiceMiner,
     BootstrapServiceRecord,
@@ -136,6 +137,7 @@ _STATIC_PROTOCOL_FACTS = {
     "service_weight_evidence_sha256": None,
     "service_weight_kind": None,
     "service_weights_active": False,
+    "service_weights_economically_effective": False,
     "section_14_gate_credit": False,
     "translation_weights_active": False,
     "validator_input_eligible": False,
@@ -548,12 +550,10 @@ def _select_simple_bootstrap_service(
         if not participant.validator_permit:
             continue
         row = rows_by_validator.get(participant.uid, ())
-        active = participant.chain_active and int(participant.last_update_block) + cutoff >= block
-        if not active:
-            continue
-        if row == expected_row:
+        fresh = int(participant.last_update_block) + cutoff >= block
+        if participant.chain_active and fresh and row == expected_row:
             exact.append(participant.uid)
-        elif row:
+        elif row and (participant.chain_active or fresh):
             mismatched.append(participant.uid)
     if not exact:
         return BootstrapServiceSelection(None, "bootstrap_service_exact_active_row_unavailable")
@@ -672,12 +672,99 @@ def _select_bootstrap_service(
     )
 
 
+def _bootstrap_service_economic_effect(
+    snapshot: ObserverSnapshot,
+    selection: BootstrapServiceSelection,
+) -> BootstrapServiceEconomicEffect:
+    """Conservatively classify the authorized row's observed economic effect."""
+
+    publication = selection.publication
+    if publication is None:
+        return BootstrapServiceEconomicEffect(
+            economically_effective=False,
+            reason_codes=("bootstrap_service_inactive",),
+            mismatched_active_validator_uids=(),
+            zero_consensus_eligible_miner_uids=(),
+            unavailable_consensus_eligible_miner_uids=(),
+            zero_incentive_eligible_miner_uids=(),
+            unavailable_incentive_eligible_miner_uids=(),
+        )
+
+    if isinstance(publication, VerifiedSimpleBootstrapConfiguration):
+        expected_row = publication.expected_row
+        activity_cutoff = publication.signed_lease.body.required_activity_cutoff_blocks
+    else:
+        expected_row = tuple(tuple(item) for item in publication.receipt.expected_applied_row)
+        activity_cutoff = (
+            publication.call_material.operational_preflight.chain.snapshot.activity_cutoff_blocks
+        )
+
+    block = int(_finalized_block(snapshot).number)
+    rows_by_validator = {
+        item.validator_uid: item.weights for item in snapshot.network.validator_mechid0_rows
+    }
+    mismatched = tuple(
+        sorted(
+            participant.uid
+            for participant in snapshot.participants
+            if participant.validator_permit
+            and (
+                participant.chain_active
+                or int(participant.last_update_block) + activity_cutoff >= block
+            )
+            and (row := rows_by_validator.get(participant.uid, ()))
+            and row != expected_row
+        )
+    )
+
+    participants_by_uid = {item.uid: item for item in snapshot.participants}
+    zero_consensus: list[int] = []
+    unavailable_consensus: list[int] = []
+    zero_incentive: list[int] = []
+    unavailable_incentive: list[int] = []
+    for entry in publication.signed_manifest.manifest.entries:
+        participant = participants_by_uid.get(entry.uid)
+        consensus = None if participant is None else participant.chain_metrics.consensus
+        incentive = None if participant is None else participant.chain_metrics.incentive
+        if consensus is None:
+            unavailable_consensus.append(entry.uid)
+        elif int(consensus.raw_numerator) == 0:
+            zero_consensus.append(entry.uid)
+        if incentive is None:
+            unavailable_incentive.append(entry.uid)
+        elif int(incentive.raw_numerator) == 0:
+            zero_incentive.append(entry.uid)
+
+    reasons: set[str] = set()
+    if mismatched:
+        reasons.add("bootstrap_service_mismatched_active_row_present")
+    if zero_consensus:
+        reasons.add("bootstrap_service_eligible_miner_consensus_zero")
+    if unavailable_consensus:
+        reasons.add("bootstrap_service_eligible_miner_consensus_unavailable")
+    if zero_incentive:
+        reasons.add("bootstrap_service_eligible_miner_incentive_zero")
+    if unavailable_incentive:
+        reasons.add("bootstrap_service_eligible_miner_incentive_unavailable")
+    return BootstrapServiceEconomicEffect(
+        economically_effective=not reasons,
+        reason_codes=tuple(sorted(reasons)),
+        mismatched_active_validator_uids=mismatched,
+        zero_consensus_eligible_miner_uids=tuple(sorted(zero_consensus)),
+        unavailable_consensus_eligible_miner_uids=tuple(sorted(unavailable_consensus)),
+        zero_incentive_eligible_miner_uids=tuple(sorted(zero_incentive)),
+        unavailable_incentive_eligible_miner_uids=tuple(sorted(unavailable_incentive)),
+    )
+
+
 def _protocol_state(
     snapshot: ObserverSnapshot,
     released_windows: Sequence[VerifiedFeedWindow] = (),
     bootstrap_publication: (
         VerifiedBootstrapServicePublication | VerifiedSimpleBootstrapConfiguration | None
     ) = None,
+    *,
+    service_weights_economically_effective: bool = False,
 ) -> ProtocolState:
     network = snapshot.network
     observed_names = tuple(
@@ -695,6 +782,7 @@ def _protocol_state(
         mechanism_id=_STATIC_PROTOCOL_FACTS["mechanism_id"],
         translation_weights_active=_STATIC_PROTOCOL_FACTS["translation_weights_active"],
         service_weights_active=bootstrap_publication is not None,
+        service_weights_economically_effective=service_weights_economically_effective,
         service_weight_kind=(
             BOOTSTRAP_SERVICE_MECHANISM if bootstrap_publication is not None else None
         ),
@@ -1147,10 +1235,15 @@ def create_observer_app(
         view: SnapshotView,
         feed: BundleFeedSnapshot,
     ) -> ProtocolState:
+        selection = bootstrap_selection(view)
         return _protocol_state(
             view.snapshot,
             feed.windows,
-            bootstrap_selection(view).publication,
+            selection.publication,
+            service_weights_economically_effective=_bootstrap_service_economic_effect(
+                view.snapshot,
+                selection,
+            ).economically_effective,
         )
 
     def released(view: SnapshotView) -> BundleFeedSnapshot:
@@ -1738,6 +1831,7 @@ def create_observer_app(
     async def status(request: Request) -> Response:
         view = current()
         feed = released(view)
+        protocol_state = current_protocol_state(view, feed)
         feed_unhealthy = any(item.status in {"degraded", "stale"} for item in feed.health)
         public_solution_windows = _public_solution_windows(feed.windows)
         gaps = set(_OUTSTANDING_GAP_CODES)
@@ -1747,14 +1841,14 @@ def create_observer_app(
             gaps.discard("public_calibration_not_started")
         if len({item.scoring_policy_hash for item in public_solution_windows}) == 1:
             gaps.discard("active_scoring_policy_unavailable")
-        if bootstrap_selection(view).publication is not None:
+        if protocol_state.service_weights_economically_effective:
             gaps.discard("umi_weight_cutover_unverified")
         response = StatusResponse(
             **released_envelope(view, feed),
             service_status=(
                 "ready" if view.freshness == "fresh" and not feed_unhealthy else "degraded"
             ),
-            protocol_state=current_protocol_state(view, feed),
+            protocol_state=protocol_state,
             finalized_block=_finalized_block(view.snapshot),
             outstanding_gap_codes=tuple(sorted(gaps)),
         )
@@ -2069,12 +2163,14 @@ def create_observer_app(
             sorted(configured_bootstrap_publications(), key=lambda item: item.publication_id)
         )
         selection = bootstrap_selection(view)
+        economic_effect = _bootstrap_service_economic_effect(view.snapshot, selection)
         response = BootstrapServiceResponse(
             **bootstrap_envelope(view, selection.publication),
             protocol_state=current_protocol_state(view, releases),
             availability="active" if selection.publication is not None else "inactive",
             reason_code=None if selection.publication is not None else selection.reason_code,
             warning_codes=selection.warning_codes,
+            economic_effect=economic_effect,
             current=(None if selection.publication is None else bootstrap_record(view, selection)),
             verified_publications=tuple(bootstrap_locator(item) for item in publications),
         )
