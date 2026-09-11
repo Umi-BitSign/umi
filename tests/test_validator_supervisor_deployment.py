@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -75,6 +76,9 @@ def test_linux_supervisor_installer_has_valid_shell_and_safe_transition_order() 
     assert '"$hotkey_source" "$runtime_hotkeys/$hotkey_name"' in source
     assert "coldkey" in usage
     assert "install-common-host-artifacts" in source
+    assert '--expected-revision "$release_revision"' in source
+    assert '--expected-revision "$installer_revision"' not in source
+    assert 'checkout --detach "$release_revision"' in source
     assert '"$artifacts_directory/uv" --version' in source
     assert source.index("supervisor_created=true") < source.index(
         'git -c safe.directory="$source_root" clone'
@@ -162,6 +166,21 @@ def test_documented_status_command_starts_from_public_cwd() -> None:
     )
 
     assert status_block.index("cd /") < status_block.index("sudo -u umi-validator env -i")
+
+
+def test_current_main_installer_pins_the_signed_runtime_release() -> None:
+    installer = (DEPLOYMENT / "install.sh").read_text()
+    release_revision = (DEPLOYMENT / "CURRENT_RELEASE_REVISION").read_text()
+    guide = (ROOT / "docs" / "PERMANENT_VALIDATOR_SUPERVISOR.md").read_text()
+
+    assert re.fullmatch(r"[0-9a-f]{40}\n", release_revision)
+    assert "git clone git@github.com:Umi-BitSign/umi.git umi-validator" in guide
+    assert "REPLACE_WITH_PUBLISHED_40_CHARACTER_REVISION" not in guide
+    assert 'release_revision_object="$installer_revision:$release_revision_path"' in installer
+    assert 'cat-file -s "$release_revision_object"' in installer
+    assert 'cat-file -e "$release_revision^{commit}"' in installer
+    assert 'checkout --detach "$release_revision"' in installer
+    assert '--expected-revision "$release_revision"' in installer
 
 
 def test_operator_guide_requires_supported_podman_and_distributions() -> None:

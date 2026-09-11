@@ -15,6 +15,7 @@ import httpx
 import pytest
 from bittensor.keyfiles import serialized_keypair_to_keyfile_data
 
+import umi.validator_supervisor_adapters as supervisor_adapters
 import umi.validator_supervisor_cli as supervisor_cli
 from tests.factories import dev_wallet
 from tests.test_bootstrap_direct_weights import (
@@ -389,6 +390,128 @@ def test_common_config_is_generated_from_platform_and_local_hotkey_only(
     ):
         with pytest.raises(ValidatorSupervisorAdapterError, match=reason):
             supervisor_cli._validate_linux_systemd_profile(config.model_copy(update={field: value}))
+
+
+@pytest.mark.asyncio
+async def test_host_artifact_install_uses_signed_release_not_installer_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = dev_wallet("//CommonHostArtifactTest").hotkey
+    monkeypatch.setattr(
+        supervisor_cli,
+        "COMMON_SUPERVISOR_AUTHORITY_HOTKEY",
+        authority.ss58_address,
+    )
+    monkeypatch.setattr(
+        supervisor_adapters,
+        "COMMON_SUPERVISOR_AUTHORITY_HOTKEY",
+        authority.ss58_address,
+    )
+    monkeypatch.setattr(
+        supervisor_cli,
+        "_load_signer",
+        lambda _args: (authority, "sr25519"),
+    )
+    release_revision = "12" * 20
+    installer_revision = "34" * 20
+    assert release_revision != installer_revision
+    artifacts: dict[str, bytes] = {
+        f"{COMMON_SUPERVISOR_RELEASE_ORIGIN}/immutable/uv": b"uv",
+        f"{COMMON_SUPERVISOR_RELEASE_ORIGIN}/immutable/finality": b"finality",
+        f"{COMMON_SUPERVISOR_RELEASE_ORIGIN}/immutable/spec": b"spec",
+    }
+    paths: dict[str, Path] = {}
+    for name, payload in zip(("uv", "finality", "spec"), artifacts.values(), strict=True):
+        path = tmp_path / name
+        path.write_bytes(payload)
+        paths[name] = path
+    signed_manifest = tmp_path / "host-artifacts.json"
+    supervisor_cli._build_common_host_artifacts(
+        SimpleNamespace(
+            target_platform="linux/amd64",
+            umi_git_revision=release_revision,
+            uv=paths["uv"],
+            uv_url=f"{COMMON_SUPERVISOR_RELEASE_ORIGIN}/immutable/uv",
+            finality_verifier=paths["finality"],
+            finality_verifier_url=(f"{COMMON_SUPERVISOR_RELEASE_ORIGIN}/immutable/finality"),
+            finney_chain_spec=paths["spec"],
+            finney_chain_spec_url=f"{COMMON_SUPERVISOR_RELEASE_ORIGIN}/immutable/spec",
+            output=signed_manifest,
+        )
+    )
+
+    downloads: list[str] = []
+
+    class FakePinnedHTTPSClient:
+        async def download_file(
+            self,
+            url: str,
+            *,
+            destination: Path,
+            maximum_bytes: int,
+            expected_size_bytes: int,
+            expected_sha256: str,
+        ) -> None:
+            payload = artifacts[url]
+            assert maximum_bytes == expected_size_bytes == len(payload)
+            assert hashlib.sha256(payload).hexdigest() == expected_sha256
+            destination.write_bytes(payload)
+            downloads.append(url)
+
+    monkeypatch.setattr(supervisor_cli, "PinnedHTTPSClient", FakePinnedHTTPSClient)
+    destination = tmp_path / "installed"
+    destination.mkdir()
+    result = await supervisor_cli._install_common_host_artifacts(
+        SimpleNamespace(
+            manifest=signed_manifest,
+            target_platform="linux/amd64",
+            expected_revision=release_revision,
+            destination=destination,
+        )
+    )
+
+    assert result["status"] == "common_host_artifacts_installed"
+    assert downloads == list(artifacts)
+    assert (destination / "uv").read_bytes() == b"uv"
+    assert (destination / "umi-grandpa-finality-observer").read_bytes() == b"finality"
+    assert (destination / "raw_spec_finney.json").read_bytes() == b"spec"
+
+    rollback_destination = tmp_path / "rollback"
+    rollback_destination.mkdir()
+    with pytest.raises(
+        ValidatorSupervisorAdapterError,
+        match="common_host_artifact_binding_mismatch",
+    ):
+        await supervisor_cli._install_common_host_artifacts(
+            SimpleNamespace(
+                manifest=signed_manifest,
+                target_platform="linux/amd64",
+                expected_revision="56" * 20,
+                destination=rollback_destination,
+            )
+        )
+    assert list(rollback_destination.iterdir()) == []
+
+    altered_payload = json.loads(signed_manifest.read_bytes())
+    altered_payload["manifest"]["umi_git_revision"] = "78" * 20
+    altered_manifest = tmp_path / "altered-host-artifacts.json"
+    altered_manifest.write_bytes(canonical_json_bytes(altered_payload))
+    altered_destination = tmp_path / "altered"
+    altered_destination.mkdir()
+    with pytest.raises(
+        ValidatorSupervisorAdapterError,
+        match="host_artifact_manifest_invalid",
+    ):
+        await supervisor_cli._install_common_host_artifacts(
+            SimpleNamespace(
+                manifest=altered_manifest,
+                target_platform="linux/amd64",
+                expected_revision=release_revision,
+                destination=altered_destination,
+            )
+        )
+    assert list(altered_destination.iterdir()) == []
 
 
 def test_linux_systemd_runtime_cgroup_must_match_fixed_profile(tmp_path: Path) -> None:

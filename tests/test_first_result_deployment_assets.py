@@ -127,8 +127,9 @@ def test_runbook_has_fail_closed_install_and_service_checks() -> None:
 def test_shared_validator_rollout_is_one_pinned_install_and_signed_channel() -> None:
     runbook = (ROOT.parents[1] / "docs" / "PERMANENT_VALIDATOR_SUPERVISOR.md").read_text()
 
-    assert "revision=REPLACE_WITH_PUBLISHED_40_CHARACTER_REVISION" in runbook
-    assert 'checkout --detach "$revision"' in runbook
+    assert "git clone git@github.com:Umi-BitSign/umi.git umi-validator" in runbook
+    assert "REPLACE_WITH_PUBLISHED_40_CHARACTER_REVISION" not in runbook
+    assert 'checkout --detach "$revision"' not in runbook
     assert "--wallet-name YOUR_WALLET" in runbook
     assert "--hotkey-name YOUR_HOTKEY" in runbook
     assert "--wallet-path /ABSOLUTE/PATH/TO/WALLETS" in runbook

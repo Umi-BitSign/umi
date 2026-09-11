@@ -11,16 +11,18 @@ and 100 GiB of local storage. A GPU is not required.
 
 ## Install
 
-Choose the exact 40-character revision published in the UMI release notice.
-Clone it into a new directory and keep the checkout clean:
+Clone the current `main` branch into a new directory and keep the checkout
+clean:
 
 ```sh
-revision=REPLACE_WITH_PUBLISHED_40_CHARACTER_REVISION
-git clone --no-checkout git@github.com:Umi-BitSign/umi.git umi-validator
-git -C umi-validator checkout --detach "$revision"
-test "$(git -C umi-validator rev-parse HEAD)" = "$revision"
+git clone git@github.com:Umi-BitSign/umi.git umi-validator
 test -z "$(git -C umi-validator status --porcelain=v1 --untracked-files=all)"
 ```
+
+The current `main` commit is the one-time installation trust boundary. Review
+that commit before running the installer with `sudo`. After installation, the
+runtime does not execute later `main` commits; it accepts only signed,
+hash-pinned UMI release directives.
 
 Run one installer command. The wallet path must be absolute and must contain the
 named hotkey:
@@ -57,6 +59,13 @@ correct amd64 or arm64 stream,
 installs the locked Python environment and signed host artifacts, creates an
 isolated service account, and copies only the selected plaintext hotkey. It does
 not read or copy a coldkey.
+
+The installer checkout and runtime release are deliberately separate. The
+installer reads `CURRENT_RELEASE_REVISION` from its own committed Git tree,
+installs that exact release commit, and requires the coordinator-signed platform
+artifact manifest to name the same commit. Advancing `main` for documentation or
+API work therefore does not invalidate installation, while a replayed or altered
+release manifest still fails before any legacy writer is stopped.
 
 The installer is safe to rerun after a failure that occurs before the legacy
 shutdown boundary. It removes the source tree and isolated hotkey that it staged

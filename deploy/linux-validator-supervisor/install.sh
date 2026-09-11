@@ -300,13 +300,30 @@ source_root=$(git -c safe.directory='*' -C "$script_directory" rev-parse --show-
 source_root=$(readlink -f -- "$source_root") || fail "could not resolve the source checkout"
 [ "$script_directory" = "$source_root/deploy/linux-validator-supervisor" ] \
   || fail "installer path does not match the source checkout"
-revision=$(git -c safe.directory="$source_root" -C "$source_root" \
+installer_revision=$(git -c safe.directory="$source_root" -C "$source_root" \
   rev-parse --verify HEAD^{commit}) || fail "could not resolve the source revision"
-[ "${#revision}" -eq 40 ] || fail "source revision is not a full Git commit"
-case "$revision" in *[!0-9a-f]*) fail "source revision is not lowercase hexadecimal" ;; esac
+[ "${#installer_revision}" -eq 40 ] || fail "source revision is not a full Git commit"
+case "$installer_revision" in
+  *[!0-9a-f]*) fail "source revision is not lowercase hexadecimal" ;;
+esac
 [ -z "$(git -c safe.directory="$source_root" -C "$source_root" \
   status --porcelain=v1 --untracked-files=all)" ] \
   || fail "source checkout must be clean before installation"
+release_revision_path=deploy/linux-validator-supervisor/CURRENT_RELEASE_REVISION
+release_revision_object="$installer_revision:$release_revision_path"
+[ "$(git -c safe.directory="$source_root" -C "$source_root" \
+  cat-file -s "$release_revision_object")" -eq 41 ] \
+  || fail "current release revision file has the wrong size"
+release_revision=$(git -c safe.directory="$source_root" -C "$source_root" \
+  show "$release_revision_object") || fail "could not read the current release revision"
+[ "${#release_revision}" -eq 40 ] \
+  || fail "current release revision is not a full Git commit"
+case "$release_revision" in
+  *[!0-9a-f]*) fail "current release revision is not lowercase hexadecimal" ;;
+esac
+git -c safe.directory="$source_root" -C "$source_root" \
+  cat-file -e "$release_revision^{commit}" \
+  || fail "current release revision is not available in the source repository"
 
 case "$(uname -m)" in
   x86_64|amd64)
@@ -375,7 +392,7 @@ if [ -n "$legacy_unit" ]; then
   legacy_fragment=$(systemctl show "$legacy_unit" --property=FragmentPath --value)
   case "$legacy_fragment" in
     "/etc/systemd/system/$legacy_unit")
-      archive_path="$archive_root/$legacy_unit.$revision"
+      archive_path="$archive_root/$legacy_unit.$release_revision"
       [ ! -e "$archive_path" ] && [ ! -L "$archive_path" ] \
         || fail "legacy unit archive target already exists"
       ;;
@@ -431,9 +448,10 @@ printf '%s  %s\n' "$uv_binary_sha256" "$uv_source" | sha256sum --check --status 
 supervisor_created=true
 git -c safe.directory="$source_root" clone --no-local --no-hardlinks --no-checkout \
   "$source_root" "$supervisor_root"
-git -c safe.directory="$supervisor_root" -C "$supervisor_root" checkout --detach "$revision"
+git -c safe.directory="$supervisor_root" -C "$supervisor_root" \
+  checkout --detach "$release_revision"
 [ "$(git -c safe.directory="$supervisor_root" -C "$supervisor_root" rev-parse HEAD)" \
-  = "$revision" ] || fail "installed checkout has the wrong revision"
+  = "$release_revision" ] || fail "installed checkout has the wrong release revision"
 [ -z "$(git -c safe.directory="$supervisor_root" -C "$supervisor_root" \
   status --porcelain=v1 --untracked-files=all)" ] \
   || fail "installed checkout is not clean"
@@ -547,7 +565,7 @@ curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
   --output "$host_manifest" "$host_manifest_url"
 "$supervisor_executable" install-common-host-artifacts \
   --manifest "$host_manifest" --target-platform "$target_platform" \
-  --expected-revision "$revision" --destination "$artifacts_directory"
+  --expected-revision "$release_revision" --destination "$artifacts_directory"
 finality_sha256=$(sha256sum "$artifacts_directory/umi-grandpa-finality-observer" \
   | cut -d' ' -f1)
 [ "$("$artifacts_directory/uv" --version | awk '{print $1 " " $2}')" = 'uv 0.12.9' ] \
@@ -685,7 +703,8 @@ done
 trap - EXIT HUP INT TERM
 cleanup
 printf 'status=installed\n'
-printf 'revision=%s\n' "$revision"
+printf 'installer_revision=%s\n' "$installer_revision"
+printf 'release_revision=%s\n' "$release_revision"
 printf 'target_platform=%s\n' "$target_platform"
 printf 'channel_id=%s\n' "$channel_id"
 if [ -n "$legacy_unit" ]; then
