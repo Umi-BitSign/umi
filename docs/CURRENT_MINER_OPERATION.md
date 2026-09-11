@@ -60,6 +60,16 @@ emission does not identify the row that produced it or prove translation scoring
 has started. Check the UID, finalized block, and exact field before attributing
 a displayed payment to UMI.
 
+The `subnet_emission_enabled` flag does not guarantee positive TAO inflow. The
+chain scales TAO emission shares by miner burn and applies an emission gate;
+participant-side alpha issuance is a separate value. At finalized block `9045044`
+on 2026-09-11, the flag was true, `SubnetTaoInEmission` and
+`SubnetAlphaInEmission` were zero, `MinerBurned` was about 99.61%, and
+`SubnetAlphaOutEmission` was 1 alpha per block. Zero TAO inflow alone does not
+establish that the switch was disabled or that every alpha payout stopped.
+See the [Bittensor emissions documentation](https://www.bittensor.com/docs/concepts/emissions#subnet-emission-shares)
+for these separate accounting paths.
+
 The public API reports `service_weights_active` separately from
 `service_weights_economically_effective`; `translation_weights_active` identifies
 the translation mechanism. See the
