@@ -115,13 +115,21 @@ def test_runtime_smoke_unit_is_exact_inert_and_always_cleaned() -> None:
     assert "cleanup() {\n  cleanup_runtime_smoke_unit" in source
     assert "trap cleanup EXIT HUP INT TERM" in source
 
+    trap_cleanup = source.split("cleanup_runtime_smoke_unit() {", 1)[1].split("\n}\n", 1)[0]
+    trap_stop = trap_cleanup.index('systemctl stop "$service_name"')
+    trap_remove_dropin = trap_cleanup.index('rm -f -- "$runtime_service_dropin_destination"')
+    trap_remove_unit = trap_cleanup.index('rm -f -- "$runtime_service_destination"')
+    trap_reset = trap_cleanup.index('systemctl reset-failed "$service_name"')
+    trap_reload = trap_cleanup.index("systemctl daemon-reload")
+    assert trap_stop < trap_reset < trap_remove_dropin < trap_remove_unit < trap_reload
+
     cleanup_function = source.split("remove_runtime_smoke_unit() {", 1)[1].split("\n}\n", 1)[0]
     stop = cleanup_function.index('systemctl stop "$service_name"')
     remove_dropin = cleanup_function.index('rm -f -- "$runtime_service_dropin_destination"')
     remove_unit = cleanup_function.index('rm -f -- "$runtime_service_destination"')
     reset = cleanup_function.index('systemctl reset-failed "$service_name"')
     reload = cleanup_function.index("systemctl daemon-reload")
-    assert stop < remove_dropin < remove_unit < reset < reload
+    assert stop < reset < remove_dropin < remove_unit < reload
 
     stage = source.split("# Rehearse the exact production unit name", 1)[1].split(
         'if [ -n "$legacy_unit" ]', 1

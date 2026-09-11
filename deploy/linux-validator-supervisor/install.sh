@@ -155,10 +155,10 @@ require_immutable_supervisor_tree() {
 cleanup_runtime_smoke_unit() {
   [ "${runtime_smoke_staged:-false}" = true ] || return 0
   systemctl stop "$service_name" >/dev/null 2>&1 || :
+  systemctl reset-failed "$service_name" >/dev/null 2>&1 || :
   rm -f -- "$runtime_service_dropin_destination" || :
   rmdir -- "$runtime_service_dropin_directory" >/dev/null 2>&1 || :
   rm -f -- "$runtime_service_destination" || :
-  systemctl reset-failed "$service_name" >/dev/null 2>&1 || :
   systemctl daemon-reload >/dev/null 2>&1 || :
   runtime_smoke_staged=false
 }
@@ -166,12 +166,14 @@ cleanup_runtime_smoke_unit() {
 remove_runtime_smoke_unit() {
   systemctl stop "$service_name" \
     || fail "could not stop the production-unit runtime smoke"
+  # Reset while the transient fragment is still loaded. On a first install,
+  # systemd may forget the unit as soon as its final fragment is removed.
+  systemctl reset-failed "$service_name" \
+    || fail "could not reset the production-unit runtime smoke state"
   rm -f -- "$runtime_service_dropin_destination"
   rmdir -- "$runtime_service_dropin_directory" \
     || fail "could not remove the production-unit runtime smoke drop-in directory"
   rm -f -- "$runtime_service_destination"
-  systemctl reset-failed "$service_name" \
-    || fail "could not reset the production-unit runtime smoke state"
   systemctl daemon-reload \
     || fail "could not unload the production-unit runtime smoke"
   [ "$(systemctl show "$service_name" --property=LoadState --value)" = not-found ] \
