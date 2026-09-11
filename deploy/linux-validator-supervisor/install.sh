@@ -8,8 +8,14 @@ service_account=umi-validator
 supervisor_root=/opt/umi-validator-supervisor
 supervisor_executable="$supervisor_root/.venv/bin/umi-validator-supervisor"
 service_destination="/etc/systemd/system/$service_name"
+runtime_service_destination="/run/systemd/system/$service_name"
+runtime_service_dropin_directory="/run/systemd/system/$service_name.d"
+runtime_service_dropin_destination="$runtime_service_dropin_directory/10-runtime-smoke.conf"
 config_destination=/etc/umi/validator-supervisor.json
 runtime_wallet_root=/var/lib/umi-validator-runtime-wallets
+runtime_smoke_mount_root=/var/lib/umi-validator-runtime-smoke
+runtime_smoke_readonly_mount="$runtime_smoke_mount_root/readonly"
+runtime_smoke_readwrite_mount="$runtime_smoke_mount_root/readwrite"
 archive_root=/var/lib/umi-validator-retired-units
 origin=https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev
 
@@ -146,27 +152,62 @@ require_immutable_supervisor_tree() {
     || fail "installed supervisor tree has a broken or escaping symlink"
 }
 
+cleanup_runtime_smoke_unit() {
+  [ "${runtime_smoke_staged:-false}" = true ] || return 0
+  systemctl stop "$service_name" >/dev/null 2>&1 || :
+  rm -f -- "$runtime_service_dropin_destination" || :
+  rmdir -- "$runtime_service_dropin_directory" >/dev/null 2>&1 || :
+  rm -f -- "$runtime_service_destination" || :
+  systemctl reset-failed "$service_name" >/dev/null 2>&1 || :
+  systemctl daemon-reload >/dev/null 2>&1 || :
+  runtime_smoke_staged=false
+}
+
+remove_runtime_smoke_unit() {
+  systemctl stop "$service_name" \
+    || fail "could not stop the production-unit runtime smoke"
+  rm -f -- "$runtime_service_dropin_destination"
+  rmdir -- "$runtime_service_dropin_directory" \
+    || fail "could not remove the production-unit runtime smoke drop-in directory"
+  rm -f -- "$runtime_service_destination"
+  systemctl reset-failed "$service_name" \
+    || fail "could not reset the production-unit runtime smoke state"
+  systemctl daemon-reload \
+    || fail "could not unload the production-unit runtime smoke"
+  [ "$(systemctl show "$service_name" --property=LoadState --value)" = not-found ] \
+    || fail "production-unit runtime smoke remained loaded"
+  runtime_smoke_staged=false
+}
+
 supervisor() {
-  runuser -u "$service_account" -- env -i \
-    HOME=/var/lib/umi-validator-supervisor/home \
-    XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
-    XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
-    XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
-    LOGNAME="$service_account" \
-    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONUTF8=1 \
-    USER="$service_account" "$supervisor_executable" "$@"
+  (
+    CDPATH= cd -- /
+    runuser -u "$service_account" -- env -i \
+      CONTAINERS_CONF_OVERRIDE=/opt/umi-validator-supervisor/deploy/linux-validator-supervisor/containers.conf \
+      HOME=/var/lib/umi-validator-supervisor/home \
+      XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
+      XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
+      XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
+      LOGNAME="$service_account" \
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONUTF8=1 \
+      USER="$service_account" "$supervisor_executable" "$@"
+  )
 }
 
 podman_as_service() {
-  runuser -u "$service_account" -- env -i \
-    HOME=/var/lib/umi-validator-supervisor/home \
-    XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
-    XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
-    XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
-    LOGNAME="$service_account" \
-    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    USER="$service_account" /usr/bin/podman "$@"
+  (
+    CDPATH= cd -- /
+    runuser -u "$service_account" -- env -i \
+      CONTAINERS_CONF_OVERRIDE=/opt/umi-validator-supervisor/deploy/linux-validator-supervisor/containers.conf \
+      HOME=/var/lib/umi-validator-supervisor/home \
+      XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
+      XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
+      XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
+      LOGNAME="$service_account" \
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      USER="$service_account" /usr/bin/podman "$@"
+  )
 }
 
 [ "$(id -u)" -eq 0 ] || fail "run this installer with sudo"
@@ -217,7 +258,7 @@ if [ -n "$legacy_unit" ]; then
   [ "$legacy_unit" != "$service_name" ] || fail "refusing to retire the UMI supervisor"
 fi
 
-package_commands='awk chmod chown curl cut find getent git groupadd install mkdir mktemp mv newgidmap newuidmap podman readlink rm runuser sed sha256sum slirp4netns stat systemctl systemd-analyze tar useradd usermod'
+package_commands='awk chmod chown curl cut find getent git groupadd install mkdir mktemp mv newgidmap newuidmap podman readlink rmdir rm runuser sed sha256sum slirp4netns stat systemctl systemd-analyze tar useradd usermod'
 missing_package_command=false
 for command_name in $package_commands; do
   command -v "$command_name" >/dev/null 2>&1 || missing_package_command=true
@@ -237,6 +278,20 @@ if [ "$missing_package_command" = true ]; then
     coreutils findutils gawk tar
 fi
 for command_name in $package_commands; do require_command "$command_name"; done
+
+podman_version=$(podman --version | awk '{print $3}') \
+  || fail "could not read the Podman version"
+podman_major=${podman_version%%.*}
+podman_remainder=${podman_version#*.}
+podman_minor=${podman_remainder%%.*}
+case "$podman_major:$podman_minor" in
+  ''|:*|*:|*[!0-9:]*) fail "could not parse the Podman version: $podman_version" ;;
+esac
+if [ "$podman_major" -lt 4 ] \
+  || { [ "$podman_major" -eq 4 ] && [ "$podman_minor" -lt 3 ]; }
+then
+  fail "Podman 4.3.0 or later is required; found $podman_version"
+fi
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 source_root=$(git -c safe.directory='*' -C "$script_directory" rev-parse --show-toplevel \
@@ -296,6 +351,17 @@ hotkey_size=$(stat -c '%s' "$hotkey_source")
   || fail "an installed supervisor config already exists"
 [ ! -e "$service_destination" ] && [ ! -L "$service_destination" ] \
   || fail "an installed supervisor service already exists"
+[ ! -e "$runtime_service_destination" ] && [ ! -L "$runtime_service_destination" ] \
+  || fail "the supervisor runtime service path already exists"
+[ ! -e "$runtime_service_dropin_directory" ] \
+  && [ ! -L "$runtime_service_dropin_directory" ] \
+  || fail "the supervisor runtime service drop-in path already exists"
+[ ! -e "$runtime_smoke_mount_root" ] && [ ! -L "$runtime_smoke_mount_root" ] \
+  || fail "the Podman runtime-smoke mount root already exists"
+service_load_state=$(systemctl show "$service_name" --property=LoadState --value) \
+  || fail "could not inspect the supervisor unit name"
+[ "$service_load_state" = not-found ] \
+  || fail "the supervisor unit name is already loaded"
 
 legacy_control_group=
 legacy_fragment=
@@ -321,8 +387,11 @@ temporary_root=$(mktemp -d /tmp/umi-validator-supervisor-install.XXXXXXXX) \
   || fail "could not allocate a temporary directory"
 supervisor_created=false
 runtime_wallet_created=false
+runtime_smoke_mount_root_created=false
+runtime_smoke_staged=false
 retain_installation=false
 cleanup() {
+  cleanup_runtime_smoke_unit
   rm -rf -- "$temporary_root"
   if [ -n "${config_build:-}" ]; then rm -f -- "$config_build"; fi
   if [ -n "${config_stage:-}" ]; then rm -f -- "$config_stage"; fi
@@ -332,6 +401,9 @@ cleanup() {
     fi
     if [ "$supervisor_created" = true ]; then
       rm -rf -- "$supervisor_root"
+    fi
+    if [ "$runtime_smoke_mount_root_created" = true ]; then
+      rm -rf -- "$runtime_smoke_mount_root"
     fi
   fi
 }
@@ -378,10 +450,19 @@ env UV_PYTHON_INSTALL_DIR="$supervisor_root/.uv-python" \
 installed_deploy="$supervisor_root/deploy/linux-validator-supervisor"
 service_source="$installed_deploy/umi-validator-supervisor.service"
 subordinate_range_checker="$installed_deploy/check-subordinate-ranges.awk"
+containers_conf_source="$installed_deploy/containers.conf"
+podman_smoke_source="$installed_deploy/podman-runtime-smoke.sh"
+runtime_smoke_dropin_source="$installed_deploy/runtime-smoke.conf"
 [ -f "$service_source" ] && [ ! -L "$service_source" ] \
   || fail "the checked-in service unit is missing or unsafe"
 [ -f "$subordinate_range_checker" ] && [ ! -L "$subordinate_range_checker" ] \
   || fail "the subordinate-ID checker is missing or unsafe"
+[ -f "$containers_conf_source" ] && [ ! -L "$containers_conf_source" ] \
+  || fail "the checked-in containers.conf is missing or unsafe"
+[ -f "$podman_smoke_source" ] && [ ! -L "$podman_smoke_source" ] \
+  || fail "the checked-in Podman runtime smoke is missing or unsafe"
+[ -f "$runtime_smoke_dropin_source" ] && [ ! -L "$runtime_smoke_dropin_source" ] \
+  || fail "the checked-in runtime-smoke drop-in is missing or unsafe"
 
 if ! getent group "$service_account" >/dev/null 2>&1; then groupadd --system "$service_account"; fi
 if ! id "$service_account" >/dev/null 2>&1; then
@@ -431,6 +512,21 @@ install -d -o "$service_account" -g "$service_account" -m 0700 \
   /var/lib/umi-validator-supervisor/releases \
   /var/lib/umi-validator-worker-state /run/umi-validator-supervisor
 
+runtime_smoke_mount_root_created=true
+install -d -o root -g root -m 0755 "$runtime_smoke_mount_root"
+install -d -o root -g root -m 0555 "$runtime_smoke_readonly_mount"
+install -d -o "$service_account" -g "$service_account" -m 0700 \
+  "$runtime_smoke_readwrite_mount"
+[ "$(stat -c '%u:%g:%a' "$runtime_smoke_mount_root")" = '0:0:755' ] \
+  || fail "Podman runtime-smoke mount root has unsafe ownership or mode"
+[ "$(stat -c '%u:%g:%a' "$runtime_smoke_readonly_mount")" = '0:0:555' ] \
+  || fail "Podman read-only runtime-smoke mount has unsafe ownership or mode"
+[ "$(stat -c '%u:%g:%a' "$runtime_smoke_readwrite_mount")" \
+  = "$service_uid:$(id -g "$service_account"):700" ] \
+  || fail "Podman read-write runtime-smoke mount has unsafe ownership or mode"
+[ -z "$(find "$runtime_smoke_mount_root" -mindepth 2 -print -quit)" ] \
+  || fail "Podman runtime-smoke mounts must start empty"
+
 runtime_wallet="$runtime_wallet_root/$wallet_name"
 runtime_hotkeys="$runtime_wallet/hotkeys"
 [ ! -e "$runtime_wallet" ] && [ ! -L "$runtime_wallet" ] \
@@ -460,6 +556,9 @@ chown -R root:root "$supervisor_root"
 find "$supervisor_root" -xdev -type d -exec chmod 0755 {} +
 find "$supervisor_root" -xdev -type f -perm /0111 -exec chmod 0755 {} +
 find "$supervisor_root" -xdev -type f ! -perm /0111 -exec chmod 0644 {} +
+chmod 0444 "$containers_conf_source"
+chmod 0555 "$podman_smoke_source"
+chmod 0444 "$runtime_smoke_dropin_source"
 chmod 0555 "$artifacts_directory/uv" "$artifacts_directory/umi-grandpa-finality-observer"
 chmod 0444 "$artifacts_directory/raw_spec_finney.json"
 require_immutable_supervisor_tree
@@ -497,6 +596,45 @@ supervisor check-config --config "$config_stage" --profile linux-systemd-v1
 # writing supervisor state. The signed sequence-1 hold is checked as history.
 # No legacy process is stopped until this command succeeds.
 supervisor preflight-common-switch --config "$config_stage"
+
+# Rehearse the exact production unit name and sandbox before any legacy writer
+# is touched. The checked-in drop-in keeps only ExecStartPre live and replaces
+# the signing supervisor process with /usr/bin/true for this one-shot gate.
+runtime_smoke_staged=true
+install -o root -g root -m 0644 "$service_source" "$runtime_service_destination"
+install -d -o root -g root -m 0755 "$runtime_service_dropin_directory"
+install -o root -g root -m 0644 \
+  "$runtime_smoke_dropin_source" "$runtime_service_dropin_destination"
+[ "$(sha256sum "$service_source" | cut -d' ' -f1)" \
+  = "$(sha256sum "$runtime_service_destination" | cut -d' ' -f1)" ] \
+  || fail "staged runtime-smoke service drifted from the production unit"
+[ "$(sha256sum "$runtime_smoke_dropin_source" | cut -d' ' -f1)" \
+  = "$(sha256sum "$runtime_service_dropin_destination" | cut -d' ' -f1)" ] \
+  || fail "staged runtime-smoke drop-in drifted from its checked-in source"
+systemctl daemon-reload
+[ "$(systemctl show "$service_name" --property=FragmentPath --value)" \
+  = "$runtime_service_destination" ] \
+  || fail "runtime smoke did not load the production service fragment"
+[ "$(systemctl show "$service_name" --property=DropInPaths --value)" \
+  = "$runtime_service_dropin_destination" ] \
+  || fail "runtime smoke loaded an unexpected drop-in set"
+[ "$(systemctl show "$service_name" --property=Type --value)" = oneshot ] \
+  || fail "runtime-smoke service type override was not applied"
+[ "$(systemctl show "$service_name" --property=Restart --value)" = no ] \
+  || fail "runtime-smoke restart override was not applied"
+[ "$(systemctl show "$service_name" --property=RuntimeDirectoryPreserve --value)" = yes ] \
+  || fail "runtime-smoke rootless-Podman namespace state would not be preserved"
+case "$(systemctl show "$service_name" --property=ExecStart --value)" in
+  *'path=/usr/bin/true'*'argv[]=/usr/bin/true'*) ;;
+  *) fail "runtime-smoke inert ExecStart override was not applied" ;;
+esac
+systemctl start "$service_name" \
+  || fail "production-unit Podman runtime smoke failed"
+[ "$(systemctl show "$service_name" --property=Result --value)" = success ] \
+  || fail "production-unit Podman runtime smoke did not succeed"
+[ "$(systemctl show "$service_name" --property=ExecMainStatus --value)" = 0 ] \
+  || fail "production-unit inert ExecStart did not exit successfully"
+remove_runtime_smoke_unit
 
 if [ -n "$legacy_unit" ]; then
   retain_installation=true

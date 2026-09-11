@@ -4,9 +4,10 @@ This is the one-time installation path for SN78 validators. Every validator uses
 the same command and signed release stream. There is no validator-specific
 configuration, directive URL, authorization file, or upload key.
 
-The installer supports Ubuntu and Debian hosts on Linux x86_64 or arm64. The
-host should have at least 8 CPU cores, 16 GiB RAM, and 100 GiB of local storage.
-A GPU is not required.
+The installer supports Ubuntu 24.04 or later and Debian 12 or later on Linux
+x86_64 or arm64. It requires Podman 4.3.0 or later. The host should have at
+least 8 CPU cores, 16 GiB RAM, and 100 GiB of local storage. A GPU is not
+required.
 
 ## Install
 
@@ -61,6 +62,15 @@ during that attempt. Once it begins retiring a named legacy service, it keeps
 the verified installation for diagnosis and never silently restarts the old
 writer.
 
+Before that shutdown boundary, the installer loads the verified production
+unit under its final `umi-validator-supervisor.service` name from
+`/run/systemd/system`. A fixed checked-in drop-in temporarily replaces the
+supervisor process with `/usr/bin/true`, while leaving the production
+`ExecStartPre` and every sandbox directive in force. The rehearsal must start
+successfully, after which the installer stops and completely unloads the
+runtime unit before touching a legacy writer. Installation refuses to proceed
+if that unit name or either transient systemd path is already occupied.
+
 ## Check the service
 
 The installer waits for the supervisor process lock and prints
@@ -69,15 +79,45 @@ bounded status later with:
 
 ```sh
 sudo systemctl status --no-pager umi-validator-supervisor.service
-sudo -u umi-validator env -i \
-  HOME=/var/lib/umi-validator-supervisor/home \
-  XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
-  XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
-  XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
-  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  /opt/umi-validator-supervisor/.venv/bin/umi-validator-supervisor status \
-  --config /etc/umi/validator-supervisor.json
+(
+  cd /
+  sudo -u umi-validator env -i \
+    CONTAINERS_CONF_OVERRIDE=/opt/umi-validator-supervisor/deploy/linux-validator-supervisor/containers.conf \
+    HOME=/var/lib/umi-validator-supervisor/home \
+    XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
+    XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
+    XDG_RUNTIME_DIR=/run/umi-validator-supervisor \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    /opt/umi-validator-supervisor/.venv/bin/umi-validator-supervisor status \
+    --config /etc/umi/validator-supervisor.json
+)
 ```
+
+The release includes an immutable root-owned Podman override that clears
+Podman's default container sysctls. The worker does not require them, and this
+keeps rootless container startup compatible with hosts where the service
+sandbox makes `/proc/sys` read-only. Before each supervisor start, systemd also
+runs an inert container smoke test under that same sandbox. It exercises the
+production slirp4netns mode and two empty, fixed dummy bind mounts—one read-only
+and one read-write—but mounts no wallet, operator input, or worker state. Its
+entrypoint is `/usr/bin/true`, so it makes no network request and exercises no
+signing path. Installation cannot report success if rootless container
+execution is broken.
+
+Rootless Podman normally keeps one unprivileged pause process alive to retain
+its user and mount namespaces. The unit preserves only its dedicated
+`/run/umi-validator-supervisor` directory across service stops so Podman can
+reuse that process instead of losing its PID metadata and accumulating orphaned
+namespace keepers. The directory remains mode `0700`, contains no wallet, and
+is cleared with the rest of `/run` at boot.
+
+The unit intentionally omits systemd's `ProtectHostname`, `ProtectKernelLogs`,
+and `ProtectKernelTunables` directives. Each creates a host mount-namespace
+restriction that prevents rootless Podman from creating the worker's own UTS or
+proc namespace. The supervisor still runs under a dedicated non-root account
+with no ambient capabilities; the container drops every capability, enables
+no-new-privileges, uses a read-only root filesystem, and receives only its
+fixed mounts.
 
 If installation reaches the legacy shutdown boundary but the new service does
 not become ready, do not unmask or restart the old writer. Inspect the service

@@ -10,7 +10,9 @@ User=umi-validator
 Group=umi-validator
 UMask=0077
 WorkingDirectory=/var/lib/umi-validator-supervisor
+ExecStartPre=/opt/umi-validator-supervisor/deploy/linux-validator-supervisor/podman-runtime-smoke.sh
 ExecStart=/usr/bin/env -i \
+  CONTAINERS_CONF_OVERRIDE=/opt/umi-validator-supervisor/deploy/linux-validator-supervisor/containers.conf \
   HOME=/var/lib/umi-validator-supervisor/home \
   XDG_CONFIG_HOME=/var/lib/umi-validator-supervisor/container-config \
   XDG_DATA_HOME=/var/lib/umi-validator-supervisor/container-data \
@@ -36,16 +38,14 @@ StateDirectory=umi-validator-supervisor
 StateDirectoryMode=0700
 RuntimeDirectory=umi-validator-supervisor
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 
 PrivateTmp=true
 KeyringMode=private
 RemoveIPC=true
 ProtectClock=true
 ProtectHome=true
-ProtectHostname=true
-ProtectKernelLogs=true
 ProtectKernelModules=true
-ProtectKernelTunables=true
 ProtectSystem=strict
 ProtectProc=invisible
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
@@ -57,8 +57,8 @@ AmbientCapabilities=
 # Rootless Podman needs the narrowly scoped setuid newuidmap/newgidmap helpers.
 # The fixed worker profile applies no-new-privileges inside the container.
 Delegate=true
-ReadOnlyPaths=/etc/umi /opt/umi-validator-supervisor /var/lib/umi-validator-operator-inputs /var/lib/umi-validator-runtime-wallets
-ReadWritePaths=/var/lib/umi-validator-supervisor /var/lib/umi-validator-worker-state /run/umi-validator-supervisor
+ReadOnlyPaths=/etc/umi /opt/umi-validator-supervisor /var/lib/umi-validator-operator-inputs /var/lib/umi-validator-runtime-wallets /var/lib/umi-validator-runtime-smoke/readonly
+ReadWritePaths=/var/lib/umi-validator-supervisor /var/lib/umi-validator-worker-state /var/lib/umi-validator-runtime-smoke/readwrite /run/umi-validator-supervisor
 
 [Install]
 WantedBy=multi-user.target

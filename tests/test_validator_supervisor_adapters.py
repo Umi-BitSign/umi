@@ -50,6 +50,7 @@ from umi.validator_supervisor import (
 )
 from umi.validator_supervisor_adapters import (
     BOOTSTRAP_RESULT_UPLOAD_CREDENTIAL,
+    MAX_FINALIZED_HEAD_AGE_SECONDS,
     SIMPLE_BOOTSTRAP_WORKER_ENTRYPOINT,
     SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
     SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
@@ -518,6 +519,24 @@ async def test_finality_reader_requires_a_strictly_new_fresh_owned_head() -> Non
 
 
 @pytest.mark.asyncio
+async def test_finality_reader_accepts_normal_public_finality_lag() -> None:
+    observed = datetime.now(timezone.utc)
+    observer = _QueueObserver()
+    reader = FinneyFinalizedBlockReader(
+        SimpleNamespace(),
+        observer=observer,
+        timeout_seconds=0.2,
+        clock=lambda: observed,
+    )
+    head = FINNEY_BOOTSTRAP_BLOCK_NUMBER + 1
+    observer.records.put(_attestation(head, observed - timedelta(seconds=39)))
+    try:
+        assert await reader.read_finalized_block() == head
+    finally:
+        await reader.stop()
+
+
+@pytest.mark.asyncio
 async def test_finality_reader_rejects_stale_head_and_times_out_without_a_new_one() -> None:
     observed = datetime.now(timezone.utc)
     stale_observer = _QueueObserver()
@@ -528,7 +547,10 @@ async def test_finality_reader_rejects_stale_head_and_times_out_without_a_new_on
         clock=lambda: observed,
     )
     stale_observer.records.put(
-        _attestation(FINNEY_BOOTSTRAP_BLOCK_NUMBER + 1, observed - timedelta(seconds=31))
+        _attestation(
+            FINNEY_BOOTSTRAP_BLOCK_NUMBER + 1,
+            observed - timedelta(seconds=MAX_FINALIZED_HEAD_AGE_SECONDS + 1),
+        )
     )
     with pytest.raises(ValidatorSupervisorAdapterError, match="finalized_head_stale"):
         await stale_reader.read_finalized_block()
