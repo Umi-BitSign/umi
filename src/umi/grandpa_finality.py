@@ -215,8 +215,10 @@ class GrandpaFinalityObserver:
         bootstrap_block_hash: str,
         record_timeout_seconds: float = 900.0,
         limits: GrandpaFinalityLimits | None = None,
+        staging_directory: str | os.PathLike[str] | None = None,
     ) -> None:
         self._limits = limits or GrandpaFinalityLimits()
+        self._staging_directory = staging_directory
         self._binary_path = self._validate_absolute_path(binary_path, field="binary")
         self._chain_spec_path = self._validate_absolute_path(chain_spec_path, field="chain_spec")
         self._expected_binary_sha256 = self._validate_sha256(expected_binary_sha256, field="binary")
@@ -402,7 +404,8 @@ class GrandpaFinalityObserver:
                     expected_sha256=self._expected_chain_spec_sha256,
                     maximum_bytes=self._limits.maximum_chain_spec_bytes,
                 ),
-            )
+            ),
+            staging_directory=self._staging_directory,
         )
 
     def _config(

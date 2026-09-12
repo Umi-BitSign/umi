@@ -637,6 +637,7 @@ class BittensorRegistrationBridgeChain:
                     finality_verifier_binary="/opt/umi/bin/umi-grandpa-finality-observer",
                     finality_verifier_sha256=_FINALITY_HASHES[architecture],
                     finality_chain_spec_path="/opt/umi/finney.json",
+                    finality_staging_directory="/run/umi-finality",
                 ),
                 timeout_seconds=120.0,
             )

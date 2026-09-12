@@ -624,6 +624,7 @@ class FinneyFinalizedBlockReader:
             bootstrap_block_number=FINNEY_BOOTSTRAP_BLOCK_NUMBER,
             bootstrap_block_hash=f"0x{FINNEY_BOOTSTRAP_BLOCK_HASH}",
             record_timeout_seconds=self.timeout_seconds,
+            staging_directory=getattr(config, "finality_staging_directory", None),
         )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._head: Any | None = None
@@ -1160,6 +1161,14 @@ class RootlessPodmanWorkerAdapter:
             "--label",
             f"vision.umi.supervisor.mode={activation.mode}",
         ]
+        if registration_bridge:
+            arguments.extend(
+                (
+                    "--tmpfs",
+                    "/run/umi-finality:rw,exec,nosuid,nodev,size=67108864,"
+                    f"uid={self.config.worker_uid},gid={self.config.worker_gid},mode=0700",
+                )
+            )
         for mount in mounts:
             arguments.extend(("--mount", mount))
         for value in environment:

@@ -131,6 +131,14 @@ jobs:
             --security-opt no-new-privileges \
             --entrypoint /opt/umi/bin/umi-grandpa-finality-observer \
             "${IMAGE_TAG}" --conformance-self-test
+          docker run --rm --platform "${PLATFORM}" \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456 \
+            --tmpfs /run/umi-finality:rw,exec,nosuid,nodev,size=67108864,uid=65532,gid=65532,mode=0700 \
+            --entrypoint /opt/umi/.venv/bin/python \
+            "${IMAGE_TAG}" -c 'import subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; chain = BittensorRegistrationBridgeChain()
+          with chain.finality.observer._staged_inputs() as staged:
+              subprocess.run([str(staged["binary"]), "--conformance-self-test"], check=True)'
 
       - name: Extract the host finality verifier and pinned Finney chain spec
         shell: bash

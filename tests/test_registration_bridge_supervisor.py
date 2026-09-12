@@ -476,6 +476,11 @@ async def test_bridge_dispatch_uses_only_fixed_entrypoint_mounts_and_release_pin
     adapter, staged, activation = await _staged_bridge_case(tmp_path, signed_bridge_policy)
     arguments = adapter._worker_arguments(staged, activation)
     encoded = "\n".join(arguments)
+    assert "/tmp:rw,noexec,nosuid,nodev,size=268435456" in arguments
+    assert (
+        "/run/umi-finality:rw,exec,nosuid,nodev,size=67108864,"
+        f"uid={adapter.config.worker_uid},gid={adapter.config.worker_gid},mode=0700"
+    ) in arguments
 
     assert arguments[arguments.index("--entrypoint") + 1] == REGISTRATION_BRIDGE_WORKER_ENTRYPOINT
     assert (

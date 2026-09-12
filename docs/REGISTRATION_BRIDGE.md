@@ -82,6 +82,11 @@ for the same hotkey. The UMI-managed UID 0 and UID 54 installations are
 updated one at a time, preserving their directive checkpoints and worker
 journals. No coldkey is used.
 
+The worker keeps its root filesystem read-only and `/tmp` non-executable.
+The hash-checked native finality verifier is copied into a dedicated 64 MiB
+in-memory executable staging mount at `/run/umi-finality`. This mount is private
+to the worker and is not a host directory or a persistent data volume.
+
 This first rollout targets those two existing UMI installations. A validator
 with an old on-chain row but no UMI submission journal is held for reconciliation;
 this release does not infer that an untracked previous writer has stopped.

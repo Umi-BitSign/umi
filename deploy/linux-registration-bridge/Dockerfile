@@ -43,6 +43,7 @@ RUN uv sync --locked --no-dev \
     && printf '%s\n' "${UMI_GIT_REVISION}" > /opt/umi-image-revision \
     && chmod 0444 /opt/umi-image-revision \
     && install -d -o 65532 -g 65532 -m 0700 /home/umi \
+    && install -d -o 65532 -g 65532 -m 0700 /run/umi-finality \
     && ln -s /opt/umi/.venv/bin/umi-registration-bridge /usr/local/bin/umi-registration-bridge
 
 COPY --from=finality /umi-grandpa-finality-observer /opt/umi/bin/umi-grandpa-finality-observer

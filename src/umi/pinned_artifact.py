@@ -136,6 +136,8 @@ def _copy_verified(specification: PinnedArtifact, destination: Path) -> None:
 @contextmanager
 def staged_pinned_artifacts(
     specifications: tuple[PinnedArtifact, ...],
+    *,
+    staging_directory: str | os.PathLike[str] | None = None,
 ) -> Iterator[Mapping[str, Path]]:
     """Yield private copies made from the exact file descriptors that were hashed."""
 
@@ -144,7 +146,20 @@ def staged_pinned_artifacts(
     names = tuple(specification.name for specification in specifications)
     if len(set(names)) != len(names):
         raise ValueError("pinned artifact names must be unique")
-    with tempfile.TemporaryDirectory(prefix="umi-pinned-artifacts-") as directory_text:
+    if staging_directory is not None:
+        parent = Path(staging_directory)
+        metadata = parent.lstat()
+        if (
+            not parent.is_absolute()
+            or parent.resolve(strict=True) != parent
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise PinnedArtifactError("unsafe_stage_parent")
+    with tempfile.TemporaryDirectory(
+        prefix="umi-pinned-artifacts-", dir=staging_directory
+    ) as directory_text:
         directory = Path(directory_text)
         os.chmod(directory, 0o700)
         directory_status = directory.stat()
