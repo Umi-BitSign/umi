@@ -39,11 +39,13 @@ protocol extension.
 SN78 is active on mainnet, but UMI translation weights are not. The public-endpoint
 pilot is closed. A signed [temporary registration bridge](docs/REGISTRATION_BRIDGE.md)
 replaces its frozen two-miner reward rule with live-miner availability checks and
-equal total weight per qualifying coldkey. It retains the original bootstrap
+equal total weight per qualifying coldkey/IP group. It retains the original bootstrap
 sunset. Both UID 0 and UID 54 have finalized bridge rows. The
 [September 12 activation readback](docs/REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
-shows positive consensus and incentive for 16 miners from the initial row;
-the expanded rows still awaited a later consensus update at that snapshot.
+shows positive consensus and incentive for 16 miners from the initial row.
+The later [IP-cap readback](docs/REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) records
+both validators applying the shared-coldkey-or-IP rule; those new rows still
+awaited a later consensus update at that snapshot.
 
 Registered non-validator miners need a healthy chain-announced HTTPS `/healthz`
 endpoint. No pilot, manual opt-in, or running model is required for the bridge.
@@ -88,7 +90,8 @@ temporary registration-bridge weights
 signed bridge policy + hash-pinned release directive
   -> finalized registration, owner, permit, and serving roster
   -> bounded public HTTPS health checks and finalized roster recheck
-  -> equal total weight per qualifying coldkey, split among its live UIDs
+  -> merge live UIDs sharing a coldkey or HTTPS IP (ports ignored)
+  -> equal total weight per connected group, split among its live UIDs
   -> exact direct 256-entry row from the installed validator
   -> finalized row and LastUpdate as the public receipt
   -> automatic renewal before the activity cutoff, ending at hard sunset

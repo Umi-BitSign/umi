@@ -1,18 +1,20 @@
 # Temporary live-miner rewards
 
 The temporary bridge has replaced the frozen two-miner pilot policy on UMI's
-UID 0 and UID 54 validators. Both have finalized bridge rows. At the published
-September 12 snapshot, 16 miners had positive consensus and incentive from the
-initial row; the expanded rows still awaited a later consensus update.
-See the [activation report and public readback](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md).
+UID 0 and UID 54 validators. Both have finalized rows under the shared-coldkey-or-IP
+rule. See the [IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) for the
+signed policy and exact rows. At that snapshot, the new rows still awaited a
+later consensus update. The [initial activation report](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
+records the earlier coldkey-only policy.
 
 ## Eligibility and weights
 
 At each finalized snapshot, the validator considers the registered SN78 UIDs.
 It checks each eligible miner's chain-announced public HTTPS `/healthz`
-endpoint. Passing miners are grouped by the coldkey that owns their registered
-hotkey in finalized chain state. Each qualifying coldkey receives the same total
-weight, divided among its passing UIDs. UID 0, validator-permitted UIDs,
+endpoint. Passing miners sharing a coldkey or HTTPS endpoint IP form one group,
+including transitive connections. Ports do not create separate groups. Each
+group receives the same total weight, divided among its passing UIDs.
+UID 0, validator-permitted UIDs,
 and subnet-owner-associated hotkeys receive zero
 miner weight. There is no pilot requirement, manual opt-in, or model evaluation.
 
@@ -23,10 +25,10 @@ that miner from the current row, without disqualifying the healthy miners.
 The validator rechecks the finalized roster after the health probes. A batch
 failure or zero passing miners holds submissions instead of inventing a row.
 
-This is equal weight per qualifying coldkey. Adding live UIDs under the same
-coldkey does not increase that coldkey's total share. A coldkey is only a proxy
-for an operator: one person can use several coldkeys, and the bridge cannot
-prove independent human ownership. It does not group miners by IP address.
+Adding live UIDs under the same coldkey or IP does not create extra group
+budgets. This is an infrastructure cap, not proof of independent operators.
+Shared-IP miners split one budget; a person using distinct coldkeys and distinct
+IPs can still create multiple groups.
 
 A health check proves HTTPS reachability only. It does not authenticate the endpoint
 to the hotkey, inspect an `ok` field in the response body, or establish that a
@@ -37,7 +39,7 @@ endpoint check.
 
 The exact row contains all 256 UID destinations, with positive integer weights
 for passing miners and `0` for excluded destinations. Let `m` be the smallest
-number of passing UIDs in any qualifying coldkey group. Each group receives an
+number of passing UIDs in any qualifying group. Each group receives an
 integer budget of `65535 * m`. Divide that budget by the group's UID count;
 assign any remainder one unit at a time in ascending UID order. Group totals
 are exactly equal, every individual weight is at most `65535`, and at least
@@ -51,12 +53,12 @@ Other validators' weights and subnet consensus can affect final incentive
 amounts. The chain's miner incentives must be checked after a consensus
 update; submitting a transaction alone is insufficient.
 
-## Prepared IP-deduplication update
+## Signed IP-deduplication update
 
-The next signed policy can select `equal_live_coldkey_ip_groups/1`, paired with
-`registered_owner_or_https_ip_connected_components/1`. This code change alone
-does not activate it. The currently signed coldkey-only policy keeps its original
-meaning and remains readable in retained journals.
+The IP-cap policy selects `equal_live_coldkey_ip_groups/1`, paired with
+`registered_owner_or_https_ip_connected_components/1`. Activation requires the
+signed policy and a finalized row, not just updated source code. The earlier
+coldkey-only policy keeps its original meaning in retained journals.
 
 Under the new rule, passing UIDs sharing a coldkey **or** an HTTPS endpoint IP
 form one reward group. Connections are transitive, and ports are ignored.
@@ -73,8 +75,8 @@ are not machine identities. Since health checks do not authenticate the endpoint
 to a hotkey, copying another miner's announced endpoint can dilute that group's
 share. No UID blacklist, penalty or burn is introduced.
 
-Activation requires a compatible host parser, a new signed worker/policy release,
-and a finalized row under that policy. The original deadline below is unchanged.
+The [IP-cap deployment record](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) records
+the signed release and finalized readback. The original deadline below is unchanged.
 
 ## Duration
 
