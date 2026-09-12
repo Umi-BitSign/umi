@@ -617,6 +617,30 @@ def build_registration_bridge_call(decision: RegistrationBridgeDecision, *, call
     return call
 
 
+async def _registration_bindings(pinned, participants):
+    """Bound point reads and drain outstanding work before retrying a snapshot."""
+    semaphore = asyncio.Semaphore(8)
+    direct = storage.SubtensorModule
+
+    async def read(participant):
+        async with semaphore:
+            return (
+                await pinned.query(direct.Keys, [78, participant.uid]),
+                await pinned.query(direct.Uids, [78, participant.hotkey]),
+                await pinned.query(direct.BlockAtRegistration, [78, participant.uid]),
+                await pinned.query(direct.Owner, [participant.hotkey]),
+            )
+
+    tasks = [asyncio.create_task(read(participant)) for participant in participants]
+    try:
+        return await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class BittensorRegistrationBridgeChain:
     """Owned finality identities with all mutable RPC reads pinned to that identity."""
 
@@ -740,17 +764,7 @@ class BittensorRegistrationBridgeChain:
         owner_keys, row, binding_values = await asyncio.gather(
             pinned.query(direct.OwnedHotkeys, [cold_address]),
             pinned.query(direct.Weights, [78, writer[0].uid]),
-            asyncio.gather(
-                *(
-                    asyncio.gather(
-                        pinned.query(direct.Keys, [78, p.uid]),
-                        pinned.query(direct.Uids, [78, p.hotkey]),
-                        pinned.query(direct.BlockAtRegistration, [78, p.uid]),
-                        pinned.query(direct.Owner, [p.hotkey]),
-                    )
-                    for p in base
-                )
-            ),
+            _registration_bindings(pinned, base),
         )
         owner_keys = getattr(owner_keys, "value", owner_keys)
         _require(
