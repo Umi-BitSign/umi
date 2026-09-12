@@ -51,6 +51,12 @@ from .grandpa_finality import (
     GrandpaFinalityObserver,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .registration_bridge import (
+    SignedRegistrationBridgePolicy,
+    parse_registration_bridge_policy,
+    registration_bridge_policy_sha256,
+    verify_registration_bridge_policy,
+)
 from .simple_bootstrap_validator import (
     SignedSimpleBootstrapLease,
     verify_simple_bootstrap_lease,
@@ -77,6 +83,10 @@ SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA = (
     "umi-validator-supervisor-simple-bootstrap-input-bundle/1"
 )
 SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE = "umi-simple-bootstrap-common-inputs/1"
+SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA = (
+    "umi-validator-supervisor-registration-bridge-input-bundle/1"
+)
+SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE = "umi-registration-bridge-policy-inputs/1"
 SUPERVISOR_HOST_ARTIFACT_MANIFEST_SCHEMA = "umi-validator-supervisor-host-artifacts/1"
 SUPERVISOR_SIGNED_HOST_ARTIFACT_MANIFEST_SCHEMA = "umi-validator-supervisor-signed-host-artifacts/1"
 SUPERVISOR_HOST_ARTIFACT_SIGNATURE_DOMAIN = b"umi-validator-supervisor-host-artifacts-v1\0"
@@ -94,8 +104,10 @@ MAX_FINALIZED_FUTURE_SKEW_SECONDS = 30.0
 WORKER_CONTAINER_NAME = "umi-validator-supervised-worker"
 WORKER_ENTRYPOINT = "/usr/local/bin/umi-validator-supervisor-worker"
 SIMPLE_BOOTSTRAP_WORKER_ENTRYPOINT = "/usr/local/bin/umi-simple-bootstrap-validator"
+REGISTRATION_BRIDGE_WORKER_ENTRYPOINT = "/usr/local/bin/umi-registration-bridge"
 WORKER_RELEASE_MANIFEST_PATH = "/run/umi/release/release-manifest.json"
 WORKER_OPERATOR_INPUT_PATH = "/run/umi/operator-inputs"
+REGISTRATION_BRIDGE_POLICY_RELATIVE_PATH = "registration-bridge/registration-bridge-policy.json"
 WORKER_WALLET_PATH = "/run/umi/wallets"
 WORKER_WALLET_NAME = "runtime"
 WORKER_STATE_PATH = "/var/lib/umi-worker"
@@ -222,6 +234,19 @@ class SupervisorSimpleBootstrapInputBundle(StrictProtocolModel):
             expected_revision=self.signed_lease.body.umi_git_revision,
             current_block=self.signed_lease.body.valid_from_block,
         )
+        return self
+
+
+class SupervisorRegistrationBridgeInputBundle(StrictProtocolModel):
+    """One signed temporary registration-bridge policy and no host authority."""
+
+    schema_: Literal[SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA] = Field(alias="schema")
+    profile: Literal[SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE]
+    signed_policy: SignedRegistrationBridgePolicy
+
+    @model_validator(mode="after")
+    def validate_signed_policy(self) -> Self:
+        parse_registration_bridge_policy(canonical_json_bytes(self.signed_policy))
         return self
 
 
@@ -599,6 +624,7 @@ class FinneyFinalizedBlockReader:
             bootstrap_block_number=FINNEY_BOOTSTRAP_BLOCK_NUMBER,
             bootstrap_block_hash=f"0x{FINNEY_BOOTSTRAP_BLOCK_HASH}",
             record_timeout_seconds=self.timeout_seconds,
+            staging_directory=getattr(config, "finality_staging_directory", None),
         )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._head: Any | None = None
@@ -1050,6 +1076,9 @@ class RootlessPodmanWorkerAdapter:
         simple_bootstrap = (
             activation.release.entrypoint_profile == "umi-simple-bootstrap-validator/1"
         )
+        registration_bridge = (
+            activation.release.entrypoint_profile == "umi-registration-bridge-validator/1"
+        )
         if legacy_bootstrap:
             mounts.append(
                 _bind_mount(
@@ -1091,6 +1120,19 @@ class RootlessPodmanWorkerAdapter:
                 )
             )
             worker_arguments = ["run", "--state-dir", WORKER_STATE_PATH]
+        elif registration_bridge:
+            entrypoint = REGISTRATION_BRIDGE_WORKER_ENTRYPOINT
+            environment.extend(
+                (
+                    f"UMI_BRIDGE_POLICY_PATH={WORKER_OPERATOR_INPUT_PATH}/"
+                    f"{REGISTRATION_BRIDGE_POLICY_RELATIVE_PATH}",
+                    f"UMI_HOTKEY={self.config.wallet.hotkey}",
+                    f"UMI_GIT_REVISION={activation.release.umi_git_revision}",
+                    "UMI_IMAGE_REVISION_PATH=/opt/umi-image-revision",
+                    f"UMI_IMAGE_SOURCE_TREE_SHA256={activation.release.umi_source_tree_sha256}",
+                )
+            )
+            worker_arguments = ["run", "--state-dir", WORKER_STATE_PATH]
         arguments: list[str] = [
             self.config.container_runtime,
             "run",
@@ -1119,6 +1161,13 @@ class RootlessPodmanWorkerAdapter:
             "--label",
             f"vision.umi.supervisor.mode={activation.mode}",
         ]
+        if registration_bridge:
+            arguments.extend(
+                (
+                    "--tmpfs",
+                    "/run/umi-finality:rw,exec,nosuid,nodev,size=67108864,mode=1777",
+                )
+            )
         for mount in mounts:
             arguments.extend(("--mount", mount))
         for value in environment:
@@ -1215,6 +1264,39 @@ class RootlessPodmanWorkerAdapter:
                 or bundle.signed_lease.body.policy_sha256 != activation.policy_sha256
             ):
                 raise ValidatorSupervisorAdapterError("operator_input_release_binding_mismatch")
+        elif (
+            activation.operator_inputs is not None
+            and activation.operator_inputs.profile == SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE
+        ):
+            bundle = _parse_bootstrap_input_bundle(
+                _read_regular_file_bounded(
+                    staged.root / "operator-input-bundle.json",
+                    MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES,
+                    "operator_input_bundle_unsafe",
+                )
+            )
+            if not isinstance(bundle, SupervisorRegistrationBridgeInputBundle):
+                raise ValidatorSupervisorAdapterError("operator_input_profile_mismatch")
+            try:
+                verify_registration_bridge_policy(
+                    bundle.signed_policy,
+                    expected_revision=activation.release.umi_git_revision,
+                    current_block=activation.valid_from_block,
+                )
+                verify_registration_bridge_policy(
+                    bundle.signed_policy,
+                    expected_revision=activation.release.umi_git_revision,
+                    current_block=activation.valid_through_block,
+                )
+            except Exception as error:
+                raise ValidatorSupervisorAdapterError(
+                    "operator_input_release_binding_mismatch"
+                ) from error
+            if not hmac.compare_digest(
+                registration_bridge_policy_sha256(bundle.signed_policy),
+                activation.policy_sha256,
+            ):
+                raise ValidatorSupervisorAdapterError("operator_input_release_binding_mismatch")
 
     async def _stage_operator_inputs(
         self,
@@ -1239,35 +1321,46 @@ class RootlessPodmanWorkerAdapter:
         if bundle.profile != target.profile:
             raise ValidatorSupervisorAdapterError("operator_input_profile_mismatch")
         input_root = release_root / "operator-inputs"
-        bootstrap_root = input_root / "bootstrap"
         input_root.mkdir(mode=0o700)
-        bootstrap_root.mkdir(mode=0o700)
-        _write_private_bytes(
-            bootstrap_root / "signed-manifest.json",
-            canonical_json_bytes(bundle.signed_manifest),
-        )
-        if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
+        if isinstance(bundle, SupervisorRegistrationBridgeInputBundle):
+            policy_root = input_root / "registration-bridge"
+            policy_root.mkdir(mode=0o700)
+            policy_path = input_root / REGISTRATION_BRIDGE_POLICY_RELATIVE_PATH
             _write_private_bytes(
-                bootstrap_root / "bootstrap-lease.json",
-                canonical_json_bytes(bundle.signed_lease),
+                policy_path,
+                canonical_json_bytes(bundle.signed_policy),
             )
+            policy_path.chmod(0o400)
+            policy_root.chmod(0o500)
         else:
+            bootstrap_root = input_root / "bootstrap"
+            bootstrap_root.mkdir(mode=0o700)
             _write_private_bytes(
-                bootstrap_root / "direct-transition-authorization.json",
-                canonical_json_bytes(bundle.transition_authorization),
+                bootstrap_root / "signed-manifest.json",
+                canonical_json_bytes(bundle.signed_manifest),
             )
-            _write_private_bytes(
-                bootstrap_root / "drain-checkpoint.json",
-                canonical_json_bytes(bundle.drain_checkpoint),
-            )
-            _write_private_bytes(
-                bootstrap_root / "owner-fence-receipt.json",
-                canonical_json_bytes(bundle.owner_fence_receipt),
-            )
+            if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
+                _write_private_bytes(
+                    bootstrap_root / "bootstrap-lease.json",
+                    canonical_json_bytes(bundle.signed_lease),
+                )
+            else:
+                _write_private_bytes(
+                    bootstrap_root / "direct-transition-authorization.json",
+                    canonical_json_bytes(bundle.transition_authorization),
+                )
+                _write_private_bytes(
+                    bootstrap_root / "drain-checkpoint.json",
+                    canonical_json_bytes(bundle.drain_checkpoint),
+                )
+                _write_private_bytes(
+                    bootstrap_root / "owner-fence-receipt.json",
+                    canonical_json_bytes(bundle.owner_fence_receipt),
+                )
+            for item in bootstrap_root.iterdir():
+                item.chmod(0o400)
+            bootstrap_root.chmod(0o500)
         bundle_path.chmod(0o400)
-        for item in bootstrap_root.iterdir():
-            item.chmod(0o400)
-        bootstrap_root.chmod(0o500)
         input_root.chmod(0o500)
 
     async def _verify_staged_operator_inputs(
@@ -1297,35 +1390,46 @@ class RootlessPodmanWorkerAdapter:
         if bundle.profile != target.profile:
             raise ValidatorSupervisorAdapterError("operator_input_profile_mismatch")
         input_root = staged.operator_input_root
-        bootstrap_root = input_root / "bootstrap"
         _require_directory(input_root, "operator_input_root_unsafe", private=True, modes={0o500})
+        if isinstance(bundle, SupervisorRegistrationBridgeInputBundle):
+            content_root = input_root / "registration-bridge"
+            expected = {
+                "registration-bridge-policy.json": canonical_json_bytes(bundle.signed_policy)
+            }
+            expected_root_names = {"registration-bridge"}
+        else:
+            content_root = input_root / "bootstrap"
+            expected_root_names = {"bootstrap"}
+            expected = {"signed-manifest.json": canonical_json_bytes(bundle.signed_manifest)}
+            if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
+                expected["bootstrap-lease.json"] = canonical_json_bytes(bundle.signed_lease)
+            else:
+                expected.update(
+                    {
+                        "direct-transition-authorization.json": canonical_json_bytes(
+                            bundle.transition_authorization
+                        ),
+                        "drain-checkpoint.json": canonical_json_bytes(bundle.drain_checkpoint),
+                        "owner-fence-receipt.json": canonical_json_bytes(
+                            bundle.owner_fence_receipt
+                        ),
+                    }
+                )
         _require_directory(
-            bootstrap_root,
+            content_root,
             "operator_input_root_unsafe",
             private=True,
             modes={0o500},
         )
-        expected = {"signed-manifest.json": canonical_json_bytes(bundle.signed_manifest)}
-        if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
-            expected["bootstrap-lease.json"] = canonical_json_bytes(bundle.signed_lease)
-        else:
-            expected.update(
-                {
-                    "direct-transition-authorization.json": canonical_json_bytes(
-                        bundle.transition_authorization
-                    ),
-                    "drain-checkpoint.json": canonical_json_bytes(bundle.drain_checkpoint),
-                    "owner-fence-receipt.json": canonical_json_bytes(bundle.owner_fence_receipt),
-                }
-            )
         try:
-            names = {item.name for item in bootstrap_root.iterdir()}
+            root_names = {item.name for item in input_root.iterdir()}
+            names = {item.name for item in content_root.iterdir()}
         except OSError as error:
             raise ValidatorSupervisorAdapterError("operator_input_root_unsafe") from error
-        if names != set(expected):
+        if root_names != expected_root_names or names != set(expected):
             raise ValidatorSupervisorAdapterError("operator_input_file_set_mismatch")
         for name, payload in expected.items():
-            path = bootstrap_root / name
+            path = content_root / name
             _require_regular_file(path, "operator_input_file_unsafe", modes={0o400})
             if (
                 _read_regular_file_bounded(
@@ -1542,7 +1646,11 @@ def parse_canonical_signed_supervisor_host_artifact_manifest(
 
 def _parse_bootstrap_input_bundle(
     payload: bytes,
-) -> SupervisorBootstrapInputBundle | SupervisorSimpleBootstrapInputBundle:
+) -> (
+    SupervisorBootstrapInputBundle
+    | SupervisorSimpleBootstrapInputBundle
+    | SupervisorRegistrationBridgeInputBundle
+):
     if not payload or len(payload) > MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES:
         raise ValidatorSupervisorAdapterError("operator_input_bundle_size_invalid")
     try:
@@ -1556,6 +1664,9 @@ def _parse_bootstrap_input_bundle(
         model = {
             SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA: SupervisorBootstrapInputBundle,
             SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA: (SupervisorSimpleBootstrapInputBundle),
+            SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA: (
+                SupervisorRegistrationBridgeInputBundle
+            ),
         }.get(value.get("schema"))
         if model is None:
             raise ValueError("operator input bundle schema is unsupported")
@@ -1993,8 +2104,12 @@ def _require_path_below(value: object, root: Path, reason: str) -> None:
 
 
 __all__ = [
+    "REGISTRATION_BRIDGE_POLICY_RELATIVE_PATH",
+    "REGISTRATION_BRIDGE_WORKER_ENTRYPOINT",
     "SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA",
     "SUPERVISOR_BOOTSTRAP_INPUT_PROFILE",
+    "SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA",
+    "SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE",
     "SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA",
     "SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE",
     "FinneyFinalizedBlockReader",
@@ -2007,6 +2122,7 @@ __all__ = [
     "SupervisorBootstrapInputBundle",
     "SupervisorHostArtifact",
     "SupervisorHostArtifactManifest",
+    "SupervisorRegistrationBridgeInputBundle",
     "SupervisorReleaseManifest",
     "SupervisorSimpleBootstrapInputBundle",
     "ValidatorSupervisorAdapterError",

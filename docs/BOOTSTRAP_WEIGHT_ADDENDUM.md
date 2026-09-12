@@ -1,10 +1,15 @@
 # SN78 seven-day bootstrap service-weight addendum
 
-Current transport note: the
+Historical policy: the [temporary live-miner bridge](REGISTRATION_BRIDGE.md)
+replaces the frozen pilot eligibility rule. It uses a separate signed policy and
+retains the original hard sunset. The text below records the earlier rules;
+it is not the current miner enrollment path.
+
+Historical transport note: the
 [shared-validator bootstrap supersession](SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
 replaces this document's validator authorization, CRv4 submission, renewal, and
 terminal-publication procedures. This document remains authoritative for the
-frozen eligibility policy and hard sunset.
+earlier frozen eligibility policy and hard sunset.
 
 Status: temporary public bootstrap profile
 

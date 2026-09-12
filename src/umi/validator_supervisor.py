@@ -59,6 +59,7 @@ SupervisorEntrypointProfile = Literal[
     "umi-live-shadow-validator/1",
     "umi-bootstrap-weight-validator/2",
     "umi-simple-bootstrap-validator/1",
+    "umi-registration-bridge-validator/1",
     "umi-translation-validator/1",
 ]
 SupervisorValidatorScope = Literal["explicit_hotkeys", "any_permitted_sn78"]
@@ -292,6 +293,7 @@ class SupervisorOperatorInputTarget(StrictProtocolModel):
     profile: Literal[
         "umi-bootstrap-direct-inputs/2",
         "umi-simple-bootstrap-common-inputs/1",
+        "umi-registration-bridge-policy-inputs/1",
     ]
     bundle_url: Annotated[str, Field(min_length=1, max_length=2_048)]
     bundle_sha256: Hex32
@@ -346,27 +348,41 @@ class SupervisorDirective(StrictProtocolModel):
         else:
             if self.policy_sha256 is None or self.release is None:
                 raise ValueError("a worker directive requires a policy and release")
-            expected_profile = {
-                "inactive_shadow": "umi-live-shadow-validator/1",
-                "bootstrap_service_weights": {
-                    "explicit_hotkeys": "umi-bootstrap-weight-validator/2",
-                    "any_permitted_sn78": "umi-simple-bootstrap-validator/1",
-                }[self.validator_scope],
-                "translation_weights": "umi-translation-validator/1",
-            }[self.mode]
-            if self.release.entrypoint_profile != expected_profile:
-                raise ValueError("worker mode and entrypoint profile disagree")
             if self.mode == "bootstrap_service_weights":
                 if self.operator_inputs is None:
                     raise ValueError("bootstrap mode requires an immutable operator-input bundle")
-                expected_input_profile = {
-                    "explicit_hotkeys": "umi-bootstrap-direct-inputs/2",
-                    "any_permitted_sn78": "umi-simple-bootstrap-common-inputs/1",
+                allowed_profiles = {
+                    "explicit_hotkeys": {
+                        (
+                            "umi-bootstrap-weight-validator/2",
+                            "umi-bootstrap-direct-inputs/2",
+                        )
+                    },
+                    "any_permitted_sn78": {
+                        (
+                            "umi-simple-bootstrap-validator/1",
+                            "umi-simple-bootstrap-common-inputs/1",
+                        ),
+                        (
+                            "umi-registration-bridge-validator/1",
+                            "umi-registration-bridge-policy-inputs/1",
+                        ),
+                    },
                 }[self.validator_scope]
-                if self.operator_inputs.profile != expected_input_profile:
-                    raise ValueError("validator scope and bootstrap input profile disagree")
+                if (
+                    self.release.entrypoint_profile,
+                    self.operator_inputs.profile,
+                ) not in allowed_profiles:
+                    raise ValueError("validator scope and bootstrap profiles disagree")
             elif self.operator_inputs is not None:
                 raise ValueError("only bootstrap mode may name an operator-input bundle")
+            else:
+                expected_profile = {
+                    "inactive_shadow": "umi-live-shadow-validator/1",
+                    "translation_weights": "umi-translation-validator/1",
+                }[self.mode]
+                if self.release.entrypoint_profile != expected_profile:
+                    raise ValueError("worker mode and entrypoint profile disagree")
         return self
 
 

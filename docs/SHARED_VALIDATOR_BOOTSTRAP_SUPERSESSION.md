@@ -1,8 +1,10 @@
 # SN78 shared-validator bootstrap supersession
 
-Status: signed release and matching finalized row published; check
-[public status](https://api.umi.vision/api/v1/bootstrap-service) for current activity
-and economic effect
+Status: historical frozen-pilot release. The
+[temporary live-miner bridge](REGISTRATION_BRIDGE.md) replaces its eligibility
+rule under a separate signed policy. The old
+[pilot status API](https://api.umi.vision/api/v1/bootstrap-service) describes this
+retired policy, not current bridge eligibility or economic effect.
 
 Scope: Finney SN78, MechId 0, `bootstrap_service_binary`
 

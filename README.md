@@ -18,6 +18,7 @@ protocol extension.
 - [bitsign product MVP](roadmap/bitsign-mvp/README.md)
 - [public observer API contract](docs/DASHBOARD_API.md)
 - [what miners should run now](docs/CURRENT_MINER_OPERATION.md)
+- [temporary live-miner policy and activation](docs/REGISTRATION_BRIDGE.md)
 - [miner model integration](docs/MINER_MODEL_INTEGRATION.md)
 - [Apple Silicon miner operator](docs/MACOS_MINER_OPERATOR.md)
 - [Linux x86_64 validator operator](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
@@ -48,26 +49,23 @@ remaining production work.
 
 Historical guides that refer to whitepaper Section 14 describe
 [version 0.1](whitepaper/LEGACY_V0_1.md), not the successor activation procedure.
-Existing signed bootstrap policies and their expiry remain unchanged.
+The registration bridge has its own signed policy and retains the original sunset.
 
-SN78 is active on mainnet, but UMI translation weights are not. The public endpoint
-pilot campaign is closed; its signed, replayable results remain available through
-the observer API. The separately labeled seven-day bootstrap service-weight release
-has published its signed lease, shared release directive, and a matching finalized
-row. See [public bootstrap status](https://api.umi.vision/api/v1/bootstrap-service)
-for its current activity and economic effect. The owner fence keeps commit-reveal
-disabled and rejects legacy short rows. Any currently permitted SN78 validator
-may install the signed supervisor release and
-submit the same raw full-UID service row through the original policy's hard
-sunset. Finalized chain state records each validator's exact row, `LastUpdate`,
-permit, and manifest commitment. The bootstrap is not a translation ranking and
-receives no credit toward translation-weight activation.
+SN78 is active on mainnet, but UMI translation weights are not. The public-endpoint
+pilot is closed. A signed [temporary registration bridge](docs/REGISTRATION_BRIDGE.md)
+replaces its frozen two-miner reward rule with live-miner availability checks and
+equal total weight per qualifying coldkey. It retains the original bootstrap
+sunset. Both UID 0 and UID 54 have finalized bridge rows. The
+[September 12 activation readback](docs/REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
+shows positive consensus and incentive for 16 miners from the initial row;
+the expanded rows still awaited a later consensus update at that snapshot.
 
-The current bootstrap worker checks endpoint health and replays existing evidence;
-it does not issue fresh translation requests. Frozen bootstrap participants must
-keep their announced HTTPS health endpoint online. Other miners do not need pilot
-compute. See [what miners should run now](docs/CURRENT_MINER_OPERATION.md) before
-starting or stopping a miner service.
+Registered non-validator miners need a healthy chain-announced HTTPS `/healthz`
+endpoint. No pilot, manual opt-in, or running model is required for the bridge.
+It does not issue translation requests or measure model quality. See
+[what miners should run now](docs/CURRENT_MINER_OPERATION.md) for the exact checks.
+The old `/api/v1/bootstrap-service` endpoint describes the retired pilot and
+cannot attest to this replacement's activation or eligibility.
 
 There are four distinct executable paths:
 
@@ -101,13 +99,12 @@ signed, hash-pinned release + private operator bindings
   -> exact projected row + signed calibration or incident bundle
   -> no weight-call capability
 
-temporary bootstrap service weights
-completed public endpoint pilots + post-publication miner opt-ins
-  -> current registration, UID, permit, serving, and health checks
-  -> coordinator-signed, declared-complete eligibility manifest
-  -> one coordinator-signed common lease and shared release directive
-  -> validator anchor of the exact manifest hash
-  -> exact direct 256-entry row from any currently permitted validator
+temporary registration-bridge weights
+signed bridge policy + hash-pinned release directive
+  -> finalized registration, owner, permit, and serving roster
+  -> bounded public HTTPS health checks and finalized roster recheck
+  -> equal total weight per qualifying coldkey, split among its live UIDs
+  -> exact direct 256-entry row from the installed validator
   -> finalized row and LastUpdate as the public receipt
   -> automatic renewal before the activity cutoff, ending at hard sunset
 ```
@@ -146,9 +143,11 @@ enable or imply a host-native Darwin validator runtime. See the
 
 The shipped version 0.1 shadow release fixes `translation_weights_active` to
 `false` and has no weight-call builder, signer or submitter. Version 0.2 requires
-the implementation and activation evidence listed in its own whitepaper. The
-temporary bootstrap remains a separate path governed by its original addendum
-and [shared-validator supersession](docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md).
+the implementation and activation evidence listed in its own whitepaper.
+The temporary registration bridge is a separate,
+narrowly bounded path governed by its [signed policy](docs/REGISTRATION_BRIDGE.md).
+The original pilot addendum and shared-validator supersession are historical
+records, not the bridge's eligibility rule.
 
 `component_test_no_weight` and `shadow_rehearsal_no_weight` remain local engineering
 results; neither is activation evidence. A correctly deployed installed path may
@@ -255,10 +254,9 @@ the one-command path for the pinned public S1 model and licensed `ASL BOOK` asse
 it runs locally and explicitly does not prove the miner's public axon.
 The [public-endpoint miner pilot](docs/PUBLIC_ENDPOINT_MINER_PILOT.md) is closed.
 Its historical evidence remains replayable, but miners should not enroll or sign
-readiness challenges. Frozen bootstrap participants must keep the HTTPS health
-endpoint required for row renewal, as explained in the
-[current miner instructions](docs/CURRENT_MINER_OPERATION.md). Other miners can
-retire their pilot services. The pilot was a component test only. It did not
+readiness challenges. Miners participating in the registration bridge should keep
+the HTTPS health endpoint described in the
+[current miner instructions](docs/CURRENT_MINER_OPERATION.md). The pilot was a component test only. It did not
 create a protocol window, submit weights, satisfy an
 activation gate, or become validator input.
 

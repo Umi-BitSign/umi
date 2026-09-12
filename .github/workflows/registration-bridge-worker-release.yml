@@ -1,0 +1,286 @@
+name: Registration bridge worker OCI release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact 40-character commit to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registration-bridge-worker-release-${{ inputs.revision }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      ARCHITECTURE: ${{ matrix.architecture }}
+      OCI_REPOSITORY: ghcr.io/umi-bitsign/umi-validator
+      PLATFORM: ${{ matrix.platform }}
+      REVISION: ${{ inputs.revision }}
+
+    steps:
+      - name: Require one exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "revision must be one 40-character lowercase commit" >&2
+            exit 2
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ inputs.revision }}
+
+      - name: Verify the checked-out source and derive artifact names
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${REVISION}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          source_tree_sha256="$(python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          root = Path("src/umi")
+          digest = hashlib.sha256(b"umi-source-tree-v1\0")
+          paths = sorted(root.rglob("*.py"), key=lambda path: path.relative_to(root).as_posix())
+          if not paths:
+              raise SystemExit("UMI Python source tree is empty")
+          for path in paths:
+              relative = path.relative_to(root).as_posix().encode()
+              digest.update(len(relative).to_bytes(4, "big"))
+              digest.update(relative)
+              digest.update(hashlib.sha256(path.read_bytes()).digest())
+          print(digest.hexdigest())
+          PY
+          )"
+          artifact_base="umi-registration-bridge-worker-${REVISION}-linux-${ARCHITECTURE}"
+          finality_base="umi-grandpa-finality-observer-${REVISION}-linux-${ARCHITECTURE}"
+          image_tag="${OCI_REPOSITORY}:supervisor-worker-${REVISION}-${ARCHITECTURE}"
+          {
+            echo "ARTIFACT_BASE=${artifact_base}"
+            echo "ARCHIVE=out/${artifact_base}.oci.tar"
+            echo "FINALITY_BASE=${finality_base}"
+            echo "IMAGE_TAG=${image_tag}"
+            echo "SOURCE_TREE_SHA256=${source_tree_sha256}"
+          } >> "${GITHUB_ENV}"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build the native image and exact OCI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker buildx build \
+            --pull \
+            --platform "${PLATFORM}" \
+            --build-arg "TARGETARCH=${ARCHITECTURE}" \
+            --build-arg "UMI_GIT_REVISION=${REVISION}" \
+            --build-arg "UMI_SOURCE_TREE_SHA256=${SOURCE_TREE_SHA256}" \
+            --tag "${IMAGE_TAG}" \
+            --provenance=false \
+            --metadata-file "out/${ARTIFACT_BASE}.build-metadata.json" \
+            --output "type=oci,name=${IMAGE_TAG},dest=${ARCHIVE}" \
+            --load \
+            --file deploy/linux-registration-bridge/Dockerfile \
+            .
+
+      - name: Verify the loaded image and smoke-test fixed entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMAGE_TAG}")" = "${REVISION}"
+          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.source-tree-sha256" }}' "${IMAGE_TAG}")" = "${SOURCE_TREE_SHA256}"
+          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.entrypoint-profile" }}' "${IMAGE_TAG}")" = "umi-registration-bridge-validator/1"
+          test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "${IMAGE_TAG}")" = "${PLATFORM}"
+          test "$(docker image inspect --format '{{ .Config.User }}' "${IMAGE_TAG}")" = "65532:65532"
+          docker run --rm --platform "${PLATFORM}" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 64 \
+            --memory 1g \
+            --cpus 1 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777 \
+            "${IMAGE_TAG}" --help
+          docker run --rm --platform "${PLATFORM}" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --entrypoint /opt/umi/bin/umi-grandpa-finality-observer \
+            "${IMAGE_TAG}" --conformance-self-test
+          docker run --rm --platform "${PLATFORM}" \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456 \
+            --tmpfs /run/umi-finality:rw,exec,nosuid,nodev,size=67108864,mode=1777 \
+            --entrypoint /opt/umi/.venv/bin/python \
+            "${IMAGE_TAG}" -c 'import subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; chain = BittensorRegistrationBridgeChain()
+          with chain.finality.observer._staged_inputs() as staged:
+              subprocess.run([str(staged["binary"]), "--conformance-self-test"], check=True)'
+
+      - name: Extract the host finality verifier and pinned Finney chain spec
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_id="$(docker create --platform "${PLATFORM}" "${IMAGE_TAG}")"
+          cleanup() { docker rm --force "${container_id}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker cp \
+            "${container_id}:/opt/umi/bin/umi-grandpa-finality-observer" \
+            "out/${FINALITY_BASE}"
+          docker cp "${container_id}:/usr/local/bin/uv" "out/uv-${REVISION}-linux-${ARCHITECTURE}"
+          docker cp "${container_id}:/opt/umi/finney.json" "out/raw_spec_finney.json"
+          cleanup
+          trap - EXIT
+          chmod 0555 "out/${FINALITY_BASE}"
+          chmod 0555 "out/uv-${REVISION}-linux-${ARCHITECTURE}"
+          chmod 0444 "out/raw_spec_finney.json"
+          "out/${FINALITY_BASE}" --conformance-self-test
+          test "$("out/uv-${REVISION}-linux-${ARCHITECTURE}" --version | cut -d' ' -f1-2)" = \
+            "uv 0.12.9"
+          test "$(sha256sum out/raw_spec_finney.json | cut -d' ' -f1)" = \
+            "f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105"
+          finality_sha256="$(sha256sum "out/${FINALITY_BASE}" | cut -d' ' -f1)"
+          finality_size_bytes="$(stat -c '%s' "out/${FINALITY_BASE}")"
+          uv_sha256="$(sha256sum "out/uv-${REVISION}-linux-${ARCHITECTURE}" | cut -d' ' -f1)"
+          uv_size_bytes="$(stat -c '%s' "out/uv-${REVISION}-linux-${ARCHITECTURE}")"
+          printf '%s  %s\n' "${finality_sha256}" "${FINALITY_BASE}" \
+            > "out/${FINALITY_BASE}.sha256"
+          printf '%s\n' "${finality_size_bytes}" > "out/${FINALITY_BASE}.size"
+          printf '%s  %s\n' "${uv_sha256}" "uv-${REVISION}-linux-${ARCHITECTURE}" \
+            > "out/uv-${REVISION}-linux-${ARCHITECTURE}.sha256"
+          printf '%s\n' "${uv_size_bytes}" \
+            > "out/uv-${REVISION}-linux-${ARCHITECTURE}.size"
+          jq -cn \
+            --arg finality_binary "${FINALITY_BASE}" \
+            --arg finality_sha256 "${finality_sha256}" \
+            --argjson finality_size_bytes "${finality_size_bytes}" \
+            --arg revision "${REVISION}" \
+            --arg source_tree_sha256 "${SOURCE_TREE_SHA256}" \
+            --arg target_platform "${PLATFORM}" \
+            --arg uv_binary "uv-${REVISION}-linux-${ARCHITECTURE}" \
+            --arg uv_sha256 "${uv_sha256}" \
+            --argjson uv_size_bytes "${uv_size_bytes}" \
+            '{chain_spec:"raw_spec_finney.json",
+              chain_spec_sha256:"f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105",
+              finality_binary:$finality_binary,
+              finality_binary_sha256:$finality_sha256,
+              finality_binary_size_bytes:$finality_size_bytes,
+              revision:$revision,
+              schema:"umi-validator-supervisor-host-artifact-build/1",
+              source_tree_sha256:$source_tree_sha256,
+              target_platform:$target_platform,
+              uv_binary:$uv_binary,
+              uv_sha256:$uv_sha256,
+              uv_size_bytes:$uv_size_bytes}' \
+            > "out/${FINALITY_BASE}.json"
+
+      - name: Verify and record the exact OCI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "${ARCHIVE}"
+          test "$(tar -xOf "${ARCHIVE}" oci-layout | jq -er '.imageLayoutVersion')" = "1.0.0"
+          index_json="$(tar -xOf "${ARCHIVE}" index.json)"
+          test "$(jq -er '.schemaVersion' <<<"${index_json}")" = "2"
+          test "$(jq -er '.manifests | length' <<<"${index_json}")" = "1"
+          test "$(jq -er '.manifests[0].platform.os' <<<"${index_json}")" = "linux"
+          test "$(jq -er '.manifests[0].platform.architecture' <<<"${index_json}")" = "${ARCHITECTURE}"
+          test "$(jq -er '.manifests[0].annotations["io.containerd.image.name"]' <<<"${index_json}")" = "${IMAGE_TAG}"
+          test "$(jq -er '.manifests[0].annotations["org.opencontainers.image.ref.name"]' <<<"${index_json}")" = "supervisor-worker-${REVISION}-${ARCHITECTURE}"
+          manifest_digest="$(jq -er '.manifests[0].digest' <<<"${index_json}")"
+          [[ "${manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          manifest_blob="blobs/sha256/${manifest_digest#sha256:}"
+          test "$(tar -xOf "${ARCHIVE}" "${manifest_blob}" | sha256sum | cut -d' ' -f1)" = "${manifest_digest#sha256:}"
+          manifest_json="$(tar -xOf "${ARCHIVE}" "${manifest_blob}")"
+          config_digest="$(jq -er '.config.digest' <<<"${manifest_json}")"
+          [[ "${config_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          config_blob="blobs/sha256/${config_digest#sha256:}"
+          test "$(tar -xOf "${ARCHIVE}" "${config_blob}" | sha256sum | cut -d' ' -f1)" = "${config_digest#sha256:}"
+          config_json="$(tar -xOf "${ARCHIVE}" "${config_blob}")"
+          jq -e \
+            --arg architecture "${ARCHITECTURE}" \
+            --arg revision "${REVISION}" \
+            --arg source_tree_sha256 "${SOURCE_TREE_SHA256}" \
+            '.os == "linux" and
+             .architecture == $architecture and
+             .config.User == "65532:65532" and
+             .config.Entrypoint == ["/usr/local/bin/umi-registration-bridge"] and
+             .config.Labels["org.opencontainers.image.revision"] == $revision and
+             .config.Labels["vision.umi.source-tree-sha256"] == $source_tree_sha256 and
+             .config.Labels["vision.umi.entrypoint-profile"] == "umi-registration-bridge-validator/1"' \
+            <<<"${config_json}" >/dev/null
+          archive_sha256="$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)"
+          archive_size_bytes="$(stat -c '%s' "${ARCHIVE}")"
+          printf '%s  %s\n' "${archive_sha256}" "$(basename "${ARCHIVE}")" \
+            > "${ARCHIVE}.sha256"
+          printf '%s\n' "${archive_size_bytes}" > "${ARCHIVE}.size"
+          jq -cn \
+            --arg archive "$(basename "${ARCHIVE}")" \
+            --arg archive_sha256 "${archive_sha256}" \
+            --argjson archive_size_bytes "${archive_size_bytes}" \
+            --arg manifest_sha256 "${manifest_digest#sha256:}" \
+            --arg oci_repository "${OCI_REPOSITORY}" \
+            --arg revision "${REVISION}" \
+            --arg source_tree_sha256 "${SOURCE_TREE_SHA256}" \
+            --arg target_platform "${PLATFORM}" \
+            '{archive:$archive,
+              oci_archive_sha256:$archive_sha256,
+              oci_archive_size_bytes:$archive_size_bytes,
+              oci_manifest_sha256:$manifest_sha256,
+              oci_repository:$oci_repository,
+              revision:$revision,
+              schema:"umi-validator-supervisor-worker-oci-artifact/1",
+              source_tree_sha256:$source_tree_sha256,
+              target_platform:$target_platform}' \
+            > "out/${ARTIFACT_BASE}.json"
+
+      - name: Upload the immutable OCI artifact
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.ARTIFACT_BASE }}
+          path: out/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: false
+          retention-days: 90
+
+      - name: Record the GitHub artifact identity
+        shell: bash
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${PLATFORM}"
+            echo ""
+            echo "- Artifact ID: ${ARTIFACT_ID}"
+            echo "- Artifact URL: ${ARTIFACT_URL}"
+            echo "- GitHub artifact digest: ${ARTIFACT_DIGEST}"
+            echo "- OCI archive record: ${ARTIFACT_BASE}.json"
+          } >> "${GITHUB_STEP_SUMMARY}"

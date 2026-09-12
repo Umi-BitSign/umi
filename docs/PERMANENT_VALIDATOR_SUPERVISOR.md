@@ -9,12 +9,17 @@ x86_64 or arm64. It requires Podman 4.3.0 or later with `crun`; the installer
 installs or verifies both. The host should have at least 8 CPU cores, 16 GiB RAM,
 and 100 GiB of local storage. A GPU is not required.
 
-The current signed worker runs bootstrap service weights: it replays existing
-pilot evidence and checks the frozen miners' HTTPS `/healthz` endpoints before
-submitting or renewing the row. It does not send new translation requests.
-Installing this release alone does not start translation scoring. Miner operators
-should follow [current miner operation](CURRENT_MINER_OPERATION.md); frozen
-bootstrap participants still need their health endpoints online.
+The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen-pilot
+worker with temporary live-miner weights grouped equally by coldkey. It does not
+send translation requests. Miner operators should follow
+[current miner operation](CURRENT_MINER_OPERATION.md).
+
+This bridge's first rollout is to UMI's existing UID 0 and UID 54 installations,
+with their submission journals preserved. Existing supervisors need the host
+parser/profile update before accepting it. An unrelated validator with an old
+on-chain row and no UMI submission journal will hold for reconciliation. Do not
+delete journals, reinstall over a running supervisor, or assume a successful
+installation proves that weights were submitted.
 
 ## Install
 
@@ -173,20 +178,22 @@ entrypoint profile, and bounded input bundle. The supervisor verifies those
 objects before changing the worker.
 
 A directive can select only one of the fixed UMI profiles allowed by the local
-configuration: hold, bootstrap service weights, inactive shadow validation, or
-translation validation. It cannot provide a shell command, arbitrary arguments,
-arbitrary mounts, or a container socket. The bootstrap profile always runs the
-fixed `umi-simple-bootstrap-validator` entrypoint.
+configuration: hold, bootstrap service weights, registration-bridge weights,
+inactive shadow validation, or translation validation. It cannot provide a shell
+command, arbitrary arguments, arbitrary mounts, or a container socket. The legacy bootstrap profile runs the
+fixed `umi-simple-bootstrap-validator` entrypoint. The registration-bridge
+profile runs `umi-registration-bridge` with its separate signed policy.
 
 The common bootstrap directive applies to any hotkey that currently holds an
 SN78 validator permit. The local configuration still binds one exact wallet and
 hotkey. The worker checks the hotkey mapping and live permit in finalized chain
 state before every write.
 
-The common bootstrap input bundle contains only the frozen signed eligibility
-manifest and coordinator-signed common lease. It has no validator-specific
-transition authorization. It also has no result-upload credential: the exact
-finalized row and `LastUpdate` on chain are the public receipt.
+The legacy bootstrap input bundle contained the frozen signed eligibility
+manifest and coordinator-signed lease. The registration-bridge input bundle
+contains the signed availability policy instead. Neither requires a per-validator
+upload credential. The exact finalized row and `LastUpdate` are publicly visible;
+the local journal also retains the submitted transaction identity and inputs.
 
 Signed, hash-pinned container updates are automatic after installation. The
 local policy permits the existing typed shadow and translation profile names,
@@ -214,11 +221,11 @@ use the isolated validator hotkey for transactions that the chain permits. An
 operator who no longer accepts that delegation must stop the service and rotate
 the hotkey if compromise is suspected.
 
-The bootstrap lease hard-pins its manifest, policy, required chain tuple, and
-sunset. The worker renews the same authorized row before the effective
-360-block activity cutoff, remains idle after the row covers the sunset, and
-stops at the signed hard sunset. Invalid, expired, rolled-back, or incompatible
-directives fail closed.
+The registration-bridge policy pins its eligibility rule, required chain tuple,
+and sunset. The worker recomputes the live-miner row and renews it before the
+effective 360-block activity cutoff while submissions remain authorized. It
+does not extend the original bootstrap deadline. Invalid, expired, rolled-back,
+or incompatible directives fail closed.
 
 ## Public artifact layout
 
