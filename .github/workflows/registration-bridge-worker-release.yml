@@ -134,7 +134,7 @@ jobs:
           docker run --rm --platform "${PLATFORM}" \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456 \
-            --tmpfs /run/umi-finality:rw,exec,nosuid,nodev,size=67108864,uid=65532,gid=65532,mode=0700 \
+            --tmpfs /run/umi-finality:rw,exec,nosuid,nodev,size=67108864,mode=1777 \
             --entrypoint /opt/umi/.venv/bin/python \
             "${IMAGE_TAG}" -c 'import subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; chain = BittensorRegistrationBridgeChain()
           with chain.finality.observer._staged_inputs() as staged:

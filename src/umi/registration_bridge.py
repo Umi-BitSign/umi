@@ -632,12 +632,14 @@ class BittensorRegistrationBridgeChain:
                 platform.system() == "Linux" and architecture in _FINALITY_HASHES,
                 "native_finality_platform_unsupported",
             )
+            staging_directory = Path("/run/umi-finality/stage")
+            staging_directory.mkdir(mode=0o700, exist_ok=True)
             finality_reader = FinneyFinalizedBlockReader(
                 SimpleNamespace(
                     finality_verifier_binary="/opt/umi/bin/umi-grandpa-finality-observer",
                     finality_verifier_sha256=_FINALITY_HASHES[architecture],
                     finality_chain_spec_path="/opt/umi/finney.json",
-                    finality_staging_directory="/run/umi-finality",
+                    finality_staging_directory=str(staging_directory),
                 ),
                 timeout_seconds=120.0,
             )

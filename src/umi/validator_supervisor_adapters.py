@@ -1165,8 +1165,7 @@ class RootlessPodmanWorkerAdapter:
             arguments.extend(
                 (
                     "--tmpfs",
-                    "/run/umi-finality:rw,exec,nosuid,nodev,size=67108864,"
-                    f"uid={self.config.worker_uid},gid={self.config.worker_gid},mode=0700",
+                    "/run/umi-finality:rw,exec,nosuid,nodev,size=67108864,mode=1777",
                 )
             )
         for mount in mounts:
