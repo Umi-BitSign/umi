@@ -618,27 +618,27 @@ def build_registration_bridge_call(decision: RegistrationBridgeDecision, *, call
 
 
 async def _registration_bindings(pinned, participants):
-    """Bound point reads and drain outstanding work before retrying a snapshot."""
-    semaphore = asyncio.Semaphore(8)
+    """Read the pinned roster in bounded batches, not 1,024 point requests."""
     direct = storage.SubtensorModule
-
-    async def read(participant):
-        async with semaphore:
-            return (
-                await pinned.query(direct.Keys, [78, participant.uid]),
-                await pinned.query(direct.Uids, [78, participant.hotkey]),
-                await pinned.query(direct.BlockAtRegistration, [78, participant.uid]),
-                await pinned.query(direct.Owner, [participant.hotkey]),
+    columns = (
+        (direct.Keys, [[78, p.uid] for p in participants]),
+        (direct.Uids, [[78, p.hotkey] for p in participants]),
+        (direct.BlockAtRegistration, [[78, p.uid] for p in participants]),
+        (direct.Owner, [[p.hotkey] for p in participants]),
+    )
+    values = []
+    for item, params in columns:
+        column = []
+        for offset in range(0, len(params), 64):
+            batch = params[offset : offset + 64]
+            result = await pinned.query_batch(item, batch)
+            _require(
+                isinstance(result, list) and len(result) == len(batch),
+                "registration_binding_batch_shape",
             )
-
-    tasks = [asyncio.create_task(read(participant)) for participant in participants]
-    try:
-        return await asyncio.gather(*tasks)
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+            column.extend(result)
+        values.append(column)
+    return list(zip(*values, strict=True))
 
 
 class BittensorRegistrationBridgeChain:
