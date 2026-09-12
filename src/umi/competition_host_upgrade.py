@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from .competition_upgrade import _fingerprint, _open_without_links, _Reader, _verify_release
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
+from .registration_bridge import registration_bridge_policy_sha256
 from .validator_supervisor import (
     MAX_SUPERVISOR_DOCUMENT_BYTES,
     advance_supervisor_directive_history_state,
@@ -37,7 +38,10 @@ from .validator_supervisor import (
     parse_canonical_supervisor_directive_state,
     parse_canonical_validator_supervisor_config,
 )
-from .validator_supervisor_adapters import _parse_bootstrap_input_bundle
+from .validator_supervisor_adapters import (
+    SupervisorRegistrationBridgeInputBundle,
+    _parse_bootstrap_input_bundle,
+)
 from .validator_supervisor_runtime import DIRECTIVE_STATE_FILENAME
 
 _ISSUER = object()
@@ -268,6 +272,7 @@ class StoppedSupervisor:
     _lease: _StoppedLease = field(repr=False, compare=False)
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
+    expected_registration_bridge_policy_sha256: str | None = None
 
     def recheck_stopped(self) -> None:
         if (
@@ -401,6 +406,7 @@ def hold_stopped_supervisor(
         ):
             raise HostUpgradeError("retained legacy directive does not match high-water state")
         expected_manifest = None
+        expected_bridge_policy = None
         if signed.directive.release is not None:
             release_root = Path(config.release_root) / state.accepted_directive_sha256
             _verify_release(reader, release_root, signed, "installed")
@@ -416,7 +422,10 @@ def hold_stopped_supervisor(
                         expected_sha256=target.bundle_sha256,
                     )
                 )
-                expected_manifest = bundle.signed_manifest.manifest_sha256
+                if isinstance(bundle, SupervisorRegistrationBridgeInputBundle):
+                    expected_bridge_policy = registration_bridge_policy_sha256(bundle.signed_policy)
+                else:
+                    expected_manifest = bundle.signed_manifest.manifest_sha256
         # Include the exact root-owned unit fragment in the retained identity.
         reader.file(
             Path(unit["FragmentPath"]),
@@ -451,6 +460,7 @@ def hold_stopped_supervisor(
             expected_manifest,
             lease,
             _ISSUER,
+            expected_registration_bridge_policy_sha256=expected_bridge_policy,
         )
         object.__setattr__(stopped, "_binding", _stopped_binding(stopped))
         stopped.recheck_stopped()

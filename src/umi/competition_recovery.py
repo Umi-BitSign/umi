@@ -35,6 +35,15 @@ from .bootstrap_weights import (
     bootstrap_policy_hash,
     verify_signed_bootstrap_eligibility_manifest,
 )
+from .competition_bridge_recovery import (
+    HISTORY as BRIDGE_HISTORY,
+)
+from .competition_bridge_recovery import (
+    JOURNAL as BRIDGE_JOURNAL,
+)
+from .competition_bridge_recovery import (
+    audit_bridge_history,
+)
 from .encoding import account_id32
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 from .simple_bootstrap_validator import (
@@ -97,9 +106,11 @@ class LegacyEffect(StrictProtocolModel):
         "prepared_without_effect_intent",
         "retained_anchor_receipt",
         "retained_weight_receipt",
+        "retained_bridge_receipt",
         "retained_recovered_effect",
         "proven_current_anchor",
         "proven_current_weight",
+        "proven_superseded_weight",
         "unresolved",
     ]
     manifest_sha256: Hex32 | None
@@ -433,6 +444,29 @@ def _classify(
             value = json.loads(data)
             if canonical_json_bytes(value) != data:
                 raise CompetitionRecoveryError("legacy JSON is not canonical")
+    if BRIDGE_JOURNAL in files:
+        bridge = audit_bridge_history(files, hotkey=hotkey)
+        recognized.update(bridge.recognized)
+        holds.update(bridge.holds)
+        for path, journal in bridge.attempts:
+            receipt = journal.weight_call
+            effects.append(
+                LegacyEffect(
+                    path=path,
+                    classification="retained_bridge_receipt" if receipt else "unresolved",
+                    manifest_sha256=None,
+                    minimum_effect_block=receipt.block_number
+                    if receipt
+                    else journal.attempt.preflight_block,
+                    minimum_observation_block=max(
+                        journal.last_observed_block,
+                        receipt.block_number if receipt else journal.attempt.preflight_block,
+                    ),
+                    reason="registration_bridge_finalized_reference_retained"
+                    if receipt
+                    else "registration_bridge_attempt_mortality_unknown",
+                )
+            )
     if "journal.json" in files:
         recognized.add("journal.json")
         journal = _model(files["journal.json"], SimpleBootstrapJournal)
@@ -712,6 +746,7 @@ def snapshot_legacy_bootstrap(
                 "bootstrap-transactions",
                 "bootstrap-authorizations",
                 "bootstrap-authorizations/operator-state",
+                BRIDGE_HISTORY,
             }
             if len(parts) == 2 and parts[0] == "bootstrap-transactions":
                 allowed = bool(_HEX.fullmatch(parts[1]))
@@ -719,7 +754,10 @@ def snapshot_legacy_bootstrap(
                     holds.append("legacy_transaction_directory_without_journal")
             if not allowed:
                 holds.append("unclassified_legacy_directory")
-        if "service.lock" in reader.files and "journal.json" not in reader.files:
+        if (
+            "service.lock" in reader.files
+            and not {"journal.json", BRIDGE_JOURNAL} & reader.files.keys()
+        ):
             holds.append("common_lock_without_journal")
         manifest = LegacySnapshotManifest(
             schema="umi-legacy-bootstrap-snapshot/1",
@@ -876,10 +914,47 @@ def _reconcile_snapshot(
             manifests_by_digest[signed.manifest_sha256] = signed
     holds = set(snapshot.manifest.holds)
     effects: list[LegacyEffect] = []
+    bridge = None
+    bridge_proven = False
+    if BRIDGE_JOURNAL in snapshot._files:
+        bridge = audit_bridge_history(snapshot._files, hotkey=snapshot.manifest.validator_hotkey)
+        current = bridge.current
+        if current.weight_call is not None:
+            receipt = current.weight_call
+            writers = [p for p in current.attempt.roster if p.hotkey == current.validator_hotkey]
+            bridge_proven = (
+                not bridge.holds
+                and observation.block >= max(current.last_observed_block, receipt.block_number)
+                and (
+                    observation.block != receipt.block_number
+                    or observation.block_hash == receipt.block_hash
+                )
+                and observation.validator_last_update == receipt.block_number
+                and tuple(tuple(pair) for pair in current.attempt.expected_row)
+                == observation.validator_row
+                and len(writers) == 1
+                and writers[0].uid == observation.validator_uid
+            )
+            if not bridge_proven:
+                holds.add("registration_bridge_latest_effect_not_proven")
     for effect in snapshot.manifest.effects:
         update = effect
         if observation.block < effect.minimum_observation_block:
             holds.add("owned_observation_predates_historical_record")
+            effects.append(update)
+            continue
+        if effect.classification == "retained_bridge_receipt":
+            if bridge_proven:
+                update = effect.model_copy(
+                    update={
+                        "classification": "proven_current_weight"
+                        if effect.path == BRIDGE_JOURNAL
+                        else "proven_superseded_weight",
+                        "reason": "owned_finality_proves_latest_bridge_row"
+                        if effect.path == BRIDGE_JOURNAL
+                        else "terminal_bridge_history_precedes_proven_latest_row",
+                    }
+                )
             effects.append(update)
             continue
         if effect.classification in {"retained_anchor_receipt", "retained_weight_receipt"}:
@@ -901,6 +976,22 @@ def _reconcile_snapshot(
                             "reason": "owned_finality_proves_current_manifest_anchor",
                         }
                     )
+            elif (
+                effect.path == "journal.json"
+                and bridge_proven
+                and bridge.attempts
+                and bridge.attempts[0][1].attempt.prior_last_update == effect.minimum_effect_block
+            ):
+                # This exact terminal journal was archived at bridge handoff.
+                # All subsequent attempts retain terminal receipts, each next
+                # preflight binds the prior LastUpdate, and the latest effect
+                # is now proven by owned storage. No uncertain intent is cleared.
+                update = effect.model_copy(
+                    update={
+                        "classification": "proven_superseded_weight",
+                        "reason": "terminal_common_receipt_precedes_proven_bridge_history",
+                    }
+                )
             elif (
                 signed is None
                 or tuple(tuple(item) for item in _full_row(signed)) != observation.validator_row
@@ -945,6 +1036,19 @@ def _snapshot_kwargs(stopped: Any, limits: RecoveryLimits, manifests: tuple, lea
 
 
 def _check_current_manifest(snapshot: LegacySnapshot, stopped: Any) -> None:
+    expected_bridge = getattr(stopped, "expected_registration_bridge_policy_sha256", None)
+    if expected_bridge is not None:
+        if not isinstance(expected_bridge, str) or not _HEX.fullmatch(expected_bridge):
+            raise CompetitionRecoveryError("stopped host bridge policy binding is invalid")
+        if stopped.expected_manifest_sha256 is not None or BRIDGE_JOURNAL not in snapshot._files:
+            raise CompetitionRecoveryError("stopped bridge host lacks its historical journal")
+        bridge = audit_bridge_history(snapshot._files, hotkey=stopped.validator_hotkey)
+        if (
+            bridge.current.attempt is not None
+            and bridge.current.attempt.policy_sha256 != expected_bridge
+        ):
+            raise CompetitionRecoveryError("bridge journal differs from installed signed policy")
+        return
     expected = stopped.expected_manifest_sha256
     if not isinstance(expected, str) or not _HEX.fullmatch(expected):
         raise CompetitionRecoveryError("stopped host lacks authenticated historical manifest")

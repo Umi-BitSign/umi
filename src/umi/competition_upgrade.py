@@ -19,6 +19,7 @@ from typing import Literal
 from .crypto import verify_response_signature
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
+from .registration_bridge import registration_bridge_policy_sha256
 from .validator_supervisor import (
     MAX_SUPERVISOR_DOCUMENT_BYTES,
     MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES,
@@ -34,6 +35,7 @@ from .validator_supervisor_adapters import (
     MAX_RELEASE_MANIFEST_BYTES,
     SUPERVISOR_RELEASE_BUNDLE_MAGIC,
     SUPERVISOR_RELEASE_SIGNATURE_DOMAIN,
+    SupervisorRegistrationBridgeInputBundle,
     SupervisorSimpleBootstrapInputBundle,
     ValidatorSupervisorAdapterError,
     _parse_bootstrap_input_bundle,
@@ -308,30 +310,54 @@ def _verify_release(reader: _Reader, root: Path, signed: SignedSupervisorDirecti
         expected_sha256=inputs.bundle_sha256,
     )
     bundle = _parse_bootstrap_input_bundle(encoded)
-    if (
-        bundle.profile != inputs.profile
-        or bundle.signed_manifest.manifest.policy_sha256 != directive.policy_sha256
-    ):
+    if bundle.profile != inputs.profile:
         raise UpgradeInspectionError(f"{label}_input_policy_binding_mismatch")
-    expected = {"signed-manifest.json": canonical_json_bytes(bundle.signed_manifest)}
-    if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
-        if bundle.signed_lease.body.umi_git_revision != target.umi_git_revision:
+    if isinstance(bundle, SupervisorRegistrationBridgeInputBundle):
+        if registration_bridge_policy_sha256(bundle.signed_policy) != directive.policy_sha256:
+            raise UpgradeInspectionError(f"{label}_input_policy_binding_mismatch")
+        if bundle.signed_policy.body.umi_git_revision != target.umi_git_revision:
             raise UpgradeInspectionError(f"{label}_input_release_binding_mismatch")
-        expected["bootstrap-lease.json"] = canonical_json_bytes(bundle.signed_lease)
+        content_name = "registration-bridge"
+        expected = {"registration-bridge-policy.json": canonical_json_bytes(bundle.signed_policy)}
     else:
-        expected.update(
-            {
-                "direct-transition-authorization.json": canonical_json_bytes(
-                    bundle.transition_authorization
-                ),
-                "drain-checkpoint.json": canonical_json_bytes(bundle.drain_checkpoint),
-                "owner-fence-receipt.json": canonical_json_bytes(bundle.owner_fence_receipt),
-            }
-        )
+        if bundle.signed_manifest.manifest.policy_sha256 != directive.policy_sha256:
+            raise UpgradeInspectionError(f"{label}_input_policy_binding_mismatch")
+        content_name = "bootstrap"
+        expected = {"signed-manifest.json": canonical_json_bytes(bundle.signed_manifest)}
+        if isinstance(bundle, SupervisorSimpleBootstrapInputBundle):
+            if bundle.signed_lease.body.umi_git_revision != target.umi_git_revision:
+                raise UpgradeInspectionError(f"{label}_input_release_binding_mismatch")
+            expected["bootstrap-lease.json"] = canonical_json_bytes(bundle.signed_lease)
+        else:
+            expected.update(
+                {
+                    "direct-transition-authorization.json": canonical_json_bytes(
+                        bundle.transition_authorization
+                    ),
+                    "drain-checkpoint.json": canonical_json_bytes(bundle.drain_checkpoint),
+                    "owner-fence-receipt.json": canonical_json_bytes(bundle.owner_fence_receipt),
+                }
+            )
     reader.directory(root / "operator-inputs", modes={0o500})
-    bootstrap = root / "operator-inputs" / "bootstrap"
-    reader.directory(bootstrap, modes={0o500})
-    descriptor = _open_without_links(bootstrap)
+    content_root = root / "operator-inputs" / content_name
+    _require_directory_names(root / "operator-inputs", {content_name}, label)
+    reader.directory(content_root, modes={0o500})
+    _require_directory_names(content_root, set(expected), label)
+    for name, body in expected.items():
+        if (
+            reader.file(
+                content_root / name,
+                f"{label}_{name}",
+                MAX_SUPERVISOR_DOCUMENT_BYTES,
+                modes={0o400},
+            )
+            != body
+        ):
+            raise UpgradeInspectionError(f"{label}_extracted_input_mismatch")
+
+
+def _require_directory_names(path: Path, expected: set[str], label: str) -> None:
+    descriptor = _open_without_links(path)
     try:
         names = set()
         with os.scandir(descriptor) as entries:
@@ -339,18 +365,10 @@ def _verify_release(reader: _Reader, root: Path, signed: SignedSupervisorDirecti
                 names.add(entry.name)
                 if len(names) > len(expected):
                     raise UpgradeInspectionError(f"{label}_input_file_set_mismatch")
-        if names != set(expected):
+        if names != expected:
             raise UpgradeInspectionError(f"{label}_input_file_set_mismatch")
     finally:
         os.close(descriptor)
-    for name, body in expected.items():
-        if (
-            reader.file(
-                bootstrap / name, f"{label}_{name}", MAX_SUPERVISOR_DOCUMENT_BYTES, modes={0o400}
-            )
-            != body
-        ):
-            raise UpgradeInspectionError(f"{label}_extracted_input_mismatch")
 
 
 def inspect_successor_upgrade(

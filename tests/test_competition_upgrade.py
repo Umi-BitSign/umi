@@ -15,11 +15,13 @@ from tests.test_validator_supervisor_adapters import _bootstrap_bundle
 from umi.competition_upgrade import inspect_successor_upgrade
 from umi.crypto import sign_response_digest
 from umi.protocol import canonical_json_bytes
+from umi.registration_bridge import registration_bridge_policy_sha256
 from umi.validator_supervisor import advance_supervisor_directive_state
 from umi.validator_supervisor_adapters import (
     SUPERVISOR_RELEASE_BUNDLE_MAGIC,
     SUPERVISOR_RELEASE_MANIFEST_SCHEMA,
     SUPERVISOR_RELEASE_SIGNATURE_DOMAIN,
+    SupervisorRegistrationBridgeInputBundle,
     SupervisorReleaseManifest,
 )
 
@@ -41,6 +43,25 @@ def release(root, config, inputs, *, sequence=1, previous=None, **changes):
     # Deliberately inert bytes: integrity checking must not imply runnable OCI.
     archive = b"inert archive; never execute this fixture"
     values = _release(target_platform=config.target_platform)
+    if isinstance(inputs, SupervisorRegistrationBridgeInputBundle):
+        changes.setdefault("validator_scope", "any_permitted_sn78")
+        values.update(
+            entrypoint_profile="umi-registration-bridge-validator/1",
+            umi_git_revision=inputs.signed_policy.body.umi_git_revision,
+        )
+        policy_sha = registration_bridge_policy_sha256(inputs.signed_policy)
+        content_name = "registration-bridge"
+        input_files = {"registration-bridge-policy.json": inputs.signed_policy}
+    else:
+        policy_sha = inputs.signed_manifest.manifest.policy_sha256
+        content_name = "bootstrap"
+        input_files = {
+            "signed-manifest.json": inputs.signed_manifest,
+            "direct-transition-authorization.json": inputs.transition_authorization,
+            "drain-checkpoint.json": inputs.drain_checkpoint,
+            "owner-fence-receipt.json": inputs.owner_fence_receipt,
+        }
+    values["umi_git_revision"] = changes.pop("release_revision", values["umi_git_revision"])
     manifest = SupervisorReleaseManifest(
         schema=SUPERVISOR_RELEASE_MANIFEST_SCHEMA,
         **{
@@ -79,9 +100,11 @@ def release(root, config, inputs, *, sequence=1, previous=None, **changes):
     directive = _directive(
         sequence=sequence,
         previous_directive_sha256=previous,
-        validator_hotkeys=[config.validator_hotkey],
+        validator_hotkeys=[]
+        if changes.get("validator_scope") == "any_permitted_sn78"
+        else [config.validator_hotkey],
         release=values,
-        policy_sha256=inputs.signed_manifest.manifest.policy_sha256,
+        policy_sha256=changes.pop("policy_sha256", policy_sha),
         operator_inputs={
             "artifact_type": "canonical_json",
             "profile": inputs.profile,
@@ -101,14 +124,9 @@ def release(root, config, inputs, *, sequence=1, previous=None, **changes):
         "operator-input-bundle.json": raw_inputs,
     }.items():
         write(root / name, content)
-    bootstrap = root / "operator-inputs" / "bootstrap"
-    for name, content in {
-        "signed-manifest.json": inputs.signed_manifest,
-        "direct-transition-authorization.json": inputs.transition_authorization,
-        "drain-checkpoint.json": inputs.drain_checkpoint,
-        "owner-fence-receipt.json": inputs.owner_fence_receipt,
-    }.items():
-        write(bootstrap / name, canonical_json_bytes(content))
+    bootstrap = root / "operator-inputs" / content_name
+    for name, item in input_files.items():
+        write(bootstrap / name, canonical_json_bytes(item))
     bootstrap.chmod(0o500)
     bootstrap.parent.chmod(0o500)
     return signed
