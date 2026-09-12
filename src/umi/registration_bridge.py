@@ -96,8 +96,11 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
     valid_from_block: PositiveInt
     stop_submitting_block: Literal[REGISTRATION_BRIDGE_STOP_SUBMITTING_BLOCK]
     hard_sunset_block: Literal[REGISTRATION_BRIDGE_HARD_SUNSET_BLOCK]
-    reward_rule: Literal["equal_live_coldkey_groups/1"]
-    grouping_rule: Literal["registered_hotkey_owner_account_id32/1"]
+    reward_rule: Literal["equal_live_coldkey_groups/1", "equal_live_coldkey_ip_groups/1"]
+    grouping_rule: Literal[
+        "registered_hotkey_owner_account_id32/1",
+        "registered_owner_or_https_ip_connected_components/1",
+    ]
     allocation_rule: Literal["equal_group_budget_min_size_divmod_uid_order/1"]
     exclude_uid_zero: Literal[True]
     exclude_validator_permits: Literal[True]
@@ -147,6 +150,12 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
     def interval(self) -> Self:
         if self.valid_from_block + self.submission_headroom_blocks >= self.stop_submitting_block:
             raise ValueError("registration bridge has no submission interval")
+        expected_grouping = {
+            "equal_live_coldkey_groups/1": "registered_hotkey_owner_account_id32/1",
+            "equal_live_coldkey_ip_groups/1": "registered_owner_or_https_ip_connected_components/1",
+        }[self.reward_rule]
+        if self.grouping_rule != expected_grouping:
+            raise ValueError("registration bridge reward and grouping rules disagree")
         return self
 
 
@@ -381,15 +390,58 @@ def _coldkey_group_row(
     groups = {}
     for participant in live:
         groups.setdefault(account_id32(participant.coldkey), []).append(participant.uid)
-    budget = 65_535 * min(len(uids) for uids in groups.values())
+    return _equal_group_row(list(groups.values())), len(groups)
+
+
+def _coldkey_ip_groups(
+    live: Sequence[RegistrationBridgeParticipant],
+) -> list[list[int]]:
+    """Merge live UIDs sharing an owner or public IP, transitively and without ports.
+
+    IPs are an infrastructure cap, not proof of independent operators. Preserve
+    the coldkey cap across multiple IPs. Mapped IPv4 and native IPv4 identify
+    the same destination. Failed/non-candidate endpoints cannot bridge groups.
+    """
+    _require(bool(live), "no_live_eligible_miners")
+    parent = {p.uid: p.uid for p in live}
+    _require(len(parent) == len(live), "duplicate_live_uid")
+
+    def root(uid):
+        while parent[uid] != uid:
+            parent[uid] = parent[parent[uid]]
+            uid = parent[uid]
+        return uid
+
+    owners, addresses = {}, {}
+    for participant in sorted(live, key=lambda p: p.uid):
+        _require(participant.origin is not None, "live_endpoint_missing")
+        canonical = _bridge_public_origin(participant.origin)
+        address = ipaddress.ip_address(urlsplit(canonical).hostname or "")
+        address = getattr(address, "ipv4_mapped", None) or address
+        for index, key in (
+            (owners, account_id32(participant.coldkey)),
+            (addresses, address),
+        ):
+            prior = index.setdefault(key, participant.uid)
+            left, right = root(participant.uid), root(prior)
+            parent[max(left, right)] = min(left, right)
+    groups = {}
+    for uid in sorted(parent):
+        groups.setdefault(root(uid), []).append(uid)
+    return [groups[key] for key in sorted(groups)]
+
+
+def _equal_group_row(groups: Sequence[Sequence[int]]) -> list[list[int]]:
+    _require(bool(groups) and all(groups), "no_live_eligible_miners")
+    budget = 65_535 * min(len(uids) for uids in groups)
     row = [[uid, 0] for uid in range(256)]
-    for uids in groups.values():
+    for uids in groups:
         quotient, remainder = divmod(budget, len(uids))
         for index, uid in enumerate(sorted(uids)):
             row[uid][1] = quotient + (index < remainder)
     _validate_row(row)
     _require(max(pair[1] for pair in row) == 65_535, "group_weight_scale_invalid")
-    return row, len(groups)
+    return row
 
 
 def _validate_row(row: list[list[int]], *, allow_sparse: bool = False) -> None:
@@ -487,7 +539,11 @@ def validate_registration_bridge_observation(
         if receipt.available:
             live.append(participant)
     _require(bool(live), "no_live_eligible_miners")
+    # Historical signed policies retain their exact allocation semantics.
+    # A new signed rule is required to enable the IP cap.
     row, coldkey_count = _coldkey_group_row(live)
+    if policy.body.reward_rule == "equal_live_coldkey_ip_groups/1":
+        row = _equal_group_row(_coldkey_ip_groups(live))
     _require(
         observation.max_weights_limit > 0
         and sum(pair[1] for pair in row) * observation.max_weights_limit >= 65_535 * 65_535,

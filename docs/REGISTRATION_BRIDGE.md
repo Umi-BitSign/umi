@@ -51,6 +51,31 @@ Other validators' weights and subnet consensus can affect final incentive
 amounts. The chain's miner incentives must be checked after a consensus
 update; submitting a transaction alone is insufficient.
 
+## Prepared IP-deduplication update
+
+The next signed policy can select `equal_live_coldkey_ip_groups/1`, paired with
+`registered_owner_or_https_ip_connected_components/1`. This code change alone
+does not activate it. The currently signed coldkey-only policy keeps its original
+meaning and remains readable in retained journals.
+
+Under the new rule, passing UIDs sharing a coldkey **or** an HTTPS endpoint IP
+form one reward group. Connections are transitive, and ports are ignored.
+IPv4-mapped IPv6 addresses are grouped with the equivalent IPv4 address. Each
+group receives the same total integer weight, split among its passing UIDs using
+the allocation above. Failed endpoints and excluded registrations do not connect
+groups. The `eligible_coldkey_count` status field remains a count of distinct
+coldkeys, not a count of the resulting reward groups.
+
+This caps the observed same-IP multiplier. It does not identify machines or
+people: shared-hosting miners share a budget, and more coldkeys plus more IPs can
+still create additional groups. Hostnames, reverse DNS and TLS certificate names
+are not machine identities. Since health checks do not authenticate the endpoint
+to a hotkey, copying another miner's announced endpoint can dilute that group's
+share. No UID blacklist, penalty or burn is introduced.
+
+Activation requires a compatible host parser, a new signed worker/policy release,
+and a finalized row under that policy. The original deadline below is unchanged.
+
 ## Duration
 
 The bridge retains the original bootstrap cutoff: no new submissions from
