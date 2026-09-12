@@ -51,6 +51,35 @@ local function verbatim_delimiter(text)
   error("inline code contains every supported LaTeX delimiter")
 end
 
+function Link(link)
+  if not FORMAT:match("latex") then
+    return nil
+  end
+
+  local target = link.target
+  if target == "" or target:match("^[#/?]")
+      or target:match("^[A-Za-z][A-Za-z0-9+.-]*:") then
+    return nil
+  end
+
+  -- Repository links are relative to the source whitepaper/README.md.
+  local path, suffix = target:match("^([^?#]*)(.*)$")
+  local parts = { "whitepaper" }
+  for part in path:gmatch("[^/]+") do
+    if part == ".." then
+      if #parts == 0 then
+        error("relative whitepaper link escapes the repository: " .. target)
+      end
+      table.remove(parts)
+    elseif part ~= "." then
+      table.insert(parts, part)
+    end
+  end
+  link.target = "https://github.com/Umi-BitSign/umi/blob/main/"
+    .. table.concat(parts, "/") .. suffix
+  return link
+end
+
 function Code(code)
   if not FORMAT:match("latex") then
     return nil
@@ -94,6 +123,9 @@ function Pandoc(document)
         block.level = math.max(1, block.level - 1)
         local title = heading_text(block):gsub("^%d+%.?%d*%.?%s+", "")
         block.content = heading_inlines(title)
+        if title == "References" then
+          block.classes:insert("unnumbered")
+        end
       elseif block.t == "Table" then
         block = set_table_widths(block)
       end

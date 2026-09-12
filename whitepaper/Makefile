@@ -1,5 +1,6 @@
 PANDOC ?= pandoc
 LATEXMK ?= latexmk
+SOURCE_DATE_EPOCH ?= 1789084800
 
 MARKDOWN := README.md
 FILTER := filters/whitepaper.lua
@@ -27,7 +28,7 @@ $(BODY): $(MARKDOWN) $(FILTER)
 
 $(PDF): $(ENTRYPOINT) $(BODY)
 	mkdir -p $(BUILD_DIR)
-	TZ=UTC SOURCE_DATE_EPOCH=1787788800 $(LATEXMK) \
+	TZ=UTC SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(LATEXMK) \
 		-xelatex \
 		-interaction=nonstopmode \
 		-halt-on-error \

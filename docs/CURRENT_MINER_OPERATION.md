@@ -42,6 +42,12 @@ mechanism.
 
 ## When translation traffic starts
 
+The [version 0.2 successor design](../whitepaper/README.md) adds self-service
+endpoint participation and an optional reproducible-model contribution track.
+The current [rehearsal tooling](OPEN_COMPETITION.md) does not open either track
+for production rewards. Do not submit new pilot requests or interpret local
+admission receipts as inclusion in the frozen bootstrap manifest.
+
 UMI will publish the matching miner instructions and signed policy before asking
 miners to serve translation requests. That phase needs the UMI protocol miner
 connected to a working model, using an in-process translator or a model sidecar

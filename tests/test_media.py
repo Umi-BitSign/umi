@@ -366,6 +366,12 @@ def test_snapshot_rejects_in_place_mutation_during_bounded_copy(
                 handle.seek(0)
                 handle.write(b"b")
                 handle.flush()
+                # Fast writes can share one filesystem timestamp tick. Make
+                # this metadata-change test deterministic on Linux as well.
+                metadata = clip.stat()
+                media_module.os.utime(
+                    clip, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000)
+                )
         return chunk
 
     monkeypatch.setattr(media_module.os, "read", mutating_read)

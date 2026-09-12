@@ -1,0 +1,715 @@
+"""Owned-finality registration reads for successor intake; no chain writes."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import sqlite3
+import time
+from collections.abc import Callable, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
+
+from pydantic import Field, field_validator, model_validator
+from typing_extensions import Self
+from websockets.asyncio.client import connect as websocket_connect
+
+from .chain_evidence import FinalizedSnapshotRef
+from .encoding import account_id32
+from .grandpa_finality import EVIDENCE_CLASS, FINNEY_GENESIS_HASH, GrandpaFinalityObserver
+from .grandpa_finality_supervisor import (
+    DurableGrandpaFinalityPort,
+    GrandpaFinalitySupervisorError,
+)
+from .open_competition import (
+    CompetitionPolicy,
+    Hex32,
+    Registration,
+    RegistrationSnapshot,
+    StrictProtocolModel,
+    digest,
+)
+from .policy import FinalityVerifierPin, LiveChainObservationPin
+from .protocol import canonical_json_bytes
+from .substrate_proof import SubprocessStorageProofVerifier
+from .validator_chain import (
+    BittensorRawJsonRpc,
+    FinalizedProofCollector,
+    FinalizedRuntimePin,
+    PinnedRuntimeContext,
+    ProofCollectionLimits,
+    StorageReadSpec,
+    ValidatorChainError,
+    VerifiedStorageBatch,
+)
+from .validator_plans import VerifiedFinalizedBlock
+
+_MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
+_STARTUP_POLL_SECONDS = 0.25
+
+
+class _AwaitingFinality(ValueError):
+    """The owned source has not yet reached the configured startup head."""
+
+
+class CompetitionChainConfig(StrictProtocolModel):
+    schema_: Literal["umi-competition-chain-config/1"] = Field(alias="schema")
+    policy_sha256: Hex32
+    network: Literal["finney"] = "finney"
+    netuid: Literal[78] = 78
+    rpc_url: Annotated[str, Field(min_length=1, max_length=2048)]
+    chain_pin: LiveChainObservationPin
+    finality_pin: FinalityVerifierPin
+    target_triple: Annotated[str, Field(min_length=1, max_length=100)]
+    finality_binary: Annotated[str, Field(min_length=1, max_length=4096)]
+    chain_spec: Annotated[str, Field(min_length=1, max_length=4096)]
+    proof_binary: Annotated[str, Field(min_length=1, max_length=4096)]
+    proof_binary_sha256: Hex32
+    state_directory: Annotated[str, Field(min_length=1, max_length=4096)]
+    minimum_finalized_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
+    maximum_head_age_ms: Annotated[int, Field(ge=1, le=120_000)] = 120_000
+    maximum_future_skew_ms: Annotated[int, Field(ge=0, le=30_000)] = 30_000
+    collection_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 15
+    startup_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 600
+    maximum_cache_bytes: Annotated[int, Field(ge=1024, le=1024**3)] = 256 * 1024**2
+
+    @field_validator("finality_binary", "chain_spec", "proof_binary", "state_directory")
+    @classmethod
+    def absolute_paths(cls, value: str) -> str:
+        if not Path(value).is_absolute() or "\x00" in value:
+            raise ValueError("chain adapter paths must be explicit absolute paths")
+        return value
+
+    @field_validator("rpc_url")
+    @classmethod
+    def read_only_rpc(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "wss"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(ord(character) < 33 for character in value)
+        ):
+            raise ValueError("chain proof RPC must be an explicit credential-free wss URL")
+        return value
+
+    @model_validator(mode="after")
+    def pinned_finney(self) -> Self:
+        if (
+            self.chain_pin.genesis_block_hash != FINNEY_GENESIS_HASH
+            or self.finality_pin.expected_genesis_hash != FINNEY_GENESIS_HASH
+        ):
+            raise ValueError("registration intake is pinned to Finney genesis")
+        if self.minimum_finalized_block < self.finality_pin.bootstrap_block_number:
+            raise ValueError("minimum finalized block precedes the finality bootstrap")
+        if self.target_triple not in self.finality_pin.release_sha256_by_target:
+            raise ValueError("finality release lacks the configured target")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class RegistrationCapture:
+    snapshot: RegistrationSnapshot
+    provenance: dict[str, Any]
+
+
+class _SocketLease:
+    def __init__(self, connection=None):
+        self.connection = connection
+
+    @asynccontextmanager
+    async def connect(self, *args, **kwargs):
+        if self.connection is None:
+            context = websocket_connect(*args, **kwargs)
+            socket = await context.__aenter__()
+            self.connection = (context, socket)
+        yield self.connection[1]
+
+
+class _BatchConnections:
+    """Exclusive leases keep the existing single-request RPC ID unambiguous."""
+
+    def __init__(self):
+        self.idle: list[tuple[Any, Any]] = []
+        self.capacity = asyncio.Semaphore(8)
+
+    @asynccontextmanager
+    async def lease(self):
+        async with self.capacity:
+            lease = _SocketLease(self.idle.pop() if self.idle else None)
+            try:
+                yield lease
+            except BaseException:
+                if lease.connection is not None:
+                    # The outer request scope includes JSON/protocol validation.
+                    # A failed connection never returns to the idle pool.
+                    await lease.connection[0].__aexit__(None, None, None)
+                raise
+            else:
+                if lease.connection is not None:
+                    self.idle.append(lease.connection)
+
+    async def close(self):
+        connections, self.idle = self.idle, []
+        await asyncio.gather(
+            *(context.__aexit__(None, None, None) for context, _ in connections),
+            return_exceptions=True,
+        )
+
+
+class _RegistrationRpc:
+    def __init__(self, config: CompetitionChainConfig):
+        self.config = config
+        self._pool: _BatchConnections | None = None
+
+    @asynccontextmanager
+    async def batch(self):
+        if self._pool is not None:
+            raise ValueError("registration RPC batch is already active")
+        pool = _BatchConnections()
+        self._pool = pool
+        try:
+            yield
+        finally:
+            self._pool = None
+            await pool.close()
+
+    async def request(self, method: str, params: Sequence[Any]) -> Any:
+        ceiling = {
+            "state_getStorageAt": 2048,
+            "state_getReadProof": 17 * 1024**2,
+            "state_getMetadata": 33 * 1024**2,
+        }.get(method, 1024**2)
+
+        async with AsyncExitStack() as stack:
+            lease = None
+            if method == "state_getStorageAt" and self._pool is not None:
+                lease = await stack.enter_async_context(self._pool.lease())
+
+            def bounded_connect(*args, **kwargs):
+                kwargs["max_size"] = min(kwargs["max_size"], ceiling)
+                if lease is not None:
+                    return lease.connect(*args, **kwargs)
+                return websocket_connect(*args, **kwargs)
+
+            rpc = BittensorRawJsonRpc(
+                SimpleNamespace(endpoint=self.config.rpc_url),
+                connect_factory=bounded_connect,
+                request_timeout_seconds=self.config.collection_timeout_seconds,
+                open_timeout_seconds=min(15, self.config.collection_timeout_seconds),
+            )
+            return await rpc.request(method, params)
+
+
+class _PrefetchRpc:
+    """Bound concurrent value reads while leaving proof verification to the collector."""
+
+    def __init__(self, rpc: Any):
+        self.rpc = rpc
+        self.values: dict[tuple[str, str], Any] = {}
+
+    async def request(self, method: str, params: Sequence[Any]) -> Any:
+        if method == "state_getStorageAt" and tuple(params) in self.values:
+            return self.values[tuple(params)]
+        return await self.rpc.request(method, params)
+
+    async def prefetch(self, block_hash: str, keys: Sequence[bytes]) -> None:
+        semaphore = asyncio.Semaphore(8)
+
+        async def read(key: bytes) -> tuple[tuple[str, str], Any]:
+            params = ("0x" + key.hex(), block_hash)
+            async with semaphore:
+                value = await self.rpc.request("state_getStorageAt", params)
+            if value is not None and (not isinstance(value, str) or len(value) > 1026):
+                raise ValueError("registration storage value exceeds its bound")
+            return params, value
+
+        async with AsyncExitStack() as stack:
+            batch = getattr(self.rpc, "batch", None)
+            if callable(batch):
+                await stack.enter_async_context(batch())
+            tasks = [asyncio.create_task(read(key)) for key in keys]
+            pending = asyncio.gather(*tasks)
+            try:
+                # Cancel children once below, allowing their socket cleanup to
+                # finish instead of interrupting it with a second cancellation.
+                self.values = dict(await asyncio.shield(pending))
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(pending, return_exceptions=True)
+
+
+class FinalizedRegistrationProvider:
+    """Collect complete SN78 membership under one owned-finality state root.
+
+    Injected ports are a test boundary. Production construction always uses the
+    hash-pinned GRANDPA sidecar and storage verifier, never an RPC finality label.
+    """
+
+    def __init__(
+        self,
+        config: CompetitionChainConfig,
+        policy: CompetitionPolicy,
+        *,
+        finality: Any = None,
+        proofs: Any = None,
+        now_ms: Callable[[], int] | None = None,
+    ):
+        self.config = CompetitionChainConfig.model_validate_json(canonical_json_bytes(config))
+        self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+        if self.config.policy_sha256 != digest(self.policy):
+            raise ValueError("chain configuration belongs to another competition policy")
+        if (finality is None) != (proofs is None):
+            raise ValueError("test ports must be supplied together")
+        self._now_ms = now_ms or (lambda: time.time_ns() // 1_000_000)
+        self._lock = asyncio.Lock()
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self._closed = False
+        self._prefetch: _PrefetchRpc | None = None
+        self._latest: RegistrationCapture | None = None
+        directory = self._cache_directory(config)
+        if directory.is_symlink():
+            raise ValueError("chain cache directory cannot be a symlink")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.stat().st_mode & 0o077:
+            raise ValueError("chain cache directory must be private")
+        self._path = directory / "registrations.sqlite3"
+        self._initialize_cache()
+        self._owned = finality is None
+        if self._owned:
+            observer = GrandpaFinalityObserver.from_policy_pin(
+                config.finality_pin,
+                target_triple=config.target_triple,
+                binary_path=config.finality_binary,
+                chain_spec_path=config.chain_spec,
+                record_timeout_seconds=config.startup_timeout_seconds,
+            )
+            finality = DurableGrandpaFinalityPort(
+                observer=observer,
+                state_path=directory / "finality.sqlite3",
+                scoring_policy_digest=digest(policy),
+                chain_observation=config.chain_pin,
+                finality_verifier_sha256=config.finality_pin.release_sha256_by_target[
+                    config.target_triple
+                ],
+                initial_minimum_finalized_block=config.minimum_finalized_block,
+                startup_timeout_seconds=config.startup_timeout_seconds,
+                limits=self._finality_storage_limits(),
+            )
+            head = finality.persisted_head()
+            self._startup_floor = (
+                config.minimum_finalized_block - 1 if head is None else head.height
+            )
+            verifier = SubprocessStorageProofVerifier(
+                binary_path=config.proof_binary,
+                expected_sha256=config.proof_binary_sha256,
+            )
+            self._prefetch = _PrefetchRpc(_RegistrationRpc(config))
+            proofs = FinalizedProofCollector(
+                self._prefetch,
+                finality=finality,
+                verifier=verifier,
+                limits=ProofCollectionLimits(
+                    maximum_storage_value_bytes=512,
+                    maximum_storage_values_bytes=256 * 512,
+                    maximum_proof_bytes=8 * 1024**2,
+                ),
+            )
+        self._finality = finality
+        self._proofs = proofs
+        self._runtime_pin = FinalizedRuntimePin(
+            metadata_sha256=config.chain_pin.metadata_sha256,
+            spec_version=config.chain_pin.runtime_spec_version,
+            transaction_version=config.chain_pin.transaction_version,
+            state_version=config.chain_pin.state_version,
+        )
+
+    def _cache_directory(self, config: CompetitionChainConfig) -> Path:
+        return Path(config.state_directory)
+
+    def _finality_storage_limits(self):
+        return None
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._path.is_symlink():
+            raise ValueError("registration cache cannot be a symlink")
+        connection = sqlite3.connect(self._path, timeout=2, isolation_level=None)
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
+
+    def _initialize_cache(self) -> None:
+        connection = self._connect()
+        try:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS binding (digest TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS captures (
+                    block INTEGER PRIMARY KEY, hash TEXT NOT NULL, snapshot TEXT NOT NULL,
+                    evidence_sha256 TEXT NOT NULL, evidence BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    digest TEXT PRIMARY KEY, body BLOB NOT NULL
+                );
+            """)
+            connection.execute("BEGIN IMMEDIATE")
+            bound = connection.execute("SELECT digest FROM binding").fetchone()
+            expected = digest(self.config)
+            if bound is None:
+                connection.execute("INSERT INTO binding VALUES (?)", (expected,))
+            elif bound[0] != expected:
+                raise ValueError("registration cache belongs to another chain configuration")
+            connection.commit()
+        finally:
+            connection.close()
+        self._path.chmod(0o600)
+
+    async def start(self) -> None:
+        if self._closed:
+            raise ValueError("registration provider is closed")
+        if self._owned and self._task is None:
+            self._task = asyncio.create_task(self._finality.run(self._stop))
+
+    async def wait_ready(self) -> RegistrationCapture:
+        """Wait for one complete owned capture after start(), without hiding faults.
+
+        Only an absent first head or a head below the startup floor is retried.
+        Proof, pin, transport, freshness and store failures remain fatal. The
+        caller owns aclose(), including when startup times out or is cancelled.
+        """
+
+        async def retry_startup() -> RegistrationCapture:
+            while True:
+                if self._owned and self._task is not None and self._task.done():
+                    # Preserve a failed observer's actual exception, including
+                    # corruption, instead of treating it as normal warm-up.
+                    self._task.result()
+                try:
+                    return await self.collect()
+                except _AwaitingFinality:
+                    pass
+                except ValidatorChainError as error:
+                    cause = error.__cause__
+                    if not (
+                        error.reason_code == "owned_finality_unavailable"
+                        and type(cause) is GrandpaFinalitySupervisorError
+                        and cause.reason_code == "no_verified_finalized_head"
+                    ):
+                        raise
+                await asyncio.sleep(_STARTUP_POLL_SECONDS)
+
+        try:
+            return await asyncio.wait_for(
+                retry_startup(), timeout=self.config.startup_timeout_seconds
+            )
+        except asyncio.TimeoutError as error:
+            raise ValueError("registration startup timed out") from error
+
+    async def aclose(self) -> None:
+        self._closed = True
+        self._stop.set()
+        if self._task is not None:
+            with suppress(asyncio.TimeoutError, asyncio.CancelledError, RuntimeError):
+                await asyncio.wait_for(self._task, timeout=5)
+        self._latest = None
+
+    async def __call__(self) -> RegistrationSnapshot:
+        return (await self.collect()).snapshot
+
+    async def collect(self) -> RegistrationCapture:
+        if self._closed:
+            raise ValueError("registration provider is closed")
+        try:
+            return await asyncio.wait_for(
+                self._collect_locked(), self.config.collection_timeout_seconds
+            )
+        except asyncio.TimeoutError as error:
+            raise ValueError("registration collection timed out") from error
+
+    async def _collect_locked(self) -> RegistrationCapture:
+        async with self._lock:
+            if self._owned and (self._task is None or self._task.done()):
+                raise ValueError("owned finality observer is not running")
+            ref = await self._proofs.finalized_snapshot()
+            if not isinstance(ref, FinalizedSnapshotRef):
+                raise ValueError("owned finalized snapshot is invalid")
+            if ref.block_number < self.config.minimum_finalized_block:
+                raise _AwaitingFinality("finalized head precedes configured minimum")
+            if self._owned and ref.block_number <= self._startup_floor:
+                raise _AwaitingFinality("awaiting a head verified by this observer process")
+            block = await self._finality.verified_block_at(ref.block_number)
+            self._check_finality(ref, block)
+            self._fresh(block.timestamp_ms)
+            self._check_prior(ref)
+            if self._latest is not None and self._latest.snapshot.block_hash == ref.block_hash:
+                return self._latest
+            runtime = await self._proofs.pinned_runtime(ref, self._runtime_pin)
+            if (
+                not isinstance(runtime, PinnedRuntimeContext)
+                or runtime.snapshot != ref
+                or runtime.pin != self._runtime_pin
+            ):
+                raise ValueError("registration runtime binding mismatch")
+            batches: list[VerifiedStorageBatch] = []
+            base = await self._read(
+                runtime,
+                (
+                    StorageReadSpec("Timestamp", "Now"),
+                    StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
+                    StorageReadSpec("SubtensorModule", "SubnetworkN", (78,)),
+                ),
+            )
+            batches.append(base)
+            values = {read.spec: read.decoded_value for read in base.reads}
+            if values[StorageReadSpec("SubtensorModule", "NetworksAdded", (78,))] is not True:
+                raise ValueError("SN78 registration subnet is unavailable")
+            timestamp = _uint(values[StorageReadSpec("Timestamp", "Now")], 2**53 - 1)
+            if timestamp != block.timestamp_ms:
+                raise ValueError("proven timestamp differs from owned finalized header")
+            count = _uint(values[StorageReadSpec("SubtensorModule", "SubnetworkN", (78,))], 256)
+            if count == 0:
+                raise ValueError("SN78 registration is empty")
+            keys = await self._read(
+                runtime,
+                tuple(
+                    StorageReadSpec("SubtensorModule", "Keys", (78, uid)) for uid in range(count)
+                ),
+            )
+            batches.append(keys)
+            key_values = {read.spec: read.decoded_value for read in keys.reads}
+            hotkeys = tuple(
+                _hotkey(key_values[StorageReadSpec("SubtensorModule", "Keys", (78, uid))])
+                for uid in range(count)
+            )
+            if len(set(hotkeys)) != count:
+                raise ValueError("duplicate registration hotkey")
+            inverse = await self._read(
+                runtime,
+                tuple(
+                    StorageReadSpec("SubtensorModule", "Uids", (78, hotkey)) for hotkey in hotkeys
+                ),
+            )
+            batches.append(inverse)
+            inverse_values = {read.spec: read.decoded_value for read in inverse.reads}
+            for uid, hotkey in enumerate(hotkeys):
+                if (
+                    _uint(
+                        inverse_values[StorageReadSpec("SubtensorModule", "Uids", (78, hotkey))],
+                        255,
+                    )
+                    != uid
+                ):
+                    raise ValueError("registration inverse mapping mismatch")
+            newest = await self._finality.verified_finalized_snapshot()
+            if newest.block_number < ref.block_number or (
+                newest.block_number == ref.block_number and newest != ref
+            ):
+                raise ValueError("owned finalized head rolled back or changed")
+            if newest.block_number - ref.block_number > self.policy.maximum_snapshot_age_blocks:
+                raise ValueError("registration snapshot became stale during proof collection")
+            self._fresh(timestamp)
+            snapshot = RegistrationSnapshot(
+                network="finney",
+                netuid=78,
+                block=ref.block_number,
+                block_hash=ref.block_hash,
+                registrations=tuple(
+                    Registration(uid=uid, hotkey=hotkey) for uid, hotkey in enumerate(hotkeys)
+                ),
+            )
+            evidence = canonical_json_bytes(
+                {
+                    "schema": "umi-competition-registration-evidence/1",
+                    "snapshot": snapshot.model_dump(mode="json"),
+                    "finality": json.loads(block.finality_evidence),
+                    "runtime_metadata_sha256": runtime.metadata_sha256,
+                    "runtime_version": json.loads(runtime.runtime_version_bytes),
+                    "storage_batches": [
+                        {
+                            "state_root": batch.evidence.verified_state_root,
+                            "claims": [
+                                {
+                                    "key": "0x" + claim.storage_key.hex(),
+                                    "value": None
+                                    if claim.value is None
+                                    else "0x" + claim.value.hex(),
+                                }
+                                for claim in batch.evidence.claims
+                            ],
+                            "proof": ["0x" + node.hex() for node in batch.evidence.proof],
+                        }
+                        for batch in batches
+                    ],
+                }
+            )
+            if len(evidence) > _MAX_EVIDENCE_BYTES:
+                raise ValueError("registration evidence exceeds its byte bound")
+            evidence_id = hashlib.sha256(evidence).hexdigest()
+            capture = RegistrationCapture(
+                snapshot,
+                {
+                    "schema": "umi-competition-registration-provenance/1",
+                    "evidence_class": EVIDENCE_CLASS,
+                    "offline_finality_proof": False,
+                    "genesis_block_hash": "0x" + FINNEY_GENESIS_HASH,
+                    "block": ref.block_number,
+                    "block_hash": ref.block_hash,
+                    "state_root": ref.state_root,
+                    "timestamp_ms": timestamp,
+                    "snapshot_sha256": digest(snapshot),
+                    "evidence_sha256": evidence_id,
+                    "metadata_sha256": runtime.metadata_sha256,
+                    "finality_evidence_sha256": block.finality_evidence_sha256,
+                    "finality_verifier_sha256": block.finality_verifier_sha256,
+                    "storage_proof_verifier_sha256": self.config.proof_binary_sha256,
+                    "chain_submission_authorized": False,
+                },
+            )
+            self._save(capture, evidence, runtime.metadata_bytes)
+            self._latest = capture
+            return capture
+
+    def _check_finality(self, ref: FinalizedSnapshotRef, block: Any) -> None:
+        if not isinstance(block, VerifiedFinalizedBlock):
+            raise ValueError("owned finality evidence is unavailable")
+        if (
+            block.height != ref.block_number
+            or block.block_hash != ref.block_hash
+            or block.state_root != ref.state_root
+            or block.chain_observation != self.config.chain_pin
+            or block.scoring_policy_hash != digest(self.policy)
+            or block.finality_verifier_sha256
+            != self.config.finality_pin.release_sha256_by_target[self.config.target_triple]
+        ):
+            raise ValueError("owned finality evidence binding mismatch")
+        record = json.loads(block.finality_evidence)
+        if (
+            record.get("evidence_class") != EVIDENCE_CLASS
+            or record.get("offline_finality_proof") is not False
+            or record.get("genesis_hash") != "0x" + FINNEY_GENESIS_HASH
+        ):
+            raise ValueError("owned finality evidence class or genesis mismatch")
+
+    def _fresh(self, timestamp: int) -> None:
+        now = _uint(self._now_ms(), 2**53 - 1)
+        if timestamp < now - self.config.maximum_head_age_ms:
+            raise ValueError("owned finalized head is stale")
+        if timestamp > now + self.config.maximum_future_skew_ms:
+            raise ValueError("owned finalized head is in the future")
+
+    async def _read(
+        self, runtime: PinnedRuntimeContext, specs: tuple[StorageReadSpec, ...]
+    ) -> VerifiedStorageBatch:
+        try:
+            if self._prefetch is not None:
+                await self._prefetch.prefetch(
+                    runtime.snapshot.block_hash,
+                    tuple(
+                        runtime.storage_key(spec.pallet, spec.item, spec.params) for spec in specs
+                    ),
+                )
+            batch = await self._proofs.storage_reads(runtime, specs)
+        finally:
+            if self._prefetch is not None:
+                self._prefetch.values.clear()
+        if not isinstance(batch, VerifiedStorageBatch) or batch.runtime != runtime:
+            raise ValueError("registration storage proof uses another runtime or state root")
+        if {read.spec for read in batch.reads} != set(specs) or len(batch.reads) != len(specs):
+            raise ValueError("registration storage response is incomplete or duplicated")
+        if any(read.raw_value is None for read in batch.reads):
+            raise ValueError("registration storage membership is incomplete")
+        return batch
+
+    def _check_prior(self, ref: FinalizedSnapshotRef) -> None:
+        connection = self._connect()
+        try:
+            prior = connection.execute(
+                "SELECT block, hash FROM captures ORDER BY block DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        if prior and (
+            ref.block_number < prior[0]
+            or (ref.block_number == prior[0] and ref.block_hash != prior[1])
+        ):
+            raise ValueError("registration finalized head rolled back or changed")
+
+    def _save(self, capture: RegistrationCapture, evidence: bytes, metadata: bytes) -> None:
+        snapshot = capture.snapshot
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            metadata_id = hashlib.sha256(metadata).hexdigest()
+            artifact = connection.execute(
+                "SELECT body FROM artifacts WHERE digest=?", (metadata_id,)
+            ).fetchone()
+            if artifact and artifact[0] != metadata:
+                raise ValueError("retained runtime metadata is corrupt")
+            latest = connection.execute(
+                "SELECT block, hash FROM captures ORDER BY block DESC LIMIT 1"
+            ).fetchone()
+            if latest and (
+                snapshot.block < latest[0]
+                or (snapshot.block == latest[0] and snapshot.block_hash != latest[1])
+            ):
+                raise ValueError("registration finalized head rolled back or changed")
+            prior = connection.execute(
+                "SELECT snapshot FROM captures WHERE block=?", (snapshot.block,)
+            ).fetchone()
+            if prior:
+                if prior[0] != digest(snapshot):
+                    raise ValueError("registration mapping changed at the same finalized block")
+            else:
+                total = connection.execute(
+                    "SELECT COALESCE(SUM(length(evidence)), 0) FROM captures"
+                ).fetchone()[0]
+                total += connection.execute(
+                    "SELECT COALESCE(SUM(length(body)), 0) FROM artifacts"
+                ).fetchone()[0]
+                added_metadata = 0 if artifact else len(metadata)
+                if total + len(evidence) + added_metadata > self.config.maximum_cache_bytes:
+                    raise ValueError("registration evidence cache is full")
+                connection.execute(
+                    "INSERT OR IGNORE INTO artifacts VALUES (?, ?)", (metadata_id, metadata)
+                )
+                connection.execute(
+                    "INSERT INTO captures VALUES (?, ?, ?, ?, ?)",
+                    (
+                        snapshot.block,
+                        snapshot.block_hash,
+                        digest(snapshot),
+                        capture.provenance["evidence_sha256"],
+                        evidence,
+                    ),
+                )
+            self._fresh(capture.provenance["timestamp_ms"])
+            connection.commit()
+        finally:
+            connection.close()
+
+
+def _uint(value: Any, maximum: int) -> int:
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ValueError("registration storage integer is invalid")
+    return value
+
+
+def _hotkey(value: Any) -> str:
+    import bittensor as bt
+
+    if isinstance(value, str) and value.startswith("0x"):
+        value = bytes.fromhex(value[2:])
+    account = account_id32(value)
+    if account == bytes(32):
+        raise ValueError("registration hotkey is empty")
+    return bt.sp_core.ss58_encode(account, 42)
