@@ -512,3 +512,20 @@ def test_changed_legacy_during_probe_is_held_and_never_overwritten(tmp_path, sig
         assert not chain.client.calls
         assert (root / "journal.json").read_bytes() == b'{"changed":true}'
         assert (root / "registration-bridge-legacy-journal.json").read_bytes() == raw
+
+
+def test_installed_console_entrypoint_supports_wallet_free_help(monkeypatch, capsys):
+    import importlib
+    import sys
+    from pathlib import Path
+
+    import tomllib
+
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    module, name = project["project"]["scripts"]["umi-registration-bridge"].split(":")
+    entrypoint = getattr(importlib.import_module(module), name)
+    monkeypatch.setattr(sys, "argv", ["umi-registration-bridge", "--help"])
+    with pytest.raises(SystemExit) as result:
+        entrypoint()
+    assert result.value.code == 0
+    assert "check" in capsys.readouterr().out

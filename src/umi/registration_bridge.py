@@ -1681,5 +1681,9 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         return 2
 
 
-if __name__ == "__main__":
+def main() -> None:
     raise SystemExit(run_cli())
+
+
+if __name__ == "__main__":
+    main()
