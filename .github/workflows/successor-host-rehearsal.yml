@@ -4,13 +4,19 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - 'src/umi/competition_*.py'
-      - 'tests/test_competition_*.py'
+      - 'src/**'
+      - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/successor-host-rehearsal.yml'
   push:
     branches: [codex/open-competition-completion-20260912]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/successor-host-rehearsal.yml'
 
 permissions:
   contents: read

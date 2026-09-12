@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import fcntl
-import multiprocessing
 import os
+import selectors
+import subprocess
 import sys
+from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
@@ -16,14 +17,18 @@ from umi.competition_upgrade import _fingerprint
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="requires Linux procfs")
 
 
-def _holder(path, ready, finish):
-    descriptor = os.open(path, os.O_RDWR | os.O_CLOEXEC)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        ready.set()
-        finish.wait(15)
-    finally:
-        os.close(descriptor)
+# Keep the child independent of application imports. Its lifetime follows the
+# parent pipe: EOF also releases the lock if the test runner exits unexpectedly.
+_HOLDER = """
+import fcntl, os, sys
+descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CLOEXEC)
+try:
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(1, b'ready\\n')
+    sys.stdin.buffer.read(1)
+finally:
+    os.close(descriptor)
+"""
 
 
 @pytest.fixture
@@ -31,12 +36,18 @@ def held(tmp_path):
     path = tmp_path / "synthetic-supervisor-process.lock"
     path.write_bytes(b"")
     path.chmod(0o600)
-    process_context = multiprocessing.get_context("spawn")
-    ready, finish = process_context.Event(), process_context.Event()
-    process = process_context.Process(target=_holder, args=(path, ready, finish))
-    process.start()
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-c", _HOLDER, str(path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+    )
     try:
-        assert ready.wait(10), "synthetic lock-holder failed to start"
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            assert selector.select(10), "synthetic lock-holder failed to start"
+            assert os.read(process.stdout.fileno(), 6) == b"ready\n"
         fixture = SimpleNamespace(
             plan=SimpleNamespace(service_uid=os.geteuid()),
             _stopped=SimpleNamespace(
@@ -49,12 +60,16 @@ def held(tmp_path):
         )
         yield process, fixture
     finally:
-        finish.set()
-        process.join(timeout=10)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=5)
-        assert process.exitcode == 0
+        with suppress(BrokenPipeError):
+            process.stdin.close()
+        process.stdin = None
+        try:
+            output, error = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
+            raise
+        assert process.returncode == 0 and output == error == b""
 
 
 def test_kernel_holder_is_the_expected_main_process(held):

@@ -147,6 +147,15 @@ host-namespace adapter rejects this layout. A namespace-aware path must preserve
 the installed config and state bindings, verify files in the correct root, and
 rehearse each service independently before either live validator is switched.
 
+Read-only inspection confirmed that both instances load the shared
+`umi-validator@.service` fragment, with no drop-ins, and use cgroups beneath
+`/umi.slice/umi-validators.slice/`. Their passwd home directories include the
+host-side RootDirectory prefix, while the running services use
+`/var/lib/umi-validator-supervisor/home` inside that root. The adapter must
+distinguish host paths from service paths, including bind-mount sources and
+cleanup execution. Do not copy the generic account-home rendering into these
+instances or edit the shared template to upgrade only one validator.
+
 The stopped-host lease is now implemented in `competition_host_upgrade.py`.
 It authenticates the retained v3 directive, installed config and release, checks
 the exact systemd unit and descendant cgroups, and holds the existing supervisor
@@ -215,15 +224,23 @@ recreates the legacy lease or modifies v3/v4 history. The focused local suite
 passed 87 tests. Seventeen root-filesystem checks passed on arm64, including
 actual process death before and after the intent's atomic rename. The startup
 tests mock systemd; they do not replace the complete service rehearsal. Native
-amd64/arm64 CI coverage has been added but is not yet a recorded pass.
+amd64/arm64 CI results for the later revision are recorded below.
 
 The local full regression passed 3,561 tests with 25 platform/rehearsal skips.
 Review then found an overlap between recovery commands during the writer-lock
 handoff. A separate per-unit operator mutex now spans recovery, start and failed
 start cleanup. The revised focused suite passed 95 tests, including overlapping
-invocations and lock identity checks. Linux reruns are pending. A Linux fixture
-also depended on umask 022; it now creates its required non-writable staging
-parent explicitly without relaxing the production ownership checks.
+invocations and lock identity checks. The arm64 VM passed 18 root-filesystem
+checks, including a crashed mutex owner and cross-process exclusion. A Linux
+fixture also depended on umask 022; it now creates its required non-writable
+staging parent explicitly without relaxing the production ownership checks.
+
+[Native CI at revision 7e04d54](https://github.com/Umi-BitSign/umi/actions/runs/34725329272)
+passed on both amd64 and arm64. Each architecture passed 191 state/startup/input
+tests and 37 root-filesystem tests; 12 opposite-architecture fixture variants
+were skipped on each runner. This includes the main-process kernel flock check,
+atomic input repair and process-death publication tests. It does not exercise
+the complete operator upgrade or the coordinator's RootDirectory service layout.
 
 The bounded host-bundle stager passed 71 combined artifact tests locally. In the
 isolated arm64 VM, nine root-filesystem cases and seven metadata checks passed;
