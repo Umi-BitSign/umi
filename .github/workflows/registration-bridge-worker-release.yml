@@ -96,6 +96,7 @@ jobs:
           docker buildx build \
             --pull \
             --platform "${PLATFORM}" \
+            --build-arg "TARGETARCH=${ARCHITECTURE}" \
             --build-arg "UMI_GIT_REVISION=${REVISION}" \
             --build-arg "UMI_SOURCE_TREE_SHA256=${SOURCE_TREE_SHA256}" \
             --tag "${IMAGE_TAG}" \
@@ -275,4 +276,3 @@ jobs:
             echo "- GitHub artifact digest: ${ARTIFACT_DIGEST}"
             echo "- OCI archive record: ${ARTIFACT_BASE}.json"
           } >> "${GITHUB_STEP_SUMMARY}"
-
