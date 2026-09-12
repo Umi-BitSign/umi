@@ -84,6 +84,7 @@ activate rewards or extend the signed bootstrap sunset.
 - [x] Verify registration-bridge policy bundles and retained attempt history.
 - [x] Start a committed generic systemd switch only after releasing the old lock.
 - [x] Recover a retained generic source switch and start without reviving legacy authority.
+- [x] Establish private fixed-path mounts for the stopped upgrade observer.
 - [ ] Wire initial privileged preparation into the operator command.
 - [ ] Adapt and rehearse the coordinator's two RootDirectory validator installations.
 - [ ] Rehearse interruption/restart on both Linux architectures and rerun all tests.
@@ -241,6 +242,12 @@ tests and 37 root-filesystem tests; 12 opposite-architecture fixture variants
 were skipped on each runner. This includes the main-process kernel flock check,
 atomic input repair and process-death publication tests. It does not exercise
 the complete operator upgrade or the coordinator's RootDirectory service layout.
+
+The private upgrade-observer namespace passed nine real-mount checks on the
+wallet-free arm64 host and 33 combined namespace/observer tests locally. It
+preserves the parent namespace through normal exit, process death and partial
+failure. The new checks are included in native amd64/arm64 CI. Initial operator
+orchestration and the coordinator adapter remain open items above.
 
 The bounded host-bundle stager passed 71 combined artifact tests locally. In the
 isolated arm64 VM, nine root-filesystem cases and seven metadata checks passed;

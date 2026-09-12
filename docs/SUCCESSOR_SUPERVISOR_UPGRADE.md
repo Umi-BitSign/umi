@@ -78,6 +78,26 @@ remain on hold. Source authentication, stopped recovery, local operator consent,
 fresh chain checks and actual sandbox execution are separate acceptance checks.
 The production source switch and both-architecture rehearsal are still required.
 
+`competition_upgrade_namespace` prepares the recovery observer's fixed helper
+paths in a fresh root process's private Linux mount namespace. It disables mount
+propagation before installing any overlay, checks the signed host tree again,
+binds its helpers read-only, and binds a separate root-private finality cache.
+The stopped observer still verifies consent, signatures and installation identity
+before running a helper. Namespace setup alone grants no service-stop or signing
+permission. It must run before threads start, once per process; after a partial
+setup failure, exit that process. Existing host mount contents are preserved.
+Only empty `/opt/umi` and `/var/lib/umi-competition` placeholders may be created
+on the host if those directories did not exist. Never use this as a replacement
+for the coordinator's separate RootDirectory service adapter.
+
+The wallet-free arm64 test host passed nine real-mount cases, including
+read-only helpers, writable private cache, invalid sources, partial setup failure
+process death and a source replaced during namespace creation. The first run
+caught descriptors still referring to mounts
+in the old namespace. Setup now reopens them after unsharing and requires the
+same inode and permissions before binding them. The operator's initial
+prepare/stop/checkpoint/switch/start command is still incomplete.
+
 The fixed `umi-competition-supervisor` entrypoint now connects the authenticated
 root anchor, owned chain observer, bounded HTTPS delivery, atomic input selection
 and durable runtime. Startup takes the original process lock before repairing an

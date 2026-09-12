@@ -60,6 +60,7 @@ jobs:
             tests/test_competition_host_switch.py \
             tests/test_competition_host_start.py \
             tests/test_competition_host_start_linux.py \
+            tests/test_competition_upgrade_namespace.py \
             tests/test_competition_switch_recovery.py \
             tests/test_competition_startup_lease.py \
             tests/test_competition_materialization.py \
@@ -70,13 +71,15 @@ jobs:
           sudo -n env \
             UMI_RUN_SERVICE_REHEARSAL=1 \
             UMI_RUN_HOST_BUNDLE_REHEARSAL=1 \
+            UMI_RUN_NAMESPACE_REHEARSAL=1 \
             PYTHONPATH="$PWD/src:$PWD" \
             "$PWD/.venv/bin/python" -m pytest -q \
             --basetemp="/var/lib/umi-successor-hostbundle-pytest-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --junitxml="$PWD/successor-root-files.xml" \
             tests/test_competition_host_bundle.py \
             tests/test_competition_host_switch_linux.py \
-            tests/test_competition_switch_recovery_linux.py
+            tests/test_competition_switch_recovery_linux.py \
+            tests/test_competition_upgrade_namespace_linux.py
 
       - name: Retain test reports
         if: always()
