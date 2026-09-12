@@ -2,7 +2,7 @@
 
 This is the one-time installation path for SN78 validators. Every validator uses
 the same command and signed release stream. There is no validator-specific
-configuration, directive URL, authorization file, or upload key.
+configuration, directive URL, authorization file, or result-upload credential.
 
 The installer supports Ubuntu 24.04 or later and Debian 12 or later on Linux
 x86_64 or arm64. It requires Podman 4.3.0 or later with `crun`; the installer

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from bittensor import Wallet
 
 import umi.registration_bridge as bridge
 from tests.factories import dev_wallet
@@ -34,8 +35,14 @@ def signed_policy(monkeypatch):
 
 @pytest.fixture
 def wallet():
-    class HotkeyOnly:
+    class HotkeyOnly(Wallet):
+        # Exercise the SDK's concrete-wallet route. Python 3.10 protocol
+        # isinstance checks invoke properties on structural test doubles.
         hotkey = dev_wallet("//RegistrationBridgeValidator").hotkey
+        hotkeypub = hotkey
+
+        def __init__(self):
+            pass  # No filesystem wallet is created by this in-memory double.
 
         @property
         def coldkey(self):
@@ -519,7 +526,10 @@ def test_installed_console_entrypoint_supports_wallet_free_help(monkeypatch, cap
     import sys
     from pathlib import Path
 
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
 
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     module, name = project["project"]["scripts"]["umi-registration-bridge"].split(":")
