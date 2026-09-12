@@ -10,7 +10,7 @@ installs or verifies both. The host should have at least 8 CPU cores, 16 GiB RAM
 and 100 GiB of local storage. A GPU is not required.
 
 The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen-pilot
-worker with temporary live-miner weights grouped equally by coldkey. It does not
+worker with temporary live-miner weights grouped by coldkey or HTTPS IP. It does not
 send translation requests. Miner operators should follow
 [current miner operation](CURRENT_MINER_OPERATION.md).
 

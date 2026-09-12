@@ -126,6 +126,7 @@ def test_runbook_has_fail_closed_install_and_service_checks() -> None:
 
 def test_shared_validator_rollout_is_one_pinned_install_and_signed_channel() -> None:
     runbook = (ROOT.parents[1] / "docs" / "PERMANENT_VALIDATOR_SUPERVISOR.md").read_text()
+    runbook = " ".join(runbook.split())
 
     assert "git clone git@github.com:Umi-BitSign/umi.git umi-validator" in runbook
     assert "REPLACE_WITH_PUBLISHED_40_CHARACTER_REVISION" not in runbook

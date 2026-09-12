@@ -4,13 +4,13 @@
 
 The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen two-miner
 pilot rule. It checks registered SN78 miners' HTTPS availability and gives each
-qualifying coldkey an equal total weight, divided among its passing UIDs.
+qualifying coldkey/IP group an equal total weight, divided among its passing UIDs.
 It does not score translations or require a running model.
 
 Both UMI validators, UID 0 and UID 54, have finalized bridge rows. The
-[September 12 readback](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md) shows
-16 miners with positive consensus and incentive from the initial row. The
-expanded rows still awaited a later consensus update at that snapshot.
+[September 12 IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) records
+61 and 60 passing UIDs respectively, grouped into 18 and 17 coldkey/IP groups.
+Those new rows still awaited a later consensus update at that snapshot.
 Inclusion in a row is not proof that a miner has already received a payout.
 
 ## Miner requirements
@@ -35,13 +35,15 @@ so passing a health check does not guarantee an immediate or fixed payout.
 
 ## How weights are shared
 
-Each qualifying coldkey gets the same total raw weight. If one coldkey has six
-passing UIDs and another has one, both groups receive the same total; the first
-group's weight is divided among its six UIDs.
+Passing UIDs sharing a coldkey or HTTPS endpoint IP form one group. Connections
+are transitive and ports are ignored. Each group gets the same total raw weight,
+split among its passing UIDs. Nineteen coldkeys on one IP therefore share one
+group budget, not nineteen budgets. See the [IP-cap deployment record](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md).
 
-Coldkeys are an on-chain grouping rule, not verified human identities. One operator
-can own multiple coldkeys. HTTPS reachability does not prove endpoint ownership or
-translation quality. These are limitations of this temporary availability rule.
+This does not prove human or machine identity. Shared hosting or NAT can group
+independent miners together. Different coldkeys on different IPs can still make
+multiple groups, and copying another miner's endpoint can dilute its group.
+HTTPS reachability does not prove endpoint ownership or translation quality.
 
 The bridge stops new submissions before block `9,073,731`, with hard sunset at
 `9,075,171`, unless replaced sooner. It retains the original bootstrap deadline.
