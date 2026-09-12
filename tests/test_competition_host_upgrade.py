@@ -146,6 +146,9 @@ def test_exception_releases_lease_without_lifecycle_calls(installed):
         ("ExecStart", "--config /etc/umi/another.json ;"),
         ("FragmentPath", "/tmp/forged.service"),
         ("DropInPaths", "/tmp/override.conf"),
+        ("RootDirectory", "/var/lib/umi-validator-hosts/uid0"),
+        ("RootImage", "/var/lib/validator.raw"),
+        ("Slice", "umi-validators.slice"),
     ],
 )
 def test_exact_unit_binding_rejects_unsafe_state(monkeypatch, field, value):

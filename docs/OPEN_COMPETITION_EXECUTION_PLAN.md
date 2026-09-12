@@ -80,7 +80,11 @@ activate rewards or extend the signed bootstrap sunset.
 - [x] Bounded HTTPS input delivery and reuse of verified downloads.
 - [x] Atomic current-input selection and crash-repair tests on Linux arm64.
 - [x] Connect the authenticated installation receipt and durable successor runtime.
-- [ ] Implement the production host switch and per-round input materialization.
+- [x] Per-round immutable input materialization after stopped-worker recovery.
+- [x] Verify registration-bridge policy bundles and retained attempt history.
+- [x] Start a committed generic systemd switch only after releasing the old lock.
+- [ ] Wire privileged preparation and interrupted-switch recovery into the operator command.
+- [ ] Adapt and rehearse the coordinator's two RootDirectory validator installations.
 - [ ] Rehearse interruption/restart on both Linux architectures and rerun all tests.
 - [ ] Complete the real-model, independent-evaluation and signed-activation gates.
 
@@ -110,12 +114,37 @@ checks.
 
 ## Upgrade details to preserve
 
-The current common bootstrap profile runs `umi-simple-bootstrap-validator`.
-Its effect record is `journal.json` under the worker state root, with
-`service.lock`. The older explicit-hotkey worker uses
+The live registration bridge runs `umi-registration-bridge`. Its effect record
+is `registration-bridge-journal.json`, with per-attempt phase records under
+`registration-bridge-history/`. It shares `service.lock` with the former common
+bootstrap worker and retains that worker's `journal.json` unchanged, plus an
+exact copy in `registration-bridge-legacy-journal.json`.
+The older explicit-hotkey worker uses
 `bootstrap-transactions/<directive>/` and `bootstrap-authorizations/`.
-The upgrade must recognize both layouts and reconcile uncertain anchor and
+The upgrade must recognize all three layouts and reconcile uncertain anchor and
 weight transactions. A new successor-only journal does not replace this step.
+
+The development branch now includes the live bridge release. Read-only upgrade
+inspection verifies its signed policy, release revision, bundle digest and exact
+extracted files. Stopped-host identity records the bridge policy separately
+from a frozen-pilot manifest. Recovery retains every history byte, checks
+canonical signed attempts and phase ordering, and requires each later preflight
+to name the prior receipt's LastUpdate. The latest row must match owned finalized
+storage. Historical SDK receipts remain retained local claims; this is not a new
+proof of every historical extrinsic. Uncertain attempts, missing records and
+unexplained weight updates remain held.
+
+The generic start routine consumes a committed switch once, waits for the main
+process to hold the original lock inode, and verifies the systemd execution
+identity. Startup failure stops that unit and invokes its sealed cleanup unit.
+It preserves state and never restores the old executable. This routine alone
+is not the complete upgrade command.
+
+The coordinator uses `umi-validator@0.service` and `umi-validator@54.service`
+with separate RootDirectory trees and a shared resource slice. The generic
+host-namespace adapter rejects this layout. A namespace-aware path must preserve
+the installed config and state bindings, verify files in the correct root, and
+rehearse each service independently before either live validator is switched.
 
 The stopped-host lease is now implemented in `competition_host_upgrade.py`.
 It authenticates the retained v3 directive, installed config and release, checks

@@ -82,17 +82,67 @@ def _process_owns_lock(pid: int, switch: CommittedSuccessorServiceSwitch) -> Non
                 except FileNotFoundError:
                     continue
                 if (target.st_dev, target.st_ino) == (info.st_dev, info.st_ino):
-                    return
+                    # An open descriptor is insufficient: even our probe has
+                    # one. fdinfo must name the exclusive flock on this open
+                    # file description, attributed to the main process.
+                    fdinfo = os.open(
+                        f"/proc/{pid}/fdinfo/{entry.name}",
+                        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    )
+                    try:
+                        metadata = os.read(fdinfo, 4097)
+                        if len(metadata) > 4096:
+                            raise HostUpgradeError("successor lock metadata exceeds its bound")
+                    finally:
+                        os.close(fdinfo)
+                    if _kernel_flock_matches(metadata, pid=pid, info=info):
+                        return
         raise _StartupPending("successor main process does not retain the original lock")
     finally:
         os.close(descriptor)
 
 
+def _kernel_flock_matches(metadata: bytes, *, pid: int, info: os.stat_result) -> bool:
+    # Linux fs/locks.c: __show_fd_locks + lock_get_status. Inspect only the
+    # kernel metadata for the matching inode; never read the opened file.
+    # https://github.com/torvalds/linux/blob/v6.8/fs/locks.c
+    for line in metadata.decode("ascii", errors="strict").splitlines():
+        fields = line.split()
+        if (
+            len(fields) != 9
+            or fields[0] != "lock:"
+            or fields[2:6] != ["FLOCK", "ADVISORY", "WRITE", str(pid)]
+            or fields[7:] != ["0", "EOF"]
+        ):
+            continue
+        device = fields[6].split(":")
+        if len(device) != 3:
+            continue
+        try:
+            identity = (int(device[0], 16), int(device[1], 16), int(device[2]))
+        except ValueError:
+            continue
+        if identity == (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino):
+            return True
+    return False
+
+
 def _running(switch: CommittedSuccessorServiceSwitch) -> int:
     unit = _unit_snapshot(switch.plan.unit_name)
     original = dict(switch._unit)
-    for key in ("Id", "LoadState", "User", "FragmentPath", "DropInPaths", "ExecStart", "OnFailure"):
-        if unit[key] != original[key]:
+    for key in (
+        "Id",
+        "LoadState",
+        "User",
+        "FragmentPath",
+        "DropInPaths",
+        "ExecStart",
+        "OnFailure",
+        "RootDirectory",
+        "RootImage",
+        "Slice",
+    ):
+        if unit.get(key) != original.get(key):
             raise HostUpgradeError("started successor unit execution identity changed")
     if unit["ActiveState"] == "activating":
         raise _StartupPending("successor service is still activating")

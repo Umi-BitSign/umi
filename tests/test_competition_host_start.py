@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -192,3 +193,22 @@ def test_fixed_systemctl_call_never_uses_shell_or_wallet(monkeypatch):
     assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"] == start.subprocess.DEVNULL
     assert kwargs["timeout"] == 45
     assert not kwargs.get("shell")
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("pos: 0", False),
+        ("lock: 1: FLOCK ADVISORY WRITE 123 00:01:42 0 EOF", True),
+        ("lock: 1: FLOCK ADVISORY WRITE 124 00:01:42 0 EOF", False),
+        ("lock: 1: FLOCK ADVISORY READ 123 00:01:42 0 EOF", False),
+        ("lock: 1: POSIX ADVISORY WRITE 123 00:01:42 0 EOF", False),
+        ("lock: 1: FLOCK ADVISORY WRITE 123 00:01:43 0 EOF", False),
+        ("lock: 1: FLOCK ADVISORY WRITE 123 00:02:42 0 EOF", False),
+        ("lock: 1: -> FLOCK ADVISORY WRITE 123 00:01:42 0 EOF", False),
+        ("lock: 1: FLOCK ADVISORY WRITE 123 invalid 0 EOF", False),
+    ],
+)
+def test_kernel_metadata_requires_this_process_exclusive_flock(line, expected):
+    info = SimpleNamespace(st_dev=os.makedev(0, 1), st_ino=42)
+    assert start._kernel_flock_matches(line.encode(), pid=123, info=info) is expected

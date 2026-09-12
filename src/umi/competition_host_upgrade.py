@@ -60,6 +60,9 @@ _PROPERTIES = (
     "ExecStart",
     "DropInPaths",
     "OnFailure",
+    "RootDirectory",
+    "RootImage",
+    "Slice",
 )
 
 
@@ -207,6 +210,15 @@ def _require_empty_cgroup(unit_name: str, reported: str) -> None:
 
 def _check_unit(unit_name: str, config_path: Path, service_uid: int) -> dict[str, str]:
     values = _unit_snapshot(unit_name)
+    # This adapter reads paths in the host namespace. A RootDirectory/RootImage
+    # service would resolve the same config and state paths to different bytes.
+    # Such installations need their own authenticated namespace migration.
+    if (
+        values.get("RootDirectory", "")
+        or values.get("RootImage", "")
+        or values.get("Slice", "system.slice") != "system.slice"
+    ):
+        raise HostUpgradeError("supervisor filesystem or slice needs a namespace-aware upgrade")
     if (
         values["Id"] != unit_name
         or values["LoadState"] != "loaded"

@@ -223,3 +223,43 @@ def test_copy_of_unresolved_frozen_pilot_journal_cannot_count_as_retired(complet
     completed.files[JOURNAL] = canonical_json_bytes(current)
     with pytest.raises(ValueError):
         audit_bridge_history(completed.files, hotkey=current.validator_hotkey)
+
+
+def retain_old_journal(completed, old):
+    raw = canonical_json_bytes(old)
+    completed.files["journal.json"] = completed.files[ARCHIVE] = raw
+    sha = hashlib.sha256(raw).hexdigest()
+    for path, body in list(completed.files.items()):
+        if path == JOURNAL or path.startswith(HISTORY + "/"):
+            record = bridge.RegistrationBridgeJournal.model_validate_json(body)
+            completed.files[path] = canonical_json_bytes(
+                record.model_copy(update={"legacy_journal_sha256": sha})
+            )
+
+
+def test_bridge_proof_does_not_clear_missing_frozen_pilot_context(tmp_path, completed, limits):
+    from tests.test_registration_bridge_runtime import old_applied
+
+    old = old_applied(
+        SimpleNamespace(hotkey=SimpleNamespace(ss58_address=completed.current.validator_hotkey))
+    )
+    retain_old_journal(completed, old)
+    with snapshot(tmp_path / "worker", completed, limits) as snap:
+        assert "common_historical_context_missing" in snap.manifest.holds
+        _, holds = recovery._reconcile_snapshot(snap, completed.owned, ())
+        assert "common_historical_context_missing" in holds
+
+
+def test_bridge_cannot_retire_an_uncertain_old_journal(tmp_path, completed, limits):
+    from tests.test_registration_bridge_runtime import old_applied
+
+    wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address=completed.current.validator_hotkey)
+    )
+    old = old_applied(wallet, phase="recovered_applied")
+    retain_old_journal(completed, old)
+    with (
+        pytest.raises(ValueError, match="not terminal"),
+        snapshot(tmp_path / "worker", completed, limits),
+    ):
+        pytest.fail("row equality cannot resolve an uncertain old attempt")

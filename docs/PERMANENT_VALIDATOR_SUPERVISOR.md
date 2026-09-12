@@ -2,7 +2,7 @@
 
 This is the one-time installation path for SN78 validators. Every validator uses
 the same command and signed release stream. There is no validator-specific
-configuration, directive URL, authorization file, or upload key.
+configuration, directive URL, authorization file, or result-upload credential.
 
 The installer supports Ubuntu 24.04 or later and Debian 12 or later on Linux
 x86_64 or arm64. It requires Podman 4.3.0 or later with `crun`; the installer
@@ -179,9 +179,10 @@ objects before changing the worker.
 
 A directive can select only one of the fixed UMI profiles allowed by the local
 configuration: hold, bootstrap service weights, registration-bridge weights,
-inactive shadow validation, or translation validation. It cannot provide a shell
-command, arbitrary arguments, arbitrary mounts, or a container socket. The legacy bootstrap profile runs the
-fixed `umi-simple-bootstrap-validator` entrypoint. The registration-bridge
+inactive shadow validation, or translation validation.
+It cannot provide a shell command, arbitrary arguments, arbitrary mounts, or a
+container socket. The legacy bootstrap profile runs the fixed
+`umi-simple-bootstrap-validator` entrypoint. The registration-bridge
 profile runs `umi-registration-bridge` with its separate signed policy.
 
 The common bootstrap directive applies to any hotkey that currently holds an
