@@ -1,9 +1,10 @@
 # Temporary live-miner rewards
 
-This release adds a short-lived replacement for the frozen two-miner pilot
-policy. Installation or publication of the code does not prove activation.
-The rollout must publish its signed policy and finalized weight evidence
-before miners are told that incentives are active.
+The temporary bridge has replaced the frozen two-miner pilot policy on UMI's
+UID 0 and UID 54 validators. Both have finalized bridge rows. At the published
+September 12 snapshot, 16 miners had positive consensus and incentive from the
+initial row; the expanded rows still awaited a later consensus update.
+See the [activation report and public readback](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md).
 
 ## Eligibility and weights
 
@@ -78,9 +79,9 @@ manifest or pretend that registration satisfies a public-pilot proof.
 
 The legacy supervisor needs the corresponding host parser/profile update
 before it can accept this worker. Operators must not run two weight writers
-for the same hotkey. The UMI-managed UID 0 and UID 54 installations are
+for the same hotkey. The UMI-managed UID 0 and UID 54 installations were
 updated one at a time, preserving their directive checkpoints and worker
-journals. No coldkey is used.
+journals. No coldkey was used.
 
 The worker keeps its root filesystem read-only and `/tmp` non-executable.
 The hash-checked native finality verifier is copied into a dedicated 64 MiB
@@ -95,5 +96,6 @@ hotkey.
 
 The old `/api/v1/bootstrap-service` endpoint describes the retired pilot
 policy. Its status is not evidence for registration-bridge activation.
-Bridge activation evidence must identify the signed policy, exact validator
-rows, finalized blocks, and the subsequent consensus/incentive readback.
+The [bridge activation report](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
+identifies the signed policy, exact validator rows, finalized blocks, and
+consensus/incentive readback. It is a dated snapshot, not a live status API.
