@@ -1,0 +1,94 @@
+# Temporary live-miner rewards
+
+This release adds a short-lived replacement for the frozen two-miner pilot
+policy. Installation or publication of the code does not prove activation.
+The rollout must publish its signed policy and finalized weight evidence
+before miners are told that incentives are active.
+
+## Eligibility and weights
+
+At each finalized snapshot, the validator considers the registered SN78 UIDs.
+It checks each eligible miner's chain-announced public HTTPS `/healthz`
+endpoint. Passing miners are grouped by the coldkey that owns their registered
+hotkey in finalized chain state. Each qualifying coldkey receives the same total
+weight, divided among its passing UIDs. UID 0, validator-permitted UIDs,
+and subnet-owner-associated hotkeys receive zero
+miner weight. There is no pilot requirement, manual opt-in, or model evaluation.
+
+A passing endpoint returns HTTP 200 within five seconds, with a valid system-
+trusted TLS certificate and a response no larger than 16 KiB. Redirects and
+non-public or multicast destinations are rejected. One failed endpoint excludes
+that miner from the current row, without disqualifying the healthy miners.
+The validator rechecks the finalized roster after the health probes. A batch
+failure or zero passing miners holds submissions instead of inventing a row.
+
+This is equal weight per qualifying coldkey. Adding live UIDs under the same
+coldkey does not increase that coldkey's total share. A coldkey is only a proxy
+for an operator: one person can use several coldkeys, and the bridge cannot
+prove independent human ownership. It does not group miners by IP address.
+
+A health check proves HTTPS reachability only. It does not authenticate the endpoint
+to the hotkey, inspect an `ok` field in the response body, or establish that a
+model is running. Reusing the same endpoint across multiple UIDs is possible
+under this temporary rule. It does not measure translation quality or establish
+useful model work. The chain's `Active` flag is not used as a substitute for an
+endpoint check.
+
+The exact row contains all 256 UID destinations, with positive integer weights
+for passing miners and `0` for excluded destinations. Let `m` be the smallest
+number of passing UIDs in any qualifying coldkey group. Each group receives an
+integer budget of `65535 * m`. Divide that budget by the group's UID count;
+assign any remainder one unit at a time in ascending UID order. Group totals
+are exactly equal, every individual weight is at most `65535`, and at least
+one weight is `65535`. This avoids changing the row through chain max-upscaling.
+
+Registration, coldkey ownership, and permit changes are taken from finalized
+chain state and checked again after the probes. A newly registered UID can enter a
+subsequent row; inclusion is not an instantaneous payout guarantee.
+
+Other validators' weights and subnet consensus can affect final incentive
+amounts. The chain's miner incentives must be checked after a consensus
+update; submitting a transaction alone is insufficient.
+
+## Duration
+
+The bridge retains the original bootstrap cutoff: no new submissions from
+block `9,073,731`, with hard sunset at `9,075,171`. It may be superseded sooner
+by the open-competition release. It does not silently extend the seven-day
+bootstrap period.
+
+## Miner actions
+
+Existing eligible registrations need a healthy chain-announced public HTTPS
+endpoint. Keep `/healthz` online; no running model is required for that check.
+The certificate must be valid for the announced IP address, not just a separate
+hostname. A self-signed certificate does not pass this check.
+There is no pilot issue, READY FOR CASE signature, or model upload for this
+bridge. Do not resume the retired pilot workflow. The later open competition
+will have its own published serving and model-contribution requirements.
+
+Registration costs, stake, and token value can change. Equal weights do not
+guarantee a particular return or that registration costs will be recovered.
+
+## Validator rollout
+
+The bridge uses an explicit signed policy and the distinct worker profile
+`umi-registration-bridge-validator/1`. It does not reinterpret the old pilot
+manifest or pretend that registration satisfies a public-pilot proof.
+
+The legacy supervisor needs the corresponding host parser/profile update
+before it can accept this worker. Operators must not run two weight writers
+for the same hotkey. The UMI-managed UID 0 and UID 54 installations are
+updated one at a time, preserving their directive checkpoints and worker
+journals. No coldkey is used.
+
+This first rollout targets those two existing UMI installations. A validator
+with an old on-chain row but no UMI submission journal is held for reconciliation;
+this release does not infer that an untracked previous writer has stopped.
+Do not delete journals to bypass a hold or run a second process with the same
+hotkey.
+
+The old `/api/v1/bootstrap-service` endpoint describes the retired pilot
+policy. Its status is not evidence for registration-bridge activation.
+Bridge activation evidence must identify the signed policy, exact validator
+rows, finalized blocks, and the subsequent consensus/incentive readback.

@@ -51,6 +51,8 @@ from .validator_supervisor import (
 from .validator_supervisor_adapters import (
     SUPERVISOR_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
     SUPERVISOR_BOOTSTRAP_INPUT_PROFILE,
+    SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA,
+    SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE,
     SUPERVISOR_RELEASE_BUNDLE_MAGIC,
     SUPERVISOR_RELEASE_SIGNATURE_DOMAIN,
     SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_BUNDLE_SCHEMA,
@@ -63,6 +65,7 @@ from .validator_supervisor_adapters import (
     SupervisorBootstrapInputBundle,
     SupervisorHostArtifact,
     SupervisorHostArtifactManifest,
+    SupervisorRegistrationBridgeInputBundle,
     SupervisorReleaseManifest,
     SupervisorSimpleBootstrapInputBundle,
     ValidatorSupervisorAdapterError,
@@ -306,6 +309,15 @@ def _parser() -> argparse.ArgumentParser:
     common_inputs.add_argument("--bundle-url", required=True)
     common_inputs.add_argument("--output", type=Path, required=True)
     common_inputs.add_argument("--target-output", type=Path, required=True)
+
+    bridge_inputs = commands.add_parser(
+        "build-registration-bridge-input-bundle",
+        help="bind one signed registration-bridge policy into an immutable input artifact",
+    )
+    bridge_inputs.add_argument("--signed-policy", type=Path, required=True)
+    bridge_inputs.add_argument("--bundle-url", required=True)
+    bridge_inputs.add_argument("--output", type=Path, required=True)
+    bridge_inputs.add_argument("--target-output", type=Path, required=True)
 
     sign = commands.add_parser("sign-directive", help="sign one canonical typed directive")
     sign.add_argument("--directive", type=Path, required=True)
@@ -688,12 +700,21 @@ async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
         directive = current_signed.directive
         release = directive.release
         operator_inputs = directive.operator_inputs
+        supported_profiles = {
+            (
+                "umi-simple-bootstrap-validator/1",
+                SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
+            ),
+            (
+                "umi-registration-bridge-validator/1",
+                SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE,
+            ),
+        }
         if (
             directive.mode != "bootstrap_service_weights"
             or release is None
-            or release.entrypoint_profile != "umi-simple-bootstrap-validator/1"
             or operator_inputs is None
-            or operator_inputs.profile != SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE
+            or (release.entrypoint_profile, operator_inputs.profile) not in supported_profiles
             or directive.policy_sha256 is None
         ):
             raise ValidatorSupervisorAdapterError("common_switch_release_required")
@@ -1210,6 +1231,42 @@ def _build_common_bootstrap_input_bundle(args: argparse.Namespace) -> dict[str, 
     }
 
 
+def _build_registration_bridge_input_bundle(args: argparse.Namespace) -> dict[str, object]:
+    payload = _read_bounded(args.signed_policy, MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)
+    try:
+        value = json.loads(payload)
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise ValidatorSupervisorAdapterError("operator_input_document_invalid") from error
+    if canonical_json_bytes(value) != payload:
+        raise ValidatorSupervisorAdapterError("operator_input_document_noncanonical")
+    try:
+        bundle = SupervisorRegistrationBridgeInputBundle.model_validate(
+            {
+                "schema": SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA,
+                "profile": SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE,
+                "signed_policy": value,
+            }
+        )
+    except Exception as error:
+        raise ValidatorSupervisorAdapterError("operator_input_bundle_invalid") from error
+    bundle_bytes = canonical_json_bytes(bundle)
+    _write_new_bytes(args.output, bundle_bytes, MAX_SUPERVISOR_OPERATOR_INPUT_BUNDLE_BYTES)
+    target = SupervisorOperatorInputTarget(
+        artifact_type="canonical_json",
+        profile=SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE,
+        bundle_url=args.bundle_url,
+        bundle_sha256=hashlib.sha256(bundle_bytes).hexdigest(),
+        bundle_size_bytes=len(bundle_bytes),
+    )
+    _write_new_canonical(args.target_output, target)
+    return {
+        "bundle_sha256": target.bundle_sha256,
+        "bundle_size_bytes": target.bundle_size_bytes,
+        "profile": target.profile,
+        "status": "registration_bridge_input_bundle_built",
+    }
+
+
 def _sign_directive(args: argparse.Namespace) -> dict[str, object]:
     directive = _load_directive(args.directive)
     signer, scheme = _load_signer(args)
@@ -1485,6 +1542,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             result, code = _build_bootstrap_input_bundle(args), 0
         elif args.command == "build-common-bootstrap-input-bundle":
             result, code = _build_common_bootstrap_input_bundle(args), 0
+        elif args.command == "build-registration-bridge-input-bundle":
+            result, code = _build_registration_bridge_input_bundle(args), 0
         elif args.command == "sign-directive":
             result, code = _sign_directive(args), 0
         elif args.command == "assemble-directive":

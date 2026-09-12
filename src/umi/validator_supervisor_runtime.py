@@ -52,7 +52,11 @@ _WORKER_MODES = frozenset({"inactive_shadow", "bootstrap_service_weights", "tran
 _EXPECTED_ENTRYPOINT = {
     "inactive_shadow": frozenset({"umi-live-shadow-validator/1"}),
     "bootstrap_service_weights": frozenset(
-        {"umi-bootstrap-weight-validator/2", "umi-simple-bootstrap-validator/1"}
+        {
+            "umi-bootstrap-weight-validator/2",
+            "umi-simple-bootstrap-validator/1",
+            "umi-registration-bridge-validator/1",
+        }
     ),
     "translation_weights": frozenset({"umi-translation-validator/1"}),
 }
@@ -118,6 +122,7 @@ class SupervisorWorkerActivation:
             expected_input_profile = {
                 "umi-bootstrap-weight-validator/2": "umi-bootstrap-direct-inputs/2",
                 "umi-simple-bootstrap-validator/1": "umi-simple-bootstrap-common-inputs/1",
+                "umi-registration-bridge-validator/1": ("umi-registration-bridge-policy-inputs/1"),
             }[self.release.entrypoint_profile]
             if self.operator_inputs.profile != expected_input_profile:
                 raise ValueError("worker release and operator-input profiles disagree")

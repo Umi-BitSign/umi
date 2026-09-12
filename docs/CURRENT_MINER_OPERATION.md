@@ -1,6 +1,23 @@
 # What SN78 miners should run now
 
-The current validator release runs the temporary `bootstrap_service_binary`
+## Live-miner replacement being prepared
+
+The frozen two-miner pilot policy is being replaced with a temporary
+[live-miner availability rule](REGISTRATION_BRIDGE.md). It uses registered,
+non-validator UIDs whose chain-announced HTTPS `/healthz` endpoint passes the
+published reachability check. Each qualifying coldkey receives one equal share,
+divided among its passing UIDs. This groups by on-chain coldkey ownership; it
+does not verify independent human operators. No pilot, issue, opt-in, or running model is
+required for that proposed rule.
+
+Code publication does not activate the replacement. Until the signed policy
+and finalized bridge rows are published, do not assume your registration is
+earning. The old `/api/v1/bootstrap-service` reports the frozen pilot only; it
+cannot confirm activation of this replacement. The timed pilot remains closed.
+
+## Previous frozen pilot mechanism
+
+The previous signed validator release runs the temporary `bootstrap_service_binary`
 mechanism. It replays completed pilot evidence, checks the frozen participants'
 announced HTTPS endpoints, and submits or renews the signed service-weight row.
 It does not issue new translation challenges or score a miner's current model.

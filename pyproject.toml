@@ -69,6 +69,7 @@ umi-validator-live-reconcile = "umi.validator_certificate_recovery:main"
 umi-validator-supervisor = "umi.validator_supervisor_cli:main"
 umi-validator-supervisor-worker = "umi.validator_supervisor_worker:main"
 umi-simple-bootstrap-validator = "umi.simple_bootstrap_validator:main"
+umi-registration-bridge = "umi.registration_bridge:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/umi"]
