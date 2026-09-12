@@ -147,7 +147,9 @@ def test_plan_binds_parent_mount_exact_hotkey_service_and_cleanup_without_writes
     assert "ExecStopPost=+/usr/sbin/runuser -u umi-validator -- /usr/bin/env -i " in text
     assert "PYTHONPATH" not in text and "coldkey" not in text
     assert "User=" not in text and "Group=" not in text
-    assert case.events == ["stopped", "anchor", "tree", "authority", "stopped", "anchor", "tree"]
+    assert case.events[0] == case.events[-1] == "stopped"
+    assert case.events.count("authority") == 2
+    assert case.events.count("anchor") == case.events.count("tree") == 3
 
 
 @pytest.mark.parametrize(

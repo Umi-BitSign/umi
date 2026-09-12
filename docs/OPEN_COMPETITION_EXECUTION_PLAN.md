@@ -83,7 +83,8 @@ activate rewards or extend the signed bootstrap sunset.
 - [x] Per-round immutable input materialization after stopped-worker recovery.
 - [x] Verify registration-bridge policy bundles and retained attempt history.
 - [x] Start a committed generic systemd switch only after releasing the old lock.
-- [ ] Wire privileged preparation and interrupted-switch recovery into the operator command.
+- [x] Recover a retained generic source switch and start without reviving legacy authority.
+- [ ] Wire initial privileged preparation into the operator command.
 - [ ] Adapt and rehearse the coordinator's two RootDirectory validator installations.
 - [ ] Rehearse interruption/restart on both Linux architectures and rerun all tests.
 - [ ] Complete the real-model, independent-evaluation and signed-activation gates.
@@ -205,7 +206,24 @@ directory is now fsynced before any companion bytes are written; fresh legacy
 leases reject it after a process restart. The revised root-file suite passed ten
 cases, and the local switch/lease/recovery suite passed 109.
 Privileged preparation/start orchestration and interrupted-switch recovery are
-still required; the publisher is not an operator installation command.
+not covered by that earlier test batch; the publisher is not an operator installation command.
+
+The subsequent recovery command records an atomic root-owned intent before
+publishing either service file. It can finish an interrupted publication or
+start that exact stopped successor using a separate start-only handle. It never
+recreates the legacy lease or modifies v3/v4 history. The focused local suite
+passed 87 tests. Seventeen root-filesystem checks passed on arm64, including
+actual process death before and after the intent's atomic rename. The startup
+tests mock systemd; they do not replace the complete service rehearsal. Native
+amd64/arm64 CI coverage has been added but is not yet a recorded pass.
+
+The local full regression passed 3,561 tests with 25 platform/rehearsal skips.
+Review then found an overlap between recovery commands during the writer-lock
+handoff. A separate per-unit operator mutex now spans recovery, start and failed
+start cleanup. The revised focused suite passed 95 tests, including overlapping
+invocations and lock identity checks. Linux reruns are pending. A Linux fixture
+also depended on umask 022; it now creates its required non-writable staging
+parent explicitly without relaxing the production ownership checks.
 
 The bounded host-bundle stager passed 71 combined artifact tests locally. In the
 isolated arm64 VM, nine root-filesystem cases and seven metadata checks passed;
@@ -224,7 +242,7 @@ The service test uses synthetic inputs and an inert launcher; no live upgrade
 is approved until the complete migration and restart rehearsal pass.
 
 The remaining upgrade work includes privileged staging/start orchestration,
-interrupted-switch recovery and the actual source switch/restart rehearsal.
+the coordinator's namespace integration and the actual source switch/restart rehearsal.
 The stopped lease alone does not authorize an upgrade or weights.
 The old live workers enforce current authorization validity, and the common
 service exits at sunset before reconciliation. They cannot simply be started

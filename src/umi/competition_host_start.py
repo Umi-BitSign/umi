@@ -20,9 +20,28 @@ from .competition_host_switch import (
     recheck_committed_successor_switch,
 )
 from .competition_host_upgrade import HostUpgradeError, _require_empty_cgroup, _unit_snapshot
+from .competition_switch_recovery import (
+    RecoveredSuccessorServiceSwitch,
+    recheck_recovered_successor_switch,
+)
 from .competition_upgrade import _open_without_links
 
-_STARTED: dict[int, CommittedSuccessorServiceSwitch] = {}
+StartableSwitch = CommittedSuccessorServiceSwitch | RecoveredSuccessorServiceSwitch
+_STARTED: dict[int, StartableSwitch] = {}
+
+
+def _recheck_startable(switch: StartableSwitch) -> None:
+    if type(switch) is RecoveredSuccessorServiceSwitch:
+        recheck_recovered_successor_switch(switch)
+    else:
+        recheck_committed_successor_switch(switch, require_held=False)
+
+
+def _installation(switch: StartableSwitch):
+    if type(switch) is RecoveredSuccessorServiceSwitch:
+        return switch.config_path, switch.lock_path, switch.lock_identity
+    lease = switch._stopped._lease
+    return lease.config_path, lease.lock_path, lease.lock_identity
 
 
 class _StartupPending(HostUpgradeError):
@@ -52,9 +71,9 @@ def _systemctl(verb: str, unit: str) -> None:
         raise HostUpgradeError(f"successor service {verb} failed")
 
 
-def _process_owns_lock(pid: int, switch: CommittedSuccessorServiceSwitch) -> None:
-    lease = switch._stopped._lease
-    descriptor = _open_without_links(lease.lock_path)
+def _process_owns_lock(pid: int, switch: StartableSwitch) -> None:
+    _, lock_path, lock_identity = _installation(switch)
+    descriptor = _open_without_links(lock_path)
     try:
         info = os.fstat(descriptor)
         if (
@@ -62,7 +81,7 @@ def _process_owns_lock(pid: int, switch: CommittedSuccessorServiceSwitch) -> Non
             or info.st_nlink != 1
             or info.st_uid != switch.plan.service_uid
             or stat.S_IMODE(info.st_mode) != 0o600
-            or (info.st_dev, info.st_ino) != lease.lock_identity[:2]
+            or (info.st_dev, info.st_ino) != lock_identity[:2]
         ):
             raise HostUpgradeError("successor startup process lock changed identity")
         try:
@@ -127,7 +146,7 @@ def _kernel_flock_matches(metadata: bytes, *, pid: int, info: os.stat_result) ->
     return False
 
 
-def _running(switch: CommittedSuccessorServiceSwitch) -> int:
+def _running(switch: StartableSwitch) -> int:
     unit = _unit_snapshot(switch.plan.unit_name)
     original = dict(switch._unit)
     for key in (
@@ -166,14 +185,14 @@ def _running(switch: CommittedSuccessorServiceSwitch) -> int:
     return pid
 
 
-def _contain_failed_start(switch: CommittedSuccessorServiceSwitch) -> None:
+def _contain_failed_start(switch: StartableSwitch) -> None:
     # The separately sealed cleanup unit can run even when activation bind
     # mounts prevent ExecStopPost from entering the main service namespace.
     _systemctl("stop", switch.plan.unit_name)
     _read_drop_in(switch.plan)
     from .competition_host_switch import _cleanup_unit
 
-    _cleanup_unit(switch.plan, switch._stopped._lease.config_path)
+    _cleanup_unit(switch.plan, _installation(switch)[0])
     _systemctl("start", switch.plan.cleanup_unit_name)
     for name, cleanup in ((switch.plan.unit_name, False), (switch.plan.cleanup_unit_name, True)):
         unit = _unit_snapshot(name, successor_cleanup=cleanup)
@@ -187,15 +206,16 @@ def _contain_failed_start(switch: CommittedSuccessorServiceSwitch) -> None:
 
 
 def start_committed_successor_service(
-    switch: CommittedSuccessorServiceSwitch,
+    switch: StartableSwitch,
 ) -> SuccessorServiceStart:
     """Consume this process's switch once and verify its exact running process.
 
     Call only after leaving hold_stopped_supervisor. A process restart requires
-    durable switch recovery, not reconstruction of this in-memory capability.
+    durable switch recovery, which issues a separate start-only handle without
+    reconstructing the legacy lease or granting checkpoint authority.
     A failed attempt remains consumed and preserves all installation evidence.
     """
-    recheck_committed_successor_switch(switch, require_held=False)
+    _recheck_startable(switch)
     if id(switch) in _STARTED:
         raise HostUpgradeError("successor switch already has a start attempt")
     _STARTED[id(switch)] = switch
@@ -203,7 +223,7 @@ def start_committed_successor_service(
         _systemctl("start", switch.plan.required_user_manager)
         # Recheck after the manager may have taken time to start. The writer
         # remains stopped and the closed legacy lease cannot authorize work.
-        recheck_committed_successor_switch(switch, require_held=False)
+        _recheck_startable(switch)
         _systemctl("start", switch.plan.unit_name)
         deadline = time.monotonic() + 30
         while True:

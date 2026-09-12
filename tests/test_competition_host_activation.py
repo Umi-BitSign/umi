@@ -126,7 +126,10 @@ def _host_tree(tmp_path, monkeypatch, config):
     revision = "42" * 20
     parent = tmp_path / "host-stages"
     stage = parent / revision
-    stage.mkdir(parents=True)
+    # The host verifier intentionally rejects a group-writable ancestor. Give
+    # the fixture that boundary even when the test runner uses umask 0002.
+    parent.mkdir(mode=0o755, parents=True)
+    stage.mkdir()
     files = []
     for name in sorted(artifacts._REQUIRED_FILES):
         path = stage / name

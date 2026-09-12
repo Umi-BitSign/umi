@@ -774,7 +774,9 @@ def _mkdir_stage(parent: int, name: str) -> None:
     os.mkdir(name, 0o700, dir_fd=parent)
 
 
-def _rename_noreplace(parent: int, source: str, destination: str) -> None:
+def _rename_noreplace(
+    parent: int, source: str, destination: str, *, destination_parent: int | None = None
+) -> None:
     _safe_name(source)
     _safe_name(destination)
     if sys.platform != "linux":
@@ -792,7 +794,8 @@ def _rename_noreplace(parent: int, source: str, destination: str) -> None:
         ctypes.c_uint,
     ]
     renameat2.restype = ctypes.c_int
-    if renameat2(parent, os.fsencode(source), parent, os.fsencode(destination), _RENAME_NOREPLACE):
+    target = parent if destination_parent is None else destination_parent
+    if renameat2(parent, os.fsencode(source), target, os.fsencode(destination), _RENAME_NOREPLACE):
         number = ctypes.get_errno()
         if number == errno.EEXIST:
             raise SuccessorAnchorError("successor anchor already exists")

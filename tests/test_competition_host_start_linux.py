@@ -41,6 +41,7 @@ def held(tmp_path):
             plan=SimpleNamespace(service_uid=os.geteuid()),
             _stopped=SimpleNamespace(
                 _lease=SimpleNamespace(
+                    config_path=tmp_path / "synthetic-config.json",
                     lock_path=path,
                     lock_identity=_fingerprint(path.stat()),
                 )

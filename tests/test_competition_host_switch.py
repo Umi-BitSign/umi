@@ -11,6 +11,7 @@ import pytest
 
 from tests.test_competition_host_upgrade import hold, inputs, installed
 from umi import competition_host_switch as switch
+from umi import competition_switch_recovery as recovery
 from umi.competition_host_service import SuccessorServiceSwitchPlan
 from umi.competition_host_upgrade import HostUpgradeError
 from umi.competition_host_upgrade import _check_unit as _real_check_unit
@@ -78,6 +79,7 @@ def switching(installed, monkeypatch, tmp_path):
     )
     anchor = SimpleNamespace(
         receipt=SimpleNamespace(checkpoint_sha256=plan.checkpoint_sha256),
+        receipt_sha256="44" * 32,
         recheck=lambda: events.append("anchor"),
     )
     tree = SimpleNamespace(
@@ -97,6 +99,25 @@ def switching(installed, monkeypatch, tmp_path):
         return os.open(value.drop_in_path.parent, os.O_RDONLY)
 
     monkeypatch.setattr(switch, "_create_switch_marker", marker)
+
+    def publish_intent(value, payload):
+        recovery._parse(payload)
+        descriptor = marker(value)
+        path = value.drop_in_path.parent / recovery.INTENT_FILENAME
+        path.write_bytes(payload)
+        path.chmod(0o444)
+        return descriptor
+
+    def read_intent(value):
+        payload = (value.drop_in_path.parent / recovery.INTENT_FILENAME).read_bytes()
+        intent = recovery._parse(payload)
+        if intent.plan_sha256 != recovery._plan_sha256(value):
+            raise host_error("changed intent")
+        return payload
+
+    host_error = HostUpgradeError
+    monkeypatch.setattr(recovery, "publish_switch_intent", publish_intent)
+    monkeypatch.setattr(recovery, "read_switch_intent", read_intent)
 
     def write_once(value, descriptor):
         events.append("write")

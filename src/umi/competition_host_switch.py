@@ -36,6 +36,10 @@ from .competition_upgrade import _fingerprint, _open_without_links
 _ISSUER = object()
 
 
+def _root_owner_uid() -> int:
+    return 0
+
+
 @dataclass(frozen=True, slots=True)
 class CommittedSuccessorServiceSwitch:
     plan: SuccessorServiceSwitchPlan
@@ -44,15 +48,32 @@ class CommittedSuccessorServiceSwitch:
     _tree: VerifiedHostTree = field(repr=False, compare=False)
     _unit: tuple[tuple[str, str], ...] = field(repr=False, compare=False)
     _cleanup_unit: tuple[tuple[str, str], ...] = field(repr=False, compare=False)
+    _intent: bytes = field(repr=False, compare=False)
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
 
 
 def _read_drop_in(plan: SuccessorServiceSwitchPlan) -> None:
+    from .competition_switch_recovery import (
+        INTENT_FILENAME,
+        RETAINED_DIRECTORY,
+        read_switch_intent,
+    )
+
     parent = _root_directory(plan.drop_in_path.parent)
     try:
-        if set(os.listdir(parent)) != {plan.drop_in_path.name}:
+        names = set(os.listdir(parent))
+        if (
+            plan.drop_in_path.name not in names
+            or not names <= {plan.drop_in_path.name, INTENT_FILENAME, RETAINED_DIRECTORY}
+            or (RETAINED_DIRECTORY in names and INTENT_FILENAME not in names)
+        ):
             raise HostUpgradeError("successor unit has unexpected drop-in files")
+        if INTENT_FILENAME in names:
+            read_switch_intent(plan)
+        if RETAINED_DIRECTORY in names:
+            retained = _root_directory(plan.drop_in_path.parent / RETAINED_DIRECTORY)
+            os.close(retained)
     finally:
         os.close(parent)
     _read_control(plan.drop_in_path, plan.drop_in_bytes, plan.drop_in_sha256)
@@ -71,7 +92,7 @@ def _read_control(path: Path, payload: bytes, expected_sha256: str) -> None:
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or before.st_uid != 0
+            or before.st_uid != _root_owner_uid()
             or before.st_nlink != 1
             or stat.S_IMODE(before.st_mode) != 0o444
             or before.st_size != len(payload)
@@ -105,7 +126,11 @@ def _root_directory(path: Path) -> int:
             else _open_without_links(item)
         )
         info = os.fstat(descriptor)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != _root_owner_uid()
+            or info.st_mode & 0o022
+        ):
             os.close(descriptor)
             raise HostUpgradeError("successor systemd parent is not root-controlled")
         if item == path:
@@ -141,7 +166,7 @@ def _check_switch_marker(plan: SuccessorServiceSwitchPlan, marker: int) -> None:
         if (
             (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino)
             or not stat.S_ISDIR(expected.st_mode)
-            or expected.st_uid != 0
+            or expected.st_uid != _root_owner_uid()
             or stat.S_IMODE(expected.st_mode) != 0o755
         ):
             raise HostUpgradeError("successor switch marker was replaced or changed")
@@ -150,10 +175,13 @@ def _check_switch_marker(plan: SuccessorServiceSwitchPlan, marker: int) -> None:
 
 
 def _write_drop_in_once(plan: SuccessorServiceSwitchPlan, marker: int) -> None:
+    from .competition_switch_recovery import INTENT_FILENAME, RETAINED_DIRECTORY
+
     _check_switch_marker(plan, marker)
     parent, descriptor = marker, -1
     try:
-        if os.listdir(parent):
+        original_names = set(os.listdir(parent))
+        if not original_names <= {INTENT_FILENAME, RETAINED_DIRECTORY}:
             raise HostUpgradeError("successor switch marker already contains retained files")
         stage = ".umi-successor-" + secrets.token_hex(16)
         descriptor = os.open(
@@ -170,7 +198,7 @@ def _write_drop_in_once(plan: SuccessorServiceSwitchPlan, marker: int) -> None:
             remaining = remaining[written:]
         os.fchmod(descriptor, 0o444)
         os.fsync(descriptor)
-        if set(os.listdir(parent)) != {stage}:
+        if set(os.listdir(parent)) != original_names | {stage}:
             raise HostUpgradeError("successor drop-in parent changed during publication")
         _rename_noreplace(parent, stage, plan.drop_in_path.name)
         os.fsync(parent)
@@ -304,6 +332,7 @@ def _binding(result: CommittedSuccessorServiceSwitch) -> str:
     values["installation"] = result._stopped.installation_sha256
     values["anchor"] = result._anchor.receipt.checkpoint_sha256
     values["host"] = result._tree.manifest_sha256
+    values["intent"] = hashlib.sha256(result._intent).hexdigest()
     return hashlib.sha256(canonical_json_bytes(values)).hexdigest()
 
 
@@ -324,12 +353,15 @@ def commit_successor_service_switch(
     plan = plan_successor_service_switch(
         stopped=stopped, anchor=anchor, host_tree=host_tree, signed_host=signed_host
     )
+    from .competition_switch_recovery import _intent_bytes, publish_switch_intent
+
+    intent = _intent_bytes(stopped, anchor, plan)
     # Consume legacy recovery authority before the first mutation. An interrupted
     # publication must not be reused to mint another legacy checkpoint.
     _consume_stopped_lease_for_successor(stopped)
     # _check_unit rejects this exact directory even before systemd has loaded
     # any files. Its durable presence survives loss of the process registry.
-    marker = _create_switch_marker(plan)
+    marker = publish_switch_intent(plan, intent)
     try:
         _write_cleanup_once(plan)
         _write_drop_in_once(plan, marker)
@@ -355,6 +387,7 @@ def commit_successor_service_switch(
         host_tree,
         tuple(sorted(snapshot.items())),
         tuple(sorted(cleanup_snapshot.items())),
+        intent,
         _ISSUER,
     )
     object.__setattr__(result, "_binding", _binding(result))
@@ -377,6 +410,10 @@ def recheck_committed_successor_switch(
         raise HostUpgradeError("successor switch was not committed by this process")
     _lock_and_originals(result._stopped, require_held=require_held)
     _read_drop_in(result.plan)
+    from .competition_switch_recovery import read_switch_intent
+
+    if read_switch_intent(result.plan) != result._intent:
+        raise HostUpgradeError("committed successor switch intent changed")
     if tuple(sorted(_switched_unit(result._stopped, result.plan).items())) != result._unit:
         raise HostUpgradeError("stopped successor unit changed after source switch")
     if (

@@ -92,14 +92,58 @@ def plan_successor_service_switch(
         or signed_host.manifest.target_platform != config.target_platform
     ):
         raise ValueError("service switch inputs describe different installations")
-    user = pwd.getpwuid(stopped.service_uid)
-    if not _USER.fullmatch(user.pw_name) or user.pw_uid != stopped.service_uid:
+    result = _plan_from_anchor(
+        unit_name=stopped.unit_name,
+        config_path=stopped._lease.config_path,
+        anchor=anchor,
+        host_tree=host_tree,
+        signed_host=signed_host,
+    )
+    stopped.recheck_stopped()
+    return result
+
+
+def _plan_from_anchor(
+    *,
+    unit_name: str,
+    config_path: Path,
+    anchor: MaterializedSuccessorAnchor,
+    host_tree: VerifiedHostTree,
+    signed_host: SignedSuccessorHostArtifact,
+) -> SuccessorServiceSwitchPlan:
+    """Render for a verified anchor, including a retained switch after restart.
+
+    This grants no stopped-host or chain authority. Callers must separately
+    authenticate the exact unit, original lock and publication transaction.
+    """
+    from .competition_host_upgrade import _UNIT_RE
+
+    if type(anchor) is not MaterializedSuccessorAnchor or type(host_tree) is not VerifiedHostTree:
+        raise TypeError("service rendering requires genuine verified anchor and host tree")
+    if not _UNIT_RE.fullmatch(unit_name):
+        raise ValueError("service rendering requires a fixed supervisor unit name")
+    anchor.recheck()
+    host_tree.recheck()
+    config = anchor.config
+    verify_host_artifact_authority(
+        signed_host, config=config, expected_manifest_sha256=anchor.receipt.host_manifest_sha256
+    )
+    if (
+        host_tree.manifest_sha256 != anchor.receipt.host_manifest_sha256
+        or host_tree.umi_git_revision != anchor.receipt.host_umi_git_revision
+        or host_tree.target_platform != config.target_platform
+        or signed_host.manifest.umi_git_revision != host_tree.umi_git_revision
+        or signed_host.manifest.target_platform != config.target_platform
+    ):
+        raise ValueError("service rendering inputs describe different host releases")
+    service_uid = anchor.service_uid
+    user = pwd.getpwuid(service_uid)
+    if not _USER.fullmatch(user.pw_name) or user.pw_uid != service_uid:
         raise ValueError("service account is not a fixed local non-root identity")
     _path(user.pw_dir)
     if Path("/var/lib") not in Path(user.pw_dir).parents:
         raise ValueError("successor service requires its dedicated home beneath /var/lib")
     revision_root = host_tree.path
-    config_path = stopped._lease.config_path
     source = anchor.source_root
     observer_source = Path(config.state_root) / "successor-observer"
     # Host and container see identical authenticated helper paths/config bytes,
@@ -143,12 +187,12 @@ def plan_successor_service_switch(
         "HOME=" + _path(user.pw_dir),
         "USER=" + user.pw_name,
         "LOGNAME=" + user.pw_name,
-        f"XDG_RUNTIME_DIR=/run/user/{stopped.service_uid}",
-        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{stopped.service_uid}/bus",
+        f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
     )
     command = "/usr/bin/env -i " + " ".join(env) + " "
-    manager = f"user@{stopped.service_uid}.service"
-    cleanup_unit = stopped.unit_name.removesuffix(".service") + "-successor-cleanup.service"
+    manager = f"user@{service_uid}.service"
+    cleanup_unit = unit_name.removesuffix(".service") + "-successor-cleanup.service"
     cleanup_command = (
         command
         + _path(revision_root / ".venv/bin/umi-competition-supervisor-cleanup")
@@ -208,27 +252,24 @@ def plan_successor_service_switch(
         # ProtectHome=true makes /run/user inaccessible even with ReadWritePaths.
         # Keep other homes/runtime directories hidden; expose only our user bus.
         "ProtectHome=tmpfs",
-        f"BindPaths=/run/user/{stopped.service_uid}",
+        f"BindPaths=/run/user/{service_uid}",
         # Bind the parent, never the current directory inode being exchanged.
         "BindReadOnlyPaths=" + _path(source) + ":" + _path(ACTIVATION_MOUNT_ROOT),
         "BindPaths=" + _path(observer_source) + ":" + _path(WORKER_FINALITY_STATE_ROOT),
         "ReadWritePaths=" + _path(observer_source),
-        "ReadWritePaths=" + _path(user.pw_dir) + f" /run/user/{stopped.service_uid}",
+        "ReadWritePaths=" + _path(user.pw_dir) + f" /run/user/{service_uid}",
         "ReadOnlyPaths=" + _path(revision_root),
     ]
     for name, _, _, target in requirements:
         lines.append("BindReadOnlyPaths=" + _path(revision_root / name) + ":" + _path(target))
     payload = ("\n".join(lines) + "\n").encode()
-    stopped.recheck_stopped()
     anchor.recheck()
     host_tree.recheck()
     return SuccessorServiceSwitchPlan(
-        unit_name=stopped.unit_name,
-        service_uid=stopped.service_uid,
+        unit_name=unit_name,
+        service_uid=service_uid,
         service_user=user.pw_name,
-        drop_in_path=Path("/etc/systemd/system")
-        / (stopped.unit_name + ".d")
-        / "50-umi-successor.conf",
+        drop_in_path=Path("/etc/systemd/system") / (unit_name + ".d") / "50-umi-successor.conf",
         drop_in_bytes=payload,
         drop_in_sha256=hashlib.sha256(payload).hexdigest(),
         cleanup_unit_name=cleanup_unit,

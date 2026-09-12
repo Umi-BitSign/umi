@@ -90,12 +90,43 @@ input caches. It will not reinterpret a journal left at an older unshipped path.
 the still-stopped unit while holding the old lock. Its first write consumes
 legacy recovery authority. A failed or partial switch is retained for explicit
 recovery; it does not restore the old executable or start either version.
-Before any companion bytes are written, the publisher creates and fsyncs the
-exact main unit's drop-in directory. Legacy recovery rejects that directory even
-before systemd has loaded a file, so a crash cannot revive legacy checkpoint
-authority. Publication retains its directory descriptor and rejects replacement.
-The complete operator preparation/start and interrupted-switch recovery path
-is not yet implemented.
+Before any companion bytes are written, the publisher atomically installs the
+main unit's drop-in directory containing a complete root-owned switch intent.
+The intent binds the original unit, lock inode, config, recovery anchor and
+signed replacement host. Legacy recovery rejects that directory even before
+systemd has loaded a file. Failed staging directories are retained and bounded.
+
+The development command can resume that recorded switch:
+
+```sh
+sudo umi-competition-host-upgrade resume-publication \
+  --config /etc/umi/validator-supervisor.json \
+  --unit umi-validator-supervisor.service
+```
+
+This completes exact file publication and reloads the still-stopped unit. It
+retains incomplete files without interpreting them, rejects changed controls
+or legacy history, and leaves existing v4 journals untouched. It does not
+reconstruct a legacy lease or grant checkpoint authority. A missing intent is
+a hold, not permission to guess or overwrite the old installation.
+
+`resume-start` performs the same checks, releases the recovery process lock,
+then starts only the recorded successor. It verifies the main process's kernel
+flock on the original inode. Failed startup invokes the exact cleanup unit;
+an error report leaves service state unconfirmed, requiring inspection. Both
+commands reject a running service and unsupported filesystem namespaces.
+Neither command grants weight authorization or creates missing launch inputs.
+
+Both operator commands retain a separate root-owned, per-unit upgrade mutex
+through publication, writer-lock handoff, startup verification and any failed
+start cleanup. A concurrent command fails before touching the service. The
+empty mutex inode remains after release so another process cannot acquire a
+replacement lock. Initial preparation must use this same mutex; the lower-level
+planning and capability functions are not independent operator commands.
+
+These commands cover a retained generic systemd switch. Initial privileged
+preparation and the coordinator's RootDirectory installations still require
+integration and full service rehearsal before deployment approval.
 
 The successor uses a dedicated user systemd manager for rootless Podman.
 `umi-competition-supervisor-cleanup` acquires the original lock and stops only
