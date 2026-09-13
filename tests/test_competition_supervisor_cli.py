@@ -140,6 +140,40 @@ async def test_cli_orders_seal_host_lock_recovery_and_shutdown(host):
     ]
 
 
+@pytest.mark.parametrize("distinct_async_timeout", [False, True])
+async def test_cli_continues_after_poll_timeout(host, monkeypatch, distinct_async_timeout):
+    class LegacyAsyncTimeout(Exception):
+        pass
+
+    # Before Python 3.11, asyncio.TimeoutError was separate from the built-in.
+    timeout_type = LegacyAsyncTimeout if distinct_async_timeout else asyncio.TimeoutError
+    monkeypatch.setattr(asyncio, "TimeoutError", timeout_type)
+    reconcile = host.runtime.reconcile
+    rounds = 0
+
+    async def twice():
+        nonlocal rounds
+        result = await reconcile()
+        rounds += 1
+        if rounds == 1:
+            host.stop.clear()
+        return result
+
+    async def wait(awaitable, *, timeout):
+        awaitable.close()
+        assert timeout == 30.0
+        if not host.stop.is_set():
+            raise timeout_type()
+        return True
+
+    monkeypatch.setattr(host.runtime, "reconcile", twice)
+    monkeypatch.setattr(asyncio, "wait_for", wait)
+    await cli.run_supervisor(Path("/etc/umi/supervisor.json"), stop_event=host.stop)
+    assert rounds == 2
+    assert host.events.count("bounded-status") == 2
+    assert host.events[-3:] == ["stop-and-unlock", "close-observer", "leave-lock-scope"]
+
+
 @pytest.mark.parametrize("boundary", ["config", "seal", "host"])
 async def test_cli_invalid_installation_never_builds_or_starts(host, monkeypatch, boundary):
     def denied(*args):

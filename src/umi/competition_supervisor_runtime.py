@@ -1027,5 +1027,5 @@ class SuccessorSupervisorRuntime:
     async def poll(self, stop_event: asyncio.Event):
         while not stop_event.is_set():
             await self.reconcile()
-            with suppress(TimeoutError):
+            with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=float(self.config.poll_seconds))

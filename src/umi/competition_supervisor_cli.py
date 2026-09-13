@@ -342,7 +342,7 @@ async def run_supervisor(config_path: Path, *, stop_event=None):
                 while not stop.is_set():
                     result = await runtime.reconcile()
                     _emit(result)
-                    with suppress(TimeoutError):
+                    with suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(
                             stop.wait(), timeout=float(installation.config.poll_seconds)
                         )

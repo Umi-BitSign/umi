@@ -47,6 +47,35 @@ from .test_competition_supervisor import (
 )
 
 
+@pytest.mark.parametrize("distinct_async_timeout", [False, True])
+async def test_poll_continues_after_timeout(monkeypatch, distinct_async_timeout):
+    class LegacyAsyncTimeout(Exception):
+        pass
+
+    timeout_type = LegacyAsyncTimeout if distinct_async_timeout else asyncio.TimeoutError
+    monkeypatch.setattr(asyncio, "TimeoutError", timeout_type)
+    stop = asyncio.Event()
+    rounds = 0
+
+    async def reconcile():
+        nonlocal rounds
+        rounds += 1
+        if rounds == 2:
+            stop.set()
+
+    async def wait(awaitable, *, timeout):
+        awaitable.close()
+        assert timeout == 30.0
+        if not stop.is_set():
+            raise timeout_type()
+        return True
+
+    monkeypatch.setattr(asyncio, "wait_for", wait)
+    supervisor = SimpleNamespace(config=SimpleNamespace(poll_seconds=30), reconcile=reconcile)
+    await runtime.SuccessorSupervisorRuntime.poll(supervisor, stop)
+    assert rounds == 2
+
+
 class Adapter:
     def __init__(self):
         self.events = []

@@ -692,7 +692,9 @@ async def test_command_failure_kills_child_and_never_inherits_environment(monkey
     if fault == "cancelled":
         await asyncio.sleep(0)
         task.cancel()
-    with pytest.raises((containers.SuccessorContainerError, TimeoutError, asyncio.CancelledError)):
+    with pytest.raises(
+        (containers.SuccessorContainerError, asyncio.TimeoutError, asyncio.CancelledError)
+    ):
         await task
     if fault != "failed":
         assert process.killed

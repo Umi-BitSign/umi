@@ -271,7 +271,7 @@ async def test_cleanup_total_deadline_cancels_operation(monkeypatch):
 
     monkeypatch.setattr(cleanup, "cleanup_successor", stuck)
     monkeypatch.setattr(cleanup, "_TOTAL_TIMEOUT_SECONDS", 0.01)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await cleanup._bounded_cleanup(None)
     assert finished.is_set()
 
