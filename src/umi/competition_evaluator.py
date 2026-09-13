@@ -144,6 +144,8 @@ class EvaluatorConfig(StrictProtocolModel):
     video_directory: Directory
     dispatch_directory: Directory | None = None
     legacy_policy_sha256: Hex32 | None = None
+    exchange_origin: str | None = None
+    assignment_directory: Directory | None = None
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
     page_size: Annotated[int, Field(ge=1, le=16)] = 4
@@ -152,6 +154,14 @@ class EvaluatorConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def bindings(self):
+        if self.exchange_origin is not None:
+            from .competition_client import validate_intake_origin
+
+            validate_intake_origin(self.exchange_origin)
+        if self.assignment_directory is not None and (
+            self.exchange_origin is None or self.legacy_policy_sha256 is None
+        ):
+            raise ValueError("assignment delivery requires an exchange and transport policy")
         paths = [
             Path(v).resolve()
             for k, v in self.model_dump().items()
@@ -349,6 +359,11 @@ class EvaluatorJournal:
                         "maximum_journal_bytes",
                         "page_size",
                         "poll_seconds",
+                        *(
+                            k
+                            for k in ("exchange_origin", "assignment_directory")
+                            if getattr(config, k) is None
+                        ),
                     },
                 )
             )
@@ -508,6 +523,12 @@ class ContinuousEvaluator:
         self._seen_orders = set()
         self._order_cursor = ""
         self._tasks = {}
+        self._exchange_task = None
+        self.exchange = None
+        if config.exchange_origin is not None:
+            from .competition_exchange import EvaluatorExchangeClient
+
+            self.exchange = EvaluatorExchangeClient(self, config.exchange_origin)
 
     async def boundary(self):
         return execution_boundary(await self.provider.collect())
@@ -733,6 +754,15 @@ class ContinuousEvaluator:
 
     async def poll_once(self):
         counts = {"held": 0, "waiting": 0, "complete": 0, "expired": 0, "executing": 0}
+        if self.exchange is not None:
+            if self._exchange_task is not None and self._exchange_task.done():
+                try:
+                    self._exchange_task.result()
+                except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+                    counts["waiting"] += 1
+                self._exchange_task = None
+            if self._exchange_task is None:
+                self._exchange_task = asyncio.create_task(self.exchange.sync_once())
         for slot, task in list(self._tasks.items()):
             if task.done():
                 with suppress(Exception, asyncio.CancelledError):
@@ -776,6 +806,10 @@ class ContinuousEvaluator:
         }
 
     async def aclose(self):
+        if self._exchange_task is not None:
+            self._exchange_task.cancel()
+            await asyncio.gather(self._exchange_task, return_exceptions=True)
+            self._exchange_task = None
         for task in self._tasks.values():
             task.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
