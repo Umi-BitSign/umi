@@ -39,7 +39,9 @@ from .test_open_competition import submission, wallet
 from .test_validator_plans import FinalizedPort, _block, _clock, _live_policy
 
 
-def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None, incumbent_sha256=None):
+def build_authorization_fixture(
+    policy, *, case_count=3, legacy_policy=None, incumbent_sha256=None, model_bundle=None
+):
     """Synthetic signed publication and owned-source test port; no network/files.
 
     Return the updated competition policy as .policy. This helper supplies test
@@ -94,6 +96,17 @@ def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None, inc
         update={"endpoint_url": serving_origin}
     )
     signed_sub = SignedSubmission(submission=sub, signature=sign_object(sub, wallet("Alice")))
+    model_sub = (
+        None
+        if model_bundle is None
+        else submission(policy, bundle=model_bundle, name="Bob", start=1000, end=1900)
+    )
+    submissions = tuple(
+        sorted(
+            (signed_sub,) if model_sub is None else (signed_sub, model_sub),
+            key=lambda s: digest(s.submission),
+        )
+    )
     video_bytes = tuple(f"inert-endpoint-video-{i}".encode() for i in range(case_count))
     suite = EvaluationSuite(
         schema="umi-competition-suite/1",
@@ -115,7 +128,7 @@ def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None, inc
         suite_sha256=digest(suite),
         incumbent_model_sha256=incumbent_sha256 or "b2" * 32,
         runtime_sha256=policy.evaluation_runtime_sha256,
-        roster=(digest(sub),),
+        roster=tuple(digest(s.submission) for s in submissions),
         submission_close_block=issued - 1,
         evaluation_close_block=issued + schedule.response_deadline_blocks + 1,
         reveal_block=issued + schedule.response_deadline_blocks + 2,
@@ -183,6 +196,8 @@ def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None, inc
         model_revision=sub.model_revision,
         serving_origin=serving_origin,
         signed_submission=signed_sub,
+        model_submission=model_sub,
+        submissions=submissions,
         suite=suite,
         round=round_,
         cases=cases,
