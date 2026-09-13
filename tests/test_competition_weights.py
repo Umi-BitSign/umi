@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import replace
+from fractions import Fraction
 from types import SimpleNamespace
 
 import pytest
@@ -299,6 +300,14 @@ async def _run(item, **changes):
 
 async def test_actual_proof_collection_then_durable_exact_sdk_row(weight_case):
     item = weight_case
+    # The package fixture includes a preserved, reviewed promotion and two
+    # synthetic evaluator groups. Keep this full submission path on the
+    # approved joint allocation, even when other tests use endpoint-only policy.
+    assert (item.policy.endpoint_reward_bps, item.policy.model_reward_bps) == (7000, 3000)
+    assert {
+        entry.uid: Fraction(int(entry.numerator), int(entry.denominator))
+        for entry in item.package.retained_settlement.projection.allocations
+    } == {6: Fraction(3, 10), 247: Fraction(7, 10)}
     outcome = await _run(item)
     assert outcome.status == "recovered_effect" and outcome.exact_row_currently_applied
     assert outcome.submitted_by_this_attempt and len(item.encoded) == 1

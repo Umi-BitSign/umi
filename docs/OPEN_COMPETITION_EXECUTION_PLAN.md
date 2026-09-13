@@ -319,6 +319,30 @@ platform/rehearsal skips. The combined coordinator/observer tests also passed
 with the actual fixed mount targets on the arm64 VM. These results do not
 approve a live upgrade.
 The stopped lease alone does not authorize an upgrade or weights.
+
+[Native CI at revision 082899e](https://github.com/Umi-BitSign/umi/actions/runs/34736960939)
+passed 317 state/startup tests and 52 root-filesystem tests on each architecture,
+with 12 opposite-architecture skips per runner. Both signed preflights also
+passed on amd64 and arm64 using the built successor OCI image and the two
+coordinator RootDirectory layouts. The subsequent lifecycle test failed in
+fixture image loading because its `/var/tmp` was not writable. Revision
+`c3533c8` fixed that fixture and its public code-directory access. Its lifecycle
+body exercised both instances, but teardown cancelled fallback cleanup and
+left a test container running, so that run failed too. The fixture now waits
+for the sealed cleanup unit and checks container absence before releasing its
+mounts. The rerun is pending. These preflights do not stop or upgrade a legacy
+service.
+
+The local full regression before that fixture correction passed 3,740 tests,
+with 45 platform/rehearsal skips and 34 warnings, mostly retained pytest
+temporary-directory cleanup warnings. A subsequent distinct-identity fixture
+check and the initial-upgrade suite passed 56 tests. Neither run establishes
+the complete rooted migration, and neither live validator was changed.
+The later fixture, service-plan, cleanup and weight-worker checks passed 118
+tests, including an explicit assertion of the 70/30 allocation through the
+signed-package and weight-submission path. Its chain and model inputs are
+synthetic.
+
 The old live workers enforce current authorization validity, and the common
 service exits at sunset before reconciliation. They cannot simply be started
 after expiry to resolve old effects. Validate historical bindings separately,

@@ -126,7 +126,9 @@ def test_two_rooted_services_restart_and_clean_up_without_stopping_each_other(tm
     run.mkdir(mode=0o755)
     run.chmod(0o755)
     code = run / "code"
-    _install_test_code(code)
+    # Match the production adapter's bounded cold image creation allowance.
+    # The smaller generic fixture's 60 seconds is insufficient on the busy VM.
+    _install_test_code(code, command_timeout_seconds=300)
     for entry in case.signed.manifest.files:
         if entry.path.startswith("artifacts/"):
             _write(code / entry.path, "unused public fixture " + entry.path, entry.mode)
@@ -235,7 +237,7 @@ def test_two_rooted_services_restart_and_clean_up_without_stopping_each_other(tm
             _command("/usr/bin/systemctl", "daemon-reload")
             for record in records:
                 _command("/usr/bin/systemctl", "start", record.layout.unit_name)
-                record.first = _wait(lambda record=record: _ready(record), seconds=180)
+                record.first = _wait(lambda record=record: _ready(record), seconds=360)
                 assert record.first["sandbox"] is True
             for record in records:
                 other = next(r for r in records if r is not record)
@@ -266,7 +268,7 @@ def test_two_rooted_services_restart_and_clean_up_without_stopping_each_other(tm
                 assert (record.state / "supervisor-process.lock").stat().st_ino == record.lock_inode
                 _command("/usr/bin/systemctl", "reset-failed", record.layout.unit_name)
                 _command("/usr/bin/systemctl", "start", record.layout.unit_name)
-                after = _wait(lambda record=record: _ready(record), seconds=180)
+                after = _wait(lambda record=record: _ready(record), seconds=360)
                 assert after["pid"] != before["pid"] and after["id"] != before["id"]
                 assert _ready(other) == before_other
             _write(
@@ -285,9 +287,18 @@ def test_two_rooted_services_restart_and_clean_up_without_stopping_each_other(tm
                 _command(
                     "/usr/bin/systemctl", "stop", record.layout.unit_name, check=False, timeout=180
                 )
-                _command(
-                    "/usr/bin/systemctl", "stop", record.cleanup.name, check=False, timeout=180
-                )
+                stopped = _show_unit(record.layout.unit_name)
+                assert stopped["ActiveState"] in {"inactive", "failed"}
+                assert stopped["MainPID"] == "0"
+            for record in records:
+                # Match failed-start containment: let the sealed fallback
+                # finish. Stopping it here can strand a user-manager container
+                # after the main unit has already stopped.
+                _command("/usr/bin/systemctl", "start", record.cleanup.name, timeout=180)
+                cleaned = _show_unit(record.cleanup.name)
+                assert cleaned["ActiveState"] == "inactive" and cleaned["Result"] == "success"
+                assert cleaned["MainPID"] == "0"
+                assert json.loads(record.cli("ps", "--format=json").stdout) == []
             # Retain the exact test unit bytes off the systemd search path.
             for index, path in enumerate(installed):
                 path.rename(run / f"retained-unit-{index}")

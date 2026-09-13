@@ -165,7 +165,7 @@ def _show_unit(unit=_UNIT):
     return dict(line.split("=", 1) for line in data.splitlines())
 
 
-def _install_test_code(destination):
+def _install_test_code(destination, *, command_timeout_seconds=60):
     project = Path(__file__).resolve().parents[1]
     shutil.copytree(project / "src", destination / "src")
     environment = destination / ".venv"
@@ -185,7 +185,7 @@ def _install_test_code(destination):
     )
     _write(
         environment / "bin/umi-competition-supervisor",
-        preamble + _HOST_PROGRAM,
+        preamble + f"COMMAND_TIMEOUT_SECONDS = {int(command_timeout_seconds)}\n" + _HOST_PROGRAM,
         0o555,
     )
     for root, directories, files in os.walk(destination):
@@ -218,7 +218,7 @@ image = json.loads((a.config.parent / 'image.json').read_bytes())['reference']
 async def run():
     with _CleanupLease(a.config):
         port = PodmanSuccessorContainer(config, limits=SuccessorContainerLimits(
-            1, 1024, 1, 1024, 1, 1024, command_timeout_seconds=60))
+            1, 1024, 1, 1024, 1, 1024, command_timeout_seconds=COMMAND_TIMEOUT_SECONDS))
         diagnostic = subprocess.run([config.container_runtime, PODMAN_CGROUP_MANAGER_ARGUMENT,
             'info', '--format=json'],
             capture_output=True, env=_command_environment(), timeout=60, cwd='/')
