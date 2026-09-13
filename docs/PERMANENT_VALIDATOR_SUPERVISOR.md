@@ -9,6 +9,13 @@ x86_64 or arm64. It requires Podman 4.3.0 or later with `crun`; the installer
 installs or verifies both. The host should have at least 8 CPU cores, 16 GiB RAM,
 and 100 GiB of local storage. A GPU is not required.
 
+Ubuntu 22.04's distribution package is Podman 3.4.4, below this requirement.
+Use Ubuntu 24.04 or later, or Debian 12 or later. Installing a third-party Podman
+build on Ubuntu 22.04 is outside the supported installation path. Do not bypass
+the Podman version check or install Ubuntu 24.04 packages into Ubuntu 22.04.
+See the official [Ubuntu 22.04 package](https://packages.ubuntu.com/jammy/podman)
+and [Ubuntu 24.04 package](https://packages.ubuntu.com/noble/podman) listings.
+
 The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen-pilot
 worker with temporary live-miner weights grouped by coldkey, HTTPS IP or a
 recorded funder in the signed policy. It does not
@@ -86,17 +93,28 @@ isolated service account, and copies only the selected plaintext hotkey. It does
 not read or copy a coldkey.
 
 The installer checkout and runtime release are deliberately separate. The
-installer reads `CURRENT_RELEASE_REVISION` from its own committed Git tree,
-installs that exact release commit, and requires the coordinator-signed platform
-artifact manifest to name the same commit. Advancing `main` for documentation or
-API work therefore does not invalidate installation, while a replayed or altered
-release manifest still fails before any legacy writer is stopped.
+installer reads `CURRENT_RELEASE_REVISION` and the signed platform manifest in
+`deploy/linux-validator-supervisor/host-artifacts/` from its own committed Git
+tree. It installs that exact release commit and requires the signed manifest to
+name the same commit. Advancing `main` or publishing a later channel manifest
+therefore does not change an existing checkout's host bootstrap. Altered
+signatures or mismatched release bindings still fail before any legacy writer
+is stopped. Release publishers must update the pin and both signed manifests in
+one commit; the deployment tests verify their signatures and revision bindings.
 
 The installer is safe to rerun after a failure that occurs before the legacy
 shutdown boundary. It removes the source tree and isolated hotkey that it staged
 during that attempt. Once it begins retiring a named legacy service, it keeps
 the verified installation for diagnosis and never silently restarts the old
 writer.
+
+If installation reports `common_host_artifact_binding_mismatch`, the signed
+manifest's platform, channel or release revision does not match the installer's
+expected values. This is separate from a Podman version error. Earlier
+installers fetched a mutable channel manifest and could encounter this mismatch
+after a channel release. Use a fresh, reviewed `main` checkout after a failed
+pre-shutdown attempt; do not edit the manifest, disable signature checks, delete
+submission journals or rerun the fresh installer over a running supervisor.
 
 Before that shutdown boundary, the installer loads the verified production
 unit under its final `umi-validator-supervisor.service` name from
@@ -249,11 +267,15 @@ The shared origin is:
 https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev
 ```
 
-For each platform, the signed host manifest is published at:
+For each platform, a signed host manifest is also published at:
 
 ```text
 validator-supervisor/channels/<channel-id>/<linux-amd64|linux-arm64>/host-artifacts.json
 ```
+
+The fresh installer uses the signed manifest committed with its release pin,
+not this mutable channel copy. It downloads the files from the digest-addressed
+URLs in that committed manifest and verifies each file's size and SHA-256.
 
 Directive cursor pages are published under the same platform base:
 
