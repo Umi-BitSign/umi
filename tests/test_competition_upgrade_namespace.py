@@ -10,6 +10,14 @@ from umi import competition_upgrade_namespace as namespace
 from umi.competition_host_upgrade import HostUpgradeError
 
 
+def test_namespace_targets_remain_fixed_production_paths():
+    assert (Path("/opt/umi"), Path("/var/lib/umi-competition")) == namespace._BASES
+    assert Path("/opt/umi/bin/umi-grandpa-finality-observer") == namespace.WORKER_FINALITY_BINARY
+    assert Path("/opt/umi/bin/umi-substrate-proof-verifier") == namespace.WORKER_PROOF_BINARY
+    assert Path("/opt/umi/raw_spec_finney.json") == namespace.WORKER_CHAIN_SPEC
+    assert Path("/var/lib/umi-competition/finality") == namespace.WORKER_FINALITY_STATE_ROOT
+
+
 def test_mount_syscall_uses_fixed_bytes_without_shell(monkeypatch):
     calls = []
 

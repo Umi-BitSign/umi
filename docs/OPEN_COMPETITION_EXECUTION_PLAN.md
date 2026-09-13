@@ -243,11 +243,13 @@ were skipped on each runner. This includes the main-process kernel flock check,
 atomic input repair and process-death publication tests. It does not exercise
 the complete operator upgrade or the coordinator's RootDirectory service layout.
 
-The private upgrade-observer namespace passed nine real-mount checks on the
-wallet-free arm64 host and 33 combined namespace/observer tests locally. It
-preserves the parent namespace through normal exit, process death and partial
-failure. The new checks are included in native amd64/arm64 CI. Initial operator
-orchestration and the coordinator adapter remain open items above.
+The private upgrade-observer namespace passed ten real-mount/filesystem checks
+on the wallet-free arm64 host and 34 combined namespace/observer tests locally.
+It preserves the parent namespace through normal exit, process death and partial
+failure. CI uses dedicated root-owned fixture target paths, since a hosted
+runner's directory permissions can fail the production ownership requirement.
+The isolated VM uses the real fixed paths. Initial operator orchestration and
+the coordinator adapter remain open items above.
 
 The bounded host-bundle stager passed 71 combined artifact tests locally. In the
 isolated arm64 VM, nine root-filesystem cases and seven metadata checks passed;

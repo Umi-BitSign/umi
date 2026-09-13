@@ -29,6 +29,18 @@ def case(tmp_path, monkeypatch):
     assert os.geteuid() == 0
     assert str(tmp_path).startswith("/var/lib/umi-successor-hostbundle-pytest-")
     config = _config(target_platform=artifacts._current_platform())
+    if os.environ.get("UMI_NAMESPACE_TEST_ROOTED_TARGETS") == "1":
+        # Hosted CI's /opt ancestor need not be root-controlled. Keep every
+        # production ownership check; place just the test mount targets beneath
+        # this root-owned fixture. The isolated VM tests the real fixed paths.
+        targets = tmp_path / "mount-targets"
+        targets.mkdir(mode=0o755)
+        code, state = targets / "code", targets / "state"
+        monkeypatch.setattr(namespace, "_BASES", (code, state))
+        monkeypatch.setattr(namespace, "WORKER_FINALITY_BINARY", code / "bin/finality")
+        monkeypatch.setattr(namespace, "WORKER_PROOF_BINARY", code / "bin/proofs")
+        monkeypatch.setattr(namespace, "WORKER_CHAIN_SPEC", code / "spec.json")
+        monkeypatch.setattr(namespace, "WORKER_FINALITY_STATE_ROOT", state / "finality")
     root = tmp_path / "signed-hosts"
     root.mkdir(mode=0o755)
     helpers = {
@@ -96,6 +108,23 @@ def _fork_check(operation, *, expected=0):
 def _mount_state():
     # Kernel mount tables only. No files in either real validator are read.
     return Path("/proc/self/mountinfo").read_bytes()
+
+
+def test_new_placeholder_mode_is_explicit_and_existing_mode_is_preserved(case):
+    parent = case["control_directory"]
+    fresh = parent / "new-placeholder"
+    existing = parent / "existing-placeholder"
+    existing.mkdir(mode=0o700)
+
+    def child():
+        os.umask(0o077)
+        for path in (fresh, existing):
+            descriptor = namespace._ensure_base(path)
+            os.close(descriptor)
+        assert fresh.stat().st_mode & 0o777 == 0o755
+        assert existing.stat().st_mode & 0o777 == 0o700
+
+    _fork_check(child)
 
 
 @pytest.mark.parametrize("crash", [False, True])
@@ -225,7 +254,9 @@ def test_invalid_sources_fail_before_namespace_creation(case, change):
             # This only changes a public config object. No wallet is opened.
             case["config"] = case["config"].model_copy(
                 update={
-                    "wallet": case["config"].wallet.model_copy(update={"path": "/opt/umi/wallets"})
+                    "wallet": case["config"].wallet.model_copy(
+                        update={"path": str(namespace._BASES[0] / "wallets")}
+                    )
                 }
             )
         with pytest.raises((ValueError, OSError)):

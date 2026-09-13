@@ -68,10 +68,12 @@ jobs:
 
       - name: Native root filesystem and process-death checks
         run: |
+          stat -c '%n owner=%u mode=%a' / /opt /var /var/lib
           sudo -n env \
             UMI_RUN_SERVICE_REHEARSAL=1 \
             UMI_RUN_HOST_BUNDLE_REHEARSAL=1 \
             UMI_RUN_NAMESPACE_REHEARSAL=1 \
+            UMI_NAMESPACE_TEST_ROOTED_TARGETS=1 \
             PYTHONPATH="$PWD/src:$PWD" \
             "$PWD/.venv/bin/python" -m pytest -q \
             --basetemp="/var/lib/umi-successor-hostbundle-pytest-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \

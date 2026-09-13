@@ -90,12 +90,15 @@ Only empty `/opt/umi` and `/var/lib/umi-competition` placeholders may be created
 on the host if those directories did not exist. Never use this as a replacement
 for the coordinator's separate RootDirectory service adapter.
 
-The wallet-free arm64 test host passed nine real-mount cases, including
-read-only helpers, writable private cache, invalid sources, partial setup failure
-process death and a source replaced during namespace creation. The first run
-caught descriptors still referring to mounts
-in the old namespace. Setup now reopens them after unsharing and requires the
-same inode and permissions before binding them. The operator's initial
+The wallet-free arm64 test host passed ten real-mount/filesystem cases, including
+read-only helpers, writable private cache, invalid sources, partial setup failure,
+process death and a source replaced during namespace creation. New placeholder
+modes are explicit even under umask 077; existing directory modes stay unchanged.
+The first run caught descriptors still referring to mounts in the old namespace.
+Setup now reopens them after unsharing and requires the same inode and permissions
+before binding them. CI uses dedicated root-owned fixture target paths and keeps
+the production ownership checks enabled; the isolated VM tests the actual fixed
+paths. The operator's initial
 prepare/stop/checkpoint/switch/start command is still incomplete.
 
 The fixed `umi-competition-supervisor` entrypoint now connects the authenticated

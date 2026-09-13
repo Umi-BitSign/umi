@@ -121,13 +121,25 @@ def _source(path: Path, *, mode: int, directory: bool = False) -> int:
 
 def _ensure_base(path: Path) -> int:
     parent = _root_directory(path.parent)
+    created = False
     try:
         try:
             os.mkdir(path.name, mode=0o755, dir_fd=parent)
-            os.fsync(parent)
+            created = True
         except FileExistsError:
             pass
-        return _root_directory(path)
+        descriptor = _root_directory(path)
+        try:
+            if created:
+                # A root upgrade commonly runs with umask 077. New fixed-path
+                # placeholders must also be traversable by the later service.
+                os.fchmod(descriptor, 0o755)
+                os.fsync(descriptor)
+                os.fsync(parent)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
     finally:
         os.close(parent)
 
@@ -260,7 +272,7 @@ def prepare_upgrade_observer_namespace(
                 _temporary_base(base, descriptor)
             finally:
                 os.close(descriptor)
-        Path("/opt/umi/bin").mkdir(mode=0o755)
+        WORKER_FINALITY_BINARY.parent.mkdir(mode=0o755)
         for descriptor, (_, target, _) in zip(opened, resources, strict=False):
             _bind(descriptor, target, directory=False)
         _bind(opened[-1], WORKER_FINALITY_STATE_ROOT, directory=True)
