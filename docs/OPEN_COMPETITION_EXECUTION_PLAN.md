@@ -108,6 +108,7 @@ contributor attribution yet.
 - [x] Add exact recent owned-snapshot reads and atomic current-roster/cutoff preparation.
 - [x] Connect private round plans to owned preparation and independent cutoff signatures.
 - [x] Derive endpoint authorizations and model orders, collect independent work signatures and deliver exact certificates.
+- [x] Prepare unsigned settlements from complete retained evidence with owned current snapshots and exact restart recovery.
 - [ ] Connect continuous round planning to independent cutoff/order signing and settlement publication.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
@@ -130,7 +131,9 @@ The [evaluator exchange](OPEN_COMPETITION_EXCHANGE.md) delivers orders and revea
 retains private peer results and records completed evidence in prepared coordinator
 rounds. The production setup must supply reviewed plans and committed protected
 suites, run the independent cutoff/work signers, and publish certificates on
-time. Automatic settlement publication remains unconnected.
+time. [Automatic settlement preparation](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md)
+now produces complete unsigned proposals after cutoff. Independent settlement
+signing and certificate delivery remain unconnected.
 
 The [round-preparation APIs](OPEN_COMPETITION_ROUND_PREPARATION.md) now freeze
 current registrations, latest accepted submissions, the incumbent and cutoff
@@ -141,8 +144,10 @@ These APIs do not publish or activate a round by themselves. The
 plans and independent cutoff signing. Its optional
 [work-signing path](OPEN_COMPETITION_WORK_SIGNING.md) derives endpoint
 authorizations and model orders, rechecks owned issuance at each signer and
-delivers quorum certificates without manual assembly. Settlement publication
-remains unconnected; the larger checklist item stays open.
+delivers quorum certificates without manual assembly. The optional settlement
+output prepares replayable unsigned proposals from the exchange's retained
+evidence. Settlement signing remains unconnected; the larger checklist item
+stays open.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting

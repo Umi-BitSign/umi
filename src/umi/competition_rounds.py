@@ -146,6 +146,7 @@ class RoundCoordinatorConfig(StrictProtocolModel):
     certificate_directory: Directory
     replay_limits: PublicationReplayLimits
     work: RoundWorkConfig | None = None
+    settlement_directory: Directory | None = None
     maximum_rounds: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
@@ -165,6 +166,8 @@ class RoundCoordinatorConfig(StrictProtocolModel):
                 self.chain.state_directory,
             )
         ]
+        if self.settlement_directory is not None:
+            paths.append(Path(self.settlement_directory).resolve())
         if self.work is not None:
             paths.extend(
                 Path(p).resolve()
@@ -317,6 +320,36 @@ class RoundJournal:
                         "UPDATE round_index SET execution_close=? WHERE sequence=?",
                         (proposal.cutoff.round.evaluation_close_block, sequence),
                     )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS round_settlement_index "
+                "(sequence INTEGER PRIMARY KEY, cutoff INTEGER NOT NULL, "
+                "valid_through INTEGER NOT NULL)"
+            )
+            rows = db.execute(
+                "SELECT sequence,suite FROM round_index LIMIT ?", (maximum_rounds + 1,)
+            ).fetchall()
+            if len(rows) > maximum_rounds:
+                raise ValueError("round settlement index capacity exhausted")
+            for sequence, suite in rows:
+                proposal = RoundProposal.model_validate_json(self._record(db, "prepared", suite))
+                if proposal.cutoff.round.sequence != sequence or (
+                    proposal.cutoff.round.suite_sha256 != suite
+                ):
+                    raise ValueError("round settlement index binding mismatch")
+                expected = (
+                    proposal.cutoff.cutoff_schedule.evidence_cutoff_block,
+                    proposal.cutoff.round.valid_through_block,
+                )
+                prior = db.execute(
+                    "SELECT cutoff,valid_through FROM round_settlement_index WHERE sequence=?",
+                    (sequence,),
+                ).fetchone()
+                if prior is not None and prior != expected:
+                    raise ValueError("round settlement index windows changed")
+                db.execute(
+                    "INSERT OR IGNORE INTO round_settlement_index VALUES (?,?,?)",
+                    (sequence, *expected),
+                )
 
     def _check_files(self):
         _private(self.root)
@@ -387,6 +420,14 @@ class RoundJournal:
                             proposal.cutoff.registration_snapshot.block,
                             proposal.signing_close_block,
                             proposal.cutoff.round.evaluation_close_block,
+                        ),
+                    )
+                    db.execute(
+                        "INSERT INTO round_settlement_index VALUES (?,?,?)",
+                        (
+                            proposal.cutoff.round.sequence,
+                            proposal.cutoff.cutoff_schedule.evidence_cutoff_block,
+                            proposal.cutoff.round.valid_through_block,
                         ),
                     )
                 elif kind == "plan":
@@ -482,6 +523,28 @@ class RoundJournal:
                 ).fetchall()
         return rows
 
+    def settlement_entries(self, block, after_sequence=0):
+        with self.transaction() as db:
+            rows = db.execute(
+                "SELECT r.sequence,r.suite,s.cutoff,s.valid_through FROM round_index r "
+                "JOIN round_settlement_index s ON s.sequence=r.sequence "
+                "WHERE r.sequence>? AND s.cutoff<=? AND s.valid_through>=? "
+                "AND r.suite NOT IN (SELECT id FROM holds) ORDER BY r.sequence LIMIT 4",
+                (after_sequence, block, block),
+            ).fetchall()
+            result = []
+            for sequence, suite, cutoff, valid_through in rows:
+                proposal = RoundProposal.model_validate_json(self._record(db, "prepared", suite))
+                if (
+                    proposal.cutoff.round.sequence != sequence
+                    or proposal.cutoff.round.suite_sha256 != suite
+                    or proposal.cutoff.cutoff_schedule.evidence_cutoff_block != cutoff
+                    or proposal.cutoff.round.valid_through_block != valid_through
+                ):
+                    raise ValueError("round settlement index differs from its retained proposal")
+                result.append(proposal)
+        return result
+
 
 class RoundCoordinator:
     def __init__(self, config, policy, provider, *, legacy=None, transport_provider=None):
@@ -503,6 +566,7 @@ class RoundCoordinator:
                     "host",
                     "port",
                     *({"work"} if config.work is None else set()),
+                    *({"settlement_directory"} if config.settlement_directory is None else set()),
                 },
             ),
             maximum_rounds=config.maximum_rounds,
@@ -512,6 +576,7 @@ class RoundCoordinator:
         self.cursor = ""
         self.new_cursor = ""
         self.work_cursor = 0
+        self.settlement_cursor = 0
         self.work_queue = None
         self.transport_provider = transport_provider
         if config.work is not None:
@@ -691,12 +756,51 @@ class RoundCoordinator:
                     counts["prepared"] += 1
                 except (OSError, ValueError, sqlite3.Error):
                     counts["held"] += 1
+            if self.config.settlement_directory is not None:
+                counts.update(await self.prepare_settlements(block))
             return {
                 "status": "round_poll_complete",
                 "finalized_block": block,
                 **counts,
                 "chain_submission_authorized": False,
             }
+
+    async def prepare_settlements(self, block):
+        from .competition_settlement_preparation import prepare_retained_settlement
+        from .competition_store import SettlementNotReadyError
+
+        proposals = self.journal.settlement_entries(block, self.settlement_cursor)
+        if not proposals:
+            proposals = self.journal.settlement_entries(block)
+        counts = dict(settlement_prepared=0, settlement_incomplete=0, settlement_held=0)
+        for proposal in proposals:
+            self.settlement_cursor = proposal.cutoff.round.sequence
+            try:
+                certificate = self.publish_certificate(proposal)
+                if certificate is None:
+                    counts["settlement_incomplete"] += 1
+                    continue
+                plan = RoundPlan.model_validate_json(
+                    canonical_json_bytes(
+                        self.journal.get("plan", proposal.cutoff.round.suite_sha256)
+                    )
+                )
+                result = await prepare_retained_settlement(
+                    store=self.store,
+                    provider=self.provider,
+                    cutoff=certificate,
+                    suite=plan.suite,
+                    limits=self.config.replay_limits,
+                    output_directory=self.config.settlement_directory,
+                )
+                counts[
+                    "settlement_prepared" if result == "prepared" else "settlement_incomplete"
+                ] += 1
+            except SettlementNotReadyError:
+                counts["settlement_incomplete"] += 1
+            except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError):
+                counts["settlement_held"] += 1
+        return counts
 
     def proposals(self, after_sequence=0, proposal_id=None, *, block=None):
         result = []

@@ -86,6 +86,10 @@ class AdmissionCapacityError(ValueError):
     """A new admission would exceed its configured durable capacity."""
 
 
+class SettlementNotReadyError(ValueError):
+    """A frozen roster entry has no complete independent evidence by cutoff."""
+
+
 class RoundPreparationCapacity(StrictProtocolModel):
     maximum_records: Annotated[int, Field(ge=1, le=65_536)] = 1024
     maximum_bytes: Annotated[int, Field(ge=1, le=16 * 1024**3)] = 1024**3
@@ -1315,6 +1319,118 @@ class CompetitionStore:
                 promoted_hotkey=baseline["contributor_hotkey"],
             )
 
+    def settlement_material(
+        self, round_: EvaluationRound, *, limits: PublicationReplayLimits
+    ) -> dict:
+        """Read a complete, bounded settlement input set in one SQLite snapshot.
+
+        Select the earliest retained independent evidence for each roster entry.
+        A prior settlement instead pins the exact evidence already used. Missing
+        and late entries block the whole round; they never become miner failures.
+        """
+        round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
+        limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
+        round_id = digest(round_)
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            self._assert_action_allowed(connection, round_id)
+            raw = _bounded_stored_body(
+                connection, "rounds", "digest", round_id, limits.maximum_certificate_bytes
+            )
+            if raw != canonical_json_bytes(round_) or round_.policy_sha256 != digest(self.policy):
+                raise ValueError("settlement material differs from the closed round")
+            _bounded_stored_body(
+                connection,
+                "evidence_cutoff_schedules",
+                "round",
+                round_id,
+                limits.maximum_certificate_bytes,
+            )
+            cutoff = self._fixed_cutoff(connection, round_id)
+            raw = _bounded_stored_body(
+                connection,
+                "competition_settlements",
+                "round",
+                round_id,
+                limits.maximum_certificate_bytes,
+                optional=True,
+            )
+            retained = None if raw is None else CompetitionSettlement.model_validate_json(raw)
+            if retained is not None:
+                stored_digest = connection.execute(
+                    "SELECT digest FROM competition_settlements WHERE round=?", (round_id,)
+                ).fetchone()[0]
+                if (
+                    competition_settlement_digest(retained) != stored_digest
+                    or retained.round_sha256 != round_id
+                    or retained.roster != round_.roster
+                    or retained.cutoff_schedule != cutoff
+                ):
+                    raise ValueError("retained settlement material binding mismatch")
+            prior = {} if retained is None else {r.submission_sha256: r for r in retained.results}
+            submissions, evidence = [], []
+            roster_bytes, evidence_bytes = 2, 2
+            for submission_id in round_.roster:
+                raw = _bounded_stored_body(
+                    connection,
+                    "submissions",
+                    "digest",
+                    submission_id,
+                    limits.maximum_roster_bytes - roster_bytes,
+                )
+                roster_bytes += len(raw) + 1
+                signed = SignedSubmission.model_validate_json(raw)
+                if digest(signed.submission) != submission_id:
+                    raise ValueError("settlement material submission binding mismatch")
+                binding = prior.get(submission_id)
+                if binding is None:
+                    selected = connection.execute(
+                        "SELECT digest FROM independent_evaluation_evidence "
+                        "WHERE round=? AND submission=? "
+                        "ORDER BY first_observed_block,digest LIMIT 1",
+                        (round_id, submission_id),
+                    ).fetchone()
+                    if selected is None:
+                        raise SettlementNotReadyError("complete roster evidence is not retained")
+                    evidence_id = selected[0]
+                else:
+                    evidence_id = binding.independent_evidence_sha256
+                raw = _bounded_stored_body(
+                    connection,
+                    "independent_evaluation_evidence",
+                    "digest",
+                    evidence_id,
+                    limits.maximum_evidence_bytes - evidence_bytes,
+                )
+                evidence_bytes += len(raw) + 1
+                independent = IndependentEvaluationEvidence.model_validate_json(raw, strict=True)
+                row = connection.execute(
+                    "SELECT round,submission,result,first_observed_block "
+                    "FROM independent_evaluation_evidence WHERE digest=?",
+                    (evidence_id,),
+                ).fetchone()
+                result_id = digest(independent.attested_result.result)
+                if row[:3] != (round_id, submission_id, result_id) or (
+                    independent_evidence_digest(independent) != evidence_id
+                ):
+                    raise ValueError("settlement material evidence binding mismatch")
+                if type(row[3]) is not int or not round_.reveal_block <= row[3]:
+                    raise ValueError("settlement evidence has an invalid first observation")
+                if row[3] > cutoff.evidence_cutoff_block:
+                    raise SettlementNotReadyError("roster evidence was first observed after cutoff")
+                if binding is not None and (
+                    binding.result_sha256 != result_id or binding.first_observed_block != row[3]
+                ):
+                    raise ValueError("retained settlement evidence observation changed")
+                submissions.append(signed)
+                evidence.append((signed, independent))
+        return {
+            "submissions": tuple(submissions),
+            "evidence": tuple(evidence),
+            "cutoff_schedule": cutoff,
+            "retained_settlement": retained,
+        }
+
     def settle(
         self,
         *,
@@ -1685,6 +1801,25 @@ class CompetitionStore:
                 (head[0] + 1, digest(round_)),
             )
             return record
+
+
+def _bounded_stored_body(connection, table, key_name, key, maximum_bytes, *, optional=False):
+    # Table/column names are fixed internal call sites, never HTTP input.
+    size = connection.execute(
+        f"SELECT length(CAST(body AS BLOB)) FROM {table} WHERE {key_name}=?", (key,)
+    ).fetchone()
+    if size is None:
+        if optional:
+            return None
+        raise ValueError("settlement material is missing a retained record")
+    if type(size[0]) is not int or not 0 < size[0] <= maximum_bytes:
+        raise ValueError("settlement material exceeds its byte bound")
+    raw = connection.execute(f"SELECT body FROM {table} WHERE {key_name}=?", (key,)).fetchone()[0]
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    if raw != canonical_json_bytes(json.loads(raw)):
+        raise ValueError("settlement material is not canonical")
+    return raw
 
 
 def _same_settlement_request(

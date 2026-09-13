@@ -111,7 +111,7 @@ def _certificate(publication):
     return SignedSettlementPublication(publication=publication, signatures=signatures)
 
 
-def _scenario(policy, root, limits):
+def _scenario(policy, root, limits, *, settle=True):
     archive = root / "archive"
     baseline = bundle_at(root / "baseline")
     candidate = bundle_at(root / "candidate", "candidate", digest(baseline))
@@ -162,6 +162,27 @@ def _scenario(policy, root, limits):
         snapshot=snapshot(150),
         current_block=150,
     )
+    cutoff_publication = build_cutoff_publication(
+        round_=round_,
+        cutoff_schedule=schedule,
+        registration_snapshot=snapshot(),
+        submissions=submissions,
+        policy=policy,
+        limits=limits,
+    )
+    cutoff_certificate = _certificate(cutoff_publication)
+    if not settle:
+        return SimpleNamespace(
+            policy=policy,
+            store=store,
+            round=round_,
+            schedule=schedule,
+            submissions=submissions,
+            suite=suite,
+            evidence=evidence,
+            promotion=promotion,
+            cutoff_certificate=cutoff_certificate,
+        )
     settlement = CompetitionSettlement.model_validate_json(
         canonical_json_bytes(
             store.settle(
@@ -174,16 +195,6 @@ def _scenario(policy, root, limits):
         ),
         strict=True,
     )
-
-    cutoff_publication = build_cutoff_publication(
-        round_=round_,
-        cutoff_schedule=schedule,
-        registration_snapshot=snapshot(),
-        submissions=submissions,
-        policy=policy,
-        limits=limits,
-    )
-    cutoff_certificate = _certificate(cutoff_publication)
     settlement_publication = build_settlement_publication(
         cutoff_certificate=cutoff_certificate,
         retained_settlement=settlement,
