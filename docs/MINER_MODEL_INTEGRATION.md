@@ -1,10 +1,38 @@
 # Miner model integration
 
 For current deployment requirements, first read
-[what miners should run now](CURRENT_MINER_OPERATION.md). The bootstrap validator
-checks endpoint health and replays old pilot evidence; it does not run fresh
+[what miners should run now](CURRENT_MINER_OPERATION.md). The registration bridge
+checks endpoint health without replaying pilot evidence; it does not run fresh
 translation challenges. The integration below is for a miner that serves actual
 translation requests under the corresponding release and policy.
+
+## Successor assignment discovery rehearsal
+
+The weight-disabled miner can discover new quorum-signed assignments while
+running. Supply `--competition-policy`, `--competition-feed https://REVIEWED_HOST`
+and `--serving-origin` alongside the normal transport policy, finality, model,
+wallet and state options. `--competition-feed` replaces
+`--competition-authorization`; do not use both. The feed URL and policy are
+reviewed operator inputs. There is no production enrollment URL in these examples.
+
+The process starts with no authorized assignments. It polls using its own hotkey,
+checks exact signed publications against the configured model and origin, then
+admits only their exact authenticated requests. Polling does not load a different
+model or change the policy. New rounds do not require a process restart.
+
+The cache holds at most four unexpired publications. Reads and pages are bounded;
+unavailable or expired publications do not grant work or block attempts to read
+later entries. Overlapping usable publications remain available until response
+close. Existing durable nonce, response and resource ledgers still apply across
+rounds and restarts. A feed outage leaves already verified unexpired assignments
+usable; after restart, assignments must be rediscovered before accepting work.
+
+This is still a no-weight rehearsal profile. Local discovery does not prove
+independently witnessed publication timing or the chain-announced endpoint origin.
+The production scheduler must allow time for discovery before dispatch and must
+not attribute coordinator publication delays to miner failure. Protected-data
+dispatch, real-model execution and signed activation still require end-to-end
+rehearsal before miners should run this for rewards.
 
 The miner accepts a model through either an in-process async callable or an
 owner-private Unix socket. Both paths receive the verified MP4 bytes and the

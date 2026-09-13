@@ -315,6 +315,18 @@ def test_owner_associated_nonzero_uid_is_excluded(signed_policy):
     assert result.eligible_count == 15 and result.expected_row[6] == [6, 0]
 
 
+def test_miner_gaining_validator_permit_does_not_abort_other_miners(signed_policy):
+    obs = observation()
+    uid = next(u for u in LIVE if u != 6)
+    before = decision(signed_policy, obs)
+    changed = replace_participant(obs, uid, validator_permit=True)
+    after = decision(signed_policy, changed)
+    assert after.action == "submit"
+    assert after.eligible_count == before.eligible_count - 1
+    assert after.expected_row[uid] == [uid, 0]
+    assert after.expected_row[6][1] > 0
+
+
 def test_health_failure_excludes_only_one_uid_and_zero_success_holds(signed_policy):
     obs = observation()
     result = decision(signed_policy, obs, health(obs, failed={6}))

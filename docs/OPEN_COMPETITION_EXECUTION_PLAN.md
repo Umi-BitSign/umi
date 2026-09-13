@@ -89,6 +89,11 @@ activate rewards or extend the signed bootstrap sunset.
 - [x] Adapt and rehearse signed preflight and lifecycle in both coordinator roots.
 - [x] Rehearse per-instance interruption/restart on both Linux architectures.
 - [x] Rehearse the complete signed initial migration and interrupted-command recovery together.
+- [x] Publish a preparation checklist addressing source rights and preliminary review.
+- [x] Connect bounded assignment discovery to a running no-weight miner and preserve transport ledgers.
+- [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
+- [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
+- [ ] Rehearse integrated protected-data scheduling, evaluator dispatch and evidence publication.
 - [ ] Complete the real-model, independent-evaluation and signed-activation gates.
 
 Publication also requires passing full-regression CI for the candidate revision.
