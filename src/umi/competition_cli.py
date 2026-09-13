@@ -110,6 +110,9 @@ def _parser() -> argparse.ArgumentParser:
     evaluator.add_argument("--config", required=True)
     evaluator.add_argument("--legacy-policy")
     evaluator.add_argument("--once", action="store_true")
+    exchange = commands.add_parser("serve-evaluator-exchange")
+    exchange.add_argument("--config", required=True)
+    exchange.add_argument("--legacy-policy")
     feed = commands.add_parser("serve-assignment-feed")
     for name in ("legacy-policy", "state", "nonce-path"):
         feed.add_argument("--" + name, required=True)
@@ -281,6 +284,16 @@ def _parser() -> argparse.ArgumentParser:
 
 def execute(args: argparse.Namespace) -> dict:
     policy = _load(args.policy, CompetitionPolicy)
+    if args.command == "serve-evaluator-exchange":
+        from .competition_exchange import ExchangeConfig, serve_exchange
+        from .policy import ScoringPolicy
+
+        serve_exchange(
+            _load(args.config, ExchangeConfig),
+            policy,
+            legacy=_load(args.legacy_policy, ScoringPolicy) if args.legacy_policy else None,
+        )
+        return {"status": "stopped", "chain_submission_authorized": False}
     if args.command == "run-evaluator":
         from .competition_evaluator import EvaluatorConfig, run_evaluator
         from .policy import ScoringPolicy

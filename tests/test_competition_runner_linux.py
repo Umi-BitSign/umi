@@ -229,18 +229,25 @@ async def test_endpoint_incumbent_job_runs_real_containers_and_retains_receipts(
     )
 
     # Drive the same real runtime through the continuous two-operator model
-    # path. Only the chain captures and private peer-file transport are test
-    # ports; execution, hotkey signatures and agreement replay are real.
+    # path. Chain captures and the ASGI socket boundary are test ports;
+    # execution, authenticated HTTP delivery and agreement replay are real.
     from types import SimpleNamespace
+
+    import httpx
 
     from tests.test_competition_chain import chain_config as chain_fixture
     from tests.test_competition_evaluator import (
-        agree,
+        Provider,
         completed,
-        execute,
         make_driver,
         put,
         signed_order,
+    )
+    from tests.test_competition_exchange import finish
+    from umi.competition_exchange import (
+        EvaluatorExchangeClient,
+        ExchangeConfig,
+        create_exchange_app,
     )
     from umi.competition_execution import ModelEvaluationJob
 
@@ -261,11 +268,31 @@ async def test_endpoint_incumbent_job_runs_real_containers_and_retains_receipts(
         make_driver(tmp_path / f"real-worker-{i}", chain, policy, archive, videos, signer)
         for i, signer in enumerate(signers)
     )
+    relay_config = ExchangeConfig(
+        schema="umi-evaluator-exchange-config/1",
+        policy_sha256=digest(policy),
+        chain=chain.model_copy(
+            update={
+                "collection_timeout_seconds": 10,
+                "state_directory": str(tmp_path / "relay-chain"),
+            }
+        ),
+        state_directory=str(tmp_path / "relay-state"),
+        order_directory=str(tmp_path / "relay-orders"),
+        reveal_directory=str(tmp_path / "relay-reveals"),
+    )
+    provider = Provider()
+    app = create_exchange_app(relay_config, policy, provider_factory=lambda *_: provider)
+    clients = tuple(
+        EvaluatorExchangeClient(d, "https://relay.example", transport=httpx.ASGITransport(app=app))
+        for d in drivers
+    )
     try:
-        for driver in drivers:
-            put(Path(driver.config.order_directory) / (digest(order.order) + ".json"), order)
-        await execute(drivers)
-        await agree(SimpleNamespace(drivers=drivers, order=order, suite=suite))
+        put(Path(relay_config.order_directory) / (digest(order.order) + ".json"), order)
+        put(Path(relay_config.reveal_directory) / (digest(suite) + ".json"), suite)
+        await finish(
+            SimpleNamespace(drivers=drivers, order=order, provider=provider, clients=clients)
+        )
         certificates = [completed(driver)[0] for driver in drivers]
         assert certificates[0] == certificates[1]
         assert all(

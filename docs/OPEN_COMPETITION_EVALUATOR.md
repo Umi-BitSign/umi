@@ -26,6 +26,9 @@ Use one hotkey per worker and a dedicated configuration with schema
 - For endpoints, `dispatch_directory` and `legacy_policy_sha256`: the local
   [dispatcher](OPEN_COMPETITION_DISPATCH.md) journal and exact transport policy.
   Supply both, or omit both for a model-only evaluator worker.
+- `exchange_origin` enables the [authenticated exchange](OPEN_COMPETITION_EXCHANGE.md).
+  For automatic endpoint publication delivery, set `assignment_directory` to
+  the dispatcher's separate `publication_directory`. No extra upload key is used.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives
@@ -70,10 +73,10 @@ The coordinator delivers canonical `SignedEvaluationOrder` JSON as
 
 The outer `signatures` must independently meet the policy quorum over the exact
 order body using the existing competition `sign_object` domain. The worker
-does not sign orders or choose a roster. Coordinator publication and peer
-delivery must be set up separately; these directories are not public upload
-endpoints. Deliver complete private files by atomic rename, without symlinks,
-hardlinks, or group/world access.
+does not sign orders or choose a roster. The exchange can populate these private
+directories and deliver peer results automatically. Without an exchange,
+deliver complete private files by atomic rename, without symlinks, hardlinks,
+or group/world access. The directories are not public upload endpoints.
 
 The worker waits for an owned finalized head after submission close before
 starting inference. It uses the existing per-invocation boundary capture and
@@ -98,7 +101,8 @@ The private outbox uses `<order-digest>.<evaluator-account-hex>.<kind>.json`:
 | `vote` | Signature on the common result and independently signed local run | Other nominated evaluators |
 | `independent` | Complete quorum result and run records | Settlement coordinator |
 
-Deliver each peer's `execution` and `vote` files unchanged into `peer_directory`.
+The exchange delivers each peer's `execution` and `vote` files unchanged into
+`peer_directory`; offline operators can provide the same files themselves.
 The worker verifies signatures and replays all nominated executions before
 signing a common result. Outputs/status and per-case resource eligibility must
 agree. Measured time uses the maximum across these fixed runs. It retains the
@@ -121,8 +125,10 @@ independent administration, protected-data rights, or publication timing.
 ## Remaining deployment connection
 
 The worker automates local execution, reveal handling and peer agreement across
-successive signed orders. It still needs the coordinator's ongoing order/reveal
-publication and authenticated peer-file delivery. Settlement cutoff publication,
-promotion review and the signed successor activation remain separate stages.
+successive signed orders. The exchange handles authenticated delivery and can
+record completed evidence in an already admitted and closed coordinator round.
+It still needs ongoing quorum-signed orders and committed protected suites.
+Settlement cutoff publication, promotion review and signed successor activation
+remain separate stages.
 The [execution plan](OPEN_COMPETITION_EXECUTION_PLAN.md) tracks those gates;
 this command alone is not an open-mining launch.
