@@ -251,6 +251,19 @@ runner's directory permissions can fail the production ownership requirement.
 The isolated VM uses the real fixed paths. Initial operator orchestration and
 the coordinator adapter remain open items above.
 
+At revision `91cfa07`, the full suite in a fixed normal clone passed 3,568 tests,
+with 43 platform/rehearsal or unavailable-Rust skips. The separate worktree run
+had eight failures because the historical hold helper requires a `.git`
+directory. A normal clone exercises that requirement without changing it.
+The subsequent placeholder-mode and CI-fixture changes passed 34 focused local
+tests and ten real-mount/filesystem cases on the arm64 VM.
+
+[Native CI at revision 9ce558d](https://github.com/Umi-BitSign/umi/actions/runs/34726994165)
+passed 199 state/startup checks and 47 root-filesystem checks on each architecture,
+with 12 opposite-architecture fixture skips per runner. Both runners reported
+`/opt` mode 0777, which explains the earlier ownership rejection. CI now uses
+root-owned fixture mount targets without weakening that production check.
+
 The bounded host-bundle stager passed 71 combined artifact tests locally. In the
 isolated arm64 VM, nine root-filesystem cases and seven metadata checks passed;
 nine amd64 variants were skipped. It verifies all signed files before no-replace
