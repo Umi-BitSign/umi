@@ -3,7 +3,9 @@
 This read-only worker checks Taostats transfer histories for shared-funder
 candidates during the registration bridge. It does not change weights, ban UIDs,
 or identify people. The active reward policy still groups passing miners by
-coldkey or HTTPS endpoint IP. Funding-based reward grouping is not activated.
+coldkey or HTTPS endpoint IP until the new
+[signed funding-cap policy](REGISTRATION_BRIDGE_FUNDING_CAP.md) is deployed.
+Publishing this checker alone does not activate funding-based reward grouping.
 
 The audit is temporary. Its watcher stops querying at finalized block
 `9,075,171`. Stop it earlier if the open competition replaces the bridge. It is
