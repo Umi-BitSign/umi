@@ -209,6 +209,48 @@ def test_switch_consumes_old_authority_but_holds_same_lock_through_context(switc
     assert case.events.index("marker") < case.events.index("write_cleanup")
 
 
+@pytest.mark.parametrize("changed", [None, "MainPID", "User", "DropInPaths", "ExecStart"])
+def test_inactive_unit_autoload_accepts_only_the_exact_stopped_successor(
+    switching, monkeypatch, changed
+):
+    case = switching
+    from umi import competition_host_upgrade as host
+
+    original = dict(case.unit)
+    monkeypatch.setattr(host, "_check_unit", lambda *args: dict(original))
+    write = switch._write_drop_in_once
+
+    def write_and_autoload(plan, descriptor):
+        write(plan, descriptor)
+        # An inactive instance can be garbage-collected and reloaded by show.
+        case.unit.update(
+            DropInPaths=str(plan.drop_in_path),
+            OnFailure=plan.cleanup_unit_name,
+            ExecStart=(
+                str(plan.host_root)
+                + "/.venv/bin/umi-competition-supervisor --config "
+                + str(case.installed.config_path)
+                + " ;"
+            ),
+        )
+        if changed is not None:
+            case.unit[changed] = "unexpected-unit-change"
+
+    monkeypatch.setattr(switch, "_write_drop_in_once", write_and_autoload)
+    if changed is None:
+        with hold(case.installed) as stopped:
+            _commit(case, stopped)
+        assert case.events.count("reload") == 1
+    else:
+        with (
+            pytest.raises(HostUpgradeError, match="exact stopped switch"),
+            hold(case.installed) as stopped,
+        ):
+            _commit(case, stopped)
+        assert "reload" not in case.events
+        assert case.plan.drop_in_path.exists()
+
+
 @pytest.mark.parametrize(
     "phase", ["write_cleanup", "write", "before_reload", "reload", "after_reload"]
 )

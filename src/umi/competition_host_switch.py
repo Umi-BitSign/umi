@@ -374,9 +374,14 @@ def commit_successor_service_switch(
     finally:
         os.close(marker)
     _lock_and_originals(stopped, require_held=True)
-    if _unit_snapshot(plan.unit_name) != stopped._lease.unit_snapshot:
-        raise HostUpgradeError("stopped unit changed before successor reload")
-    _require_empty_cgroup(plan.unit_name, stopped._lease.unit_snapshot["ControlGroup"])
+    current = _unit_snapshot(plan.unit_name)
+    if current != stopped._lease.unit_snapshot:
+        # systemd may unload an inactive instance and load its new drop-in on
+        # the next show request, before daemon-reload. Accept only the exact
+        # published successor, still stopped under the original process lock.
+        _read_drop_in(plan)
+        current = _switched_unit(stopped, plan)
+    _require_empty_cgroup(plan.unit_name, current["ControlGroup"])
     anchor.recheck()
     host_tree.recheck()
     _reload_systemd()

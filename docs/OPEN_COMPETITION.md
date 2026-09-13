@@ -70,6 +70,17 @@ authorizes new weights or changes the current bootstrap.
   report current conflict holds; the worker cannot submit weights.
 - Read-only installed/staged supervisor inspection that verifies historical
   signed bindings and artifact bytes while preserving all upgrade/stop holds.
+- Separate signed v4 supervisor and weight-authorization contracts, with
+  exact-byte transaction intent, uncertain-effect recovery and per-round
+  immutable input selection. The retained v3 history is preserved.
+- A signed host/OCI upgrade command with wallet-free preflight, stopped-worker
+  reconciliation, an immutable recovery archive, source publication and startup.
+  Its resume command recovers a recorded interrupted switch without restoring
+  the superseded writer. Both coordinator instances have separate paths,
+  process locks, cleanup units and resource boundaries.
+- Native amd64 and arm64 tests of signed preflight, rooted service startup,
+  interruption and cleanup. The complete signed migration and interrupted-command
+  scenario is under test; its passing result is still required before release.
 
 Model-bundle verification proves possession and byte integrity. The signed
 review records are evaluator attestations about offline reconstruction and
@@ -109,11 +120,11 @@ independent access to it.
   they do not yet establish a live protected-data publication workflow.
 - Published license/reconstruction evidence and model-copy review operations.
 - Signed successor policy/activation artifacts and production chain submission.
-- An installed-supervisor compatibility rehearsal and an explicit host upgrade.
-  Do not relabel successor inputs as the frozen bootstrap profile.
-  The current host schemas require changes for successor settlement inputs;
-  see [upgrade requirements](SUCCESSOR_SUPERVISOR_UPGRADE.md). The existing
-  fresh-install script cannot upgrade an installed supervisor.
+- Completion of the combined signed initial-migration rehearsal and publication
+  of reviewed host/OCI upgrade artifacts. The dedicated upgrade command exists;
+  the existing fresh-install script cannot upgrade an installed supervisor.
+  See [upgrade requirements](SUCCESSOR_SUPERVISOR_UPGRADE.md). Successor inputs
+  must never be relabeled as the frozen bootstrap profile.
 
 The tests use inert model bytes and development signing keys. Their successful
 results are engineering evidence, not evidence of real ASL model improvement,

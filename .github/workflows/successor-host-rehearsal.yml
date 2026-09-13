@@ -10,7 +10,7 @@ on:
       - 'uv.lock'
       - '.github/workflows/successor-host-rehearsal.yml'
   push:
-    branches: [main, codex/open-competition-completion-20260912]
+    branches: [main]
     paths:
       - 'src/**'
       - 'tests/**'

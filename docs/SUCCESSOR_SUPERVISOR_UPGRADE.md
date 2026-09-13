@@ -151,6 +151,13 @@ The intent binds the original unit, lock inode, config, recovery anchor and
 signed replacement host. Legacy recovery rejects that directory even before
 systemd has loaded a file. Failed staging directories are retained and bounded.
 
+Systemd can reload an inactive instance when queried, exposing the published
+successor command before an explicit `daemon-reload`. At that boundary the
+publisher accepts either the unchanged legacy snapshot or the exact published
+successor, with no running processes and the original lock still held. It
+verifies the published files and repeats the checks after the explicit reload.
+Unexpected commands, identities or additional drop-ins remain errors.
+
 The development command can resume that recorded switch:
 
 ```sh
