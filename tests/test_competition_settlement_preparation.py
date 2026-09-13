@@ -252,6 +252,14 @@ def test_material_evidence_digest_matches_publication_contract(setup):
     assert material["retained_settlement"] is None
 
 
+def test_settlement_transport_bound_is_16_mib_before_model_parsing(setup):
+    from umi.competition_settlement_preparation import MAX_BYTES
+
+    assert MAX_BYTES == 16 * 1024**2
+    with pytest.raises(ValueError, match="transport byte bound"):
+        validate_preparation({"oversized": "a" * MAX_BYTES}, setup.policy, setup.limits)
+
+
 @pytest.mark.asyncio
 async def test_expiry_during_final_collection_does_not_commit(setup):
     s = setup

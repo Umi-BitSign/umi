@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from .competition_evaluator import MAX_BYTES, _publish
+from .competition_evaluator import _publish
 from .competition_execution import execution_boundary
 from .competition_package import (
     CompetitionPackageEvidence,
@@ -29,6 +29,8 @@ from .competition_publication import (
 from .competition_settlement import CompetitionSettlement
 from .open_competition import StrictProtocolModel, digest
 from .protocol import canonical_json_bytes
+
+MAX_BYTES = 16 * 1024**2
 
 
 class SettlementPreparation(StrictProtocolModel):
