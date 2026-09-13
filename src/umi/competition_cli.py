@@ -90,6 +90,10 @@ def _parser() -> argparse.ArgumentParser:
     origin = commands.add_parser("check-endpoint-origin")
     origin.add_argument("--submission", required=True)
     origin.add_argument("--chain-config", required=True)
+    dispatch = commands.add_parser("run-endpoint-dispatch")
+    dispatch.add_argument("--config", required=True)
+    dispatch.add_argument("--legacy-policy", required=True)
+    dispatch.add_argument("--once", action="store_true")
     feed = commands.add_parser("serve-assignment-feed")
     for name in ("legacy-policy", "state", "nonce-path"):
         feed.add_argument("--" + name, required=True)
@@ -239,6 +243,19 @@ def _parser() -> argparse.ArgumentParser:
 
 def execute(args: argparse.Namespace) -> dict:
     policy = _load(args.policy, CompetitionPolicy)
+    if args.command == "run-endpoint-dispatch":
+        from .competition_dispatch import EndpointDispatchConfig, run_dispatch
+        from .policy import ScoringPolicy
+
+        return asyncio.run(
+            run_dispatch(
+                _load(args.config, EndpointDispatchConfig),
+                policy,
+                _load(args.legacy_policy, ScoringPolicy),
+                once=args.once,
+                report=lambda status: print(canonical_json_bytes(status).decode(), flush=True),
+            )
+        )
     if args.command == "prepare-settlement-package":
         from .competition_package import (
             CompetitionPackageLimits,

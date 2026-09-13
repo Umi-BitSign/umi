@@ -984,6 +984,42 @@ class AssignmentPublicationJournal:
             "chain_submission_authorized": False,
         }
 
+    def pending_dispatches(self, *, evaluator_hotkey: str, after=None, limit=8) -> dict:
+        """Bounded local dispatch queue, without granting a transmission claim."""
+        evaluator = identity(evaluator_hotkey)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("invalid dispatch page size")
+        if after is not None and (
+            not isinstance(after, str)
+            or len(after) != 64
+            or any(c not in "0123456789abcdef" for c in after)
+        ):
+            raise ValueError("invalid dispatch page cursor")
+        with self._transaction() as db:
+            self._expire_elapsed(db)
+            rows = db.execute(
+                "SELECT a.*,p.observed_ms FROM assignments a "
+                "JOIN publications p ON p.id=a.publication_id "
+                "WHERE evaluator=? AND a.id>? "
+                "AND (SELECT kind FROM events e WHERE e.assignment_id=a.id "
+                "ORDER BY ordinal DESC LIMIT 1)='published' ORDER BY a.id LIMIT ?",
+                (evaluator, after or "", limit + 1),
+            ).fetchall()
+            return {
+                "items": [
+                    {
+                        "assignment_key": row["id"],
+                        "publication_sha256": row["publication_id"],
+                        "miner_account": row["miner"],
+                        "first_observed_unix_ms": row["observed_ms"],
+                        "issued_block": row["issued_block"],
+                        "issue_close_unix_ms": row["issue_close_ms"],
+                    }
+                    for row in rows[:limit]
+                ],
+                "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None,
+            }
+
     def publication_status(self, key: str) -> dict:
         with self._transaction() as db:
             self._publication(db, key)

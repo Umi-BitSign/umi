@@ -76,6 +76,60 @@ async def test_origin_collects_proven_bidirectional_registration_and_axon(origin
     assert not any(method.startswith("author_") for method, _ in item.rpc.calls)
 
 
+async def test_dispatch_provider_keeps_transport_attestations_and_origin_proofs_bound(
+    origin_chain, monkeypatch
+):
+    from umi.competition_dispatch import DispatchFinalityProvider
+    from umi.policy import scoring_policy_hash
+
+    from .test_competition_authorization import _live_policy
+
+    item = origin_chain
+    legacy = _live_policy(activation_block=1000)
+    legacy = legacy.model_copy(
+        update={
+            "implementation_pins": legacy.implementation_pins.model_copy(
+                update={
+                    "live_chain": item.config.chain_pin,
+                    "finality_verifier": item.config.finality_pin,
+                }
+            )
+        }
+    )
+    config = item.config.model_copy(
+        update={"state_directory": item.config.state_directory + "-dispatch"}
+    )
+    provider = DispatchFinalityProvider(
+        config,
+        item.policy,
+        legacy,
+        finality=item.finality,
+        proofs=item.proofs,
+        now_ms=lambda: item.clock.now,
+    )
+    # Original fixture port emits competition-bound blocks, which must fail.
+    with pytest.raises(ValueError, match="binding mismatch"):
+        await provider.dispatch_origin(item.signed, _HEIGHT)
+    original = item.finality.verified_block_at
+
+    async def transport_fixture(height):
+        return replace(await original(height), scoring_policy_hash=scoring_policy_hash(legacy))
+
+    monkeypatch.setattr(item.finality, "verified_block_at", transport_fixture)
+    result = await provider.dispatch_origin(item.signed, _HEIGHT)
+    assert result.capture.origin == "https://8.8.8.8:443"
+    assert result.observed == result.issuance
+    assert result.observed.scoring_policy_hash == scoring_policy_hash(legacy)
+    assert result.capture.submission_sha256 == digest(item.signed.submission)
+    with pytest.raises(ValueError, match="not finalized"):
+        await provider.verified_blocks((_HEIGHT + 1,))
+    with pytest.raises(ValueError, match="bounded"):
+        await provider.verified_blocks((True,))
+    await provider.aclose()
+    with pytest.raises(ValueError, match="not running"):
+        await provider.verified_blocks()
+
+
 @pytest.mark.parametrize(
     "value",
     [

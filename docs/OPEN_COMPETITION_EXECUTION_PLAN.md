@@ -101,6 +101,7 @@ contributor attribution yet.
 - [x] Rehearse the complete signed initial migration and interrupted-command recovery together.
 - [x] Publish a preparation checklist addressing source rights and preliminary review.
 - [x] Connect bounded assignment discovery to a running no-weight miner and preserve transport ledgers.
+- [x] Connect a continuous signed-inbox dispatcher, owned origin checks and durable transcript replay.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
 - [ ] Rehearse integrated protected-data scheduling, evaluator dispatch and evidence publication.

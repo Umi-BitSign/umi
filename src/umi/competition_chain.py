@@ -299,7 +299,7 @@ class FinalizedRegistrationProvider:
             finality = DurableGrandpaFinalityPort(
                 observer=observer,
                 state_path=directory / "finality.sqlite3",
-                scoring_policy_digest=digest(policy),
+                scoring_policy_digest=self._finality_policy_hash(),
                 chain_observation=config.chain_pin,
                 finality_verifier_sha256=config.finality_pin.release_sha256_by_target[
                     config.target_triple
@@ -339,6 +339,12 @@ class FinalizedRegistrationProvider:
     def _cache_directory(self, config: CompetitionChainConfig) -> Path:
         return Path(config.state_directory)
 
+    def _finality_policy_hash(self) -> str:
+        return digest(self.policy)
+
+    def _cache_binding_hash(self) -> str:
+        return digest(self.config)
+
     def _finality_storage_limits(self):
         return None
 
@@ -364,7 +370,7 @@ class FinalizedRegistrationProvider:
             """)
             connection.execute("BEGIN IMMEDIATE")
             bound = connection.execute("SELECT digest FROM binding").fetchone()
-            expected = digest(self.config)
+            expected = self._cache_binding_hash()
             if bound is None:
                 connection.execute("INSERT INTO binding VALUES (?)", (expected,))
             elif bound[0] != expected:
@@ -586,8 +592,14 @@ class FinalizedRegistrationProvider:
             block.height != ref.block_number
             or block.block_hash != ref.block_hash
             or block.state_root != ref.state_root
-            or block.chain_observation != self.config.chain_pin
-            or block.scoring_policy_hash != digest(self.policy)
+        ):
+            raise ValueError("owned finality snapshot binding mismatch")
+        self._check_finality_context(block)
+
+    def _check_finality_context(self, block: VerifiedFinalizedBlock) -> None:
+        if (
+            block.chain_observation != self.config.chain_pin
+            or block.scoring_policy_hash != self._finality_policy_hash()
             or block.finality_verifier_sha256
             != self.config.finality_pin.release_sha256_by_target[self.config.target_triple]
         ):

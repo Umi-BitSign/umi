@@ -1,0 +1,112 @@
+# Endpoint dispatcher
+
+This is the no-weight endpoint execution path for the open competition. It
+consumes quorum-signed publications, sends their exact requests to miners and
+retains responses for later replay. It neither generates protected challenges
+nor signs evaluation results, promotions or chain weights. Production enrollment
+and the simultaneous 70/30 activation still require the gates in the
+[execution plan](OPEN_COMPETITION_EXECUTION_PLAN.md).
+
+## Required inputs
+
+Use a dedicated evaluator account with its named hotkey. The dispatcher never
+loads the coldkey. Do not point its directories at either live bridge validator.
+Each evaluator has its own journal and owned finality observer.
+
+The config schema is `EndpointDispatchConfig` in
+[`competition_dispatch.py`](../src/umi/competition_dispatch.py). It rejects
+unknown fields and overlapping state/wallet directories. Supply these fields:
+
+| Field | Value |
+| --- | --- |
+| `schema` | `umi-endpoint-dispatch-config/1` |
+| `policy_sha256` | Digest of the reviewed competition policy |
+| `legacy_policy_sha256` | Scoring-policy hash of the reviewed transport policy |
+| `chain` | A complete `CompetitionChainConfig` object, including exact verifier pins and dedicated state directory |
+| `journal_directory` | Absolute private scheduler directory, also used by the assignment feed |
+| `publication_directory` | Separate absolute private directory for signed publications |
+| `evaluator_hotkey` | This evaluator's public hotkey, registered in both policies |
+| `wallet_name`, `hotkey_name`, `wallet_path` | Local hotkey wallet identifiers and absolute wallet root |
+| `no_weight` | `true` |
+
+Defaults are a five-second poll, ten-second discovery grace, four concurrent
+requests, pages of 32 assignments, and a 180-second total request timeout. At
+most one request per miner runs at a time in this process. Select a timeout that
+fits the reviewed inference and delivery budget. The signed response-close time
+still limits every request; a timeout setting cannot extend it.
+
+The chain config keeps the competition-policy digest. Its chain and finality pins
+must equal those in the transport policy. The observer creates transport-bound
+verified blocks directly. The dispatcher does not relabel competition-bound
+blocks or treat an RPC finalized label as a verified attestation.
+
+## Run and feed miners
+
+Create the publication directory with mode 0700 under the evaluator account.
+Put each complete canonical `SignedEndpointAuthorization` in it as
+`<publication-body-digest>.json`, mode 0600 or 0400. Write to a temporary filename
+and atomically rename it only after all bytes are present. The reviewed round
+producer must supply the required independent signatures. There is no command
+that fabricates them or edits signed deadlines.
+
+Run the dispatcher and feed as separate processes under the same account:
+
+```sh
+umi-competition --policy /ABSOLUTE/POLICY.json run-endpoint-dispatch \
+  --legacy-policy /ABSOLUTE/TRANSPORT-POLICY.json \
+  --config /ABSOLUTE/DISPATCH-CONFIG.json
+
+umi-competition --policy /ABSOLUTE/POLICY.json serve-assignment-feed \
+  --legacy-policy /ABSOLUTE/TRANSPORT-POLICY.json \
+  --state /ABSOLUTE/PRIVATE/SCHEDULER \
+  --nonce-path /ABSOLUTE/PRIVATE/FEED/nonces.sqlite3
+```
+
+The feed binds loopback. An operator-managed HTTPS proxy with ingress limits
+must protect it before miners connect. Use the same scheduler path and policies
+in both commands. Miners use the existing feed-backed competition mode described
+in [OPEN_COMPETITION.md](OPEN_COMPETITION.md).
+
+The dispatcher reads one inbox file per poll and continues accepting later
+publications without restarting. The inbox admits at most 1,024 entries; each
+publication is bounded to 16 MiB. Journal quotas reserve outcome capacity before
+admission. A rejected inbox file does not block already accepted assignments.
+Inspect `publication_intake: held` locally and correct the producer or capacity
+problem. Never clear the journal to recover space or retry work.
+
+`--once` runs one bounded poll and waits for its requests. It may only retain a
+publication or begin discovery grace. Use continuous mode for ongoing dispatch.
+SIGTERM and SIGINT cancel in-flight work and close the observer.
+
+## Evidence and recovery
+
+The dispatcher waits until the entire publication is retrievable, then gives
+miners the configured discovery grace. This delay does not prove that every
+miner fetched it or provide independent publication-time evidence. A restart
+begins grace again and cannot extend the signed issue window.
+
+Before signing, it verifies the current bidirectional UID/hotkey mapping and
+announced public-IP HTTPS origin, then commits a journal claim. Completed work
+is never resent. Cancellation, deadline or recording failure after the claim
+leaves `uncertain_dispatched`. That uncertainty cannot be automatically retried,
+even if the miner may never have received the request. Expired coordinator work
+is retained with `miner_fault: false`.
+
+The private transcript retains exact request/authentication and response bytes,
+receipt times, and the digest of the separately retained origin proof. A
+`completed` dispatch means bytes were recorded, not that the miner succeeded.
+`replay_dispatch_transcript` reconstructs those inputs without a wallet or a
+network request and uses the existing endpoint replay checks. Authenticated
+sealed responses require the matching verified reveal pulse and committed
+reference suite. Unauthenticated transport failures remain infrastructure
+failures. This replay does not certify origin proofs or independent evaluation.
+
+Keep the scheduler and origin evidence through the evaluation/audit retention
+period. Do not publish raw transcripts or inbox files: video delivery URLs can
+contain credentials. Public loop status contains bounded counters and no wallet
+paths, endpoint URLs or authentication headers.
+
+The synthetic integration tests cover the actual miner HTTP handler, signature
+and sealed-response checks, inbox admission, wrong origins, expired work, lost
+results and restart without duplicate dispatch. They do not establish protected
+ASL accuracy, independent operator participation or production activation.

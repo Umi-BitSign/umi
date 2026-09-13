@@ -39,13 +39,13 @@ from .test_open_competition import submission, wallet
 from .test_validator_plans import FinalizedPort, _block, _clock, _live_policy
 
 
-def build_authorization_fixture(policy, *, case_count=3):
+def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None):
     """Synthetic signed publication and owned-source test port; no network/files.
 
     Return the updated competition policy as .policy. This helper supplies test
     identities and allocations only; none of its values are release defaults.
     """
-    legacy = _live_policy(activation_block=1000)
+    legacy = _live_policy(activation_block=1000) if legacy_policy is None else legacy_policy
     evaluator_wallets = tuple(wallet(f"Validator{i}") for i in range(4))
     policy = policy.model_copy(
         update={
@@ -188,6 +188,7 @@ def build_authorization_fixture(policy, *, case_count=3):
         cases=cases,
         schedule=schedule,
         video_bytes=video_bytes[0],
+        all_video_bytes=video_bytes,
     )
 
 
