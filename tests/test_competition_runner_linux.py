@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -226,3 +227,51 @@ async def test_endpoint_incumbent_job_runs_real_containers_and_retains_receipts(
         )
         == result
     )
+
+    # Drive the same real runtime through the continuous two-operator model
+    # path. Only the chain captures and private peer-file transport are test
+    # ports; execution, hotkey signatures and agreement replay are real.
+    from types import SimpleNamespace
+
+    from tests.test_competition_chain import chain_config as chain_fixture
+    from tests.test_competition_evaluator import (
+        agree,
+        completed,
+        execute,
+        make_driver,
+        put,
+        signed_order,
+    )
+    from umi.competition_execution import ModelEvaluationJob
+
+    model_submission = submission(policy, bundle=bundle)
+    model_job = ModelEvaluationJob(
+        schema="umi-model-evaluation-job/1",
+        round=round_for(policy, suite, (model_submission,), incumbent=digest(bundle)),
+        submission=model_submission,
+        incumbent=bundle,
+        runtime=runtime,
+        evaluator_hotkey=wallet("Charlie").hotkey.ss58_address,
+        cases=job.cases,
+    )
+    signers = (wallet("Charlie"), wallet("Dave"))
+    order = signed_order(model_job, signers)
+    chain = chain_fixture.__wrapped__(policy, tmp_path)
+    drivers = tuple(
+        make_driver(tmp_path / f"real-worker-{i}", chain, policy, archive, videos, signer)
+        for i, signer in enumerate(signers)
+    )
+    try:
+        for driver in drivers:
+            put(Path(driver.config.order_directory) / (digest(order.order) + ".json"), order)
+        await execute(drivers)
+        await agree(SimpleNamespace(drivers=drivers, order=order, suite=suite))
+        certificates = [completed(driver)[0] for driver in drivers]
+        assert certificates[0] == certificates[1]
+        assert all(
+            output.hypothesis == "hello"
+            for output in certificates[0].attested_result.result.candidate
+        )
+    finally:
+        for driver in drivers:
+            await driver.aclose()

@@ -728,7 +728,9 @@ The journal defaults to 1,024 jobs and 1 GiB of reserved logical receipt space;
 `--maximum-jobs` and `--maximum-evidence-bytes` can set operator-reviewed limits.
 Capacity includes worst-case JSON escaping. It excludes model/video archives
 and database overhead. Full journals reject new jobs without deleting history.
-There is no automatic scheduler or fleet-wide evaluator capacity manager yet.
+The [continuous evaluator](OPEN_COMPETITION_EVALUATOR.md) now advances signed
+orders through execution, reveal and peer agreement. Coordinator order delivery
+and fleet-wide evaluator capacity management still need deployment wiring.
 
 After the authorized reveal, local proposal commands check the retained cases
 against the full committed suite:

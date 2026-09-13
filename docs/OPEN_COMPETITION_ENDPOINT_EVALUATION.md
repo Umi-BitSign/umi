@@ -106,7 +106,9 @@ run records and shared result enter the existing independent-evaluation and
 settlement flow. Multiple hotkeys controlled by one operator still count as
 one evaluator group.
 
-These commands handle one assigned endpoint job at a time. Production round
-orchestration must schedule the incumbent work early enough, retain all
-responses and publish the independently agreed settlement evidence. The
-dispatcher alone does not perform those steps.
+These commands handle one assigned endpoint job at a time. The
+[continuous evaluator](OPEN_COMPETITION_EVALUATOR.md) runs them across successive
+quorum-signed orders and prepares independent evidence through signed peer
+agreement. It requires coordinator order/reveal delivery and private peer
+transport. Settlement publication remains a separate stage; the dispatcher
+alone does not perform those steps.

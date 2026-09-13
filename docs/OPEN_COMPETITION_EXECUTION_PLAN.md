@@ -103,6 +103,7 @@ contributor attribution yet.
 - [x] Connect bounded assignment discovery to a running no-weight miner and preserve transport ledgers.
 - [x] Connect a continuous signed-inbox dispatcher, owned origin checks and durable transcript replay.
 - [x] Pair retained endpoint responses with actual pre-reveal incumbent runs and independent-result preparation.
+- [x] Connect continuous local execution, reference reveal and signed peer agreement for both tracks.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
 - [ ] Rehearse integrated protected-data scheduling, evaluator dispatch and evidence publication.
@@ -117,9 +118,11 @@ baseline jobs from signed publications, execute the archived incumbent through
 the existing CPU runner and journal, then replay retained endpoint transport
 after reference reveal. Their unsigned output enters the same independent
 result/run-record checks as model evaluation. Missing dispatches and
-infrastructure failures cannot become scored miner failures. The production
-round orchestrator must still schedule those jobs and publish complete,
-independently agreed settlement evidence on time.
+infrastructure failures cannot become scored miner failures. The
+[continuous evaluator](OPEN_COMPETITION_EVALUATOR.md) now executes quorum-signed
+orders and exchanges retained execution/vote files across successive rounds.
+The production coordinator must still publish those orders and committed reveals,
+deliver the private peer files, and publish complete settlement evidence on time.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting
