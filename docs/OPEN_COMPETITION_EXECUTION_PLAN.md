@@ -85,7 +85,7 @@ activate rewards or extend the signed bootstrap sunset.
 - [x] Start a committed generic systemd switch only after releasing the old lock.
 - [x] Recover a retained generic source switch and start without reviving legacy authority.
 - [x] Establish private fixed-path mounts for the stopped upgrade observer.
-- [ ] Wire initial privileged preparation into the operator command.
+- [x] Wire generic initial privileged preparation into the operator command.
 - [ ] Adapt and rehearse the coordinator's two RootDirectory validator installations.
 - [ ] Rehearse interruption/restart on both Linux architectures and rerun all tests.
 - [ ] Complete the real-model, independent-evaluation and signed-activation gates.
@@ -144,9 +144,10 @@ is not the complete upgrade command.
 
 The coordinator uses `umi-validator@0.service` and `umi-validator@54.service`
 with separate RootDirectory trees and a shared resource slice. The generic
-host-namespace adapter rejects this layout. A namespace-aware path must preserve
-the installed config and state bindings, verify files in the correct root, and
-rehearse each service independently before either live validator is switched.
+host-namespace adapter rejects this layout unless the coordinator adapter has
+prepared the selected instance's private filesystem view. The adapter is now
+connected to initial upgrade, publication recovery and startup checks. Complete
+rooted service rehearsals are still required before either live validator is switched.
 
 Read-only inspection confirmed that both instances load the shared
 `umi-validator@.service` fragment, with no drop-ins, and use cgroups beneath
@@ -280,8 +281,43 @@ passed 148 tests. The earlier interactive VM test did not cover these conditions
 The service test uses synthetic inputs and an inert launcher; no live upgrade
 is approved until the complete migration and restart rehearsal pass.
 
-The remaining upgrade work includes privileged staging/start orchestration,
-the coordinator's namespace integration and the actual source switch/restart rehearsal.
+The generic `upgrade` command now authenticates its controls, stages the signed
+host, and rehearses the signed OCI image in a wallet-free systemd service before
+stopping the old writer. After stop it requires owned finality reads, an immutable
+recovery archive and a root-owned anchor before publication and start. Retried
+anchor preparation retains unpublished partial directories outside the active
+source; it never treats them as valid anchors or resets retained journals.
+
+The initial driver and partial-retention suite passed 61 local tests. The
+isolated arm64 VM passed the real signed-host/OCI preflight and three root/OS
+tests, including process exit between atomic partial-retention moves. The
+preflight initially exposed a root-only platform helper called by the non-root
+child; that check is corrected. The signed test verifies that its own container
+is removed and pre-existing unrelated fixtures remain unchanged. No legacy
+service stop or complete migration is exercised by that preflight test.
+
+The coordinator adapter preserves logical config paths and the original state
+inodes through private bind mounts. Service files use physical bind sources,
+retain the selected RootDirectory and resource slice, and write only an
+instance-specific override. The inner runtime account is `umi-validator`; the
+host accounts are `umi-validator-uid0` and `umi-validator-uid54`. The adapter
+checks that the inner numeric UID matches the selected host service. It keeps
+the explicit `/var/lib/umi-validator-supervisor/home` environment rather than
+using the physical passwd home. Recovery requires the same private view.
+
+The revised focused migration suite passed 233 tests. Two real arm64 Linux
+namespace tests passed with both synthetic validator roots on a private tmpfs.
+They verify same-inode lock contention, read-only aliases, preserved writable
+state, cross-instance isolation and rejection of an inherited view after fork.
+The extended cases also prepare the signed observer helpers inside the same
+private view. The CI-style arm64 batch passed all 15 namespace and transient
+service checks after fixing a missing directory in the new fixture. The
+coordinator cases do not start a systemd service or run Podman. The combined
+rooted initial source-switch/restart rehearsal and native amd64/arm64 CI remain
+required. The subsequent local regression passed 3,737 tests with 42
+platform/rehearsal skips. The combined coordinator/observer tests also passed
+with the actual fixed mount targets on the arm64 VM. These results do not
+approve a live upgrade.
 The stopped lease alone does not authorize an upgrade or weights.
 The old live workers enforce current authorization validity, and the common
 service exits at sunset before reconciliation. They cannot simply be started

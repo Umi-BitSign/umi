@@ -46,7 +46,9 @@ from .validator_supervisor_runtime import DIRECTIVE_STATE_FILENAME
 
 _ISSUER = object()
 _SUCCESSOR_HANDOFFS: dict[int, Any] = {}
-_UNIT_RE = re.compile(r"^umi-validator-supervisor(?:-[a-z0-9-]{1,48})?\.service$")
+_UNIT_RE = re.compile(
+    r"^(?:umi-validator-supervisor(?:-[a-z0-9-]{1,48})?|umi-validator@(0|54))\.service$"
+)
 _PROPERTIES = (
     "Id",
     "LoadState",
@@ -164,9 +166,45 @@ def _unit_snapshot(unit_name: str, *, successor_cleanup: bool = False) -> dict[s
     return values
 
 
+def _service_layout(unit_name: str):
+    from .competition_coordinator_namespace import active_coordinator_view
+
+    base = (
+        unit_name.removesuffix("-successor-cleanup.service") + ".service"
+        if (unit_name.endswith("-successor-cleanup.service"))
+        else unit_name
+    )
+    view = active_coordinator_view(base)
+    if base.startswith("umi-validator@"):
+        if view is None:
+            raise HostUpgradeError("coordinator service requires its private namespace view")
+        return view.layout
+    return None
+
+
+def _check_service_namespace(unit_name: str, values: dict[str, str]):
+    layout = _service_layout(unit_name)
+    expected_root = str(layout.root_directory) if layout else ""
+    expected_slice = "umi-validators.slice" if layout else "system.slice"
+    if (
+        values.get("RootDirectory", "") != expected_root
+        or values.get("RootImage", "")
+        or values.get("Slice", "system.slice") != expected_slice
+        or (layout and values.get("User") != layout.service_user)
+    ):
+        raise HostUpgradeError("supervisor filesystem or slice needs a namespace-aware upgrade")
+    return layout
+
+
+def _expected_cgroup(unit_name: str) -> str:
+    layout = _service_layout(unit_name)
+    parent = layout.cgroup.rpartition("/")[0] if layout else "/system.slice"
+    return parent + "/" + unit_name
+
+
 def _require_empty_cgroup(unit_name: str, reported: str) -> None:
     # A stopped service may have lost its cgroup. Never treat / as its group.
-    expected = "/system.slice/" + unit_name
+    expected = _expected_cgroup(unit_name)
     if reported not in {"", expected}:
         raise HostUpgradeError("supervisor cgroup is outside its fixed system slice")
     root = Path("/sys/fs/cgroup") / expected.lstrip("/")
@@ -209,25 +247,24 @@ def _require_empty_cgroup(unit_name: str, reported: str) -> None:
 
 
 def _check_unit(unit_name: str, config_path: Path, service_uid: int) -> dict[str, str]:
-    values = _unit_snapshot(unit_name)
-    # This adapter reads paths in the host namespace. A RootDirectory/RootImage
-    # service would resolve the same config and state paths to different bytes.
-    # Such installations need their own authenticated namespace migration.
+    values = inspect_legacy_service(unit_name, config_path, service_uid)
     if (
-        values.get("RootDirectory", "")
-        or values.get("RootImage", "")
-        or values.get("Slice", "system.slice") != "system.slice"
-    ):
-        raise HostUpgradeError("supervisor filesystem or slice needs a namespace-aware upgrade")
-    if (
-        values["Id"] != unit_name
-        or values["LoadState"] != "loaded"
-        or values["ActiveState"] not in {"inactive", "failed"}
+        values["ActiveState"] not in {"inactive", "failed"}
         or values["SubState"] not in {"dead", "failed"}
         or values["MainPID"] != "0"
         or values["ControlPID"] != "0"
     ):
         raise HostUpgradeError("exact supervisor unit is not stopped")
+    _require_empty_cgroup(unit_name, values["ControlGroup"])
+    return values
+
+
+def inspect_legacy_service(unit_name: str, config_path: Path, service_uid: int) -> dict[str, str]:
+    """Inspect execution identity before a stop; this grants no stopped lease."""
+    values = _unit_snapshot(unit_name)
+    layout = _check_service_namespace(unit_name, values)
+    if values["Id"] != unit_name or values["LoadState"] != "loaded":
+        raise HostUpgradeError("exact supervisor unit is not loaded")
     try:
         user_uid = pwd.getpwnam(values["User"]).pw_uid
     except KeyError:
@@ -239,19 +276,23 @@ def _check_unit(unit_name: str, config_path: Path, service_uid: int) -> dict[str
     if ("--config " + str(config_path) + " ;") not in values["ExecStart"]:
         raise HostUpgradeError("supervisor unit is not bound to the exact installed config")
     fragment = Path(values["FragmentPath"])
-    if fragment != Path("/etc/systemd/system") / unit_name:
+    expected_fragment = layout.fragment if layout else Path("/etc/systemd/system") / unit_name
+    if fragment != expected_fragment:
         raise HostUpgradeError("unexpected supervisor unit fragment")
     _root_file(fragment)
     # An unexamined override could change execution or the process boundary.
     if values["DropInPaths"]:
         raise HostUpgradeError("legacy supervisor has unreviewed systemd drop-ins")
+    names = [unit_name]
+    if layout:
+        names.append(layout.fragment.name)
     for root in ("/etc/systemd/system", "/run/systemd/system"):
-        try:
-            (Path(root) / (unit_name + ".d")).lstat()
-        except FileNotFoundError:
-            continue
-        raise HostUpgradeError("legacy supervisor has an unloaded or pending systemd drop-in")
-    _require_empty_cgroup(unit_name, values["ControlGroup"])
+        for name in names:
+            try:
+                (Path(root) / (name + ".d")).lstat()
+            except FileNotFoundError:
+                continue
+            raise HostUpgradeError("legacy supervisor has an unloaded or pending systemd drop-in")
     return values
 
 

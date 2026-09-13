@@ -38,6 +38,7 @@ _MS_REC = 16384
 _MS_PRIVATE = 1 << 18
 _BASES = (Path("/opt/umi"), Path("/var/lib/umi-competition"))
 _ENTERED_PID: int | None = None
+_OBSERVER_PID: int | None = None
 
 
 def _mount(source: str | None, target: str, filesystem: str | None, flags: int, data=None):
@@ -203,7 +204,12 @@ def prepare_upgrade_observer_namespace(
     consent, the signed manifest, configuration hashes and stopped-host identity
     before executing a helper. No service is stopped or started by this call.
     """
+    global _OBSERVER_PID
+    from .competition_coordinator_namespace import active_coordinator_view
+
     _require_root_linux()
+    if _OBSERVER_PID is not None:
+        raise HostUpgradeError("observer preparation cannot be repeated or inherited")
     if type(host_tree) is not VerifiedHostTree:
         raise HostUpgradeError("observer namespace requires a verified signed host tree")
     host_tree.recheck()
@@ -252,7 +258,12 @@ def prepare_upgrade_observer_namespace(
             opened.append(_source(source, mode=mode))
         opened.append(_source(cache, mode=0o700, directory=True))
         host_tree.recheck()
-        _unshare_mounts()
+        view = active_coordinator_view()
+        if view is None:
+            _unshare_mounts()
+        else:
+            view.recheck()
+        _OBSERVER_PID = os.getpid()
         # A descriptor opened before unshare retains its old vfsmount. Linux
         # rejects using that mount as a bind source in the new namespace.
         # Reopen in the private namespace while requiring the same inode and

@@ -19,7 +19,12 @@ from .competition_host_switch import (
     _read_drop_in,
     recheck_committed_successor_switch,
 )
-from .competition_host_upgrade import HostUpgradeError, _require_empty_cgroup, _unit_snapshot
+from .competition_host_upgrade import (
+    HostUpgradeError,
+    _expected_cgroup,
+    _require_empty_cgroup,
+    _unit_snapshot,
+)
 from .competition_switch_recovery import (
     RecoveredSuccessorServiceSwitch,
     recheck_recovered_successor_switch,
@@ -172,7 +177,7 @@ def _running(switch: StartableSwitch) -> int:
         or not unit["MainPID"].isdigit()
         or int(unit["MainPID"]) <= 1
         or unit["ControlPID"] != "0"
-        or unit["ControlGroup"] != "/system.slice/" + switch.plan.unit_name
+        or unit["ControlGroup"] != _expected_cgroup(switch.plan.unit_name)
     ):
         raise HostUpgradeError("successor service is not running in its exact cgroup")
     pid = int(unit["MainPID"])

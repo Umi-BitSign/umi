@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import stat
+import subprocess
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,8 +38,10 @@ from .competition_host_service import SuccessorServiceSwitchPlan, _plan_from_anc
 from .competition_host_upgrade import (
     _UNIT_RE,
     HostUpgradeError,
+    _check_service_namespace,
     _require_empty_cgroup,
     _require_root_linux,
+    _service_layout,
     _unit_snapshot,
 )
 from .competition_upgrade import _fingerprint, _open_without_links, _Reader
@@ -354,11 +357,13 @@ def _retain_partial_files(plan, marker):
 
 def _check_unit_identity(values, intent, plan, *, require_switched=False):
     original = intent.original_unit
+    layout = _check_service_namespace(plan.unit_name, values)
+    fragment = layout.fragment if layout else _SYSTEMD_ROOT / plan.unit_name
     if (
         values.get("Id") != plan.unit_name
         or values.get("LoadState") != "loaded"
         or values.get("User") != plan.service_user
-        or values.get("FragmentPath") != str(_SYSTEMD_ROOT / plan.unit_name)
+        or values.get("FragmentPath") != str(fragment)
     ):
         raise HostUpgradeError("recovery unit does not match its fixed identity")
     for key in ("Id", "LoadState", "User", "FragmentPath", "RootDirectory", "RootImage", "Slice"):
@@ -369,9 +374,6 @@ def _check_unit_identity(values, intent, plan, *, require_switched=False):
         or values["SubState"] not in {"dead", "failed"}
         or values["MainPID"] != "0"
         or values["ControlPID"] != "0"
-        or values.get("RootDirectory", "")
-        or values.get("RootImage", "")
-        or values.get("Slice", "system.slice") != "system.slice"
     ):
         raise HostUpgradeError("recovery requires the exact stopped host-namespace service")
     _require_empty_cgroup(plan.unit_name, values["ControlGroup"])
@@ -459,8 +461,12 @@ def recover_successor_service_switch(
             or intent.plan_sha256 != _plan_sha256(plan)
         ):
             raise HostUpgradeError("recovery anchor or host differs from the retained switch")
+        layout = _service_layout(unit_name)
+        fragment = layout.fragment if layout else _SYSTEMD_ROOT / unit_name
+        if intent.original_unit.get("FragmentPath") != str(fragment):
+            raise HostUpgradeError("retained switch names another unit fragment")
         reader.file(
-            _SYSTEMD_ROOT / unit_name,
+            fragment,
             "unit_fragment",
             128 * 1024,
             modes={0o400, 0o444, 0o600, 0o644},
@@ -601,6 +607,9 @@ def recheck_recovered_successor_switch(result: RecoveredSuccessorServiceSwitch) 
 
 
 def resume_successor_service_publication(*, config_path: Path, unit_name: str) -> dict:
+    from .competition_coordinator_namespace import ensure_coordinator_host_view
+
+    ensure_coordinator_host_view(unit_name=unit_name, config_path=config_path)
     with exclusive_upgrade_operation(unit_name):
         result = recover_successor_service_switch(config_path=config_path, unit_name=unit_name)
     # A JSON status cannot be reused as a start capability.
@@ -615,8 +624,10 @@ def resume_successor_service_publication(*, config_path: Path, unit_name: str) -
 
 
 def resume_and_start_successor_service(*, config_path: Path, unit_name: str) -> dict:
+    from .competition_coordinator_namespace import ensure_coordinator_host_view
     from .competition_host_start import start_committed_successor_service
 
+    ensure_coordinator_host_view(unit_name=unit_name, config_path=config_path)
     with exclusive_upgrade_operation(unit_name):
         result = recover_successor_service_switch(config_path=config_path, unit_name=unit_name)
         try:
@@ -637,6 +648,17 @@ def resume_and_start_successor_service(*, config_path: Path, unit_name: str) -> 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    initial = commands.add_parser(
+        "upgrade", help="rehearse, stop, archive, switch and start one legacy service"
+    )
+    initial.add_argument("--config", type=Path, required=True)
+    initial.add_argument("--unit", required=True)
+    initial.add_argument("--controls", type=Path, required=True)
+    initial.add_argument("--host-bundle", type=Path, required=True)
+    initial.add_argument("--oci-bundle", type=Path, required=True)
+    initial.add_argument("--recovery-root", type=Path, required=True)
+    initial.add_argument("--recovery-limits", type=Path, required=True)
+    initial.add_argument("--historical-context", type=Path)
     for command, help_text in (
         ("resume-publication", "recover verified files; keep service stopped"),
         ("resume-start", "recover and start only the exact retained successor switch"),
@@ -646,21 +668,45 @@ def main(argv: list[str] | None = None) -> int:
         resume.add_argument("--unit", required=True)
     args = parser.parse_args(argv)
     try:
-        operation = (
-            resume_and_start_successor_service
-            if args.command == "resume-start"
-            else resume_successor_service_publication
-        )
-        result = operation(config_path=args.config, unit_name=args.unit)
-    except (ValueError, OSError, RuntimeError, ValidatorSupervisorError):
+        if args.command == "upgrade":
+            from .competition_initial_upgrade import upgrade_successor_service
+
+            result = upgrade_successor_service(
+                config_path=args.config,
+                unit_name=args.unit,
+                controls_path=args.controls,
+                host_bundle=args.host_bundle,
+                oci_bundle=args.oci_bundle,
+                recovery_root=args.recovery_root,
+                recovery_limits_path=args.recovery_limits,
+                historical_context_path=args.historical_context,
+            )
+        else:
+            operation = (
+                resume_and_start_successor_service
+                if args.command == "resume-start"
+                else resume_successor_service_publication
+            )
+            result = operation(config_path=args.config, unit_name=args.unit)
+    except (
+        ValueError,
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        ValidatorSupervisorError,
+    ):
         print(
             json.dumps(
                 {
                     "status": "held",
-                    "reason_code": "host_switch_recovery_failed",
-                    "service_started": None if args.command == "resume-start" else False,
+                    "reason_code": "initial_host_upgrade_failed"
+                    if args.command == "upgrade"
+                    else "host_switch_recovery_failed",
+                    "service_started": None
+                    if args.command in {"upgrade", "resume-start"}
+                    else False,
                     "service_state": "unconfirmed"
-                    if args.command == "resume-start"
+                    if args.command in {"upgrade", "resume-start"}
                     else "unchanged",
                     "chain_submission_authorized": False,
                 }

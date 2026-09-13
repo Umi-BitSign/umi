@@ -61,6 +61,10 @@ jobs:
             tests/test_competition_host_start.py \
             tests/test_competition_host_start_linux.py \
             tests/test_competition_upgrade_namespace.py \
+            tests/test_competition_coordinator_namespace.py \
+            tests/test_competition_host_service.py \
+            tests/test_competition_initial_upgrade.py \
+            tests/test_competition_initial_anchor_retention.py \
             tests/test_competition_switch_recovery.py \
             tests/test_competition_startup_lease.py \
             tests/test_competition_materialization.py \
@@ -73,6 +77,8 @@ jobs:
             UMI_RUN_SERVICE_REHEARSAL=1 \
             UMI_RUN_HOST_BUNDLE_REHEARSAL=1 \
             UMI_RUN_NAMESPACE_REHEARSAL=1 \
+            UMI_RUN_INITIAL_UPGRADE_REHEARSAL=1 \
+            UMI_RUN_COORDINATOR_NAMESPACE=1 \
             UMI_NAMESPACE_TEST_ROOTED_TARGETS=1 \
             PYTHONPATH="$PWD/src:$PWD" \
             "$PWD/.venv/bin/python" -m pytest -q \
@@ -81,7 +87,9 @@ jobs:
             tests/test_competition_host_bundle.py \
             tests/test_competition_host_switch_linux.py \
             tests/test_competition_switch_recovery_linux.py \
-            tests/test_competition_upgrade_namespace_linux.py
+            tests/test_competition_upgrade_namespace_linux.py \
+            tests/test_competition_coordinator_namespace_linux.py \
+            tests/test_competition_initial_upgrade_linux.py
 
       - name: Retain test reports
         if: always()

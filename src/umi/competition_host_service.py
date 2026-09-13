@@ -60,6 +60,43 @@ def _path(value: str | Path) -> str:
     return value
 
 
+def validate_host_service_resources(signed_host, observer):
+    """Check the same helper pins and lifecycle tools before stop and publication.
+
+    Signature and tree verification belong to the caller. This check grants no
+    authority and performs no filesystem or service operations.
+    """
+    records = {item.path: item for item in signed_host.manifest.files}
+    requirements = (
+        (
+            "artifacts/umi-grandpa-finality-observer",
+            observer.finality_pin.release_sha256_by_target[observer.target_triple],
+            0o555,
+            WORKER_FINALITY_BINARY,
+        ),
+        (
+            "artifacts/umi-substrate-proof-verifier",
+            observer.proof_binary_sha256,
+            0o555,
+            WORKER_PROOF_BINARY,
+        ),
+        (
+            "artifacts/raw_spec_finney.json",
+            observer.finality_pin.chain_spec_sha256,
+            0o444,
+            WORKER_CHAIN_SPEC,
+        ),
+    )
+    for name, sha, mode, _ in requirements:
+        if name not in records or records[name].sha256 != sha or records[name].mode != mode:
+            raise ValueError("host manifest lacks the exact installed observer resource")
+    for entrypoint in ("umi-competition-supervisor", "umi-competition-supervisor-cleanup"):
+        record = records.get(".venv/bin/" + entrypoint)
+        if record is None or record.mode != 0o555:
+            raise ValueError("host manifest lacks a fixed supervisor lifecycle entrypoint")
+    return requirements
+
+
 def plan_successor_service_switch(
     *,
     stopped: StoppedSupervisor,
@@ -116,12 +153,13 @@ def _plan_from_anchor(
     This grants no stopped-host or chain authority. Callers must separately
     authenticate the exact unit, original lock and publication transaction.
     """
-    from .competition_host_upgrade import _UNIT_RE
+    from .competition_host_upgrade import _UNIT_RE, _service_layout
 
     if type(anchor) is not MaterializedSuccessorAnchor or type(host_tree) is not VerifiedHostTree:
         raise TypeError("service rendering requires genuine verified anchor and host tree")
     if not _UNIT_RE.fullmatch(unit_name):
         raise ValueError("service rendering requires a fixed supervisor unit name")
+    layout = _service_layout(unit_name)
     anchor.recheck()
     host_tree.recheck()
     config = anchor.config
@@ -143,40 +181,21 @@ def _plan_from_anchor(
     _path(user.pw_dir)
     if Path("/var/lib") not in Path(user.pw_dir).parents:
         raise ValueError("successor service requires its dedicated home beneath /var/lib")
+    if layout and user.pw_name != layout.service_user:
+        raise ValueError("successor service account differs from its coordinator instance")
+    home = layout.logical_home(user.pw_dir) if layout else Path(user.pw_dir)
+    runtime_user = layout.runtime_user if layout else user.pw_name
+    bind_source = layout.bind_source if layout else lambda path: path
+
+    def restricted(path):
+        return ("+" if layout else "") + _path(path)
+
     revision_root = host_tree.path
     source = anchor.source_root
     observer_source = Path(config.state_root) / "successor-observer"
     # Host and container see identical authenticated helper paths/config bytes,
     # but their writable observer databases are different physical directories.
-    observer = anchor.observer_config.chain
-    records = {item.path: item for item in signed_host.manifest.files}
-    requirements = (
-        (
-            "artifacts/umi-grandpa-finality-observer",
-            observer.finality_pin.release_sha256_by_target[observer.target_triple],
-            0o555,
-            WORKER_FINALITY_BINARY,
-        ),
-        (
-            "artifacts/umi-substrate-proof-verifier",
-            observer.proof_binary_sha256,
-            0o555,
-            WORKER_PROOF_BINARY,
-        ),
-        (
-            "artifacts/raw_spec_finney.json",
-            observer.finality_pin.chain_spec_sha256,
-            0o444,
-            WORKER_CHAIN_SPEC,
-        ),
-    )
-    for name, sha, mode, _ in requirements:
-        if name not in records or records[name].sha256 != sha or records[name].mode != mode:
-            raise ValueError("host manifest lacks the exact installed observer resource")
-    for entrypoint in ("umi-competition-supervisor", "umi-competition-supervisor-cleanup"):
-        record = records.get(".venv/bin/" + entrypoint)
-        if record is None or record.mode != 0o555:
-            raise ValueError("host manifest lacks a fixed supervisor lifecycle entrypoint")
+    requirements = validate_host_service_resources(signed_host, anchor.observer_config.chain)
     env = (
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "LANG=C.UTF-8",
@@ -184,9 +203,9 @@ def _plan_from_anchor(
         "PYTHONDONTWRITEBYTECODE=1",
         "PYTHONUNBUFFERED=1",
         "PYTHONUTF8=1",
-        "HOME=" + _path(user.pw_dir),
-        "USER=" + user.pw_name,
-        "LOGNAME=" + user.pw_name,
+        "HOME=" + _path(home),
+        "USER=" + runtime_user,
+        "LOGNAME=" + runtime_user,
         f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
     )
@@ -218,6 +237,19 @@ def _plan_from_anchor(
                 "TimeoutStartSec=180s",
                 "KillMode=mixed",
                 "Restart=no",
+                *(
+                    [
+                        "RootDirectory=" + _path(layout.root_directory),
+                        "Slice=umi-validators.slice",
+                        "MountAPIVFS=yes",
+                        "ProtectHome=tmpfs",
+                        f"BindPaths=/run/user/{service_uid}",
+                        "BindReadOnlyPaths=" + _path(revision_root),
+                        "InaccessiblePaths=+" + _path(config.wallet.path),
+                    ]
+                    if layout
+                    else []
+                ),
             ]
         )
         + "\n"
@@ -243,7 +275,7 @@ def _plan_from_anchor(
         # systemd 255: namespace setup failure needs a separate cleanup unit.
         # Drop to the exact service user; cleanup refuses root and takes the lock.
         "ExecStopPost=+/usr/sbin/runuser -u "
-        + user.pw_name
+        + runtime_user
         + " -- "
         + command
         + _path(revision_root / ".venv/bin/umi-competition-supervisor-cleanup")
@@ -254,12 +286,23 @@ def _plan_from_anchor(
         "ProtectHome=tmpfs",
         f"BindPaths=/run/user/{service_uid}",
         # Bind the parent, never the current directory inode being exchanged.
-        "BindReadOnlyPaths=" + _path(source) + ":" + _path(ACTIVATION_MOUNT_ROOT),
-        "BindPaths=" + _path(observer_source) + ":" + _path(WORKER_FINALITY_STATE_ROOT),
-        "ReadWritePaths=" + _path(observer_source),
-        "ReadWritePaths=" + _path(user.pw_dir) + f" /run/user/{service_uid}",
-        "ReadOnlyPaths=" + _path(revision_root),
+        "BindReadOnlyPaths=" + _path(bind_source(source)) + ":" + _path(ACTIVATION_MOUNT_ROOT),
+        "BindPaths="
+        + _path(bind_source(observer_source))
+        + ":"
+        + _path(WORKER_FINALITY_STATE_ROOT),
+        "ReadWritePaths=" + restricted(observer_source),
+        "ReadWritePaths=" + restricted(home) + " " + restricted(f"/run/user/{service_uid}"),
+        "ReadOnlyPaths=" + restricted(revision_root),
     ]
+    if layout:
+        # systemd's manager is outside the upgrade process's private view.
+        # Keep execution paths identical inside the original RootDirectory.
+        lines += [
+            "RootDirectory=" + _path(layout.root_directory),
+            "Slice=umi-validators.slice",
+            "BindReadOnlyPaths=" + _path(revision_root),
+        ]
     for name, _, _, target in requirements:
         lines.append("BindReadOnlyPaths=" + _path(revision_root / name) + ":" + _path(target))
     payload = ("\n".join(lines) + "\n").encode()

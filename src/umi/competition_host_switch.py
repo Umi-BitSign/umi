@@ -270,7 +270,10 @@ def _lock_and_originals(stopped: StoppedSupervisor, *, require_held: bool) -> No
 
 
 def _switched_unit(stopped: StoppedSupervisor, plan: SuccessorServiceSwitchPlan):
+    from .competition_host_upgrade import _check_service_namespace
+
     values = _unit_snapshot(plan.unit_name)
+    _check_service_namespace(plan.unit_name, values)
     original = stopped._lease.unit_snapshot
     if (
         values["Id"] != plan.unit_name
@@ -298,7 +301,10 @@ def _switched_unit(stopped: StoppedSupervisor, plan: SuccessorServiceSwitchPlan)
 
 
 def _cleanup_unit(plan: SuccessorServiceSwitchPlan, config_path: Path):
+    from .competition_host_upgrade import _check_service_namespace
+
     values = _unit_snapshot(plan.cleanup_unit_name, successor_cleanup=True)
+    _check_service_namespace(plan.cleanup_unit_name, values)
     if (
         values["Id"] != plan.cleanup_unit_name
         or values["LoadState"] != "loaded"

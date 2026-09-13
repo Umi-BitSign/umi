@@ -239,3 +239,41 @@ def test_closed_stopped_lease_prevents_plan(case, monkeypatch):
     with pytest.raises(ValueError, match="closed stopped lease"):
         _plan(case)
     assert case.events == []
+
+
+@pytest.mark.parametrize("uid", [0, 54])
+def test_coordinator_plan_preserves_logical_paths_and_uses_physical_bind_sources(
+    case, monkeypatch, uid
+):
+    from umi import competition_host_upgrade as upgrade
+    from umi.competition_coordinator_namespace import CoordinatorLayout
+
+    layout = CoordinatorLayout(f"umi-validator@{uid}.service")
+    monkeypatch.setattr(upgrade, "_service_layout", lambda unit: layout)
+    object.__setattr__(case.stopped, "unit_name", layout.unit_name)
+    case.user.pw_name = layout.service_user
+    case.user.pw_dir = str(layout.physical(layout.account_home))
+    case.anchor.config.wallet = SimpleNamespace(path="/var/lib/umi-validator-runtime-wallets")
+    plan = _plan(case)
+    main, cleanup = plan.drop_in_bytes.decode(), plan.cleanup_unit_bytes.decode()
+    for payload in (main, cleanup):
+        assert f"RootDirectory={layout.root_directory}\n" in payload
+        assert "Slice=umi-validators.slice\n" in payload
+        assert f"BindReadOnlyPaths={case.tree.path}\n" in payload
+        assert f"HOME={layout.service_home} " in payload
+        assert "--config /etc/umi/validator-supervisor.json" in payload
+        assert f"HOME={layout.physical(layout.service_home)}" not in payload
+    assert (
+        f"BindReadOnlyPaths={layout.physical(case.anchor.source_root)}:/run/umi-successor-activation"
+        in main
+    )
+    assert (
+        f"BindPaths={layout.physical(Path(case.anchor.config.state_root) / 'successor-observer')}:"
+        in main
+    )
+    assert "ReadWritePaths=+/var/lib/umi-validator-supervisor/home +/run/user/1001" in main
+    assert "activation-source" not in cleanup
+    assert "InaccessiblePaths=+/var/lib/umi-validator-runtime-wallets" in cleanup
+    assert plan.drop_in_path.parent.name == layout.unit_name + ".d"
+    assert plan.drop_in_path.parent.name != "umi-validator@.service.d"
+    assert "ExecStopPost=+/usr/sbin/runuser -u umi-validator -- " in main

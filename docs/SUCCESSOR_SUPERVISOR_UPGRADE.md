@@ -76,7 +76,8 @@ The stopped-host lease and recovery checkpoint preserve the old process lock,
 directive, journal, claims and supporting bytes. Incomplete or uncertain effects
 remain on hold. Source authentication, stopped recovery, local operator consent,
 fresh chain checks and actual sandbox execution are separate acceptance checks.
-The production source switch and both-architecture rehearsal are still required.
+The combined production source-switch/restart and both-architecture rehearsals
+are still required.
 
 `competition_upgrade_namespace` prepares the recovery observer's fixed helper
 paths in a fresh root process's private Linux mount namespace. It disables mount
@@ -88,7 +89,9 @@ permission. It must run before threads start, once per process; after a partial
 setup failure, exit that process. Existing host mount contents are preserved.
 Only empty `/opt/umi` and `/var/lib/umi-competition` placeholders may be created
 on the host if those directories did not exist. Never use this as a replacement
-for the coordinator's separate RootDirectory service adapter.
+for the coordinator's separate RootDirectory service adapter. When that adapter
+has established a verified private instance view, observer preparation reuses
+its mount namespace once rather than discarding the existing aliases.
 
 The wallet-free arm64 test host passed ten real-mount/filesystem cases, including
 read-only helpers, writable private cache, invalid sources, partial setup failure,
@@ -98,8 +101,36 @@ The first run caught descriptors still referring to mounts in the old namespace.
 Setup now reopens them after unsharing and requires the same inode and permissions
 before binding them. CI uses dedicated root-owned fixture target paths and keeps
 the production ownership checks enabled; the isolated VM tests the actual fixed
-paths. The operator's initial
-prepare/stop/checkpoint/switch/start command is still incomplete.
+paths.
+
+The development `umi-competition-host-upgrade upgrade` command now connects
+generic host-namespace preparation, preflight, stop, checkpoint, publication
+and start. It takes `--config`, `--unit`, `--controls`, `--host-bundle`,
+`--oci-bundle`, `--recovery-root` and `--recovery-limits`; historical bootstrap
+contexts can be supplied through `--historical-context`. All artifacts and
+authorization controls must already be reviewed and signed. The command does
+not fetch or create missing launch inputs.
+
+Its pre-stop child runs as the installed non-root account, verifies its complete
+signed host tree and stages the signed OCI bundle before exercising the actual
+Podman sandbox. The named wallet directory is inaccessible to that child.
+Bounded progress records identify control, host, release and sandbox stages.
+Wrong host resources, changed controls or a failed rehearsal leave the old
+service running. If a failure happens after stop, the command preserves state
+and does not restart the old writer.
+
+Interrupted anchor writes are moved intact into root-private `retained-anchors`
+beside `activation-source`, with eight retained slots and no overwrites.
+Retrying requires fresh stopped-state reconciliation; a partial directory grants
+no authorization. Unexpected entries or exhausted retention hold the operation.
+Existing published anchors are checked before stopping the service and again
+at the stopped acceptance boundary.
+
+The real signed-host/OCI preflight passed on the isolated arm64 VM, as did the
+root process-death retention test. These tests do not prove that the complete
+initial migration succeeds. The coordinator namespace adapter is connected but
+still needs complete rooted service rehearsals. Do not use this development
+command on either live validator.
 
 The fixed `umi-competition-supervisor` entrypoint now connects the authenticated
 root anchor, owned chain observer, bounded HTTPS delivery, atomic input selection
@@ -147,9 +178,26 @@ empty mutex inode remains after release so another process cannot acquire a
 replacement lock. Initial preparation must use this same mutex; the lower-level
 planning and capability functions are not independent operator commands.
 
-These commands cover a retained generic systemd switch. Initial privileged
-preparation and the coordinator's RootDirectory installations still require
-integration and full service rehearsal before deployment approval.
+For the coordinator's exact `umi-validator@0.service` and
+`umi-validator@54.service` names, these commands first prepare a process-private
+view of that instance's preserved directories. Use the unchanged logical
+`--config /etc/umi/validator-supervisor.json` path. Other template instances and
+unreviewed RootDirectory layouts are rejected. The view neither stops a service
+nor authorizes recovery. Running services still prevent stopped-state recovery.
+
+The generated override retains the selected RootDirectory and slice, maps bind
+sources to that instance's physical host directories, and mounts the signed
+successor host tree inside the root at its original path. Cleanup uses the inner
+`umi-validator` account while systemd retains the host-side instance account.
+Its separate failure-cleanup unit has no activation-source bind dependency.
+Neither operation changes the shared template or the other validator's roots.
+
+Two real arm64 namespace tests passed with synthetic roots, including original
+lock contention and cross-instance isolation. The extended tests prepare the
+signed recovery observer in that same view. The CI-style arm64 batch passed
+15 namespace and transient-service checks. The coordinator cases are filesystem tests, not
+approval of the complete rooted systemd/Podman migration. That rehearsal and
+both-architecture restart/interruption checks remain required before deployment.
 
 The successor uses a dedicated user systemd manager for rootless Podman.
 `umi-competition-supervisor-cleanup` acquires the original lock and stops only
