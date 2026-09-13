@@ -7,9 +7,10 @@ import asyncio
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from .competition_artifacts import preserve_bundle, verify_bundle_directory
+from .competition_endpoint_execution import EndpointPairedEvidence, RetainedRevealPulse
 from .competition_evidence import IndependentEvaluationEvidence, replay_independent_evaluation
 from .competition_execution import ModelExecutionEvidence
 from .competition_settlement import EvidenceCutoffSchedule
@@ -58,7 +59,14 @@ class SettlementInput(StrictProtocolModel):
 
 
 class ExecutionInputs(StrictProtocolModel):
-    executions: Annotated[tuple[ModelExecutionEvidence, ...], Field(min_length=1, max_length=64)]
+    executions: Annotated[
+        tuple[ModelExecutionEvidence | EndpointPairedEvidence, ...],
+        Field(min_length=1, max_length=64),
+    ]
+
+
+class ExecutionRevealPulses(StrictProtocolModel):
+    pulses: Annotated[tuple[RetainedRevealPulse, ...], Field(max_length=2048)]
 
 
 class PublicationRoster(StrictProtocolModel):
@@ -74,7 +82,11 @@ def _load(path: str, model):
         data = stream.read(MAX_JSON_BYTES + 1)
     if len(data) > MAX_JSON_BYTES:
         raise ValueError("rehearsal JSON exceeds the byte limit")
-    return model.model_validate_json(data)
+    return (
+        model.validate_json(data)
+        if isinstance(model, TypeAdapter)
+        else model.model_validate_json(data)
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -148,11 +160,33 @@ def _parser() -> argparse.ArgumentParser:
     offline = commands.add_parser("run-offline-case")
     for name in ("runtime", "manifest", "archive", "video", "case-id", "video-sha256"):
         offline.add_argument("--" + name, required=True)
-    model_run = commands.add_parser("run-model-evaluation")
-    for name in ("job", "chain-config", "archive", "videos", "state"):
-        model_run.add_argument("--" + name, required=True)
-    model_run.add_argument("--maximum-jobs", type=int, default=1024)
-    model_run.add_argument("--maximum-evidence-bytes", type=int, default=1024**3)
+    for command in ("run-model-evaluation", "run-endpoint-incumbent"):
+        model_run = commands.add_parser(command)
+        for name in ("job", "chain-config", "archive", "videos", "state"):
+            model_run.add_argument("--" + name, required=True)
+        model_run.add_argument("--maximum-jobs", type=int, default=1024)
+        model_run.add_argument("--maximum-evidence-bytes", type=int, default=1024**3)
+    endpoint_job = commands.add_parser("prepare-endpoint-incumbent")
+    for name in (
+        "publication",
+        "submission-sha256",
+        "incumbent",
+        "runtime",
+        "evaluator-hotkey",
+        "legacy-policy",
+    ):
+        endpoint_job.add_argument("--" + name, required=True)
+    endpoint_pair = commands.add_parser("assemble-endpoint-execution")
+    for name in (
+        "incumbent-execution",
+        "dispatch-state",
+        "publication-sha256",
+        "legacy-policy",
+        "suite",
+        "reveal-pulses",
+    ):
+        endpoint_pair.add_argument("--" + name, required=True)
+    endpoint_pair.add_argument("--current-block", type=int, required=True)
     execution_status = commands.add_parser("execution-status")
     execution_status.add_argument("--state", required=True)
     execution_status.add_argument("--execution-key", required=True)
@@ -446,17 +480,40 @@ def execute(args: argparse.Namespace) -> dict:
                 await provider.aclose()
 
         return asyncio.run(check())
-    if args.command == "run-model-evaluation":
+    if args.command == "prepare-endpoint-incumbent":
+        from .competition_authorization import SignedEndpointAuthorization
+        from .competition_endpoint_execution import prepare_incumbent_job
+        from .competition_runner import OfflineCpuRuntime
+        from .policy import ScoringPolicy
+
+        return prepare_incumbent_job(
+            publication=_load(args.publication, SignedEndpointAuthorization),
+            submission_sha256=args.submission_sha256,
+            incumbent=_load(args.incumbent, ModelBundle),
+            runtime=_load(args.runtime, OfflineCpuRuntime),
+            evaluator_hotkey=args.evaluator_hotkey,
+            policy=policy,
+            legacy_policy=_load(args.legacy_policy, ScoringPolicy),
+        ).model_dump(mode="json", by_alias=True)
+    if args.command in {"run-model-evaluation", "run-endpoint-incumbent"}:
         from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
         from .competition_execution import (
+            EndpointIncumbentJob,
             ExecutionJournal,
             ModelEvaluationJob,
             execution_boundary,
+            run_endpoint_incumbent,
             run_model_evaluation,
+            validate_incumbent_job,
             validate_job,
         )
 
-        job = validate_job(_load(args.job, ModelEvaluationJob), policy)
+        endpoint = args.command == "run-endpoint-incumbent"
+        job = (
+            validate_incumbent_job(_load(args.job, EndpointIncumbentJob), policy)
+            if endpoint
+            else validate_job(_load(args.job, ModelEvaluationJob), policy)
+        )
         chain = _load(args.chain_config, CompetitionChainConfig)
         if chain.policy_sha256 != digest(policy) or chain.collection_timeout_seconds > 15:
             raise ValueError("execution requires a matching bounded finalized provider")
@@ -492,7 +549,8 @@ def execute(args: argparse.Namespace) -> dict:
                 return execution_boundary(await provider.collect())
 
             try:
-                return await run_model_evaluation(
+                execute_job = run_endpoint_incumbent if endpoint else run_model_evaluation
+                return await execute_job(
                     job=job,
                     policy=policy,
                     archive=Path(args.archive).absolute(),
@@ -506,6 +564,26 @@ def execute(args: argparse.Namespace) -> dict:
                     await provider.aclose()
 
         return asyncio.run(run()).model_dump(mode="json", by_alias=True)
+    if args.command == "assemble-endpoint-execution":
+        from .competition_endpoint_execution import assemble_endpoint_evidence
+        from .competition_execution import EndpointIncumbentEvidence
+        from .competition_scheduling import AssignmentPublicationJournal
+        from .policy import ScoringPolicy
+
+        pulses = _load(args.reveal_pulses, ExecutionRevealPulses).pulses
+        if len({p.round for p in pulses}) != len(pulses):
+            raise ValueError("duplicate retained reveal pulse")
+        journal = AssignmentPublicationJournal(
+            Path(args.dispatch_state).absolute(), policy, _load(args.legacy_policy, ScoringPolicy)
+        )
+        return assemble_endpoint_evidence(
+            incumbent=_load(args.incumbent_execution, EndpointIncumbentEvidence),
+            journal=journal,
+            publication_sha256=args.publication_sha256,
+            suite=_load(args.suite, EvaluationSuite),
+            pulses={p.round: p for p in pulses},
+            current_block=args.current_block,
+        ).model_dump(mode="json", by_alias=True)
     if args.command == "execution-status":
         from .competition_execution import ExecutionJournal
 
@@ -527,7 +605,7 @@ def execute(args: argparse.Namespace) -> dict:
             )
         else:
             value = run_record_from_execution(
-                _load(args.execution, ModelExecutionEvidence),
+                _load(args.execution, TypeAdapter(ModelExecutionEvidence | EndpointPairedEvidence)),
                 _load(args.result, EvaluationResult),
                 suite,
                 policy,

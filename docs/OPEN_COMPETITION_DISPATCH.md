@@ -101,6 +101,10 @@ sealed responses require the matching verified reveal pulse and committed
 reference suite. Unauthenticated transport failures remain infrastructure
 failures. This replay does not certify origin proofs or independent evaluation.
 
+Use [paired endpoint evaluation](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) to run
+the preserved incumbent on the assigned videos before reveal, then assemble
+the retained endpoint responses into evidence for independent result agreement.
+
 Keep the scheduler and origin evidence through the evaluation/audit retention
 period. Do not publish raw transcripts or inbox files: video delivery URLs can
 contain credentials. Public loop status contains bounded counters and no wallet

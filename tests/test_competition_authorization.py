@@ -39,7 +39,7 @@ from .test_open_competition import submission, wallet
 from .test_validator_plans import FinalizedPort, _block, _clock, _live_policy
 
 
-def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None):
+def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None, incumbent_sha256=None):
     """Synthetic signed publication and owned-source test port; no network/files.
 
     Return the updated competition policy as .policy. This helper supplies test
@@ -113,7 +113,7 @@ def build_authorization_fixture(policy, *, case_count=3, legacy_policy=None):
         policy_sha256=digest(policy),
         sequence=1,
         suite_sha256=digest(suite),
-        incumbent_model_sha256="b2" * 32,
+        incumbent_model_sha256=incumbent_sha256 or "b2" * 32,
         runtime_sha256=policy.evaluation_runtime_sha256,
         roster=(digest(sub),),
         submission_close_block=issued - 1,
