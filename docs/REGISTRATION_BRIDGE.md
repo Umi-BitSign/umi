@@ -80,6 +80,11 @@ the signed release and finalized readback. The original deadline below is unchan
 
 ## Duration
 
+The separate [funding audit](REGISTRATION_FUNDING_AUDIT.md) collects shared-funder
+candidates with a cached Taostats worker. Funding-based reward grouping is not
+active. The audit does not change the coldkey-or-IP rule above, and it is not a
+permanent requirement of the planned open competition.
+
 The bridge retains the original bootstrap cutoff: no new submissions from
 block `9,073,731`, with hard sunset at `9,075,171`. It may be superseded sooner
 by the open-competition release. It does not silently extend the seven-day

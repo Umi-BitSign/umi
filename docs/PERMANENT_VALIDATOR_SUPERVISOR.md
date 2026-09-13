@@ -23,6 +23,16 @@ installation proves that weights were submitted.
 
 ## Install
 
+### Optional temporary funding audit
+
+Operators running the separate [registration-funding audit](REGISTRATION_FUNDING_AUDIT.md)
+need a Taostats API key. The deployed weight-writing validator does not require
+one. UMI can run a single cached audit worker on the coordinator; validators do
+not each need to repeat the scan. This temporary worker produces review
+candidates and does not change the signed reward policy.
+
+### Validator installation
+
 Clone the current `main` branch into a new directory and keep the checkout
 clean:
 
