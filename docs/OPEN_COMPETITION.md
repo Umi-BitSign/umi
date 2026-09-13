@@ -64,6 +64,12 @@ authorizes new weights or changes the current bootstrap.
   and preserves the existing authenticated transport and durable resource ledgers.
   This removes per-round manual authorization-file restarts in rehearsal; it
   does not establish a production publication or dispatch workflow.
+- A continuous no-weight evaluator dispatcher with a private signed-publication
+  inbox, verified origin checks, durable pre-sign claims and bounded transport.
+  Cancellation and unrecorded outcomes cannot trigger duplicate requests.
+  Its retained transcripts connect to offline endpoint replay after reveal.
+  See [the dispatcher guide](OPEN_COMPETITION_DISPATCH.md). Protected round
+  production and independent evidence publication still need deployment rehearsal.
 - An owned-finality endpoint collector that verifies `Axons`, `Uids` and `Keys`
   under one pinned state root, requires a matching public literal-IP HTTPS
   origin, and retains bounded evidence with integrity and rollback checks.
@@ -194,10 +200,10 @@ availability and authenticated miner responses still need transport checks.
 The storage layout is defined by the pinned runtime metadata; see the
 [Subtensor storage definitions](https://github.com/opentensor/subtensor/blob/main/pallets/subtensor/src/lib.rs).
 
-The local assignment feed serves a journal populated through the typed
-`AssignmentPublicationJournal.publish`, `observe` and `claim` APIs. Those APIs
-require concrete verifier-owned block observations, not a JSON field claiming
-to be finalized. There is no public publication or dispatch endpoint.
+The local assignment feed serves a journal populated by the
+[continuous dispatcher](OPEN_COMPETITION_DISPATCH.md) through typed publication,
+observation and claim APIs. These APIs require concrete verifier-owned block
+observations. There is no public publication or dispatch endpoint.
 
 ```sh
 umi-competition --policy policy.json serve-assignment-feed \
