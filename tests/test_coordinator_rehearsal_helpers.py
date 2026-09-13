@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,8 +7,9 @@ import pytest
 
 from umi.competition_bridge_recovery import audit_bridge_history
 from umi.competition_coordinator_namespace import CoordinatorLayout
-from umi.competition_recovery import _SnapshotReader
+from umi.competition_recovery import _reconcile_snapshot, snapshot_legacy_bootstrap
 from umi.competition_upgrade import _Reader, _verify_release
+from umi.protocol import canonical_json_bytes
 
 from . import coordinator_rehearsal as rehearsal
 from .test_competition_recovery import limits as limits
@@ -72,12 +74,22 @@ def test_signed_migration_bridge_fixture_has_valid_preservable_history(
         item.signed,
         "installed",
     )
-    snapshot = _SnapshotReader(item.worker, user.pw_uid, limits)
-    try:
-        snapshot.read(item.worker)
-        assert snapshot.files == item.files
-    finally:
-        snapshot.close()
+    with snapshot_legacy_bootstrap(
+        item.worker,
+        expected_hotkey=item.config.validator_hotkey,
+        service_uid=user.pw_uid,
+        accepted_sequence=item.state.accepted_sequence,
+        accepted_directive_sha256=item.state.accepted_directive_sha256,
+        accepted_at_finalized_block=item.state.accepted_at_finalized_block,
+        config_sha256=hashlib.sha256(canonical_json_bytes(item.config)).hexdigest(),
+        installation_sha256="11" * 32,
+        limits=limits,
+    ) as snapshot:
+        assert snapshot._files == item.files
+        assert not snapshot.manifest.holds
+        effects, holds = _reconcile_snapshot(snapshot, item.owned, ())
+        assert not holds
+        assert [effect.classification for effect in effects] == ["proven_current_weight"]
     audit = audit_bridge_history(item.files, hotkey=item.config.validator_hotkey)
     assert not audit.holds
     assert audit.attempts[-1][1].weight_call.block_number == 161

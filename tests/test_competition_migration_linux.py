@@ -150,7 +150,7 @@ def _prepare_legacy(layout, user, target, signer):
             }
         ).model_dump(mode="python")
     )
-    files = {"service.lock": b"original bridge service lock"}
+    files = {"service.lock": b""}
     current = add_attempt(files, signed, base)
     for name, raw in files.items():
         _write(worker / name, raw, 0o600)
