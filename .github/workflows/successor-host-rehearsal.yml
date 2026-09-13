@@ -101,15 +101,23 @@ jobs:
           retention-days: 14
 
   rooted-services:
-    name: Rooted OCI services (${{ matrix.architecture }})
+    name: Rooted OCI ${{ matrix.scenario }} (${{ matrix.architecture }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
             architecture: amd64
+            scenario: lifecycle
           - runner: ubuntu-24.04-arm
             architecture: arm64
+            scenario: lifecycle
+          - runner: ubuntu-24.04
+            architecture: amd64
+            scenario: migration
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+            scenario: migration
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
@@ -151,6 +159,7 @@ jobs:
             --file deploy/linux-competition-worker/Dockerfile .
 
       - name: Signed preflight in both coordinator roots
+        if: matrix.scenario == 'lifecycle'
         run: |
           sudo -n env \
             UMI_RUN_COORDINATOR_SERVICE_REHEARSAL=1 \
@@ -162,6 +171,7 @@ jobs:
             tests/test_competition_coordinator_preflight_linux.py
 
       - name: Both rooted services and per-instance crash cleanup
+        if: matrix.scenario == 'lifecycle'
         run: |
           sudo -n env \
             UMI_RUN_COORDINATOR_SERVICE_REHEARSAL=1 \
@@ -172,11 +182,24 @@ jobs:
             --junitxml="$PWD/successor-rooted-services.xml" \
             tests/test_competition_coordinator_service_linux.py
 
+      - name: Complete signed migration and interrupted-command recovery
+        if: matrix.scenario == 'migration'
+        run: |
+          sudo -n env \
+            UMI_RUN_COORDINATOR_SERVICE_REHEARSAL=1 \
+            UMI_RUN_SIGNED_MIGRATION_REHEARSAL=1 \
+            UMI_REHEARSAL_OCI_ARCHIVE="$RUNNER_TEMP/umi-successor-replay.oci.tar" \
+            PYTHONPATH="$PWD/src:$PWD" \
+            "$PWD/.venv/bin/python" -m pytest -q -x \
+            --basetemp="/var/lib/umi-rooted-migration-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --junitxml="$PWD/successor-rooted-migration.xml" \
+            tests/test_competition_migration_linux.py
+
       - name: Retain bounded test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: successor-rooted-services-${{ matrix.architecture }}-${{ github.sha }}
+          name: successor-rooted-${{ matrix.scenario }}-${{ matrix.architecture }}-${{ github.sha }}
           path: successor-rooted-*.xml
           if-no-files-found: warn
           retention-days: 14

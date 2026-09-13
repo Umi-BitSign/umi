@@ -139,7 +139,7 @@ def release_identity(oci_release):
     return oci_release.identity
 
 
-def _host_bundle(run, config):
+def _host_bundle(run, config, *, startup_probe=None):
     """Build a complete test host with no editable imports or symlinks."""
     project = Path(__file__).parents[1]
     candidate = run / "candidate"
@@ -168,6 +168,14 @@ def _host_bundle(run, config):
         _write(
             environment / "bin" / executable,
             f"#!{final}/.venv/bin/python -I\nfrom {module} import main\nmain()\n",
+            0o555,
+        )
+    if startup_probe is not None:
+        # Only explicit migration fixtures substitute the long-running entry
+        # point. The complete candidate, including this probe, is signed below.
+        _write(
+            environment / "bin/umi-competition-supervisor",
+            f"#!{final}/.venv/bin/python -I\n" + startup_probe,
             0o555,
         )
     helpers = {
@@ -216,19 +224,33 @@ def _host_bundle(run, config):
 
 
 def _signed_preflight_case(
-    run, config, oci_release, package_case, package_limits, policy, worker_capacity, chain_config
+    run,
+    config,
+    oci_release,
+    package_case,
+    package_limits,
+    policy,
+    worker_capacity,
+    chain_config,
+    *,
+    predecessor=None,
+    startup_probe=None,
 ):
-    host, tree, helpers = _host_bundle(run, config)
-    old = legacy_signed(
-        legacy_directive(
-            validator_hotkeys=[config.validator_hotkey],
-            release={
-                **legacy_directive().release.model_dump(mode="python"),
-                "target_platform": config.target_platform,
-            },
+    host, tree, helpers = _host_bundle(run, config, startup_probe=startup_probe)
+    old = (
+        predecessor.signed
+        if predecessor is not None
+        else legacy_signed(
+            legacy_directive(
+                validator_hotkeys=[config.validator_hotkey],
+                release={
+                    **legacy_directive().release.model_dump(mode="python"),
+                    "target_platform": config.target_platform,
+                },
+            )
         )
     )
-    predecessor = SimpleNamespace(
+    predecessor = predecessor or SimpleNamespace(
         config=config,
         signed=old,
         body=canonical_json_bytes(old),

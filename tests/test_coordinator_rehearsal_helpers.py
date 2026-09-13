@@ -1,8 +1,14 @@
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from umi.competition_bridge_recovery import audit_bridge_history
 from umi.competition_coordinator_namespace import CoordinatorLayout
 
 from . import coordinator_rehearsal as rehearsal
+from .test_registration_bridge import signed_policy as signed_policy
 
 
 def test_fixture_validators_have_different_synthetic_identities():
@@ -27,3 +33,26 @@ def test_fixture_podman_uses_successor_store_and_selected_user_bus(monkeypatch):
         "--format=json",
     )
     assert kwargs == {"timeout": 17}
+
+
+@pytest.mark.parametrize("instance", ["0", "54"])
+def test_signed_migration_bridge_fixture_has_valid_preservable_history(
+    tmp_path, signed_policy, instance
+):
+    from .test_competition_migration_linux import _prepare_legacy
+
+    class LocalLayout:
+        def physical(self, path):
+            return tmp_path / str(path).lstrip("/")
+
+    layout = LocalLayout()
+    layout.instance = instance
+    for name in ("state", "releases"):
+        layout.physical(Path("/var/lib/umi-validator-supervisor") / name).mkdir(parents=True)
+    layout.physical(Path("/var/lib/umi-validator-worker-state")).mkdir(parents=True)
+    user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
+    item = _prepare_legacy(layout, user, "linux/amd64", signed_policy)
+    audit = audit_bridge_history(item.files, hotkey=item.config.validator_hotkey)
+    assert not audit.holds
+    assert audit.attempts[-1][1].weight_call.block_number == 161
+    assert item.owned.validator_uid == int(instance)
