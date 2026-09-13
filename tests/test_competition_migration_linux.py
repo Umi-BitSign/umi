@@ -22,6 +22,7 @@ import pytest
 from umi import competition_initial_upgrade as upgrade
 from umi import competition_switch_recovery as restart
 from umi import registration_bridge as bridge
+from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor import advance_supervisor_directive_state
 from umi.validator_supervisor_adapters import (
@@ -299,19 +300,14 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     from umi import competition_chain_state as chain_state
                     from umi import competition_host_observer as host_observer
 
-                    selected = json.loads(
+                    selected = host_observer.parse_successor_host_observer_config(
                         case.control.sources[upgrade.activation.HOST_OBSERVER_FILENAME].payload
-                    )["chain"]
-                    item.owned.chain_config_sha256 = hashlib.sha256(
-                        canonical_json_bytes(selected)
-                    ).hexdigest()
+                    ).chain
+                    item.owned.chain_config_sha256 = digest(selected)
 
                     class FinalityPort:
                         def __init__(self, chain, policy):
-                            assert (
-                                hashlib.sha256(canonical_json_bytes(chain)).hexdigest()
-                                == item.owned.chain_config_sha256
-                            )
+                            assert digest(chain) == item.owned.chain_config_sha256
 
                         async def start(self):
                             pass

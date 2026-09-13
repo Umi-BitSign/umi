@@ -17,12 +17,13 @@ from tests.test_registration_bridge import (
     replace_participant,
     signed_policy,
 )
+from tests.test_registration_bridge_funding import setup as funding_setup
 from umi import competition_recovery as recovery
 from umi import registration_bridge as bridge
 from umi.competition_bridge_recovery import ARCHIVE, HISTORY, JOURNAL, audit_bridge_history
 from umi.protocol import canonical_json_bytes
 
-__all__ = ["limits", "signed_policy"]
+__all__ = ["funding_setup", "limits", "signed_policy"]
 
 
 def add_attempt(files, policy, obs, *, legacy_sha=None, phase="applied"):
@@ -173,6 +174,59 @@ def test_stopped_snapshot_retains_every_bridge_byte_and_reconciles_latest_row(
             "proven_superseded_weight",
         }
         assert len(effects) == 2
+
+
+def test_funding_bridge_upgrade_preserves_v1_history_and_reconciles_v2(
+    tmp_path, funding_setup, limits
+):
+    obs, _, _, funded_policy, old_policy = funding_setup
+    files = {"service.lock": b""}
+    first = add_attempt(files, old_policy, obs)
+    prior_history = {path: raw for path, raw in files.items() if path.startswith(HISTORY + "/")}
+    next_obs = replace_participant(
+        obs.model_copy(
+            update={"block_number": BLOCK + 250, "validator_row": first.attempt.expected_row}
+        ),
+        54,
+        last_update=first.weight_call.block_number,
+    )
+    current = add_attempt(files, funded_policy, next_obs)
+    assert first.attempt.expected_row != current.attempt.expected_row
+    item = SimpleNamespace(
+        files=files,
+        current=current,
+        owned=SimpleNamespace(
+            validator_hotkey=current.validator_hotkey,
+            validator_uid=54,
+            validator_row=tuple(tuple(pair) for pair in current.attempt.expected_row),
+            validator_last_update=current.weight_call.block_number,
+            block=current.last_observed_block + 1,
+            block_hash="0x" + "33" * 32,
+            manifest_anchor_sha256=None,
+            manifest_anchor_block=None,
+            commit_reveal_enabled=False,
+        ),
+    )
+    with snapshot(tmp_path / "worker", item, limits) as snap:
+        assert not snap.manifest.holds
+        assert snap._files == files
+        assert all(snap._files[path] == raw for path, raw in prior_history.items())
+        recovery._check_current_manifest(
+            snap,
+            SimpleNamespace(
+                validator_hotkey=current.validator_hotkey,
+                expected_manifest_sha256=None,
+                expected_registration_bridge_policy_sha256=(
+                    bridge.registration_bridge_policy_sha256(funded_policy)
+                ),
+            ),
+        )
+        effects, holds = recovery._reconcile_snapshot(snap, item.owned, ())
+        assert not holds
+        assert [effect.classification for effect in effects] == [
+            "proven_superseded_weight",
+            "proven_current_weight",
+        ]
 
 
 @pytest.mark.parametrize(

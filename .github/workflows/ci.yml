@@ -97,6 +97,7 @@ jobs:
           .venv/bin/umi-competition-worker --help
           .venv/bin/umi-competition-supervisor --help
           .venv/bin/umi-competition-supervisor-cleanup --help
+          .venv/bin/umi-competition-host-upgrade --help
           .venv/bin/umi-bootstrap-direct-weights --help
           .venv/bin/umi-bootstrap-weights --help
           .venv/bin/umi-component-pilot --help
