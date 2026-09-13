@@ -76,8 +76,8 @@ The stopped-host lease and recovery checkpoint preserve the old process lock,
 directive, journal, claims and supporting bytes. Incomplete or uncertain effects
 remain on hold. Source authentication, stopped recovery, local operator consent,
 fresh chain checks and actual sandbox execution are separate acceptance checks.
-The combined production source-switch/restart and both-architecture rehearsals
-are still required.
+Both-architecture rooted preflight and lifecycle checks now pass. A combined
+signed initial-migration and interrupted-command rehearsal is still required.
 
 `competition_upgrade_namespace` prepares the recovery observer's fixed helper
 paths in a fresh root process's private Linux mount namespace. It disables mount
@@ -128,9 +128,10 @@ at the stopped acceptance boundary.
 
 The real signed-host/OCI preflight passed on the isolated arm64 VM, as did the
 root process-death retention test. These tests do not prove that the complete
-initial migration succeeds. The coordinator namespace adapter is connected but
-still needs complete rooted service rehearsals. Do not use this development
-command on either live validator.
+initial migration succeeds. The coordinator's rooted preflight and lifecycle
+checks also pass on both architectures, with the scope described below. Do not
+use this development command on either live validator before the combined
+migration rehearsal passes and its activation inputs are approved.
 
 The fixed `umi-competition-supervisor` entrypoint now connects the authenticated
 root anchor, owned chain observer, bounded HTTPS delivery, atomic input selection
@@ -195,9 +196,14 @@ Neither operation changes the shared template or the other validator's roots.
 Two real arm64 namespace tests passed with synthetic roots, including original
 lock contention and cross-instance isolation. The extended tests prepare the
 signed recovery observer in that same view. The CI-style arm64 batch passed
-15 namespace and transient-service checks. The coordinator cases are filesystem tests, not
-approval of the complete rooted systemd/Podman migration. That rehearsal and
-both-architecture restart/interruption checks remain required before deployment.
+15 namespace and transient-service checks. The later
+[native CI run at 8fe8483](https://github.com/Umi-BitSign/umi/actions/runs/34737773586)
+passed the actual signed-host/OCI preflight in both roots and the two-instance
+systemd/Podman lifecycle test on amd64 and arm64. The lifecycle test uses an
+inert host launcher and synthetic capability issuers. It verifies kernel
+resource limits, per-instance SIGKILL cleanup and restart, preservation of the
+other instance, and teardown container absence. It does not execute the
+complete signed initial migration or establish live chain authority.
 
 The successor uses a dedicated user systemd manager for rootless Podman.
 `umi-competition-supervisor-cleanup` acquires the original lock and stops only

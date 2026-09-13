@@ -86,8 +86,10 @@ activate rewards or extend the signed bootstrap sunset.
 - [x] Recover a retained generic source switch and start without reviving legacy authority.
 - [x] Establish private fixed-path mounts for the stopped upgrade observer.
 - [x] Wire generic initial privileged preparation into the operator command.
-- [ ] Adapt and rehearse the coordinator's two RootDirectory validator installations.
-- [ ] Rehearse interruption/restart on both Linux architectures and rerun all tests.
+- [x] Adapt and rehearse signed preflight and lifecycle in both coordinator roots.
+- [x] Rehearse per-instance interruption/restart on both Linux architectures.
+- [ ] Rehearse the complete signed initial migration and interrupted-command recovery together.
+- [ ] Rerun all tests at the final publication revision.
 - [ ] Complete the real-model, independent-evaluation and signed-activation gates.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
@@ -146,8 +148,9 @@ The coordinator uses `umi-validator@0.service` and `umi-validator@54.service`
 with separate RootDirectory trees and a shared resource slice. The generic
 host-namespace adapter rejects this layout unless the coordinator adapter has
 prepared the selected instance's private filesystem view. The adapter is now
-connected to initial upgrade, publication recovery and startup checks. Complete
-rooted service rehearsals are still required before either live validator is switched.
+connected to initial upgrade, publication recovery and startup checks. Rooted
+preflight and lifecycle rehearsals now pass; the complete signed migration
+still needs a combined rehearsal before either live validator is switched.
 
 Read-only inspection confirmed that both instances load the shared
 `umi-validator@.service` fragment, with no drop-ins, and use cgroups beneath
@@ -330,8 +333,15 @@ fixture image loading because its `/var/tmp` was not writable. Revision
 body exercised both instances, but teardown cancelled fallback cleanup and
 left a test container running, so that run failed too. The fixture now waits
 for the sealed cleanup unit and checks container absence before releasing its
-mounts. The rerun is pending. These preflights do not stop or upgrade a legacy
-service.
+mounts. These preflights do not stop or upgrade a legacy service.
+
+[Native CI at revision 8fe8483](https://github.com/Umi-BitSign/umi/actions/runs/34737773586)
+passed all four jobs. Each architecture passed 317 state/startup tests, 52
+root-filesystem tests, both signed rooted preflights and the two-instance
+lifecycle test. That test starts both supervisors, kills and restarts each
+main process, verifies the other instance is unchanged, and confirms container
+absence before teardown. It uses an inert host launcher and synthetic capability
+issuers; it does not replace the complete signed initial-migration rehearsal.
 
 The local full regression before that fixture correction passed 3,740 tests,
 with 45 platform/rehearsal skips and 34 warnings, mostly retained pytest
