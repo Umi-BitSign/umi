@@ -6,6 +6,7 @@ import pytest
 
 from umi.competition_bridge_recovery import audit_bridge_history
 from umi.competition_coordinator_namespace import CoordinatorLayout
+from umi.competition_upgrade import _Reader
 
 from . import coordinator_rehearsal as rehearsal
 from .test_registration_bridge import signed_policy as signed_policy
@@ -48,10 +49,21 @@ def test_signed_migration_bridge_fixture_has_valid_preservable_history(
     layout = LocalLayout()
     layout.instance = instance
     for name in ("state", "releases"):
-        layout.physical(Path("/var/lib/umi-validator-supervisor") / name).mkdir(parents=True)
-    layout.physical(Path("/var/lib/umi-validator-worker-state")).mkdir(parents=True)
+        layout.physical(Path("/var/lib/umi-validator-supervisor") / name).mkdir(
+            parents=True, mode=0o700
+        )
+    for name in ("umi-validator-worker-state", "umi-validator-operator-inputs"):
+        layout.physical(Path("/var/lib") / name).mkdir(parents=True, mode=0o700)
     user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
     item = _prepare_legacy(layout, user, "linux/amd64", signed_policy)
+    reader = _Reader(user.pw_uid)
+    for root in (
+        item.config.state_root,
+        item.config.worker_state_root,
+        item.config.release_root,
+        item.config.operator_input_root,
+    ):
+        reader.directory(layout.physical(Path(root)))
     audit = audit_bridge_history(item.files, hotkey=item.config.validator_hotkey)
     assert not audit.holds
     assert audit.attempts[-1][1].weight_call.block_number == 161

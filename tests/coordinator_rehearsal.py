@@ -180,7 +180,6 @@ def _prepare_root(layout, user, start):
     for logical in (
         "/etc/umi",
         "/opt/umi-validator-supervisor",
-        "/var/lib/umi-validator-operator-inputs",
         "/var/lib/umi-validator-runtime-smoke/readonly",
     ):
         path = root / logical.lstrip("/")
@@ -191,6 +190,7 @@ def _prepare_root(layout, user, start):
         "/var/lib/umi-validator-supervisor/state",
         "/var/lib/umi-validator-supervisor/releases",
         "/var/lib/umi-validator-worker-state",
+        "/var/lib/umi-validator-operator-inputs",
         "/var/lib/umi-validator-runtime-wallets",
         "/var/lib/umi-validator-runtime-smoke/readwrite",
         "/run/umi-validator-supervisor",
