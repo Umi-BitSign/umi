@@ -530,8 +530,9 @@ async def test_peer_equivocation_stays_held_even_if_conflicting_file_disappears(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("startup_delay", [0, 2.05])
 async def test_production_entrypoint_owns_provider_and_excludes_a_second_process(
-    setup, monkeypatch
+    setup, monkeypatch, startup_delay
 ):
     import bittensor as bt
 
@@ -542,6 +543,7 @@ async def test_production_entrypoint_owns_provider_and_excludes_a_second_process
     class Owned(Provider):
         async def start(self):
             events.append("start")
+            await asyncio.sleep(startup_delay)
 
         async def aclose(self):
             events.append("close")
@@ -565,12 +567,26 @@ async def test_production_entrypoint_owns_provider_and_excludes_a_second_process
         stop.set()
 
     task = asyncio.create_task(worker.run_evaluator(first.config, first.policy, report=report))
-    await asyncio.wait_for(stop.wait(), 2)
-    with pytest.raises(BlockingIOError):
-        await worker.run_evaluator(first.config, first.policy, once=True)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    reported = asyncio.create_task(stop.wait())
+    try:
+        # This checks ownership and exclusion, not two-second startup latency.
+        # Watch the worker as well so startup failures surface immediately.
+        done, _ = await asyncio.wait(
+            (task, reported), timeout=15, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task in done:
+            await task
+            pytest.fail("continuous evaluator exited before cancellation")
+        assert reported in done, "continuous evaluator did not report its first poll"
+        with pytest.raises(BlockingIOError):
+            await worker.run_evaluator(first.config, first.policy, once=True)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        reported.cancel()
+        await asyncio.gather(task, reported, return_exceptions=True)
     assert events[0] == "start" and events[-1] == "close"
     # The original private lease inode remains reusable after cancellation.
     lock = worker._lock_file(Path(first.config.state_directory) / "evaluator.lock")
