@@ -4,13 +4,13 @@
 
 The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen two-miner
 pilot rule. It checks registered SN78 miners' HTTPS availability and gives each
-qualifying coldkey/IP group an equal total weight, divided among its passing UIDs.
+qualifying coldkey/IP/funding group an equal total weight, divided among its passing UIDs.
 It does not score translations or require a running model.
 
-Both UMI validators, UID 0 and UID 54, have finalized bridge rows. The
-[September 12 IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) records
-61 and 60 passing UIDs respectively, grouped into 18 and 17 coldkey/IP groups.
-Those new rows still awaited a later consensus update at that snapshot.
+Both UMI validators, UID 0 and UID 54, have finalized bridge rows. See the
+[funding-cap deployment record](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
+for the applied policy and exact rows. The earlier
+[IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) is historical.
 Inclusion in a row is not proof that a miner has already received a payout.
 
 ## Miner requirements
@@ -35,15 +35,23 @@ so passing a health check does not guarantee an immediate or fixed payout.
 
 ## How weights are shared
 
-Passing UIDs sharing a coldkey or HTTPS endpoint IP form one group. Connections
-are transitive and ports are ignored. Each group gets the same total raw weight,
-split among its passing UIDs. Nineteen coldkeys on one IP therefore share one
-group budget, not nineteen budgets. See the [IP-cap deployment record](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md).
+Passing UIDs sharing a coldkey, HTTPS endpoint IP, or a common recorded
+pre-registration sender in the signed funding snapshot form one group.
+Connections are transitive and ports are ignored. Each group gets the same
+total raw weight, split among its passing UIDs. See the
+[funding-cap rule](REGISTRATION_BRIDGE_FUNDING_CAP.md).
 
 This does not prove human or machine identity. Shared hosting or NAT can group
-independent miners together. Different coldkeys on different IPs can still make
-multiple groups, and copying another miner's endpoint can dilute its group.
+independent miners together. Shared exchange withdrawal wallets can also group
+independent recipients. Unknown or multiple-sender funding histories add no
+funding link. Different coldkeys, IPs and funding sources can still make multiple
+groups, and copying another miner's endpoint can dilute its group.
 HTTPS reachability does not prove endpoint ownership or translation quality.
+
+The cached funding checker detects new registrations automatically. Adding new
+funding links to rewards still requires a signed snapshot refresh. Until then,
+new registrations use the existing coldkey/IP rules and cannot inherit a reused
+UID's old funding assertion. Miners do not need a Taostats API key.
 
 The bridge stops new submissions before block `9,073,731`, with hard sunset at
 `9,075,171`, unless replaced sooner. It retains the original bootstrap deadline.

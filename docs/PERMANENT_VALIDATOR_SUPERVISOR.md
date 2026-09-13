@@ -10,7 +10,8 @@ installs or verifies both. The host should have at least 8 CPU cores, 16 GiB RAM
 and 100 GiB of local storage. A GPU is not required.
 
 The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen-pilot
-worker with temporary live-miner weights grouped by coldkey or HTTPS IP. It does not
+worker with temporary live-miner weights grouped by coldkey, HTTPS IP or a
+recorded funder in the signed policy. It does not
 send translation requests. Miner operators should follow
 [current miner operation](CURRENT_MINER_OPERATION.md).
 
@@ -27,9 +28,11 @@ installation proves that weights were submitted.
 
 Operators running the separate [registration-funding audit](REGISTRATION_FUNDING_AUDIT.md)
 need a Taostats API key. The deployed weight-writing validator does not require
-one. UMI can run a single cached audit worker on the coordinator; validators do
-not each need to repeat the scan. This temporary worker produces review
-candidates and does not change the signed reward policy.
+one. UMI runs one cached audit worker on the coordinator; validators do not each
+need to repeat the scan. The [funding-cap policy](REGISTRATION_BRIDGE_FUNDING_CAP.md)
+carries the reviewed funding snapshot and its report digest. The audit cannot
+change weights without a new signed policy and directive. New registration
+checks are automatic; publishing new funding bindings is still a separate step.
 
 ### Validator installation
 
