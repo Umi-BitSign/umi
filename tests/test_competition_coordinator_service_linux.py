@@ -79,6 +79,10 @@ def _render(case, layout, user, config, code, run):
                     entry.sha256 = hashlib.sha256((code / entry.path).read_bytes()).hexdigest()
             entries = {item.path: item for item in case.signed.manifest.files}
             chain = case.anchor.observer_config.chain
+            chain.target_triple = {
+                "linux/arm64": "aarch64-unknown-linux-gnu",
+                "linux/amd64": "x86_64-unknown-linux-gnu",
+            }[config.target_platform]
             chain.proof_binary_sha256 = entries["artifacts/umi-substrate-proof-verifier"].sha256
             chain.finality_pin.release_sha256_by_target[chain.target_triple] = entries[
                 "artifacts/umi-grandpa-finality-observer"
@@ -113,6 +117,11 @@ def _ready(record):
 
 def test_two_rooted_services_restart_and_clean_up_without_stopping_each_other(tmp_path, case):
     assert os.geteuid() == 0 and Path("/var/lib") in tmp_path.parents
+    # Only these new, wallet-free fixture directories are made traversable by
+    # the service users. pytest creates both with root-only access by default.
+    for path in (tmp_path.parent, tmp_path):
+        assert not path.is_symlink() and path.stat().st_uid == 0
+        path.chmod(0o755)
     run = tmp_path / ("coordinator-lifecycle-" + secrets.token_hex(8))
     run.mkdir(mode=0o755)
     run.chmod(0o755)

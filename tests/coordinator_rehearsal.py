@@ -141,11 +141,24 @@ def _prepare_root(layout, user, start):
     root = layout.root_directory
     if not root.exists():
         root.mkdir(parents=True, mode=0o755)
-    for name in ("etc", "run", "proc", "sys", "dev", "tmp", "var", "var/lib", "opt", "home"):
+    for name in (
+        "etc",
+        "run",
+        "proc",
+        "sys",
+        "dev",
+        "tmp",
+        "var",
+        "var/lib",
+        "var/tmp",
+        "opt",
+        "home",
+    ):
         path = root / name
         path.mkdir(parents=True, mode=0o755, exist_ok=True)
         assert not path.is_symlink() and path.stat().st_uid == 0
     (root / "tmp").chmod(0o1777)
+    (root / "var/tmp").chmod(0o1777)
     _public_file(
         root / "etc/passwd",
         (
