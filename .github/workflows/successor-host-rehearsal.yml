@@ -57,6 +57,7 @@ jobs:
           umask 022
           .venv/bin/python -m pytest -q --junitxml=successor-state.xml \
             tests/test_competition_bridge_recovery.py \
+            tests/test_coordinator_rehearsal_helpers.py \
             tests/test_competition_host_anchor.py \
             tests/test_competition_host_switch.py \
             tests/test_competition_host_start.py \

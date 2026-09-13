@@ -94,11 +94,11 @@ with (state / 'supervisor-process.lock').open('r+b') as lock:
 """
 
 
-def _owned_tree(root, user):
+def _owned_tree(root, user, *, private_directories=False):
     # Only newly constructed, marker-guarded, key-free fixture trees.
     for path in (root, *root.rglob("*")):
         assert not path.is_symlink()
-        if path.is_dir():
+        if private_directories and path.is_dir():
             path.chmod(0o700)
         os.chown(path, user.pw_uid, user.pw_gid)
 
@@ -154,7 +154,7 @@ def _prepare_legacy(layout, user, target, signer):
     current = add_attempt(files, signed, base)
     for name, raw in files.items():
         _write(worker / name, raw, 0o600)
-    _owned_tree(worker, user)
+    _owned_tree(worker, user, private_directories=True)
     releases = layout.physical(Path(config.release_root))
     stage = releases / "test-initial-stage"
     old = install_legacy_release(stage, config, inputs)

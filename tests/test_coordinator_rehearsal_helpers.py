@@ -7,7 +7,7 @@ import pytest
 from umi.competition_bridge_recovery import audit_bridge_history
 from umi.competition_coordinator_namespace import CoordinatorLayout
 from umi.competition_recovery import _SnapshotReader
-from umi.competition_upgrade import _Reader
+from umi.competition_upgrade import _Reader, _verify_release
 
 from . import coordinator_rehearsal as rehearsal
 from .test_competition_recovery import limits as limits
@@ -66,6 +66,12 @@ def test_signed_migration_bridge_fixture_has_valid_preservable_history(
         item.config.operator_input_root,
     ):
         reader.directory(layout.physical(Path(root)))
+    _verify_release(
+        reader,
+        layout.physical(Path(item.config.release_root)) / item.signed.directive_sha256,
+        item.signed,
+        "installed",
+    )
     snapshot = _SnapshotReader(item.worker, user.pw_uid, limits)
     try:
         snapshot.read(item.worker)
