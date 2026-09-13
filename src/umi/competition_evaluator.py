@@ -146,6 +146,8 @@ class EvaluatorConfig(StrictProtocolModel):
     legacy_policy_sha256: Hex32 | None = None
     exchange_origin: str | None = None
     round_coordinator_origin: str | None = None
+    work_signing_chain: CompetitionChainConfig | None = None
+    work_minimum_issue_ms: Annotated[int, Field(ge=1, le=300_000)] | None = None
     assignment_directory: Directory | None = None
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
@@ -159,6 +161,17 @@ class EvaluatorConfig(StrictProtocolModel):
             from .competition_client import validate_intake_origin
 
             validate_intake_origin(self.round_coordinator_origin)
+        if (self.work_signing_chain is None) != (self.work_minimum_issue_ms is None):
+            raise ValueError("work signing needs both owned transport and an explicit issue margin")
+        if self.work_signing_chain is not None and (
+            self.round_coordinator_origin is None
+            or self.legacy_policy_sha256 is None
+            or self.work_signing_chain.policy_sha256 != self.policy_sha256
+            or self.work_signing_chain.collection_timeout_seconds > 15
+        ):
+            raise ValueError(
+                "work signing requires the round service and matching bounded transport"
+            )
         if self.exchange_origin is not None:
             from .competition_client import validate_intake_origin
 
@@ -172,6 +185,8 @@ class EvaluatorConfig(StrictProtocolModel):
             for k, v in self.model_dump().items()
             if (k.endswith("_directory") or k == "wallet_path") and v is not None
         ] + [Path(_path(self.chain.state_directory)).resolve()]
+        if self.work_signing_chain is not None:
+            paths.append(Path(_path(self.work_signing_chain.state_directory)).resolve())
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(paths)
@@ -220,13 +235,8 @@ def order_job(order, evaluator, policy, legacy=None):
 
 def validate_order(signed, policy, legacy=None):
     signed = SignedEvaluationOrder.model_validate_json(canonical_json_bytes(signed))
-    order = signed.order
+    order = validate_order_body(signed.order, policy, legacy)
     groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
-    keys = [identity(k) for k in order.evaluators]
-    if keys != sorted(set(keys)) or any(k not in groups for k in keys):
-        raise ValueError("order evaluators must be canonical authorized identities")
-    if len({groups[k] for k in keys}) != len(keys) or len(keys) < policy.required_evaluator_groups:
-        raise ValueError("order requires distinct independent evaluator groups")
     signers = set()
     signer_groups = set()
     for signature in signed.signatures:
@@ -238,9 +248,21 @@ def validate_order(signed, policy, legacy=None):
         signer_groups.add(groups[key])
     if len(signer_groups) < policy.required_evaluator_groups:
         raise ValueError("order lacks independent quorum signatures")
+    return signed
+
+
+def validate_order_body(order, policy, legacy=None):
+    """Check a reference-free proposal without authorizing execution."""
+    order = EvaluationOrder.model_validate_json(canonical_json_bytes(order))
+    groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
+    keys = [identity(k) for k in order.evaluators]
+    if keys != sorted(set(keys)) or any(k not in groups for k in keys):
+        raise ValueError("order evaluators must be canonical authorized identities")
+    if len({groups[k] for k in keys}) != len(keys) or len(keys) < policy.required_evaluator_groups:
+        raise ValueError("order requires distinct independent evaluator groups")
     for evaluator in order.evaluators:
         order_job(order, evaluator, policy, legacy)
-    return signed
+    return order
 
 
 def _private(path):
@@ -370,6 +392,8 @@ class EvaluatorJournal:
                                 "exchange_origin",
                                 "assignment_directory",
                                 "round_coordinator_origin",
+                                "work_signing_chain",
+                                "work_minimum_issue_ms",
                             )
                             if getattr(config, k) is None
                         ),
@@ -534,11 +558,27 @@ class ContinuousEvaluator:
         self._tasks = {}
         self._exchange_task = None
         self._round_task = None
+        self._work_task = None
+        self.work_provider = None
+        self.work_client = None
         self.round_client = None
         if config.round_coordinator_origin is not None:
             from .competition_rounds import RoundSigningClient
 
             self.round_client = RoundSigningClient(self, config.round_coordinator_origin)
+        if config.work_signing_chain is not None:
+            from .competition_dispatch import DispatchFinalityProvider
+            from .competition_work_transport import WorkSigningClient
+
+            self.work_provider = DispatchFinalityProvider(config.work_signing_chain, policy, legacy)
+            self.work_client = WorkSigningClient(
+                self,
+                config.round_coordinator_origin,
+                self.round_client.journal,
+                transport_provider=self.work_provider,
+                legacy=legacy,
+                minimum_issue_ms=config.work_minimum_issue_ms,
+            )
         self.exchange = None
         if config.exchange_origin is not None:
             from .competition_exchange import EvaluatorExchangeClient
@@ -769,6 +809,16 @@ class ContinuousEvaluator:
 
     async def poll_once(self):
         counts = {"held": 0, "waiting": 0, "complete": 0, "expired": 0, "executing": 0}
+        if self.work_client is not None:
+            if self._work_task is not None and self._work_task.done():
+                try:
+                    result = self._work_task.result()
+                    counts["held"] += result["held"]
+                except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+                    counts["waiting"] += 1
+                self._work_task = None
+            if self._work_task is None:
+                self._work_task = asyncio.create_task(self.work_client.sync_once())
         if self.round_client is not None:
             if self._round_task is not None and self._round_task.done():
                 try:
@@ -830,6 +880,10 @@ class ContinuousEvaluator:
         }
 
     async def aclose(self):
+        if self._work_task is not None:
+            self._work_task.cancel()
+            await asyncio.gather(self._work_task, return_exceptions=True)
+            self._work_task = None
         if self._round_task is not None:
             self._round_task.cancel()
             await asyncio.gather(self._round_task, return_exceptions=True)
@@ -842,6 +896,8 @@ class ContinuousEvaluator:
             task.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
+        if self.work_provider is not None:
+            await self.work_provider.aclose()
 
 
 async def run_evaluator(config, policy, *, legacy=None, once=False, report=None):
@@ -866,6 +922,8 @@ async def run_evaluator(config, policy, *, legacy=None, once=False, report=None)
             loop.add_signal_handler(sig, stop.set)
             handlers.append(sig)
         await provider.start()
+        if worker.work_provider is not None:
+            await worker.work_provider.start()
 
         async def cycle():
             result = await worker.poll_once()
@@ -887,10 +945,12 @@ async def run_evaluator(config, policy, *, legacy=None, once=False, report=None)
         return {"status": "stopped", "no_weight": True, "chain_submission_authorized": False}
     finally:
         try:
-            if worker is not None:
-                await worker.aclose()
-            if provider is not None:
-                await provider.aclose()
+            try:
+                if worker is not None:
+                    await worker.aclose()
+            finally:
+                if provider is not None:
+                    await provider.aclose()
         finally:
             for sig in handlers:
                 loop.remove_signal_handler(sig)

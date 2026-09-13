@@ -5,9 +5,11 @@ collects cutoff signatures from independently operated evaluators. Each evaluato
 rechecks the proposed registration snapshot through its own finalized-state
 provider before signing. The coordinator has no wallet.
 
-This service publishes cutoff certificates only. It does not yet generate
-evaluation orders, endpoint authorizations or settlement certificates. It does
-not activate the 70/30 policy, change bridge weights or extend the bridge sunset.
+With the optional [work-signing configuration](OPEN_COMPETITION_WORK_SIGNING.md),
+this service also generates endpoint authorizations and evaluation orders and
+collects independent signatures before delivery. Settlement publication remains
+unconnected. The service does not activate the 70/30 policy, change bridge
+weights or extend the bridge sunset.
 
 ## Operator inputs
 
@@ -25,6 +27,10 @@ schema `umi-round-coordinator-config/1`:
 - `replay_limits`: explicit `maximum_roster_bytes`, `maximum_evidence_bytes` and
   `maximum_certificate_bytes`. Roster and certificate limits cannot exceed 4 MiB.
 - `no_weight: true`.
+- Optional `work`: separate work state, reviewed per-suite assets, output
+  directories, transport-bound finality and an explicit issue margin. See the
+  [work-signing guide](OPEN_COMPETITION_WORK_SIGNING.md) and pass its transport
+  policy through `--legacy-policy` when enabled.
 
 All directories, including the finality provider's state, must be separate,
 absolute and owned by the service user. Directories use mode `0700`; input files

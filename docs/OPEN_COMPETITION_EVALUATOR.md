@@ -31,7 +31,12 @@ Use one hotkey per worker and a dedicated configuration with schema
   the dispatcher's separate `publication_directory`. No extra upload key is used.
 - `round_coordinator_origin` enables [independent cutoff signing](OPEN_COMPETITION_ROUND_COORDINATOR.md).
   The worker proves the exact proposed registration snapshot through its own
-  provider before signing. This does not enable evaluation-order signing.
+  provider before signing.
+- `work_signing_chain` and `work_minimum_issue_ms` additionally enable
+  [automatic work signing](OPEN_COMPETITION_WORK_SIGNING.md). Both are required,
+  along with the round origin and endpoint transport policy. The separate
+  owned observer independently verifies endpoint issuance. The worker requires
+  its own retained cutoff vote before signing an order or authorization.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives
@@ -75,8 +80,9 @@ The coordinator delivers canonical `SignedEvaluationOrder` JSON as
 - `no_weight: true`.
 
 The outer `signatures` must independently meet the policy quorum over the exact
-order body using the existing competition `sign_object` domain. The worker
-does not sign orders or choose a roster. The exchange can populate these private
+order body using the existing competition `sign_object` domain. Work signing is
+disabled unless configured explicitly; it signs only the independently checked
+frozen roster and nominated work. The exchange can populate these private
 directories and deliver peer results automatically. Without an exchange,
 deliver complete private files by atomic rename, without symlinks, hardlinks,
 or group/world access. The directories are not public upload endpoints.
@@ -130,8 +136,9 @@ independent administration, protected-data rights, or publication timing.
 The worker automates local execution, reveal handling and peer agreement across
 successive signed orders. The exchange handles authenticated delivery and can
 record completed evidence in an already admitted and closed coordinator round.
-It still needs ongoing quorum-signed orders and committed protected suites.
-Settlement cutoff publication, promotion review and signed successor activation
-remain separate stages.
+The round coordinator and configured independent work signers can now supply
+ongoing quorum-signed orders. Reviewed private plans and protected suites remain
+required inputs. Settlement publication, promotion review and signed successor
+activation remain separate stages.
 The [execution plan](OPEN_COMPETITION_EXECUTION_PLAN.md) tracks those gates;
 this command alone is not an open-mining launch.

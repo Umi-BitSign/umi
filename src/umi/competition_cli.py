@@ -98,6 +98,7 @@ def _parser() -> argparse.ArgumentParser:
     intake.add_argument("--config", required=True)
     rounds = commands.add_parser("serve-round-coordinator")
     rounds.add_argument("--config", required=True)
+    rounds.add_argument("--legacy-policy")
     submit = commands.add_parser("submit")
     submit.add_argument("--submission", required=True)
     submit.add_argument("--origin", required=True)
@@ -288,8 +289,13 @@ def execute(args: argparse.Namespace) -> dict:
     policy = _load(args.policy, CompetitionPolicy)
     if args.command == "serve-round-coordinator":
         from .competition_rounds import RoundCoordinatorConfig, serve_rounds
+        from .policy import ScoringPolicy
 
-        serve_rounds(_load(args.config, RoundCoordinatorConfig), policy)
+        serve_rounds(
+            _load(args.config, RoundCoordinatorConfig),
+            policy,
+            legacy=_load(args.legacy_policy, ScoringPolicy) if args.legacy_policy else None,
+        )
         return {"status": "stopped", "chain_submission_authorized": False}
     if args.command == "serve-evaluator-exchange":
         from .competition_exchange import ExchangeConfig, serve_exchange

@@ -99,7 +99,8 @@ that two test hotkeys are independently administered operators.
 
 The relay's cursor and arrival timestamp are transport observations. They do not
 prove independently witnessed publication timing, model quality, rights approval,
-or reward eligibility. Automatic round/order creation, signed cutoff and
-settlement publication, production throughput, and the reviewed 70/30 activation
-remain launch work. Keep the live registration bridge unchanged until those
-gates pass.
+or reward eligibility. The [round coordinator](OPEN_COMPETITION_ROUND_COORDINATOR.md)
+and [independent work signers](OPEN_COMPETITION_WORK_SIGNING.md) can supply its
+cutoff and signed-order inputs. Settlement publication, production throughput,
+and the reviewed 70/30 activation remain launch work. Keep the live registration
+bridge unchanged until those gates pass.

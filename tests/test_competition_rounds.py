@@ -664,9 +664,11 @@ def test_cli_routes_private_coordinator_config_without_constructing_wallet(
     config_path.write_bytes(canonical_json_bytes(setup.config))
     calls = []
     monkeypatch.setattr(bt, "Wallet", lambda **_: pytest.fail("coordinator constructed a wallet"))
-    monkeypatch.setattr(rounds, "serve_rounds", lambda c, p: calls.append((c, p)))
+    monkeypatch.setattr(
+        rounds, "serve_rounds", lambda c, p, *, legacy=None: calls.append((c, p, legacy))
+    )
     main(["--policy", str(policy_path), "serve-round-coordinator", "--config", str(config_path)])
-    assert calls == [(setup.config, setup.policy)]
+    assert calls == [(setup.config, setup.policy, None)]
 
 
 @pytest.mark.asyncio
