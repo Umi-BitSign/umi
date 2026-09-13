@@ -211,7 +211,21 @@ def _fork(run, label, action, *, exit_code=0):
         try:
             action()
         except BaseException:
-            _write(run / (label + "-failure.txt"), traceback.format_exc())
+            failure = traceback.format_exc()
+            # Wallet-free fixture metadata only; retain the service boundary
+            # that failed rather than guessing from the high-level exception.
+            from umi.competition_host_upgrade import _unit_snapshot
+
+            for instance in ("0", "54"):
+                for cleanup in (False, True):
+                    unit = "umi-validator@" + instance
+                    unit += "-successor-cleanup.service" if cleanup else ".service"
+                    try:
+                        values = _unit_snapshot(unit, successor_cleanup=cleanup)
+                        failure += "\n" + json.dumps({"unit": unit, "snapshot": values})
+                    except BaseException as error:
+                        failure += "\nfixture snapshot unavailable: " + type(error).__name__
+            _write(run / (label + "-failure.txt"), failure)
             os._exit(1)
         os._exit(0)
     _, status = os.waitpid(pid, 0)

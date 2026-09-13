@@ -20,11 +20,31 @@ from umi import competition_host_upgrade as host
 __all__ = ["inputs", "installed", "switching"]
 
 
+def _execution_report(command, *, started=False):
+    return (
+        "{ path=/usr/bin/env ; argv[]="
+        + command
+        + " ignore_errors=no ; start_time=["
+        + ("Sun 2026-09-13 05:00:00 UTC" if started else "n/a")
+        + "] ; stop_time=[n/a] ; pid="
+        + ("123" if started else "0")
+        + " ; code=(null) ; status=0/0 }"
+    )
+
+
 @pytest.fixture
 def ready(switching, monkeypatch):
     case = switching
     original = dict(case.unit)
     monkeypatch.setattr(host, "_check_unit", lambda *args: dict(original))
+    reload = switch._reload_systemd
+
+    def load_command():
+        reload()
+        case.command = case.unit["ExecStart"]
+        case.unit["ExecStart"] = _execution_report(case.command)
+
+    monkeypatch.setattr(switch, "_reload_systemd", load_command)
     with hold(case.installed) as stopped:
         case.result = _commit(case, stopped)
     case.calls = []
@@ -38,10 +58,15 @@ def ready(switching, monkeypatch):
                     SubState="running",
                     MainPID="123",
                     ControlGroup="/system.slice/" + case.plan.unit_name,
+                    ExecStart=_execution_report(case.command, started=True),
                 )
             else:
                 case.unit.update(
-                    ActiveState="inactive", SubState="dead", MainPID="0", ControlGroup=""
+                    ActiveState="inactive",
+                    SubState="dead",
+                    MainPID="0",
+                    ControlGroup="",
+                    ExecStart=_execution_report(case.command),
                 )
 
     monkeypatch.setattr(start, "_systemctl", systemctl)
@@ -67,6 +92,7 @@ def test_start_uses_only_exact_committed_unit_after_lock_release(ready):
     assert result.main_pid == 123
     assert result.host_manifest_sha256 == ready.plan.host_manifest_sha256
     assert not result.chain_submission_authorized
+    assert ready.unit["ExecStart"] != dict(ready.result._unit)["ExecStart"]
 
 
 def test_start_cannot_use_a_copied_capability(ready):
@@ -173,6 +199,31 @@ def test_started_service_must_match_exact_identity(ready, monkeypatch, field, va
         original(verb, unit)
         if verb == "start" and unit == ready.plan.unit_name:
             ready.unit[field] = value
+
+    monkeypatch.setattr(start, "_systemctl", mutate)
+    with pytest.raises(host.HostUpgradeError):
+        start.start_committed_successor_service(ready.result)
+    assert ("stop", ready.plan.unit_name) in ready.calls
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        ("path=/usr/bin/env", "path=/tmp/env"),
+        ("--config ", "--other "),
+        ("ignore_errors=no", "ignore_errors=yes"),
+        (" ; pid=123", " ; unexpected=1 ; pid=123"),
+        ("status=0/0 }", "status=0/0 } { path=/tmp/extra ; argv[]=/tmp/extra ; }"),
+    ],
+)
+def test_start_does_not_ignore_configured_command_changes(ready, monkeypatch, before, after):
+    original = start._systemctl
+
+    def mutate(verb, unit):
+        original(verb, unit)
+        if verb == "start" and unit == ready.plan.unit_name:
+            assert before in ready.unit["ExecStart"]
+            ready.unit["ExecStart"] = ready.unit["ExecStart"].replace(before, after)
 
     monkeypatch.setattr(start, "_systemctl", mutate)
     with pytest.raises(host.HostUpgradeError):

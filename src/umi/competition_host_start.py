@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import stat
 import subprocess
 import time
@@ -51,6 +52,21 @@ def _installation(switch: StartableSwitch):
 
 class _StartupPending(HostUpgradeError):
     pass
+
+
+def _exec_start_command(value: str) -> str:
+    # systemctl's ExecStart report includes changing execution metadata after
+    # the configured path, argv and ignore-errors flag. Permit only that known
+    # suffix to change. Extra commands, fields or malformed reports must fail.
+    match = re.fullmatch(
+        r"(?P<command>\{ path=[^;\n{}]+ ; argv\[\]=[^;\n{}]+ ; ignore_errors=(?:yes|no))"
+        r" ; start_time=\[[^\[\]\n]*\] ; stop_time=\[[^\[\]\n]*\]"
+        r" ; pid=[0-9]+ ; code=(?:\(null\)|[A-Za-z0-9_-]+) ; status=[0-9]+/[A-Za-z0-9_+-]+ \}",
+        value,
+    )
+    if match is None:
+        raise HostUpgradeError("unexpected successor ExecStart observation")
+    return match["command"]
 
 
 @dataclass(frozen=True)
@@ -167,7 +183,11 @@ def _running(switch: StartableSwitch) -> int:
         "Slice",
     ):
         if unit.get(key) != original.get(key):
-            raise HostUpgradeError("started successor unit execution identity changed")
+            if key == "ExecStart" and _exec_start_command(unit[key]) == _exec_start_command(
+                original[key]
+            ):
+                continue
+            raise HostUpgradeError("started successor unit execution identity changed: " + key)
     if unit["ActiveState"] == "activating":
         raise _StartupPending("successor service is still activating")
     if (

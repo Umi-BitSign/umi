@@ -158,6 +158,12 @@ successor, with no running processes and the original lock still held. It
 verifies the published files and repeats the checks after the explicit reload.
 Unexpected commands, identities or additional drop-ins remain errors.
 
+After startup, systemd adds execution timestamps and a PID to `ExecStart`.
+Startup verification compares the configured executable, arguments and
+ignore-errors flag separately from those runtime fields. Unknown fields or
+additional commands are rejected. The main PID, cgroup and ownership of the
+original process lock are verified independently.
+
 The development command can resume that recorded switch:
 
 ```sh
