@@ -210,6 +210,7 @@ def test_disabled_settlement_preserves_the_previous_configuration_binding(setup,
             "port",
             "work",
             "settlement_directory",
+            "settlement_delivery",
         },
     )
     rounds.RoundJournal(Path(config.state_directory), old_binding)
