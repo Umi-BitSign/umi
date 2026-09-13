@@ -215,37 +215,17 @@ def _host_bundle(run, config):
     return signed, tree, helpers
 
 
-def test_signed_host_child_stages_oci_and_rehearses_without_wallet_or_service_stop(
-    tmp_path, oci_release, package_case, package_limits, policy, worker_capacity, chain_config
+def _signed_preflight_case(
+    run, config, oci_release, package_case, package_limits, policy, worker_capacity, chain_config
 ):
-    assert os.geteuid() == 0 and Path("/var/lib") in tmp_path.parents
-    _ROOT.mkdir(mode=0o755, exist_ok=True)
-    user = _account()
-    assert _show_unit().get("ActiveState") != "active"
-    run = _ROOT / ("signed-initial-" + secrets.token_hex(8))
-    run.mkdir(mode=0o755)
-    run.chmod(0o755)
-    state, release, wallet = (run / name for name in ("state", "release", "inert-wallet"))
-    for path in (state, release, wallet):
-        _owned_directory(path, user)
-    _write(wallet / "inert-marker", b"not a key", 0o444)
-    config = _config(
-        target_platform=oci_release.target.target_platform,
-        state_root=str(state),
-        release_root=str(release),
-        worker_state_root=str(run / "unused-worker"),
-        operator_input_root=str(run / "unused-input"),
-        worker_cpu_millis=1000,
-        worker_memory_bytes=1024**3,
-        wallet={"path": str(wallet), "name": "none", "hotkey": "none"},
-    )
     host, tree, helpers = _host_bundle(run, config)
     old = legacy_signed(
         legacy_directive(
+            validator_hotkeys=[config.validator_hotkey],
             release={
                 **legacy_directive().release.model_dump(mode="python"),
                 "target_platform": config.target_platform,
-            }
+            },
         )
     )
     predecessor = SimpleNamespace(
@@ -334,6 +314,43 @@ def test_signed_host_child_stages_oci_and_rehearses_without_wallet_or_service_st
     upgrade._prestop_host_requirements(control, tree)
     bundle = run / "release.bundle"
     _write(bundle, oci_release.bundle, 0o400)
+    return SimpleNamespace(control=control, tree=tree, bundle=bundle, controls=controls)
+
+
+def test_signed_host_child_stages_oci_and_rehearses_without_wallet_or_service_stop(
+    tmp_path, oci_release, package_case, package_limits, policy, worker_capacity, chain_config
+):
+    assert os.geteuid() == 0 and Path("/var/lib") in tmp_path.parents
+    _ROOT.mkdir(mode=0o755, exist_ok=True)
+    user = _account()
+    assert _show_unit().get("ActiveState") != "active"
+    run = _ROOT / ("signed-initial-" + secrets.token_hex(8))
+    run.mkdir(mode=0o755)
+    run.chmod(0o755)
+    state, release, wallet = (run / name for name in ("state", "release", "inert-wallet"))
+    for path in (state, release, wallet):
+        _owned_directory(path, user)
+    _write(wallet / "inert-marker", b"not a key", 0o444)
+    config = _config(
+        target_platform=oci_release.target.target_platform,
+        state_root=str(state),
+        release_root=str(release),
+        worker_state_root=str(run / "unused-worker"),
+        operator_input_root=str(run / "unused-input"),
+        worker_cpu_millis=1000,
+        worker_memory_bytes=1024**3,
+        wallet={"path": str(wallet), "name": "none", "hotkey": "none"},
+    )
+    case = _signed_preflight_case(
+        run,
+        config,
+        oci_release,
+        package_case,
+        package_limits,
+        policy,
+        worker_capacity,
+        chain_config,
+    )
     fragment = run / "preflight-base.service"
     _write(
         fragment,
@@ -350,14 +367,14 @@ def test_signed_host_child_stages_oci_and_rehearses_without_wallet_or_service_st
         ).stdout.splitlines()
     )
     upgrade._rehearse_service(
-        control,
+        case.control,
         user,
         {"Id": "umi-validator-supervisor.service", "FragmentPath": str(fragment)},
-        tree,
-        bundle,
+        case.tree,
+        case.bundle,
     )
     assert _show_unit() == before
-    tree.recheck()
+    case.tree.recheck()
     assert (wallet / "inert-marker").read_bytes() == b"not a key"
     assert not (state / "successor-v4").exists()
     assert not Path(config.worker_state_root).exists()

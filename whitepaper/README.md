@@ -4,12 +4,12 @@ Canonical public whitepaper and successor mechanism specification
 
 Protocol version: 0.2
 
-Status: Successor specification and implementation work; open competition rewards inactive; existing bootstrap remains governed by its signed policy and fixed sunset
+Status: Successor specification and implementation work; open competition rewards inactive; temporary registration-bridge weights governed by a separate signed policy and fixed sunset
 
 This edition replaces the proposed endpoint-only launch design in
 [version 0.1](LEGACY_V0_1.md). It does not activate a new reward mechanism,
-extend the current bootstrap, change its frozen eligibility manifest, or
-authorize a validator transaction. Activation requires the separately published,
+extend the temporary registration bridge, rewrite historical bootstrap records,
+or authorize a validator transaction. Activation requires the separately published,
 signed successor policy and the evidence in Section 10.
 
 Publication files: [PDF](UMI-Whitepaper.pdf), [LaTeX entry point](main.tex),
@@ -43,12 +43,37 @@ for endpoint service, subject to the service deadline and applicable terms.
 A promoted model must run with its archived dependencies and no external
 inference service. Future tasks require their own evaluation and reward policy.
 
-The current seven-day bootstrap is a separate historical service mechanism.
-It checks health endpoints and replays old evidence. Its signed manifest,
-lease and block sunset remain unchanged. See the
+The frozen two-miner pilot bootstrap is retired. Its signed manifest and
+historical evidence remain unchanged; see the
 [bootstrap addendum](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and
 [shared-validator supersession](../docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md).
-Open registration under this document never adds a miner to that frozen row.
+It was replaced by the separately signed
+[temporary registration bridge](../docs/REGISTRATION_BRIDGE.md).
+The [September 13 deployment record](../docs/REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
+records funding-grouped bridge rows finalized by validators UID 0 and UID 54.
+
+The bridge checks registered miners' chain-announced HTTPS health endpoints.
+Prior pilot participation and a running translation model are not required.
+Passing miners connected by a shared coldkey, HTTPS endpoint IP or recorded
+pre-registration funding source share one equal group weight budget, divided
+among their passing UIDs. Validator-permitted and owner-associated identities
+remain excluded. The [miner guide](../docs/CURRENT_MINER_OPERATION.md) gives the
+complete eligibility and endpoint requirements.
+
+Funding assertions bind an exact registration identity in the signed policy.
+A cached coordinator checker detects new registrations; new funding links
+affect weights only after a signed snapshot refresh. Validators and miners
+do not each need a Taostats API key. Shared-sender grouping can combine
+independent exchange customers, and separate funding sources can evade it.
+It does not prove common human ownership. The
+[funding-cap rule](../docs/REGISTRATION_BRIDGE_FUNDING_CAP.md) is temporary and
+is not a requirement of the 70/30 successor mechanism specified below.
+
+Bridge weights measure availability only. They establish neither translation
+quality nor successor qualification. The bridge retains the original deadline:
+new submissions stop before block `9,073,731`, with hard sunset `9,075,171`,
+unless superseded sooner by an approved transition. This document does not
+extend that deadline or reopen the retired pilot.
 
 Version 0.2 supersedes [version 0.1](LEGACY_V0_1.md)'s proposed fixed four-validator,
 three-publisher and 30-day-soak launch gates. It replaces them with a published
@@ -488,10 +513,12 @@ Test the actual installed supervisor against the successor. Publish a host
 upgrade only if required, with explicit operator consent and rollback.
 Never run competing weight writers for the same hotkey.
 
-Keep the current UID 0 and UID 54 bootstrap processes operating within their
-existing policy until the approved transition. A signed transition coordinates
-the stop of each old worker and activation of its successor. The historical
-bootstrap's hard sunset remains effective even if the successor is delayed.
+Keep the UID 0 and UID 54 registration-bridge processes operating within their
+signed policy until the approved transition or their submission deadline.
+A signed transition coordinates the stop of each old worker and activation of
+its successor, preserving authorization history, keys and transaction journals.
+The bridge's inherited hard sunset remains effective even if the successor is
+delayed.
 
 ## 11. Implementation status
 
