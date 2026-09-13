@@ -38,12 +38,13 @@ protocol extension.
 
 ## Current status
 
-The version 0.2 whitepaper defines the successor design. Its signed-submission
-registry with capacity limits, model archive verifier, paired-model executor,
-evaluation replay, baseline promotion store and exact row projection are local,
-weight-disabled implementation work.
-They are not connected to the public miner service or the installed bootstrap
-supervisors. No successor reward allocation has been activated. See the
+The version 0.2 whitepaper defines the successor design. The code includes signed
+submission intake, model preservation and promotion, evaluation and settlement,
+and a separately authorized weight worker. The successor supervisor supports
+per-round input updates and recovery from interrupted host upgrades.
+The public competition service is not deployed, and the installed validators
+still use their signed registration-bridge policy. No successor reward allocation
+has been activated. See the
 [implementation checklist](docs/OPEN_COMPETITION.md) for the tested scope and
 remaining production work.
 
@@ -107,7 +108,7 @@ temporary registration-bridge weights
 signed bridge policy + hash-pinned release directive
   -> finalized registration, owner, permit, and serving roster
   -> bounded public HTTPS health checks and finalized roster recheck
-  -> merge live UIDs sharing a coldkey or HTTPS IP (ports ignored)
+  -> merge live UIDs by coldkey, HTTPS IP or signed funding link (ports ignored)
   -> equal total weight per connected group, split among its live UIDs
   -> exact direct 256-entry row from the installed validator
   -> finalized row and LastUpdate as the public receipt

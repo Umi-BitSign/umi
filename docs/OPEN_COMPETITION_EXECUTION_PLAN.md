@@ -88,9 +88,12 @@ activate rewards or extend the signed bootstrap sunset.
 - [x] Wire generic initial privileged preparation into the operator command.
 - [x] Adapt and rehearse signed preflight and lifecycle in both coordinator roots.
 - [x] Rehearse per-instance interruption/restart on both Linux architectures.
-- [ ] Rehearse the complete signed initial migration and interrupted-command recovery together.
-- [ ] Rerun all tests at the final publication revision.
+- [x] Rehearse the complete signed initial migration and interrupted-command recovery together.
 - [ ] Complete the real-model, independent-evaluation and signed-activation gates.
+
+Publication also requires passing full-regression CI for the candidate revision.
+That gate is tracked by the repository checks, separately from the activation
+inputs above. A documentation merge does not activate the successor.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting
@@ -149,8 +152,9 @@ with separate RootDirectory trees and a shared resource slice. The generic
 host-namespace adapter rejects this layout unless the coordinator adapter has
 prepared the selected instance's private filesystem view. The adapter is now
 connected to initial upgrade, publication recovery and startup checks. Rooted
-preflight and lifecycle rehearsals now pass; the complete signed migration
-still needs a combined rehearsal before either live validator is switched.
+preflight, lifecycle and combined signed-migration rehearsals now pass. Either
+live validator still requires reviewed production artifacts and authorized
+activation inputs before it can be switched.
 
 Read-only inspection confirmed that both instances load the shared
 `umi-validator@.service` fragment, with no drop-ins, and use cgroups beneath
@@ -352,6 +356,34 @@ The later fixture, service-plan, cleanup and weight-worker checks passed 118
 tests, including an explicit assertion of the 70/30 allocation through the
 signed-package and weight-submission path. Its chain and model inputs are
 synthetic.
+
+The combined native migration revealed two systemd behaviors absent from the
+earlier unit mocks. Inactive services can load a new drop-in on a `show` request
+before `daemon-reload`, and `ExecStart` reports acquire execution timestamps and
+a PID after startup. Initial switch and recovery now accept only the exact
+verified stopped successor at the first boundary. Startup compares configured
+commands separately from execution metadata and still verifies the main PID,
+cgroup and original exclusive process lock. Unexpected commands, fields,
+identities and drop-ins remain errors.
+
+[Native migration at aaf7689](https://github.com/Umi-BitSign/umi/actions/runs/34741778051)
+passed on amd64 and arm64. Each architecture passed 359 state/startup checks,
+52 root-filesystem checks, two signed rooted preflights, the two-instance lifecycle
+test and the combined signed migration/interrupted-command test, with 12
+opposite-architecture variants skipped. The migration uses real
+service operations, signed archives and retained journals, with synthetic chain
+observations and an anchor/lock startup probe. It does not establish live chain
+authority or independent model execution.
+
+The preceding full local regression at `3fcd345` passed 3,754 tests with 46
+platform/opt-in skips and 34 warnings. The subsequent recovery change passed
+155 focused tests. Full publication CI must include that later change. The
+whitepaper rebuild produced the same tracked Markdown-derived LaTeX and PDF.
+
+A read-only production check during this work found UID 0 and UID 54 active
+with their unchanged start times of 2026-09-13 02:15:17 and 02:19:15 UTC.
+No live service, wallet, signed directive or reward policy was changed. This
+process-health check is not a fresh chain-incentive readback.
 
 The old live workers enforce current authorization validity, and the common
 service exits at sunset before reconciliation. They cannot simply be started

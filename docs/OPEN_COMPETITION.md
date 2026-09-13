@@ -5,7 +5,7 @@ participation and optional model contributions. This document describes the
 code that exists and the remaining production integration. Nothing here
 authorizes new weights or changes the current bootstrap.
 
-## Implemented, weight-disabled
+## Implemented; successor rewards inactive
 
 - Canonical, hotkey-signed submissions with explicit policy and terms binding.
 - Registration-snapshot checks, persistent idempotent intake, replacement
@@ -79,8 +79,12 @@ authorizes new weights or changes the current bootstrap.
   the superseded writer. Both coordinator instances have separate paths,
   process locks, cleanup units and resource boundaries.
 - Native amd64 and arm64 tests of signed preflight, rooted service startup,
-  interruption and cleanup. The complete signed migration and interrupted-command
-  scenario is under test; its passing result is still required before release.
+  interruption and cleanup. The combined signed migration and interrupted-command
+  scenario passed on both architectures at `aaf7689`; see the
+  [native run](https://github.com/Umi-BitSign/umi/actions/runs/34741778051).
+  It uses synthetic chain observations and a startup probe that verifies the
+  installed anchor and original process lock. It does not run a live model or
+  authorize a production transaction.
 
 Model-bundle verification proves possession and byte integrity. The signed
 review records are evaluator attestations about offline reconstruction and
@@ -120,8 +124,8 @@ independent access to it.
   they do not yet establish a live protected-data publication workflow.
 - Published license/reconstruction evidence and model-copy review operations.
 - Signed successor policy/activation artifacts and production chain submission.
-- Completion of the combined signed initial-migration rehearsal and publication
-  of reviewed host/OCI upgrade artifacts. The dedicated upgrade command exists;
+- Publication of reviewed host/OCI upgrade artifacts and deployment-specific
+  rehearsal. The dedicated upgrade command exists and has native migration tests;
   the existing fresh-install script cannot upgrade an installed supervisor.
   See [upgrade requirements](SUCCESSOR_SUPERVISOR_UPGRADE.md). Successor inputs
   must never be relabeled as the frozen bootstrap profile.

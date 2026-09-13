@@ -1,8 +1,9 @@
 # Successor supervisor upgrade requirements
 
-Status: implementation requirements. No upgrade procedure or successor release
-is approved by this document. Keep UID 0 and UID 54 on their existing bootstrap
-policy until an authorized transition, subject to its hard sunset.
+Status: implemented upgrade command with synthetic native Linux migration
+coverage. This document does not approve production artifacts or a transition.
+Keep UID 0 and UID 54 on their existing bridge policy until an authorized
+transition, subject to its hard sunset.
 
 ## Available read-only inspection
 
@@ -26,7 +27,7 @@ the command's successor policy does not replace it. The result always reports
 `readiness: hold` and lists checks still requiring a real upgrade procedure.
 Contract fixtures cover both architectures; they are not Linux sandbox rehearsals.
 
-## Implemented components, not an installation procedure
+## Components and dedicated upgrade command
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;
@@ -76,8 +77,9 @@ The stopped-host lease and recovery checkpoint preserve the old process lock,
 directive, journal, claims and supporting bytes. Incomplete or uncertain effects
 remain on hold. Source authentication, stopped recovery, local operator consent,
 fresh chain checks and actual sandbox execution are separate acceptance checks.
-Both-architecture rooted preflight and lifecycle checks now pass. A combined
-signed initial-migration and interrupted-command rehearsal is still required.
+Both-architecture rooted preflight and lifecycle checks pass. The combined
+signed initial-migration and interrupted-command rehearsal also passed on
+amd64 and arm64 at `aaf7689`, with the fixture boundaries described below.
 
 `competition_upgrade_namespace` prepares the recovery observer's fixed helper
 paths in a fresh root process's private Linux mount namespace. It disables mount
@@ -126,12 +128,12 @@ no authorization. Unexpected entries or exhausted retention hold the operation.
 Existing published anchors are checked before stopping the service and again
 at the stopped acceptance boundary.
 
-The real signed-host/OCI preflight passed on the isolated arm64 VM, as did the
-root process-death retention test. These tests do not prove that the complete
-initial migration succeeds. The coordinator's rooted preflight and lifecycle
-checks also pass on both architectures, with the scope described below. Do not
-use this development command on either live validator before the combined
-migration rehearsal passes and its activation inputs are approved.
+The signed-host/OCI preflight and root process-death retention test first passed
+on the isolated arm64 VM. Native CI now also covers the combined initial migration
+and interrupted-command recovery on both architectures. Production use still
+requires reviewed release artifacts, approved activation inputs and a rehearsal
+of the deployment-specific runtime and model. Do not use fixture keys, chain
+observations or model bytes as those inputs.
 
 The fixed `umi-competition-supervisor` entrypoint now connects the authenticated
 root anchor, owned chain observer, bounded HTTPS delivery, atomic input selection
@@ -220,6 +222,21 @@ resource limits, per-instance SIGKILL cleanup and restart, preservation of the
 other instance, and teardown container absence. It does not execute the
 complete signed initial migration or establish live chain authority.
 
+The [combined migration run at aaf7689](https://github.com/Umi-BitSign/umi/actions/runs/34741778051)
+passed on both architectures. It creates two distinct signed bridge installations,
+performs the actual wallet-free signed-host/OCI preflight, archives and reconciles
+their retained history, publishes their successor anchors and switches the units.
+It interrupts the second command immediately after durable intent publication
+and resumes in a fresh process. The first instance, both lock inodes, every
+bridge-journal byte and both legacy high-water records remain intact.
+
+The chain-observation port is synthetic. The started fixture entrypoint verifies
+the real materialized anchor and holds the original process lock, but does not
+run the production observation loop or submit weights. The separate lifecycle
+test exercises actual Podman execution and cleanup. These results establish
+the tested migration behavior; real model execution, independent evaluation and
+production activation remain separate gates.
+
 The successor uses a dedicated user systemd manager for rootless Podman.
 `umi-competition-supervisor-cleanup` acquires the original lock and stops only
 the exact labelled successor container. Noninteractive startup and SIGKILL
@@ -231,8 +248,8 @@ restart enabled; the publisher now seals and verifies both unit files. A cold
 user-namespace check then exposed a Podman manager-detection difference. The
 adapter now explicitly selects systemd. The actual cold-start service test
 passed with this fixed command, kernel resource checks and the cleanup paths.
-It used synthetic inputs and an inert launcher. The complete migration is not
-ready for deployment.
+It used synthetic inputs and an inert launcher. No live deployment is authorized
+by these test results.
 
 ## Why an image update is insufficient
 
