@@ -17,6 +17,11 @@ from .competition_evidence import (
     independent_evidence_digest,
     replay_independent_evaluation,
 )
+from .competition_publication import (
+    CutoffPublication,
+    PublicationReplayLimits,
+    build_cutoff_publication,
+)
 from .competition_settlement import (
     CompetitionSettlement,
     EvidenceCutoffSchedule,
@@ -26,6 +31,7 @@ from .competition_settlement import (
     evidence_cutoff_schedule_digest,
 )
 from .open_competition import (
+    STRATUM_WEIGHTS,
     AttestedResult,
     CompetitionPolicy,
     EvaluationResult,
@@ -80,6 +86,11 @@ class AdmissionCapacityError(ValueError):
     """A new admission would exceed its configured durable capacity."""
 
 
+class RoundPreparationCapacity(StrictProtocolModel):
+    maximum_records: Annotated[int, Field(ge=1, le=65_536)] = 1024
+    maximum_bytes: Annotated[int, Field(ge=1, le=16 * 1024**3)] = 1024**3
+
+
 def verify_review(review: AttestedPromotionReview, policy: CompetitionPolicy) -> None:
     groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
     seen: set[str] = set()
@@ -109,6 +120,7 @@ class CompetitionStore:
         policy: CompetitionPolicy,
         *,
         admission_capacity: AdmissionCapacity | None = None,
+        preparation_capacity: RoundPreparationCapacity | None = None,
     ):
         if not directory.is_absolute() or directory.is_symlink():
             raise ValueError("competition state directory must be absolute and not a symlink")
@@ -119,6 +131,9 @@ class CompetitionStore:
         self.admission_capacity = AdmissionCapacity.model_validate_json(
             canonical_json_bytes(admission_capacity or AdmissionCapacity())
         )
+        self.preparation_capacity = RoundPreparationCapacity.model_validate_json(
+            canonical_json_bytes(preparation_capacity or RoundPreparationCapacity())
+        )
         self.directory = directory
         self.path = directory / "competition.sqlite3"
         if self.path.is_symlink():
@@ -126,6 +141,9 @@ class CompetitionStore:
         with self._connection() as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS round_preparations (
+                    suite TEXT PRIMARY KEY, body BLOB NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS submissions (
                     digest TEXT PRIMARY KEY, hotkey TEXT NOT NULL, track TEXT NOT NULL,
                     sequence INTEGER NOT NULL, accepted_block INTEGER NOT NULL,
@@ -929,6 +947,238 @@ class CompetitionStore:
                 ),
             )
             return receipt
+
+    def prepare_round(
+        self,
+        *,
+        snapshot: RegistrationSnapshot,
+        suite: EvaluationSuite,
+        evaluation_close_block: int,
+        reveal_block: int,
+        evidence_cutoff_block: int,
+        valid_through_block: int,
+        limits: PublicationReplayLimits,
+    ) -> dict:
+        """Freeze the complete current roster and cutoff in one transaction.
+
+        This produces unsigned publication inputs. The caller must obtain the
+        snapshot from its owned provider; this store has no finality port or key.
+        An exact retry returns the original preparation without retiming it.
+        """
+        snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
+        suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+        limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
+        if suite.policy_sha256 != digest(self.policy) or any(
+            sum(case.stratum == stratum for case in suite.cases)
+            < self.policy.minimum_cases_per_stratum
+            for stratum in STRATUM_WEIGHTS
+        ):
+            raise ValueError("round suite has the wrong policy or insufficient stratum coverage")
+        window = {
+            "evaluation_close_block": evaluation_close_block,
+            "reveal_block": reveal_block,
+            "valid_through_block": valid_through_block,
+        }
+        if any(
+            type(v) is not int or not 0 <= v <= 2**53 - 1
+            for v in (*window.values(), evidence_cutoff_block)
+        ):
+            raise ValueError("round window requires integer block numbers")
+        suite_id, policy_id = digest(suite), digest(self.policy)
+        with self._transaction() as connection:
+            prepared = self._prepared_round(connection, suite_id, limits)
+            if prepared is not None:
+                cutoff = prepared["cutoff_publication"]
+                if any(cutoff["round"][key] != value for key, value in window.items()) or (
+                    cutoff["cutoff_schedule"]["evidence_cutoff_block"] != evidence_cutoff_block
+                ):
+                    raise ValueError("suite already has a frozen round window")
+                return prepared
+            if self._baseline_conflicted(connection):
+                raise ValueError("round preparation requires an unconflicted baseline")
+            if connection.execute(
+                "SELECT 1 FROM suite_usage WHERE suite=?", (suite_id,)
+            ).fetchone():
+                raise ValueError("evaluation suite was already used by a closed round")
+            if connection.execute(
+                "SELECT 1 FROM evidence_cutoff_schedules s WHERE NOT EXISTS "
+                "(SELECT 1 FROM rounds r WHERE r.digest=s.round)"
+            ).fetchone():
+                raise ValueError("a previously fixed cutoff still needs its round closed")
+            head = connection.execute(
+                "SELECT model FROM promotions ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if head is None:
+                raise ValueError("round preparation requires a preserved baseline")
+            latest = connection.execute(
+                "SELECT sequence, body FROM rounds ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if latest and snapshot.block <= json.loads(latest[1])["submission_close_block"]:
+                raise ValueError("round preparation must advance the admission boundary")
+            keys = [
+                identity(r.hotkey)
+                for r in snapshot.registrations
+                if r.uid < self.policy.maximum_uids
+            ]
+            placeholders = ",".join("?" for _ in keys) or "NULL"
+            selected = connection.execute(
+                "SELECT s.digest, length(s.body) FROM submissions s WHERE s.accepted_block<=? "
+                f"AND s.hotkey IN ({placeholders}) "
+                "AND s.expires_block>=? AND NOT EXISTS "
+                "(SELECT 1 FROM submissions n WHERE n.hotkey=s.hotkey AND n.track=s.track "
+                "AND n.sequence>s.sequence AND n.accepted_block<=?) ORDER BY s.digest LIMIT 513",
+                (snapshot.block, *keys, evaluation_close_block, snapshot.block),
+            ).fetchall()
+            if len(selected) > 512 or sum(size + 1 for _, size in selected) + 2 > min(
+                limits.maximum_roster_bytes, limits.maximum_certificate_bytes
+            ):
+                raise ValueError("round preparation roster exceeds its byte or count bound")
+            ids = [record[0] for record in selected]
+            placeholders = ",".join("?" for _ in ids) or "NULL"
+            rows = connection.execute(
+                f"SELECT body FROM submissions WHERE digest IN ({placeholders}) ORDER BY digest",
+                ids,
+            ).fetchall()
+            submissions = tuple(SignedSubmission.model_validate_json(row[0]) for row in rows)
+            round_ = EvaluationRound(
+                schema="umi-competition-round/1",
+                policy_sha256=policy_id,
+                sequence=1 if latest is None else latest[0] + 1,
+                suite_sha256=suite_id,
+                incumbent_model_sha256=head[0],
+                runtime_sha256=self.policy.evaluation_runtime_sha256,
+                roster=tuple(digest(s.submission) for s in submissions),
+                submission_close_block=snapshot.block,
+                **window,
+            )
+            round_id = digest(round_)
+            schedule = EvidenceCutoffSchedule(
+                schema="umi-competition-evidence-cutoff/1",
+                policy_sha256=policy_id,
+                round_sha256=round_id,
+                evidence_cutoff_block=evidence_cutoff_block,
+            )
+            publication = build_cutoff_publication(
+                round_=round_,
+                cutoff_schedule=schedule,
+                registration_snapshot=snapshot,
+                submissions=submissions,
+                policy=self.policy,
+                limits=limits,
+            )
+            _advance_block(connection, snapshot.block)
+            receipt = {
+                "schema": "umi-competition-evidence-cutoff-receipt/1",
+                "policy_sha256": policy_id,
+                "round_sha256": round_id,
+                "schedule_sha256": evidence_cutoff_schedule_digest(schedule),
+                "evidence_cutoff_block": schedule.evidence_cutoff_block,
+                "fixed_observed_block": snapshot.block,
+                "chain_submission_authorized": False,
+            }
+            connection.execute(
+                "INSERT INTO evidence_cutoff_schedules VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    round_id,
+                    round_.sequence,
+                    schedule.evidence_cutoff_block,
+                    receipt["schedule_sha256"],
+                    canonical_json_bytes(schedule),
+                    snapshot.block,
+                    canonical_json_bytes(receipt),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO rounds VALUES (?, ?, ?)",
+                (round_id, round_.sequence, canonical_json_bytes(round_)),
+            )
+            connection.execute("INSERT INTO suite_usage VALUES (?, ?)", (suite_id, round_id))
+            prepared = {
+                "schema": "umi-competition-round-preparation/1",
+                "cutoff_publication": publication.model_dump(mode="json", by_alias=True),
+                "submissions": [s.model_dump(mode="json", by_alias=True) for s in submissions],
+                "cutoff_receipt": receipt,
+                "chain_submission_authorized": False,
+            }
+            body = canonical_json_bytes(prepared)
+            if len(body) > limits.maximum_certificate_bytes:
+                raise ValueError("round preparation exceeds its byte bound")
+            records, size = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(length(body)), 0) FROM round_preparations"
+            ).fetchone()
+            if (
+                records >= self.preparation_capacity.maximum_records
+                or size + len(body) > self.preparation_capacity.maximum_bytes
+            ):
+                raise ValueError("round preparation storage capacity is exhausted")
+            connection.execute("INSERT INTO round_preparations VALUES (?, ?)", (suite_id, body))
+            return prepared
+
+    def _prepared_round(self, connection, suite_id, limits):
+        prior = connection.execute(
+            "SELECT length(body) FROM round_preparations WHERE suite=?", (suite_id,)
+        ).fetchone()
+        if prior is None:
+            return None
+        if not 0 < prior[0] <= limits.maximum_certificate_bytes:
+            raise ValueError("retained preparation exceeds its byte bound")
+        raw = connection.execute(
+            "SELECT body FROM round_preparations WHERE suite=?", (suite_id,)
+        ).fetchone()[0]
+        prepared = json.loads(raw)
+        if (
+            not isinstance(prepared, dict)
+            or set(prepared)
+            != {
+                "schema",
+                "cutoff_publication",
+                "submissions",
+                "cutoff_receipt",
+                "chain_submission_authorized",
+            }
+            or prepared["schema"] != "umi-competition-round-preparation/1"
+            or prepared["chain_submission_authorized"] is not False
+            or canonical_json_bytes(prepared) != raw
+        ):
+            raise ValueError("retained round preparation is corrupt")
+        cutoff = CutoffPublication.model_validate_json(
+            canonical_json_bytes(prepared["cutoff_publication"])
+        )
+        submissions = tuple(
+            SignedSubmission.model_validate_json(canonical_json_bytes(s))
+            for s in prepared["submissions"]
+        )
+        expected = build_cutoff_publication(
+            round_=cutoff.round,
+            cutoff_schedule=cutoff.cutoff_schedule,
+            registration_snapshot=cutoff.registration_snapshot,
+            submissions=submissions,
+            policy=self.policy,
+            limits=limits,
+        )
+        round_id = digest(cutoff.round)
+        round_row = connection.execute(
+            "SELECT body FROM rounds WHERE digest=?", (round_id,)
+        ).fetchone()
+        schedule = connection.execute(
+            "SELECT body, receipt FROM evidence_cutoff_schedules WHERE round=?", (round_id,)
+        ).fetchone()
+        usage = connection.execute(
+            "SELECT round FROM suite_usage WHERE suite=?", (suite_id,)
+        ).fetchone()
+        if (
+            cutoff != expected
+            or cutoff.round.suite_sha256 != suite_id
+            or round_row != (canonical_json_bytes(cutoff.round),)
+            or schedule
+            != (
+                canonical_json_bytes(cutoff.cutoff_schedule),
+                canonical_json_bytes(prepared["cutoff_receipt"]),
+            )
+            or usage != (round_id,)
+        ):
+            raise ValueError("retained round preparation differs from its frozen records")
+        return prepared
 
     def close_round(
         self,

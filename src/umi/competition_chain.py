@@ -47,6 +47,7 @@ from .validator_chain import (
     ValidatorChainError,
     VerifiedStorageBatch,
 )
+from .validator_chain_scan import VerifiedFinalizedBlockIdentity
 from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
@@ -367,6 +368,10 @@ class FinalizedRegistrationProvider:
                 CREATE TABLE IF NOT EXISTS artifacts (
                     digest TEXT PRIMARY KEY, body BLOB NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS observed_head (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    block INTEGER NOT NULL, hash TEXT NOT NULL
+                );
             """)
             connection.execute("BEGIN IMMEDIATE")
             bound = connection.execute("SELECT digest FROM binding").fetchone()
@@ -433,16 +438,30 @@ class FinalizedRegistrationProvider:
         return (await self.collect()).snapshot
 
     async def collect(self) -> RegistrationCapture:
+        return await self._collect()
+
+    async def collect_at(self, height: int) -> RegistrationCapture:
+        """Reprove recent membership at an exact height from the owned verifier.
+
+        Round signers can compare one snapshot despite different current heads.
+        This does not accept coordinator headers or relax wall-clock freshness.
+        """
+        height = _uint(height, 2**53 - 1)
+        if height < self.config.minimum_finalized_block:
+            raise ValueError("requested registration block precedes configured minimum")
+        return await self._collect(height)
+
+    async def _collect(self, height: int | None = None) -> RegistrationCapture:
         if self._closed:
             raise ValueError("registration provider is closed")
         try:
             return await asyncio.wait_for(
-                self._collect_locked(), self.config.collection_timeout_seconds
+                self._collect_locked(height), self.config.collection_timeout_seconds
             )
         except asyncio.TimeoutError as error:
             raise ValueError("registration collection timed out") from error
 
-    async def _collect_locked(self) -> RegistrationCapture:
+    async def _collect_locked(self, height: int | None = None) -> RegistrationCapture:
         async with self._lock:
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
@@ -457,7 +476,30 @@ class FinalizedRegistrationProvider:
             self._check_finality(ref, block)
             self._fresh(block.timestamp_ms)
             self._check_prior(ref)
-            if self._latest is not None and self._latest.snapshot.block_hash == ref.block_hash:
+            head = ref
+            if height is not None and height != head.block_number:
+                if not 0 <= head.block_number - height <= self.policy.maximum_snapshot_age_blocks:
+                    raise ValueError("requested registration block is future or stale")
+                identity = await self._finality.verified_identity_at(height)
+                if (
+                    not isinstance(identity, VerifiedFinalizedBlockIdentity)
+                    or identity.snapshot.block_number != height
+                ):
+                    raise ValueError("owned historical finalized identity is unavailable")
+                ref = identity.snapshot
+                block = await self._finality.verified_block_at(height)
+                self._check_finality(ref, block)
+                if (
+                    identity.finality_verifier_sha256 != block.finality_verifier_sha256
+                    or identity.finality_evidence_sha256 != block.finality_evidence_sha256
+                ):
+                    raise ValueError("owned historical finalized evidence binding mismatch")
+                self._fresh(block.timestamp_ms)
+            if (
+                height is None
+                and self._latest is not None
+                and self._latest.snapshot.block_hash == ref.block_hash
+            ):
                 return self._latest
             runtime = await self._proofs.pinned_runtime(ref, self._runtime_pin)
             if (
@@ -517,8 +559,10 @@ class FinalizedRegistrationProvider:
                 ):
                     raise ValueError("registration inverse mapping mismatch")
             newest = await self._finality.verified_finalized_snapshot()
-            if newest.block_number < ref.block_number or (
-                newest.block_number == ref.block_number and newest != ref
+            if (
+                not isinstance(newest, FinalizedSnapshotRef)
+                or newest.block_number < head.block_number
+                or (newest.block_number == head.block_number and newest != head)
             ):
                 raise ValueError("owned finalized head rolled back or changed")
             if newest.block_number - ref.block_number > self.policy.maximum_snapshot_age_blocks:
@@ -581,8 +625,9 @@ class FinalizedRegistrationProvider:
                     "chain_submission_authorized": False,
                 },
             )
-            self._save(capture, evidence, runtime.metadata_bytes)
-            self._latest = capture
+            self._save(capture, evidence, runtime.metadata_bytes, head=newest)
+            if ref == head:
+                self._latest = capture
             return capture
 
     def _check_finality(self, ref: FinalizedSnapshotRef, block: Any) -> None:
@@ -645,18 +690,30 @@ class FinalizedRegistrationProvider:
     def _check_prior(self, ref: FinalizedSnapshotRef) -> None:
         connection = self._connect()
         try:
-            prior = connection.execute(
-                "SELECT block, hash FROM captures ORDER BY block DESC LIMIT 1"
-            ).fetchone()
+            self._check_head(connection, ref.block_number, ref.block_hash)
         finally:
             connection.close()
-        if prior and (
-            ref.block_number < prior[0]
-            or (ref.block_number == prior[0] and ref.block_hash != prior[1])
+
+    @staticmethod
+    def _check_head(connection, height, block_hash):
+        # Include captures for caches written before observed_head existed.
+        priors = connection.execute(
+            "SELECT block, hash FROM captures UNION ALL SELECT block, hash FROM observed_head "
+            "ORDER BY block DESC LIMIT 2"
+        ).fetchall()
+        if any(
+            height < block or (height == block and block_hash != hash_) for block, hash_ in priors
         ):
             raise ValueError("registration finalized head rolled back or changed")
 
-    def _save(self, capture: RegistrationCapture, evidence: bytes, metadata: bytes) -> None:
+    def _save(
+        self,
+        capture: RegistrationCapture,
+        evidence: bytes,
+        metadata: bytes,
+        *,
+        head: FinalizedSnapshotRef | None = None,
+    ) -> None:
         snapshot = capture.snapshot
         connection = self._connect()
         try:
@@ -667,14 +724,14 @@ class FinalizedRegistrationProvider:
             ).fetchone()
             if artifact and artifact[0] != metadata:
                 raise ValueError("retained runtime metadata is corrupt")
-            latest = connection.execute(
-                "SELECT block, hash FROM captures ORDER BY block DESC LIMIT 1"
-            ).fetchone()
-            if latest and (
-                snapshot.block < latest[0]
-                or (snapshot.block == latest[0] and snapshot.block_hash != latest[1])
-            ):
-                raise ValueError("registration finalized head rolled back or changed")
+            height, block_hash = (
+                (snapshot.block, snapshot.block_hash)
+                if head is None
+                else (head.block_number, head.block_hash)
+            )
+            self._check_head(connection, height, block_hash)
+            if not 0 <= height - snapshot.block <= self.policy.maximum_snapshot_age_blocks:
+                raise ValueError("retained registration snapshot is future or stale")
             prior = connection.execute(
                 "SELECT snapshot FROM captures WHERE block=?", (snapshot.block,)
             ).fetchone()
@@ -705,6 +762,11 @@ class FinalizedRegistrationProvider:
                     ),
                 )
             self._fresh(capture.provenance["timestamp_ms"])
+            connection.execute(
+                "INSERT INTO observed_head VALUES (1, ?, ?) "
+                "ON CONFLICT(singleton) DO UPDATE SET block=excluded.block, hash=excluded.hash",
+                (height, block_hash),
+            )
             connection.commit()
         finally:
             connection.close()

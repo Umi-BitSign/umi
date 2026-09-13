@@ -105,6 +105,8 @@ contributor attribution yet.
 - [x] Pair retained endpoint responses with actual pre-reveal incumbent runs and independent-result preparation.
 - [x] Connect continuous local execution, reference reveal and signed peer agreement for both tracks.
 - [x] Connect hotkey-authenticated order/reveal delivery, peer exchange and completed-evidence collection.
+- [x] Add exact recent owned-snapshot reads and atomic current-roster/cutoff preparation.
+- [ ] Connect continuous round planning to independent cutoff/order signing and settlement publication.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
 - [ ] Rehearse integrated protected-data scheduling, evaluator dispatch and evidence publication.
@@ -127,6 +129,13 @@ retains private peer results and records completed evidence in prepared coordina
 rounds. The production coordinator must still generate quorum-signed orders,
 supply committed protected suites, and publish cutoff and settlement certificates
 on time.
+
+The [round-preparation APIs](OPEN_COMPETITION_ROUND_PREPARATION.md) now freeze
+current registrations, latest accepted submissions, the incumbent and cutoff
+in one transaction. Exact retries preserve deadlines. An evaluator can reprove
+the proposal's recent registration snapshot through its own finality provider.
+These APIs still need the continuous coordinator and quorum-signing integration;
+they do not publish or activate a round by themselves.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting
