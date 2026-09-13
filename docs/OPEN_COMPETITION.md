@@ -636,6 +636,16 @@ memory, process, scratch-space and video-size limits. Its digest must equal the
 policy's `evaluation_runtime_sha256`. The image is installed by the evaluator
 operator; a miner cannot request an unreviewed image pull.
 
+Runtime `umi-offline-cpu-runtime/2` supports CPU frameworks that create POSIX
+semaphores or shared-memory buffers. It assigns up to one quarter of the declared
+scratch budget (capped at 64 MiB) to private `/dev/shm`, with the remainder at
+`/tmp`. Both mounts are bounded, non-executable tmpfs filesystems; their combined
+allowance never exceeds `scratch_bytes`. Mount sizes are rounded down to 64 KiB
+units. IPC remains private and the model/input trees remain read-only.
+Runtime v1 retains its original single `/tmp` mount and read-only shared memory.
+The version changes the runtime digest, so selecting v2 requires a policy that
+binds it explicitly. It does not alter an existing signed policy.
+
 The initial adapter supports exactly one manifest file with role `inference`,
 ending in `.py`. The pinned image supplies `/usr/local/bin/python3` and all
 runtime dependencies. The program receives `/input/video.mp4` as its only

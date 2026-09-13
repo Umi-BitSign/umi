@@ -142,6 +142,16 @@ jobs:
           # signed-host ancestry checks require this root-owned parent sealed.
           sudo -n chmod go-w /opt
 
+      - name: CPU evaluator private shared-memory contract
+        if: matrix.scenario == 'lifecycle'
+        run: |
+          image='docker.io/library/python@sha256:68d914ec641a0b69267ce65184d000a2bc3a9ee2590ab702b82250ab2385735a'
+          podman pull "$image"
+          UMI_OFFLINE_TEST_IMAGE='docker.io/library/python@sha256:68d914ec641a0b69267ce65184d000a2bc3a9ee2590ab702b82250ab2385735a' \
+            .venv/bin/python -m pytest -q -x \
+            --junitxml="$PWD/successor-rooted-cpu-runtime.xml" \
+            tests/test_competition_runner_linux.py
+
       - name: Build the actual wallet-free successor OCI image
         env:
           ARCHITECTURE: ${{ matrix.architecture }}

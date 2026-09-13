@@ -28,7 +28,9 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class OfflineCpuRuntime(StrictProtocolModel):
-    schema_: Literal["umi-offline-cpu-runtime/1"] = Field(alias="schema")
+    schema_: Literal["umi-offline-cpu-runtime/1", "umi-offline-cpu-runtime/2"] = Field(
+        alias="schema"
+    )
     image: Annotated[
         str,
         Field(
@@ -135,6 +137,24 @@ def model_command(
     from .open_competition import BundleFile
 
     BundleFile(path=entrypoint, role="inference", sha256="00" * 32, size_bytes=0)
+    temporary_mounts = (
+        "--tmpfs",
+        f"/tmp:rw,nosuid,nodev,noexec,size={runtime.scratch_bytes},mode=1777",
+    )
+    if runtime.schema_ == "umi-offline-cpu-runtime/2":
+        # POSIX semaphores used by CPU frameworks need writable /dev/shm.
+        # Divide the existing budget, never add an unaccounted shared-memory
+        # allowance. Use 64 KiB units for the supported Linux architectures'
+        # 4/16/64 KiB pages, so tmpfs rounding stays within the budget.
+        unit = 64 * 1024
+        shared = min(runtime.scratch_bytes // 4, 64 * 1024**2) // unit * unit
+        temporary = (runtime.scratch_bytes - shared) // unit * unit
+        temporary_mounts = (
+            "--tmpfs",
+            f"/tmp:rw,nosuid,nodev,noexec,size={temporary},mode=1777",
+            "--tmpfs",
+            f"/dev/shm:rw,nosuid,nodev,noexec,size={shared},mode=1777",
+        )
     return (
         "/usr/bin/podman",
         "run",
@@ -169,8 +189,7 @@ def model_command(
         str(runtime.memory_bytes),
         "--ulimit=core=0:0",
         "--ulimit=nofile=256:256",
-        "--tmpfs",
-        f"/tmp:rw,nosuid,nodev,noexec,size={runtime.scratch_bytes},mode=1777",
+        *temporary_mounts,
         "--mount",
         f"type=bind,src={_mount_path(model)},dst=/model,ro=true",
         "--mount",

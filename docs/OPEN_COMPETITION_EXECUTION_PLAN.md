@@ -61,6 +61,16 @@ activate rewards or extend the signed bootstrap sunset.
 
 ## Work in this execution
 
+The supplied community model now has a verified ZIP importer and a Linux CPU
+adapter in [reference-model PR #1](https://github.com/Umi-BitSign/umi-reference-model/pull/1).
+One real ARM64 invocation through the actual evaluator completed in 231,638 ms
+on a synthetic two-second clip. It required explicit runtime v2 support for
+bounded private shared memory. This is functional evidence only; protected ASL
+quality, production throughput, independent evaluation and rights approval remain
+open. The private object-store backup has been downloaded and reconstructed with
+the exact original ZIP checksum. There is no public baseline download or promoted
+contributor attribution yet.
+
 - [x] Durable assignment publication/claim journal and expiry tests.
 - [x] Owned-finality endpoint origin proof and adversarial tests.
 - [x] Signed cutoff/settlement verification and conflict tests.
