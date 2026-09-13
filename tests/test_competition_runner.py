@@ -58,6 +58,40 @@ def test_cpu_command_has_no_network_wallet_or_writable_model(runtime):
     ]
     assert not any("wallet" in arg or "socket" in arg or "privileged" in arg for arg in command)
     assert command[-3:] == (runtime.image, "/model/infer.py", "/input/video.mp4")
+    temporary = [command[i + 1] for i, arg in enumerate(command) if arg == "--tmpfs"]
+    assert temporary == [f"/tmp:rw,nosuid,nodev,noexec,size={runtime.scratch_bytes},mode=1777"]
+
+
+@pytest.mark.parametrize(
+    "scratch", [1024**2, 1024**2 + 1, 16 * 1024**2, 256 * 1024**2, 512 * 1024**2]
+)
+def test_v2_private_shared_memory_divides_existing_scratch_budget(runtime, scratch):
+    original = runtime.model_copy(
+        update={"scratch_bytes": scratch, "memory_bytes": max(runtime.memory_bytes, scratch * 4)}
+    )
+    updated = original.model_copy(update={"schema_": "umi-offline-cpu-runtime/2"})
+    assert digest(updated) != digest(original)
+    updated = runner.OfflineCpuRuntime.model_validate_json(updated.model_dump_json(by_alias=True))
+    command = runner.model_command(
+        updated,
+        name="umi-evaluation-" + "ab" * 16,
+        model=Path("/archive/model"),
+        inputs=Path("/scratch/input"),
+        entrypoint="infer.py",
+        maximum_inference_ms=1000,
+    )
+    temporary = [command[i + 1] for i, arg in enumerate(command) if arg == "--tmpfs"]
+    assert len(temporary) == 2
+    sizes = []
+    for path, mount in zip(("/tmp", "/dev/shm"), temporary, strict=True):
+        assert mount.startswith(f"{path}:rw,nosuid,nodev,noexec,size=")
+        assert mount.endswith(",mode=1777")
+        sizes.append(int(mount.split("size=")[1].split(",")[0]))
+    assert 0 < sum(sizes) <= scratch
+    assert all(size % (64 * 1024) == 0 for size in sizes)
+    assert 0 < sizes[1] <= min(scratch // 4, 64 * 1024**2)
+    assert "--ipc=private" in command
+    assert "--read-only" in command
 
 
 @pytest.mark.parametrize("path", ["/source,ro=false", "/source\nother", "relative"])
