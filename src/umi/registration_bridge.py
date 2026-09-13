@@ -46,6 +46,7 @@ from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
+from .registration_funding_snapshot import FundingSnapshot, matching_funders
 from .simple_bootstrap_validator import (
     SIMPLE_BOOTSTRAP_MANIFEST_SHA256,
     SimpleBootstrapJournal,
@@ -153,23 +154,40 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
         expected_grouping = {
             "equal_live_coldkey_groups/1": "registered_hotkey_owner_account_id32/1",
             "equal_live_coldkey_ip_groups/1": "registered_owner_or_https_ip_connected_components/1",
+            "equal_live_coldkey_ip_funder_groups/1": (
+                "registered_owner_or_https_ip_or_recorded_funder_connected_components/1"
+            ),
         }[self.reward_rule]
         if self.grouping_rule != expected_grouping:
             raise ValueError("registration bridge reward and grouping rules disagree")
         return self
 
 
+class RegistrationBridgeFundingPolicyBody(RegistrationBridgePolicyBody):
+    schema_: Literal["umi-registration-bridge-policy-body/2"] = Field(alias="schema")
+    reward_rule: Literal["equal_live_coldkey_ip_funder_groups/1"]
+    grouping_rule: Literal["registered_owner_or_https_ip_or_recorded_funder_connected_components/1"]
+    funding_snapshot: FundingSnapshot
+
+    @model_validator(mode="after")
+    def funding_interval(self) -> Self:
+        if self.funding_snapshot.finalized_block > self.valid_from_block:
+            raise ValueError("funding snapshot is newer than policy")
+        return self
+
+
 class SignedRegistrationBridgePolicy(StrictProtocolModel):
     schema_: Literal[REGISTRATION_BRIDGE_POLICY_SCHEMA] = Field(alias="schema")
-    body: RegistrationBridgePolicyBody
+    body: Annotated[
+        RegistrationBridgePolicyBody | RegistrationBridgeFundingPolicyBody,
+        Field(discriminator="schema_"),
+    ]
     signature_scheme: Literal["sr25519"]
     signature: Annotated[str, Field(pattern=r"^0x[0-9a-f]{128}$")]
 
 
 def registration_bridge_policy_digest(body: RegistrationBridgePolicyBody) -> bytes:
-    body = RegistrationBridgePolicyBody.model_validate(
-        body.model_dump(mode="python", by_alias=True)
-    )
+    body = type(body).model_validate(body.model_dump(mode="python", by_alias=True))
     return hashlib.sha256(
         REGISTRATION_BRIDGE_SIGNATURE_DOMAIN + canonical_json_bytes(body)
     ).digest()
@@ -395,6 +413,8 @@ def _coldkey_group_row(
 
 def _coldkey_ip_groups(
     live: Sequence[RegistrationBridgeParticipant],
+    *,
+    funding_snapshot: FundingSnapshot | None = None,
 ) -> list[list[int]]:
     """Merge live UIDs sharing an owner or public IP, transitively and without ports.
 
@@ -412,16 +432,20 @@ def _coldkey_ip_groups(
             uid = parent[uid]
         return uid
 
-    owners, addresses = {}, {}
+    owners, addresses, funders = {}, {}, {}
+    funding = matching_funders(funding_snapshot, live) if funding_snapshot is not None else {}
     for participant in sorted(live, key=lambda p: p.uid):
         _require(participant.origin is not None, "live_endpoint_missing")
         canonical = _bridge_public_origin(participant.origin)
         address = ipaddress.ip_address(urlsplit(canonical).hostname or "")
         address = getattr(address, "ipv4_mapped", None) or address
-        for index, key in (
+        edges = [
             (owners, account_id32(participant.coldkey)),
             (addresses, address),
-        ):
+        ]
+        if participant.uid in funding:
+            edges.append((funders, funding[participant.uid]))
+        for index, key in edges:
             prior = index.setdefault(key, participant.uid)
             left, right = root(participant.uid), root(prior)
             parent[max(left, right)] = min(left, right)
@@ -544,6 +568,10 @@ def validate_registration_bridge_observation(
     row, coldkey_count = _coldkey_group_row(live)
     if policy.body.reward_rule == "equal_live_coldkey_ip_groups/1":
         row = _equal_group_row(_coldkey_ip_groups(live))
+    elif isinstance(policy.body, RegistrationBridgeFundingPolicyBody):
+        row = _equal_group_row(
+            _coldkey_ip_groups(live, funding_snapshot=policy.body.funding_snapshot)
+        )
     _require(
         observation.max_weights_limit > 0
         and sum(pair[1] for pair in row) * observation.max_weights_limit >= 65_535 * 65_535,
