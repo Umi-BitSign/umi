@@ -71,9 +71,10 @@ must never override current conflict checks in the signer or successor worker.
 
 ## Remaining publication work
 
-Independent evaluators still need the automatic settlement-signing and delivery
-connection. They must check their own retained evidence and promotion history,
-reprove the registration snapshot, retain signing intent, and gather eligible
-independent-group signatures. A coordinator proposal alone is insufficient.
+The [independent settlement signer](OPEN_COMPETITION_SETTLEMENT_SIGNING.md)
+checks local execution receipts and reviewed promotion history, re-proves the
+registration snapshot, and retains signing intent before signing. Its automatic
+delivery connection and eligible-group certificate collection remain unfinished.
+A coordinator proposal alone is insufficient.
 Signed activation and finalized incentive checks follow that connection and
 the reviewed-input gates in the [execution plan](OPEN_COMPETITION_EXECUTION_PLAN.md).

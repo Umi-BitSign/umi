@@ -491,6 +491,27 @@ async def test_endpoint_workers_pair_actual_signed_responses_and_fetch_verified_
     )
     assert aggregate_quality(quality) == 1 and aggregate_quality(baseline) == 0
     for d in drivers:
+        from umi.competition_settlement_signing import IndependentSettlementSigner
+
+        prepared = SimpleNamespace(
+            publication=SimpleNamespace(
+                round=item.round,
+                settlement=SimpleNamespace(
+                    suite=item.suite,
+                    cutoff_schedule=SimpleNamespace(
+                        evidence_cutoff_block=item.round.reveal_block + 1
+                    ),
+                ),
+            ),
+            evidence=SimpleNamespace(
+                entries=(
+                    SimpleNamespace(submission=item.signed_submission, evidence=completed(d)[0]),
+                )
+            ),
+        )
+        IndependentSettlementSigner._local_evidence(
+            SimpleNamespace(worker=d), prepared, item.round.reveal_block + 1
+        )
         await d.aclose()
 
 

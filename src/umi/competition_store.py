@@ -1263,6 +1263,40 @@ class CompetitionStore:
             ).fetchone()
         return None if row is None else json.loads(row[0])
 
+    def reviewed_promotion_head(self, round_sha256: str, *, maximum_bytes: int):
+        """Read the local accepted promotion head; never import a caller's head."""
+        _require_hex32(round_sha256, "round")
+        if type(maximum_bytes) is not int or not 1 <= maximum_bytes <= 16 * 1024**2:
+            raise ValueError("invalid promotion head byte bound")
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            self._assert_action_allowed(connection, round_sha256)
+            head = connection.execute(
+                "SELECT sequence,digest,model,contributor FROM promotions "
+                "ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if head is None:
+                raise ValueError("independently reviewed promotion history is missing")
+            raw = _bounded_stored_body(connection, "promotions", "sequence", head[0], maximum_bytes)
+            record = json.loads(raw)
+            if not isinstance(record, dict):
+                raise ValueError("independently reviewed promotion head is corrupt")
+            contributor = record.get("contributor_hotkey")
+            if (
+                _record_digest(record) != head[1]
+                or record.get("policy_sha256") != digest(self.policy)
+                or record.get("sequence") != head[0]
+                or record.get("model_sha256") != head[2]
+                or head[3] != (None if contributor is None else identity(contributor))
+            ):
+                raise ValueError("independently reviewed promotion head is corrupt")
+            return PromotionHeadBinding(
+                sequence=head[0],
+                promotion_sha256=head[1],
+                model_sha256=head[2],
+                contributor_hotkey=contributor,
+            )
+
     def project(
         self,
         *,

@@ -1,0 +1,89 @@
+# Independent settlement signing
+
+`IndependentSettlementSigner` reviews an unsigned settlement preparation using
+one evaluator's own journals and finality provider. It returns one hotkey
+endorsement. That endorsement alone is neither a quorum certificate nor
+permission to submit weights.
+
+The signer is a component API. Automatic proposal delivery, vote collection,
+certificate publication and service configuration still need to be connected.
+This code does not change either deployed bridge validator.
+
+## Inputs and local checks
+
+Construct the signer with the running `ContinuousEvaluator`, that evaluator's
+cutoff-signing journal, its locally reviewed `CompetitionStore`, and bounded
+`PublicationReplayLimits`. Call `await signer.endorse(preparation)` with an
+[`umi-settlement-preparation/1` proposal](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md).
+
+The signer requires:
+
+- Its own signed cutoff reservation, exact frozen roster and suite reservation.
+- A completed local evaluator slot for every roster member, without a conflict
+  hold. The retained independent evidence must match the proposal exactly.
+- A local receipt showing that complete independent evidence was retained by
+  cutoff. The matching signed execution announcement must reproduce the
+  evaluator's run in the independent evidence.
+- A promotion head matching the evaluator's local reviewed history. The
+  proposal cannot initialize that history or import a contributor attribution.
+- An exact registration snapshot re-proved through the evaluator's owned
+  historical finality provider, and a fresh head inside the signing window.
+
+The existing publication replay verifies the complete roster, result signatures
+and deterministic 70/30 projection. A signer cannot be a roster submitter,
+positive-weight recipient, promoted contributor, or a member of a policy
+control group containing any of those identities. Quorum still requires the
+configured number of distinct eligible groups. UID 0 and UID 54 operated by us
+do not become two independent evaluators.
+
+The local review store must have been populated through the preserved-bundle
+and signed rights/quality review path. Merely copying the coordinator's SQLite
+database does not constitute independent review. An empty store blocks signing;
+this component provides no automatic review approval. All known promotion and
+settlement conflicts remain blocking conditions.
+
+The reviewed histories must agree on the exact promotion record, including its
+agreed observation block and parent link. Independently creating similar records
+at different blocks produces different digests. The deployment rehearsal must
+check this agreement through the review/promotion workflow; this signer never
+substitutes the coordinator's head to resolve a mismatch.
+
+## Evidence timing and restart
+
+Before publishing completed independent evidence, the evaluator now saves an
+`umi-independent-evidence-observation/1` receipt with its current owned finalized
+boundary. A receipt is local provenance, not a proof of global network receipt
+time. If a crash occurs after evidence retention but before receipt persistence,
+recovery uses the actual restart observation. It never backdates a receipt from
+an execution timestamp, relay claim or file modification time.
+
+The coordinator's first-observation fields retain their existing meaning. A
+signer checks its own evidence was also retained by cutoff; different operators
+need not claim they first saw it at exactly the same block. The publication's
+`finalized_receipt_timing_proven` field stays false.
+
+The signer reserves the exact publication and suite before calling the hotkey.
+A changed valid publication for the same round sequence creates a durable hold.
+An exact retry returns the retained vote after checking current local state.
+A missing vote after a crash can only be regenerated for the reserved bytes.
+Never delete the journal to choose another settlement.
+
+Owned finality is checked again after proof collection and evidence replay.
+Missing evidence, a late local receipt, changed promotion history, an expired
+snapshot, or a conflict discovered during collection blocks signing. No miner
+is silently removed to make the remaining roster settle.
+
+## Verification scope and remaining work
+
+The tests exercise complete 70/30 publication signatures and signing-state
+failure cases. Separate execution tests check model journals and the actual
+authenticated endpoint-response path against the local-evidence verifier.
+This does not yet prove the complete scheduling-to-signed-settlement service
+workflow with both tracks running together.
+
+Connect authenticated settlement discovery and vote delivery next, then retain
+the quorum certificate and publish its immutable replay package. The integrated
+protected-data rehearsal, independent operators, reviewed terms/rights,
+qualifying model promotion, signed activation and finalized incentive evidence
+remain launch requirements. Importing Michael's baseline grants no contributor
+reward by itself.
