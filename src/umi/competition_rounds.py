@@ -37,6 +37,7 @@ from .competition_publication import (
     verify_cutoff_publication,
 )
 from .competition_store import CompetitionStore
+from .competition_work_plans import RoundWorkConfig
 from .crypto import verify_response_signature
 from .nonce import SQLiteNonceStore
 from .open_competition import (
@@ -144,6 +145,7 @@ class RoundCoordinatorConfig(StrictProtocolModel):
     plan_directory: Directory
     certificate_directory: Directory
     replay_limits: PublicationReplayLimits
+    work: RoundWorkConfig | None = None
     maximum_rounds: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
@@ -163,6 +165,21 @@ class RoundCoordinatorConfig(StrictProtocolModel):
                 self.chain.state_directory,
             )
         ]
+        if self.work is not None:
+            paths.extend(
+                Path(p).resolve()
+                for p in (
+                    self.work.state_directory,
+                    self.work.asset_directory,
+                    self.work.order_directory,
+                    self.work.publication_directory,
+                    self.work.transport_chain.state_directory,
+                )
+            )
+            if self.work.transport_chain.policy_sha256 != self.policy_sha256 or (
+                self.work.transport_chain.collection_timeout_seconds > 15
+            ):
+                raise ValueError("work preparation requires bounded matching transport finality")
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(paths)
@@ -275,6 +292,31 @@ class RoundJournal:
                 "CREATE TABLE IF NOT EXISTS plan_index "
                 "(suite TEXT PRIMARY KEY, opens INTEGER NOT NULL, closes INTEGER NOT NULL)"
             )
+            if "execution_close" not in {
+                r[1] for r in db.execute("PRAGMA table_info(round_index)")
+            }:
+                db.execute(
+                    "ALTER TABLE round_index ADD COLUMN execution_close INTEGER NOT NULL DEFAULT 0"
+                )
+                rows = db.execute(
+                    "SELECT sequence,suite FROM round_index LIMIT ?", (maximum_rounds + 1,)
+                ).fetchall()
+                if len(rows) > maximum_rounds:
+                    raise ValueError("round journal index capacity exhausted")
+                for sequence, suite in rows:
+                    raw = self._record(db, "prepared", suite)
+                    if raw is None:
+                        raise ValueError("round index is missing its prepared record")
+                    proposal = RoundProposal.model_validate_json(raw)
+                    if (
+                        proposal.cutoff.round.sequence != sequence
+                        or proposal.cutoff.round.suite_sha256 != suite
+                    ):
+                        raise ValueError("round index migration binding mismatch")
+                    db.execute(
+                        "UPDATE round_index SET execution_close=? WHERE sequence=?",
+                        (proposal.cutoff.round.evaluation_close_block, sequence),
+                    )
 
     def _check_files(self):
         _private(self.root)
@@ -337,13 +379,14 @@ class RoundJournal:
                     if key != proposal.cutoff.round.suite_sha256:
                         raise ValueError("round index suite binding mismatch")
                     db.execute(
-                        "INSERT INTO round_index VALUES (?,?,?,?,?)",
+                        "INSERT INTO round_index VALUES (?,?,?,?,?,?)",
                         (
                             proposal.cutoff.round.sequence,
                             key,
                             digest(proposal),
                             proposal.cutoff.registration_snapshot.block,
                             proposal.signing_close_block,
+                            proposal.cutoff.round.evaluation_close_block,
                         ),
                     )
                 elif kind == "plan":
@@ -411,13 +454,22 @@ class RoundJournal:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def prepared_entries(self, after_sequence=0, proposal_id=None, *, block=None, maximum_age=360):
+    def prepared_entries(
+        self, after_sequence=0, proposal_id=None, *, block=None, maximum_age=360, for_work=False
+    ):
         with self.transaction() as db:
             if proposal_id is not None:
                 rows = db.execute(
                     "SELECT sequence,suite,proposal,snapshot_block,signing_close "
                     "FROM round_index WHERE proposal=?",
                     (proposal_id,),
+                ).fetchall()
+            elif for_work and block is not None:
+                rows = db.execute(
+                    "SELECT sequence,suite,proposal,snapshot_block,signing_close FROM round_index "
+                    "WHERE sequence>? AND snapshot_block<=? AND execution_close>? "
+                    "AND suite NOT IN (SELECT id FROM holds) ORDER BY sequence LIMIT 4",
+                    (after_sequence, block, block),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -432,7 +484,7 @@ class RoundJournal:
 
 
 class RoundCoordinator:
-    def __init__(self, config, policy, provider):
+    def __init__(self, config, policy, provider, *, legacy=None, transport_provider=None):
         self.config = RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         if digest(self.policy) != config.policy_sha256:
@@ -444,7 +496,14 @@ class RoundCoordinator:
             config.model_dump(
                 mode="json",
                 by_alias=True,
-                exclude={"maximum_rounds", "maximum_journal_bytes", "poll_seconds", "host", "port"},
+                exclude={
+                    "maximum_rounds",
+                    "maximum_journal_bytes",
+                    "poll_seconds",
+                    "host",
+                    "port",
+                    *({"work"} if config.work is None else set()),
+                },
             ),
             maximum_rounds=config.maximum_rounds,
             maximum_bytes=config.maximum_journal_bytes,
@@ -452,6 +511,59 @@ class RoundCoordinator:
         self.serial = asyncio.Lock()
         self.cursor = ""
         self.new_cursor = ""
+        self.work_cursor = 0
+        self.work_queue = None
+        self.transport_provider = transport_provider
+        if config.work is not None:
+            from .competition_dispatch import DispatchFinalityProvider
+            from .competition_work_queue import WorkQueue
+            from .policy import scoring_policy_hash
+
+            work = config.work
+            if legacy is None or work.legacy_policy_sha256 != scoring_policy_hash(legacy):
+                raise ValueError("round work requires its matching transport policy")
+            self.transport_provider = transport_provider or DispatchFinalityProvider(
+                work.transport_chain, policy, legacy
+            )
+            self.work_queue = WorkQueue(
+                Path(work.state_directory),
+                policy,
+                provider,
+                order_directory=work.order_directory,
+                publication_directory=work.publication_directory,
+                minimum_issue_ms=work.minimum_issue_ms,
+                legacy=legacy,
+                transport_provider=self.transport_provider,
+                maximum_orders=config.maximum_rounds,
+                maximum_bytes=config.maximum_journal_bytes,
+            )
+
+    async def prepare_work(self, proposal):
+        if self.work_queue is None:
+            return
+        from .competition_work_plans import RoundWorkAssets, prepare_work_plan
+
+        certificate = self.publish_certificate(proposal)
+        if certificate is None:
+            return
+        suite_id = proposal.cutoff.round.suite_sha256
+        private = RoundPlan.model_validate_json(
+            canonical_json_bytes(self.journal.get("plan", suite_id))
+        )
+        assets = _read(
+            Path(self.config.work.asset_directory) / (suite_id + ".json"), RoundWorkAssets
+        )
+        if assets.suite_sha256 != suite_id or digest(private.suite) != suite_id:
+            raise ValueError("round work assets differ from the private committed suite")
+        plan = prepare_work_plan(
+            cutoff=certificate,
+            submissions=proposal.submissions,
+            suite=private.suite,
+            incumbent=assets.incumbent,
+            runtime=assets.runtime,
+            policy=self.policy,
+        )
+        await self.work_queue.prepare(plan, videos=assets.videos)
 
     async def capture(self):
         capture = await self.provider.collect()
@@ -485,6 +597,15 @@ class RoundCoordinator:
             active = self.journal.prepared_entries(
                 block=block, maximum_age=self.policy.maximum_snapshot_age_blocks
             )
+            if self.work_queue is not None:
+                working = self.journal.prepared_entries(
+                    self.work_cursor, block=block, for_work=True
+                )
+                if not working:
+                    working = self.journal.prepared_entries(block=block, for_work=True)
+                if working:
+                    self.work_cursor = working[-1][0]
+                active += working
             pending = list(
                 dict.fromkeys(
                     [key + ".json" for key in self.journal.due_plans(block)]
@@ -512,6 +633,7 @@ class RoundCoordinator:
                     if existing is not None:
                         proposal = RoundProposal.model_validate_json(canonical_json_bytes(existing))
                         self.publish_certificate(proposal)
+                        await self.prepare_work(proposal)
                         counts["prepared"] += 1
                         continue
                     prepared = self.store.prepared_round(suite_id, self.config.replay_limits)
@@ -565,6 +687,7 @@ class RoundCoordinator:
                     ):
                         raise ValueError("recovered round differs from its original plan window")
                     self.journal.put("prepared", suite_id, proposal)
+                    await self.prepare_work(proposal)
                     counts["prepared"] += 1
                 except (OSError, ValueError, sqlite3.Error):
                     counts["held"] += 1
@@ -669,6 +792,7 @@ class RoundCoordinator:
                 raise ValueError("new endorsement outside its original signing window")
             self.journal.put("vote", key, vote)
             self.publish_certificate(proposal)
+            await self.prepare_work(proposal)
             return RoundReply(
                 query_sha256=digest(query),
                 policy_sha256=digest(self.policy),
@@ -677,11 +801,19 @@ class RoundCoordinator:
 
 
 def create_round_app(
-    config, policy, *, provider_factory=FinalizedRegistrationProvider, report=None
+    config,
+    policy,
+    *,
+    provider_factory=FinalizedRegistrationProvider,
+    report=None,
+    legacy=None,
+    transport_provider=None,
 ):
     config = RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
     provider = provider_factory(config.chain, policy)
-    coordinator = RoundCoordinator(config, policy, provider)
+    coordinator = RoundCoordinator(
+        config, policy, provider, legacy=legacy, transport_provider=transport_provider
+    )
     nonces = SQLiteNonceStore(
         Path(config.state_directory) / "nonces.sqlite3",
         allowed_hotkeys=[e.hotkey for e in policy.evaluators],
@@ -707,6 +839,8 @@ def create_round_app(
         task = None
         try:
             await provider.start()
+            if coordinator.transport_provider is not None:
+                await coordinator.transport_provider.start()
             task = asyncio.create_task(polling())
             yield
         finally:
@@ -714,11 +848,19 @@ def create_round_app(
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             try:
-                await provider.aclose()
+                try:
+                    if coordinator.transport_provider is not None:
+                        await coordinator.transport_provider.aclose()
+                finally:
+                    await provider.aclose()
             finally:
                 os.close(lease)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    if coordinator.work_queue is not None:
+        from .competition_work_transport import attach_work_route
+
+        attach_work_route(app, coordinator.work_queue)
     capacity = asyncio.Semaphore(2)
 
     @app.exception_handler(StarletteHTTPException)
@@ -958,7 +1100,7 @@ class RoundSigningClient:
                 self.cursor = proposal.cutoff.round.sequence
 
 
-def serve_rounds(config, policy):
+def serve_rounds(config, policy, *, legacy=None):
     import uvicorn
 
     config = RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
@@ -966,6 +1108,7 @@ def serve_rounds(config, policy):
         create_round_app(
             config,
             policy,
+            legacy=legacy,
             report=lambda value: print(canonical_json_bytes(value).decode("utf-8"), flush=True),
         ),
         host=config.host,

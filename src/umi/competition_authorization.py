@@ -194,9 +194,33 @@ def validate_publication(
     if len(raw) > MAX_AUTHORIZATION_BYTES:
         raise ValueError("endpoint authorization exceeds its byte bound")
     publication = SignedEndpointAuthorization.model_validate_json(raw)
+    body = validate_publication_body(publication.publication, policy, legacy_policy)
+    groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
+    seen_keys, seen_groups = set(), set()
+    miner_keys = {identity(s.submission.hotkey) for s in body.submissions}
+    for signature in publication.signatures:
+        key = identity(signature.hotkey)
+        if key not in groups or key in seen_keys or groups[key] in seen_groups or key in miner_keys:
+            raise ValueError("unauthorized, duplicate or self-authorizing publication signer")
+        verify_signature(body, signature)
+        seen_keys.add(key)
+        seen_groups.add(groups[key])
+    if len(seen_groups) < policy.required_evaluator_groups:
+        raise ValueError("publication lacks independent evaluator quorum")
+    return publication
+
+
+def validate_publication_body(
+    body: EndpointAuthorizationPublication, policy: CompetitionPolicy, legacy_policy: ScoringPolicy
+) -> EndpointAuthorizationPublication:
+    """Check an unsigned proposal. This never grants transmission authority."""
+    raw = canonical_json_bytes(body)
+    if len(raw) > MAX_AUTHORIZATION_BYTES:
+        raise ValueError("endpoint authorization exceeds its byte bound")
+    body = EndpointAuthorizationPublication.model_validate_json(raw)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     legacy_policy = ScoringPolicy.model_validate_json(canonical_json_bytes(legacy_policy))
-    body, policy_sha = publication.publication, digest(policy)
+    policy_sha = digest(policy)
     round_, legacy_sha = body.round, scoring_policy_hash(legacy_policy)
     if (
         body.policy_sha256 != policy_sha
@@ -216,17 +240,7 @@ def validate_publication(
     ):
         raise ValueError("authorization round is outside the competition policy")
     groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
-    seen_keys, seen_groups = set(), set()
     miner_keys = {identity(s.submission.hotkey) for s in body.submissions}
-    for signature in publication.signatures:
-        key = identity(signature.hotkey)
-        if key not in groups or key in seen_keys or groups[key] in seen_groups or key in miner_keys:
-            raise ValueError("unauthorized, duplicate or self-authorizing publication signer")
-        verify_signature(body, signature)
-        seen_keys.add(key)
-        seen_groups.add(groups[key])
-    if len(seen_groups) < policy.required_evaluator_groups:
-        raise ValueError("publication lacks independent evaluator quorum")
     submissions = {digest(s.submission): s.submission for s in body.submissions}
     if len(submissions) != len(body.submissions) or len(miner_keys) != len(body.submissions):
         raise ValueError("publication has duplicate submissions or miner identities")
@@ -320,7 +334,7 @@ def validate_publication(
     ):
         raise ValueError("each endpoint needs complete case coverage by independent evaluators")
     _check_quotas(body, legacy_policy, Limits.from_policy(legacy_policy))
-    return publication
+    return body
 
 
 def validate_publication_suite(
