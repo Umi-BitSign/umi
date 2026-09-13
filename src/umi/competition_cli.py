@@ -106,6 +106,10 @@ def _parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--config", required=True)
     dispatch.add_argument("--legacy-policy", required=True)
     dispatch.add_argument("--once", action="store_true")
+    evaluator = commands.add_parser("run-evaluator")
+    evaluator.add_argument("--config", required=True)
+    evaluator.add_argument("--legacy-policy")
+    evaluator.add_argument("--once", action="store_true")
     feed = commands.add_parser("serve-assignment-feed")
     for name in ("legacy-policy", "state", "nonce-path"):
         feed.add_argument("--" + name, required=True)
@@ -277,6 +281,19 @@ def _parser() -> argparse.ArgumentParser:
 
 def execute(args: argparse.Namespace) -> dict:
     policy = _load(args.policy, CompetitionPolicy)
+    if args.command == "run-evaluator":
+        from .competition_evaluator import EvaluatorConfig, run_evaluator
+        from .policy import ScoringPolicy
+
+        return asyncio.run(
+            run_evaluator(
+                _load(args.config, EvaluatorConfig),
+                policy,
+                legacy=_load(args.legacy_policy, ScoringPolicy) if args.legacy_policy else None,
+                once=args.once,
+                report=lambda value: print(canonical_json_bytes(value).decode(), flush=True),
+            )
+        )
     if args.command == "run-endpoint-dispatch":
         from .competition_dispatch import EndpointDispatchConfig, run_dispatch
         from .policy import ScoringPolicy
