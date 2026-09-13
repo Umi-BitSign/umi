@@ -31,12 +31,14 @@ from .competition_endpoint_execution import (
 from .competition_evidence import (
     IndependentEvaluationEvidence,
     SignedEvaluatorRunRecord,
+    independent_evidence_digest,
     replay_independent_evaluation,
     sign_evaluator_run,
     verify_evaluator_run,
 )
 from .competition_execution import (
     EndpointIncumbentJob,
+    ExecutionBoundary,
     ExecutionCase,
     ExecutionJournal,
     ModelEvaluationJob,
@@ -109,6 +111,41 @@ class EvaluationVote(StrictProtocolModel):
     result: EvaluationResult
     result_signature: Signature
     run: SignedEvaluatorRunRecord
+
+
+class IndependentEvidenceObservation(StrictProtocolModel):
+    """Local first-retention receipt, never a remote proof of receipt timing."""
+
+    schema_: Literal["umi-independent-evidence-observation/1"] = Field(alias="schema")
+    evaluator_hotkey: Hotkey
+    policy_sha256: Hex32
+    round_sha256: Hex32
+    order_sha256: Hex32
+    submission_sha256: Hex32
+    evidence_sha256: Hex32
+    observed: ExecutionBoundary
+    chain_submission_authorized: Literal[False] = False
+
+
+def validate_evidence_observation(receipt, order, evidence, hotkey, *, cutoff_block=None):
+    receipt = IndependentEvidenceObservation.model_validate_json(canonical_json_bytes(receipt))
+    if (
+        identity(receipt.evaluator_hotkey) != identity(hotkey)
+        or receipt.policy_sha256 != order.round.policy_sha256
+        or receipt.round_sha256 != digest(order.round)
+        or receipt.order_sha256 != digest(order)
+        or receipt.submission_sha256 != digest(order.submission.submission)
+        or receipt.evidence_sha256 != independent_evidence_digest(evidence)
+        or receipt.observed.block < order.round.reveal_block
+    ):
+        raise ValueError("local independent-evidence observation binding mismatch")
+    if cutoff_block is not None and (
+        type(cutoff_block) is not int
+        or not order.round.reveal_block <= cutoff_block <= order.round.valid_through_block
+        or receipt.observed.block > cutoff_block
+    ):
+        raise ValueError("independent evidence was not locally observed by cutoff")
+    return receipt
 
 
 def _path(value):
@@ -490,6 +527,39 @@ class EvaluatorJournal:
             ).fetchone()
         return None if row is None else model.model_validate_json(row[0])
 
+    def settlement_evidence(self, slot):
+        """Read one completed local slot coherently, rejecting holds and oversized rows."""
+
+        def read(db, table, kind, model):
+            where, args = (
+                ("slot=?", (slot,)) if kind is None else ("slot=? AND kind=?", (slot, kind))
+            )
+            size = db.execute(
+                f"SELECT length(CAST(body AS BLOB)) FROM {table} WHERE {where}", args
+            ).fetchone()
+            if size is None:
+                raise ValueError("local settlement execution evidence is incomplete")
+            if type(size[0]) is not int or not 0 < size[0] <= MAX_BYTES:
+                raise ValueError("local settlement evidence exceeds its byte bound")
+            raw = db.execute(f"SELECT body FROM {table} WHERE {where}", args).fetchone()[0]
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            value = model.model_validate_json(raw)
+            if canonical_json_bytes(value) != bytes(raw):
+                raise ValueError("local settlement evidence is not canonical")
+            return value
+
+        with self.transaction() as db:
+            status = db.execute("SELECT conflict FROM orders WHERE slot=?", (slot,)).fetchone()
+            if status is None or status[0]:
+                raise ValueError("local settlement order is missing or conflicted")
+            return (
+                read(db, "orders", None, SignedEvaluationOrder),
+                read(db, "artifacts", "independent", IndependentEvaluationEvidence),
+                read(db, "artifacts", "independent_observation", IndependentEvidenceObservation),
+                read(db, "artifacts", "announcement", SignedExecutionAnnouncement),
+            )
+
     def put(self, slot, kind, value):
         raw = canonical_json_bytes(value)
         conflict = False
@@ -651,11 +721,32 @@ class ContinuousEvaluator:
                 raise
             return saved
 
+    async def observe_independent(self, slot, order, evidence):
+        receipt = self.journal.get(slot, "independent_observation", IndependentEvidenceObservation)
+        if receipt is None:
+            # If a crash followed evidence retention but preceded this receipt,
+            # use the restart's actual observation. Never infer an earlier time
+            # from execution finish, filesystem metadata or the relay's claim.
+            receipt = IndependentEvidenceObservation(
+                schema="umi-independent-evidence-observation/1",
+                evaluator_hotkey=self.config.evaluator_hotkey,
+                policy_sha256=digest(self.policy),
+                round_sha256=digest(order.round),
+                order_sha256=digest(order),
+                submission_sha256=digest(order.submission.submission),
+                evidence_sha256=independent_evidence_digest(evidence),
+                observed=await self.boundary(),
+            )
+            validate_evidence_observation(receipt, order, evidence, self.config.evaluator_hotkey)
+            self.journal.put(slot, "independent_observation", receipt)
+        return validate_evidence_observation(receipt, order, evidence, self.config.evaluator_hotkey)
+
     async def advance(self, slot, signed, head):
         order = signed.order
         job = order_job(order, self.config.evaluator_hotkey, self.policy, self.legacy)
         final = self.journal.get(slot, "independent", IndependentEvaluationEvidence)
         if final is not None:
+            await self.observe_independent(slot, order, final)
             self._output(order, "independent", final)
             return "complete"
         if head > order.round.valid_through_block:
@@ -804,6 +895,7 @@ class ContinuousEvaluator:
             final, order.submission, order.round, suite, self.policy, current_block=head
         )
         self.journal.put(slot, "independent", final)
+        await self.observe_independent(slot, order, final)
         self._output(order, "independent", final)
         return "complete"
 

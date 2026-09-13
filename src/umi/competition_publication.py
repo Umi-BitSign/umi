@@ -388,18 +388,35 @@ def verify_settlement_publication(
         certificate.signatures,
         policy=policy,
         roster=normalized_roster,
-        forbidden_hotkeys=tuple(
-            allocation.hotkey
-            for allocation in publication.settlement.projection.allocations
-            if allocation.raw_weight > 0
-        )
-        + (
-            ()
-            if publication.settlement.promotion_head.contributor_hotkey is None
-            else (publication.settlement.promotion_head.contributor_hotkey,)
-        ),
+        forbidden_hotkeys=_settlement_recipients(publication),
     )
     return publication
+
+
+def _settlement_recipients(publication):
+    contributor = publication.settlement.promotion_head.contributor_hotkey
+    return tuple(
+        a.hotkey for a in publication.settlement.projection.allocations if a.raw_weight > 0
+    ) + (() if contributor is None else (contributor,))
+
+
+def settlement_signer_eligible(hotkey, publication, policy, submissions):
+    return identity(hotkey) in _publication_groups(
+        policy, submissions, _settlement_recipients(publication)
+    )
+
+
+def verify_settlement_endorsement(signature, publication, policy, submissions):
+    """Validate one eligible signature, without claiming publication quorum."""
+    if not settlement_signer_eligible(signature.hotkey, publication, policy, submissions):
+        raise ValueError("unauthorized or self-interested settlement signer")
+    if not verify_response_signature(
+        settlement_publication_digest(publication),
+        hotkey_ss58=signature.hotkey,
+        scheme=signature.scheme,
+        signature=signature.signature,
+    ):
+        raise ValueError("invalid settlement endorsement")
 
 
 def _validate_cutoff_material(
@@ -540,6 +557,18 @@ def _validate_settlement_material(
     return normalized_roster, _evidence_digest(normalized_evidence)
 
 
+def _publication_groups(policy, roster, forbidden_hotkeys):
+    groups = {
+        identity(evaluator.hotkey): evaluator.control_group for evaluator in policy.evaluators
+    }
+    forbidden_keys = {identity(item.submission.hotkey) for item in roster}
+    forbidden_keys.update(identity(hotkey) for hotkey in forbidden_hotkeys)
+    forbidden_groups = {groups[key] for key in forbidden_keys if key in groups}
+    return {
+        k: g for k, g in groups.items() if k not in forbidden_keys and g not in forbidden_groups
+    }
+
+
 def _verify_publication_quorum(
     statement_digest: str,
     signatures: Sequence[Signature],
@@ -548,24 +577,13 @@ def _verify_publication_quorum(
     roster: Sequence[SignedSubmission],
     forbidden_hotkeys: Sequence[str],
 ) -> None:
-    groups = {
-        identity(evaluator.hotkey): evaluator.control_group for evaluator in policy.evaluators
-    }
-    forbidden_keys = {identity(item.submission.hotkey) for item in roster}
-    forbidden_keys.update(identity(hotkey) for hotkey in forbidden_hotkeys)
-    forbidden_groups = {groups[key] for key in forbidden_keys if key in groups}
+    groups = _publication_groups(policy, roster, forbidden_hotkeys)
     seen_keys: set[str] = set()
     seen_groups: set[str] = set()
     for signature in signatures:
         key = identity(signature.hotkey)
         group = groups.get(key)
-        if (
-            group is None
-            or key in forbidden_keys
-            or group in forbidden_groups
-            or key in seen_keys
-            or group in seen_groups
-        ):
+        if group is None or key in seen_keys or group in seen_groups:
             raise ValueError("unauthorized, self-interested or duplicate publication signer")
         if not verify_response_signature(
             statement_digest,
@@ -1180,10 +1198,12 @@ __all__ = [
     "cutoff_publication_digest",
     "independent_evidence_set_digest",
     "settlement_publication_digest",
+    "settlement_signer_eligible",
     "sign_cutoff_publication",
     "sign_settlement_publication",
     "signed_cutoff_publication_digest",
     "signed_settlement_publication_digest",
     "verify_cutoff_publication",
+    "verify_settlement_endorsement",
     "verify_settlement_publication",
 ]

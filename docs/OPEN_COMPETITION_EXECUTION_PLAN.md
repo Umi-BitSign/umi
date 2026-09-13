@@ -132,8 +132,10 @@ retains private peer results and records completed evidence in prepared coordina
 rounds. The production setup must supply reviewed plans and committed protected
 suites, run the independent cutoff/work signers, and publish certificates on
 time. [Automatic settlement preparation](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md)
-now produces complete unsigned proposals after cutoff. Independent settlement
-signing and certificate delivery remain unconnected.
+now produces complete unsigned proposals after cutoff. The
+[independent settlement signer](OPEN_COMPETITION_SETTLEMENT_SIGNING.md) checks
+local execution receipts, reviewed promotion history and owned snapshots.
+Automatic settlement discovery and certificate delivery remain unconnected.
 
 The [round-preparation APIs](OPEN_COMPETITION_ROUND_PREPARATION.md) now freeze
 current registrations, latest accepted submissions, the incumbent and cutoff
@@ -146,8 +148,8 @@ plans and independent cutoff signing. Its optional
 authorizations and model orders, rechecks owned issuance at each signer and
 delivers quorum certificates without manual assembly. The optional settlement
 output prepares replayable unsigned proposals from the exchange's retained
-evidence. Settlement signing remains unconnected; the larger checklist item
-stays open.
+evidence. Independent settlement signing has a component API; automatic vote
+delivery remains unconnected, so the larger checklist item stays open.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting

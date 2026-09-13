@@ -220,18 +220,25 @@ def _runs_per_case(job):
 
 def execution_key(job: ModelEvaluationJob) -> str:
     """One attempt per evaluator/round/submission, even if assignment bytes change."""
+    return execution_slot(job.round, job.submission, job.evaluator_hotkey)
+
+
+def execution_slot(round_, submission, evaluator_hotkey) -> str:
+    """Locate a retained execution without accepting a new assignment."""
+    if submission.submission.track not in {"endpoint", "model"}:
+        raise ValueError("unsupported execution track")
     return hashlib.sha256(
         (
             b"umi-endpoint-incumbent-execution-key-v1\0"
-            if isinstance(job, EndpointIncumbentJob)
+            if submission.submission.track == "endpoint"
             else b"umi-model-execution-key-v1\0"
         )
         + canonical_json_bytes(
             [
-                job.round.policy_sha256,
-                digest(job.round),
-                digest(job.submission.submission),
-                identity(job.evaluator_hotkey),
+                round_.policy_sha256,
+                digest(round_),
+                digest(submission.submission),
+                identity(evaluator_hotkey),
             ]
         )
     ).hexdigest()
