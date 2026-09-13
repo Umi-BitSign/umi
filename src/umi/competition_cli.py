@@ -96,6 +96,8 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("inspect-policy")
     intake = commands.add_parser("serve-intake")
     intake.add_argument("--config", required=True)
+    rounds = commands.add_parser("serve-round-coordinator")
+    rounds.add_argument("--config", required=True)
     submit = commands.add_parser("submit")
     submit.add_argument("--submission", required=True)
     submit.add_argument("--origin", required=True)
@@ -284,6 +286,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def execute(args: argparse.Namespace) -> dict:
     policy = _load(args.policy, CompetitionPolicy)
+    if args.command == "serve-round-coordinator":
+        from .competition_rounds import RoundCoordinatorConfig, serve_rounds
+
+        serve_rounds(_load(args.config, RoundCoordinatorConfig), policy)
+        return {"status": "stopped", "chain_submission_authorized": False}
     if args.command == "serve-evaluator-exchange":
         from .competition_exchange import ExchangeConfig, serve_exchange
         from .policy import ScoringPolicy

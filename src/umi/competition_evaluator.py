@@ -145,6 +145,7 @@ class EvaluatorConfig(StrictProtocolModel):
     dispatch_directory: Directory | None = None
     legacy_policy_sha256: Hex32 | None = None
     exchange_origin: str | None = None
+    round_coordinator_origin: str | None = None
     assignment_directory: Directory | None = None
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
@@ -154,6 +155,10 @@ class EvaluatorConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def bindings(self):
+        if self.round_coordinator_origin is not None:
+            from .competition_client import validate_intake_origin
+
+            validate_intake_origin(self.round_coordinator_origin)
         if self.exchange_origin is not None:
             from .competition_client import validate_intake_origin
 
@@ -361,7 +366,11 @@ class EvaluatorJournal:
                         "poll_seconds",
                         *(
                             k
-                            for k in ("exchange_origin", "assignment_directory")
+                            for k in (
+                                "exchange_origin",
+                                "assignment_directory",
+                                "round_coordinator_origin",
+                            )
                             if getattr(config, k) is None
                         ),
                     },
@@ -524,6 +533,12 @@ class ContinuousEvaluator:
         self._order_cursor = ""
         self._tasks = {}
         self._exchange_task = None
+        self._round_task = None
+        self.round_client = None
+        if config.round_coordinator_origin is not None:
+            from .competition_rounds import RoundSigningClient
+
+            self.round_client = RoundSigningClient(self, config.round_coordinator_origin)
         self.exchange = None
         if config.exchange_origin is not None:
             from .competition_exchange import EvaluatorExchangeClient
@@ -754,6 +769,15 @@ class ContinuousEvaluator:
 
     async def poll_once(self):
         counts = {"held": 0, "waiting": 0, "complete": 0, "expired": 0, "executing": 0}
+        if self.round_client is not None:
+            if self._round_task is not None and self._round_task.done():
+                try:
+                    self._round_task.result()
+                except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+                    counts["waiting"] += 1
+                self._round_task = None
+            if self._round_task is None:
+                self._round_task = asyncio.create_task(self.round_client.sync_once())
         if self.exchange is not None:
             if self._exchange_task is not None and self._exchange_task.done():
                 try:
@@ -806,6 +830,10 @@ class ContinuousEvaluator:
         }
 
     async def aclose(self):
+        if self._round_task is not None:
+            self._round_task.cancel()
+            await asyncio.gather(self._round_task, return_exceptions=True)
+            self._round_task = None
         if self._exchange_task is not None:
             self._exchange_task.cancel()
             await asyncio.gather(self._exchange_task, return_exceptions=True)

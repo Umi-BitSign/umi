@@ -106,6 +106,7 @@ contributor attribution yet.
 - [x] Connect continuous local execution, reference reveal and signed peer agreement for both tracks.
 - [x] Connect hotkey-authenticated order/reveal delivery, peer exchange and completed-evidence collection.
 - [x] Add exact recent owned-snapshot reads and atomic current-roster/cutoff preparation.
+- [x] Connect private round plans to owned preparation and independent cutoff signatures.
 - [ ] Connect continuous round planning to independent cutoff/order signing and settlement publication.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
@@ -134,8 +135,10 @@ The [round-preparation APIs](OPEN_COMPETITION_ROUND_PREPARATION.md) now freeze
 current registrations, latest accepted submissions, the incumbent and cutoff
 in one transaction. Exact retries preserve deadlines. An evaluator can reprove
 the proposal's recent registration snapshot through its own finality provider.
-These APIs still need the continuous coordinator and quorum-signing integration;
-they do not publish or activate a round by themselves.
+These APIs do not publish or activate a round by themselves. The
+[round coordinator](OPEN_COMPETITION_ROUND_COORDINATOR.md) now connects private
+plans and independent cutoff signing. Automatic evaluation-order signing and
+settlement publication remain unconnected; the larger checklist item stays open.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting

@@ -29,6 +29,9 @@ Use one hotkey per worker and a dedicated configuration with schema
 - `exchange_origin` enables the [authenticated exchange](OPEN_COMPETITION_EXCHANGE.md).
   For automatic endpoint publication delivery, set `assignment_directory` to
   the dispatcher's separate `publication_directory`. No extra upload key is used.
+- `round_coordinator_origin` enables [independent cutoff signing](OPEN_COMPETITION_ROUND_COORDINATOR.md).
+  The worker proves the exact proposed registration snapshot through its own
+  provider before signing. This does not enable evaluation-order signing.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives

@@ -61,9 +61,10 @@ preparations. Ordinary admission and existing proof-cache limits still apply.
 
 ## Remaining integration
 
-The continuous coordinator still needs to supply fresh protected suites and
-reviewed round windows, call these APIs, obtain independent cutoff/order
-signatures and deliver the resulting publications to the evaluator exchange.
+The [continuous coordinator](OPEN_COMPETITION_ROUND_COORDINATOR.md) now consumes
+private plans, calls these APIs and obtains independent cutoff signatures.
+Operators still supply fresh protected suites and reviewed round windows.
+Automatic evaluation-order signing and delivery to the exchange remain work.
 Completed rounds then need signed settlement publication and successor input
 materialization. None of these internal methods changes the live bridge policy
 or extends its sunset.

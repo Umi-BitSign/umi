@@ -1114,6 +1114,13 @@ class CompetitionStore:
             connection.execute("INSERT INTO round_preparations VALUES (?, ?)", (suite_id, body))
             return prepared
 
+    def prepared_round(self, suite_sha256: str, limits: PublicationReplayLimits) -> dict | None:
+        """Recover original preparation after a caller crash, without advancing it."""
+        _require_hex32(suite_sha256, "suite digest")
+        limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
+        with self._connection() as connection:
+            return self._prepared_round(connection, suite_sha256, limits)
+
     def _prepared_round(self, connection, suite_id, limits):
         prior = connection.execute(
             "SELECT length(body) FROM round_preparations WHERE suite=?", (suite_id,)
