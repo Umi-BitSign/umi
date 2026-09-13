@@ -6,9 +6,11 @@ import pytest
 
 from umi.competition_bridge_recovery import audit_bridge_history
 from umi.competition_coordinator_namespace import CoordinatorLayout
+from umi.competition_recovery import _SnapshotReader
 from umi.competition_upgrade import _Reader
 
 from . import coordinator_rehearsal as rehearsal
+from .test_competition_recovery import limits as limits
 from .test_registration_bridge import signed_policy as signed_policy
 
 
@@ -38,7 +40,7 @@ def test_fixture_podman_uses_successor_store_and_selected_user_bus(monkeypatch):
 
 @pytest.mark.parametrize("instance", ["0", "54"])
 def test_signed_migration_bridge_fixture_has_valid_preservable_history(
-    tmp_path, signed_policy, instance
+    tmp_path, signed_policy, instance, limits
 ):
     from .test_competition_migration_linux import _prepare_legacy
 
@@ -64,6 +66,12 @@ def test_signed_migration_bridge_fixture_has_valid_preservable_history(
         item.config.operator_input_root,
     ):
         reader.directory(layout.physical(Path(root)))
+    snapshot = _SnapshotReader(item.worker, user.pw_uid, limits)
+    try:
+        snapshot.read(item.worker)
+        assert snapshot.files == item.files
+    finally:
+        snapshot.close()
     audit = audit_bridge_history(item.files, hotkey=item.config.validator_hotkey)
     assert not audit.holds
     assert audit.attempts[-1][1].weight_call.block_number == 161

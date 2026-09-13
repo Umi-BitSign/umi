@@ -98,6 +98,8 @@ def _owned_tree(root, user):
     # Only newly constructed, marker-guarded, key-free fixture trees.
     for path in (root, *root.rglob("*")):
         assert not path.is_symlink()
+        if path.is_dir():
+            path.chmod(0o700)
         os.chown(path, user.pw_uid, user.pw_gid)
 
 
