@@ -81,6 +81,12 @@ class ModelEvaluationJob(StrictProtocolModel):
         return self
 
 
+class EndpointIncumbentJob(ModelEvaluationJob):
+    """Execute only the preserved comparator for an endpoint submission."""
+
+    schema_: Literal["umi-endpoint-incumbent-job/1"] = Field(alias="schema")
+
+
 class ExecutionBoundary(StrictProtocolModel):
     """Reference into the owned provider's retained proof cache."""
 
@@ -136,8 +142,23 @@ class ModelExecutionEvidence(StrictProtocolModel):
     chain_submission_authorized: Literal[False] = False
 
 
+class EndpointIncumbentEvidence(StrictProtocolModel):
+    schema_: Literal["umi-endpoint-incumbent-evidence/1"] = Field(alias="schema")
+    job: EndpointIncumbentJob
+    steps: Annotated[tuple[ExecutionStep, ...], Field(min_length=3, max_length=2048)]
+    chain_submission_authorized: Literal[False] = False
+
+
 def validate_job(job: ModelEvaluationJob, policy: CompetitionPolicy) -> ModelEvaluationJob:
-    job = ModelEvaluationJob.model_validate_json(canonical_json_bytes(job))
+    return _validate_job(job, policy, ModelEvaluationJob, "model")
+
+
+def validate_incumbent_job(job, policy) -> EndpointIncumbentJob:
+    return _validate_job(job, policy, EndpointIncumbentJob, "endpoint")
+
+
+def _validate_job(job, policy, model, track):
+    job = model.model_validate_json(canonical_json_bytes(job))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     round_, sub = job.round, job.submission.submission
     if (
@@ -145,8 +166,8 @@ def validate_job(job: ModelEvaluationJob, policy: CompetitionPolicy) -> ModelEva
         or sub.policy_sha256 != digest(policy)
         or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
         or digest(sub) not in round_.roster
-        or sub.track != "model"
-        or sub.model_bundle is None
+        or sub.track != track
+        or (track == "model" and sub.model_bundle is None)
         or digest(job.incumbent) != round_.incumbent_model_sha256
         or digest(job.runtime) != round_.runtime_sha256
         or round_.runtime_sha256 != policy.evaluation_runtime_sha256
@@ -179,15 +200,32 @@ def validate_job(job: ModelEvaluationJob, policy: CompetitionPolicy) -> ModelEva
         for s in STRATUM_WEIGHTS
     ):
         raise ValueError("model execution job has insufficient stratum coverage")
-    validate_bundle_policy(sub.model_bundle, policy)
+    if track == "model":
+        validate_bundle_policy(sub.model_bundle, policy)
     validate_bundle_policy(job.incumbent, policy)
     return job
+
+
+def _journal_job(job, policy):
+    return (
+        validate_incumbent_job(job, policy)
+        if isinstance(job, EndpointIncumbentJob)
+        else validate_job(job, policy)
+    )
+
+
+def _runs_per_case(job):
+    return 1 if isinstance(job, EndpointIncumbentJob) else 2
 
 
 def execution_key(job: ModelEvaluationJob) -> str:
     """One attempt per evaluator/round/submission, even if assignment bytes change."""
     return hashlib.sha256(
-        b"umi-model-execution-key-v1\0"
+        (
+            b"umi-endpoint-incumbent-execution-key-v1\0"
+            if isinstance(job, EndpointIncumbentJob)
+            else b"umi-model-execution-key-v1\0"
+        )
         + canonical_json_bytes(
             [
                 job.round.policy_sha256,
@@ -215,14 +253,20 @@ def _ordered(boundary: ExecutionBoundary, previous: ExecutionBoundary | None, jo
 
 
 def validate_execution(evidence: ModelExecutionEvidence, policy: CompetitionPolicy) -> None:
-    evidence = ModelExecutionEvidence.model_validate_json(canonical_json_bytes(evidence))
-    job = validate_job(evidence.job, policy)
-    if len(evidence.steps) != 2 * len(job.cases):
+    model = (
+        EndpointIncumbentEvidence
+        if isinstance(evidence, EndpointIncumbentEvidence)
+        else ModelExecutionEvidence
+    )
+    evidence = model.model_validate_json(canonical_json_bytes(evidence))
+    job = _journal_job(evidence.job, policy)
+    width = _runs_per_case(job)
+    if len(evidence.steps) != width * len(job.cases):
         raise ValueError("execution evidence omits assigned runs")
     previous = None
     for index, step in enumerate(evidence.steps):
-        case = job.cases[index // 2]
-        role = "candidate" if index % 2 == 0 else "incumbent"
+        case = job.cases[index // width]
+        role = "candidate" if width == 2 and index % 2 == 0 else "incumbent"
         expected_model = (
             job.submission.submission.model_revision
             if role == "candidate"
@@ -342,11 +386,11 @@ class ExecutionJournal:
         }
 
     def reserve(self, job: ModelEvaluationJob) -> ModelExecutionEvidence | None:
-        job = validate_job(job, self.policy)
+        job = _journal_job(job, self.policy)
         raw, key = canonical_json_bytes(job), execution_key(job)
         # JSON escaping can expand a 4096-byte hypothesis sixfold. Reserve
         # space for that, its raw hex prefix, and both boundary records.
-        reserved = len(raw) + 2 * len(job.cases) * _MAX_STEP_BYTES + 4096
+        reserved = len(raw) + _runs_per_case(job) * len(job.cases) * _MAX_STEP_BYTES + 4096
         with self._transaction() as db:
             existing = db.execute("SELECT job, status FROM jobs WHERE id=?", (key,)).fetchone()
             if existing:
@@ -377,7 +421,7 @@ class ExecutionJournal:
             if row is None or row[1] != "running" or bytes(row[0]) != canonical_json_bytes(job):
                 raise ValueError("execution job is not reserved for these inputs")
             index = db.execute("SELECT COUNT(*) FROM steps WHERE job_id=?", (key,)).fetchone()[0]
-            if index >= 2 * len(job.cases):
+            if index >= _runs_per_case(job) * len(job.cases):
                 raise ValueError("execution has too many steps")
             pending = db.execute("SELECT body FROM pending_steps WHERE job_id=?", (key,)).fetchone()
             expected = PendingExecutionStep(
@@ -401,7 +445,7 @@ class ExecutionJournal:
             if row is None or row[1] != "running" or bytes(row[0]) != canonical_json_bytes(job):
                 raise ValueError("execution job is not reserved for these inputs")
             index = db.execute("SELECT COUNT(*) FROM steps WHERE job_id=?", (key,)).fetchone()[0]
-            if index >= 2 * len(job.cases):
+            if index >= _runs_per_case(job) * len(job.cases):
                 raise ValueError("execution has too many observations")
             db.execute("INSERT INTO pending_steps VALUES (?,?)", (key, raw))
 
@@ -413,8 +457,17 @@ class ExecutionJournal:
         rows = db.execute(
             "SELECT body FROM steps WHERE job_id=? ORDER BY ordinal", (execution_key(job),)
         ).fetchall()
-        evidence = ModelExecutionEvidence(
-            schema="umi-model-execution-evidence/1",
+        model = (
+            EndpointIncumbentEvidence
+            if isinstance(job, EndpointIncumbentJob)
+            else ModelExecutionEvidence
+        )
+        evidence = model(
+            schema=(
+                "umi-endpoint-incumbent-evidence/1"
+                if isinstance(job, EndpointIncumbentJob)
+                else "umi-model-execution-evidence/1"
+            ),
             job=job,
             steps=tuple(ExecutionStep.model_validate_json(bytes(row[0])) for row in rows),
         )
@@ -473,13 +526,56 @@ async def run_model_evaluation(
     boundary_provider: Callable[[], Awaitable[ExecutionBoundary]],
     prepare_boundaries: Callable[[], Awaitable[None]] | None = None,
 ) -> ModelExecutionEvidence:
+    return await _run_evaluation(
+        job=validate_job(job, policy),
+        policy=policy,
+        archive=archive,
+        videos=videos,
+        journal=journal,
+        boundary_provider=boundary_provider,
+        prepare_boundaries=prepare_boundaries,
+    )
+
+
+async def run_endpoint_incumbent(
+    *,
+    job: EndpointIncumbentJob,
+    policy: CompetitionPolicy,
+    archive: Path,
+    videos: Path,
+    journal: ExecutionJournal,
+    boundary_provider: Callable[[], Awaitable[ExecutionBoundary]],
+    prepare_boundaries: Callable[[], Awaitable[None]] | None = None,
+) -> EndpointIncumbentEvidence:
+    """Run the actual archived baseline before reveal, without contacting a miner."""
+    return await _run_evaluation(
+        job=validate_incumbent_job(job, policy),
+        policy=policy,
+        archive=archive,
+        videos=videos,
+        journal=journal,
+        boundary_provider=boundary_provider,
+        prepare_boundaries=prepare_boundaries,
+    )
+
+
+async def _run_evaluation(
+    *,
+    job,
+    policy,
+    archive,
+    videos,
+    journal,
+    boundary_provider,
+    prepare_boundaries,
+):
     """Sequential candidate/incumbent execution, with no references or signer.
 
     Reserve first, retain each invocation before the next one, and refuse to
     rerun after ambiguous failure. Recovery of a complete job uses its exact
     persisted evidence even when finality or the model archive is unavailable.
     """
-    job = validate_job(job, policy)
+    job = _journal_job(job, policy)
     if digest(journal.policy) != digest(policy):
         raise ValueError("execution journal policy mismatch")
     saved = journal.reserve(job)
@@ -500,12 +596,18 @@ async def run_model_evaluation(
             await prepare_boundaries()
         await verify_runtime(job.runtime, policy)
         candidate = job.submission.submission.model_bundle
-        assert candidate is not None
-        verify_preserved_bundle(candidate, archive, policy)
+        if not isinstance(job, EndpointIncumbentJob):
+            assert candidate is not None
+            verify_preserved_bundle(candidate, archive, policy)
         verify_preserved_bundle(job.incumbent, archive, policy)
+        runs = (
+            (("incumbent", job.incumbent),)
+            if isinstance(job, EndpointIncumbentJob)
+            else (("candidate", candidate), ("incumbent", job.incumbent))
+        )
         for case in job.cases:
             video = _read_video(videos, case.video_sha256, job.runtime.maximum_video_bytes)
-            for role, model in (("candidate", candidate), ("incumbent", job.incumbent)):
+            for role, model in runs:
                 started = await boundary()
                 record = await execute_offline_case(
                     bundle=model,
@@ -576,15 +678,12 @@ def common_execution_result(
         raise ValueError("invalid execution aggregation size")
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
-    evidence = tuple(
-        ModelExecutionEvidence.model_validate_json(canonical_json_bytes(e)) for e in evidence
-    )
+    views = tuple(_evaluation_view(e, suite, policy, current_block) for e in evidence)
     groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
     seen = set()
-    first = evidence[0].job
-    for item in evidence:
-        validate_revealed_execution(item, suite, policy, current_block=current_block)
-        job = item.job
+    first = views[0]["job"]
+    for item in views:
+        job = item["job"]
         group = groups[identity(job.evaluator_hotkey)]
         if group in seen or (job.round, job.submission, job.incumbent, job.runtime, job.cases) != (
             first.round,
@@ -599,7 +698,7 @@ def common_execution_result(
         raise ValueError("insufficient independent execution groups")
 
     def agreed(role):
-        runs = [_outputs(item, role) for item in evidence]
+        runs = [item[role] for item in views]
         merged = []
         for outputs in zip(*runs, strict=True):
 
@@ -627,7 +726,7 @@ def common_execution_result(
         model_revision=first.submission.submission.model_revision,
         incumbent_model_sha256=digest(first.incumbent),
         runtime_sha256=digest(first.runtime),
-        finished_block=max(item.steps[-1].finished.block for item in evidence),
+        finished_block=max(item["finished_block"] for item in views),
         candidate=agreed("candidate"),
         incumbent=agreed("incumbent"),
     )
@@ -642,25 +741,22 @@ def run_record_from_execution(
     current_block: int,
 ) -> EvaluatorRunRecord:
     """Validate the proposed common result against one evaluator's retained run."""
-    evidence = ModelExecutionEvidence.model_validate_json(canonical_json_bytes(evidence))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
-    validate_revealed_execution(evidence, suite, policy, current_block=current_block)
+    view = _evaluation_view(evidence, suite, policy, current_block)
     common = EvaluationResult.model_validate_json(canonical_json_bytes(common))
-    job = evidence.job
+    job = view["job"]
     if (
         common.round_sha256 != digest(job.round)
         or common.submission_sha256 != digest(job.submission.submission)
         or common.model_revision != job.submission.submission.model_revision
         or common.incumbent_model_sha256 != digest(job.incumbent)
         or common.runtime_sha256 != digest(job.runtime)
-        or not evidence.steps[-1].finished.block
-        <= common.finished_block
-        <= job.round.evaluation_close_block
+        or not view["finished_block"] <= common.finished_block <= job.round.evaluation_close_block
     ):
         raise ValueError("common result does not bind this completed execution")
     for role in ("candidate", "incumbent"):
-        own = _outputs(evidence, role)
+        own = view[role]
         proposed = getattr(common, role)
         if len(own) != len(proposed):
             raise ValueError("common result has incomplete output coverage")
@@ -691,9 +787,26 @@ def run_record_from_execution(
         model_revision=job.submission.submission.model_revision,
         incumbent_model_sha256=digest(job.incumbent),
         runtime_sha256=digest(job.runtime),
-        started_block=evidence.steps[0].started.block,
-        finished_block=evidence.steps[-1].finished.block,
-        candidate=_outputs(evidence, "candidate"),
-        incumbent=_outputs(evidence, "incumbent"),
-        execution_evidence_sha256=digest(evidence),
+        started_block=view["started_block"],
+        finished_block=view["finished_block"],
+        candidate=view["candidate"],
+        incumbent=view["incumbent"],
+        execution_evidence_sha256=view["evidence_sha256"],
     )
+
+
+def _evaluation_view(evidence, suite, policy, current_block):
+    from .competition_endpoint_execution import EndpointPairedEvidence, endpoint_evaluation_view
+
+    if isinstance(evidence, EndpointPairedEvidence):
+        return endpoint_evaluation_view(evidence, suite, policy, current_block=current_block)
+    evidence = ModelExecutionEvidence.model_validate_json(canonical_json_bytes(evidence))
+    validate_revealed_execution(evidence, suite, policy, current_block=current_block)
+    return {
+        "job": evidence.job,
+        "candidate": _outputs(evidence, "candidate"),
+        "incumbent": _outputs(evidence, "incumbent"),
+        "started_block": evidence.steps[0].started.block,
+        "finished_block": evidence.steps[-1].finished.block,
+        "evidence_sha256": digest(evidence),
+    }

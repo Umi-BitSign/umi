@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -98,3 +99,130 @@ print('bounded-private-shared-memory-ok')
             timeout=30,
             check=True,
         )
+
+
+async def test_endpoint_incumbent_job_runs_real_containers_and_retains_receipts(tmp_path):
+    """Inert model/video fixtures; boundary port is synthetic, execution is real."""
+    from tests.test_competition_execution import boundary
+    from tests.test_open_competition import bundle_at, round_for, submission, wallet
+    from tests.test_open_competition import policy as policy_fixture
+    from umi.competition_artifacts import preserve_bundle
+    from umi.competition_execution import (
+        EndpointIncumbentJob,
+        ExecutionCase,
+        ExecutionJournal,
+        execution_key,
+        run_endpoint_incumbent,
+    )
+    from umi.open_competition import BundleFile, EvaluationCase, EvaluationSuite, digest
+
+    assert os.geteuid() != 0
+    runtime = OfflineCpuRuntime(
+        schema="umi-offline-cpu-runtime/2",
+        image=os.environ["UMI_OFFLINE_TEST_IMAGE"],
+        cpus=1,
+        memory_bytes=256 * 1024**2,
+        scratch_bytes=16 * 1024**2,
+        pids_limit=32,
+        maximum_video_bytes=1024,
+    )
+    policy = policy_fixture.__wrapped__().model_copy(
+        update={
+            "evaluation_runtime_sha256": digest(runtime),
+            "maximum_inference_ms": 60_000,
+        }
+    )
+    source = tmp_path / "source"
+    bundle = bundle_at(source)
+    entry = next(f for f in bundle.files if f.role == "inference")
+    code = (
+        b"from pathlib import Path\nimport sys\n"
+        b"assert Path(sys.argv[1]).read_bytes().startswith(b'inert')\nprint('hello')\n"
+    )
+    (source / entry.path).rename(source / "infer.py")
+    (source / "infer.py").write_bytes(code)
+    bundle = bundle.model_copy(
+        update={
+            "files": tuple(
+                BundleFile(
+                    path="infer.py",
+                    role=f.role,
+                    sha256=hashlib.sha256(code).hexdigest(),
+                    size_bytes=len(code),
+                )
+                if f.role == "inference"
+                else f
+                for f in bundle.files
+            )
+        }
+    )
+    archive = tmp_path / "archive"
+    preserve_bundle(bundle, source, archive, policy)
+    videos = tmp_path / "videos"
+    videos.mkdir(mode=0o700)
+    cases = []
+    for i, stratum in enumerate(("fingerspelling", "short_utterance", "continuous")):
+        raw = f"inert-{i}".encode()
+        sha = hashlib.sha256(raw).hexdigest()
+        (videos / (sha + ".mp4")).write_bytes(raw)
+        cases.append(
+            EvaluationCase(
+                case_id=f"{i:064x}",
+                video_sha256=sha,
+                stratum=stratum,
+                references=("hello", "hi", "greetings"),
+            )
+        )
+    suite = EvaluationSuite(
+        schema="umi-competition-suite/1", policy_sha256=digest(policy), cases=tuple(cases)
+    )
+    signed = submission(policy)
+    round_ = round_for(policy, suite, (signed,), incumbent=digest(bundle))
+    job = EndpointIncumbentJob(
+        schema="umi-endpoint-incumbent-job/1",
+        round=round_,
+        submission=signed,
+        incumbent=bundle,
+        runtime=runtime,
+        evaluator_hotkey=wallet("Charlie").hotkey.ss58_address,
+        cases=tuple(
+            ExecutionCase(case_id=c.case_id, video_sha256=c.video_sha256, stratum=c.stratum)
+            for c in cases
+        ),
+    )
+    journal = ExecutionJournal(tmp_path / "journal", policy)
+
+    async def observe():
+        return boundary(125)
+
+    result = await run_endpoint_incumbent(
+        job=job,
+        policy=policy,
+        archive=archive,
+        videos=videos,
+        journal=journal,
+        boundary_provider=observe,
+    )
+    assert len(result.steps) == 3
+    assert all(
+        s.role == "incumbent"
+        and s.execution.output.hypothesis == "hello"
+        and s.execution.reason == "ok"
+        for s in result.steps
+    )
+    assert journal.status(execution_key(job))["status"] == "complete"
+
+    async def forbidden():
+        pytest.fail("completed receipt recovery accessed finality")
+
+    assert (
+        await run_endpoint_incumbent(
+            job=job,
+            policy=policy,
+            archive=tmp_path / "unavailable",
+            videos=tmp_path / "missing",
+            journal=journal,
+            boundary_provider=forbidden,
+        )
+        == result
+    )
