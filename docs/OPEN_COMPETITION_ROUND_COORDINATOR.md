@@ -7,8 +7,10 @@ provider before signing. The coordinator has no wallet.
 
 With the optional [work-signing configuration](OPEN_COMPETITION_WORK_SIGNING.md),
 this service also generates endpoint authorizations and evaluation orders and
-collects independent signatures before delivery. Settlement publication remains
-unconnected. The service does not activate the 70/30 policy, change bridge
+collects independent signatures before delivery. Optional
+[settlement preparation](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md) produces
+unsigned proposals from complete retained evidence. Independent settlement
+signing remains unconnected. The service does not activate the 70/30 policy, change bridge
 weights or extend the bridge sunset.
 
 ## Operator inputs
@@ -27,6 +29,9 @@ schema `umi-round-coordinator-config/1`:
 - `replay_limits`: explicit `maximum_roster_bytes`, `maximum_evidence_bytes` and
   `maximum_certificate_bytes`. Roster and certificate limits cannot exceed 4 MiB.
 - `no_weight: true`.
+- Optional `settlement_directory`: private unsigned settlement proposals after
+  evidence cutoff. This directory must be separate from all other state and
+  delivery paths. See the [settlement guide](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md).
 - Optional `work`: separate work state, reviewed per-suite assets, output
   directories, transport-bound finality and an explicit issue margin. See the
   [work-signing guide](OPEN_COMPETITION_WORK_SIGNING.md) and pass its transport
