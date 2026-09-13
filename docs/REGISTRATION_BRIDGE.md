@@ -1,17 +1,19 @@
 # Temporary live-miner rewards
 
 The temporary bridge has replaced the frozen two-miner pilot policy on UMI's
-UID 0 and UID 54 validators. Both have finalized rows under the shared-coldkey-or-IP
-rule. See the [IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) for the
-signed policy and exact rows. At that snapshot, the new rows still awaited a
-later consensus update. The [initial activation report](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
-records the earlier coldkey-only policy.
+UID 0 and UID 54 validators. Both have finalized rows under the shared-coldkey,
+HTTPS-IP or recorded-funder rule. See the
+[funding-cap readback](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md) for the
+signed policy and exact rows. The [IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md)
+and [initial activation report](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
+record the earlier policies, whose signed bytes remain unchanged.
 
 ## Eligibility and weights
 
 At each finalized snapshot, the validator considers the registered SN78 UIDs.
 It checks each eligible miner's chain-announced public HTTPS `/healthz`
-endpoint. Passing miners sharing a coldkey or HTTPS endpoint IP form one group,
+endpoint. Passing miners sharing a coldkey, HTTPS endpoint IP, or a recorded
+pre-registration sender bound in the signed funding snapshot form one group,
 including transitive connections. Ports do not create separate groups. Each
 group receives the same total weight, divided among its passing UIDs.
 UID 0, validator-permitted UIDs,
@@ -25,10 +27,10 @@ that miner from the current row, without disqualifying the healthy miners.
 The validator rechecks the finalized roster after the health probes. A batch
 failure or zero passing miners holds submissions instead of inventing a row.
 
-Adding live UIDs under the same coldkey or IP does not create extra group
-budgets. This is an infrastructure cap, not proof of independent operators.
-Shared-IP miners split one budget; a person using distinct coldkeys and distinct
-IPs can still create multiple groups.
+Adding live UIDs under the same coldkey, IP, or matched funding group does not
+create extra group budgets. This is not proof of independent operators. Shared
+hosting and shared withdrawal senders can group independent miners. Distinct
+coldkeys, IPs and funding sources can still create multiple groups.
 
 A health check proves HTTPS reachability only. It does not authenticate the endpoint
 to the hotkey, inspect an `ok` field in the response body, or establish that a
@@ -81,9 +83,12 @@ the signed release and finalized readback. The original deadline below is unchan
 ## Duration
 
 The separate [funding audit](REGISTRATION_FUNDING_AUDIT.md) collects shared-funder
-candidates with a cached Taostats worker. Funding-based reward grouping is not
-active. The audit does not change the coldkey-or-IP rule above, and it is not a
-permanent requirement of the planned open competition.
+candidates with a cached Taostats worker. The
+[funding-cap policy](REGISTRATION_BRIDGE_FUNDING_CAP.md) adds reviewed bindings
+to the signed policy; an audit report alone cannot change weights. New
+registrations are checked automatically, but new bindings require a signed
+snapshot refresh. Unknown or multiple-sender histories retain coldkey/IP grouping.
+This is not a permanent requirement of the planned open competition.
 
 The bridge retains the original bootstrap cutoff: no new submissions from
 block `9,073,731`, with hard sunset at `9,075,171`. It may be superseded sooner

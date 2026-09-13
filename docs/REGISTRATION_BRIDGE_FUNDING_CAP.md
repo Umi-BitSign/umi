@@ -4,6 +4,9 @@ The funding-cap worker supports a new signed bridge policy. Deployment is a
 separate step: check the applied policy in each validator's journal and its
 finalized weight row before announcing activation.
 
+The [September 13 readback](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
+records this policy applied by both UMI validators, UID 0 and UID 54.
+
 Under `equal_live_coldkey_ip_funder_groups/1`, passing miners are connected by
 shared coldkey, HTTPS endpoint IP, or a common recorded pre-registration sender.
 Each connected group receives one equal raw-weight budget, divided among its
