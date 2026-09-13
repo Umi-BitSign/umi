@@ -17,7 +17,6 @@ runtime_smoke_mount_root=/var/lib/umi-validator-runtime-smoke
 runtime_smoke_readonly_mount="$runtime_smoke_mount_root/readonly"
 runtime_smoke_readwrite_mount="$runtime_smoke_mount_root/readwrite"
 archive_root=/var/lib/umi-validator-retired-units
-origin=https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev
 
 fail() {
   printf 'umi-validator-supervisor-install: %s\n' "$*" >&2
@@ -559,10 +558,24 @@ install -o "$service_account" -g "$service_account" -m 0400 \
 artifacts_directory="$supervisor_root/artifacts"
 install -d -o root -g root -m 0755 "$artifacts_directory"
 host_manifest="$temporary_root/host-artifacts.json"
-host_manifest_url="$origin/validator-supervisor/channels/$channel_id/$platform_suffix/host-artifacts.json"
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
-  --max-filesize 1048576 \
-  --output "$host_manifest" "$host_manifest_url"
+# Read the signed manifest and release pin from the same committed installer.
+# A later channel publication must not change this checkout's host bootstrap.
+host_manifest_object="$installer_revision:deploy/linux-validator-supervisor/host-artifacts/$platform_suffix.json"
+[ "$(git -c safe.directory="$source_root" -C "$source_root" \
+  cat-file -t "$host_manifest_object")" = blob ] \
+  || fail "committed host artifact manifest is missing or is not a file"
+host_manifest_size=$(git -c safe.directory="$source_root" -C "$source_root" \
+  cat-file -s "$host_manifest_object") \
+  || fail "could not read the committed host artifact manifest size"
+[ "$host_manifest_size" -gt 0 ] && [ "$host_manifest_size" -le 1048576 ] \
+  || fail "committed host artifact manifest has an invalid size"
+# The repository copy ends with a newline; the signature parser requires the
+# canonical JSON bytes without it. It still verifies every signed field.
+host_manifest_payload=$(git -c safe.directory="$source_root" -C "$source_root" \
+  show "$host_manifest_object") \
+  || fail "could not read the committed host artifact manifest"
+printf '%s' "$host_manifest_payload" > "$host_manifest"
+unset host_manifest_payload
 "$supervisor_executable" install-common-host-artifacts \
   --manifest "$host_manifest" --target-platform "$target_platform" \
   --expected-revision "$release_revision" --destination "$artifacts_directory"
