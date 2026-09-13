@@ -548,9 +548,10 @@ async def test_production_entrypoint_owns_provider_and_excludes_a_second_process
         async def aclose(self):
             events.append("close")
 
-    class HotkeyOnly:
-        hotkey = first.wallet.hotkey
-
+    # Exercise the production SDK Wallet path. Python 3.10's runtime Protocol
+    # checks evaluate properties on an unrelated duck-typed wallet; that fake
+    # never reached the SDK's native WalletSigner branch.
+    class HotkeyOnly(bt.Wallet):
         @property
         def coldkey(self):
             pytest.fail("evaluator accessed the coldkey")
@@ -559,7 +560,32 @@ async def test_production_entrypoint_owns_provider_and_excludes_a_second_process
         def coldkeypub(self):
             pytest.fail("evaluator accessed the coldkey public file")
 
-    monkeypatch.setattr(bt, "Wallet", lambda **kw: HotkeyOnly())
+        @property
+        def coldkey_file(self):
+            pytest.fail("evaluator accessed the coldkey file")
+
+        @property
+        def coldkeypub_file(self):
+            pytest.fail("evaluator accessed the coldkey public file")
+
+        def get_coldkey(self, *args, **kwargs):
+            pytest.fail("evaluator tried to unlock the coldkey")
+
+    native_wallet = HotkeyOnly(
+        name=first.config.wallet_name,
+        hotkey=first.config.hotkey_name,
+        path=first.config.wallet_path,
+    )
+    native_wallet.hotkey_file.set_keypair(first.wallet.hotkey, encrypt=False, overwrite=False)
+    # No coldkey or hotkey-public file exists: also test the SDK's legacy
+    # hotkey-only fallback and actual signing, without mocking its resolver.
+    from umi.crypto import sign_response_digest, verify_response_signature
+
+    scheme, signature = sign_response_digest(native_wallet, "ab" * 32)
+    assert verify_response_signature(
+        "ab" * 32, hotkey_ss58=first.config.evaluator_hotkey, scheme=scheme, signature=signature
+    )
+    monkeypatch.setattr(bt, "Wallet", HotkeyOnly)
     monkeypatch.setattr(worker, "FinalizedRegistrationProvider", lambda *a: Owned())
 
     def report(result):
@@ -588,6 +614,11 @@ async def test_production_entrypoint_owns_provider_and_excludes_a_second_process
         reported.cancel()
         await asyncio.gather(task, reported, return_exceptions=True)
     assert events[0] == "start" and events[-1] == "close"
+    assert sorted(
+        str(path.relative_to(first.config.wallet_path))
+        for path in Path(first.config.wallet_path).rglob("*")
+        if path.is_file()
+    ) == [f"{first.config.wallet_name}/hotkeys/{first.config.hotkey_name}"]
     # The original private lease inode remains reusable after cancellation.
     lock = worker._lock_file(Path(first.config.state_directory) / "evaluator.lock")
     import os
