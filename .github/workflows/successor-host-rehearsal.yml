@@ -1,0 +1,207 @@
+name: Successor host recovery checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/successor-host-rehearsal.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/successor-host-rehearsal.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: successor-host-recovery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  recovery:
+    name: Recovery files and state (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install locked development dependencies
+        run: |
+          python -m pip install uv==0.12.9
+          uv sync --locked --extra dev --python "$(command -v python)"
+
+      - name: State, startup and interrupted publication checks
+        run: |
+          umask 022
+          .venv/bin/python -m pytest -q --junitxml=successor-state.xml \
+            tests/test_competition_bridge_recovery.py \
+            tests/test_coordinator_rehearsal_helpers.py \
+            tests/test_competition_host_anchor.py \
+            tests/test_competition_host_switch.py \
+            tests/test_competition_host_start.py \
+            tests/test_competition_host_start_linux.py \
+            tests/test_competition_upgrade_namespace.py \
+            tests/test_competition_coordinator_namespace.py \
+            tests/test_competition_host_service.py \
+            tests/test_competition_initial_upgrade.py \
+            tests/test_competition_initial_anchor_retention.py \
+            tests/test_competition_switch_recovery.py \
+            tests/test_competition_startup_lease.py \
+            tests/test_competition_materialization.py \
+            tests/test_competition_materializer.py
+
+      - name: Native root filesystem and process-death checks
+        run: |
+          stat -c '%n owner=%u mode=%a' / /opt /var /var/lib
+          sudo -n env \
+            UMI_RUN_SERVICE_REHEARSAL=1 \
+            UMI_RUN_HOST_BUNDLE_REHEARSAL=1 \
+            UMI_RUN_NAMESPACE_REHEARSAL=1 \
+            UMI_RUN_INITIAL_UPGRADE_REHEARSAL=1 \
+            UMI_RUN_COORDINATOR_NAMESPACE=1 \
+            UMI_NAMESPACE_TEST_ROOTED_TARGETS=1 \
+            PYTHONPATH="$PWD/src:$PWD" \
+            "$PWD/.venv/bin/python" -m pytest -q \
+            --basetemp="/var/lib/umi-successor-hostbundle-pytest-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --junitxml="$PWD/successor-root-files.xml" \
+            tests/test_competition_host_bundle.py \
+            tests/test_competition_host_switch_linux.py \
+            tests/test_competition_switch_recovery_linux.py \
+            tests/test_competition_upgrade_namespace_linux.py \
+            tests/test_competition_coordinator_namespace_linux.py \
+            tests/test_competition_initial_upgrade_linux.py
+
+      - name: Retain test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: successor-recovery-${{ matrix.architecture }}-${{ github.sha }}
+          path: successor-*.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  rooted-services:
+    name: Rooted OCI ${{ matrix.scenario }} (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+            scenario: lifecycle
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+            scenario: lifecycle
+          - runner: ubuntu-24.04
+            architecture: amd64
+            scenario: migration
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+            scenario: migration
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install locked dependencies and rootless runtime
+        run: |
+          python -m pip install uv==0.12.9
+          uv sync --locked --extra dev --python "$(command -v python)"
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y podman crun uidmap slirp4netns dbus-user-session
+          test "$(stat -c %u /opt)" = 0
+          # Disposable hosted runners expose /opt as world-writable. Production
+          # signed-host ancestry checks require this root-owned parent sealed.
+          sudo -n chmod go-w /opt
+
+      - name: Build the actual wallet-free successor OCI image
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          revision="$(git rev-parse HEAD)"
+          source_tree_sha256="$(.venv/bin/python -c \
+            'from umi.policy import umi_source_tree_sha256; print(umi_source_tree_sha256())')"
+          docker buildx create --name umi-successor-rehearsal --driver docker-container --use
+          docker buildx build \
+            --platform "linux/$ARCHITECTURE" \
+            --build-arg "UMI_GIT_REVISION=$revision" \
+            --build-arg "UMI_SOURCE_TREE_SHA256=$source_tree_sha256" \
+            --build-arg UMI_ENTRYPOINT_PROFILE=umi-competition-replay-worker/1 \
+            --tag ghcr.io/umi-bitsign/umi-validator:synthetic-successor-rehearsal \
+            --provenance=false \
+            --output "type=oci,dest=$RUNNER_TEMP/umi-successor-replay.oci.tar" \
+            --file deploy/linux-competition-worker/Dockerfile .
+
+      - name: Signed preflight in both coordinator roots
+        if: matrix.scenario == 'lifecycle'
+        run: |
+          sudo -n env \
+            UMI_RUN_COORDINATOR_SERVICE_REHEARSAL=1 \
+            UMI_REHEARSAL_OCI_ARCHIVE="$RUNNER_TEMP/umi-successor-replay.oci.tar" \
+            PYTHONPATH="$PWD/src:$PWD" \
+            "$PWD/.venv/bin/python" -m pytest -q -x \
+            --basetemp="/var/lib/umi-rooted-preflight-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --junitxml="$PWD/successor-rooted-preflight.xml" \
+            tests/test_competition_coordinator_preflight_linux.py
+
+      - name: Both rooted services and per-instance crash cleanup
+        if: matrix.scenario == 'lifecycle'
+        run: |
+          sudo -n env \
+            UMI_RUN_COORDINATOR_SERVICE_REHEARSAL=1 \
+            UMI_REHEARSAL_OCI_ARCHIVE="$RUNNER_TEMP/umi-successor-replay.oci.tar" \
+            PYTHONPATH="$PWD/src:$PWD" \
+            "$PWD/.venv/bin/python" -m pytest -q -x \
+            --basetemp="/var/lib/umi-rooted-services-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --junitxml="$PWD/successor-rooted-services.xml" \
+            tests/test_competition_coordinator_service_linux.py
+
+      - name: Complete signed migration and interrupted-command recovery
+        if: matrix.scenario == 'migration'
+        run: |
+          sudo -n env \
+            UMI_RUN_COORDINATOR_SERVICE_REHEARSAL=1 \
+            UMI_RUN_SIGNED_MIGRATION_REHEARSAL=1 \
+            UMI_REHEARSAL_OCI_ARCHIVE="$RUNNER_TEMP/umi-successor-replay.oci.tar" \
+            PYTHONPATH="$PWD/src:$PWD" \
+            "$PWD/.venv/bin/python" -m pytest -q -x \
+            --basetemp="/var/lib/umi-rooted-migration-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --junitxml="$PWD/successor-rooted-migration.xml" \
+            tests/test_competition_migration_linux.py
+
+      - name: Retain bounded test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: successor-rooted-${{ matrix.scenario }}-${{ matrix.architecture }}-${{ github.sha }}
+          path: successor-rooted-*.xml
+          if-no-files-found: warn
+          retention-days: 14

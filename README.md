@@ -1,9 +1,9 @@
 # UMI
 
-UMI is building a trust-minimized translation layer at the boundary between people
-and machines. Its first subnet mechanism is deliberately narrow: miners translate
-raw American Sign Language video into English, and validators score sealed, signed
-responses against references that were fixed before assignment.
+UMI develops ASL-to-English translation through endpoint competition and
+reproducible public model contributions. Endpoint miners may keep their models
+private. Contributors can submit licensed, runnable model bundles for evaluation
+and promotion into successive public UMI baselines.
 
 The longer-term protocol can expand to other directions and forms of human-machine
 interaction only when each task has an independently useful output and a
@@ -13,6 +13,8 @@ protocol extension.
 - [UMI whitepaper (PDF)](whitepaper/UMI-Whitepaper.pdf)
 - [LaTeX publication source](whitepaper/main.tex)
 - [Plain-text protocol source](whitepaper/README.md)
+- [Open competition implementation and rehearsal](docs/OPEN_COMPETITION.md)
+- [Historical version 0.1 specification](whitepaper/LEGACY_V0_1.md)
 - [bitsign product MVP](roadmap/bitsign-mvp/README.md)
 - [public observer API contract](docs/DASHBOARD_API.md)
 - [what miners should run now](docs/CURRENT_MINER_OPERATION.md)
@@ -35,6 +37,20 @@ protocol extension.
 - [first public post-reveal result deployment](deploy/first-public-result/README.md)
 
 ## Current status
+
+The version 0.2 whitepaper defines the successor design. The code includes signed
+submission intake, model preservation and promotion, evaluation and settlement,
+and a separately authorized weight worker. The successor supervisor supports
+per-round input updates and recovery from interrupted host upgrades.
+The public competition service is not deployed, and the installed validators
+still use their signed registration-bridge policy. No successor reward allocation
+has been activated. See the
+[implementation checklist](docs/OPEN_COMPETITION.md) for the tested scope and
+remaining production work.
+
+Historical guides that refer to whitepaper Section 14 describe
+[version 0.1](whitepaper/LEGACY_V0_1.md), not the successor activation procedure.
+The registration bridge has its own signed policy and retains the original sunset.
 
 SN78 is active on mainnet, but UMI translation weights are not. The public-endpoint
 pilot is closed. A signed [temporary registration bridge](docs/REGISTRATION_BRIDGE.md)
@@ -92,7 +108,7 @@ temporary registration-bridge weights
 signed bridge policy + hash-pinned release directive
   -> finalized registration, owner, permit, and serving roster
   -> bounded public HTTPS health checks and finalized roster recheck
-  -> merge live UIDs sharing a coldkey or HTTPS IP (ports ignored)
+  -> merge live UIDs by coldkey, HTTPS IP or signed funding link (ports ignored)
   -> equal total weight per connected group, split among its live UIDs
   -> exact direct 256-entry row from the installed validator
   -> finalized row and LastUpdate as the public receipt
@@ -111,17 +127,10 @@ published, an installed reconciliation command accepts only the originally
 committed objects, applies the public retirement and objective-fault transition
 without scoring the failed window, and releases only that incident's intake hold.
 
-The protocol implementation is complete for the planned baseline demonstration.
-The separately versioned `umi-reference-model` repository contains the
-`umi-s1-baseline-v0` miner fixture and its release evidence. That model is
-deliberately low-accuracy and is a replacement target for miners, not activation
-evidence.
-
-The remaining work before public calibration is deployment work: publish the
-owner-approved model release, then create the signed inactive UMI release and
-operator bindings for the exact policy, binaries, identities, mirrors, and
-configuration that will be deployed. These steps do not require another mechanism
-implementation.
+These four historical paths remain available. They do not implement all of the
+version 0.2 model-contribution mechanism. The separately versioned
+`umi-reference-model` repository contains the public baseline and its release
+evidence. It is a replacement target for contributors, not activation evidence.
 
 On supported Linux release targets, every FFmpeg and FFprobe child enters a finite
 address-space, CPU, and core-dump envelope before the pinned executable runs. A
@@ -138,14 +147,10 @@ enable or imply a host-native Darwin validator runtime. See the
 [macOS miner guide](docs/MACOS_MINER_OPERATOR.md) and
 [macOS validator guide](docs/MACOS_VALIDATOR_OPERATOR.md).
 
-The remaining translation-weight activation gates are external evidence and
-governance work, not missing inactive-validator code. They include independent
-publishers and validators, miner implementation diversity and positive utility,
-consented challenge supply, metric and canary studies, validator economics, the
-full shadow soak and drills, and a later governed policy with
-`translation_weights_active: true`. The shipped shadow release schema fixes that
-field to `false`, and the installed live-shadow runtime has no weight-call builder,
-signer, or submitter. The temporary registration bridge is a separate,
+The shipped version 0.1 shadow release fixes `translation_weights_active` to
+`false` and has no weight-call builder, signer or submitter. Version 0.2 requires
+the implementation and activation evidence listed in its own whitepaper.
+The temporary registration bridge is a separate,
 narrowly bounded path governed by its [signed policy](docs/REGISTRATION_BRIDGE.md).
 The original pilot addendum and shared-validator supersession are historical
 records, not the bridge's eligibility rule.

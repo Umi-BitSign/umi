@@ -4,9 +4,12 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOYMENT = ROOT / "deploy" / "macos-validator"
@@ -119,6 +122,8 @@ def test_macos_audit_tunnel_is_token_file_only_and_supervised() -> None:
 
 
 def test_compose_file_resolves_with_only_declared_public_configuration() -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose is not installed")
     docker = subprocess.run(
         ["docker", "compose", "version"],
         check=False,
@@ -126,7 +131,7 @@ def test_compose_file_resolves_with_only_declared_public_configuration() -> None
         stderr=subprocess.DEVNULL,
     )
     if docker.returncode != 0:
-        return
+        pytest.skip("Docker Compose is not available")
     environment = {
         **os.environ,
         "UMI_HOST_UID": str(os.getuid()),
@@ -212,6 +217,8 @@ def test_management_script_never_deletes_runtime_state() -> None:
 
 
 def test_env_file_wins_over_hostile_ambient_compose_values(tmp_path: Path) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose is not installed")
     docker = subprocess.run(
         ["docker", "compose", "version"],
         check=False,
@@ -219,7 +226,7 @@ def test_env_file_wins_over_hostile_ambient_compose_values(tmp_path: Path) -> No
         stderr=subprocess.DEVNULL,
     )
     if docker.returncode != 0:
-        return
+        pytest.skip("Docker Compose is not available")
     deployment_id = "reviewed-release"
     revision = "1" * 40
     values = {

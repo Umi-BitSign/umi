@@ -1,0 +1,1476 @@
+"""Durable no-weight admission and compare-and-swap model promotion."""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Annotated, Literal
+
+from pydantic import Field
+
+from .competition_artifacts import verify_preserved_bundle
+from .competition_evidence import (
+    IndependentEvaluationEvidence,
+    independent_evidence_digest,
+    replay_independent_evaluation,
+)
+from .competition_settlement import (
+    CompetitionSettlement,
+    EvidenceCutoffSchedule,
+    PromotionHeadBinding,
+    SettlementResultBinding,
+    competition_settlement_digest,
+    evidence_cutoff_schedule_digest,
+)
+from .open_competition import (
+    AttestedResult,
+    CompetitionPolicy,
+    EvaluationResult,
+    EvaluationRound,
+    EvaluationSuite,
+    Hex32,
+    ModelBundle,
+    RegistrationSnapshot,
+    Signature,
+    SignedSubmission,
+    StrictProtocolModel,
+    WeightProjection,
+    authenticate_evaluation,
+    digest,
+    identity,
+    model_content_digest,
+    project_weights,
+    qualifies_for_promotion,
+    replay_evaluation,
+    validate_admission,
+    validate_evaluation_suite,
+    verify_signature,
+)
+from .protocol import canonical_json_bytes
+
+
+class PromotionReview(StrictProtocolModel):
+    schema_: Literal["umi-model-promotion-review/1"] = Field(alias="schema")
+    policy_sha256: Hex32
+    model_sha256: Hex32
+    incumbent_model_sha256: Hex32
+    evaluation_result_sha256: Hex32
+    reconstruction_evidence_sha256: Hex32
+    rights_review_sha256: Hex32
+    offline_reconstruction_passed: Literal[True]
+    rights_review_passed: Literal[True]
+
+
+class AttestedPromotionReview(StrictProtocolModel):
+    review: PromotionReview
+    signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
+
+
+class AdmissionCapacity(StrictProtocolModel):
+    """Operational bounds for the append-only admission ledger."""
+
+    maximum_records: Annotated[int, Field(ge=1, le=1_000_000)] = 65_536
+    maximum_bytes: Annotated[int, Field(ge=1, le=64 * 1024**3)] = 2 * 1024**3
+
+
+class AdmissionCapacityError(ValueError):
+    """A new admission would exceed its configured durable capacity."""
+
+
+def verify_review(review: AttestedPromotionReview, policy: CompetitionPolicy) -> None:
+    groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
+    seen: set[str] = set()
+    for sig in review.signatures:
+        key = identity(sig.hotkey)
+        if key not in groups or groups[key] in seen:
+            raise ValueError("unauthorized or duplicate promotion review group")
+        verify_signature(review.review, sig)
+        seen.add(groups[key])
+    if len(seen) < policy.required_evaluator_groups:
+        raise ValueError("insufficient independent promotion review")
+    if review.review.policy_sha256 != digest(policy):
+        raise ValueError("promotion review belongs to another policy")
+    if "0" * 64 in {
+        review.review.reconstruction_evidence_sha256,
+        review.review.rights_review_sha256,
+    }:
+        raise ValueError("promotion review requires evidence identities")
+
+
+class CompetitionStore:
+    """One policy-bound SQLite store; never a source of chain authorization."""
+
+    def __init__(
+        self,
+        directory: Path,
+        policy: CompetitionPolicy,
+        *,
+        admission_capacity: AdmissionCapacity | None = None,
+    ):
+        if not directory.is_absolute() or directory.is_symlink():
+            raise ValueError("competition state directory must be absolute and not a symlink")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.stat().st_mode & 0o077:
+            raise ValueError("competition state directory must be private")
+        self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+        self.admission_capacity = AdmissionCapacity.model_validate_json(
+            canonical_json_bytes(admission_capacity or AdmissionCapacity())
+        )
+        self.directory = directory
+        self.path = directory / "competition.sqlite3"
+        if self.path.is_symlink():
+            raise ValueError("competition database cannot be a symlink")
+        with self._connection() as connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS submissions (
+                    digest TEXT PRIMARY KEY, hotkey TEXT NOT NULL, track TEXT NOT NULL,
+                    sequence INTEGER NOT NULL, accepted_block INTEGER NOT NULL,
+                    expires_block INTEGER NOT NULL, body BLOB NOT NULL, receipt BLOB NOT NULL,
+                    UNIQUE(hotkey, track, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS admission_usage (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    records INTEGER NOT NULL CHECK(records >= 0),
+                    payload_bytes INTEGER NOT NULL CHECK(payload_bytes >= 0)
+                );
+                CREATE TABLE IF NOT EXISTS rounds (
+                    digest TEXT PRIMARY KEY, sequence INTEGER UNIQUE NOT NULL, body BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS promotions (
+                    sequence INTEGER PRIMARY KEY, digest TEXT UNIQUE NOT NULL,
+                    model TEXT UNIQUE NOT NULL, contributor TEXT, body BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS model_identities (
+                    content TEXT PRIMARY KEY, model TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS suite_usage (
+                    suite TEXT PRIMARY KEY, round TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS evaluation_results (
+                    digest TEXT PRIMARY KEY, round TEXT NOT NULL, submission TEXT NOT NULL,
+                    body BLOB NOT NULL, observed_block INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS evaluation_slot
+                    ON evaluation_results (round, submission);
+                CREATE TABLE IF NOT EXISTS evaluation_signatures (
+                    result TEXT NOT NULL, signer TEXT NOT NULL, control_group TEXT NOT NULL,
+                    body BLOB NOT NULL, PRIMARY KEY(result, signer)
+                );
+                CREATE TABLE IF NOT EXISTS round_conflicts (
+                    round TEXT PRIMARY KEY, detected_block INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS promotion_sources (
+                    sequence INTEGER PRIMARY KEY, round TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS evidence_cutoff_schedules (
+                    round TEXT PRIMARY KEY, round_sequence INTEGER UNIQUE NOT NULL,
+                    cutoff_block INTEGER NOT NULL, digest TEXT UNIQUE NOT NULL,
+                    body BLOB NOT NULL, fixed_observed_block INTEGER NOT NULL,
+                    receipt BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS independent_evaluation_evidence (
+                    digest TEXT PRIMARY KEY, round TEXT NOT NULL, submission TEXT NOT NULL,
+                    result TEXT NOT NULL, body BLOB NOT NULL,
+                    first_observed_block INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS independent_evidence_slot
+                    ON independent_evaluation_evidence (round, submission, result);
+                CREATE TABLE IF NOT EXISTS competition_settlements (
+                    round TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, body BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS settlement_heads (
+                    round TEXT PRIMARY KEY, promotion_sequence INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS settlement_disputes (
+                    round TEXT PRIMARY KEY, detected_block INTEGER NOT NULL
+                );
+            """)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                bound = connection.execute(
+                    "SELECT value FROM metadata WHERE key='policy'"
+                ).fetchone()
+                if bound is None:
+                    connection.execute(
+                        "INSERT INTO metadata VALUES ('policy', ?)", (digest(policy),)
+                    )
+                elif bound[0] != digest(policy):
+                    raise ValueError("state directory is bound to a different competition policy")
+                actual_usage = connection.execute(
+                    "SELECT COUNT(*), COALESCE(SUM("
+                    "length(CAST(body AS BLOB)) + length(CAST(receipt AS BLOB))"
+                    "), 0) FROM submissions"
+                ).fetchone()
+                connection.execute(
+                    "INSERT INTO admission_usage VALUES (1, ?, ?) "
+                    "ON CONFLICT(singleton) DO UPDATE SET records=excluded.records, "
+                    "payload_bytes=excluded.payload_bytes",
+                    actual_usage,
+                )
+                self._hydrate_promotion_evidence(connection)
+                self._hydrate_settlement_heads(connection)
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        os.chmod(self.path, 0o600)
+
+    @contextmanager
+    def _connection(self):
+        connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _transaction(self):
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+    def admit(
+        self,
+        signed: SignedSubmission,
+        snapshot: RegistrationSnapshot,
+        current_block: int,
+        *,
+        registration_source: Literal[
+            "rehearsal_snapshot", "verifier_attested_finality"
+        ] = "rehearsal_snapshot",
+    ) -> dict:
+        if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
+            raise ValueError("unsupported registration source")
+        signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
+        snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
+        sub = signed.submission
+        if sub.policy_sha256 != digest(self.policy):
+            raise ValueError("submission belongs to another policy")
+        sub_id, key = digest(sub), identity(sub.hotkey)
+        with self._transaction() as connection:
+            old = connection.execute(
+                "SELECT receipt FROM submissions WHERE digest=?", (sub_id,)
+            ).fetchone()
+            if old:
+                return json.loads(old[0])  # Historical retry, never an expiry renewal.
+            _advance_block(connection, current_block)
+            closed = connection.execute(
+                "SELECT body FROM rounds ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if closed and current_block <= json.loads(closed[0])["submission_close_block"]:
+                raise ValueError("the admission boundary is already closed; retry in a later block")
+            uid = validate_admission(signed, self.policy, snapshot, current_block)
+            latest = connection.execute(
+                "SELECT sequence, accepted_block FROM submissions WHERE hotkey=? AND track=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (key, sub.track),
+            ).fetchone()
+            if latest:
+                if sub.sequence <= latest[0]:
+                    raise ValueError("submission sequence must increase")
+                if current_block - latest[1] < self.policy.minimum_submission_interval_blocks:
+                    raise ValueError("submission replacement is rate limited")
+            receipt = {
+                "schema": "umi-competition-admission/2",
+                "policy_sha256": digest(self.policy),
+                "submission_sha256": sub_id,
+                "accepted_block": current_block,
+                "registration_snapshot_sha256": digest(snapshot),
+                "registration_snapshot": snapshot.model_dump(mode="json", by_alias=True),
+                "registration_source": registration_source,
+                "observed_uid": uid,
+                "status": "accepted_no_weight",
+                "chain_submission_authorized": False,
+            }
+            body_bytes = canonical_json_bytes(signed)
+            receipt_bytes = canonical_json_bytes(receipt)
+            usage = connection.execute(
+                "SELECT records, payload_bytes FROM admission_usage WHERE singleton=1"
+            ).fetchone()
+            if usage is None:
+                raise ValueError("admission usage ledger is unavailable")
+            next_records = usage[0] + 1
+            next_bytes = usage[1] + len(body_bytes) + len(receipt_bytes)
+            if (
+                next_records > self.admission_capacity.maximum_records
+                or next_bytes > self.admission_capacity.maximum_bytes
+            ):
+                raise AdmissionCapacityError("admission capacity is exhausted")
+            self._insert_admission(
+                connection,
+                (
+                    sub_id,
+                    key,
+                    sub.track,
+                    sub.sequence,
+                    current_block,
+                    sub.valid_through_block,
+                    body_bytes,
+                    receipt_bytes,
+                ),
+                records=next_records,
+                payload_bytes=next_bytes,
+            )
+            return receipt
+
+    @staticmethod
+    def _insert_admission(
+        connection: sqlite3.Connection,
+        values: tuple,
+        *,
+        records: int,
+        payload_bytes: int,
+    ) -> None:
+        connection.execute("INSERT INTO submissions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", values)
+        connection.execute(
+            "UPDATE admission_usage SET records=?, payload_bytes=? WHERE singleton=1",
+            (records, payload_bytes),
+        )
+
+    def admission_capacity_status(self) -> dict:
+        """Return bounded logical usage, excluding SQLite and journal overhead."""
+
+        with self._connection() as connection:
+            usage = connection.execute(
+                "SELECT records, payload_bytes FROM admission_usage WHERE singleton=1"
+            ).fetchone()
+        if usage is None:
+            raise ValueError("admission usage ledger is unavailable")
+        return {
+            "records": usage[0],
+            "maximum_records": self.admission_capacity.maximum_records,
+            "payload_bytes": usage[1],
+            "maximum_payload_bytes": self.admission_capacity.maximum_bytes,
+            "accepting_new": usage[0] < self.admission_capacity.maximum_records
+            and usage[1] < self.admission_capacity.maximum_bytes,
+        }
+
+    def submissions(self, *, offset: int = 0, limit: int = 100) -> list[dict]:
+        if not 0 <= offset <= 10_000_000 or not 1 <= limit <= 100:
+            raise ValueError("invalid admission-log page")
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT body, receipt FROM submissions "
+                "ORDER BY accepted_block, digest LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [
+            {"signed_submission": json.loads(body), "receipt": json.loads(receipt)}
+            for body, receipt in rows
+        ]
+
+    def admission_summaries(self, *, offset: int = 0, limit: int = 20) -> list[dict]:
+        if not 0 <= offset <= 10_000_000 or not 1 <= limit <= 100:
+            raise ValueError("invalid admission-log page")
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT digest, hotkey, track, sequence, accepted_block, expires_block "
+                "FROM submissions ORDER BY accepted_block, digest LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [
+            dict(
+                zip(
+                    (
+                        "submission_sha256",
+                        "hotkey_account_id32",
+                        "track",
+                        "sequence",
+                        "accepted_block",
+                        "valid_through_block",
+                    ),
+                    row,
+                    strict=True,
+                )
+            )
+            for row in rows
+        ]
+
+    def submission_by_digest(self, submission_sha256: str) -> dict | None:
+        if len(submission_sha256) != 64 or any(
+            c not in "0123456789abcdef" for c in submission_sha256
+        ):
+            raise ValueError("invalid submission digest")
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT body, receipt FROM submissions WHERE digest=?", (submission_sha256,)
+            ).fetchone()
+        return (
+            None
+            if row is None
+            else {"signed_submission": json.loads(row[0]), "receipt": json.loads(row[1])}
+        )
+
+    def baseline_summary(self) -> dict | None:
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT sequence, digest, model, contributor FROM promotions "
+                "ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            held = self._baseline_conflicted(connection)
+        return (
+            None
+            if row is None
+            else {
+                **dict(
+                    zip(
+                        (
+                            "sequence",
+                            "promotion_sha256",
+                            "model_sha256",
+                            "contributor_account_id32",
+                        ),
+                        row,
+                        strict=True,
+                    )
+                ),
+                "held_for_conflict": held,
+            }
+        )
+
+    def _store_certificate(
+        self, connection: sqlite3.Connection, attested: AttestedResult, observed_block: int
+    ) -> dict:
+        """Called only after authentication; never raises a conflict rejection."""
+        result = attested.result
+        result_id = digest(result)
+        connection.execute(
+            "INSERT OR IGNORE INTO evaluation_results VALUES (?, ?, ?, ?, ?)",
+            (
+                result_id,
+                result.round_sha256,
+                result.submission_sha256,
+                canonical_json_bytes(result),
+                observed_block,
+            ),
+        )
+        groups = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
+        for signature in attested.signatures:
+            signer = identity(signature.hotkey)
+            connection.execute(
+                "INSERT OR IGNORE INTO evaluation_signatures VALUES (?, ?, ?, ?)",
+                (result_id, signer, groups[signer], canonical_json_bytes(signature)),
+            )
+        # Certificates may have disjoint quorums. Detect conflicting result
+        # identities, not just two statements by the same signing key.
+        alternatives = connection.execute(
+            "SELECT COUNT(*) FROM evaluation_results WHERE round=? AND submission=?",
+            (result.round_sha256, result.submission_sha256),
+        ).fetchone()[0]
+        if alternatives > 1:
+            connection.execute(
+                "INSERT OR IGNORE INTO round_conflicts VALUES (?, ?)",
+                (result.round_sha256, observed_block),
+            )
+            if connection.execute(
+                "SELECT 1 FROM competition_settlements WHERE round=?",
+                (result.round_sha256,),
+            ).fetchone():
+                connection.execute(
+                    "INSERT OR IGNORE INTO settlement_disputes VALUES (?, ?)",
+                    (result.round_sha256, observed_block),
+                )
+            source = connection.execute(
+                "SELECT MIN(sequence) FROM promotion_sources WHERE round=?",
+                (result.round_sha256,),
+            ).fetchone()[0]
+            if source is not None:
+                connection.execute(
+                    "INSERT OR IGNORE INTO settlement_disputes "
+                    "SELECT round, ? FROM settlement_heads WHERE promotion_sequence>=?",
+                    (observed_block, source),
+                )
+        return {
+            "round_sha256": result.round_sha256,
+            "submission_sha256": result.submission_sha256,
+            "result_sha256": result_id,
+            "conflicted": bool(
+                connection.execute(
+                    "SELECT 1 FROM round_conflicts WHERE round=?", (result.round_sha256,)
+                ).fetchone()
+            ),
+            "chain_submission_authorized": False,
+        }
+
+    def record_evaluation(
+        self,
+        *,
+        signed: SignedSubmission,
+        attested: AttestedResult,
+        round_: EvaluationRound,
+        suite: EvaluationSuite,
+        observed_block: int,
+    ) -> dict:
+        """Commit historical quorum evidence independently of any reward action."""
+        signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
+        attested = AttestedResult.model_validate_json(canonical_json_bytes(attested))
+        round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
+        authenticate_evaluation(attested, signed, round_, self.policy)
+        validate_evaluation_suite(attested, round_, suite, self.policy)
+        if (
+            type(observed_block) is not int
+            or not round_.reveal_block <= observed_block <= 2**53 - 1
+        ):
+            raise ValueError("evidence observation must be at or after reveal in a valid block")
+        with self._transaction() as connection:
+            closed = connection.execute(
+                "SELECT body FROM rounds WHERE digest=?", (digest(round_),)
+            ).fetchone()
+            if closed is None or closed[0] != canonical_json_bytes(round_):
+                raise ValueError("evaluation round has not been closed in the admission log")
+            if not connection.execute(
+                "SELECT 1 FROM submissions WHERE digest=?", (digest(signed.submission),)
+            ).fetchone():
+                raise ValueError("evaluation submission is absent from the admission log")
+            _advance_block(connection, observed_block)
+            # This transaction commits even when a following project/promote
+            # transaction fails. Never raise a conflict error in this scope.
+            return self._store_certificate(connection, attested, observed_block)
+
+    def record_independent_evaluation(
+        self,
+        *,
+        signed: SignedSubmission,
+        evidence: IndependentEvaluationEvidence,
+        round_: EvaluationRound,
+        suite: EvaluationSuite,
+        observed_block: int,
+    ) -> dict:
+        """Retain a quorum certificate before checking its independent run evidence."""
+
+        self.record_evaluation(
+            signed=signed,
+            attested=evidence.attested_result,
+            round_=round_,
+            suite=suite,
+            observed_block=observed_block,
+        )
+        return self._store_independent_evaluation(
+            signed=signed,
+            evidence=evidence,
+            round_=round_,
+            suite=suite,
+            observed_block=observed_block,
+        )
+
+    def _store_independent_evaluation(
+        self,
+        *,
+        signed: SignedSubmission,
+        evidence: IndependentEvaluationEvidence,
+        round_: EvaluationRound,
+        suite: EvaluationSuite,
+        observed_block: int,
+    ) -> dict:
+        signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
+        evidence = IndependentEvaluationEvidence.model_validate_json(
+            canonical_json_bytes(evidence), strict=True
+        )
+        round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
+        suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+        replay_independent_evaluation(
+            evidence,
+            signed,
+            round_,
+            suite,
+            self.policy,
+            current_block=observed_block,
+        )
+        round_id = digest(round_)
+        submission_id = digest(signed.submission)
+        result_id = digest(evidence.attested_result.result)
+        evidence_id = independent_evidence_digest(evidence)
+        body = canonical_json_bytes(evidence)
+        with self._transaction() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM evidence_cutoff_schedules WHERE round=?", (round_id,)
+            ).fetchone():
+                raise ValueError("independent evidence requires a pre-fixed cutoff schedule")
+            _advance_block(connection, observed_block)
+            prior = connection.execute(
+                "SELECT round, submission, result, body, first_observed_block "
+                "FROM independent_evaluation_evidence WHERE digest=?",
+                (evidence_id,),
+            ).fetchone()
+            expected = (round_id, submission_id, result_id, body)
+            if prior is not None:
+                if prior[:4] != expected:
+                    raise ValueError("independent evidence digest conflicts with stored evidence")
+                first_observed_block = prior[4]
+            else:
+                connection.execute(
+                    "INSERT INTO independent_evaluation_evidence VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        evidence_id,
+                        round_id,
+                        submission_id,
+                        result_id,
+                        body,
+                        observed_block,
+                    ),
+                )
+                first_observed_block = observed_block
+        return {
+            "schema": "umi-competition-independent-evidence-receipt/1",
+            "policy_sha256": digest(self.policy),
+            "round_sha256": round_id,
+            "submission_sha256": submission_id,
+            "result_sha256": result_id,
+            "independent_evidence_sha256": evidence_id,
+            "first_observed_block": first_observed_block,
+            "chain_submission_authorized": False,
+        }
+
+    def round_status(self, round_sha256: str, *, offset: int = 0, limit: int = 100) -> dict:
+        if not 0 <= offset <= 10_000_000 or not 1 <= limit <= 100:
+            raise ValueError("invalid round-evidence page")
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            if not connection.execute(
+                "SELECT 1 FROM rounds WHERE digest=?", (round_sha256,)
+            ).fetchone():
+                raise ValueError("unknown round")
+            conflict = connection.execute(
+                "SELECT detected_block FROM round_conflicts WHERE round=?", (round_sha256,)
+            ).fetchone()
+            results = connection.execute(
+                "SELECT digest, submission, observed_block FROM evaluation_results "
+                "WHERE round=? ORDER BY digest LIMIT ? OFFSET ?",
+                (round_sha256, limit, offset),
+            ).fetchall()
+            equivocations = connection.execute(
+                "SELECT r.submission, v.control_group FROM evaluation_signatures v "
+                "JOIN evaluation_results r ON r.digest=v.result WHERE r.round=? "
+                "GROUP BY r.submission, v.control_group HAVING COUNT(DISTINCT r.digest)>1 "
+                "ORDER BY r.submission, v.control_group LIMIT ? OFFSET ?",
+                (round_sha256, limit, offset),
+            ).fetchall()
+        return {
+            "round_sha256": round_sha256,
+            "conflicted": conflict is not None,
+            "conflict_detected_block": None if conflict is None else conflict[0],
+            "results": [
+                dict(
+                    zip(
+                        ("result_sha256", "submission_sha256", "first_observed_block"),
+                        row,
+                        strict=True,
+                    )
+                )
+                for row in results
+            ],
+            "equivocations": [
+                dict(zip(("submission_sha256", "control_group"), row, strict=True))
+                for row in equivocations
+            ],
+            "offset": offset,
+            "limit": limit,
+            "chain_submission_authorized": False,
+        }
+
+    def settlement_status(self, round_sha256: str) -> dict | None:
+        _require_hex32(round_sha256, "round digest")
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT digest, body FROM competition_settlements WHERE round=?",
+                (round_sha256,),
+            ).fetchone()
+            if row is None:
+                return None
+            conflict = connection.execute(
+                "SELECT detected_block FROM round_conflicts WHERE round=?",
+                (round_sha256,),
+            ).fetchone()
+            dispute = connection.execute(
+                "SELECT detected_block FROM settlement_disputes WHERE round=?",
+                (round_sha256,),
+            ).fetchone()
+        settlement = CompetitionSettlement.model_validate_json(row[1])
+        if competition_settlement_digest(settlement) != row[0]:
+            raise ValueError("stored competition settlement is corrupt")
+        detected = dispute or conflict
+        return {
+            "settlement_sha256": row[0],
+            "settlement": settlement.model_dump(mode="json", by_alias=True),
+            "disputed": detected is not None,
+            "dispute_detected_block": None if detected is None else detected[0],
+            "chain_submission_authorized": False,
+        }
+
+    @staticmethod
+    def _baseline_conflicted(connection: sqlite3.Connection) -> bool:
+        # The preserved history is a single parent-linked chain. Holding all
+        # descendants prevents a new round from laundering a disputed promotion.
+        return bool(
+            connection.execute(
+                "SELECT 1 FROM promotion_sources p "
+                "JOIN round_conflicts c ON p.round=c.round LIMIT 1"
+            ).fetchone()
+        )
+
+    def _assert_action_allowed(self, connection: sqlite3.Connection, round_sha256: str) -> None:
+        if connection.execute(
+            "SELECT 1 FROM round_conflicts WHERE round=?", (round_sha256,)
+        ).fetchone():
+            raise ValueError("round has conflicting quorum evidence")
+        if self._baseline_conflicted(connection):
+            raise ValueError("baseline history contains a conflicted promotion")
+        if connection.execute("SELECT 1 FROM settlement_disputes LIMIT 1").fetchone():
+            raise ValueError("settlement history contains conflicting quorum evidence")
+
+    @staticmethod
+    def _recorded_evaluation(
+        connection: sqlite3.Connection, round_sha256: str, submission_sha256: str
+    ) -> tuple[SignedSubmission, AttestedResult]:
+        rows = connection.execute(
+            "SELECT digest, body FROM evaluation_results WHERE round=? AND submission=?",
+            (round_sha256, submission_sha256),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ValueError("evaluation evidence is missing or conflicting")
+        result_id, body = rows[0]
+        votes = connection.execute(
+            "SELECT control_group, body FROM evaluation_signatures WHERE result=? "
+            "ORDER BY control_group, signer",
+            (result_id,),
+        ).fetchall()
+        # Preserve every signed statement in the ledger, but count one key per
+        # control group when reconstructing a certificate for replay.
+        groups: dict[str, Signature] = {}
+        for group, signature in votes:
+            groups.setdefault(group, Signature.model_validate_json(signature))
+        submission_row = connection.execute(
+            "SELECT body FROM submissions WHERE digest=?",
+            (submission_sha256,),
+        ).fetchone()
+        if submission_row is None:
+            raise ValueError("recorded evaluation lacks its admitted submission")
+        return (
+            SignedSubmission.model_validate_json(submission_row[0]),
+            AttestedResult(
+                result=EvaluationResult.model_validate_json(body), signatures=tuple(groups.values())
+            ),
+        )
+
+    def _hydrate_promotion_evidence(self, connection: sqlite3.Connection) -> None:
+        """Recover certificates retained by earlier, no-ledger rehearsal stores."""
+        for sequence, record_id, model, body in connection.execute(
+            "SELECT sequence, digest, model, body FROM promotions ORDER BY sequence"
+        ).fetchall():
+            record = json.loads(body)
+            if _record_digest(record) != record_id or record["model_sha256"] != model:
+                raise ValueError("preserved promotion history is corrupt")
+            if sequence == 0:
+                continue
+            evaluation = dict(record["evaluation"])
+            result_body = dict(evaluation["result"])
+            # Earlier prototype records used Pydantic field names in this
+            # embedded object. Verify the original record hash above and only
+            # normalize a copy for certificate authentication. Never rewrite it.
+            if "schema_" in result_body and "schema" not in result_body:
+                result_body["schema"] = result_body.pop("schema_")
+            evaluation["result"] = result_body
+            attested = AttestedResult.model_validate_json(canonical_json_bytes(evaluation))
+            result = attested.result
+            round_row = connection.execute(
+                "SELECT body FROM rounds WHERE digest=?", (result.round_sha256,)
+            ).fetchone()
+            sub_row = connection.execute(
+                "SELECT body FROM submissions WHERE digest=?", (result.submission_sha256,)
+            ).fetchone()
+            if round_row is None or sub_row is None or model != result.model_revision:
+                raise ValueError("preserved promotion lacks its closed round or submission")
+            round_ = EvaluationRound.model_validate_json(round_row[0])
+            signed = SignedSubmission.model_validate_json(sub_row[0])
+            authenticate_evaluation(attested, signed, round_, self.policy)
+            observed = record["promoted_at_block"]
+            if (
+                type(observed) is not int
+                or not round_.reveal_block <= observed <= round_.valid_through_block
+            ):
+                raise ValueError("preserved promotion has an invalid observation block")
+            self._store_certificate(connection, attested, observed)
+            connection.execute(
+                "INSERT OR IGNORE INTO promotion_sources VALUES (?, ?)",
+                (sequence, result.round_sha256),
+            )
+
+    @staticmethod
+    def _hydrate_settlement_heads(connection: sqlite3.Connection) -> None:
+        """Recover the query index without rewriting immutable settlement bodies."""
+        orphan = connection.execute(
+            "SELECT h.round FROM settlement_heads h "
+            "LEFT JOIN competition_settlements s ON s.round=h.round "
+            "WHERE s.round IS NULL LIMIT 1"
+        ).fetchone()
+        if orphan is not None:
+            raise ValueError("settlement head index references a missing settlement")
+        for round_id, settlement_id, body in connection.execute(
+            "SELECT round, digest, body FROM competition_settlements"
+        ).fetchall():
+            settlement = CompetitionSettlement.model_validate_json(body)
+            if (
+                settlement.round_sha256 != round_id
+                or competition_settlement_digest(settlement) != settlement_id
+            ):
+                raise ValueError("stored competition settlement is corrupt")
+            indexed = connection.execute(
+                "SELECT promotion_sequence FROM settlement_heads WHERE round=?",
+                (round_id,),
+            ).fetchone()
+            sequence = settlement.promotion_head.sequence
+            if indexed is None:
+                connection.execute(
+                    "INSERT INTO settlement_heads VALUES (?, ?)", (round_id, sequence)
+                )
+            elif indexed[0] != sequence:
+                raise ValueError("settlement head index is corrupt")
+
+        connection.execute(
+            "INSERT OR IGNORE INTO settlement_disputes "
+            "SELECT s.round, c.detected_block FROM competition_settlements s "
+            "JOIN round_conflicts c ON c.round=s.round"
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO settlement_disputes "
+            "SELECT h.round, MIN(c.detected_block) FROM settlement_heads h "
+            "JOIN promotion_sources p ON h.promotion_sequence>=p.sequence "
+            "JOIN round_conflicts c ON c.round=p.round GROUP BY h.round"
+        )
+
+    def fix_evidence_cutoff(
+        self,
+        round_: EvaluationRound,
+        schedule: EvidenceCutoffSchedule,
+        *,
+        observed_block: int,
+    ) -> dict:
+        """Fix one explicit evidence cutoff before the corresponding round closes."""
+
+        round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
+        schedule = EvidenceCutoffSchedule.model_validate_json(canonical_json_bytes(schedule))
+        round_id = digest(round_)
+        if round_.policy_sha256 != digest(self.policy):
+            raise ValueError("round belongs to another policy")
+        if schedule.policy_sha256 != digest(self.policy) or schedule.round_sha256 != round_id:
+            raise ValueError("evidence cutoff schedule binding mismatch")
+        if round_.runtime_sha256 != self.policy.evaluation_runtime_sha256:
+            raise ValueError("round runtime does not match policy")
+        if not (
+            round_.submission_close_block
+            < round_.evaluation_close_block
+            < round_.reveal_block
+            <= schedule.evidence_cutoff_block
+            <= round_.valid_through_block
+            <= self.policy.valid_through_block
+        ):
+            raise ValueError("evidence cutoff schedule has an invalid window")
+        schedule_id = evidence_cutoff_schedule_digest(schedule)
+        schedule_body = canonical_json_bytes(schedule)
+        with self._transaction() as connection:
+            prior = connection.execute(
+                "SELECT body, receipt FROM evidence_cutoff_schedules WHERE round=?",
+                (round_id,),
+            ).fetchone()
+            if prior is not None:
+                if prior[0] == schedule_body:
+                    return json.loads(prior[1])
+                raise ValueError("round already has a different evidence cutoff schedule")
+            if (
+                type(observed_block) is not int
+                or not self.policy.valid_from_block
+                <= observed_block
+                <= round_.submission_close_block
+            ):
+                raise ValueError("evidence cutoff schedule has an invalid observation")
+            if connection.execute(
+                "SELECT 1 FROM evidence_cutoff_schedules WHERE round_sequence=?",
+                (round_.sequence,),
+            ).fetchone():
+                raise ValueError("round sequence already has an evidence cutoff schedule")
+            if connection.execute(
+                "SELECT 1 FROM rounds WHERE digest=? OR sequence=?",
+                (round_id, round_.sequence),
+            ).fetchone():
+                raise ValueError("evidence cutoff must be fixed before its round closes")
+            _advance_block(connection, observed_block)
+            receipt = {
+                "schema": "umi-competition-evidence-cutoff-receipt/1",
+                "policy_sha256": digest(self.policy),
+                "round_sha256": round_id,
+                "schedule_sha256": schedule_id,
+                "evidence_cutoff_block": schedule.evidence_cutoff_block,
+                "fixed_observed_block": observed_block,
+                "chain_submission_authorized": False,
+            }
+            connection.execute(
+                "INSERT INTO evidence_cutoff_schedules VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    round_id,
+                    round_.sequence,
+                    schedule.evidence_cutoff_block,
+                    schedule_id,
+                    schedule_body,
+                    observed_block,
+                    canonical_json_bytes(receipt),
+                ),
+            )
+            return receipt
+
+    def close_round(
+        self,
+        round_: EvaluationRound,
+        *,
+        current_block: int,
+    ) -> str:
+        if round_.policy_sha256 != digest(self.policy):
+            raise ValueError("round belongs to another policy")
+        if not (
+            self.policy.valid_from_block
+            <= round_.submission_close_block
+            <= current_block
+            < round_.evaluation_close_block
+            < round_.reveal_block
+            <= round_.valid_through_block
+            <= self.policy.valid_through_block
+        ):
+            raise ValueError("round cannot be published with an unusable or invalid window")
+        if round_.runtime_sha256 != self.policy.evaluation_runtime_sha256:
+            raise ValueError("round runtime does not match policy")
+        with self._transaction() as connection:
+            prior = connection.execute(
+                "SELECT body FROM rounds WHERE sequence=?", (round_.sequence,)
+            ).fetchone()
+            if prior:
+                if prior[0] == canonical_json_bytes(round_):
+                    return digest(round_)
+                raise ValueError("round sequence is already closed")
+            _advance_block(connection, current_block)
+            latest_sequence = connection.execute("SELECT MAX(sequence) FROM rounds").fetchone()[0]
+            if latest_sequence is not None and round_.sequence <= latest_sequence:
+                raise ValueError("round sequence must increase")
+            scheduled = connection.execute(
+                "SELECT round FROM evidence_cutoff_schedules WHERE round_sequence=?",
+                (round_.sequence,),
+            ).fetchone()
+            if scheduled is not None and scheduled[0] != digest(round_):
+                raise ValueError("round differs from its fixed evidence cutoff schedule")
+            if connection.execute(
+                "SELECT 1 FROM suite_usage WHERE suite=?", (round_.suite_sha256,)
+            ).fetchone():
+                raise ValueError("evaluation suite was already used by a closed round")
+            rows = connection.execute(
+                "SELECT s.digest, s.expires_block FROM submissions s WHERE s.accepted_block<=? "
+                "AND NOT EXISTS (SELECT 1 FROM submissions n WHERE n.hotkey=s.hotkey "
+                "AND n.track=s.track AND n.sequence>s.sequence AND n.accepted_block<=?)",
+                (round_.submission_close_block, round_.submission_close_block),
+            ).fetchall()
+            roster = sorted(d for d, expiry in rows if expiry >= round_.evaluation_close_block)
+            if list(round_.roster) != roster:
+                raise ValueError("round roster omits or adds an accepted current submission")
+            baseline = connection.execute(
+                "SELECT model FROM promotions ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if baseline is None or baseline[0] != round_.incumbent_model_sha256:
+                raise ValueError("round incumbent is not the preserved current baseline")
+            connection.execute(
+                "INSERT INTO rounds VALUES (?, ?, ?)",
+                (digest(round_), round_.sequence, canonical_json_bytes(round_)),
+            )
+            connection.execute(
+                "INSERT INTO suite_usage VALUES (?, ?)", (round_.suite_sha256, digest(round_))
+            )
+            return digest(round_)
+
+    def baseline(self) -> dict | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT body FROM promotions ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def project(
+        self,
+        *,
+        round_: EvaluationRound,
+        suite: EvaluationSuite,
+        evaluations: tuple[tuple[SignedSubmission, AttestedResult], ...],
+        snapshot: RegistrationSnapshot,
+        current_block: int,
+    ) -> WeightProjection:
+        """Project only a durably closed round with one consistent baseline head."""
+        invalid: ValueError | None = None
+        for signed, attested in evaluations:
+            try:
+                self.record_evaluation(
+                    signed=signed,
+                    attested=attested,
+                    round_=round_,
+                    suite=suite,
+                    observed_block=current_block,
+                )
+            except ValueError as error:
+                # An unrelated invalid entry must not discard a valid conflict
+                # elsewhere in this batch. Each valid intake commits separately.
+                invalid = error
+        if invalid is not None:
+            raise ValueError(
+                "projection contains invalid evaluation evidence: " + str(invalid)
+            ) from invalid
+        with self._transaction() as connection:
+            closed = connection.execute(
+                "SELECT body FROM rounds WHERE digest=?", (digest(round_),)
+            ).fetchone()
+            if closed is None or closed[0] != canonical_json_bytes(round_):
+                raise ValueError("projection round has not been closed in the admission log")
+            self._assert_action_allowed(connection, digest(round_))
+            _advance_block(connection, current_block)
+            head = connection.execute(
+                "SELECT body FROM promotions ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if head is None:
+                raise ValueError("projection requires a preserved baseline")
+            baseline = json.loads(head[0])
+            return project_weights(
+                policy=self.policy,
+                round_=round_,
+                suite=suite,
+                evaluations=tuple(
+                    self._recorded_evaluation(connection, digest(round_), digest(signed.submission))
+                    for signed, _ in evaluations
+                ),
+                snapshot=snapshot,
+                current_block=current_block,
+                promoted_model_sha256=baseline["model_sha256"],
+                promoted_hotkey=baseline["contributor_hotkey"],
+            )
+
+    def settle(
+        self,
+        *,
+        round_: EvaluationRound,
+        suite: EvaluationSuite,
+        evidence: tuple[tuple[SignedSubmission, IndependentEvaluationEvidence], ...],
+        snapshot: RegistrationSnapshot,
+        current_block: int,
+    ) -> dict:
+        """Persist one immutable no-weight settlement after its fixed evidence cutoff."""
+
+        invalid: ValueError | None = None
+        for signed, independent in evidence:
+            try:
+                # The old quorum certificate is useful conflict evidence even
+                # when the stronger per-evaluator run record later fails.
+                self.record_evaluation(
+                    signed=signed,
+                    attested=independent.attested_result,
+                    round_=round_,
+                    suite=suite,
+                    observed_block=current_block,
+                )
+            except ValueError as error:
+                invalid = error
+        if invalid is not None:
+            raise ValueError(
+                "settlement contains invalid quorum evidence: " + str(invalid)
+            ) from invalid
+
+        round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
+        suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+        normalized = tuple(
+            (
+                SignedSubmission.model_validate_json(canonical_json_bytes(signed)),
+                IndependentEvaluationEvidence.model_validate_json(
+                    canonical_json_bytes(independent), strict=True
+                ),
+            )
+            for signed, independent in evidence
+        )
+        round_id = digest(round_)
+        with self._connection() as connection:
+            cutoff = self._fixed_cutoff(connection, round_id)
+
+        if type(current_block) is not int:
+            raise ValueError("settlement observation block must be an integer")
+        if current_block <= cutoff.evidence_cutoff_block:
+            invalid = None
+            for signed, independent in normalized:
+                try:
+                    self._store_independent_evaluation(
+                        signed=signed,
+                        evidence=independent,
+                        round_=round_,
+                        suite=suite,
+                        observed_block=current_block,
+                    )
+                except ValueError as error:
+                    invalid = error
+            if invalid is not None:
+                raise ValueError(
+                    "settlement contains invalid independent evidence: " + str(invalid)
+                ) from invalid
+
+        snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
+        supplied: dict[str, tuple[SignedSubmission, IndependentEvaluationEvidence, str]] = {}
+        for signed, independent in normalized:
+            submission_id = digest(signed.submission)
+            if submission_id in supplied:
+                raise ValueError("settlement contains duplicate roster evidence")
+            supplied[submission_id] = (
+                signed,
+                independent,
+                independent_evidence_digest(independent),
+            )
+
+        with self._transaction() as connection:
+            closed = connection.execute(
+                "SELECT body FROM rounds WHERE digest=?", (round_id,)
+            ).fetchone()
+            if closed is None or closed[0] != canonical_json_bytes(round_):
+                raise ValueError("settlement round has not been closed in the admission log")
+            cutoff = self._fixed_cutoff(connection, round_id)
+            self._assert_action_allowed(connection, round_id)
+            if set(supplied) != set(round_.roster):
+                raise ValueError("settlement requires the exact complete round roster")
+
+            existing = connection.execute(
+                "SELECT digest, body FROM competition_settlements WHERE round=?", (round_id,)
+            ).fetchone()
+            if existing is not None:
+                settlement = CompetitionSettlement.model_validate_json(existing[1])
+                if competition_settlement_digest(settlement) != existing[0]:
+                    raise ValueError("stored competition settlement is corrupt")
+                if not _same_settlement_request(
+                    settlement,
+                    suite=suite,
+                    snapshot=snapshot,
+                    supplied=supplied,
+                ):
+                    raise ValueError("round already has a settlement with different inputs")
+                return settlement.model_dump(mode="json", by_alias=True)
+
+            if not (cutoff.evidence_cutoff_block <= current_block <= round_.valid_through_block):
+                raise ValueError("settlement observation is outside its fixed usable window")
+            _advance_block(connection, current_block)
+
+            replay_entries: list[tuple[SignedSubmission, IndependentEvaluationEvidence]] = []
+            bindings: list[SettlementResultBinding] = []
+            for submission_id in round_.roster:
+                _caller_signed, caller_evidence, evidence_id = supplied[submission_id]
+                row = connection.execute(
+                    "SELECT round, submission, result, body, first_observed_block "
+                    "FROM independent_evaluation_evidence WHERE digest=?",
+                    (evidence_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("independent evidence was not durably recorded by cutoff")
+                stored_evidence = IndependentEvaluationEvidence.model_validate_json(
+                    row[3], strict=True
+                )
+                expected = (
+                    round_id,
+                    submission_id,
+                    digest(caller_evidence.attested_result.result),
+                    canonical_json_bytes(caller_evidence),
+                )
+                if (
+                    row[:4] != expected
+                    or independent_evidence_digest(stored_evidence) != evidence_id
+                ):
+                    raise ValueError("stored independent evidence binding is corrupt")
+                if row[4] > cutoff.evidence_cutoff_block:
+                    raise ValueError("independent evidence was first observed after cutoff")
+                recorded_signed, recorded_attested = self._recorded_evaluation(
+                    connection, round_id, submission_id
+                )
+                if digest(recorded_attested.result) != row[2]:
+                    raise ValueError("independent evidence differs from recorded quorum result")
+                replay_independent_evaluation(
+                    stored_evidence,
+                    recorded_signed,
+                    round_,
+                    suite,
+                    self.policy,
+                    current_block=current_block,
+                )
+                replay_entries.append((recorded_signed, stored_evidence))
+                bindings.append(
+                    SettlementResultBinding(
+                        submission_sha256=submission_id,
+                        result_sha256=row[2],
+                        independent_evidence_sha256=evidence_id,
+                        first_observed_block=row[4],
+                    )
+                )
+
+            head = connection.execute(
+                "SELECT sequence, digest, model, contributor, body FROM promotions "
+                "ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if head is None:
+                raise ValueError("settlement requires a preserved promotion head")
+            baseline = json.loads(head[4])
+            contributor = baseline.get("contributor_hotkey")
+            if (
+                _record_digest(baseline) != head[1]
+                or baseline.get("sequence") != head[0]
+                or baseline.get("model_sha256") != head[2]
+                or head[3] != (None if contributor is None else identity(contributor))
+            ):
+                raise ValueError("preserved promotion head is corrupt")
+
+            projection = project_weights(
+                policy=self.policy,
+                round_=round_,
+                suite=suite,
+                evaluations=tuple(
+                    (signed, independent.attested_result) for signed, independent in replay_entries
+                ),
+                snapshot=snapshot,
+                current_block=current_block,
+                promoted_model_sha256=baseline["model_sha256"],
+                promoted_hotkey=contributor,
+            )
+            settlement = CompetitionSettlement(
+                schema="umi-competition-settlement/1",
+                policy_sha256=digest(self.policy),
+                round_sha256=round_id,
+                cutoff_schedule=cutoff,
+                roster=round_.roster,
+                results=tuple(bindings),
+                suite=suite,
+                registration_snapshot=snapshot,
+                promotion_head=PromotionHeadBinding(
+                    sequence=head[0],
+                    promotion_sha256=head[1],
+                    model_sha256=head[2],
+                    contributor_hotkey=contributor,
+                ),
+                projection=projection,
+                observed_block=current_block,
+            )
+            settlement_id = competition_settlement_digest(settlement)
+            connection.execute(
+                "INSERT INTO competition_settlements VALUES (?, ?, ?)",
+                (round_id, settlement_id, canonical_json_bytes(settlement)),
+            )
+            connection.execute("INSERT INTO settlement_heads VALUES (?, ?)", (round_id, head[0]))
+            return settlement.model_dump(mode="json", by_alias=True)
+
+    @staticmethod
+    def _fixed_cutoff(connection: sqlite3.Connection, round_sha256: str) -> EvidenceCutoffSchedule:
+        row = connection.execute(
+            "SELECT cutoff_block, digest, body FROM evidence_cutoff_schedules WHERE round=?",
+            (round_sha256,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("round has no pre-fixed evidence cutoff schedule")
+        schedule = EvidenceCutoffSchedule.model_validate_json(row[2])
+        if (
+            schedule.round_sha256 != round_sha256
+            or schedule.evidence_cutoff_block != row[0]
+            or evidence_cutoff_schedule_digest(schedule) != row[1]
+        ):
+            raise ValueError("stored evidence cutoff schedule is corrupt")
+        return schedule
+
+    def initialize_baseline(self, bundle: ModelBundle, archive: Path) -> dict:
+        """Import an operator-selected historical baseline with no reward attribution."""
+        verify_preserved_bundle(bundle, archive, self.policy)
+        record = {
+            "schema": "umi-model-baseline/1",
+            "sequence": 0,
+            "policy_sha256": digest(self.policy),
+            "model_sha256": digest(bundle),
+            "contributor_hotkey": None,
+            "previous_promotion_sha256": None,
+            "kind": "initial_reference_no_reward",
+        }
+        with self._transaction() as connection:
+            prior = connection.execute(
+                "SELECT body FROM promotions ORDER BY sequence LIMIT 1"
+            ).fetchone()
+            if prior:
+                if json.loads(prior[0]) == record:
+                    return record
+                raise ValueError("initial baseline is already set")
+            record_hash = _record_digest(record)
+            connection.execute(
+                "INSERT INTO promotions VALUES (?, ?, ?, ?, ?)",
+                (0, record_hash, digest(bundle), None, canonical_json_bytes(record)),
+            )
+            connection.execute(
+                "INSERT INTO model_identities VALUES (?, ?)",
+                (model_content_digest(bundle), digest(bundle)),
+            )
+        return record
+
+    def promote(
+        self,
+        *,
+        signed: SignedSubmission,
+        attested: AttestedResult,
+        round_: EvaluationRound,
+        suite: EvaluationSuite,
+        review: AttestedPromotionReview,
+        archive: Path,
+        snapshot: RegistrationSnapshot,
+        current_block: int,
+    ) -> dict:
+        self.record_evaluation(
+            signed=signed,
+            attested=attested,
+            round_=round_,
+            suite=suite,
+            observed_block=current_block,
+        )
+        with self._connection() as connection:
+            self._assert_action_allowed(connection, digest(round_))
+            signed, attested = self._recorded_evaluation(
+                connection, digest(round_), digest(signed.submission)
+            )
+        sub = signed.submission
+        if sub.track != "model" or sub.model_bundle is None:
+            raise ValueError("only contributed offline bundles can be promoted")
+        validate_admission(signed, self.policy, snapshot, current_block)
+        candidate, incumbent = replay_evaluation(
+            attested,
+            signed,
+            round_,
+            suite,
+            self.policy,
+            current_block=current_block,
+        )
+        if not qualifies_for_promotion(candidate, incumbent, self.policy):
+            raise ValueError("candidate did not clear every promotion quality gate")
+        verify_review(review, self.policy)
+        if (
+            review.review.model_sha256 != sub.model_revision
+            or review.review.incumbent_model_sha256 != round_.incumbent_model_sha256
+            or review.review.evaluation_result_sha256 != digest(attested.result)
+        ):
+            raise ValueError("promotion review does not bind this paired evaluation")
+        if sub.model_bundle.parent_baseline_sha256 not in {None, round_.incumbent_model_sha256}:
+            raise ValueError("candidate declares a different parent baseline")
+        verify_preserved_bundle(sub.model_bundle, archive, self.policy)
+        with self._transaction() as connection:
+            self._assert_action_allowed(connection, digest(round_))
+            if not connection.execute(
+                "SELECT 1 FROM rounds WHERE digest=?", (digest(round_),)
+            ).fetchone():
+                raise ValueError("promotion round has not been closed in the admission log")
+            _advance_block(connection, current_block)
+            submitted = connection.execute(
+                "SELECT 1 FROM submissions WHERE digest=?", (digest(sub),)
+            ).fetchone()
+            if submitted is None:
+                raise ValueError("promotion submission is absent from the admission log")
+            prior = connection.execute(
+                "SELECT body FROM promotions WHERE model=?", (sub.model_revision,)
+            ).fetchone()
+            if prior:
+                record = json.loads(prior[0])
+                if record.get("submission_sha256") == digest(sub):
+                    return record
+                raise ValueError("model was already promoted; attribution cannot be reassigned")
+            if connection.execute(
+                "SELECT 1 FROM model_identities WHERE content=?",
+                (model_content_digest(sub.model_bundle),),
+            ).fetchone():
+                raise ValueError("runnable model content was already preserved as a baseline")
+            head = connection.execute(
+                "SELECT sequence, digest, model FROM promotions ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if head is None or head[2] != round_.incumbent_model_sha256:
+                raise ValueError("baseline changed; a fresh paired evaluation is required")
+            record = {
+                "schema": "umi-model-baseline/1",
+                "sequence": head[0] + 1,
+                "policy_sha256": digest(self.policy),
+                "model_sha256": sub.model_revision,
+                "contributor_hotkey": sub.hotkey,
+                "previous_promotion_sha256": head[1],
+                "submission_sha256": digest(sub),
+                "evaluation": attested.model_dump(mode="json", by_alias=True),
+                "review": review.model_dump(mode="json", by_alias=True),
+                "promoted_at_block": current_block,
+                "kind": "verified_model_promotion_no_weight",
+            }
+            connection.execute(
+                "INSERT INTO promotions VALUES (?, ?, ?, ?, ?)",
+                (
+                    head[0] + 1,
+                    _record_digest(record),
+                    sub.model_revision,
+                    identity(sub.hotkey),
+                    canonical_json_bytes(record),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO model_identities VALUES (?, ?)",
+                (model_content_digest(sub.model_bundle), sub.model_revision),
+            )
+            connection.execute(
+                "INSERT INTO promotion_sources VALUES (?, ?)",
+                (head[0] + 1, digest(round_)),
+            )
+            return record
+
+
+def _same_settlement_request(
+    settlement: CompetitionSettlement,
+    *,
+    suite: EvaluationSuite,
+    snapshot: RegistrationSnapshot,
+    supplied: dict[str, tuple[SignedSubmission, IndependentEvaluationEvidence, str]],
+) -> bool:
+    if settlement.suite != suite or settlement.registration_snapshot != snapshot:
+        return False
+    expected = {
+        item.submission_sha256: (item.result_sha256, item.independent_evidence_sha256)
+        for item in settlement.results
+    }
+    actual = {
+        submission_id: (digest(evidence.attested_result.result), evidence_id)
+        for submission_id, (_signed, evidence, evidence_id) in supplied.items()
+    }
+    return expected == actual
+
+
+def _require_hex32(value: str, label: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"invalid {label}")
+
+
+def _record_digest(record: dict) -> str:
+    import hashlib
+
+    return hashlib.sha256(b"umi-baseline-history-v1\0" + canonical_json_bytes(record)).hexdigest()
+
+
+def _advance_block(connection: sqlite3.Connection, block: int) -> None:
+    previous = connection.execute(
+        "SELECT value FROM metadata WHERE key='observed_block'"
+    ).fetchone()
+    if previous and block < int(previous[0]):
+        raise ValueError("competition state cannot move to an earlier finalized block")
+    connection.execute(
+        "INSERT OR REPLACE INTO metadata VALUES ('observed_block', ?)", (str(block),)
+    )

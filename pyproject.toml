@@ -69,6 +69,11 @@ umi-validator-live-reconcile = "umi.validator_certificate_recovery:main"
 umi-validator-supervisor = "umi.validator_supervisor_cli:main"
 umi-validator-supervisor-worker = "umi.validator_supervisor_worker:main"
 umi-simple-bootstrap-validator = "umi.simple_bootstrap_validator:main"
+umi-competition = "umi.competition_cli:main"
+umi-competition-worker = "umi.competition_worker_cli:main"
+umi-competition-supervisor = "umi.competition_supervisor_cli:main"
+umi-competition-supervisor-cleanup = "umi.competition_supervisor_cleanup:main"
+umi-competition-host-upgrade = "umi.competition_switch_recovery:main"
 umi-registration-bridge = "umi.registration_bridge:main"
 
 [tool.hatch.build.targets.wheel]

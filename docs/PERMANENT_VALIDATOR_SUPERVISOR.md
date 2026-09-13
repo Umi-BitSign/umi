@@ -192,9 +192,10 @@ objects before changing the worker.
 
 A directive can select only one of the fixed UMI profiles allowed by the local
 configuration: hold, bootstrap service weights, registration-bridge weights,
-inactive shadow validation, or translation validation. It cannot provide a shell
-command, arbitrary arguments, arbitrary mounts, or a container socket. The legacy bootstrap profile runs the
-fixed `umi-simple-bootstrap-validator` entrypoint. The registration-bridge
+inactive shadow validation, or translation validation.
+It cannot provide a shell command, arbitrary arguments, arbitrary mounts, or a
+container socket. The legacy bootstrap profile runs the fixed
+`umi-simple-bootstrap-validator` entrypoint. The registration-bridge
 profile runs `umi-registration-bridge` with its separate signed policy.
 
 The common bootstrap directive applies to any hotkey that currently holds an
@@ -209,10 +210,12 @@ upload credential. The exact finalized row and `LastUpdate` are publicly visible
 the local journal also retains the submitted transaction identity and inputs.
 
 Signed, hash-pinned container updates are automatic after installation. The
-local policy already permits the typed shadow and translation profiles, so a
-later governed release can move the same installation beyond bootstrap without
-another host migration. A new profile or trust authority would still require an
-explicit operator change.
+local policy permits the existing typed shadow and translation profile names,
+but the current worker implements bootstrap only. The open-competition
+successor needs new host-side input and durable-state contracts, a compatible
+worker and a consented host upgrade. An image update alone cannot perform that
+transition. See [successor upgrade requirements](SUCCESSOR_SUPERVISOR_UPGRADE.md).
+Do not rerun the fresh-install script over an existing supervisor installation.
 
 ## Security boundary
 

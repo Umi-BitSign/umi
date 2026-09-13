@@ -14,6 +14,8 @@
 !deploy/macos-validator/container-entrypoint.sh
 !deploy/linux-validator-supervisor-worker/
 !deploy/linux-validator-supervisor-worker/Dockerfile
+!deploy/linux-competition-worker/
+!deploy/linux-competition-worker/Dockerfile
 !rust/
 !rust/grandpa-finality-observer/
 !rust/grandpa-finality-observer/Cargo.toml
@@ -26,6 +28,13 @@
 !rust/grandpa-finality-observer/fixtures/**
 !rust/grandpa-finality-observer/vendor/
 !rust/grandpa-finality-observer/vendor/**
+!rust/substrate-proof-verifier/
+!rust/substrate-proof-verifier/Cargo.toml
+!rust/substrate-proof-verifier/Cargo.lock
+!rust/substrate-proof-verifier/src/
+!rust/substrate-proof-verifier/src/**
+!rust/substrate-proof-verifier/fixtures/
+!rust/substrate-proof-verifier/fixtures/**
 
 # Defense in depth for ignored files accidentally placed below an allowed path.
 **/.env

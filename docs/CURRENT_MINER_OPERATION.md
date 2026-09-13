@@ -59,6 +59,11 @@ See the [signed-policy specification and rollout evidence](REGISTRATION_BRIDGE.m
 
 ## Later translation competition
 
+The [version 0.2 successor design](../whitepaper/README.md) adds self-service
+endpoint participation and an optional reproducible-model contribution track.
+The [rehearsal tooling](OPEN_COMPETITION.md) does not open either track for
+production rewards or replace the bridge policy.
+
 UMI will publish the miner instructions and signed policy before asking miners
 to serve translation requests or enter the model-contribution track. Translation
 requests need the [protocol miner connected to a working model](MINER_MODEL_INTEGRATION.md).

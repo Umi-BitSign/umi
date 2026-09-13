@@ -21,6 +21,11 @@ from pydantic import ValidationError
 
 from .auth import REQUEST_BODY_SHA256_HEADER, RequestAuthenticator, wire_request_target
 from .backends import Translator, UnixSocketTranslator, load_translator
+from .competition_authorization import (
+    MAX_AUTHORIZATION_BYTES,
+    EndpointAuthorizationAuthority,
+    SignedEndpointAuthorization,
+)
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
 from .grandpa_finality_supervisor import DurableGrandpaFinalityPort
@@ -38,6 +43,7 @@ from .miner_resources import (
 )
 from .model_scheduler import WindowCoalescingTranslator
 from .nonce import NonceStoreAuthorizationError, NonceStoreCapacityError, NonceStoreError
+from .open_competition import CompetitionPolicy
 from .policy import ScoringPolicy, scoring_policy_hash, validate_scoring_runtime
 from .protocol import (
     PROTOCOL_VERSION,
@@ -86,7 +92,14 @@ class MinerRuntime:
     resource_ledger: SQLiteMinerResourceLedger
     window_authority: MinerWindowAuthority
     model_revision: str | None = None
-    runtime_mode: Literal["inactive_shadow", "public_component_pilot"] = "inactive_shadow"
+    runtime_mode: Literal["inactive_shadow", "public_component_pilot", "competition_no_weight"] = (
+        "inactive_shadow"
+    )
+    competition_authority: EndpointAuthorizationAuthority | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     finality_service: DurableGrandpaFinalityPort | None = field(
         default=None,
         repr=False,
@@ -151,8 +164,26 @@ class MinerRuntime:
             and re.fullmatch(r"[0-9a-f]{64}", self.model_revision) is None
         ):
             raise ValueError("model revision must be a lowercase SHA-256 hex digest")
-        if self.runtime_mode not in {"inactive_shadow", "public_component_pilot"}:
+        if self.runtime_mode not in {
+            "inactive_shadow",
+            "public_component_pilot",
+            "competition_no_weight",
+        }:
             raise ValueError("unsupported miner runtime mode")
+        if (self.runtime_mode == "competition_no_weight") != (
+            self.competition_authority is not None
+        ):
+            raise ValueError("competition mode requires its explicit authorization authority")
+        if self.competition_authority is not None:
+            if not isinstance(self.competition_authority, EndpointAuthorizationAuthority):
+                raise TypeError("competition authority must verify signed endpoint assignments")
+            self.competition_authority.validate_runtime(
+                miner_hotkey=self.hotkey_ss58,
+                model_revision=self.model_revision,
+                transport_policy_sha256=self.scoring_policy_sha256,
+                allowed_validator_hotkeys=self.allowed_validator_hotkeys,
+                limits=self.limits,
+            )
         if self.runtime_mode == "public_component_pilot" and self.finality_service is not None:
             raise ValueError("public component pilots cannot attach a finality service")
         if not isinstance(self.limits, Limits):
@@ -889,6 +920,15 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
         }
         if runtime.runtime_mode == "public_component_pilot":
             result["activation_evidence"] = False
+        if runtime.competition_authority is not None:
+            result.update(
+                competition_policy_sha256=runtime.competition_authority.policy_sha256,
+                authorization_sha256=runtime.competition_authority.publication_sha256,
+                activation_evidence=False,
+                chain_submission_authorized=False,
+                serving_origin_finality_verified=False,
+                window_authority=type(runtime.competition_authority).__name__,
+            )
         return result
 
     @app.post(TRANSLATE_PATH)
@@ -988,7 +1028,12 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
                     )
 
                 try:
-                    admission = await runtime.window_authority.authorize(challenge)
+                    if runtime.competition_authority is None:
+                        admission = await runtime.window_authority.authorize(challenge)
+                    else:
+                        admission = await runtime.competition_authority.authorize(
+                            challenge, validator_hotkey=validator_hotkey
+                        )
                 except MinerAdmissionError as error:
                     status = 503 if error.retryable else 422
                     raise HTTPException(status_code=status, detail=error.reason_code) from error
@@ -1044,6 +1089,30 @@ async def _run_translator_lifecycle(runtime: MinerRuntime, operation: str) -> No
 def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     import bittensor as bt
 
+    competition_inputs = (
+        getattr(args, "competition_policy", None),
+        getattr(args, "competition_authorization", None),
+        getattr(args, "serving_origin", None),
+    )
+    if any(competition_inputs) and not all(competition_inputs):
+        raise ValueError(
+            "competition mode requires policy, authorization and serving origin together"
+        )
+    competition_policy = None
+    publication = None
+    if all(competition_inputs):
+        if args.model_revision is None:
+            raise ValueError("competition mode requires the submitted model revision")
+        competition_policy = CompetitionPolicy.model_validate_json(
+            _read_startup_file(competition_inputs[0], label="competition policy")
+        )
+        publication = SignedEndpointAuthorization.model_validate_json(
+            _read_startup_file(
+                competition_inputs[1],
+                label="competition authorization",
+                maximum_bytes=MAX_AUTHORIZATION_BYTES,
+            )
+        )
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path)
     hotkey_ss58, scheme = _identity(wallet)
     policy = _load_policy(args.policy)
@@ -1070,6 +1139,18 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         maximum_inference_concurrency=inference_concurrency,
         request_body_timeout_seconds=args.request_body_timeout,
     )
+    if competition_policy is not None:
+        from dataclasses import replace
+
+        limits = replace(
+            limits,
+            inference_timeout_seconds=min(
+                limits.inference_timeout_seconds, competition_policy.maximum_inference_ms / 1000
+            ),
+            maximum_hypothesis_utf8_bytes=min(
+                limits.maximum_hypothesis_utf8_bytes, competition_policy.maximum_output_bytes
+            ),
+        )
     fetcher = HttpVideoFetcher(
         allowed_origins=frozenset(args.video_origin),
         maximum_clip_size_bytes=limits.maximum_clip_size_bytes,
@@ -1100,6 +1181,17 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             policy.activation_block - 1,
         ),
     )
+    competition_authority = None
+    if competition_policy is not None:
+        competition_authority = EndpointAuthorizationAuthority(
+            policy=competition_policy,
+            legacy_policy=policy,
+            publication=publication,
+            finalized_blocks=finality,
+            miner_hotkey=hotkey_ss58,
+            model_revision=args.model_revision,
+            serving_origin=competition_inputs[2],
+        )
     translator = _build_translator(
         args,
         limits=limits,
@@ -1134,6 +1226,8 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             finalized_blocks=finality,
         ),
         model_revision=args.model_revision,
+        runtime_mode="competition_no_weight" if competition_authority else "inactive_shadow",
+        competition_authority=competition_authority,
         finality_service=finality,
         inference_semaphore=asyncio.Semaphore(limits.maximum_inference_concurrency),
         work_semaphore=asyncio.Semaphore(limits.maximum_inference_concurrency),
@@ -1215,26 +1309,28 @@ def _effective_inference_concurrency(
     return requested
 
 
-def _load_policy(path: str | Path) -> ScoringPolicy:
-    """Load an exact canonical policy without following a final symlink."""
+def _read_startup_file(
+    path: str | Path, *, label: str = "scoring policy", maximum_bytes: int = 1024 * 1024
+) -> bytes:
+    """Read bounded operator-owned canonical JSON without following the final link."""
 
     resolved = Path(path).expanduser().absolute()
     try:
         parent = resolved.parent.lstat()
     except OSError as error:
-        raise RuntimeError("scoring policy parent is unavailable") from error
+        raise RuntimeError(f"{label} parent is unavailable") from error
     if (
         stat.S_ISLNK(parent.st_mode)
         or not stat.S_ISDIR(parent.st_mode)
         or parent.st_uid != os.geteuid()
         or parent.st_mode & 0o022
     ):
-        raise RuntimeError("scoring policy parent is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        raise RuntimeError(f"{label} parent is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(resolved, flags)
     except OSError as error:
-        raise RuntimeError("scoring policy could not be opened safely") from error
+        raise RuntimeError(f"{label} could not be opened safely") from error
     try:
         metadata = os.fstat(descriptor)
         if (
@@ -1243,14 +1339,14 @@ def _load_policy(path: str | Path) -> ScoringPolicy:
             or metadata.st_nlink != 1
             or metadata.st_mode & 0o022
         ):
-            raise RuntimeError("scoring policy file is unsafe")
-        if metadata.st_size <= 0 or metadata.st_size > 1024 * 1024:
-            raise RuntimeError("scoring policy file size is invalid")
+            raise RuntimeError(f"{label} file is unsafe")
+        if metadata.st_size <= 0 or metadata.st_size > maximum_bytes:
+            raise RuntimeError(f"{label} file size is invalid")
         encoded = bytearray()
-        while chunk := os.read(descriptor, min(1024 * 1024 + 1 - len(encoded), 64 * 1024)):
+        while chunk := os.read(descriptor, min(maximum_bytes + 1 - len(encoded), 64 * 1024)):
             encoded.extend(chunk)
-            if len(encoded) > 1024 * 1024:
-                raise RuntimeError("scoring policy exceeds the startup ceiling")
+            if len(encoded) > maximum_bytes:
+                raise RuntimeError(f"{label} exceeds the startup ceiling")
         after = os.fstat(descriptor)
         before_identity = (
             metadata.st_dev,
@@ -1267,10 +1363,24 @@ def _load_policy(path: str | Path) -> ScoringPolicy:
             after.st_ctime_ns,
         )
         if before_identity != after_identity or len(encoded) != metadata.st_size:
-            raise RuntimeError("scoring policy changed while it was read")
+            raise RuntimeError(f"{label} changed while it was read")
     finally:
         os.close(descriptor)
     raw = bytes(encoded)
+    import json
+
+    try:
+        value = json.loads(raw)
+        if canonical_json_bytes(value) != raw:
+            raise RuntimeError(f"{label} is not RFC 8785 canonical")
+    except (ValueError, TypeError) as error:
+        raise RuntimeError(f"{label} is invalid") from error
+    return raw
+
+
+def _load_policy(path: str | Path) -> ScoringPolicy:
+    """Load an exact canonical policy without following a final symlink."""
+    raw = _read_startup_file(path)
     try:
         policy = ScoringPolicy.model_validate_json(raw)
     except (ValidationError, ValueError) as error:
@@ -1299,6 +1409,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hotkey", required=True)
     parser.add_argument("--wallet-path", default="~/.bittensor/wallets")
     parser.add_argument("--policy", required=True, help="canonical inactive scoring policy")
+    parser.add_argument(
+        "--competition-policy", help="reviewed successor policy for weight-disabled requests"
+    )
+    parser.add_argument(
+        "--competition-authorization", help="canonical quorum-signed exact endpoint assignments"
+    )
+    parser.add_argument(
+        "--serving-origin", help="local HTTPS origin matching the miner-signed submission"
+    )
     parser.add_argument(
         "--target-triple",
         required=True,
