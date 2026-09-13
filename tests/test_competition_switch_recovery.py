@@ -140,6 +140,42 @@ def test_resume_each_publication_boundary_retains_state_and_stays_stopped(retain
         assert not partial.exists()
 
 
+@pytest.mark.parametrize("changed", [None, "MainPID", "User", "DropInPaths", "ExecStart"])
+def test_recovery_accepts_only_exact_stopped_successor_autoload(retained, monkeypatch, changed):
+    case = retained
+    write = switch._write_drop_in_once
+    before = case.installed.state_path.read_bytes()
+
+    def autoload(plan, marker):
+        write(plan, marker)
+        case.unit.update(
+            DropInPaths=str(plan.drop_in_path),
+            OnFailure=plan.cleanup_unit_name,
+            ExecStart=(
+                str(plan.host_root)
+                + "/.venv/bin/umi-competition-supervisor --config "
+                + str(case.installed.config_path)
+                + " ;"
+            ),
+        )
+        if changed is not None:
+            case.unit[changed] = "unexpected"
+
+    monkeypatch.setattr(switch, "_write_drop_in_once", autoload)
+    if changed is None:
+        result = resume(case)
+        assert result["status"] == "source_switch_recovered"
+        assert not result["service_started"] and not result["chain_submission_authorized"]
+        assert case.events.count("reload") == 1
+    else:
+        with pytest.raises(host.HostUpgradeError):
+            resume(case)
+        assert "reload" not in case.events
+    assert case.installed.state_path.read_bytes() == before
+    assert recovery.read_switch_intent(case.plan) == case.payload
+    assert case.plan.drop_in_path.read_bytes() == case.plan.drop_in_bytes
+
+
 @pytest.mark.parametrize(
     "what", ["busy_lock", "replaced_lock", "history", "fragment", "anchor", "plan", "running"]
 )

@@ -157,6 +157,8 @@ publisher accepts either the unchanged legacy snapshot or the exact published
 successor, with no running processes and the original lock still held. It
 verifies the published files and repeats the checks after the explicit reload.
 Unexpected commands, identities or additional drop-ins remain errors.
+The interrupted-publication recovery command applies the same check when it
+finishes writing a previously missing drop-in.
 
 After startup, systemd adds execution timestamps and a PID to `ExecStart`.
 Startup verification compares the configured executable, arguments and

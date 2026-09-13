@@ -527,8 +527,13 @@ def recover_successor_service_switch(
         history_reader.unchanged()
         anchor.recheck()
         tree.recheck()
-        if _unit_snapshot(unit_name) != before:
-            raise HostUpgradeError("service changed during publication recovery")
+        current = _unit_snapshot(unit_name)
+        if current != before:
+            # As in the initial switch, systemd may load the newly completed
+            # drop-in while showing an inactive unit, before daemon-reload.
+            # Only the exact sealed successor is an allowed transition here.
+            switch._read_drop_in(plan)
+            _check_unit_identity(current, intent, plan, require_switched=True)
         switch._reload_systemd()
         unit = _unit_snapshot(unit_name)
         _check_unit_identity(unit, intent, plan, require_switched=True)
