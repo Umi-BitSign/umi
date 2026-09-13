@@ -457,66 +457,27 @@ class EndpointAuthorizationAuthority:
         allowed_validator_hotkeys: frozenset[str],
         limits: Limits,
     ) -> None:
-        if (
-            identity(miner_hotkey) != identity(self.miner_hotkey)
-            or model_revision != self.model_revision
-            or transport_policy_sha256 != self.transport_policy_sha256
-        ):
-            raise ValueError(
-                "runtime identity, revision or transport policy differs from authorization"
-            )
-        if not isinstance(allowed_validator_hotkeys, frozenset) or not isinstance(limits, Limits):
-            raise TypeError(
-                "runtime must provide an immutable validator allowlist and explicit Limits"
-            )
-        limits = Limits(**asdict(limits))
-        actual = {identity(k) for k in allowed_validator_hotkeys}
-        permitted = {identity(v.validator_hotkey) for v in self._legacy_policy.validator_registry}
-        required = {identity(k) for k in self.allowed_validator_hotkeys}
-        if not required <= actual <= permitted:
-            raise ValueError(
-                "runtime validator allowlist omits assignments or adds unknown validators"
-            )
-        if (
-            limits.inference_timeout_seconds * 1000 > self._policy.maximum_inference_ms
-            or limits.maximum_hypothesis_utf8_bytes > self._policy.maximum_output_bytes
-        ):
-            raise ValueError("runtime inference/output limits exceed the competition policy")
-        legacy_limits = Limits.from_policy(self._legacy_policy)
-        for name in (
-            "maximum_request_body_bytes",
-            "maximum_response_body_bytes",
-            "maximum_response_plaintext_bytes",
-            "maximum_http_header_bytes",
-            "maximum_clip_size_bytes",
-            "maximum_hypothesis_utf8_bytes",
-            "maximum_hypothesis_tokens",
-            "maximum_hypothesis_graphemes",
-            "maximum_request_transmissions_per_assignment",
-            "maximum_response_bodies_per_assignment",
-            "maximum_video_fetch_attempts_per_actor",
-            "maximum_assignment_wire_bytes",
-            "maximum_assignments_per_validator_window",
-            "maximum_total_assignments_per_window",
-            "maximum_unique_videos_per_validator_window",
-            "maximum_retained_video_bytes_per_validator_window",
-            "maximum_unique_videos_per_window",
-            "maximum_retained_video_bytes",
-            "maximum_active_windows",
-            "maximum_nonce_rows_per_validator",
-            "maximum_nonce_rows_total",
-            "maximum_nonce_database_bytes",
-            "btauth_max_age_seconds",
-            "btauth_allowed_skew_seconds",
-        ):
-            if getattr(limits, name) > getattr(legacy_limits, name):
-                raise ValueError("runtime limits exceed legacy transport quotas")
+        validate_runtime_binding(
+            policy=self._policy,
+            legacy_policy=self._legacy_policy,
+            expected_miner=self.miner_hotkey,
+            expected_revision=self.model_revision,
+            required_validators=self.allowed_validator_hotkeys,
+            miner_hotkey=miner_hotkey,
+            model_revision=model_revision,
+            transport_policy_sha256=transport_policy_sha256,
+            allowed_validator_hotkeys=allowed_validator_hotkeys,
+            limits=limits,
+        )
         _check_quotas(
             self._publication.publication,
             self._legacy_policy,
             limits,
             miner_account=identity(self.miner_hotkey),
         )
+
+    def contains(self, request: TranslationRequest, *, validator_hotkey: str) -> bool:
+        return (identity(validator_hotkey), request_digest(request)) in self._assignments
 
     async def authorize(
         self, request: TranslationRequest, *, validator_hotkey: str
@@ -534,3 +495,69 @@ class EndpointAuthorizationAuthority:
         # This performs actual owned-finality checks. The publication's hashes
         # and local timing observation are never substituted for chain evidence.
         return await self._legacy.authorize(request)
+
+
+def validate_runtime_binding(
+    *,
+    policy,
+    legacy_policy,
+    expected_miner,
+    expected_revision,
+    required_validators,
+    miner_hotkey,
+    model_revision,
+    transport_policy_sha256,
+    allowed_validator_hotkeys,
+    limits,
+):
+    """Shared binding checks for static and feed-backed no-weight miners."""
+    if (
+        identity(miner_hotkey) != identity(expected_miner)
+        or model_revision != expected_revision
+        or transport_policy_sha256 != scoring_policy_hash(legacy_policy)
+    ):
+        raise ValueError(
+            "runtime identity, revision or transport policy differs from authorization"
+        )
+    if not isinstance(allowed_validator_hotkeys, frozenset) or not isinstance(limits, Limits):
+        raise TypeError("runtime must provide an immutable validator allowlist and explicit Limits")
+    limits = Limits(**asdict(limits))
+    actual = {identity(k) for k in allowed_validator_hotkeys}
+    permitted = {identity(v.validator_hotkey) for v in legacy_policy.validator_registry}
+    required = {identity(k) for k in required_validators}
+    if not required <= actual <= permitted:
+        raise ValueError("runtime validator allowlist omits assignments or adds unknown validators")
+    if (
+        limits.inference_timeout_seconds * 1000 > policy.maximum_inference_ms
+        or limits.maximum_hypothesis_utf8_bytes > policy.maximum_output_bytes
+    ):
+        raise ValueError("runtime inference/output limits exceed the competition policy")
+    legacy_limits = Limits.from_policy(legacy_policy)
+    for name in (
+        "maximum_request_body_bytes",
+        "maximum_response_body_bytes",
+        "maximum_response_plaintext_bytes",
+        "maximum_http_header_bytes",
+        "maximum_clip_size_bytes",
+        "maximum_hypothesis_utf8_bytes",
+        "maximum_hypothesis_tokens",
+        "maximum_hypothesis_graphemes",
+        "maximum_request_transmissions_per_assignment",
+        "maximum_response_bodies_per_assignment",
+        "maximum_video_fetch_attempts_per_actor",
+        "maximum_assignment_wire_bytes",
+        "maximum_assignments_per_validator_window",
+        "maximum_total_assignments_per_window",
+        "maximum_unique_videos_per_validator_window",
+        "maximum_retained_video_bytes_per_validator_window",
+        "maximum_unique_videos_per_window",
+        "maximum_retained_video_bytes",
+        "maximum_active_windows",
+        "maximum_nonce_rows_per_validator",
+        "maximum_nonce_rows_total",
+        "maximum_nonce_database_bytes",
+        "btauth_max_age_seconds",
+        "btauth_allowed_skew_seconds",
+    ):
+        if getattr(limits, name) > getattr(legacy_limits, name):
+            raise ValueError("runtime limits exceed legacy transport quotas")

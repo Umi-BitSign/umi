@@ -59,6 +59,11 @@ authorizes new weights or changes the current bootstrap.
   The feed releases a complete signed publication only to its single miner
   audience after all included issuance boundaries have been verified. Lists
   contain no video URLs. Neither listing nor retrieval grants a dispatch token.
+- A feed-backed no-weight miner mode that installs verified assignments into the
+  running process. It retains overlapping usable publications in a bounded cache
+  and preserves the existing authenticated transport and durable resource ledgers.
+  This removes per-round manual authorization-file restarts in rehearsal; it
+  does not establish a production publication or dispatch workflow.
 - An owned-finality endpoint collector that verifies `Axons`, `Uids` and `Keys`
   under one pinned state root, requires a matching public literal-IP HTTPS
   origin, and retains bounded evidence with integrity and rollback checks.
@@ -115,14 +120,17 @@ independent access to it.
 - A released CPU inference image and real-model Linux sandbox rehearsal.
   GPU model execution is not implemented by the CPU adapter.
 - A deployed successor miner release, integrated evaluator dispatch and assignment
-  feed. The static authorization
-  mode checks the signed mapping and existing transport schedule, but does not
+  feed. Static and feed-backed authorization
+  check the signed mapping and existing transport schedule, but do not
   prove the chain-announced serving origin or independently observed publication
-  timing. It is not the self-service live onboarding path. Do not replace a
+  timing. They are not a deployed self-service live onboarding path. Do not replace a
   legacy `ScoringPolicy` hash with a `CompetitionPolicy` hash in a live request.
   The new origin collector and release-gated feed have fixture integration tests;
   they do not yet establish a live protected-data publication workflow.
 - Published license/reconstruction evidence and model-copy review operations.
+  The [contributor checklist](MODEL_CONTRIBUTION_REVIEW.md) is available; the
+  final accepted-license list, contribution terms and staffed review route are
+  still launch inputs, not supplied by that checklist.
 - Signed successor policy/activation artifacts and production chain submission.
 - Publication of reviewed host/OCI upgrade artifacts and deployment-specific
   rehearsal. The dedicated upgrade command exists and has native migration tests;
@@ -209,6 +217,10 @@ using the named hotkey; it needs no per-miner credential. Add
 publication. Treat its output as private operational data because video URLs
 can carry delivery credentials. This command does not install the authorization
 into a running miner or start inference.
+
+For ongoing discovery inside the no-weight miner process, use the separate
+[`--competition-feed` mode](MINER_MODEL_INTEGRATION.md#successor-assignment-discovery-rehearsal).
+It does not change this CLI command's behavior or activate competition rewards.
 
 Use one miner and one usable issuance window per signed publication for this
 feed. A multi-miner audience is refused; a future case within a larger publication

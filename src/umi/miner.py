@@ -26,6 +26,7 @@ from .competition_authorization import (
     EndpointAuthorizationAuthority,
     SignedEndpointAuthorization,
 )
+from .competition_miner_feed import FeedEndpointAuthorizationAuthority
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
 from .grandpa_finality_supervisor import DurableGrandpaFinalityPort
@@ -95,7 +96,9 @@ class MinerRuntime:
     runtime_mode: Literal["inactive_shadow", "public_component_pilot", "competition_no_weight"] = (
         "inactive_shadow"
     )
-    competition_authority: EndpointAuthorizationAuthority | None = field(
+    competition_authority: (
+        EndpointAuthorizationAuthority | FeedEndpointAuthorizationAuthority | None
+    ) = field(
         default=None,
         repr=False,
         compare=False,
@@ -175,7 +178,10 @@ class MinerRuntime:
         ):
             raise ValueError("competition mode requires its explicit authorization authority")
         if self.competition_authority is not None:
-            if not isinstance(self.competition_authority, EndpointAuthorizationAuthority):
+            if not isinstance(
+                self.competition_authority,
+                (EndpointAuthorizationAuthority, FeedEndpointAuthorizationAuthority),
+            ):
                 raise TypeError("competition authority must verify signed endpoint assignments")
             self.competition_authority.validate_runtime(
                 miner_hotkey=self.hotkey_ss58,
@@ -871,10 +877,12 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
 
     finality_task: asyncio.Task[None] | None = None
     finality_stop: asyncio.Event | None = None
+    assignment_task: asyncio.Task[None] | None = None
+    assignment_stop: asyncio.Event | None = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        nonlocal finality_stop, finality_task
+        nonlocal finality_stop, finality_task, assignment_task, assignment_stop
         translator_lifecycle_entered = False
         try:
             translator_lifecycle_entered = True
@@ -885,8 +893,19 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
                 await asyncio.sleep(0)
                 if finality_task.done():
                     await finality_task
+            if isinstance(runtime.competition_authority, FeedEndpointAuthorizationAuthority):
+                assignment_stop = asyncio.Event()
+                assignment_task = asyncio.create_task(
+                    runtime.competition_authority.run(assignment_stop)
+                )
             yield
         finally:
+            if assignment_stop is not None:
+                assignment_stop.set()
+            if assignment_task is not None:
+                assignment_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await assignment_task
             if finality_stop is not None:
                 finality_stop.set()
             if finality_task is not None:
@@ -929,6 +948,8 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
                 serving_origin_finality_verified=False,
                 window_authority=type(runtime.competition_authority).__name__,
             )
+            if isinstance(runtime.competition_authority, FeedEndpointAuthorizationAuthority):
+                result["assignment_discovery"] = runtime.competition_authority.status()
         return result
 
     @app.post(TRANSLATE_PATH)
@@ -1089,14 +1110,17 @@ async def _run_translator_lifecycle(runtime: MinerRuntime, operation: str) -> No
 def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     import bittensor as bt
 
+    feed_origin = getattr(args, "competition_feed", None)
+    if feed_origin is not None and getattr(args, "competition_authorization", None) is not None:
+        raise ValueError("choose either a competition feed or a static authorization")
     competition_inputs = (
         getattr(args, "competition_policy", None),
-        getattr(args, "competition_authorization", None),
+        getattr(args, "competition_authorization", None) or feed_origin,
         getattr(args, "serving_origin", None),
     )
     if any(competition_inputs) and not all(competition_inputs):
         raise ValueError(
-            "competition mode requires policy, authorization and serving origin together"
+            "competition mode requires policy, authorization or feed, and serving origin together"
         )
     competition_policy = None
     publication = None
@@ -1106,13 +1130,18 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         competition_policy = CompetitionPolicy.model_validate_json(
             _read_startup_file(competition_inputs[0], label="competition policy")
         )
-        publication = SignedEndpointAuthorization.model_validate_json(
-            _read_startup_file(
-                competition_inputs[1],
-                label="competition authorization",
-                maximum_bytes=MAX_AUTHORIZATION_BYTES,
+        if feed_origin is not None:
+            from .competition_client import validate_intake_origin
+
+            validate_intake_origin(feed_origin)
+        else:
+            publication = SignedEndpointAuthorization.model_validate_json(
+                _read_startup_file(
+                    competition_inputs[1],
+                    label="competition authorization",
+                    maximum_bytes=MAX_AUTHORIZATION_BYTES,
+                )
             )
-        )
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path)
     hotkey_ss58, scheme = _identity(wallet)
     policy = _load_policy(args.policy)
@@ -1183,15 +1212,22 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     )
     competition_authority = None
     if competition_policy is not None:
-        competition_authority = EndpointAuthorizationAuthority(
+        authority_inputs = dict(
             policy=competition_policy,
             legacy_policy=policy,
-            publication=publication,
             finalized_blocks=finality,
             miner_hotkey=hotkey_ss58,
             model_revision=args.model_revision,
             serving_origin=competition_inputs[2],
         )
+        if feed_origin is None:
+            competition_authority = EndpointAuthorizationAuthority(
+                **authority_inputs, publication=publication
+            )
+        else:
+            competition_authority = FeedEndpointAuthorizationAuthority(
+                **authority_inputs, origin=feed_origin, wallet=wallet
+            )
     translator = _build_translator(
         args,
         limits=limits,
@@ -1412,8 +1448,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--competition-policy", help="reviewed successor policy for weight-disabled requests"
     )
-    parser.add_argument(
+    assignment_source = parser.add_mutually_exclusive_group()
+    assignment_source.add_argument(
         "--competition-authorization", help="canonical quorum-signed exact endpoint assignments"
+    )
+    assignment_source.add_argument(
+        "--competition-feed", help="HTTPS assignment feed for ongoing weight-disabled requests"
     )
     parser.add_argument(
         "--serving-origin", help="local HTTPS origin matching the miner-signed submission"

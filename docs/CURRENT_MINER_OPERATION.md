@@ -12,6 +12,8 @@ Both UMI validators, UID 0 and UID 54, have finalized bridge rows. See the
 for the applied policy and exact rows. The earlier
 [IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) is historical.
 Inclusion in a row is not proof that a miner has already received a payout.
+Use the [current-row diagnostic](REGISTRATION_BRIDGE_HEALTH.md) for freshness;
+the deployment records above are dated snapshots.
 
 ## Miner requirements
 
@@ -68,6 +70,11 @@ UMI will publish the miner instructions and signed policy before asking miners
 to serve translation requests or enter the model-contribution track. Translation
 requests need the [protocol miner connected to a working model](MINER_MODEL_INTEGRATION.md).
 A health-only keepalive cannot answer them.
+
+Before spending compute on a model contribution, read the
+[provenance and rights checklist](MODEL_CONTRIBUTION_REVIEW.md). The final
+accepted-license list and contribution terms still need publication before
+intake opens. Endpoint service does not require contributing private weights.
 
 ## Reading payout dashboards
 
