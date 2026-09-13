@@ -27,6 +27,7 @@ from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProv
 from .competition_client import validate_intake_origin
 from .competition_evaluator import Directory, _lock_file, _private, _publish, _read
 from .competition_execution import execution_boundary
+from .competition_package import CompetitionPackageLimits, CompetitionReleaseIdentity
 from .competition_publication import (
     CutoffPublication,
     PublicationReplayLimits,
@@ -136,6 +137,28 @@ class RoundReply(StrictProtocolModel):
     chain_submission_authorized: Literal[False] = False
 
 
+class SettlementDeliveryConfig(StrictProtocolModel):
+    state_directory: Directory
+    certificate_directory: Directory
+    package_directory: Directory
+    package_limits: CompetitionPackageLimits
+    release_identity: CompetitionReleaseIdentity
+
+    @model_validator(mode="after")
+    def directories(self):
+        paths = [
+            Path(p).resolve()
+            for p in (self.state_directory, self.certificate_directory, self.package_directory)
+        ]
+        if any(
+            a == b or a in b.parents or b in a.parents
+            for i, a in enumerate(paths)
+            for b in paths[i + 1 :]
+        ):
+            raise ValueError("settlement delivery directories must not overlap")
+        return self
+
+
 class RoundCoordinatorConfig(StrictProtocolModel):
     schema_: Literal["umi-round-coordinator-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -147,6 +170,7 @@ class RoundCoordinatorConfig(StrictProtocolModel):
     replay_limits: PublicationReplayLimits
     work: RoundWorkConfig | None = None
     settlement_directory: Directory | None = None
+    settlement_delivery: SettlementDeliveryConfig | None = None
     maximum_rounds: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
@@ -168,6 +192,17 @@ class RoundCoordinatorConfig(StrictProtocolModel):
         ]
         if self.settlement_directory is not None:
             paths.append(Path(self.settlement_directory).resolve())
+        if self.settlement_delivery is not None:
+            if self.settlement_directory is None:
+                raise ValueError("settlement delivery requires automatic preparation")
+            paths.extend(
+                Path(p).resolve()
+                for p in (
+                    self.settlement_delivery.state_directory,
+                    self.settlement_delivery.certificate_directory,
+                    self.settlement_delivery.package_directory,
+                )
+            )
         if self.work is not None:
             paths.extend(
                 Path(p).resolve()
@@ -567,6 +602,7 @@ class RoundCoordinator:
                     "port",
                     *({"work"} if config.work is None else set()),
                     *({"settlement_directory"} if config.settlement_directory is None else set()),
+                    *({"settlement_delivery"} if config.settlement_delivery is None else set()),
                 },
             ),
             maximum_rounds=config.maximum_rounds,
@@ -577,6 +613,18 @@ class RoundCoordinator:
         self.new_cursor = ""
         self.work_cursor = 0
         self.settlement_cursor = 0
+        self.settlement_queue = None
+        if config.settlement_delivery is not None:
+            from .competition_settlement_delivery import SettlementQueue
+
+            self.settlement_queue = SettlementQueue(
+                config.settlement_delivery,
+                self.store,
+                provider,
+                limits=config.replay_limits,
+                maximum_rounds=config.maximum_rounds,
+                maximum_bytes=config.maximum_journal_bytes,
+            )
         self.work_queue = None
         self.transport_provider = transport_provider
         if config.work is not None:
@@ -793,6 +841,15 @@ class RoundCoordinator:
                     limits=self.config.replay_limits,
                     output_directory=self.config.settlement_directory,
                 )
+                if result == "prepared" and self.settlement_queue is not None:
+                    from .competition_settlement_preparation import SettlementPreparation
+
+                    prepared = _read(
+                        Path(self.config.settlement_directory)
+                        / (digest(proposal.cutoff.round) + ".settlement-proposal.json"),
+                        SettlementPreparation,
+                    )
+                    await self.settlement_queue.prepare(prepared)
                 counts[
                     "settlement_prepared" if result == "prepared" else "settlement_incomplete"
                 ] += 1
@@ -965,6 +1022,10 @@ def create_round_app(
         from .competition_work_transport import attach_work_route
 
         attach_work_route(app, coordinator.work_queue)
+    if coordinator.settlement_queue is not None:
+        from .competition_settlement_transport import attach_settlement_route
+
+        attach_settlement_route(app, coordinator.settlement_queue)
     capacity = asyncio.Semaphore(2)
 
     @app.exception_handler(StarletteHTTPException)

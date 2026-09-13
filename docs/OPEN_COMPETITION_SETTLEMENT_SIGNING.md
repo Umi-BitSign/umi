@@ -5,9 +5,10 @@ one evaluator's own journals and finality provider. It returns one hotkey
 endorsement. That endorsement alone is neither a quorum certificate nor
 permission to submit weights.
 
-The signer is a component API. Automatic proposal delivery, vote collection,
-certificate publication and service configuration still need to be connected.
-This code does not change either deployed bridge validator.
+The signer is used by the optional
+[automatic delivery path](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md), which connects
+proposal discovery, vote collection and replay-package publication. This code
+does not change either deployed bridge validator.
 
 ## Inputs and local checks
 
@@ -81,8 +82,8 @@ authenticated endpoint-response path against the local-evidence verifier.
 This does not yet prove the complete scheduling-to-signed-settlement service
 workflow with both tracks running together.
 
-Connect authenticated settlement discovery and vote delivery next, then retain
-the quorum certificate and publish its immutable replay package. The integrated
+The delivery tests additionally cover authenticated proposal discovery,
+certificate collection and immutable package publication. The integrated
 protected-data rehearsal, independent operators, reviewed terms/rights,
 qualifying model promotion, signed activation and finalized incentive evidence
 remain launch requirements. Importing Michael's baseline grants no contributor
