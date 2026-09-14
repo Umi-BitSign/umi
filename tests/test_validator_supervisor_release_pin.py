@@ -23,8 +23,8 @@ MANIFESTS = DEPLOYMENT / "host-artifacts"
 PLATFORMS = ("linux-amd64", "linux-arm64")
 
 
-def test_first_install_pin_matches_published_runtime458_operator_bundle() -> None:
-    # Captured from the shared sequence-13 feed. Verify the real signature,
+def test_first_install_pin_matches_published_runtime_independent_operator_bundle() -> None:
+    # Captured from the sequence-14 release. Verify the real signature,
     # without a wallet or any permit lookup. Keep first-install artifacts and
     # this release compatibility fixture in sync when publishing a new host.
     payload = (
@@ -33,9 +33,10 @@ def test_first_install_pin_matches_published_runtime458_operator_bundle() -> Non
         .removesuffix(b"\n")
     )
     assert hashlib.sha256(payload).hexdigest() == (
-        "919403f2dc359102964069cafa4d05eabe172a3917e64b22178b4e16b66924a4"
+        "9ad7f434fde7a406725f93db6c09bfec0f049f49b4552197e036986051d316fe"
     )
     bundle = _parse_bootstrap_input_bundle(payload)
+    # The legacy signed annotation is retained, but no longer gates operation.
     assert bundle.signed_policy.body.required_runtime_spec_version == 458
     assert (DEPLOYMENT / "CURRENT_RELEASE_REVISION").read_text().strip() == (
         bundle.signed_policy.body.umi_git_revision
