@@ -151,10 +151,22 @@ Thirteen multi-page/parser/host/delivery tests passed, followed by four Linux
 exchange and target-observer cases. Initial v3-to-v4 installation now accepts
 bounded full histories and has a preparation-only HTTPS collection command.
 Six initial receipt, restart, anchor and pre-stop authentication tests passed
-with one and 69 records; eight collector tests passed. CLI publication and
-revised total-deadline tests remain in progress. Production
-HTTPS routing and the deployed successor-host handoff remain unfinished.
-Long-run retention capacity must be rehearsed before deployment.
+with one and 69 records; eight collector tests and four CLI publication and
+total-deadline tests passed. The broader adapter/materializer regression passed
+102 tests on the Studio before the shared-registry change below.
+Production HTTPS routing and the deployed successor-host handoff remain unfinished.
+
+The adapter now stores exact signed history prefixes once in its recovery
+registry, reconstructing a run's original history on access. Stopped recovery
+retains authorization identities between audits instead of every expanded
+history. Existing inline records are preserved. Storage round-trip, growth,
+capacity and atomic-failure checks passed on the first snapshot. The expanded
+link-validation suite passed all 11 tests in 476.15 seconds; the recovery
+regression remains in progress. Download delivery now records a small hash/size
+binding for runtime-supplied histories, preserving and checking any older
+full-history files. Its focused regression is running. Materialized current
+histories still need long-run retention work before deployment. These changes
+neither prune recovery evidence nor remove configured capacity limits.
 
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through

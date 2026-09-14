@@ -42,6 +42,7 @@ from .test_competition_supervisor import (
     _directive,
     _signed,
     _signed_authorization_target,
+    _signed_continuation,
     authority_wallets,
 )
 from .test_competition_supervisor import successor_case as successor_case
@@ -757,6 +758,138 @@ async def test_identical_refetch_path_does_not_rewrite_recovery_history(adapter_
         )
     finally:
         copied.chmod(0o700)
+
+
+def test_shared_registry_history_is_lossless_lazy_and_keeps_legacy_runs(adapter_case, monkeypatch):
+    """Storage-only test; this does not simulate successful worker execution."""
+    import hashlib
+    import json
+
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    case = adapter_case
+    anchor = case.selection.signed
+    # Keep an old inline-format record unchanged beside the new references.
+    old = adapters._record(case.selection, case.files)
+    with sqlite3.connect(case.adapter.path) as db:
+        db.execute(
+            "INSERT INTO runs VALUES (?,?,?)",
+            (anchor.directive_sha256, old, hashlib.sha256(old).hexdigest()),
+        )
+    records = _signed_continuation(anchor, 12)
+    bodies = []
+    for count, signed in enumerate(records, 1):
+        body = successor_continuation_bytes(anchor, records[:count])
+        bodies.append(body)
+        files = replace(case.files, current_directive_page_bytes=body)
+        case.adapter._retain(
+            SimpleNamespace(selection=SuccessorWorkerSelection(signed), files=files)
+        )
+    with sqlite3.connect(case.adapter.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM history_nodes").fetchone() == (12,)
+        assert db.execute(
+            "SELECT body FROM runs WHERE id=?", (anchor.directive_sha256,)
+        ).fetchone() == (old,)
+        rows = db.execute(
+            "SELECT body FROM runs WHERE id!=?", (anchor.directive_sha256,)
+        ).fetchall()
+        assert all(json.loads(raw)["schema"] == "umi-successor-adapter-run/2" for (raw,) in rows)
+    calls = []
+    restore = adapters.restore_history
+
+    def observe_restore(*args, **kwargs):
+        calls.append(True)
+        return restore(*args, **kwargs)
+
+    monkeypatch.setattr(adapters, "restore_history", observe_restore)
+    snapshot = case.adapter._records()
+    assert len(snapshot) == 13 and calls == []
+    assert snapshot[records[-1].directive_sha256][1].current_directive_page_bytes == bodies[-1]
+    assert calls == [True]
+    assert snapshot[anchor.directive_sha256][1] == case.files
+
+
+def test_shared_registry_counts_nodes_in_budget_and_rolls_back_failed_retention(
+    adapter_case, monkeypatch
+):
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    case = adapter_case
+    records = _signed_continuation(case.selection.signed, 2)
+    body = successor_continuation_bytes(case.selection.signed, records)
+    prepared = SimpleNamespace(
+        selection=SuccessorWorkerSelection(records[-1]),
+        files=replace(case.files, current_directive_page_bytes=body),
+    )
+    # A failed run insertion must roll back the preceding node insertions too.
+    with sqlite3.connect(case.adapter.path) as db:
+        db.execute(
+            "CREATE TRIGGER refuse_run BEFORE INSERT ON runs "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        case.adapter._retain(prepared)
+    with sqlite3.connect(case.adapter.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM history_nodes").fetchone() == (0,)
+        db.execute("DROP TRIGGER refuse_run")
+    case.adapter._retain(prepared)
+    with sqlite3.connect(case.adapter.path) as db:
+        size = db.execute("SELECT SUM(length(body)) FROM runs").fetchone()[0]
+        size += db.execute("SELECT SUM(length(body)) FROM history_nodes").fetchone()[0]
+    assert case.adapter._records().used_bytes == size
+    # Exercise a smaller read ceiling without changing any durable record.
+    monkeypatch.setattr(
+        case.adapter, "limits", replace(case.adapter.limits, maximum_registry_bytes=size - 1)
+    )
+    with pytest.raises(adapters.SuccessorAdapterError, match="capacity"):
+        case.adapter._records()
+
+
+def test_shared_registry_checks_missing_nodes_and_head_before_history_expansion(
+    adapter_case, monkeypatch
+):
+    import hashlib
+    import json
+
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    case = adapter_case
+    records = _signed_continuation(case.selection.signed, 2)
+    body = successor_continuation_bytes(case.selection.signed, records)
+    case.adapter._retain(
+        SimpleNamespace(
+            selection=SuccessorWorkerSelection(records[-1]),
+            files=replace(case.files, current_directive_page_bytes=body),
+        )
+    )
+    monkeypatch.setattr(
+        adapters, "restore_history", lambda *args, **kwargs: pytest.fail("expanded full history")
+    )
+    assert len(case.adapter._records()) == 1
+    with sqlite3.connect(case.adapter.path) as db:
+        node = db.execute("SELECT id,body FROM history_nodes ORDER BY id LIMIT 1").fetchone()
+        run = db.execute("SELECT id,body,sha FROM runs").fetchone()
+        db.execute("DELETE FROM history_nodes WHERE id=?", (node[0],))
+    with pytest.raises(ValueError, match="missing"):
+        case.adapter._records()
+    with sqlite3.connect(case.adapter.path) as db:
+        db.execute("INSERT INTO history_nodes VALUES (?,?)", node)
+    assert len(case.adapter._records()) == 1
+    for field, value in (("count", 1), ("after_directive_sha256", "00" * 32)):
+        altered = json.loads(run[1])
+        altered["current_directive_page"][field] = value
+        raw = canonical_json_bytes(altered)
+        with sqlite3.connect(case.adapter.path) as db:
+            db.execute(
+                "UPDATE runs SET body=?,sha=? WHERE id=?",
+                (raw, hashlib.sha256(raw).hexdigest(), run[0]),
+            )
+        with pytest.raises(ValueError, match="prefix or head"):
+            case.adapter._records()
+    with sqlite3.connect(case.adapter.path) as db:
+        db.execute("UPDATE runs SET body=?,sha=? WHERE id=?", (run[1], run[2], run[0]))
+    assert len(case.adapter._records()) == 1
 
 
 @pytest.mark.parametrize(

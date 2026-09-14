@@ -14,12 +14,22 @@ import hashlib
 import json
 import os
 import sqlite3
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Protocol
 
+from .competition_adapter_history import (
+    MAX_HISTORY_NODE_BYTES,
+    encode_history,
+    parse_history_node,
+    restore_history,
+    summarize_history_nodes,
+    validate_history_reference,
+    validate_reference_head,
+)
 from .competition_chain_state import (
     OwnedCompetitionChainObservation,
     validate_owned_weight_observation,
@@ -36,6 +46,7 @@ from .competition_package import VerifiedCompetitionPackage
 from .competition_release import VerifiedSuccessorOCI
 from .competition_supervisor import (
     MAX_SUCCESSOR_HISTORY_BYTES,
+    MAX_SUCCESSOR_HISTORY_RECORDS,
     load_bound_successor_replay_package,
     parse_canonical_signed_successor_supervisor_directive,
     parse_canonical_successor_supervisor_directive_history,
@@ -165,15 +176,19 @@ def _canonical(model, payload):
     return result
 
 
-def _record(selection, files):
+def _record(selection, files, *, history_reference=None):
     return canonical_json_bytes(
         {
-            "schema": "umi-successor-adapter-run/1",
+            "schema": "umi-successor-adapter-run/1"
+            if history_reference is None
+            else "umi-successor-adapter-run/2",
             "signed_directive": json.loads(canonical_json_bytes(selection.signed)),
             "release_bundle_path": str(files.release_bundle_path),
             "package_path": str(files.package_path),
             "worker_execution": json.loads(files.worker_execution_bytes),
-            "current_directive_page": json.loads(files.current_directive_page_bytes),
+            "current_directive_page": json.loads(files.current_directive_page_bytes)
+            if history_reference is None
+            else history_reference,
             "authorization": None
             if files.authorization_bytes is None
             else json.loads(files.authorization_bytes),
@@ -181,7 +196,7 @@ def _record(selection, files):
     )
 
 
-def _decode_record(raw):
+def _decode_record(raw, *, history_nodes=None, history_prefixes=None, metadata_only=False):
     value = json.loads(raw)
     if (
         canonical_json_bytes(value) != raw
@@ -196,25 +211,61 @@ def _decode_record(raw):
             "current_directive_page",
             "authorization",
         }
-        or value["schema"] != "umi-successor-adapter-run/1"
+        or not isinstance(value["schema"], str)
+        or value["schema"] not in {"umi-successor-adapter-run/1", "umi-successor-adapter-run/2"}
     ):
         raise SuccessorAdapterError("retained successor run is corrupt")
-    return (
-        SuccessorWorkerSelection(
-            parse_canonical_signed_successor_supervisor_directive(
-                canonical_json_bytes(value["signed_directive"])
+    signed = parse_canonical_signed_successor_supervisor_directive(
+        canonical_json_bytes(value["signed_directive"])
+    )
+    if value["schema"] == "umi-successor-adapter-run/2":
+        validate_history_reference(value["current_directive_page"])
+        if metadata_only:
+            validate_reference_head(
+                value["current_directive_page"],
+                head=signed,
+                nodes=history_nodes or {},
+                prefixes=history_prefixes or {},
             )
-        ),
+        # Only _records uses metadata_only to validate paths and small fields
+        # without allocating every run's full continuation at once.
+        page_bytes = (
+            b"{}"
+            if metadata_only
+            else restore_history(
+                value["current_directive_page"], head=signed, nodes=history_nodes or {}
+            )
+        )
+    else:
+        page_bytes = canonical_json_bytes(value["current_directive_page"])
+    return (
+        SuccessorWorkerSelection(signed),
         SuccessorArtifactFiles(
             release_bundle_path=Path(value["release_bundle_path"]),
             package_path=Path(value["package_path"]),
             worker_execution_bytes=canonical_json_bytes(value["worker_execution"]),
-            current_directive_page_bytes=canonical_json_bytes(value["current_directive_page"]),
+            current_directive_page_bytes=page_bytes,
             authorization_bytes=None
             if value["authorization"] is None
             else canonical_json_bytes(value["authorization"]),
         ),
     )
+
+
+class _RetainedRuns(Mapping):
+    """One bounded registry snapshot, with histories reconstructed on access."""
+
+    def __init__(self, records, nodes, used_bytes):
+        self._records, self.nodes, self.used_bytes = records, nodes, used_bytes
+
+    def __iter__(self):
+        return iter(self._records)
+
+    def __len__(self):
+        return len(self._records)
+
+    def __getitem__(self, identity):
+        return _decode_record(self._records[identity], history_nodes=self.nodes)
 
 
 @contextmanager
@@ -291,6 +342,7 @@ class ProductionSuccessorRuntimeAdapter:
         with self._registry() as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (id INTEGER PRIMARY KEY, body BLOB)")
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, body BLOB, sha TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS history_nodes (id TEXT PRIMARY KEY, body BLOB)")
             old = db.execute("SELECT id,body FROM binding").fetchall()
             if not old:
                 db.execute("INSERT INTO binding VALUES (1,?)", (self._binding,))
@@ -326,26 +378,39 @@ class ProductionSuccessorRuntimeAdapter:
                 "SELECT COUNT(*),COALESCE(SUM(length(body)),0),"
                 "COALESCE(MAX(length(body)),0) FROM runs"
             ).fetchone()
+            node_count, node_total, node_maximum = db.execute(
+                "SELECT COUNT(*),COALESCE(SUM(length(body)),0),"
+                "COALESCE(MAX(length(body)),0) FROM history_nodes"
+            ).fetchone()
             if (
                 count > self.limits.maximum_retained_runs
-                or total > self.limits.maximum_registry_bytes
+                or node_count > MAX_SUCCESSOR_HISTORY_RECORDS + self.limits.maximum_retained_runs
+                or total + node_total > self.limits.maximum_registry_bytes
             ):
                 raise SuccessorAdapterError("adapter registry capacity exhausted")
             if count and not 0 < maximum <= self.limits.maximum_registry_bytes:
                 raise SuccessorAdapterError("adapter registry record is malformed")
+            if node_count and not 0 < node_maximum <= MAX_HISTORY_NODE_BYTES:
+                raise SuccessorAdapterError("adapter registry history node is malformed")
+            nodes = {
+                identity: parse_history_node(identity, body)
+                for identity, body in db.execute("SELECT id,body FROM history_nodes")
+            }
+            prefixes = summarize_history_nodes(nodes)
             result = {}
             for identity, raw, checksum in db.execute("SELECT id,body,sha FROM runs"):
                 if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != checksum:
                     raise SuccessorAdapterError("adapter registry record is corrupt")
-                selection, files = _decode_record(raw)
+                selection, _ = _decode_record(
+                    raw, history_nodes=nodes, history_prefixes=prefixes, metadata_only=True
+                )
                 if selection.directive_sha256 != identity:
                     raise SuccessorAdapterError("adapter registry directive binding changed")
-                result[identity] = (selection, files)
-            return result
+                result[identity] = raw
+            return _RetainedRuns(result, nodes, total + node_total)
 
     def _retain(self, prepared):
         records = self._records()
-        raw = _record(prepared.selection, prepared.files)
         identity = prepared.selection.directive_sha256
         if identity in records:
             prior_selection, prior_files = records[identity]
@@ -358,13 +423,21 @@ class ProductionSuccessorRuntimeAdapter:
             # A refetch may use a new immutable cache path or equivalent signed
             # history page. Preserve the original recovery sources unchanged.
             return
-        used = sum(len(_record(*record)) for record in records.values())
+        reference, nodes = encode_history(prepared.files.current_directive_page_bytes)
+        raw = _record(prepared.selection, prepared.files, history_reference=reference)
+        missing = {
+            identity: body for identity, body in nodes.items() if identity not in records.nodes
+        }
         if (
             len(records) >= self.limits.maximum_retained_runs
-            or used + len(raw) > self.limits.maximum_registry_bytes
+            or len(records.nodes) + len(missing)
+            > MAX_SUCCESSOR_HISTORY_RECORDS + self.limits.maximum_retained_runs
+            or records.used_bytes + len(raw) + sum(map(len, missing.values()))
+            > self.limits.maximum_registry_bytes
         ):
             raise SuccessorAdapterError("adapter registry full; no retained run was removed")
         with self._registry() as db:
+            db.executemany("INSERT INTO history_nodes VALUES (?,?)", missing.items())
             db.execute(
                 "INSERT INTO runs VALUES (?,?,?)",
                 (
@@ -606,19 +679,25 @@ class ProductionSuccessorRuntimeAdapter:
                 identity = prepared.authorization.authorization.authorization_id
                 if identity in targets:
                     raise SuccessorAdapterError("retained runs reuse a weight authorization")
-                targets[identity] = prepared
+                # Keep only bounded identities between audits. Reconstruct the
+                # full continuation for the one unsettled attempt being handled.
+                targets[identity] = (
+                    selection.directive_sha256,
+                    competition_weight_authorization_digest(prepared.authorization.authorization),
+                    digest(prepared.execution.weights.chain),
+                )
         for identity, attempt in attempts.items():
-            prepared = targets.get(identity)
+            binding = targets.get(identity)
             if (
-                prepared is None
-                or attempt.authorization_sha256
-                != competition_weight_authorization_digest(prepared.authorization.authorization)
+                binding is None
+                or attempt.authorization_sha256 != binding[1]
                 or attempt.recovery_checkpoint_sha256 != self.installation.checkpoint_sha256
-                or attempt.chain_config_sha256 != digest(prepared.execution.weights.chain)
+                or attempt.chain_config_sha256 != binding[2]
             ):
                 raise SuccessorAdapterError("weight attempt lacks its retained signed authority")
             if attempt.phase in _TERMINAL:
                 continue
+            prepared = self._verify(*records[binding[0]])
             execution = prepared.execution.weights
             replay = CompetitionReplayWorker(
                 self.root / "preflight-replay",

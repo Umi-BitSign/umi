@@ -1009,6 +1009,143 @@ def _signed_continuation(anchor, count=MAX_SUPERVISOR_DIRECTIVES_PER_PAGE + 4):
     return records
 
 
+@pytest.mark.parametrize(
+    "initial,count", [(False, 0), (False, 2), (False, 68), (True, 2), (True, 68)]
+)
+def test_shared_history_roundtrip_preserves_exact_signed_bytes(successor_case, initial, count):
+    from umi.competition_adapter_history import (
+        encode_history,
+        parse_history_node,
+        restore_history,
+        summarize_history_nodes,
+        validate_reference_head,
+    )
+    from umi.competition_supervisor import successor_initial_history_bytes
+
+    case = successor_case
+    if initial:
+        records = [case.signed, *_signed_continuation(case.signed, count - 1)]
+        body = successor_initial_history_bytes(case.predecessor.signed, records)
+    else:
+        records = _signed_continuation(case.signed, count)
+        body = successor_continuation_bytes(case.signed, records)
+    reference, stored = encode_history(body)
+    nodes = {identity: parse_history_node(identity, raw) for identity, raw in stored.items()}
+    head = records[-1] if records else case.signed
+    validate_reference_head(
+        reference, head=head, nodes=nodes, prefixes=summarize_history_nodes(nodes)
+    )
+    assert restore_history(reference, head=head, nodes=nodes) == body
+    assert len(nodes) == count
+
+
+def test_shared_history_prefix_storage_is_linear(successor_case):
+    from umi.competition_adapter_history import encode_history, parse_history_node, restore_history
+
+    anchor = successor_case.signed
+    records = _signed_continuation(anchor, 68)
+    nodes, references, bodies = {}, [], []
+    sizes = {}
+    for count in range(1, 69):
+        body = successor_continuation_bytes(anchor, records[:count])
+        reference, additions = encode_history(body)
+        nodes.update(additions)
+        references.append(reference)
+        bodies.append(body)
+        assert len(nodes) == count
+        if count in (34, 68):
+            sizes[count] = sum(map(len, nodes.values())) + sum(
+                len(canonical_json_bytes(item)) for item in references
+            )
+    assert sizes[68] < 2.1 * sizes[34]
+    assert sizes[68] < sum(map(len, bodies)) / 8
+    parsed = {identity: parse_history_node(identity, raw) for identity, raw in nodes.items()}
+    for count in (1, 34, 68):
+        assert (
+            restore_history(references[count - 1], head=records[count - 1], nodes=parsed)
+            == bodies[count - 1]
+        )
+
+
+def test_shared_history_corruption_and_limits_fail_closed(successor_case):
+    from umi.competition_adapter_history import (
+        RetainedHistoryError,
+        encode_history,
+        parse_history_node,
+        restore_history,
+    )
+
+    records = _signed_continuation(successor_case.signed, 2)
+    body = successor_continuation_bytes(successor_case.signed, records)
+    reference, stored = encode_history(body)
+    parsed = {identity: parse_history_node(identity, raw) for identity, raw in stored.items()}
+    for field, value in (
+        ("count", True),
+        ("count", 65537),
+        ("count", 1),
+        ("tip", "00" * 32),
+        ("page_size_bytes", 1),
+        ("page_schema", []),
+        ("page_sha256", "00" * 32),
+        ("after_directive_sha256", "00" * 32),
+    ):
+        with pytest.raises(RetainedHistoryError):
+            restore_history({**reference, field: value}, head=records[-1], nodes=parsed)
+    with pytest.raises(RetainedHistoryError, match="missing"):
+        restore_history(reference, head=records[-1], nodes={})
+    with pytest.raises(RetainedHistoryError, match="corrupt"):
+        parse_history_node(reference["tip"], b"{}")
+
+
+def test_shared_history_checks_all_links_and_reference_heads(successor_case, monkeypatch):
+    import hashlib
+    import json
+
+    from umi import competition_adapter_history as history
+
+    anchor = successor_case.signed
+    records = _signed_continuation(anchor, 2)
+    reference, stored = history.encode_history(successor_continuation_bytes(anchor, records))
+    nodes = {
+        identity: history.parse_history_node(identity, raw) for identity, raw in stored.items()
+    }
+    prefixes = history.summarize_history_nodes(nodes)
+    for field, value in (
+        ("count", 1),
+        ("tip", "00" * 32),
+        ("after_sequence", reference["after_sequence"] + 1),
+        ("after_directive_sha256", "00" * 32),
+        ("page_size_bytes", 1),
+    ):
+        with pytest.raises(history.RetainedHistoryError):
+            history.validate_reference_head(
+                {**reference, field: value}, head=records[-1], nodes=nodes, prefixes=prefixes
+            )
+    with pytest.raises(history.RetainedHistoryError, match="head"):
+        history.validate_reference_head(reference, head=anchor, nodes=nodes, prefixes=prefixes)
+    empty, _ = history.encode_history(successor_continuation_bytes(anchor, []))
+    with pytest.raises(history.RetainedHistoryError, match="head"):
+        history.validate_reference_head(empty, head=records[-1], nodes={}, prefixes={})
+
+    # Recompute the storage checksum: hashes alone must not accept a broken link.
+    tip = reference["tip"]
+    raw = json.loads(stored[tip])
+    for updates, reason in (
+        ({"previous": "00" * 32}, "missing"),
+        ({"signed": records[0].model_dump(mode="json", by_alias=True)}, "predecessor"),
+    ):
+        bad_body = canonical_json_bytes({**raw, **updates})
+        identity = hashlib.sha256(bad_body).hexdigest()
+        corrupt = {**nodes, identity: history.parse_history_node(identity, bad_body)}
+        with pytest.raises(history.RetainedHistoryError, match=reason):
+            history.summarize_history_nodes(corrupt)
+
+    # Exercise the depth guard with a smaller ceiling; durable history is unchanged.
+    monkeypatch.setattr(history, "MAX_SUCCESSOR_HISTORY_RECORDS", 1)
+    with pytest.raises(history.RetainedHistoryError, match="bound"):
+        history.summarize_history_nodes(nodes)
+
+
 def test_local_history_exceeds_one_network_page_without_relaxing_network_parser(successor_case):
     anchor = successor_case.signed
     records = _signed_continuation(anchor)
