@@ -173,13 +173,19 @@ def _package_target(package, limits):
     )
 
 
-def _intent(plan, package, *, sequence, predecessor_version, predecessor, block):
+class PublicationWindowUnavailable(ValueError):
+    """An intact completed round cannot be activated at this finalized head."""
+
+
+def publication_valid_through(plan, package, block):
     settlement = package.retained_settlement
     policy = package.policy
     if not plan.valid_from_block <= block <= plan.valid_through_block or (
         block < settlement.observed_block
     ):
-        raise ValueError("publication is outside its policy or precedes settlement")
+        raise PublicationWindowUnavailable(
+            "publication is outside its policy or precedes settlement"
+        )
     valid_through = min(
         plan.valid_through_block,
         policy.valid_through_block,
@@ -190,7 +196,15 @@ def _intent(plan, package, *, sequence, predecessor_version, predecessor, block)
     if valid_through - block < max(
         plan.weights.mortality_period, plan.minimum_activation_headroom_blocks
     ):
-        raise ValueError("publication lacks its original activation and mortality window")
+        raise PublicationWindowUnavailable(
+            "publication lacks its original activation and mortality window"
+        )
+    return valid_through
+
+
+def _intent(plan, package, *, sequence, predecessor_version, predecessor, block):
+    policy = package.policy
+    valid_through = publication_valid_through(plan, package, block)
     target = _package_target(package, plan.package_limits)
     identifier = hashlib.sha256(
         b"umi-successor-round-authorization-v1\0"

@@ -227,6 +227,11 @@ class SuccessorPublicationFeed:
     async def retain_async(self, publication, prepared):
         await _drained_thread(self.retain, publication, prepared)
 
+    def history(self):
+        """Read verified signed history for local delivery-outbox recovery."""
+        with self._locked():
+            return tuple(record.publication for record in self._history())
+
     def read(self, route):
         """Return only protocol objects. No request string becomes a file path."""
         if not isinstance(route, str) or len(route) > 256:
