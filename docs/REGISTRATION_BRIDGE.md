@@ -105,6 +105,23 @@ guarantee a particular return or that registration costs will be recovered.
 
 ## Validator rollout
 
+The bridge does not gate submission on a runtime `specVersion` number. A
+version-only upgrade does not require a new policy signature or host parser.
+The legacy `required_runtime_spec_version` field remains in signed policies for
+byte-compatible parsing and journal recovery; it is informational. Signatures
+still authenticate that field, so signed documents must not be edited in place.
+
+Compatibility checks use the finalized chain settings, including mechanism
+count, weight version key, commit-reveal configuration, UID domain, rate limit,
+tempo and activity cutoff. Finality freshness, writer permits, pending
+commitments and exact applied-row verification remain enforced. An unsupported
+storage or call change can still prevent operation. Accepting a new version
+number is not a guarantee of compatibility with every future runtime.
+
+Deploying this behavior requires an updated host and worker release. Old
+installations keep their old runtime check until updated; changing `main`
+alone does not update a running supervisor.
+
 The bridge uses an explicit signed policy and the distinct worker profile
 `umi-registration-bridge-validator/1`. It does not reinterpret the old pilot
 manifest or pretend that registration satisfies a public-pilot proof.
