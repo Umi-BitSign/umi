@@ -153,9 +153,13 @@ test-only rights review. Independent production operators and real model quality
 remain unverified. Continuous-round failure recovery is under test. The explicit
 void contract in `competition_void.py` retains independently signed attempts and a
 quorum decision. Evaluator exchange, first-arrival retention, mixed-outcome
-settlement and package replay are connected in the current worktree. A mixed
-three-entry settlement has passed the 70/30 replay test. Broader regression,
-local signer checks and the connected outage lifecycle must pass before this
+settlement and package replay are connected in the current worktree. The
+settlement/publication/package/preparation regression passed 74 tests, including
+a three-entry 70/30 settlement. The endpoint-503 relay, restart, local receipt and
+bounded BLS-cache tests passed together (29 tests). Repeated checks of one
+Quicknet signature caused the relay deadline failure; exact-tuple cryptographic
+verification is now cached while publication and timing checks still run. The
+complete mixed-outcome service lifecycle and candidate CI must pass before this
 item is complete or released. Missing observations still cannot create a void.
 
 The versioned [promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md)

@@ -40,7 +40,13 @@ from .test_validator_plans import FinalizedPort, _block, _clock, _live_policy
 
 
 def build_authorization_fixture(
-    policy, *, case_count=3, legacy_policy=None, incumbent_sha256=None, model_bundle=None
+    policy,
+    *,
+    case_count=3,
+    legacy_policy=None,
+    incumbent_sha256=None,
+    model_bundle=None,
+    extra_model_bundle=None,
 ):
     """Synthetic signed publication and owned-source test port; no network/files.
 
@@ -101,9 +107,14 @@ def build_authorization_fixture(
         if model_bundle is None
         else submission(policy, bundle=model_bundle, name="Bob", start=1000, end=1900)
     )
+    extra_model_sub = (
+        None
+        if extra_model_bundle is None
+        else submission(policy, bundle=extra_model_bundle, name="Eve", start=1000, end=1900)
+    )
     submissions = tuple(
         sorted(
-            (signed_sub,) if model_sub is None else (signed_sub, model_sub),
+            (s for s in (signed_sub, model_sub, extra_model_sub) if s is not None),
             key=lambda s: digest(s.submission),
         )
     )
@@ -197,6 +208,7 @@ def build_authorization_fixture(
         serving_origin=serving_origin,
         signed_submission=signed_sub,
         model_submission=model_sub,
+        extra_model_submission=extra_model_sub,
         submissions=submissions,
         suite=suite,
         round=round_,
