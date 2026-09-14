@@ -137,6 +137,12 @@ Publication also requires passing full-regression CI for the candidate revision.
 That gate is tracked by the repository checks, separately from the activation
 inputs above. A documentation merge does not activate the successor.
 
+The [per-round successor publisher](OPEN_COMPETITION_ROUND_PUBLISHER.md) now has
+a durable signing core and current finality/source-conflict checks. Its 19
+focused tests passed with synthetic authority keys and replayed packages. Five
+local command-wiring tests also passed. Automatic completed-round selection, immutable
+feed distribution and the deployed successor-host handoff remain unfinished.
+
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through
 the existing CPU runner and journal, then replay retained endpoint transport
