@@ -27,7 +27,7 @@ from .test_open_competition import wallet
 
 
 @pytest.fixture
-def authorization(policy):
+def authorization(policy, request):
     from umi.grandpa_finality import FINNEY_GENESIS_HASH
 
     legacy = _live_policy(activation_block=1000)
@@ -46,7 +46,11 @@ def authorization(policy):
             )
         }
     )
-    return build_authorization_fixture(policy, legacy_policy=legacy)
+    return build_authorization_fixture(
+        policy,
+        legacy_policy=legacy,
+        serving_origin=getattr(request, "param", "https://8.8.8.8:443"),
+    )
 
 
 @pytest.fixture
@@ -107,6 +111,7 @@ def dispatch(feed, tmp_path):
                 block.state_root,
                 block.timestamp_ms,
                 b"test-proof",
+                "https://8.8.8.8:443" if "example.org" in item.serving_origin else None,
             )
             return DispatchOrigin(capture, block, block)
 
@@ -187,6 +192,40 @@ async def test_invalid_origin_never_claims_or_signs(dispatch, monkeypatch):
     assert await dispatch.driver.dispatch_one(dispatch.key) == "held"
     assert dispatch.feed.journal.status(dispatch.key)["state"] == "published"
     assert dispatch.miner.translator.calls == 0
+
+
+@pytest.mark.parametrize("authorization", ["https://miner.example.org:443"], indirect=True)
+async def test_hostname_dispatch_keeps_host_sni_and_authenticated_response(dispatch, monkeypatch):
+    await ready(dispatch)
+    transport = dispatch.driver.transport
+    original = transport.handle_async_request
+    requests = []
+
+    async def record(request):
+        requests.append(request)
+        assert str(request.url).startswith("https://8.8.8.8/")
+        assert request.headers["host"] == "miner.example.org"
+        assert request.extensions["sni_hostname"] == "miner.example.org"
+        return await original(request)
+
+    async def forbidden(*args):
+        pytest.fail("second DNS lookup")
+
+    monkeypatch.setattr(transport, "handle_async_request", record)
+    monkeypatch.setattr("umi.validator._system_origin_resolver", forbidden)
+    assert await dispatch.driver.dispatch_one(dispatch.key) == "completed"
+    transcript = json.loads(dispatch.feed.journal.outcome(dispatch.key))
+    assert transcript["failure_code"] is None
+    item = dispatch.feed.item
+    validate_response_envelope(
+        bytes.fromhex(transcript["envelope_hex"]),
+        transcript["response_signature"],
+        request=item.request,
+        validator_hotkey=item.validator_wallet.hotkey.ss58_address,
+        miner_hotkey=item.miner_wallet.hotkey.ss58_address,
+    )
+    assert len(requests) == dispatch.miner.translator.calls == 1
+    assert await dispatch.driver.dispatch_one(dispatch.key) == "held"
 
 
 async def test_other_evaluator_never_claims(dispatch, monkeypatch):

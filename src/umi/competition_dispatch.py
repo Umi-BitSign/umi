@@ -28,7 +28,11 @@ from .competition_authorization import (
 )
 from .competition_chain import CompetitionChainConfig
 from .competition_endpoint import prepare_endpoint_case
-from .competition_origin import EndpointOriginCapture, FinalizedEndpointProvider, public_ip_origin
+from .competition_origin import (
+    EndpointOriginCapture,
+    FinalizedEndpointProvider,
+    public_https_origin,
+)
 from .competition_scheduling import AssignmentPublicationJournal, assignment_key
 from .config import Limits
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
@@ -322,9 +326,10 @@ class EndpointDispatcher:
             if not isinstance(origin, DispatchOrigin) or (
                 origin.capture.submission_sha256 != digest(signed.submission)
                 or identity(origin.capture.hotkey) != identity(signed.submission.hotkey)
-                or origin.capture.origin != public_ip_origin(signed.submission.endpoint_url)
+                or origin.capture.origin != public_https_origin(signed.submission.endpoint_url)
             ):
                 raise ValueError("dispatch origin binding mismatch")
+            resolver = origin.capture.transport_resolver()
             claim = self.journal.claim(key, observed=origin.observed, issuance=origin.issuance)
             if claim is None:
                 return "held"
@@ -355,6 +360,7 @@ class EndpointDispatcher:
                 limits=self.limits,
                 timeout_seconds=self.config.request_timeout_seconds,
                 transport=self.transport,
+                resolver=resolver,
                 maximum_request_transmissions=1,
                 maximum_response_bodies=1,
             )

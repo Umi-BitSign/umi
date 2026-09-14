@@ -1,8 +1,9 @@
 """Read-only, owned-finality Axon checks for successor endpoint dispatch.
 
 The result proves registration and the announced IP/port at a pinned state root.
+For signed hostnames, a separate local DNS observation must include that IP.
 It does not prove TLS possession, endpoint availability or publication timing.
-The endpoint transport must still authenticate TLS and the miner response.
+The endpoint transport pins that IP and authenticates TLS and the miner response.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
@@ -22,9 +24,11 @@ from .encoding import account_id32
 from .grandpa_finality_supervisor import GrandpaFinalitySupervisorError
 from .open_competition import SignedSubmission, digest
 from .protocol import canonical_json_bytes
+from .validator import OriginResolver, _system_origin_resolver
 from .validator_chain import PinnedRuntimeContext, StorageReadSpec, ValidatorChainError
 
 _MAX_ORIGIN_EVIDENCE_BYTES = 32 * 1024**2
+_MAX_DNS_ADDRESSES = 64
 
 
 def public_ip_origin(value: str) -> str:
@@ -66,6 +70,53 @@ def public_ip_origin(value: str) -> str:
     return canonical
 
 
+def public_https_origin(value: str) -> str:
+    """Canonicalize an IP or DNS HTTPS origin; DNS still needs a public-IP check."""
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or any(ord(char) < 33 or ord(char) > 126 for char in value)
+    ):
+        raise ValueError("endpoint needs a public HTTPS origin")
+    hostname = parsed.hostname
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        return public_ip_origin(value)
+    labels = hostname.split(".")
+    if (
+        len(hostname) > 253
+        or len(labels) < 2
+        or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", s) for s in labels)
+        or not re.fullmatch(r"[a-z][a-z0-9-]*", labels[-1])
+        or hostname.endswith((".local", ".localhost", ".internal", ".onion", ".home.arpa"))
+    ):
+        raise ValueError("endpoint hostname must be a canonical public DNS name")
+    try:
+        if hostname.encode("ascii").decode("idna").encode("idna").decode("ascii") != hostname:
+            raise ValueError("noncanonical IDNA hostname")
+    except UnicodeError as error:
+        raise ValueError("invalid IDNA hostname") from error
+    port = parsed.port if parsed.port is not None else 443
+    if not 1 <= port <= 65535:
+        raise ValueError("endpoint port is invalid")
+    canonical = f"https://{hostname}:{port}"
+    permitted = {canonical, canonical + "/"}
+    if port == 443:
+        permitted.update({f"https://{hostname}", f"https://{hostname}/"})
+    if value not in permitted:
+        raise ValueError("endpoint origin is not canonical")
+    return canonical
+
+
 def _axon_origin(value, *, block: int) -> str:
     bounds = {
         "block": 2**64 - 1,
@@ -101,6 +152,30 @@ class EndpointOriginCapture:
     state_root: str
     timestamp_ms: int
     evidence: bytes
+    connection_origin: str | None = None
+
+    def transport_resolver(self) -> OriginResolver | None:
+        """Use the captured chain IP, retaining the signed hostname for TLS/SNI."""
+        origin = public_https_origin(self.origin)
+        connection = public_ip_origin(self.connection_origin or self.origin)
+        if origin == connection:
+            return None  # Literal IP: the existing transport needs no DNS binding.
+        parsed, pinned = urlsplit(origin), urlsplit(connection)
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("literal endpoint connection binding mismatch")
+        if parsed.port != pinned.port:
+            raise ValueError("endpoint connection port mismatch")
+
+        async def resolve(hostname: str, port: int):
+            if hostname != parsed.hostname or port != parsed.port:
+                raise ValueError("endpoint resolver binding mismatch")
+            return (pinned.hostname,)
+
+        return resolve
 
     @property
     def evidence_sha256(self) -> str:
@@ -108,7 +183,9 @@ class EndpointOriginCapture:
 
     def status(self) -> dict:
         return {
-            "schema": "umi-competition-endpoint-origin-status/1",
+            "schema": "umi-competition-endpoint-origin-status/1"
+            if self.connection_origin is None
+            else "umi-competition-endpoint-origin-status/2",
             "submission_sha256": self.submission_sha256,
             "uid": self.uid,
             "hotkey": self.hotkey,
@@ -122,6 +199,11 @@ class EndpointOriginCapture:
             "tls_verified": False,
             "publication_timing_proven": False,
             "chain_submission_authorized": False,
+            **(
+                {}
+                if self.connection_origin is None
+                else {"connection_origin": self.connection_origin, "dns_is_chain_proven": False}
+            ),
         }
 
 
@@ -131,6 +213,46 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
     Use a dedicated state directory. No config option accepts an injected proof
     source; inherited port injections exist only for in-process tests.
     """
+
+    def __init__(self, config, policy, *, resolver: OriginResolver | None = None, **test_ports):
+        if resolver is not None and test_ports.get("finality") is None:
+            raise ValueError("resolver injection requires in-process test ports")
+        super().__init__(config, policy, **test_ports)
+        self._resolver = resolver or _system_origin_resolver
+
+    async def _bind_origin(self, origin: str, announced: str) -> dict | None:
+        if origin == announced:
+            return None
+        parsed, axon = urlsplit(origin), urlsplit(announced)
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("submitted endpoint differs from finalized Axon")
+        if parsed.port != axon.port:
+            raise ValueError("submitted endpoint port differs from finalized Axon")
+        answers = await self._resolver(parsed.hostname, parsed.port)
+        if not isinstance(answers, (list, tuple)) or not 0 < len(answers) <= _MAX_DNS_ADDRESSES:
+            raise ValueError("endpoint DNS response must be nonempty and bounded")
+        addresses = set()
+        for value in answers:
+            if not isinstance(value, str):
+                raise ValueError("endpoint DNS response contains an invalid IP")
+            address = ipaddress.ip_address(value)
+            host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+            # Reject every unsafe answer, even if another answer matches the Axon.
+            public_ip_origin(f"https://{host}:{axon.port}")
+            addresses.add(address.compressed)
+        if axon.hostname not in addresses:
+            raise ValueError("endpoint DNS does not include the finalized Axon IP")
+        return {
+            "hostname": parsed.hostname,
+            "addresses": sorted(addresses),
+            "observed_at_unix_ms": self._now_ms(),
+            "evidence_class": "local_resolver_observation",
+            "chain_storage_proven": False,
+        }
 
     def _connect(self):
         directory = self._path.parent.stat()
@@ -220,7 +342,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             <= self.policy.valid_through_block
         ):
             raise ValueError("endpoint submission policy/terms/lifetime mismatch")
-        origin = public_ip_origin(sub.endpoint_url)
+        origin = public_https_origin(sub.endpoint_url)
         try:
             return await asyncio.wait_for(
                 self._collect_origin_locked(signed, origin),
@@ -268,12 +390,12 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             if values[specs[1]] is not True:
                 raise ValueError("endpoint subnet is unavailable")
             uid = _uint(values[specs[2]], self.policy.maximum_uids - 1)
-            if _axon_origin(values[specs[3]], block=ref.block_number) != origin:
-                raise ValueError("submitted endpoint differs from finalized Axon")
+            announced = _axon_origin(values[specs[3]], block=ref.block_number)
             inverse_spec = StorageReadSpec("SubtensorModule", "Keys", (78, uid))
             inverse = await self._read(runtime, (inverse_spec,))
             if account_id32(_hotkey(inverse.reads[0].decoded_value)) != account_id32(hotkey):
                 raise ValueError("endpoint UID inverse mapping mismatch")
+            dns = await self._bind_origin(origin, announced)
             newest = await self._finality.verified_finalized_snapshot()
             if newest.block_number < ref.block_number or (
                 newest.block_number == ref.block_number and newest != ref
@@ -283,7 +405,10 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                 raise ValueError("endpoint snapshot became stale during proof collection")
             evidence = canonical_json_bytes(
                 {
-                    "schema": "umi-competition-endpoint-origin-evidence/1",
+                    "schema": "umi-competition-endpoint-origin-evidence/1"
+                    if dns is None
+                    else "umi-competition-endpoint-origin-evidence/2",
+                    **({} if dns is None else {"dns": dns, "connection_origin": announced}),
                     "policy_sha256": digest(self.policy),
                     "signed_submission": signed.model_dump(mode="json"),
                     "uid": uid,
@@ -328,6 +453,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                 ref.state_root,
                 block.timestamp_ms,
                 evidence,
+                None if dns is None else announced,
             )
             return self._save_origin(capture, runtime.metadata_bytes)
 
@@ -391,6 +517,16 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                     any(old[key] != new[key] for key in fields)
                     or old["signed_submission"]["submission"]
                     != new["signed_submission"]["submission"]
+                    or old.get("connection_origin") != new.get("connection_origin")
+                    or any(
+                        old.get("dns", {}).get(key) != new.get("dns", {}).get(key)
+                        for key in (
+                            "hostname",
+                            "addresses",
+                            "evidence_class",
+                            "chain_storage_proven",
+                        )
+                    )
                 ):
                     raise ValueError("endpoint evidence changed at the same finalized block")
                 # Equivalent proof encodings or re-signatures do not replace

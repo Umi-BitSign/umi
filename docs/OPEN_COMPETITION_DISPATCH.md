@@ -86,8 +86,11 @@ miner fetched it or provide independent publication-time evidence. A restart
 begins grace again and cannot extend the signed issue window.
 
 Before signing, it verifies the current bidirectional UID/hotkey mapping and
-announced public-IP HTTPS origin, then commits a journal claim. Completed work
-is never resent. Cancellation, deadline or recording failure after the claim
+announced public-IP HTTPS origin. A signed hostname must resolve exclusively to
+public addresses including the announced IP, on the same port. The dispatcher
+pins that IP while keeping the hostname for TLS/SNI and the HTTP Host header;
+it does not perform a second DNS lookup. It then commits a journal claim.
+Completed work is never resent. Cancellation, deadline or recording failure after the claim
 leaves `uncertain_dispatched`. That uncertainty cannot be automatically retried,
 even if the miner may never have received the request. Expired coordinator work
 is retained with `miner_fault: false`.
@@ -111,6 +114,7 @@ contain credentials. Public loop status contains bounded counters and no wallet
 paths, endpoint URLs or authentication headers.
 
 The synthetic integration tests cover the actual miner HTTP handler, signature
-and sealed-response checks, inbox admission, wrong origins, expired work, lost
-results and restart without duplicate dispatch. They do not establish protected
+and sealed-response checks, hostname routing and connection pinning, inbox
+admission, wrong origins, expired work, lost results and restart without duplicate
+dispatch. They do not establish protected
 ASL accuracy, independent operator participation or production activation.
