@@ -140,8 +140,12 @@ inputs above. A documentation merge does not activate the successor.
 The [per-round successor publisher](OPEN_COMPETITION_ROUND_PUBLISHER.md) now has
 a durable signing core and current finality/source-conflict checks. Its 19
 focused tests passed with synthetic authority keys and replayed packages. Five
-local command-wiring tests also passed. Automatic completed-round selection, immutable
-feed distribution and the deployed successor-host handoff remain unfinished.
+local command-wiring tests also passed. The optional wallet-free delivery
+service now retains verified signed exports and exposes the existing cursor and
+artifact routes. Its focused regression is tracked in the publisher guide.
+Automatic completed-round selection, production HTTPS routing and the deployed
+successor-host handoff remain unfinished. In particular, the host must assemble
+fetched continuation history from its own root-sealed activation anchor.
 
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through

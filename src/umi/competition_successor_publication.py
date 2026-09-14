@@ -284,6 +284,47 @@ def _directive(plan, intent, authorization):
     )
 
 
+def verify_successor_round_publication(plan, publication, package=None):
+    """Verify exported signed records without opening an authority journal."""
+    plan = _canonical(SuccessorRoundPublicationPlan, plan)
+    publication = _canonical(SignedSuccessorRoundPublication, publication)
+    intent = publication.intent
+    signed, authorization = publication.signed, publication.authorization
+    if (
+        intent.plan_sha256 != digest(plan)
+        or intent.round_sequence != intent.package.round_sequence
+        or authorization.authorization != intent.authorization
+        or signed.directive != _directive(plan, intent, authorization)
+    ):
+        raise ValueError("retained publication differs from its signing intent")
+    verify_signed_successor_supervisor_directive_history(
+        signed,
+        config=plan.supervisor,
+        operator_consent=plan.consent,
+        finalized_block=signed.directive.issued_at_block,
+    )
+    if package is not None:
+        if intent.package != _package_target(package, plan.package_limits):
+            raise ValueError("retained publication differs from the complete package")
+        expected = _intent(
+            plan,
+            package,
+            sequence=intent.sequence,
+            predecessor_version=intent.predecessor_version,
+            predecessor=intent.authorization.predecessor_directive_sha256,
+            block=intent.authorization.signed_at_block,
+        )
+        if intent != expected:
+            raise ValueError("retained publication exceeds its approved signing plan")
+        verify_bound_successor_chain_authorization(
+            canonical_json_bytes(authorization),
+            directive=signed.directive,
+            config=plan.supervisor,
+            package=package,
+        )
+    return publication
+
+
 class SuccessorRoundPublicationBuilder:
     """Durably sign one byte-stable update per round, without distributing it."""
 
@@ -367,30 +408,9 @@ class SuccessorRoundPublicationBuilder:
             raise ValueError("publication requires a distinct trusted signing quorum")
 
     def _verify(self, publication, package=None):
-        plan, intent = self.plan, publication.intent
-        signed, authorization = publication.signed, publication.authorization
-        if (
-            intent.plan_sha256 != self._plan_digest
-            or authorization.authorization != intent.authorization
-            or signed.directive != _directive(plan, intent, authorization)
-        ):
-            raise ValueError("retained publication differs from its signing intent")
-        verify_signed_successor_supervisor_directive_history(
-            signed,
-            config=plan.supervisor,
-            operator_consent=plan.consent,
-            finalized_block=signed.directive.issued_at_block,
-        )
-        if package is not None:
-            if intent.package != _package_target(package, plan.package_limits):
-                raise ValueError("retained publication differs from the complete package")
-            verify_bound_successor_chain_authorization(
-                canonical_json_bytes(authorization),
-                directive=signed.directive,
-                config=plan.supervisor,
-                package=package,
-            )
-        return publication
+        if digest(self.plan) != self._plan_digest:
+            raise ValueError("publication plan changed")
+        return verify_successor_round_publication(self.plan, publication, package)
 
     def history(self):
         prior, sequence, version, last_round = (
