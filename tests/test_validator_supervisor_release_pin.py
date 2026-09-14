@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ from umi import validator_supervisor_cli as supervisor_cli
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor_adapters import (
     ValidatorSupervisorAdapterError,
+    _parse_bootstrap_input_bundle,
     parse_canonical_signed_supervisor_host_artifact_manifest,
 )
 
@@ -19,6 +21,25 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOYMENT = ROOT / "deploy" / "linux-validator-supervisor"
 MANIFESTS = DEPLOYMENT / "host-artifacts"
 PLATFORMS = ("linux-amd64", "linux-arm64")
+
+
+def test_first_install_pin_matches_published_runtime458_operator_bundle() -> None:
+    # Captured from the shared sequence-13 feed. Verify the real signature,
+    # without a wallet or any permit lookup. Keep first-install artifacts and
+    # this release compatibility fixture in sync when publishing a new host.
+    payload = (
+        (ROOT / "tests/fixtures/validator-supervisor/runtime458-registration-bridge.json")
+        .read_bytes()
+        .removesuffix(b"\n")
+    )
+    assert hashlib.sha256(payload).hexdigest() == (
+        "919403f2dc359102964069cafa4d05eabe172a3917e64b22178b4e16b66924a4"
+    )
+    bundle = _parse_bootstrap_input_bundle(payload)
+    assert bundle.signed_policy.body.required_runtime_spec_version == 458
+    assert (DEPLOYMENT / "CURRENT_RELEASE_REVISION").read_text().strip() == (
+        bundle.signed_policy.body.umi_git_revision
+    )
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
