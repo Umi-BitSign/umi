@@ -47,6 +47,8 @@ def build_authorization_fixture(
     incumbent_sha256=None,
     model_bundle=None,
     extra_model_bundle=None,
+    window_index=0,
+    sequence=1,
 ):
     """Synthetic signed publication and owned-source test port; no network/files.
 
@@ -70,8 +72,8 @@ def build_authorization_fixture(
     now_ms = time.time_ns() // 1_000_000
     announcement = _block(
         legacy,
-        0,
-        block_byte="31",
+        window_index,
+        block_byte=f"{0x31 + window_index:02x}",
         timestamp_ms=now_ms
         - 1000
         * (
@@ -80,7 +82,7 @@ def build_authorization_fixture(
         ),
     )
     schedule = _clock(legacy).derive(
-        0,
+        window_index,
         netuid=78,
         announcement_block_hash=announcement.block_hash,
         announcement_timestamp_ms=announcement.timestamp_ms,
@@ -89,8 +91,8 @@ def build_authorization_fixture(
     issued = schedule.closing_block + 1
     issuance = _block(
         legacy,
-        0,
-        block_byte="41",
+        window_index,
+        block_byte=f"{0x41 + window_index:02x}",
         height=issued,
         timestamp_ms=QUICKNET_GENESIS_MS + (schedule.selection_round - 1) * QUICKNET_PERIOD_MS,
     )
@@ -124,7 +126,7 @@ def build_authorization_fixture(
         policy_sha256=digest(policy),
         cases=tuple(
             EvaluationCase(
-                case_id=f"{i + 1:064x}",
+                case_id=f"{window_index * 1000 + i + 1:064x}",
                 video_sha256=hashlib.sha256(video_bytes[i]).hexdigest(),
                 stratum=("fingerspelling", "short_utterance", "continuous")[i % 3],
                 references=("hello", "hi", "greetings"),
@@ -135,7 +137,7 @@ def build_authorization_fixture(
     round_ = EvaluationRound(
         schema="umi-competition-round/1",
         policy_sha256=digest(policy),
-        sequence=1,
+        sequence=sequence,
         suite_sha256=digest(suite),
         incumbent_model_sha256=incumbent_sha256 or "b2" * 32,
         runtime_sha256=policy.evaluation_runtime_sha256,
@@ -143,7 +145,7 @@ def build_authorization_fixture(
         submission_close_block=issued - 1,
         evaluation_close_block=issued + schedule.response_deadline_blocks + 1,
         reveal_block=issued + schedule.response_deadline_blocks + 2,
-        valid_through_block=1200,
+        valid_through_block=1200 + window_index * legacy.clock.window_stride_blocks,
     )
     cases = tuple(
         EndpointAuthorizationCase(case_id=c.case_id, video_sha256=c.video_sha256, stratum=c.stratum)

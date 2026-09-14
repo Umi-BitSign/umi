@@ -126,8 +126,8 @@ contributor attribution yet.
 - [x] Derive endpoint authorizations and model orders, collect independent work signatures and deliver exact certificates.
 - [x] Prepare unsigned settlements from complete retained evidence with owned current snapshots and exact restart recovery.
 - [x] Verify archive-backed work selection follows approved promotions while preserving frozen incumbents.
-- [ ] Connect explicit void certificates through evaluator exchange, fixed-cutoff retention, settlement signing and replay.
-- [ ] Connect continuous round planning to independent cutoff/order signing and settlement publication.
+- [x] Connect explicit void certificates through evaluator exchange, fixed-cutoff retention, settlement signing and replay.
+- [x] Connect continuous round planning to independent cutoff/order signing and settlement publication.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
 - [ ] Rehearse integrated protected-data scheduling, evaluator dispatch and evidence publication.
@@ -156,26 +156,28 @@ local execution receipts, reviewed promotion history and owned snapshots.
 [Automatic settlement delivery](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md) connects
 authenticated discovery, endorsements and immutable replay packages. The full
 both-track synthetic service lifecycle passed with archive-backed baseline
-selection. This covers one connected round and uses fixture keys and an explicit
-test-only rights review. Independent production operators and real model quality
-remain unverified. Continuous-round failure recovery is under test. The explicit
+selection. A second rehearsal completes a promotion, restarts the coordinator
+and both evaluators, then executes the next window against that preserved model.
+It retains both exact settlement packages and the first round's frozen incumbent,
+without another manual admission or promotion. The running miner discovers the
+new assignments without restarting. This two-round test passed in 235.96 seconds
+on the Studio at `8772d55`. It uses fixture keys and an explicit test-only rights
+review. Independent production operators and real model quality remain unverified.
+The explicit
 void contract in `competition_void.py` retains independently signed attempts and a
 quorum decision. Evaluator exchange, first-arrival retention, mixed-outcome
-settlement and package replay are connected in the current worktree. The
-settlement/publication/package/preparation regression passed 74 tests, including
-a three-entry 70/30 settlement. The endpoint-503 relay, restart, local receipt and
-bounded BLS-cache tests passed together (29 tests). Repeated checks of one
-Quicknet signature caused the relay deadline failure; exact-tuple cryptographic
-verification is now cached while publication and timing checks still run. The
-complete service lifecycle now passes both its original scored round and its
-three-entry mixed round (2 tests, 596.68 seconds on the Studio). The mixed round
-retains the disagreeing model's void and settles the healthy endpoint and
-qualifying model at 70/30. Another 125 authorization, exchange, endpoint execution,
-void settlement and cache tests passed. A remaining CLI input mismatch was found:
-its settlement/package wrapper accepted scored evidence only. The wrapper now
-accepts both outcome types; its real command-path regression and candidate CI
-must pass before this item is released. Missing observations still cannot create
-a void. These runs use fixture identities and test-only rights approvals.
+settlement and package replay are merged in
+[PR #81](https://github.com/Umi-BitSign/umi/pull/81). All 18 repository checks
+passed for its exact head `522c180`. The Studio passed both scored and mixed
+service lifecycle variants (2 tests, 622.265 seconds) and the final signing,
+delivery, void, CLI and workflow regression (77 tests, 852.559 seconds). The
+mixed round retains the disagreeing model's void and settles the healthy endpoint
+and qualifying model at 70/30. CLI settlement/package inputs accept both outcome
+types; scoring-only commands continue to reject voids. The signer rechecks local
+evidence and cutoff conflicts after its final awaited head read. Missing
+observations still cannot create a void. Repeated pure BLS checks use a bounded
+exact-tuple cache; publication, authorization and timing checks remain uncached.
+These runs use fixture identities and test-only rights approvals.
 
 The versioned [promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md)
 separates the shared model decision from each operator's actual receipt block
@@ -197,8 +199,10 @@ authorizations and model orders, rechecks owned issuance at each signer and
 delivers quorum certificates without manual assembly. The optional settlement
 output prepares replayable unsigned proposals from the exchange's retained
 evidence. Optional settlement delivery collects the independent votes and
-publishes replay packages. The larger checklist item stays open pending the
-complete scheduling, execution and promotion-history rehearsal.
+publishes replay packages. The connected scheduling, execution and
+promotion-history path has passed the synthetic consecutive-round rehearsal
+above. This does not supply production plans, protected suites or independent
+operators, or verify continuous operation through actual HTTPS ingress.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting
