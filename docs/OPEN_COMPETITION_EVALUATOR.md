@@ -10,6 +10,11 @@ The imported baseline still has no contributor attribution. Running this worker
 does not activate the approved simultaneous 70/30 reward policy or satisfy its
 protected-data, rights-review and independent-operator launch gates.
 
+Scoring is automatic; no human ASL judge is part of the work-order path.
+The [private holdout](OPEN_COMPETITION_PRIVATE_HOLDOUT.md) supplies committed
+English references from documented annotations. An independent evaluator is a
+separately administered execution service, not a person grading translations.
+
 ## Inputs and identity
 
 Use one hotkey per worker and a dedicated configuration with schema

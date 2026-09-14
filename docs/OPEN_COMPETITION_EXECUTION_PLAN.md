@@ -5,6 +5,14 @@ The approved launch runs both reward tracks together: 70% endpoint service and
 baseline has no contributor attribution. Neither this plan nor local tests
 activate rewards or extend the signed bootstrap sunset.
 
+Launch quality evaluation uses automatic CER/WER scoring on a private labeled
+holdout. No human ASL grading panel or per-output human review is a launch gate.
+Documented existing annotations may supply references. Training exclusion,
+annotation provenance, data permissions and independent automated evaluator
+groups remain required. Follow the
+[private-holdout procedure](OPEN_COMPETITION_PRIVATE_HOLDOUT.md); do not treat
+previously used training data as an unseen test set.
+
 ## Execution order and acceptance gates
 
 1. Assignment scheduling and chain-bound endpoint checks.

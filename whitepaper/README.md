@@ -177,10 +177,21 @@ bundle; enrollment must not require private credentials or wallet material.
 
 ### 4.1 Data and holdouts
 
-Use consented, quality-reviewed ASL clips with English references fixed before
-candidate evaluation. Publish a development set separately. Hidden evaluation
-clips and labels must not become miner training data through repeated tests,
-debug logs, image layers or unrestricted evaluator APIs.
+The launch uses automatic scoring against a private, labeled ASL holdout. It
+does not require a person to grade miner outputs or a new ASL review panel before
+activation. Existing dataset annotations may supply the English references when
+their source, annotation procedure and permitted use are documented. Dataset
+validation and model-contribution rights review remain required; neither is a
+per-output human scoring step.
+
+Reserve the evaluation split before training or tuning. Clips, labels and
+near-duplicate recordings used to train or select the baseline or a candidate
+cannot count as unseen evaluation evidence for that model. Making training data
+private afterward does not make it a holdout. Record known training overlap and
+unknown upstream exposure rather than claiming they have been ruled out.
+Publish a development set separately. Hidden evaluation clips and labels must
+not become miner training data through repeated tests, debug logs, image layers
+or unrestricted evaluator APIs.
 
 A round commits its exact policy, candidate roster, incumbent baseline,
 evaluation suite and runtime profile. Candidates and incumbent are scored
@@ -196,7 +207,9 @@ limitation and retain access-controlled independent verification; do not call
 a hash alone public reproducibility.
 
 Data collection and labeling can be developed separately. They receive no
-implicit share of this policy's miner rewards.
+implicit share of this policy's miner rewards. The
+[private-holdout launch procedure](../docs/OPEN_COMPETITION_PRIVATE_HOLDOUT.md)
+describes required inputs, annotation checks, split isolation and suite retirement.
 
 ### 4.2 Deterministic quality
 
@@ -229,11 +242,17 @@ A promoted candidate must improve the aggregate by at least the declared
 margin and must not regress in any required stratum. It must pass the offline
 resource and reconstruction checks as well. A tie retains the incumbent.
 No score is a claim of clinical fitness or a replacement for product-specific
-safety evaluation.
+safety evaluation. CER/WER measure agreement with the committed English
+references. Without separate semantic validation, report these as automatic
+benchmark scores, not human-verified ASL understanding. Valid paraphrases and
+meaning-changing errors can be misranked by text edit distance.
 
 ### 4.3 Evaluators and trust
 
 A policy lists evaluator hotkeys and independently administered control groups.
+Evaluators are automated execution and signing services; their operators do not
+need to grade ASL outputs. Removing human output grading does not remove the
+separate requirement for independently administered result reproduction.
 Multiple hotkeys controlled by one operator count as one group. UID 0 and UID 54
 under the same administration cannot supply two independent votes.
 
@@ -510,7 +529,8 @@ Before activating successor rewards, publish:
 - supported miner instructions and the complete admission interface;
 - the initial preserved baseline and accepted license profile;
 - the exact evaluator cohort, control-group disclosures and resource profile;
-- evaluation-data provenance, quality review and protected-suite procedure;
+- evaluation-data rights and annotation provenance, dataset validation, split
+  isolation and protected-suite procedure, without a mandatory human grading panel;
 - successful endpoint and contributed-model end-to-end evidence, including
   independently signed run records bound to the common result, and adversarial,
   timeout, restart, replay and failed-promotion cases;
