@@ -143,9 +143,11 @@ focused tests passed with synthetic authority keys and replayed packages. Five
 local command-wiring tests also passed. The optional wallet-free delivery
 service now retains verified signed exports and exposes the existing cursor and
 artifact routes. Its focused regression is tracked in the publisher guide.
-Automatic completed-round selection, production HTTPS routing and the deployed
-successor-host handoff remain unfinished. In particular, the host must assemble
-fetched continuation history from its own root-sealed activation anchor.
+Automatic completed-round selection and recovery of signed-but-undelivered
+exports are now implemented in the local publisher's follow mode; verification
+is tracked in its guide. Production HTTPS routing and the deployed successor-host
+handoff remain unfinished. The host must assemble fetched continuation history
+from its own root-sealed activation anchor.
 
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through

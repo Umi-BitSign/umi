@@ -5,10 +5,10 @@ directive under explicit release-authority controls. It runs separately from
 the wallet-free coordinator. It does not submit a chain transaction or change
 the running validators.
 
-This is a local signing command with optional wallet-free feed delivery.
-Automatic selection of completed rounds and the live host handoff remain to be
-connected and rehearsed. Do not use this command as a launch announcement or a
-replacement for the signed initial supervisor upgrade.
+The local command supports one supplied package or polling completed coordinator
+rounds with wallet-free feed delivery. Production HTTPS routing and the live
+host handoff still need rehearsal. Do not use this command as a launch
+announcement or a replacement for the signed initial supervisor upgrade.
 
 ## Inputs
 
@@ -101,6 +101,51 @@ head. The host integration still needs to assemble the continuation from its
 own root-sealed activation anchor, including catch-up across multiple feed
 pages. A successful package download alone does not prove that host handoff.
 
+## Automatic completed-round publishing
+
+Use `--follow-config` instead of `--prepared-package` to poll the coordinator's
+completed-package directory. The canonical private `umi-successor-follow-config/1`
+file contains:
+
+- `certificate_directory` and `package_directory`: the exact separate roots
+  used by the coordinator's settlement-delivery configuration. They must already
+  exist and must not overlap authority, wallet or execution state.
+- `maximum_rounds`: the retained source limit, no greater than the signing and
+  delivery journals' limits. The default is 1024.
+- `poll_interval_seconds`: 2 to 60 seconds, default 15.
+
+```sh
+python -m umi.competition_successor_publisher_cli \
+  --config /absolute/private/publisher.json \
+  --policy /absolute/private/policy.json \
+  --follow-config /absolute/private/follow.json \
+  --feed-config /absolute/private/feed.json
+```
+
+Add `--once` to perform one tick and exit. Stdout contains bounded status records,
+not package paths or wallet material. The process owns one finalized provider;
+it closes that provider on exit and drains active signing work on cancellation.
+Invalid inputs, journal conflicts and provider failures stop the command. A
+service manager may restart it with a delay; restarting cannot clear a durable
+conflict hold. Reaching capacity stops new work without deleting history.
+
+Discovery accepts canonical private `<settlement-digest>.package.json`
+descriptors whose sealed manifests match the descriptor, filename, policy and
+fixed package root. It checks at most `2 * maximum_rounds + 1` directory entries
+per tick. Discovered round identities are retained across restart. A descriptor
+is not sufficient to sign: the selected package is fully replayed and the
+publisher still checks its current source and owned finalized head.
+
+Each tick first repairs a missing signed export, one predecessor at a time,
+without a new signature or timestamp. When delivery is caught up, the publisher
+resumes an unexpired partial signing attempt, or selects the highest completed
+round number newer than its last publication. It waits if that round has no
+usable original activation window. It does not extend expired windows or fall
+back to another package after a validation failure.
+
+The feed remains a separate wallet-free process. Automatic signing does not
+install a TLS route, activate a host or establish miner incentive on chain.
+
 ## Current checks and recovery
 
 The publisher fully replays the package and checks the current local intake
@@ -142,3 +187,10 @@ cleanup, changed package files, the existing HTTPS consumer and canceled reads.
 The HTTPS consumer uses an ASGI test transport and an inert hash-pinned release
 archive. No production TLS route, OCI execution or host handoff is established
 by those tests. Repository-wide Ruff and formatting checks also passed.
+
+The first automatic-publication batch passed 11 cases on the Studio's Linux VM
+in 257.44 seconds. It covers completed-round selection, signed-export recovery,
+expiry, late conflicts, descriptor bindings, scan limits and provider cleanup.
+Two further cases cover unfinished-signature priority and cancellation during
+discovery. Those cases and the combined regression still need a completed run;
+no live publisher service has been installed by this work.
