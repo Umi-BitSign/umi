@@ -48,10 +48,56 @@ Thirteen focused tests passed on the Studio Linux VM, covering 68-update
 catch-up, restart, host verification and HTTP delivery. They took 751.00 seconds.
 The separate Linux exchange test exposed an old page parser in the anchor
 reader. That reader and the target observer now accept the bounded local history;
-their integrated rerun passed four cases in 357.99 seconds. Synthetic test
-authority keys are reused within each generated chain. Long-run cache and
-recovery-registry retention still need work before deployment. No live validator
-was upgraded.
+their integrated rerun passed four cases in 357.99 seconds. The broader
+adapter/materializer regression passed 102 tests in 3246.16 seconds before the
+shared-registry change below. Synthetic test authority keys are reused within
+each generated chain. No live validator was upgraded.
+
+### Shared recovery-registry history
+
+New `umi-successor-adapter-run/2` records keep a reference to content-addressed
+signed history nodes in the same private SQLite registry. A later run reuses
+identical prefixes. Its reference binds the original page schema, cursor,
+selected head, count, byte length and hash. Registry loading checks every stored
+node's checksum and predecessor links, including unreferenced nodes, and checks
+each run's head and cursor without expanding all histories together. Accessing
+one run reconstructs its exact original bytes and checks the page binding.
+The existing authority and signature verification still applies before use.
+
+Run metadata and new nodes are committed in one transaction. Both count toward
+the configured byte budget. A full registry stops retention; it never deletes
+evidence to make room. Existing inline `/1` records remain unchanged and readable.
+Older binaries cannot read `/2` runs, so do not roll back a supervisor over a
+registry written by this version.
+
+Stopped recovery audits each retained run, then retains only authorization
+identities between audits. It reconstructs the relevant history again when
+reconciling an unsettled transaction. No attempt or recovery source is discarded.
+
+The first shared-storage snapshot passed 11 focused tests in 245.98 seconds,
+including lossless 68-record reconstruction, prefix storage growth, legacy
+record preservation and atomic insertion failure. The expanded link-validation
+suite passed 11 tests in 476.15 seconds, including missing nodes, broken links
+with recomputed storage checksums, reference/head mismatches and depth bounds.
+The recovery regression remains in progress. The registry still has its
+configured byte and record limits.
+
+### Download history bindings
+
+When the runtime supplies its retained continuation, delivery stores only
+`history-binding.json`, a bounded hash/size/selected-head binding. The full signed
+records remain in the runtime journal and recovery registry. Delivery verifies
+the supplied history before fetching a package, and the host checks its exact
+bytes against the original root-sealed anchor before activation. The binding
+file cannot substitute for the history or grant authority.
+
+An existing `history.json` from an earlier version is preserved and checked
+against the supplied bytes on every refetch. A changed continuation for an
+already cached head, corrupt binding or differing legacy file fails closed.
+Older delivery binaries reject the new cache filename; rollback over these
+cache entries is unsupported. The focused delivery regression is running.
+Materialized current copies still need long-run retention work before
+deployment, and package/object capacity limits remain in effect.
 
 ### Initial history after multiple feed pages
 
@@ -91,9 +137,9 @@ anchor materialization, and initial pre-stop authentication with both one and 69
 signed records. Their ownership/mount ports are synthetic; directory and signed
 history operations execute on Linux. Eight collector tests passed in 427.93
 seconds, covering five-page catch-up, wrong cursors, forged signatures, missing
-pages, budgets, cancellation and wrong legacy binding. The CLI publication and
-revised total-deadline tests are still in progress. Production initial
-installation remains unperformed.
+pages, budgets, cancellation and wrong legacy binding. Four CLI publication and
+total-deadline tests passed in 203.47 seconds. Production initial installation
+remains unperformed.
 
 ### Worker and host components
 

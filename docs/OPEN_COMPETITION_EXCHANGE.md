@@ -77,6 +77,13 @@ accepted upload returns its original receipt, even after round expiry. That
 does not renew the round or authorize another chain transaction. Changed signed
 peer results are retained as conflicts; workers hold that order across restart.
 
+Each evaluator upload cycle sends at most one page of pending files and audits
+a separate page of acknowledged files. Retained acknowledgments do not consume
+the pending-upload budget. Both cursors rotate, and durable acknowledgments
+prevent duplicate uploads after restart. The audits compare retained payloads
+against their acknowledged digests; changed payloads or disappearing markers
+stop that cycle. Outbox and delivery-marker counts remain bounded.
+
 Reference suites are released only after the relay's owned finalized boundary
 reaches the committed reveal block. Workers also check their own boundary before
 installing the reveal and before signing results. Private endpoint transcripts

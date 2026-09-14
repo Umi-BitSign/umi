@@ -395,6 +395,9 @@ async def test_fetch_replays_exact_package_without_activation_and_reuses_after_r
 
 
 async def test_retained_multi_page_history_is_used_without_remote_page_and_survives_restart(case):
+    import hashlib
+    import json
+
     anchor = case.selection.signed
     records = _signed_continuation(anchor)
     body = successor_continuation_bytes(anchor, records)
@@ -405,11 +408,76 @@ async def test_retained_multi_page_history_is_used_without_remote_page_and_survi
     )
     result = await case.fetcher.fetch(selected)
     assert result.current_directive_page_bytes == body
+    controls = case.fetcher.root / ("controls-" + selected.directive_sha256)
+    assert not (controls / "history.json").exists()
+    binding = (controls / "history-binding.json").read_bytes()
+    assert len(binding) < 1024
+    assert json.loads(binding) == {
+        "schema": "umi-successor-delivery-history-binding/1",
+        "directive_sha256": selected.directive_sha256,
+        "history_sha256": hashlib.sha256(body).hexdigest(),
+        "history_size_bytes": len(body),
+    }
     assert not any(url.endswith("/page.json") for url in case.responses.requests)
     requests = list(case.responses.requests)
     restarted = delivery.HTTPSSuccessorArtifactDelivery(**case.args)
     assert await restarted.fetch(selected) == result
     assert case.responses.requests == requests
+
+
+@pytest.mark.parametrize("fault", ["changed_history", "corrupt_binding"])
+async def test_retained_history_binding_cannot_be_replaced_on_restart(case, fault):
+    records = _signed_continuation(case.selection.signed, 2)
+    body = successor_continuation_bytes(case.selection.signed, records)
+    selected = SuccessorWorkerSelection(records[-1], body)
+    control_base = case.base + "/directives/" + selected.directive_sha256
+    case.responses.objects[control_base + "/execution.json"] = (
+        case.item.files.worker_execution_bytes
+    )
+    await case.fetcher.fetch(selected)
+    requests = list(case.responses.requests)
+    if fault == "changed_history":
+        selected = SuccessorWorkerSelection(
+            records[-1], successor_continuation_bytes(records[0], records[1:])
+        )
+    else:
+        binding = (
+            case.fetcher.root / ("controls-" + selected.directive_sha256) / "history-binding.json"
+        )
+        binding.chmod(0o600)
+        binding.write_bytes(b"{}")
+        binding.chmod(0o400)
+    restarted = delivery.HTTPSSuccessorArtifactDelivery(**case.args)
+    with pytest.raises(delivery.SuccessorDeliveryError, match="cached continuation differs"):
+        await restarted.fetch(selected)
+    assert case.responses.requests == requests
+
+
+async def test_retained_legacy_history_is_preserved_and_checked_on_refetch(case):
+    records = _signed_continuation(case.selection.signed, 2)
+    body = successor_continuation_bytes(case.selection.signed, records)
+    selected = SuccessorWorkerSelection(records[-1], body)
+    control_base = case.base + "/directives/" + selected.directive_sha256
+    case.responses.objects[control_base + "/execution.json"] = (
+        case.item.files.worker_execution_bytes
+    )
+    result = await case.fetcher.fetch(selected)
+    controls = case.fetcher.root / ("controls-" + selected.directive_sha256)
+    legacy = controls / "history.json"
+    legacy.write_bytes(body)
+    legacy.chmod(0o400)
+    identity = legacy.stat()
+    restarted = delivery.HTTPSSuccessorArtifactDelivery(**case.args)
+    assert await restarted.fetch(selected) == result
+    assert legacy.read_bytes() == body
+    assert delivery._identity(legacy.stat()) == delivery._identity(identity)
+    # Corrupt the old file while preserving its size. The new binding must not
+    # hide corruption in evidence retained by an earlier release.
+    legacy.chmod(0o600)
+    legacy.write_bytes(b" " * len(body))
+    legacy.chmod(0o400)
+    with pytest.raises(delivery.SuccessorDeliveryError, match="cached input hash differs"):
+        await restarted.fetch(selected)
 
 
 async def test_retained_history_forged_signature_fails_before_package_fetch(case):

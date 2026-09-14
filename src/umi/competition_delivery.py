@@ -338,7 +338,13 @@ def _allowed_object_names(name):
     elif name.startswith("release-"):
         final = {"release.bundle"}
     elif name.startswith("controls-"):
-        final = {"page.json", "history.json", "execution.json", "authorization.json"}
+        final = {
+            "page.json",
+            "history.json",
+            "history-binding.json",
+            "execution.json",
+            "authorization.json",
+        }
     else:
         raise SuccessorDeliveryError("unknown cache object profile")
     return final | {value + ".partial" for value in final}
@@ -666,6 +672,33 @@ class HTTPSSuccessorArtifactDelivery:
                 ),
             )
 
+    async def _retained_history(self, controls, selection):
+        """Bind runtime-owned bytes without storing another full prefix per run."""
+        body = selection.continuation_bytes
+        self._validate_page(body, selection, local_history=True)
+        history_sha = hashlib.sha256(body).hexdigest()
+        # Preserve and check full histories written by older versions. New
+        # entries need only a binding: the runtime and recovery registry retain
+        # the signed records, and the host still verifies the supplied bytes.
+        legacy = controls / "history.json"
+        if legacy.exists() or legacy.is_symlink():
+            _read(
+                legacy,
+                MAX_SUCCESSOR_HISTORY_BYTES,
+                expected_sha256=history_sha,
+                expected_size=len(body),
+            )
+        binding = canonical_json_bytes(
+            {
+                "schema": "umi-successor-delivery-history-binding/1",
+                "directive_sha256": selection.directive_sha256,
+                "history_sha256": history_sha,
+                "history_size_bytes": len(body),
+            }
+        )
+        await self._small(None, controls / "history-binding.json", 1024, local_body=binding)
+        return body
+
     async def fetch(self, selection: SuccessorWorkerSelection) -> SuccessorArtifactFiles:
         directive = selection.signed.directive
         verify_signed_successor_supervisor_directive_history(
@@ -695,13 +728,7 @@ class HTTPSSuccessorArtifactDelivery:
             # The runtime supplies the complete signed continuation assembled
             # from its retained cursor history. No HTTP request can replace it.
             # The host later checks it against its own root-sealed anchor.
-            page_bytes = await self._small(
-                None,
-                controls / "history.json",
-                MAX_SUCCESSOR_HISTORY_BYTES,
-                validate=lambda body: self._validate_page(body, selection, local_history=True),
-                local_body=selection.continuation_bytes,
-            )
+            page_bytes = await self._retained_history(controls, selection)
         package_path = self._object("package-" + target.package_sha256)
         package_base = self.base + "/packages/" + target.package_sha256
         manifest_bytes = await self._small(
