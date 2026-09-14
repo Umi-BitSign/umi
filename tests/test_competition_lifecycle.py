@@ -576,7 +576,24 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
 
 
 @pytest.mark.asyncio
-async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(lifecycle):
+async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
+    lifecycle, monkeypatch
+):
+    from umi import competition_settlement_preparation as preparation
+
+    preparation_errors = []
+    original_prepare = preparation.prepare_retained_settlement
+
+    async def diagnosed_prepare(**kwargs):
+        try:
+            return await original_prepare(**kwargs)
+        except Exception as exc:
+            # Synthetic test inputs only. Preserve the cause hidden by the
+            # production coordinator's bounded hold status.
+            preparation_errors.append(f"{type(exc).__name__}: {exc}")
+            raise
+
+    monkeypatch.setattr(preparation, "prepare_retained_settlement", diagnosed_prepare)
     s = lifecycle
     await complete_first_round(s)
     item, dispatch = s.item, s.paired.dispatch
@@ -753,11 +770,17 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(l
         assert all(len(completed(d)) == 4 for d in s.drivers)
         for driver in s.drivers:
             await driver.exchange.sync_once()
+        material = s.store.settlement_material(item.round, limits=s.config.replay_limits)
+        assert len(material["evidence"]) == 2
         s.provider.block = plan.evidence_cutoff_block
         for driver in s.drivers:
             driver.provider.block = s.provider.block
         result = await s.coordinator.cycle()
-        assert result["settlement_prepared"] >= 1 and result["settlement_held"] == 0, result
+        assert result["settlement_prepared"] >= 1 and result["settlement_held"] == 0, (
+            canonical_json_bytes(
+                {"counts": result, "preparation_errors": preparation_errors}
+            ).decode()
+        )
         for driver in s.drivers:
             result = await driver.settlement_client.sync_once()
             assert result == {"endorsed": 1, "held": 0}, result
