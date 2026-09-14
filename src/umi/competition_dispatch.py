@@ -346,17 +346,17 @@ class EndpointDispatcher:
                 limits=self.limits,
             )
             started = str(time.time_ns())
-            outcome = await asyncio.wait_for(
-                send_prepared_request(
-                    prepared,
-                    miner_url=origin.capture.origin,
-                    limits=self.limits,
-                    timeout_seconds=self.config.request_timeout_seconds,
-                    transport=self.transport,
-                    maximum_request_transmissions=1,
-                    maximum_response_bodies=1,
-                ),
-                timeout=self.config.request_timeout_seconds,
+            # The transport owns its deadline and retains any partial response
+            # when it expires. An equal outer deadline races that retention and
+            # leaves an ordinary timeout permanently uncertain in the journal.
+            outcome = await send_prepared_request(
+                prepared,
+                miner_url=origin.capture.origin,
+                limits=self.limits,
+                timeout_seconds=self.config.request_timeout_seconds,
+                transport=self.transport,
+                maximum_request_transmissions=1,
+                maximum_response_bodies=1,
             )
             evidence = canonical_json_bytes(
                 {
