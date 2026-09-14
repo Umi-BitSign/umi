@@ -729,7 +729,7 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(l
         )
         for driver in s.drivers:
             await driver.exchange.sync_once()
-        for turn in range(6):
+        for _ in range(6):
             for driver in s.drivers:
                 await tick(driver)
             for driver in dispatchers:
