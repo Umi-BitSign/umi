@@ -417,6 +417,34 @@ async def test_timeout_after_claim_is_not_retried(dispatch, monkeypatch):
     assert calls == 1
 
 
+async def test_transport_deadline_retains_timeout_and_partial_bytes_without_retry(dispatch):
+    await ready(dispatch)
+    calls = 0
+
+    class SlowBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"partial"
+            await asyncio.Future()
+
+    async def delayed(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, stream=SlowBody())
+
+    dispatch.driver.config = dispatch.config.model_copy(update={"request_timeout_seconds": 1})
+    dispatch.driver.transport = httpx.MockTransport(delayed)
+    assert (
+        await asyncio.wait_for(dispatch.driver.dispatch_one(dispatch.key), timeout=5) == "completed"
+    )
+    transcript = json.loads(dispatch.feed.journal.outcome(dispatch.key))
+    assert transcript["failure_code"] == "transport_timeout"
+    assert transcript["envelope_hex"] is None
+    assert transcript["received_body_prefix_hex"] == b"partial".hex()
+    assert transcript["received_bytes_sha256"] == hashlib.sha256(b"partial").hexdigest()
+    assert await dispatch.driver.dispatch_one(dispatch.key) == "held"
+    assert calls == 1
+
+
 async def test_wrong_cli_wallet_never_starts_provider(dispatch, monkeypatch):
     from umi.competition_dispatch import run_dispatch
 

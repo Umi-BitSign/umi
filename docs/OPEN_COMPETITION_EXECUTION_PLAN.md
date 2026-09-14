@@ -24,6 +24,9 @@ activate rewards or extend the signed bootstrap sunset.
    - Retain conflicting certificates across restart; local settlement alone
      must not grant chain-write permission.
    - Bind an explicit late-conflict recovery rule and publication observations.
+   - Account for each roster entry with scored evidence or an independently
+     certified void. A void retains actual observations and assigns no miner
+     fault score. Missing evidence or missing quorum must remain a hold.
 3. Successor supervisor and host upgrade.
    - First run settlement replay through a fixed-command, wallet-free worker
      with bounded immutable inputs and durable receipts. Keep historical
@@ -114,7 +117,8 @@ contributor attribution yet.
 - [x] Connect private round plans to owned preparation and independent cutoff signatures.
 - [x] Derive endpoint authorizations and model orders, collect independent work signatures and deliver exact certificates.
 - [x] Prepare unsigned settlements from complete retained evidence with owned current snapshots and exact restart recovery.
-- [ ] Verify archive-backed work selection follows approved promotions while preserving frozen incumbents.
+- [x] Verify archive-backed work selection follows approved promotions while preserving frozen incumbents.
+- [ ] Connect explicit void certificates through evaluator exchange, fixed-cutoff retention, settlement signing and replay.
 - [ ] Connect continuous round planning to independent cutoff/order signing and settlement publication.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
@@ -143,7 +147,14 @@ now produces complete unsigned proposals after cutoff. The
 local execution receipts, reviewed promotion history and owned snapshots.
 [Automatic settlement delivery](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md) connects
 authenticated discovery, endorsements and immutable replay packages. The full
-both-track execution and independently reviewed promotion rehearsal remains open.
+both-track synthetic service lifecycle passed with archive-backed baseline
+selection. This covers one connected round and uses fixture keys and an explicit
+test-only rights review. Independent production operators and real model quality
+remain unverified. Continuous-round failure recovery is also incomplete: scored
+settlement still requires evidence for every frozen entry. The explicit void
+contract in `competition_void.py` retains independently signed attempts and a
+quorum decision, but it is not yet connected to the settlement pipeline. An
+unavailable endpoint must not hold up healthy miners once that path is complete.
 
 The versioned [promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md)
 separates the shared model decision from each operator's actual receipt block

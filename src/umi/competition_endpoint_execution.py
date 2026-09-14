@@ -130,6 +130,21 @@ def _assignments(incumbent, publication, policy, legacy_policy):
 def assemble_endpoint_evidence(
     *, incumbent, journal, publication_sha256, suite, pulses, current_block
 ):
+    evidence = assemble_endpoint_observations(
+        incumbent=incumbent,
+        journal=journal,
+        publication_sha256=publication_sha256,
+        suite=suite,
+        pulses=pulses,
+        current_block=current_block,
+    )
+    endpoint_evaluation_view(evidence, suite, journal.policy, current_block=current_block)
+    return evidence
+
+
+def assemble_endpoint_observations(
+    *, incumbent, journal, publication_sha256, suite, pulses, current_block
+):
     """Export completed local journal bytes and bind them to retained baseline runs.
 
     Uncertain/missing work is never converted to a miner failure. This function
@@ -165,12 +180,20 @@ def assemble_endpoint_evidence(
         legacy_policy=journal.legacy_policy,
         dispatches=tuple(dispatches),
     )
-    endpoint_evaluation_view(evidence, suite, journal.policy, current_block=current_block)
+    endpoint_execution_observations(evidence, suite, journal.policy, current_block=current_block)
     return evidence
 
 
 def endpoint_evaluation_view(evidence, suite, policy, *, current_block):
     """Replay both roles before proposing or accepting a shared result."""
+    view = endpoint_execution_observations(evidence, suite, policy, current_block=current_block)
+    _quality(view["candidate"], suite, policy)
+    _quality(view["incumbent"], suite, policy, incumbent=True)
+    return view
+
+
+def endpoint_execution_observations(evidence, suite, policy, *, current_block):
+    """Replay complete dispatch bytes and baseline runs without scoring failures."""
     raw = canonical_json_bytes(evidence)
     if len(raw) > MAX_PAIRED_BYTES:
         raise ValueError("paired endpoint evidence exceeds its byte bound")
@@ -221,8 +244,6 @@ def endpoint_evaluation_view(evidence, suite, policy, *, current_block):
         outputs.append(replay.output)
     candidate = tuple(outputs)
     incumbent = tuple(s.execution.output for s in evidence.incumbent.steps)
-    _quality(candidate, suite, policy)
-    _quality(incumbent, suite, policy, incumbent=True)
     return {
         "job": job,
         "candidate": candidate,

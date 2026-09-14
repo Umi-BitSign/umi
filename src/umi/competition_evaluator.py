@@ -23,7 +23,6 @@ from pydantic import AfterValidator, Field, model_validator
 from .competition_authorization import SignedEndpointAuthorization
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_endpoint_execution import (
-    EndpointPairedEvidence,
     RetainedRevealPulse,
     assemble_endpoint_evidence,
     prepare_incumbent_job,
@@ -42,7 +41,6 @@ from .competition_execution import (
     ExecutionCase,
     ExecutionJournal,
     ModelEvaluationJob,
-    ModelExecutionEvidence,
     _evaluation_view,
     common_execution_result,
     execution_boundary,
@@ -52,6 +50,7 @@ from .competition_execution import (
     run_record_from_execution,
     validate_job,
 )
+from .competition_observations import ExecutionAnnouncement, SignedExecutionAnnouncement
 from .competition_publication import PublicationReplayLimits
 from .competition_runner import OfflineCpuRuntime
 from .competition_scheduling import AssignmentPublicationJournal
@@ -92,18 +91,6 @@ class EvaluationOrder(StrictProtocolModel):
 class SignedEvaluationOrder(StrictProtocolModel):
     order: EvaluationOrder
     signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
-
-
-class ExecutionAnnouncement(StrictProtocolModel):
-    schema_: Literal["umi-execution-announcement/1"] = Field(alias="schema")
-    order_sha256: Hex32
-    evaluator_hotkey: Hotkey
-    evidence: ModelExecutionEvidence | EndpointPairedEvidence
-
-
-class SignedExecutionAnnouncement(StrictProtocolModel):
-    announcement: ExecutionAnnouncement
-    signature: Signature
 
 
 class EvaluationVote(StrictProtocolModel):

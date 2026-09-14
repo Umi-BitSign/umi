@@ -644,6 +644,17 @@ def _outputs(evidence, role: str) -> tuple[CaseOutput, ...]:
 
 
 def validate_revealed_execution(evidence, suite, policy, *, current_block: int) -> None:
+    view = revealed_execution_observations(evidence, suite, policy, current_block=current_block)
+    _quality(view["candidate"], suite, policy)
+    _quality(view["incumbent"], suite, policy, incumbent=True)
+
+
+def revealed_execution_observations(evidence, suite, policy, *, current_block: int):
+    """Validate complete retained observations without assigning a quality score.
+
+    Infrastructure failures remain observable for an explicit void review. This
+    function never makes them eligible for scoring or model promotion.
+    """
     evidence = ModelExecutionEvidence.model_validate_json(canonical_json_bytes(evidence))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     validate_execution(evidence, policy)
@@ -664,8 +675,14 @@ def validate_revealed_execution(evidence, suite, policy, *, current_block: int) 
         or job.cases != expected
     ):
         raise ValueError("execution assignment differs from the committed revealed suite")
-    _quality(_outputs(evidence, "candidate"), suite, policy)
-    _quality(_outputs(evidence, "incumbent"), suite, policy, incumbent=True)
+    return {
+        "job": job,
+        "candidate": _outputs(evidence, "candidate"),
+        "incumbent": _outputs(evidence, "incumbent"),
+        "started_block": evidence.steps[0].started.block,
+        "finished_block": evidence.steps[-1].finished.block,
+        "evidence_sha256": digest(evidence),
+    }
 
 
 def common_execution_result(

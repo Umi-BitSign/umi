@@ -151,7 +151,7 @@ async def run_incumbent(setup, tmp_path, *, evaluator=0, source=None, **limits):
     return result, journal
 
 
-async def pair(setup, tmp_path, *, evaluator=0):
+async def pair(setup, tmp_path, *, evaluator=0, assemble=assemble_endpoint_evidence):
     dispatch = setup.dispatch
     item = dispatch.feed.item
     incumbent, _ = await run_incumbent(setup, tmp_path, evaluator=evaluator)
@@ -176,7 +176,7 @@ async def pair(setup, tmp_path, *, evaluator=0):
             dispatch.feed.clock.ns += dispatch.config.discovery_grace_seconds * 1_000_000_000
     await driver.aclose()
     assert driver._counts["completed"] == 3
-    return assemble_endpoint_evidence(
+    return assemble(
         incumbent=incumbent,
         journal=dispatch.feed.journal,
         publication_sha256=digest(item.publication.publication),
