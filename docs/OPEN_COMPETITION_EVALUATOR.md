@@ -3,7 +3,8 @@
 `run-evaluator` executes signed work orders for endpoint and model submissions,
 retains each result, and exchanges signed observations with the nominated
 independent evaluators. It produces the existing `IndependentEvaluationEvidence`
-used by settlement replay. It does not publish settlements or submit weights.
+used by settlement replay. Optional settlement signing returns endorsements to
+the coordinator. The worker does not submit weights.
 
 The imported baseline still has no contributor attribution. Running this worker
 does not activate the approved simultaneous 70/30 reward policy or satisfy its
@@ -37,6 +38,11 @@ Use one hotkey per worker and a dedicated configuration with schema
   along with the round origin and endpoint transport policy. The separate
   owned observer independently verifies endpoint issuance. The worker requires
   its own retained cutoff vote before signing an order or authorization.
+- `settlement_review_directory` and `settlement_replay_limits` enable
+  [automatic settlement signing](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md), using
+  the round origin and the worker's independently reviewed promotion history.
+  Both fields are required together. Empty or conflicting review history holds
+  signing; remote proposals cannot populate it.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives

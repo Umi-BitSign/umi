@@ -9,9 +9,11 @@ With the optional [work-signing configuration](OPEN_COMPETITION_WORK_SIGNING.md)
 this service also generates endpoint authorizations and evaluation orders and
 collects independent signatures before delivery. Optional
 [settlement preparation](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md) produces
-unsigned proposals from complete retained evidence. Independent settlement
-signing remains unconnected. The service does not activate the 70/30 policy, change bridge
-weights or extend the bridge sunset.
+unsigned proposals from complete retained evidence.
+[Settlement delivery](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md) connects those
+proposals to independent signers and publishes verified replay packages.
+The service does not activate the 70/30 policy, change bridge weights or extend
+the bridge sunset.
 
 ## Operator inputs
 
@@ -32,6 +34,9 @@ schema `umi-round-coordinator-config/1`:
 - Optional `settlement_directory`: private unsigned settlement proposals after
   evidence cutoff. This directory must be separate from all other state and
   delivery paths. See the [settlement guide](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md).
+- Optional `settlement_delivery`: signature-collection state, certificate/package
+  output, explicit package limits and reviewed release identity. Requires
+  `settlement_directory`; see the [delivery guide](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md).
 - Optional `work`: separate work state, reviewed per-suite assets, output
   directories, transport-bound finality and an explicit issue margin. See the
   [work-signing guide](OPEN_COMPETITION_WORK_SIGNING.md) and pass its transport

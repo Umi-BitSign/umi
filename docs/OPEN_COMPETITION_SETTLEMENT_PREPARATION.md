@@ -73,8 +73,9 @@ must never override current conflict checks in the signer or successor worker.
 
 The [independent settlement signer](OPEN_COMPETITION_SETTLEMENT_SIGNING.md)
 checks local execution receipts and reviewed promotion history, re-proves the
-registration snapshot, and retains signing intent before signing. Its automatic
-delivery connection and eligible-group certificate collection remain unfinished.
+registration snapshot, and retains signing intent before signing. Optional
+[automatic delivery](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md) connects discovery,
+eligible-group certificate collection and immutable replay packages.
 A coordinator proposal alone is insufficient.
 Signed activation and finalized incentive checks follow that connection and
 the reviewed-input gates in the [execution plan](OPEN_COMPETITION_EXECUTION_PLAN.md).

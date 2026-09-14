@@ -135,7 +135,9 @@ time. [Automatic settlement preparation](OPEN_COMPETITION_SETTLEMENT_PREPARATION
 now produces complete unsigned proposals after cutoff. The
 [independent settlement signer](OPEN_COMPETITION_SETTLEMENT_SIGNING.md) checks
 local execution receipts, reviewed promotion history and owned snapshots.
-Automatic settlement discovery and certificate delivery remain unconnected.
+[Automatic settlement delivery](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md) connects
+authenticated discovery, endorsements and immutable replay packages. The full
+both-track execution and independently reviewed promotion rehearsal remains open.
 
 The [round-preparation APIs](OPEN_COMPETITION_ROUND_PREPARATION.md) now freeze
 current registrations, latest accepted submissions, the incumbent and cutoff
@@ -148,8 +150,9 @@ plans and independent cutoff signing. Its optional
 authorizations and model orders, rechecks owned issuance at each signer and
 delivers quorum certificates without manual assembly. The optional settlement
 output prepares replayable unsigned proposals from the exchange's retained
-evidence. Independent settlement signing has a component API; automatic vote
-delivery remains unconnected, so the larger checklist item stays open.
+evidence. Optional settlement delivery collects the independent votes and
+publishes replay packages. The larger checklist item stays open pending the
+complete scheduling, execution and promotion-history rehearsal.
 
 The first batch passed 2,429 tests on 2026-09-12, with one Linux-only memory test
 skipped and two dependency deprecation warnings. Ruff checks and formatting

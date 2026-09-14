@@ -52,6 +52,7 @@ from .competition_execution import (
     run_record_from_execution,
     validate_job,
 )
+from .competition_publication import PublicationReplayLimits
 from .competition_runner import OfflineCpuRuntime
 from .competition_scheduling import AssignmentPublicationJournal
 from .drand import QuicknetClient
@@ -185,6 +186,8 @@ class EvaluatorConfig(StrictProtocolModel):
     round_coordinator_origin: str | None = None
     work_signing_chain: CompetitionChainConfig | None = None
     work_minimum_issue_ms: Annotated[int, Field(ge=1, le=300_000)] | None = None
+    settlement_review_directory: Directory | None = None
+    settlement_replay_limits: PublicationReplayLimits | None = None
     assignment_directory: Directory | None = None
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
@@ -194,6 +197,14 @@ class EvaluatorConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def bindings(self):
+        if (self.settlement_review_directory is None) != (
+            self.settlement_replay_limits is None
+        ) or (
+            self.settlement_review_directory is not None and self.round_coordinator_origin is None
+        ):
+            raise ValueError(
+                "settlement signing requires local reviews, replay limits and the round service"
+            )
         if self.round_coordinator_origin is not None:
             from .competition_client import validate_intake_origin
 
@@ -431,6 +442,8 @@ class EvaluatorJournal:
                                 "round_coordinator_origin",
                                 "work_signing_chain",
                                 "work_minimum_issue_ms",
+                                "settlement_review_directory",
+                                "settlement_replay_limits",
                             )
                             if getattr(config, k) is None
                         ),
@@ -629,6 +642,8 @@ class ContinuousEvaluator:
         self._exchange_task = None
         self._round_task = None
         self._work_task = None
+        self._settlement_task = None
+        self.settlement_client = None
         self.work_provider = None
         self.work_client = None
         self.round_client = None
@@ -636,6 +651,17 @@ class ContinuousEvaluator:
             from .competition_rounds import RoundSigningClient
 
             self.round_client = RoundSigningClient(self, config.round_coordinator_origin)
+        if config.settlement_review_directory is not None:
+            from .competition_settlement_transport import SettlementSigningClient
+            from .competition_store import CompetitionStore
+
+            self.settlement_client = SettlementSigningClient(
+                self,
+                config.round_coordinator_origin,
+                self.round_client.journal,
+                CompetitionStore(Path(config.settlement_review_directory), policy),
+                limits=config.settlement_replay_limits,
+            )
         if config.work_signing_chain is not None:
             from .competition_dispatch import DispatchFinalityProvider
             from .competition_work_transport import WorkSigningClient
@@ -901,6 +927,16 @@ class ContinuousEvaluator:
 
     async def poll_once(self):
         counts = {"held": 0, "waiting": 0, "complete": 0, "expired": 0, "executing": 0}
+        if self.settlement_client is not None:
+            if self._settlement_task is not None and self._settlement_task.done():
+                try:
+                    result = self._settlement_task.result()
+                    counts["held"] += result["held"]
+                except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+                    counts["waiting"] += 1
+                self._settlement_task = None
+            if self._settlement_task is None:
+                self._settlement_task = asyncio.create_task(self.settlement_client.sync_once())
         if self.work_client is not None:
             if self._work_task is not None and self._work_task.done():
                 try:
@@ -972,6 +1008,10 @@ class ContinuousEvaluator:
         }
 
     async def aclose(self):
+        if self._settlement_task is not None:
+            self._settlement_task.cancel()
+            await asyncio.gather(self._settlement_task, return_exceptions=True)
+            self._settlement_task = None
         if self._work_task is not None:
             self._work_task.cancel()
             await asyncio.gather(self._work_task, return_exceptions=True)
