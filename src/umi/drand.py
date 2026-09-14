@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -151,12 +152,33 @@ class DrandPulse:
 def verify_quicknet_signature(round_number: int, signature: bytes) -> bool:
     """Verify Quicknet's G1 signature over SHA256(U64BE(round))."""
 
-    if isinstance(round_number, bool) or not isinstance(round_number, int) or round_number <= 0:
+    if (
+        isinstance(round_number, bool)
+        or not isinstance(round_number, int)
+        or not 0 < round_number < 2**64
+    ):
         return False
     if not isinstance(signature, bytes) or len(signature) != 48:
         return False
-    public_key = bytes.fromhex(QUICKNET_PUBLIC_KEY)
+    return _verify_quicknet_signature_cached(
+        round_number, signature, QUICKNET_PUBLIC_KEY, QUICKNET_DST, QUICKNET_CHAIN_HASH
+    )
+
+
+@lru_cache(maxsize=256, typed=True)
+def _verify_quicknet_signature_cached(
+    round_number: int, signature: bytes, public_key_hex: str, dst: bytes, _chain_hash: str
+) -> bool:
+    """Reuse only pure BLS verification under the exact pinned trust tuple.
+
+    Paired evidence repeats a pulse across cases, observations and endorsements.
+    Round bounds and input types are checked before cache lookup; randomness,
+    expected-round, publication, policy and current-block checks remain outside
+    this cache. Entries contain bounded public bytes and a boolean, never a
+    mutable evidence object or an authorization decision.
+    """
     try:
+        public_key = bytes.fromhex(public_key_hex)
         signature_point = decompress_G1(int.from_bytes(signature, "big"))
         public_key_point = decompress_G2(
             (
@@ -169,7 +191,7 @@ def verify_quicknet_signature(round_number: int, signature: bytes) -> bool:
         if not eq(multiply(public_key_point, curve_order), Z2):
             return False
         message = hashlib.sha256(u64be(round_number)).digest()
-        message_point = hash_to_G1(message, QUICKNET_DST, hashlib.sha256)
+        message_point = hash_to_G1(message, dst, hashlib.sha256)
         return pairing(G2, signature_point) == pairing(public_key_point, message_point)
     except (TypeError, ValueError, OverflowError):
         return False

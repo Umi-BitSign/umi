@@ -36,9 +36,10 @@ from umi.competition_review_history import EvaluatorReviewStore
 from umi.competition_round_assets import ArchivedRoundWorkAssets
 from umi.competition_scheduling import AssignmentPublicationJournal
 from umi.competition_store import AgreedPromotionReview, AttestedPromotionReview, CompetitionStore
+from umi.competition_void import AttestedEvaluationVoid
 from umi.competition_work_plans import RoundWorkConfig
 from umi.drand import DrandPulse
-from umi.open_competition import digest, sign_object
+from umi.open_competition import Registration, digest, sign_object
 from umi.policy import scoring_policy_hash
 from umi.protocol import canonical_json_bytes
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
@@ -53,14 +54,40 @@ from .test_competition_package import release_identity as release_identity
 from .test_competition_rounds import OwnedProvider
 from .test_competition_runner import runtime as runtime
 from .test_drand import ROUND, pulse_record
-from .test_open_competition import bundle_at, review_for, snapshot
+from .test_open_competition import bundle_at, review_for, snapshot, wallet
 from .test_open_competition import policy as policy
 
 
 @pytest.fixture
-def authorization(policy, runtime, tmp_path, monkeypatch):
+def authorization(policy, runtime, tmp_path, monkeypatch, request):
     baseline = bundle_at(tmp_path / "baseline")
     candidate = bundle_at(tmp_path / "candidate", "candidate", digest(baseline))
+    unstable = (
+        bundle_at(tmp_path / "unstable", "unstable", digest(baseline))
+        if getattr(request, "param", "scored") == "void"
+        else None
+    )
+    if unstable is not None:
+        original_snapshot = snapshot
+
+        def with_eve(block=110):
+            value = original_snapshot(block)
+            return value.model_copy(
+                update={
+                    "registrations": tuple(
+                        sorted(
+                            (
+                                *value.registrations,
+                                Registration(uid=8, hotkey=wallet("Eve").hotkey.ss58_address),
+                            ),
+                            key=lambda r: r.uid,
+                        )
+                    )
+                }
+            )
+
+        monkeypatch.setattr("tests.test_competition_lifecycle.snapshot", with_eve)
+        monkeypatch.setattr("tests.test_competition_evaluator.snapshot", with_eve)
     policy = policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
     legacy = original_authorization.__wrapped__(policy).legacy_policy
     now = 1789300000000000000
@@ -73,6 +100,7 @@ def authorization(policy, runtime, tmp_path, monkeypatch):
         legacy_policy=legacy,
         incumbent_sha256=digest(baseline),
         model_bundle=candidate,
+        extra_model_bundle=unstable,
     )
     assert item.request.reveal_round == ROUND
     monkeypatch.setattr(
@@ -81,6 +109,7 @@ def authorization(policy, runtime, tmp_path, monkeypatch):
         lambda: (time.time_ns() // 1_000_000 - QUICKNET_GENESIS_MS) // QUICKNET_PERIOD_MS + 1,
     )
     item.baseline, item.candidate, item.runtime = baseline, candidate, runtime
+    item.unstable = unstable
     return item
 
 
@@ -115,10 +144,26 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
     dispatch = setup.dispatch
     item = dispatch.feed.item
     preserve_bundle(item.candidate, tmp_path / "candidate", setup.archive, item.policy)
+    if item.unstable is not None:
+        preserve_bundle(item.unstable, tmp_path / "unstable", setup.archive, item.policy)
     original_run = execution.execute_offline_case
+    unstable_calls = 0
 
     async def run(**kwargs):
+        nonlocal unstable_calls
         result = await original_run(**kwargs)
+        if item.unstable is not None and kwargs["bundle"] == item.unstable:
+            # Only the first real adapter invocation returns "hello". The other
+            # evaluator observes different output for that same case, regardless
+            # of task ordering. All output bytes still pass ordinary replay.
+            unstable_calls += 1
+            text = "hello" if unstable_calls == 1 else "different"
+            return result.model_copy(
+                update={
+                    "output": result.output.model_copy(update={"hypothesis": text}),
+                    "stdout_hex": (text + "\n").encode().hex(),
+                }
+            )
         if kwargs["bundle"] == item.candidate:
             return result.model_copy(
                 update={
@@ -332,10 +377,20 @@ async def tick(driver):
     ], results
 
 
+def completed_voids(driver):
+    return [
+        _read(path, AttestedEvaluationVoid)
+        for path in Path(driver.config.outbox_directory).glob("*.void.json")
+    ]
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authorization", ["scored", "void"], indirect=True)
 async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_journals(lifecycle):
     s = lifecycle
     item, dispatch = s.item, s.paired.dispatch
+    void_count = int(item.unstable is not None)
+    inference_count = 18 + 12 * void_count
     try:
         result = await s.coordinator.cycle()
         assert result["prepared"] == 1 and result["held"] == 0, result
@@ -362,7 +417,11 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
             _read(path, SignedEvaluationOrder)
             for path in Path(s.config.work.order_directory).glob("*.json")
         ]
-        assert sorted(o.order.submission.submission.track for o in orders) == ["endpoint", "model"]
+        assert sorted(o.order.submission.submission.track for o in orders) == [
+            "endpoint",
+            "model",
+            *(["model"] if void_count else []),
+        ]
         assert all(b'"references"' not in canonical_json_bytes(o) for o in orders)
         assert not list(Path(dispatch.config.publication_directory).glob("*.json"))
         for driver in s.drivers:
@@ -404,7 +463,9 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
         for _ in range(10):
             for driver in s.drivers:
                 await tick(driver)
-            if all(len(completed(d)) == 2 for d in s.drivers):
+            if all(
+                len(completed(d)) == 2 and len(completed_voids(d)) == void_count for d in s.drivers
+            ):
                 break
         for driver in s.drivers:
             await driver.exchange.sync_once()
@@ -412,9 +473,16 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
             {e.attested_result.result.submission_sha256: e for e in completed(d)} for d in s.drivers
         ]
         assert len(results[0]) == 2 and results[0] == results[1]
+        void_results = [completed_voids(d) for d in s.drivers]
+        assert len(void_results[0]) == void_count and void_results[0] == void_results[1]
+        if void_count:
+            assert void_results[0][0].void.reason == "observation_disagreement"
+            assert void_results[0][0].void.submission_sha256 == digest(
+                item.extra_model_submission.submission
+            )
         assert s.fetched == [ROUND, ROUND]
         assert dispatch.miner.translator.calls == 6
-        assert len([c for c in s.paired.calls if isinstance(c, dict)]) == 18
+        assert len([c for c in s.paired.calls if isinstance(c, dict)]) == inference_count
 
         # Each reviewer uses its own completed evidence and admission history.
         # Synthetic rights/reconstruction reviews are explicitly test inputs.
@@ -484,14 +552,19 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
         )
         weights = package.retained_settlement.projection.weights
         assert weights[6] == 45875 and weights[247] == 19660
+        assert weights[8] == 0
         assert sum(weights) == 65535 and weights.count(0) == 254
+        settlement = package.retained_settlement
+        assert settlement.schema_ == f"umi-competition-settlement/{1 + void_count}"
+        assert len(settlement.results) == 2 + void_count
+        assert {r.submission_sha256 for r in settlement.results} == set(item.round.roster)
         assert not package.chain_submission_authorized
         # Exact retries cannot rerun inference or replace a settled publication.
         prior = paths[0].read_bytes()
         for driver in s.drivers:
             await tick(driver)
         assert paths[0].read_bytes() == prior
-        assert len([c for c in s.paired.calls if isinstance(c, dict)]) == 18
+        assert len([c for c in s.paired.calls if isinstance(c, dict)]) == inference_count
     finally:
         for driver in s.drivers:
             await driver.aclose()

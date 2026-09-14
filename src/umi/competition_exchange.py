@@ -25,6 +25,7 @@ from starlette.responses import JSONResponse, Response
 
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_client import validate_intake_origin
+from .competition_endpoint_execution import EndpointPairedEvidence
 from .competition_evaluator import (
     MAX_BYTES,
     Directory,
@@ -42,7 +43,15 @@ from .competition_evidence import (
     replay_independent_evaluation,
     verify_evaluator_run,
 )
-from .competition_execution import _evaluation_view, execution_boundary, execution_key
+from .competition_execution import execution_boundary, execution_key
+from .competition_observations import execution_observations
+from .competition_void import (
+    AttestedEvaluationVoid,
+    EvaluationVoidVote,
+    VoidEvaluationEvidence,
+    propose_evaluation_void,
+    verify_evaluation_void,
+)
 from .nonce import SQLiteNonceStore
 from .open_competition import (
     CompetitionPolicy,
@@ -58,13 +67,15 @@ from .open_competition import (
 from .policy import scoring_policy_hash
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
-Kind = Literal["order", "suite", "execution", "vote", "independent"]
+Kind = Literal["order", "suite", "execution", "vote", "independent", "void_vote", "void"]
 MODELS = {
     "order": SignedEvaluationOrder,
     "suite": EvaluationSuite,
     "execution": SignedExecutionAnnouncement,
     "vote": EvaluationVote,
     "independent": IndependentEvaluationEvidence,
+    "void_vote": EvaluationVoidVote,
+    "void": AttestedEvaluationVoid,
 }
 MAX_WIRE_BYTES = MAX_BYTES + 8192
 ROUTE = "/v1/competition/evaluators/exchange"
@@ -122,7 +133,7 @@ class ExchangeQuery(StrictProtocolModel):
     after: Annotated[int, Field(ge=0, le=2**53 - 1)] = 0
     event: Annotated[int, Field(ge=1, le=2**53 - 1)] | None = None
     order_sha256: Hex32 | None = None
-    kind: Literal["execution", "vote", "independent"] | None = None
+    kind: Literal["execution", "vote", "independent", "void_vote", "void"] | None = None
     payload_sha256: Hex32 | None = None
 
     @model_validator(mode="after")
@@ -195,7 +206,11 @@ def validate_payload(kind, payload, signed, author, suite, policy, legacy, block
             or identity(value.signature.hotkey) != author
         ):
             raise ValueError("execution announcement binding mismatch")
-        view = _evaluation_view(body.evidence, suite, policy, block)
+        if isinstance(body.evidence, EndpointPairedEvidence) and (
+            body.evidence.publication != order.publication or body.evidence.legacy_policy != legacy
+        ):
+            raise ValueError("execution changes the exact assigned endpoint publication")
+        view = execution_observations(body.evidence, suite, policy, current_block=block)
         if view["job"] != order_job(order, body.evaluator_hotkey, policy, legacy):
             raise ValueError("execution differs from the authorized order")
     elif kind == "vote":
@@ -210,6 +225,27 @@ def validate_payload(kind, payload, signed, author, suite, policy, legacy, block
         ):
             raise ValueError("vote signer or result binding mismatch")
         # Agreement with retained execution is enforced by each evaluator.
+    elif kind == "void_vote":
+        verify_signature(value.void, value.signature)
+        expected = propose_evaluation_void(
+            signed_order=signed,
+            observations=value.void.observations,
+            suite=suite,
+            policy=policy,
+            legacy=legacy,
+            current_block=block,
+        )
+        if identity(value.signature.hotkey) != author or value.void != expected:
+            raise ValueError("void vote signer or observation binding mismatch")
+    elif kind == "void":
+        verify_evaluation_void(
+            value,
+            signed_order=signed,
+            suite=suite,
+            policy=policy,
+            legacy=legacy,
+            current_block=block,
+        )
     else:
         replay_independent_evaluation(
             value, order.submission, order.round, suite, policy, current_block=block
@@ -495,28 +531,43 @@ class ExchangeJournal:
             )
         ).model_copy(update={"query_sha256": digest(query), "payload": None})
 
-    def collect(self, store):
+    def collect(self, store, *, observed_block):
         """Repair delivery to an already admitted/closed coordinator round."""
         with self.transaction() as db:
             rows = db.execute(
-                "SELECT id,order_id,body,block FROM events WHERE kind='independent' "
+                "SELECT id,order_id,body,kind FROM events WHERE kind IN ('independent','void') "
                 "AND id NOT IN (SELECT event FROM collected) AND id>? ORDER BY id LIMIT 16",
                 (self._collect_cursor,),
             ).fetchall()
             if not rows and self._collect_cursor:
                 self._collect_cursor = 0
                 return
-        for event, order_id, raw, block in rows:
+        for event, order_id, raw, kind in rows:
             self._collect_cursor = event
             try:
-                order = self.object(order_id, "order").order
-                store.record_independent_evaluation(
-                    signed=order.submission,
-                    evidence=IndependentEvaluationEvidence.model_validate_json(raw),
-                    round_=order.round,
-                    suite=self.object(order_id, "suite"),
-                    observed_block=block,
-                )
+                signed = self.object(order_id, "order")
+                suite = self.object(order_id, "suite")
+                # The relay's earlier receipt is not the coordinator's receipt.
+                # Delayed collection must retain its actual owned arrival block.
+                if kind == "void":
+                    store.record_void_evaluation(
+                        evidence=VoidEvaluationEvidence(
+                            schema="umi-competition-void-evidence/1",
+                            order=signed,
+                            certificate=AttestedEvaluationVoid.model_validate_json(raw),
+                            legacy_policy=self.legacy,
+                        ),
+                        suite=suite,
+                        observed_block=observed_block,
+                    )
+                else:
+                    store.record_independent_evaluation(
+                        signed=signed.order.submission,
+                        evidence=IndependentEvaluationEvidence.model_validate_json(raw),
+                        round_=signed.order.round,
+                        suite=suite,
+                        observed_block=observed_block,
+                    )
             except ValueError:
                 continue
             with self.transaction() as db:
@@ -614,7 +665,7 @@ def create_exchange_app(
                     else await run_in_threadpool(journal.delivery, q)
                 )
                 if store is not None:
-                    await run_in_threadpool(journal.collect, store)
+                    await run_in_threadpool(journal.collect, store, observed_block=block)
             body = canonical_json_bytes(result)
             if len(body) > MAX_WIRE_BYTES:
                 raise ValueError("exchange reply too large")
@@ -824,7 +875,7 @@ class EvaluatorExchangeClient:
             w.legacy,
             event.observed_block,
         )
-        if event.kind == "independent":
+        if event.kind in {"independent", "void"}:
             return
         try:
             w.journal.put(slot, "peer_" + event.kind + ":" + event.author, value)
@@ -858,7 +909,7 @@ class EvaluatorExchangeClient:
             if (
                 len(parts) != 4
                 or parts[1] != identity(w.config.evaluator_hotkey)
-                or parts[2] not in {"execution", "vote", "independent"}
+                or parts[2] not in {"execution", "vote", "independent", "void_vote", "void"}
             ):
                 raise ValueError("unexpected evaluator outbox name")
             value = _read(root / name, MODELS[parts[2]])

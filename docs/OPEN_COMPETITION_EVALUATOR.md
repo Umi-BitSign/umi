@@ -117,6 +117,8 @@ The private outbox uses `<order-digest>.<evaluator-account-hex>.<kind>.json`:
 | `execution` | Signed, complete local paired execution | Other nominated evaluators |
 | `vote` | Signature on the common result and independently signed local run | Other nominated evaluators |
 | `independent` | Complete quorum result and run records | Settlement coordinator |
+| `void_vote` | Signature on a deterministic void and every assigned evaluator's observations | Other nominated evaluators |
+| `void` | Complete void certificate with all assigned signatures | Settlement coordinator |
 
 The exchange delivers each peer's `execution` and `vote` files unchanged into
 `peer_directory`; offline operators can provide the same files themselves.
@@ -127,6 +129,19 @@ exact result and local-run signing intent before touching the hotkey and checks
 a fresh owned head again before signing. Unavailable peers hold agreement.
 Authenticated changes to retained peer artifacts produce a persistent conflict
 hold, including when the conflicting inbox file is later removed.
+
+Complete observations that show infrastructure failure, failed incumbent
+evaluation, or disagreement use the explicit void path. Every assigned evaluator
+must sign its own observations and the common void decision. Agreeing valid
+results and scored miner failures cannot use this path. Missing observations
+or a missing peer signature still hold the round. Scored and void signing
+intents are mutually exclusive for one local slot, including after restart.
+
+The worker retains the full void evidence and its actual first-observation
+block. Settlement signing requires that local receipt to precede the fixed
+cutoff and checks the evaluator's exact retained observation. A certificate
+downloaded from a peer cannot substitute for local execution. Void outcomes
+assign no score or model-contribution credit.
 
 Completed execution, signatures and certificates survive restart. Private peer
 inputs already retained in the journal can be reused if the transport copy is

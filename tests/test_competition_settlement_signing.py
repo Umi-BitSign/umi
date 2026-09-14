@@ -140,7 +140,7 @@ async def test_two_endorsements_verify_the_complete_70_30_publication(setup):
         == s.prepared.publication
     )
     assert s.policy.endpoint_reward_bps == 7000 and s.policy.model_reward_bps == 3000
-    assert s.local_checks == [160, 160, 160, 160]
+    assert s.local_checks == [160, 160, 160, 160, 160, 160]
     assert all(x.worker.provider.history == [160] for x in s.signers)
     assert not certificate.publication.chain_submission_authorized
 
@@ -203,6 +203,41 @@ async def test_rechecks_after_owned_historical_proof(setup, damage):
         provider.historical_change = change
     with pytest.raises(ValueError):
         await signer.endorse(s.prepared)
+    assert signer.journal.get("vote", "1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["execution_conflict", "cutoff_conflict"])
+async def test_rechecks_conflicts_after_the_final_owned_head(setup, monkeypatch, damage):
+    s, signer = setup, setup.signers[0]
+    original = signer.worker.boundary
+    captures = 0
+    conflicted = False
+
+    async def boundary():
+        nonlocal captures, conflicted
+        result = await original()
+        captures += 1
+        if captures == 3:
+            if damage == "cutoff_conflict":
+                with signer.cutoffs.transaction() as db:
+                    db.execute("INSERT INTO holds VALUES ('1')")
+            else:
+                conflicted = True
+        return result
+
+    def local_evidence(*_):
+        if conflicted:
+            raise ValueError("local execution became conflicted during the final head read")
+
+    monkeypatch.setattr(signer.worker, "boundary", boundary)
+    monkeypatch.setattr(signer, "_local_evidence", local_evidence)
+    monkeypatch.setattr(
+        signing, "sign_settlement_publication", lambda *_: pytest.fail("signed after conflict")
+    )
+    with pytest.raises(ValueError):
+        await signer.endorse(s.prepared)
+    assert captures == 3
     assert signer.journal.get("vote", "1") is None
 
 
@@ -278,7 +313,7 @@ async def test_window_expiring_during_final_replay_cannot_sign(setup, monkeypatc
 async def test_missing_execution_cannot_use_coordinator_records(setup, monkeypatch):
     s, signer = setup, setup.signers[0]
 
-    def missing(slot):
+    def missing(slot, *, void=False):
         raise ValueError("local settlement execution evidence is incomplete")
 
     signer.worker.journal = SimpleNamespace(settlement_evidence=missing)

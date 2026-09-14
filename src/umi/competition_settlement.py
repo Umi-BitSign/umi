@@ -45,15 +45,27 @@ class SettlementResultBinding(StrictProtocolModel):
     first_observed_block: Block
 
 
+class SettlementVoidBinding(StrictProtocolModel):
+    submission_sha256: Hex32
+    void_decision_sha256: Hex32
+    void_evidence_sha256: Hex32
+    first_observed_block: Block
+
+
 class CompetitionSettlement(StrictProtocolModel):
     """A durable replay record. It grants no permission to submit its projected row."""
 
-    schema_: Literal["umi-competition-settlement/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-settlement/1", "umi-competition-settlement/2"] = Field(
+        alias="schema"
+    )
     policy_sha256: Hex32
     round_sha256: Hex32
     cutoff_schedule: EvidenceCutoffSchedule
     roster: Annotated[tuple[Hex32, ...], Field(min_length=1, max_length=512)]
-    results: Annotated[tuple[SettlementResultBinding, ...], Field(min_length=1, max_length=512)]
+    results: Annotated[
+        tuple[SettlementResultBinding | SettlementVoidBinding, ...],
+        Field(min_length=1, max_length=512),
+    ]
     suite: EvaluationSuite
     registration_snapshot: RegistrationSnapshot
     promotion_head: PromotionHeadBinding
@@ -63,6 +75,11 @@ class CompetitionSettlement(StrictProtocolModel):
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
+        has_void = any(isinstance(item, SettlementVoidBinding) for item in self.results)
+        if has_void != (self.schema_ == "umi-competition-settlement/2"):
+            raise ValueError(
+                "mixed void settlements require version 2; scored settlements use version 1"
+            )
         result_submissions = [item.submission_sha256 for item in self.results]
         if list(self.roster) != sorted(set(self.roster)):
             raise ValueError("settlement roster must be sorted and unique")
@@ -99,9 +116,12 @@ def evidence_cutoff_schedule_digest(schedule: EvidenceCutoffSchedule) -> str:
 
 def competition_settlement_digest(settlement: CompetitionSettlement) -> str:
     settlement = CompetitionSettlement.model_validate_json(canonical_json_bytes(settlement))
-    return hashlib.sha256(
-        b"umi-competition-settlement-v1\0" + canonical_json_bytes(settlement)
-    ).hexdigest()
+    domain = (
+        b"umi-competition-settlement-v2\0"
+        if settlement.schema_ == "umi-competition-settlement/2"
+        else b"umi-competition-settlement-v1\0"
+    )
+    return hashlib.sha256(domain + canonical_json_bytes(settlement)).hexdigest()
 
 
 __all__ = [
@@ -109,6 +129,7 @@ __all__ = [
     "EvidenceCutoffSchedule",
     "PromotionHeadBinding",
     "SettlementResultBinding",
+    "SettlementVoidBinding",
     "competition_settlement_digest",
     "evidence_cutoff_schedule_digest",
 ]

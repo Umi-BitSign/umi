@@ -7,6 +7,7 @@ import json
 import httpx
 import pytest
 
+from umi import drand
 from umi.drand import (
     QUICKNET_CHAIN_HASH,
     QUICKNET_PUBLIC_KEY,
@@ -81,6 +82,81 @@ def test_tampered_round_signature_randomness_and_info_fail_closed() -> None:
     wrong_info["public_key"] = "00" * 96
     with pytest.raises(DrandVerificationError, match="does not match"):
         QuicknetInfo.from_json(wrong_info)
+
+
+@pytest.fixture
+def empty_bls_cache():
+    drand._verify_quicknet_signature_cached.cache_clear()
+    yield drand._verify_quicknet_signature_cached
+    drand._verify_quicknet_signature_cached.cache_clear()
+
+
+def test_repeated_pulse_reuses_only_exact_bls_verification(empty_bls_cache, monkeypatch):
+    calls = []
+    original = drand.pairing
+
+    def pairing(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(drand, "pairing", pairing)
+    pulse = DrandPulse.from_json(pulse_record(), expected_round=ROUND)
+    assert len(calls) == 2
+    pulse.verify()
+    assert verify_quicknet_signature(ROUND, bytes.fromhex(SIGNATURE))
+    assert len(calls) == 2 and empty_bls_cache.cache_info().hits == 2
+    with pytest.raises(DrandVerificationError, match="different round"):
+        DrandPulse.from_json(pulse_record(), expected_round=ROUND + 1)
+    with pytest.raises(DrandVerificationError, match="SHA-256"):
+        DrandPulse(ROUND, "00" * 32, SIGNATURE).verify()
+    assert not verify_quicknet_signature(ROUND + 1, bytes.fromhex(SIGNATURE))
+    assert not verify_quicknet_signature(ROUND, bytes.fromhex(SIGNATURE[:-2] + "00"))
+    assert empty_bls_cache.cache_info().misses == 3
+
+
+@pytest.mark.parametrize(
+    ("constant", "value", "valid"),
+    [
+        ("QUICKNET_PUBLIC_KEY", "00" * 96, False),
+        ("QUICKNET_DST", b"a-different-signature-domain", False),
+        ("QUICKNET_CHAIN_HASH", "00" * 32, True),
+    ],
+)
+def test_bls_cache_key_includes_complete_trust_tuple(
+    empty_bls_cache, monkeypatch, constant, value, valid
+):
+    signature = bytes.fromhex(SIGNATURE)
+    assert verify_quicknet_signature(ROUND, signature)
+    monkeypatch.setattr(drand, constant, value)
+    # A different chain label alone leaves the mathematical equation unchanged,
+    # but must still miss the cache. Chain pin validation is a separate check.
+    assert verify_quicknet_signature(ROUND, signature) is valid
+    assert empty_bls_cache.cache_info().misses == 2
+    assert empty_bls_cache.cache_info().hits == 0
+
+
+@pytest.mark.parametrize("number", [True, float(ROUND), 0, -1, 2**64, [], None])
+def test_round_type_and_bounds_are_checked_before_bls_cache(empty_bls_cache, number):
+    assert not verify_quicknet_signature(number, bytes.fromhex(SIGNATURE))
+    assert empty_bls_cache.cache_info().misses == 0
+
+
+@pytest.mark.parametrize("signature", [None, [], bytearray(48), b"", b"a" * 49])
+def test_signature_shape_is_checked_before_bls_cache(empty_bls_cache, signature):
+    assert not verify_quicknet_signature(ROUND, signature)
+    assert empty_bls_cache.cache_info().misses == 0
+
+
+def test_bls_verification_cache_is_bounded(empty_bls_cache, monkeypatch):
+    def malformed_point(_):
+        raise ValueError("synthetic malformed point")
+
+    monkeypatch.setattr(drand, "decompress_G1", malformed_point)
+    signature = bytes.fromhex(SIGNATURE)
+    for number in range(1, 300):
+        assert not verify_quicknet_signature(number, signature)
+    assert empty_bls_cache.cache_info().maxsize == 256
+    assert empty_bls_cache.cache_info().currsize == 256
 
 
 @pytest.mark.asyncio

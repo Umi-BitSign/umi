@@ -45,8 +45,18 @@ private. They contain references and are excluded from cutoff/work discovery.
 
 The store selects the earliest retained evidence per roster entry, with a
 digest tie-break. Evidence received after cutoff cannot fill a missing entry.
-Every frozen roster member must be represented. Missing work blocks the round
-instead of becoming a scored miner failure or silently reducing the roster.
+Every frozen roster member must have either a scored result or a certified void
+received by cutoff. A void retains all assigned evaluators' signed observations
+and a separate agreement on the reason. It gives no score or reward attribution.
+Missing work or quorum still blocks the round; neither can silently reduce the
+roster or become a scored miner failure.
+
+Mixed outcomes use `umi-competition-settlement/2` and
+`umi-competition-replay-evidence/2`. Each void binding includes the decision
+digest, full evidence digest and first observed block. Scored-only records keep
+their version-1 encoding and digests. Conflicting scored/void outcomes or distinct
+void decisions hold the round and dispute any existing settlement. Valid
+signature variants alone do not change the decision identity.
 
 After the first settlement, retries use its exact evidence identities and
 original snapshot. A newer snapshot or another signature ordering does not

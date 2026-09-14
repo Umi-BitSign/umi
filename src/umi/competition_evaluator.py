@@ -20,13 +20,13 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, Field, model_validator
 
-from .competition_authorization import SignedEndpointAuthorization
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_endpoint_execution import (
     RetainedRevealPulse,
-    assemble_endpoint_evidence,
+    assemble_endpoint_observations,
     prepare_incumbent_job,
 )
+from .competition_evaluator_orders import EvaluationOrder, SignedEvaluationOrder
 from .competition_evidence import (
     IndependentEvaluationEvidence,
     SignedEvaluatorRunRecord,
@@ -38,33 +38,42 @@ from .competition_evidence import (
 from .competition_execution import (
     EndpointIncumbentJob,
     ExecutionBoundary,
-    ExecutionCase,
     ExecutionJournal,
     ModelEvaluationJob,
-    _evaluation_view,
     common_execution_result,
     execution_boundary,
     execution_key,
+    execution_slot,
     run_endpoint_incumbent,
     run_model_evaluation,
     run_record_from_execution,
     validate_job,
 )
-from .competition_observations import ExecutionAnnouncement, SignedExecutionAnnouncement
+from .competition_observations import (
+    ExecutionAnnouncement,
+    SignedExecutionAnnouncement,
+    execution_observations,
+)
 from .competition_publication import PublicationReplayLimits
-from .competition_runner import OfflineCpuRuntime
 from .competition_scheduling import AssignmentPublicationJournal
+from .competition_void import (
+    AttestedEvaluationVoid,
+    EvaluationVoidVote,
+    ScorableObservations,
+    VoidEvaluationEvidence,
+    propose_evaluation_void,
+    validate_own_void,
+    verify_evaluation_void,
+    void_evidence_digest,
+)
 from .drand import QuicknetClient
 from .open_competition import (
     AttestedResult,
     CompetitionPolicy,
     EvaluationResult,
-    EvaluationRound,
     EvaluationSuite,
     Hotkey,
-    ModelBundle,
     Signature,
-    SignedSubmission,
     digest,
     identity,
     sign_object,
@@ -74,23 +83,6 @@ from .policy import scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_BYTES = 64 * 1024**2
-
-
-class EvaluationOrder(StrictProtocolModel):
-    schema_: Literal["umi-evaluation-order/1"] = Field(alias="schema")
-    round: EvaluationRound
-    submission: SignedSubmission
-    incumbent: ModelBundle
-    runtime: OfflineCpuRuntime
-    cases: Annotated[tuple[ExecutionCase, ...], Field(min_length=3, max_length=2048)]
-    evaluators: Annotated[tuple[Hotkey, ...], Field(min_length=1, max_length=64)]
-    publication: SignedEndpointAuthorization | None = None
-    no_weight: Literal[True] = True
-
-
-class SignedEvaluationOrder(StrictProtocolModel):
-    order: EvaluationOrder
-    signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
 
 
 class EvaluationVote(StrictProtocolModel):
@@ -115,15 +107,41 @@ class IndependentEvidenceObservation(StrictProtocolModel):
     chain_submission_authorized: Literal[False] = False
 
 
+class VoidEvidenceObservation(IndependentEvidenceObservation):
+    schema_: Literal["umi-void-evidence-observation/1"] = Field(alias="schema")
+
+
 def validate_evidence_observation(receipt, order, evidence, hotkey, *, cutoff_block=None):
-    receipt = IndependentEvidenceObservation.model_validate_json(canonical_json_bytes(receipt))
+    return _validate_observation(
+        receipt,
+        order,
+        independent_evidence_digest(evidence),
+        hotkey,
+        model=IndependentEvidenceObservation,
+        cutoff_block=cutoff_block,
+    )
+
+
+def validate_void_observation(receipt, order, evidence, hotkey, *, cutoff_block=None):
+    return _validate_observation(
+        receipt,
+        order,
+        void_evidence_digest(evidence),
+        hotkey,
+        model=VoidEvidenceObservation,
+        cutoff_block=cutoff_block,
+    )
+
+
+def _validate_observation(receipt, order, evidence_sha256, hotkey, *, model, cutoff_block):
+    receipt = model.model_validate_json(canonical_json_bytes(receipt))
     if (
         identity(receipt.evaluator_hotkey) != identity(hotkey)
         or receipt.policy_sha256 != order.round.policy_sha256
         or receipt.round_sha256 != digest(order.round)
         or receipt.order_sha256 != digest(order)
         or receipt.submission_sha256 != digest(order.submission.submission)
-        or receipt.evidence_sha256 != independent_evidence_digest(evidence)
+        or receipt.evidence_sha256 != evidence_sha256
         or receipt.observed.block < order.round.reveal_block
     ):
         raise ValueError("local independent-evidence observation binding mismatch")
@@ -527,7 +545,7 @@ class EvaluatorJournal:
             ).fetchone()
         return None if row is None else model.model_validate_json(row[0])
 
-    def settlement_evidence(self, slot):
+    def settlement_evidence(self, slot, *, void=False):
         """Read one completed local slot coherently, rejecting holds and oversized rows."""
 
         def read(db, table, kind, model):
@@ -555,8 +573,18 @@ class EvaluatorJournal:
                 raise ValueError("local settlement order is missing or conflicted")
             return (
                 read(db, "orders", None, SignedEvaluationOrder),
-                read(db, "artifacts", "independent", IndependentEvaluationEvidence),
-                read(db, "artifacts", "independent_observation", IndependentEvidenceObservation),
+                read(
+                    db,
+                    "artifacts",
+                    "void" if void else "independent",
+                    VoidEvaluationEvidence if void else IndependentEvaluationEvidence,
+                ),
+                read(
+                    db,
+                    "artifacts",
+                    "void_observation" if void else "independent_observation",
+                    VoidEvidenceObservation if void else IndependentEvidenceObservation,
+                ),
                 read(db, "artifacts", "announcement", SignedExecutionAnnouncement),
             )
 
@@ -564,10 +592,28 @@ class EvaluatorJournal:
         raw = canonical_json_bytes(value)
         conflict = False
         with self.transaction() as db:
+            scored = ("result_intent", "run_intent", "vote", "independent")
+            void = ("void_intent", "void_vote", "void")
+            opposite = void if kind in scored else scored if kind in void else ()
+            incompatible = (
+                bool(opposite)
+                and db.execute(
+                    "SELECT 1 FROM artifacts WHERE slot=? AND kind IN ("
+                    + ",".join("?" for _ in opposite)
+                    + ") LIMIT 1",
+                    (slot, *opposite),
+                ).fetchone()
+            )
+            if incompatible:
+                # Commit the hold even when capacity cannot retain another body.
+                db.execute("UPDATE orders SET conflict=1 WHERE slot=?", (slot,))
+                conflict = True
             row = db.execute(
                 "SELECT body FROM artifacts WHERE slot=? AND kind=?", (slot, kind)
             ).fetchone()
-            if row:
+            if incompatible:
+                pass
+            elif row:
                 if bytes(row[0]) != raw:
                     conflict = True
                     db.execute("UPDATE orders SET conflict=1 WHERE slot=?", (slot,))
@@ -682,6 +728,11 @@ class ContinuousEvaluator:
         head = (await self.boundary()).block
         if not order.round.reveal_block <= head <= order.round.valid_through_block:
             raise ValueError("evaluation signing is premature or expired")
+        slot = execution_slot(order.round, order.submission, self.config.evaluator_hotkey)
+        with self.journal.transaction() as db:
+            state = db.execute("SELECT conflict FROM orders WHERE slot=?", (slot,)).fetchone()
+        if state != (0,):
+            raise ValueError("evaluation signing order is missing or conflicted")
         return head
 
     def ingest_once(self):
@@ -791,6 +842,11 @@ class ContinuousEvaluator:
     async def advance(self, slot, signed, head):
         order = signed.order
         job = order_job(order, self.config.evaluator_hotkey, self.policy, self.legacy)
+        void = self.journal.get(slot, "void", VoidEvaluationEvidence)
+        if void is not None:
+            await self.observe_void(slot, order, void)
+            self._output(order, "void", void.certificate)
+            return "complete"
         final = self.journal.get(slot, "independent", IndependentEvaluationEvidence)
         if final is not None:
             await self.observe_independent(slot, order, final)
@@ -845,7 +901,7 @@ class ContinuousEvaluator:
                             raise ValueError("wrong reveal pulse")
                         self.journal.put(slot, key, pulse)
                     pulses[number] = pulse
-                retained = assemble_endpoint_evidence(
+                retained = assemble_endpoint_observations(
                     incumbent=retained,
                     journal=self.dispatch,
                     publication_sha256=digest(order.publication.publication),
@@ -853,7 +909,7 @@ class ContinuousEvaluator:
                     pulses=pulses,
                     current_block=head,
                 )
-            _evaluation_view(retained, suite, self.policy, head)
+            execution_observations(retained, suite, self.policy, current_block=head)
             announcement = ExecutionAnnouncement(
                 schema="umi-execution-announcement/1",
                 order_sha256=digest(order),
@@ -867,7 +923,7 @@ class ContinuousEvaluator:
             )
             self.journal.put(slot, "announcement", own)
         self._output(order, "execution", own)
-        executions = []
+        executions, observations = [], []
         for evaluator in order.evaluators:
             value = (
                 own
@@ -882,11 +938,25 @@ class ContinuousEvaluator:
                 or identity(value.signature.hotkey) != identity(evaluator)
             ):
                 raise ValueError("peer execution signer/order mismatch")
-            view = _evaluation_view(body.evidence, suite, self.policy, head)
+            view = execution_observations(body.evidence, suite, self.policy, current_block=head)
             if view["job"] != order_job(order, evaluator, self.policy, self.legacy):
                 raise ValueError("peer execution differs from the assigned job")
             self.journal.put(slot, "peer_execution:" + identity(evaluator), value)
             executions.append(body.evidence)
+            observations.append(value)
+        try:
+            proposed_void = propose_evaluation_void(
+                signed_order=signed,
+                observations=tuple(observations),
+                suite=suite,
+                policy=self.policy,
+                current_block=head,
+                legacy=self.legacy,
+            )
+        except ScorableObservations:
+            pass
+        else:
+            return await self.advance_void(slot, signed, proposed_void, own, suite)
         common = common_execution_result(tuple(executions), suite, self.policy, current_block=head)
         record = run_record_from_execution(
             own.announcement.evidence, common, suite, self.policy, current_block=head
@@ -944,6 +1014,83 @@ class ContinuousEvaluator:
         self.journal.put(slot, "independent", final)
         await self.observe_independent(slot, order, final)
         self._output(order, "independent", final)
+        return "complete"
+
+    async def observe_void(self, slot, order, evidence):
+        receipt = self.journal.get(slot, "void_observation", VoidEvidenceObservation)
+        if receipt is None:
+            receipt = VoidEvidenceObservation(
+                schema="umi-void-evidence-observation/1",
+                evaluator_hotkey=self.config.evaluator_hotkey,
+                policy_sha256=digest(self.policy),
+                round_sha256=digest(order.round),
+                order_sha256=digest(order),
+                submission_sha256=digest(order.submission.submission),
+                evidence_sha256=void_evidence_digest(evidence),
+                observed=await self.boundary(),
+            )
+            validate_void_observation(receipt, order, evidence, self.config.evaluator_hotkey)
+            self.journal.put(slot, "void_observation", receipt)
+        validate_void_observation(receipt, order, evidence, self.config.evaluator_hotkey)
+        if self.review_store is not None:
+            retained = self.journal.get(slot, "void_review_retention", VoidEvidenceObservation)
+            if retained is not None:
+                validate_void_observation(retained, order, evidence, self.config.evaluator_hotkey)
+                return receipt
+            suite = _read(
+                Path(self.config.reveal_directory) / (order.round.suite_sha256 + ".json"),
+                EvaluationSuite,
+            )
+            current = await self.boundary()
+            self.review_store.record_void_evaluation(
+                evidence=evidence, suite=suite, observed_block=current.block
+            )
+            self.journal.put(
+                slot, "void_review_retention", receipt.model_copy(update={"observed": current})
+            )
+        return receipt
+
+    async def advance_void(self, slot, signed, proposed, own, suite):
+        order = signed.order
+        context = dict(signed_order=signed, suite=suite, policy=self.policy, legacy=self.legacy)
+        head = await self.signing_head(order)
+        validate_own_void(
+            proposed,
+            own_observation=own,
+            evaluator_hotkey=self.config.evaluator_hotkey,
+            current_block=head,
+            **context,
+        )
+        self.journal.put(slot, "void_intent", proposed)
+        vote = self.journal.get(slot, "void_vote", EvaluationVoidVote)
+        if vote is None:
+            head = await self.signing_head(order)
+            vote = EvaluationVoidVote(void=proposed, signature=sign_object(proposed, self.wallet))
+            self.journal.put(slot, "void_vote", vote)
+        self._output(order, "void_vote", vote)
+        votes = []
+        for evaluator in order.evaluators:
+            value = (
+                vote
+                if identity(evaluator) == identity(self.config.evaluator_hotkey)
+                else self._peer(slot, order, evaluator, "void_vote", EvaluationVoidVote)
+            )
+            verify_signature(value.void, value.signature)
+            if value.void != proposed or identity(value.signature.hotkey) != identity(evaluator):
+                raise ValueError("peer void decision differs from retained observations")
+            self.journal.put(slot, "peer_void_vote:" + identity(evaluator), value)
+            votes.append(value.signature)
+        certificate = AttestedEvaluationVoid(void=proposed, signatures=tuple(votes))
+        verify_evaluation_void(certificate, current_block=await self.signing_head(order), **context)
+        evidence = VoidEvaluationEvidence(
+            schema="umi-competition-void-evidence/1",
+            order=signed,
+            certificate=certificate,
+            legacy_policy=self.legacy,
+        )
+        self.journal.put(slot, "void", evidence)
+        await self.observe_void(slot, order, evidence)
+        self._output(order, "void", certificate)
         return "complete"
 
     async def poll_once(self):

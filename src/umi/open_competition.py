@@ -596,21 +596,41 @@ def project_weights(
     current_block: int,
     promoted_model_sha256: str | None,
     promoted_hotkey: str | None,
+    voids: tuple = (),
 ) -> WeightProjection:
     """Rehearse an exact row. The caller must supply verified promotion attribution.
 
     This intentionally returns no signed transaction or activation authority.
-    Only complete rounds settle: every frozen roster member has one transcript.
+    Every frozen roster member requires a scored result or a replayable void.
     """
     if not 0 <= current_block - snapshot.block <= policy.maximum_snapshot_age_blocks:
         raise ValueError("weight snapshot is stale or from the future")
-    supplied = [digest(s.submission) for s, _ in evaluations]
+    # Lazy imports avoid a cycle through the execution contract. An exclusion
+    # is accepted only with its complete, independently signed observations.
+    from .competition_void import replay_void_evidence
+
+    excluded = []
+    for evidence in voids:
+        evidence = replay_void_evidence(
+            evidence, suite=suite, policy=policy, current_block=current_block
+        )
+        if evidence.order.order.round != round_:
+            raise ValueError("void projection evidence belongs to another round")
+        excluded.append(evidence.order.order.submission)
+    supplied = [digest(s.submission) for s, _ in evaluations] + [
+        digest(s.submission) for s in excluded
+    ]
     if sorted(supplied) != list(round_.roster):
         raise ValueError("weight projection requires the exact complete round roster")
     by_key = {identity(r.hotkey): r for r in snapshot.registrations if r.uid < policy.maximum_uids}
     endpoint_scores: dict[str, Fraction] = {}
     model_recipient: str | None = None
     seen: set[tuple[str, str]] = set()
+    for signed in excluded:
+        key = (identity(signed.submission.hotkey), signed.submission.track)
+        if key in seen:
+            raise ValueError("multiple submissions for the same hotkey and track")
+        seen.add(key)
     for signed, attested in evaluations:
         sub = signed.submission
         key = identity(sub.hotkey)

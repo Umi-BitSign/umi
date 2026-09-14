@@ -83,10 +83,18 @@ installing the reveal and before signing results. Private endpoint transcripts
 can contain URL credentials, so never publish the exchange database or peer
 outboxes as public artifacts.
 
-The optional coordinator collector replays complete independent evidence and
-retains the relay's original observed block. Missing admission or cutoff state
-leaves it pending. Preserve these records; deleting them to retry would lose the
-first-arrival evidence needed for settlement.
+The optional coordinator collector replays complete scored or void evidence.
+The coordinator records its actual collection block, independently of the
+relay's earlier transport receipt. Delayed collection cannot backdate evidence
+across the fixed settlement cutoff. Exact retries preserve the coordinator's
+first retained receipt. Missing admission or cutoff state leaves collection
+pending. Preserve these records; deleting them would lose first-arrival evidence.
+
+Void votes and certificates carry all assigned evaluators' signed observations.
+The relay verifies the deterministic decision and signatures before retaining
+them. Endpoint observations must also match the exact assigned publication and
+transport policy. A final certificate delivered to an evaluator never replaces
+that evaluator's own completion and local receipt.
 
 ## What this establishes
 
