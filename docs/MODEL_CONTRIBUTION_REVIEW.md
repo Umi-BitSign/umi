@@ -12,11 +12,14 @@ license list, the review route and the supported evaluation resource limits
 before asking contributors to train or submit for this competition. No date is
 committed until those inputs and the deployment checks are ready.
 
-The current reference repository declares Apache-2.0 for code and CC BY-SA 4.0
-for weights and its portable bundle. That does not make those licenses a general
-allowlist or clear every upstream model and dataset. Do not remove attribution,
-change inherited license labels, or assume a new bundle license overrides
-upstream restrictions.
+The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its
+weights and portable bundle. The separate
+[community candidate](https://github.com/Umi-BitSign/umi-reference-model/blob/main/community/README.md)
+records the supplied SHuBERT model's MIT declaration and retains separate
+wrapper, DINO and ByT5 notices. It does not inherit S1's CC BY-SA label. Neither
+candidate defines the launch allowlist or clears every upstream model and
+dataset. Do not remove attribution, change inherited license labels, or assume
+a new bundle license overrides upstream restrictions.
 
 The code checks `license_id` against `CompetitionPolicy.accepted_model_licenses`
 and binds `accepted_terms_sha256` to the policy. Those checks establish agreement
