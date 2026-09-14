@@ -14,6 +14,7 @@ from umi.competition_store import AdmissionCapacity, AdmissionCapacityError, Com
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_publication import _independent
 from .test_open_competition import policy as policy
 from .test_open_competition import scenario as scenario
 from .test_open_competition import snapshot, wallet
@@ -95,6 +96,34 @@ def test_reviewed_history_supports_actual_promotion_and_restart(setup):
     reopened = EvaluatorReviewStore(s.reviews.directory, s.policy, limits=s.limits)
     assert reopened.baseline() == first
     assert reopened.reviewed_promotion_head(digest(s.round), maximum_bytes=8_000_000).sequence == 1
+
+
+def test_records_independent_evidence_against_verified_schedule_without_intake_receipt(setup):
+    s = setup
+    observe(s)
+    evidence = _independent(s.policy, s.model, s.round, s.suite, s.evaluation)
+    receipt = s.reviews.record_independent_evaluation(
+        signed=s.model,
+        evidence=evidence,
+        round_=s.round,
+        suite=s.suite,
+        observed_block=150,
+    )
+    assert receipt["first_observed_block"] == 150
+    reopened = EvaluatorReviewStore(s.reviews.directory, s.policy, limits=s.limits)
+    with reopened._connection() as c:
+        assert reopened._fixed_cutoff(c, digest(s.round)) == s.cutoff.publication.cutoff_schedule
+        assert c.execute("SELECT COUNT(*) FROM evidence_cutoff_schedules").fetchone() == (0,)
+        c.execute("UPDATE reviewed_cutoffs SET observed_block=999")
+        c.commit()
+    with pytest.raises(ValueError, match="receipt block"):
+        reopened.record_independent_evaluation(
+            signed=s.model,
+            evidence=evidence,
+            round_=s.round,
+            suite=s.suite,
+            observed_block=151,
+        )
 
 
 def test_roles_cannot_be_reinterpreted_or_used_for_new_intake(setup):

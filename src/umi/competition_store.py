@@ -649,10 +649,9 @@ class CompetitionStore:
         evidence_id = independent_evidence_digest(evidence)
         body = canonical_json_bytes(evidence)
         with self._transaction() as connection:
-            if not connection.execute(
-                "SELECT 1 FROM evidence_cutoff_schedules WHERE round=?", (round_id,)
-            ).fetchone():
-                raise ValueError("independent evidence requires a pre-fixed cutoff schedule")
+            # Intake uses its pre-fixed ledger schedule. Evaluator review stores
+            # obtain the same deadline from their independently verified cutoff.
+            self._fixed_cutoff(connection, round_id)
             _advance_block(connection, observed_block)
             prior = connection.execute(
                 "SELECT round, submission, result, body, first_observed_block "
