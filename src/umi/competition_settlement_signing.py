@@ -10,12 +10,12 @@ import asyncio
 from pathlib import Path
 
 from .competition_evaluator import (
-    ModelExecutionEvidence,
     order_job,
     validate_evidence_observation,
     validate_order,
 )
 from .competition_execution import (
+    ModelExecutionEvidence,
     execution_boundary,
     execution_slot,
     run_record_from_execution,
