@@ -44,6 +44,36 @@ class SettlementEndorsement(StrictProtocolModel):
     signature: Signature
 
 
+def validate_local_execution(worker, order, independent, own, suite, head):
+    hotkey = worker.config.evaluator_hotkey
+    body = own.announcement
+    verify_signature(body, own.signature)
+    if (
+        body.order_sha256 != digest(order)
+        or identity(body.evaluator_hotkey) != identity(hotkey)
+        or identity(own.signature.hotkey) != identity(hotkey)
+    ):
+        raise ValueError("local execution announcement belongs to another evaluator")
+    job = order_job(order, hotkey, worker.policy, worker.legacy)
+    actual_job = (
+        body.evidence.job
+        if isinstance(body.evidence, ModelExecutionEvidence)
+        else body.evidence.incumbent.job
+    )
+    if actual_job != job:
+        raise ValueError("local execution differs from the retained assignment")
+    expected = run_record_from_execution(
+        body.evidence, independent.attested_result.result, suite, worker.policy, current_block=head
+    )
+    runs = [
+        r.run
+        for r in independent.evaluator_runs
+        if identity(r.run.evaluator_hotkey) == identity(hotkey)
+    ]
+    if runs != [expected]:
+        raise ValueError("missing the exact independently executed run")
+
+
 class IndependentSettlementSigner:
     def __init__(self, worker, cutoff_journal, review_store, *, limits):
         if review_store.policy != worker.policy:
@@ -111,36 +141,7 @@ class IndependentSettlementSigner:
                 hotkey,
                 cutoff_block=settlement.cutoff_schedule.evidence_cutoff_block,
             )
-            body = own.announcement
-            verify_signature(body, own.signature)
-            if (
-                body.order_sha256 != digest(order)
-                or identity(body.evaluator_hotkey) != identity(hotkey)
-                or identity(own.signature.hotkey) != identity(hotkey)
-            ):
-                raise ValueError("settlement execution announcement belongs to another evaluator")
-            job = order_job(order, hotkey, worker.policy, worker.legacy)
-            actual_job = (
-                body.evidence.job
-                if isinstance(body.evidence, ModelExecutionEvidence)
-                else body.evidence.incumbent.job
-            )
-            if actual_job != job:
-                raise ValueError("settlement execution differs from the retained assignment")
-            expected = run_record_from_execution(
-                body.evidence,
-                independent.attested_result.result,
-                settlement.suite,
-                worker.policy,
-                current_block=head,
-            )
-            runs = [
-                r.run
-                for r in independent.evaluator_runs
-                if identity(r.run.evaluator_hotkey) == identity(hotkey)
-            ]
-            if runs != [expected]:
-                raise ValueError("settlement is missing the exact independently executed run")
+            validate_local_execution(worker, order, independent, own, settlement.suite, head)
 
     def _promotion(self, prepared):
         actual = self.reviews.reviewed_promotion_head(

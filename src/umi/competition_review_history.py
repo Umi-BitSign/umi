@@ -102,6 +102,10 @@ class EvaluatorReviewStore(CompetitionStore):
         super()._assert_action_allowed(connection, round_sha256)
         self._read_cutoff(connection, round_sha256)
 
+    def _fixed_cutoff(self, connection, round_sha256):
+        publication, _, _ = self._read_cutoff(connection, round_sha256)
+        return publication.cutoff_schedule
+
     def observe_cutoff(self, certificate, submissions, *, snapshot, observed_block):
         """Caller supplies its independently proved cutoff snapshot and current head."""
         publication = verify_cutoff_publication(

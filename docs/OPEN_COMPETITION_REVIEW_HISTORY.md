@@ -74,8 +74,11 @@ evaluation and preserved model; use the
 [v2 agreed review](OPEN_COMPETITION_PROMOTION_AGREEMENT.md) to retain a common
 history head with separate local receipt times.
 
-Automatic delivery and application of reviewed promotion decisions is separate
-work. Real protected-data evaluation, rights approval, independent operators,
+The [reviewed promotion delivery](OPEN_COMPETITION_PROMOTION_DELIVERY.md) path
+retains completed independent evidence automatically and delivers approved v2
+decisions through the existing authenticated round connection. Each operator
+applies the decision using its own evidence, archive and actual finalized head.
+Real protected-data evaluation, rights approval, independent operators,
 signed activation and finalized incentive verification remain launch gates.
 This implementation does not change the live bridge policy or deadlines.
 

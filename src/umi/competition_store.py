@@ -649,10 +649,9 @@ class CompetitionStore:
         evidence_id = independent_evidence_digest(evidence)
         body = canonical_json_bytes(evidence)
         with self._transaction() as connection:
-            if not connection.execute(
-                "SELECT 1 FROM evidence_cutoff_schedules WHERE round=?", (round_id,)
-            ).fetchone():
-                raise ValueError("independent evidence requires a pre-fixed cutoff schedule")
+            # Intake uses its pre-fixed ledger schedule. Evaluator review stores
+            # obtain the same deadline from their independently verified cutoff.
+            self._fixed_cutoff(connection, round_id)
             _advance_block(connection, observed_block)
             prior = connection.execute(
                 "SELECT round, submission, result, body, first_observed_block "
@@ -687,6 +686,75 @@ class CompetitionStore:
             "first_observed_block": first_observed_block,
             "chain_submission_authorized": False,
         }
+
+    def accepted_review(self, value):
+        """Verify an existing decision and its local receipt without retiming it."""
+        review = value.review
+        verify_review(review, self.policy)
+        with self._connection() as connection:
+            self._assert_action_allowed(connection, digest(value.round))
+            row = connection.execute(
+                "SELECT length(body) FROM promotions WHERE sequence=?", (review.review.sequence,)
+            ).fetchone()
+            if row is None:
+                return None
+            if not 0 < row[0] <= 16 * 1024**2:
+                raise ValueError("retained promotion exceeds its byte bound")
+            raw = connection.execute(
+                "SELECT body FROM promotions WHERE sequence=?", (review.review.sequence,)
+            ).fetchone()[0]
+            record = json.loads(raw)
+            if (
+                canonical_json_bytes(record) != raw
+                or record.get("schema") != "umi-model-baseline/2"
+            ):
+                raise ValueError("retained promotion is not an agreed canonical decision")
+            attested, _ = self._read_agreed_promotion_receipt(connection, record)
+            if record != _agreed_promotion_record(value.submission, attested, review.review):
+                raise ValueError("review delivery changes an already accepted promotion")
+            return record
+
+    def promotion_evidence(self, *, round_, signed, suite, current_block):
+        """Load bounded independent evidence already retained by this operator."""
+        round_id, sub_id = digest(round_), digest(signed.submission)
+        with self._connection() as connection:
+            self._assert_action_allowed(connection, round_id)
+            cutoff = self._fixed_cutoff(connection, round_id)
+            if not round_.reveal_block <= current_block <= cutoff.evidence_cutoff_block:
+                raise ValueError("reviewed promotion arrived outside its evidence window")
+            retained, attested = self._recorded_evaluation(connection, round_id, sub_id)
+            if retained != signed:
+                raise ValueError("promotion differs from retained submission")
+            result_id = digest(attested.result)
+            row = connection.execute(
+                "SELECT digest,length(body),first_observed_block "
+                "FROM independent_evaluation_evidence WHERE round=? AND submission=? AND result=? "
+                "ORDER BY first_observed_block,digest LIMIT 1",
+                (round_id, sub_id, result_id),
+            ).fetchone()
+            if (
+                row is None
+                or not 0 < row[1] <= 16 * 1024**2
+                or (
+                    not round_.reveal_block
+                    <= row[2]
+                    <= min(current_block, cutoff.evidence_cutoff_block)
+                )
+            ):
+                raise ValueError("promotion requires timely retained independent evidence")
+            raw = connection.execute(
+                "SELECT body FROM independent_evaluation_evidence WHERE digest=?", (row[0],)
+            ).fetchone()[0]
+        evidence = IndependentEvaluationEvidence.model_validate_json(raw)
+        if canonical_json_bytes(evidence) != raw or (
+            independent_evidence_digest(evidence) != row[0]
+            or evidence.attested_result.result != attested.result
+        ):
+            raise ValueError("promotion independent evidence differs from its retained identity")
+        replay_independent_evaluation(
+            evidence, signed, round_, suite, self.policy, current_block=current_block
+        )
+        return evidence
 
     def round_status(self, round_sha256: str, *, offset: int = 0, limit: int = 100) -> dict:
         if not 0 <= offset <= 10_000_000 or not 1 <= limit <= 100:
