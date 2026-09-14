@@ -3,8 +3,10 @@
 The temporary bridge has replaced the frozen two-miner pilot policy on UMI's
 UID 0 and UID 54 validators. Both have finalized rows under the shared-coldkey,
 HTTPS-IP or recorded-funder rule. See the
-[funding-cap readback](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md) for the
-signed policy and exact rows. The [IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md)
+[runtime-458 recovery record](REGISTRATION_BRIDGE_RUNTIME_458.md) for the
+replacement policy and exact rows after the September 14 chain upgrade.
+The [funding-cap readback](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md),
+[IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md)
 and [initial activation report](REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
 record the earlier policies, whose signed bytes remain unchanged.
 

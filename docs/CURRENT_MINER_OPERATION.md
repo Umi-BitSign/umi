@@ -8,9 +8,10 @@ qualifying coldkey/IP/funding group an equal total weight, divided among its pas
 It does not score translations or require a running model.
 
 Both UMI validators, UID 0 and UID 54, have finalized bridge rows. See the
-[funding-cap deployment record](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
-for the applied policy and exact rows. The earlier
-[IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) is historical.
+[runtime-458 recovery record](REGISTRATION_BRIDGE_RUNTIME_458.md) for the
+replacement policy and exact rows after the September 14 chain upgrade.
+The earlier [funding-cap deployment record](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md) and
+[IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) are historical.
 Inclusion in a row is not proof that a miner has already received a payout.
 Use the [current-row diagnostic](REGISTRATION_BRIDGE_HEALTH.md) for freshness;
 the deployment records above are dated snapshots.
