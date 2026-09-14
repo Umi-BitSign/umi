@@ -618,6 +618,8 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(l
     )
     next_item = next_fixture()
     assert next_item.request.reveal_round == next_pulse.round
+    issuance = next_item.finalized_blocks.blocks[next_item.request.issued_block]
+    dispatch.feed.clock.ns = max(dispatch.feed.clock.ns, issuance.timestamp_ms * 1_000_000 + 1)
     assert next_item.policy == item.policy
     # sr25519 re-signing may change signature bytes; the retained admission and
     # its exact original signature remain in the store across both rounds.
@@ -734,10 +736,12 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(l
                 await driver.poll_once()
                 await driver.drain()
             await dispatch.miner.competition_authority.poll_once()
-            dispatch.feed.clock.ns += 1
-            if turn == 0:
-                dispatch.feed.clock.ns += dispatch.config.discovery_grace_seconds * 1_000_000_000
-        assert [d._counts["completed"] for d in dispatchers] == [3, 3]
+            # A restarted dispatcher may ingest an old publication first. Each
+            # newly discovered publication gets its own full discovery grace.
+            dispatch.feed.clock.ns += dispatch.config.discovery_grace_seconds * 1_000_000_000
+        assert [d._counts["completed"] for d in dispatchers] == [3, 3], [
+            d._counts for d in dispatchers
+        ]
         s.provider.block = item.round.reveal_block
         for driver in s.drivers:
             driver.provider.block = s.provider.block
