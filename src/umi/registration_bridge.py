@@ -121,7 +121,10 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
     tls_verification: Literal["system_trust_store/1"]
     allow_redirects: Literal[False]
     maximum_raw_weight: Literal[65_535]
-    required_runtime_spec_version: Literal[455]
+    # Retain the legacy field and its signed bytes for existing policies/journals.
+    # Runtime specVersion is informational; compatibility is checked from the
+    # finalized chain settings and decoded state, not a runtime-number allowlist.
+    required_runtime_spec_version: Annotated[int, Field(ge=0, le=2**32 - 1)]
     required_mechanism_count: Literal[1]
     required_commit_reveal_enabled: Literal[False]
     required_commit_reveal_version: Literal[4]
@@ -165,9 +168,6 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
 
 class RegistrationBridgeFundingPolicyBody(RegistrationBridgePolicyBody):
     schema_: Literal["umi-registration-bridge-policy-body/2"] = Field(alias="schema")
-    # Each signed policy selects one reviewed runtime, never the observed version.
-    # Keep 455 readable for retained policies and uncertain submission journals.
-    required_runtime_spec_version: Literal[455, 458]
     reward_rule: Literal["equal_live_coldkey_ip_funder_groups/1"]
     grouping_rule: Literal["registered_owner_or_https_ip_or_recorded_funder_connected_components/1"]
     funding_snapshot: FundingSnapshot
@@ -506,7 +506,6 @@ def validate_registration_bridge_chain(
     )
     body = policy.body
     gates = {
-        "runtime_spec_version": body.required_runtime_spec_version,
         "mechanism_count": body.required_mechanism_count,
         "commit_reveal_enabled": body.required_commit_reveal_enabled,
         "commit_reveal_version": body.required_commit_reveal_version,

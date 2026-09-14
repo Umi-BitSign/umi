@@ -20,6 +20,11 @@ from tests.test_registration_bridge_ip_groups import roster
 from umi.protocol import canonical_json_bytes
 from umi.registration_funding_audit import TRANSFER_URL
 from umi.registration_funding_snapshot import snapshot_from_report
+from umi.validator_supervisor_adapters import (
+    SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA,
+    SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE,
+    _parse_bootstrap_input_bundle,
+)
 
 
 def funding_report(obs, funders):
@@ -108,16 +113,25 @@ def test_different_keys_and_ips_same_funder_share_one_budget(setup):
     assert sum(decision(old, obs).expected_row[u][1] for u in (71, 72, 73)) == 3 * 65535
 
 
-def test_reviewed_runtime_requires_new_signature_and_preserves_allocation(setup):
+@pytest.mark.parametrize("runtime", [0, 454, 456, 458, 459, 1000, 2**32 - 1])
+def test_runtime_annotation_accepts_uint32_and_preserves_allocation(setup, runtime):
     obs, _, signer, policy, _ = setup
     expected = decision(policy, obs)
     values = policy.body.model_dump(by_alias=True)
-    values["required_runtime_spec_version"] = 458
+    values["required_runtime_spec_version"] = runtime
     updated = bridge.sign_registration_bridge_policy(
         bridge.RegistrationBridgeFundingPolicyBody.model_validate(values), wallet=signer
     )
     parsed = bridge.parse_registration_bridge_policy(canonical_json_bytes(updated))
-    result = decision(parsed, obs.model_copy(update={"runtime_spec_version": 458}))
+    bundle_raw = canonical_json_bytes(
+        {
+            "schema": SUPERVISOR_REGISTRATION_BRIDGE_INPUT_BUNDLE_SCHEMA,
+            "profile": SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE,
+            "signed_policy": updated.model_dump(mode="json", by_alias=True),
+        }
+    )
+    assert _parse_bootstrap_input_bundle(bundle_raw).signed_policy == parsed
+    result = decision(parsed, obs.model_copy(update={"runtime_spec_version": runtime}))
     assert result.action == "submit"
     assert result.expected_row == expected.expected_row
     assert parsed.body.funding_snapshot == policy.body.funding_snapshot
@@ -126,28 +140,37 @@ def test_reviewed_runtime_requires_new_signature_and_preserves_allocation(setup)
     assert bridge.registration_bridge_policy_sha256(parsed) != (
         bridge.registration_bridge_policy_sha256(policy)
     )
-    for observed_runtime in (455, 456, 457, 459):
-        with pytest.raises(bridge.RegistrationBridgeError, match="runtime_spec_version_changed"):
-            decision(parsed, obs.model_copy(update={"runtime_spec_version": observed_runtime}))
+    assert decision(parsed, obs).expected_row == expected.expected_row
 
 
-def test_old_signed_runtime_does_not_follow_chain_upgrade(setup):
+@pytest.mark.parametrize("runtime", [456, 458, 459, 1000, 2**32 - 1])
+def test_runtime_only_upgrade_keeps_old_policies_valid_without_resigning(setup, runtime):
     obs, _, _, policy, old = setup
     for signed in (policy, old):
-        with pytest.raises(bridge.RegistrationBridgeError, match="runtime_spec_version_changed"):
-            decision(signed, obs.model_copy(update={"runtime_spec_version": 458}))
+        raw = canonical_json_bytes(signed)
+        parsed = bridge.parse_registration_bridge_policy(raw)
+        expected = decision(parsed, obs)
+        upgraded = decision(parsed, obs.model_copy(update={"runtime_spec_version": runtime}))
+        assert upgraded.action == "submit"
+        assert upgraded.expected_row == expected.expected_row
+        assert canonical_json_bytes(parsed) == raw
+
+
+def test_runtime_annotation_is_still_authenticated(setup):
+    policy = setup[3]
     tampered = policy.model_dump(by_alias=True)
     tampered["body"]["required_runtime_spec_version"] = 458
     with pytest.raises(bridge.RegistrationBridgeError, match="policy_signature_invalid"):
         bridge.parse_registration_bridge_policy(canonical_json_bytes(tampered))
 
 
-@pytest.mark.parametrize("runtime", [454, 456, 457, 459, True, "458"])
-def test_unreviewed_funding_policy_runtime_is_rejected(setup, runtime):
-    values = setup[3].body.model_dump(by_alias=True)
-    values["required_runtime_spec_version"] = runtime
-    with pytest.raises(ValueError):
-        bridge.RegistrationBridgeFundingPolicyBody.model_validate(values)
+@pytest.mark.parametrize("runtime", [-1, 2**32, True, "458", 458.0, None])
+def test_malformed_runtime_annotation_is_rejected(setup, runtime):
+    for signed in (setup[3], setup[4]):
+        values = signed.body.model_dump(by_alias=True)
+        values["required_runtime_spec_version"] = runtime
+        with pytest.raises(ValueError):
+            type(signed.body).model_validate(values)
 
 
 @pytest.mark.parametrize(
