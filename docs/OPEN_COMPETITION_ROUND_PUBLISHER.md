@@ -5,9 +5,10 @@ directive under explicit release-authority controls. It runs separately from
 the wallet-free coordinator. It does not submit a chain transaction or change
 the running validators.
 
-This is a local signing command. Feed distribution and automatic selection of
-completed rounds are not connected yet. Do not use it as a launch announcement
-or a replacement for the signed initial supervisor upgrade.
+This is a local signing command with optional wallet-free feed delivery.
+Automatic selection of completed rounds and the live host handoff remain to be
+connected and rehearsed. Do not use this command as a launch announcement or a
+replacement for the signed initial supervisor upgrade.
 
 ## Inputs
 
@@ -44,6 +45,62 @@ No coldkey is requested. These are release-authority signatures, not validator
 weight transactions. Never mount these authority hotkeys into the coordinator
 or a model-execution container.
 
+## Wallet-free delivery
+
+Add `--feed-config /absolute/private/feed.json` to retain the signed result in
+the delivery journal after the current signing checks. The canonical, private
+`umi-successor-feed-config/1` file contains:
+
+- `directory`: a private delivery journal separate from signing, replay, intake,
+  finality and wallet directories.
+- `plan`: the exact same approved publication plan.
+- `execution` and `worker_limits`: fixed worker execution settings and ceilings.
+- `maximum_rounds` and `maximum_journal_bytes`: bounded retained history.
+
+The feed verifies the signed record, replays its complete package, validates
+execution settings and requires a continuous predecessor chain before retaining
+the export. Retries retain the same bytes. A different export at the same
+sequence places the delivery journal on hold.
+
+Run the wallet-free HTTP process separately:
+
+```sh
+python -m umi.competition_successor_feed \
+  --config /absolute/private/feed.json --port 8094
+```
+
+It binds loopback only. The operator must route the installed directive origin's
+`/successor` path to this service through HTTPS. Supply only its delivery journal,
+configuration and the exact sealed package directories. Do not mount signing
+wallets, authority state or the intake database into this process. Release
+archives continue to use their separately signed immutable URLs.
+
+GET serves cursor pages, hash-addressed authorizations, per-directive execution
+settings and the nine declared replay-package files. The package descriptor and
+its local filesystem paths are never served. There is no POST or HTTP signing
+route. Cursor pages use `no-store`; immutable objects retain their exact bytes.
+Concurrent reads are bounded; cancellation drains a read before releasing its
+quota. Expired signed history remains available for validator catch-up and does
+not renew an authorization.
+
+If signing completed but delivery failed, recover the original signed export
+without loading any wallet or collecting a new signing timestamp:
+
+```sh
+python -m umi.competition_successor_feed \
+  --config /absolute/private/feed.json \
+  --publication /absolute/private/original-signed-publication.json \
+  --prepared-package /absolute/private/original-round.package.json
+```
+
+Recover missing predecessors in order. The source sealed packages must remain
+available. No history or package is automatically evicted to free capacity.
+
+Each directive's `page.json` supplies its exact immediate predecessor and signed
+head. The host integration still needs to assemble the continuation from its
+own root-sealed activation anchor, including catch-up across multiple feed
+pages. A successful package download alone does not prove that host handoff.
+
 ## Current checks and recovery
 
 The publisher fully replays the package and checks the current local intake
@@ -77,3 +134,11 @@ The command-wiring suite passed five additional cases on the Studio. It checks
 provider cleanup on success and failure, explicit wallet selection after
 readiness, missing intake history, overlapping state roots and private input
 permissions. The chain and wallet ports in those tests are test doubles.
+
+The combined feed and publisher regression passed all 33 cases on the Studio's
+Linux VM in 410.45 seconds. Nine new cases cover consecutive exports and restart,
+missing predecessors, unsigned metadata changes, wallet-free recovery, export
+cleanup, changed package files, the existing HTTPS consumer and canceled reads.
+The HTTPS consumer uses an ASGI test transport and an inert hash-pinned release
+archive. No production TLS route, OCI execution or host handoff is established
+by those tests. Repository-wide Ruff and formatting checks also passed.
