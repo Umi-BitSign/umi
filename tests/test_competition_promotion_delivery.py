@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import httpx
 import pytest
 
 from umi.competition_promotion_delivery import (
@@ -9,8 +12,16 @@ from umi.competition_promotion_delivery import (
     validate_delivery,
 )
 from umi.competition_review_history import EvaluatorReviewStore
-from umi.competition_rounds import RoundJournal, RoundQuery
+from umi.competition_rounds import (
+    RoundJournal,
+    RoundQuery,
+    RoundReply,
+    RoundSigningClient,
+    SignedRoundQuery,
+    request_round,
+)
 from umi.open_competition import digest, sign_object
+from umi.protocol import canonical_json_bytes
 
 from .test_competition_publication import _independent
 from .test_competition_review_history import observe
@@ -178,8 +189,6 @@ def test_fresh_valid_submission_signature_cannot_create_a_decision_conflict(setu
 
 @pytest.mark.asyncio
 async def test_completed_peer_evidence_cannot_replace_missing_local_execution(setup):
-    from types import SimpleNamespace
-
     from umi.competition_promotion_delivery import apply_evaluator_promotion
 
     class MissingJournal:
@@ -214,3 +223,79 @@ def test_review_cursor_is_part_of_authenticated_round_query(setup):
         after_promotion_sequence=0,
     )
     assert digest(q) != digest(q.model_copy(update={"after_promotion_sequence": 1}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after", [None, 1])
+async def test_round_transport_rejects_unsolicited_or_replayed_reviews(setup, after):
+    s, key = setup, wallet("Charlie")
+    query = RoundQuery(
+        schema="umi-round-query/1",
+        policy_sha256=digest(s.policy),
+        hotkey=key.hotkey.ss58_address,
+        nonce_unix_ns="1",
+        after_promotion_sequence=after,
+    )
+    signed = SignedRoundQuery(query=query, signature=sign_object(query, key))
+    reply = RoundReply(
+        query_sha256=digest(query),
+        policy_sha256=digest(s.policy),
+        promotions=(s.delivery,),
+    )
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200,
+            content=canonical_json_bytes(reply),
+            headers={"Content-Type": "application/json"},
+        )
+    )
+    with pytest.raises(ValueError, match="review discovery cursor mismatch"):
+        await request_round("https://rounds.example", signed, transport=transport)
+
+
+@pytest.mark.asyncio
+async def test_pending_review_is_retried_without_skipping_its_sequence(
+    setup, tmp_path, monkeypatch
+):
+    from umi import competition_promotion_delivery as delivery
+
+    s, key = setup, wallet("Charlie")
+    worker = SimpleNamespace(
+        policy=s.policy,
+        wallet=key,
+        review_store=s.reviews,
+        config=SimpleNamespace(
+            state_directory=str(tmp_path / "worker-client"),
+            evaluator_hotkey=key.hotkey.ss58_address,
+            maximum_orders=1024,
+            maximum_journal_bytes=1024**3,
+        ),
+    )
+    client = RoundSigningClient(worker, "https://rounds.example")
+    queries, applications = [], []
+    ready = False
+
+    async def query(**fields):
+        queries.append(fields)
+        return RoundReply(
+            query_sha256="00" * 32,
+            policy_sha256=digest(s.policy),
+            promotions=(s.delivery,),
+        )
+
+    async def apply(worker_, review):
+        applications.append(review)
+        assert worker_ is worker
+        if not ready:
+            raise FileNotFoundError("archive is not available yet")
+
+    monkeypatch.setattr(client, "query", query)
+    monkeypatch.setattr(delivery, "apply_evaluator_promotion", apply)
+    with pytest.raises(FileNotFoundError):
+        await client.sync_once()
+    assert client.promotion_cursor == 0
+    ready = True
+    await client.sync_once()
+    assert client.promotion_cursor == 1
+    assert [q["after_promotion_sequence"] for q in queries] == [0, 0]
+    assert applications == [s.delivery, s.delivery]

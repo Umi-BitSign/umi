@@ -321,7 +321,11 @@ async def test_client_keeps_later_rounds_moving_after_one_proposal_fails(setup, 
     calls = []
 
     async def query(**_):
-        return SimpleNamespace(proposals=(proposal, other))
+        return rounds.RoundReply(
+            query_sha256="00" * 32,
+            policy_sha256=digest(setup.policy),
+            proposals=(proposal, other),
+        )
 
     async def endorse(value):
         calls.append(value.cutoff.round.sequence)
