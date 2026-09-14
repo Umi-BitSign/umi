@@ -180,6 +180,40 @@ async def test_fetch_never_selects_or_observes_and_reuses_stage(case):
     activation.validate_authenticated_successor_installation(case.installation)
 
 
+async def test_retired_current_copies_stay_bounded_across_signed_rounds(case):
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    from .test_competition_supervisor import _signed_continuation
+
+    retained = {case.selection.directive_sha256: (case.selection, case.files)}
+    assert await case.value.retire_redundant(retained) == 1
+    continuation = _signed_continuation(case.base.signed, 8)
+    for count, signed in enumerate(continuation, 1):
+        body = successor_continuation_bytes(case.base.signed, continuation[:count])
+        selected = SuccessorWorkerSelection(signed, body)
+        files = replace(case.files, current_directive_page_bytes=body)
+        staged = material.stage_successor_current(
+            selection=selected,
+            files=files,
+            config=case.base.config,
+            operator_consent=case.base.consent,
+            worker_limits=case.base.limits,
+            limits=case.limits,
+        )
+        retained[selected.directive_sha256] = (selected, files)
+        material.select_staged_successor_current(staged, anchor=case.anchor)
+        assert await case.value.retire_redundant(retained) == 1
+        assert not list(staged.path.parent.glob("stage-*"))
+        assert not list(staged.path.parent.glob("retiring-*"))
+        assert (
+            case.item.source_root / "current" / material.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME
+        ).read_bytes() == body
+    # Eight independently signed transitions exceed the five-stage quota.
+    # Every original registry history and recovery package remains available.
+    assert len(retained) == 9 and case.files.package_path.exists()
+    case.anchor.recheck()
+
+
 async def test_activate_returns_real_capability_after_selection_and_fresh_reload(case, monkeypatch):
     old = (case.item.source_root / "current").stat().st_ino
     initial = case.mint()

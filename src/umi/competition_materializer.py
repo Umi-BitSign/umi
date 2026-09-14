@@ -25,6 +25,7 @@ from .competition_materialization import (
     select_staged_successor_current,
     stage_successor_current,
 )
+from .competition_materialization_retention import retire_redundant_successor_inputs
 from .competition_supervisor import verify_signed_successor_supervisor_directive
 from .competition_supervisor_adapters import SuccessorArtifactFiles, SuccessorArtifactObserver
 from .competition_supervisor_runtime import SuccessorWorkerSelection
@@ -94,6 +95,15 @@ class AuthenticatedSuccessorArtifactMaterializer:
             self._stage(selection, files)
             self._recheck()
             return files
+
+    async def retire_redundant(self, retained):
+        async with self._mutex:
+            self._recheck()
+            count = retire_redundant_successor_inputs(
+                anchor=self._anchor, limits=self.limits, retained=retained
+            )
+            self._recheck()
+            return count
 
     def _floor(self, observation, selection):
         validate_owned_weight_observation(observation)

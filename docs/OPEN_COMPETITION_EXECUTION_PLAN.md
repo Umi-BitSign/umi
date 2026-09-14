@@ -165,16 +165,21 @@ link-validation suite passed all 11 tests in 476.15 seconds; the recovery
 regression passed 45 tests in 1391.01 seconds. Download delivery now records
 a small hash/size binding for runtime-supplied histories, preserving and
 checking any older full-history files. Its five-test regression passed in
-264.03 seconds. Materialized current histories still need long-run retention
-work before deployment. These changes neither prune recovery evidence nor
-remove configured capacity limits.
+264.03 seconds. Stopped recovery now retires exact redundant materialized
+copies using independently retained registry and delivery inputs. Interrupted
+cleanup resumes only after source and surviving-file verification. The initial
+11 repeated-round and interruption tests passed in 346.11 seconds. Expanded
+rescan checks and surrounding regression tests remain required before deployment.
+These changes neither prune recovery evidence nor remove configured capacity
+limits. Package/object capacity remains a separate operational limit.
 
 Full-regression CI at `96fcd4e` exposed delayed evidence delivery in the
 two-round restart test: acknowledged files could fill an upload page ahead of
 new evidence. A deterministic reproduction failed with the old uploader.
 Separate pending-upload and retained-file audit pages passed seven focused
-regressions in 58.12 seconds. The integrated lifecycle and full CI must also
-pass on the fix before release.
+regressions in 58.12 seconds. All 18 repository checks passed at `1448bba`,
+including Python 3.10, 3.12 and 3.14. The separate Studio lifecycle/exchange run
+passed 27 tests in 3005.94 seconds. PR89 merged as `3314b5c`.
 
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through

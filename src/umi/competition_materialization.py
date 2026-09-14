@@ -2,8 +2,9 @@
 
 Staging and selection convey no activation authority. The runtime must hold its
 process lock, confirm worker absence, reconcile transactions, select the inputs,
-then reload the actual read-only activation mount. Old current trees and partial
-stages remain in the bounded cache; this module never deletes them.
+then reload the actual read-only activation mount. Stopped recovery may retire
+redundant cached trees through competition_materialization_retention; current,
+unbacked stages and the durable recovery sources remain intact.
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 SOURCE_DIRECTORY_NAME = "activation-source"
 CACHE_DIRECTORY_NAME = "input-cache"
 _STAGE_NAME = re.compile(r"^stage-[0-9a-f]{32}$")
+_RETIRING_NAME = re.compile(r"^retiring-([0-9a-f]{64})-[0-9a-f]{32}$")
 _LOCK_NAME = ".materialization.lock"
 _ISSUER = object()
 _CHUNK = 1024 * 1024
@@ -259,7 +261,9 @@ def _cache_usage(cache, cache_fd, limits):
             if entry.name == _LOCK_NAME:
                 continue
             count += 1
-            if count > limits.maximum_stages or not _STAGE_NAME.fullmatch(entry.name):
+            if count > limits.maximum_stages or not (
+                _STAGE_NAME.fullmatch(entry.name) or _RETIRING_NAME.fullmatch(entry.name)
+            ):
                 raise SuccessorMaterializationError(
                     "materialization cache is full or has unknown entries"
                 )
@@ -443,8 +447,12 @@ def _reusable_stage(cache, cache_fd, controls, package, config, consent, worker_
             if entry.name == _LOCK_NAME:
                 continue
             count += 1
-            if count > limits.maximum_stages or not _STAGE_NAME.fullmatch(entry.name):
+            if count > limits.maximum_stages or not (
+                _STAGE_NAME.fullmatch(entry.name) or _RETIRING_NAME.fullmatch(entry.name)
+            ):
                 raise SuccessorMaterializationError("reusable stage scan exceeded its bound")
+            if _RETIRING_NAME.fullmatch(entry.name):
+                continue
             info = os.stat(entry.name, dir_fd=cache_fd, follow_symlinks=False)
             if stat.S_IMODE(info.st_mode) != 0o555:
                 # Interrupted stages remain private and are not promoted implicitly.
@@ -955,8 +963,12 @@ def repair_successor_source_permissions(
                     if entry.name == _LOCK_NAME:
                         continue
                     count += 1
-                    if count > limits.maximum_stages or not _STAGE_NAME.fullmatch(entry.name):
+                    if count > limits.maximum_stages or not (
+                        _STAGE_NAME.fullmatch(entry.name) or _RETIRING_NAME.fullmatch(entry.name)
+                    ):
                         raise SuccessorMaterializationError("repair cache bound exceeded")
+                    if _RETIRING_NAME.fullmatch(entry.name):
+                        continue
                     info = os.stat(entry.name, dir_fd=cache_fd, follow_symlinks=False)
                     if stat.S_IMODE(info.st_mode) != 0o755:
                         continue
