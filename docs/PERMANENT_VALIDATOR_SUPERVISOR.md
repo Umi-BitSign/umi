@@ -120,8 +120,10 @@ If installation reports `operator_input_bundle_invalid`, the host could not
 validate the signed operator-input bundle. This is separate from a missing
 validator permit, which the worker reports as `validator_permit_missing`.
 The runtime-458 bridge update exposed an older installer pin whose host parser
-accepted only runtime 455. The installer now pins the published runtime-458
-host release and its matching signed manifests for both architectures. After
+accepted only runtime 455. The installer now pins the runtime-independent
+host release and its matching signed manifests for both architectures. The
+legacy runtime field remains in signed bundles for compatibility; the worker
+checks actual chain settings rather than requiring that version number. After
 a failed pre-shutdown installation, use a fresh, reviewed main checkout.
 Do not edit the bundle or bypass validation. A permitted SN78 hotkey is still
 required to submit weights, and an unrelated old weight row may require the
