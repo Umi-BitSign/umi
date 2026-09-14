@@ -224,7 +224,11 @@ class IndependentSettlementSigner:
                 self._cutoff(prepared)
                 # Full evidence replay can take time. Do not sign against the
                 # head captured before that CPU work.
-                await self._current(prepared)
+                head = await self._current(prepared)
+                # The final owned-head read yields to evidence/cutoff collection.
+                # Recheck their current holds before reserving or signing a vote.
+                self._local_evidence(prepared, head)
+                self._cutoff(prepared)
                 self._promotion(prepared)
                 self.journal.put("intent", slot, publication)
                 self.journal.put(
