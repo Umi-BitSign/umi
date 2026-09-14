@@ -764,6 +764,7 @@ class EvaluatorExchangeClient:
                 "INSERT OR IGNORE INTO exchange_delivery VALUES ('origin',?)", (self.origin,)
             )
         self._upload_cursor = ""
+        self._upload_audit_cursor = ""
         self._nonce = 0
 
     async def query(self, operation, *, payload=None, **fields):
@@ -901,10 +902,30 @@ class EvaluatorExchangeClient:
                     raise ValueError("evaluator outbox capacity exceeded")
                 names.append(entry.name)
         names = sorted(n for n in names if n.endswith(".json"))
-        candidates = ([n for n in names if n > self._upload_cursor] or names)[: w.config.page_size]
+        with w.journal.transaction() as db:
+            markers = db.execute(
+                "SELECT name FROM exchange_delivery WHERE name LIKE 'sent:%' LIMIT ?",
+                (w.config.maximum_orders * 3 + 1,),
+            ).fetchall()
+        if len(markers) > w.config.maximum_orders * 3:
+            raise ValueError("evaluator delivery marker capacity exceeded")
+        delivered = {row[0][5:] for row in markers}
+        pending = [name for name in names if name not in delivered]
+        retained = [name for name in names if name in delivered]
+        # Old acknowledgments must not consume the new-evidence upload budget.
+        # Audit a separate bounded page so modified retained files still fail.
+        candidates = ([name for name in pending if name > self._upload_cursor] or pending)[
+            : w.config.page_size
+        ]
+        candidates += ([name for name in retained if name > self._upload_audit_cursor] or retained)[
+            : w.config.page_size
+        ]
         uploaded = 0
         for name in candidates:
-            self._upload_cursor = name
+            if name in delivered:
+                self._upload_audit_cursor = name
+            else:
+                self._upload_cursor = name
             parts = name.split(".")
             if (
                 len(parts) != 4
@@ -922,6 +943,8 @@ class EvaluatorExchangeClient:
                 if sent[0] != digest(value):
                     raise ValueError("previously delivered evaluator output changed")
                 continue
+            if name in delivered:
+                raise ValueError("previously delivered evaluator marker disappeared")
             reply = await self.query(
                 "put",
                 payload=value.model_dump(mode="json", by_alias=True),

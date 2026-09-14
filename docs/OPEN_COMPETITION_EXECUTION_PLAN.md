@@ -162,11 +162,19 @@ retains authorization identities between audits instead of every expanded
 history. Existing inline records are preserved. Storage round-trip, growth,
 capacity and atomic-failure checks passed on the first snapshot. The expanded
 link-validation suite passed all 11 tests in 476.15 seconds; the recovery
-regression remains in progress. Download delivery now records a small hash/size
-binding for runtime-supplied histories, preserving and checking any older
-full-history files. Its focused regression is running. Materialized current
-histories still need long-run retention work before deployment. These changes
-neither prune recovery evidence nor remove configured capacity limits.
+regression passed 45 tests in 1391.01 seconds. Download delivery now records
+a small hash/size binding for runtime-supplied histories, preserving and
+checking any older full-history files. Its five-test regression passed in
+264.03 seconds. Materialized current histories still need long-run retention
+work before deployment. These changes neither prune recovery evidence nor
+remove configured capacity limits.
+
+Full-regression CI at `96fcd4e` exposed delayed evidence delivery in the
+two-round restart test: acknowledged files could fill an upload page ahead of
+new evidence. A deterministic reproduction failed with the old uploader.
+Separate pending-upload and retained-file audit pages passed seven focused
+regressions in 58.12 seconds. The integrated lifecycle and full CI must also
+pass on the fix before release.
 
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through
