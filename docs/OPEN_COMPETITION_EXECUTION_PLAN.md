@@ -139,6 +139,12 @@ local execution receipts, reviewed promotion history and owned snapshots.
 authenticated discovery, endorsements and immutable replay packages. The full
 both-track execution and independently reviewed promotion rehearsal remains open.
 
+The versioned [promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md)
+separates the shared model decision from each operator's actual receipt block
+and full certificates. It preserves legacy history bytes and prevents valid
+endorsement order or supersets from changing the shared head. Automated review
+distribution and the independent-operator deployment rehearsal remain open.
+
 The [round-preparation APIs](OPEN_COMPETITION_ROUND_PREPARATION.md) now freeze
 current registrations, latest accepted submissions, the incumbent and cutoff
 in one transaction. Exact retries preserve deadlines. An evaluator can reprove

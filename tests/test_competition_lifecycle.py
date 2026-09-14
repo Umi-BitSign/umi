@@ -32,7 +32,7 @@ from umi.competition_feed import create_assignment_feed
 from umi.competition_package import PreparedCompetitionPackage, load_competition_package
 from umi.competition_publication import PublicationReplayLimits
 from umi.competition_scheduling import AssignmentPublicationJournal
-from umi.competition_store import AttestedPromotionReview, CompetitionStore
+from umi.competition_store import AgreedPromotionReview, AttestedPromotionReview, CompetitionStore
 from umi.competition_work_plans import RoundWorkAssets, RoundWorkConfig
 from umi.drand import DrandPulse
 from umi.open_competition import digest, sign_object
@@ -188,7 +188,7 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
         signing_close_block=r.submission_close_block + 1,
         evaluation_close_block=r.evaluation_close_block,
         reveal_block=r.reveal_block,
-        evidence_cutoff_block=r.reveal_block + 1,
+        evidence_cutoff_block=r.reveal_block + 3,
         valid_through_block=r.valid_through_block,
     )
     put(Path(config.plan_directory) / (digest(item.suite) + ".json"), plan)
@@ -413,6 +413,16 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
         model_id = digest(item.model_submission.submission)
         attested = results[0][model_id].attested_result
         review_body = review_for(item.policy, item.model_submission, item.round, attested).review
+        review_body = AgreedPromotionReview.model_validate(
+            {
+                **review_body.model_dump(mode="json", by_alias=True),
+                "schema": "umi-model-promotion-review/2",
+                "round_sha256": digest(item.round),
+                "submission_sha256": digest(item.model_submission.submission),
+                "previous_promotion_sha256": s.store.baseline_summary()["promotion_sha256"],
+                "sequence": 1,
+            }
+        )
         reviewed = AttestedPromotionReview(
             review=review_body,
             signatures=tuple(sign_object(review_body, w) for w in item.evaluator_wallets[:2]),
@@ -427,7 +437,8 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
                     suite=item.suite,
                     observed_block=s.provider.block,
                 )
-        for store in (*s.reviews, s.store):
+        for index, store in enumerate((*s.reviews, s.store)):
+            observed = s.provider.block + index
             promotions.append(
                 store.promote(
                     signed=item.model_submission,
@@ -436,11 +447,16 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
                     suite=item.suite,
                     review=reviewed,
                     archive=s.paired.archive,
-                    snapshot=snapshot(s.provider.block),
-                    current_block=s.provider.block,
+                    snapshot=snapshot(observed),
+                    current_block=observed,
                 )
             )
         assert promotions[0] == promotions[1] == promotions[2]
+        for index, store in enumerate((*s.reviews, s.store)):
+            with store._connection() as connection:
+                assert connection.execute(
+                    "SELECT observed_block FROM promotion_receipts WHERE sequence=1"
+                ).fetchone() == (s.provider.block + index,)
         s.provider.block = s.plan.evidence_cutoff_block
         for driver in s.drivers:
             driver.provider.block = s.provider.block
