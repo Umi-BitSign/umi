@@ -36,6 +36,7 @@ def policy_body(*, coordinator_hotkey, revision=REVISION, valid_from_block=BLOCK
         coordinator_hotkey=coordinator_hotkey,
         umi_git_revision=revision,
         valid_from_block=valid_from_block,
+        required_runtime_spec_version=455,
     )
     return bridge.RegistrationBridgePolicyBody.model_validate(values)
 
@@ -252,7 +253,6 @@ def test_policy_real_signature_canonical_envelope_and_domain(signed_policy):
         {"require_fresh_endpoint_health": False},
         {"require_public_pilot_replay": True},
         {"hard_sunset_block": 9075172},
-        {"required_runtime_spec_version": 456},
         {"health_concurrency": 256},
         {"allow_redirects": True},
         {"health_status_code": 302},
@@ -338,9 +338,13 @@ def test_health_failure_excludes_only_one_uid_and_zero_success_holds(signed_poli
 @pytest.mark.parametrize(
     "changes",
     [
-        {"runtime_spec_version": 456},
+        {"mechanism_count": 2},
         {"commit_reveal_enabled": True},
+        {"commit_reveal_version": 5},
+        {"reveal_period_epochs": 2},
         {"weights_version_key": 1},
+        {"min_allowed_weights": 255},
+        {"max_allowed_uids": 257},
         {"activity_cutoff_factor_milli": 999},
         {"tempo": 359},
         {"weights_set_rate_limit": 101},
@@ -350,7 +354,7 @@ def test_health_failure_excludes_only_one_uid_and_zero_success_holds(signed_poli
         {"block_timestamp_ms": NOW_MS + 30001},
     ],
 )
-def test_mutable_runtime_tuple_and_freshness_fail_closed(signed_policy, changes):
+def test_chain_settings_and_freshness_fail_closed(signed_policy, changes):
     with pytest.raises(bridge.RegistrationBridgeError):
         decision(signed_policy, observation(**changes))
 

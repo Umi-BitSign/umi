@@ -1,5 +1,11 @@
 # Registration bridge runtime 458 compatibility
 
+This records the initial runtime-458 repair. The subsequent
+[version-independent bridge](REGISTRATION_BRIDGE.md#validator-rollout) removes
+both the parser allowlist and the runtime-number submission gate. The rollout
+below describes the older pinned release, not a requirement to approve each
+future version number.
+
 Finney advanced from runtime spec 455 to 458 on September 14, 2026. The
 registration bridge deliberately holds when the finalized runtime differs
 from the exact version in its signed policy. A running supervisor therefore

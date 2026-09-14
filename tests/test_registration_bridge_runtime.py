@@ -159,13 +159,17 @@ def run(policy, wallet, chain, state, request=healthy, **kwargs):
     )
 
 
+@pytest.mark.parametrize("runtime_after_probe", [455, 458, 459, 1000])
 def test_exact_real_sdk_call_intent_before_submit_and_retained_final_receipt(
-    tmp_path, signed_policy, wallet
+    tmp_path, signed_policy, wallet, runtime_after_probe
 ):
     before = writer_observation(wallet)
-    after = applied_observation(wallet, signed_policy)
+    refreshed = before.model_copy(update={"runtime_spec_version": runtime_after_probe})
+    after = applied_observation(wallet, signed_policy).model_copy(
+        update={"runtime_spec_version": runtime_after_probe}
+    )
     with bridge.RegistrationBridgeState(tmp_path.resolve() / "state") as state:
-        chain = Chain(state, [before, before, after])
+        chain = Chain(state, [before, refreshed, after])
         result = run(signed_policy, wallet, chain, state)
         assert result["status"] == "submitted" and result["eligible_count"] == len(LIVE)
         assert len(chain.client.calls) == 1 and len(chain.receipts) == 1
@@ -177,6 +181,21 @@ def test_exact_real_sdk_call_intent_before_submit_and_retained_final_receipt(
         }
         assert phases == {"submitting.json", "receipt_returned.json", "applied.json"}
         assert not (state.root / "journal.json").exists()
+
+
+def test_runtime_upgrade_with_changed_chain_settings_holds_before_send(
+    tmp_path, signed_policy, wallet
+):
+    before = writer_observation(wallet)
+    refreshed = before.model_copy(
+        update={"runtime_spec_version": 1000, "commit_reveal_enabled": True}
+    )
+    with bridge.RegistrationBridgeState(tmp_path.resolve() / "state") as state:
+        chain = Chain(state, [before, refreshed])
+        with pytest.raises(bridge.RegistrationBridgeError, match="commit_reveal_enabled_changed"):
+            run(signed_policy, wallet, chain, state)
+        assert not chain.client.calls
+        assert state.load().phase == "idle"
 
 
 @pytest.mark.parametrize(
