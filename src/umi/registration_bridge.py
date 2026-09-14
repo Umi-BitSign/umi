@@ -165,6 +165,9 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
 
 class RegistrationBridgeFundingPolicyBody(RegistrationBridgePolicyBody):
     schema_: Literal["umi-registration-bridge-policy-body/2"] = Field(alias="schema")
+    # Each signed policy selects one reviewed runtime, never the observed version.
+    # Keep 455 readable for retained policies and uncertain submission journals.
+    required_runtime_spec_version: Literal[455, 458]
     reward_rule: Literal["equal_live_coldkey_ip_funder_groups/1"]
     grouping_rule: Literal["registered_owner_or_https_ip_or_recorded_funder_connected_components/1"]
     funding_snapshot: FundingSnapshot

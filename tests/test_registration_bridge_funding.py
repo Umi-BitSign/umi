@@ -108,6 +108,48 @@ def test_different_keys_and_ips_same_funder_share_one_budget(setup):
     assert sum(decision(old, obs).expected_row[u][1] for u in (71, 72, 73)) == 3 * 65535
 
 
+def test_reviewed_runtime_requires_new_signature_and_preserves_allocation(setup):
+    obs, _, signer, policy, _ = setup
+    expected = decision(policy, obs)
+    values = policy.body.model_dump(by_alias=True)
+    values["required_runtime_spec_version"] = 458
+    updated = bridge.sign_registration_bridge_policy(
+        bridge.RegistrationBridgeFundingPolicyBody.model_validate(values), wallet=signer
+    )
+    parsed = bridge.parse_registration_bridge_policy(canonical_json_bytes(updated))
+    result = decision(parsed, obs.model_copy(update={"runtime_spec_version": 458}))
+    assert result.action == "submit"
+    assert result.expected_row == expected.expected_row
+    assert parsed.body.funding_snapshot == policy.body.funding_snapshot
+    assert parsed.body.stop_submitting_block == 9073731
+    assert parsed.body.hard_sunset_block == 9075171
+    assert bridge.registration_bridge_policy_sha256(parsed) != (
+        bridge.registration_bridge_policy_sha256(policy)
+    )
+    for observed_runtime in (455, 456, 457, 459):
+        with pytest.raises(bridge.RegistrationBridgeError, match="runtime_spec_version_changed"):
+            decision(parsed, obs.model_copy(update={"runtime_spec_version": observed_runtime}))
+
+
+def test_old_signed_runtime_does_not_follow_chain_upgrade(setup):
+    obs, _, _, policy, old = setup
+    for signed in (policy, old):
+        with pytest.raises(bridge.RegistrationBridgeError, match="runtime_spec_version_changed"):
+            decision(signed, obs.model_copy(update={"runtime_spec_version": 458}))
+    tampered = policy.model_dump(by_alias=True)
+    tampered["body"]["required_runtime_spec_version"] = 458
+    with pytest.raises(bridge.RegistrationBridgeError, match="policy_signature_invalid"):
+        bridge.parse_registration_bridge_policy(canonical_json_bytes(tampered))
+
+
+@pytest.mark.parametrize("runtime", [454, 456, 457, 459, True, "458"])
+def test_unreviewed_funding_policy_runtime_is_rejected(setup, runtime):
+    values = setup[3].body.model_dump(by_alias=True)
+    values["required_runtime_spec_version"] = runtime
+    with pytest.raises(ValueError):
+        bridge.RegistrationBridgeFundingPolicyBody.model_validate(values)
+
+
 @pytest.mark.parametrize(
     "field,value",
     [("hotkey", hotkey(3000)), ("coldkey", hotkey(4000)), ("registered_at_block", BLOCK - 2)],
