@@ -31,6 +31,7 @@ from umi.competition_exchange import ExchangeConfig, create_exchange_app
 from umi.competition_feed import create_assignment_feed
 from umi.competition_package import PreparedCompetitionPackage, load_competition_package
 from umi.competition_publication import PublicationReplayLimits
+from umi.competition_review_history import EvaluatorReviewStore
 from umi.competition_scheduling import AssignmentPublicationJournal
 from umi.competition_store import AgreedPromotionReview, AttestedPromotionReview, CompetitionStore
 from umi.competition_work_plans import RoundWorkAssets, RoundWorkConfig
@@ -243,7 +244,8 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
     drivers, review_stores = [], []
     for index, signer in enumerate(item.evaluator_wallets[:2]):
         root = tmp_path / f"worker-{index}"
-        review_store = seed_store(root / "reviews", item, setup.archive)
+        review_store = EvaluatorReviewStore(root / "reviews", item.policy, limits=limits)
+        review_store.initialize_baseline(item.baseline, setup.archive)
         cfg = EvaluatorConfig(
             schema="umi-evaluator-config/1",
             policy_sha256=digest(item.policy),
@@ -335,21 +337,16 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
             driver.provider.block = s.provider.block
             await driver.round_client.sync_once()
             assert driver.round_client.journal.get("vote", str(item.round.sequence)) is not None
-        for review in s.reviews:
-            prepared = review.prepare_round(
-                snapshot=proposal.cutoff.registration_snapshot,
-                suite=item.suite,
-                evaluation_close_block=item.round.evaluation_close_block,
-                reveal_block=item.round.reveal_block,
-                evidence_cutoff_block=s.plan.evidence_cutoff_block,
-                valid_through_block=item.round.valid_through_block,
-                limits=s.config.replay_limits,
-            )
-            assert prepared["cutoff_receipt"]["round_sha256"] == digest(item.round)
+        assert all(not review.submissions() for review in s.reviews)
         for _ in range(3):
             for driver in s.drivers:
                 result = await driver.work_client.sync_once()
                 assert result["held"] == 0, result
+        for review in s.reviews:
+            entries = review.submissions()
+            assert len(entries) == len(item.submissions)
+            assert all(e["receipt"]["first_observed_block"] == s.provider.block for e in entries)
+            assert all("accepted_block" not in e["receipt"] for e in entries)
         orders = [
             _read(path, SignedEvaluationOrder)
             for path in Path(s.config.work.order_directory).glob("*.json")

@@ -41,8 +41,10 @@ Use one hotkey per worker and a dedicated configuration with schema
 - `settlement_review_directory` and `settlement_replay_limits` enable
   [automatic settlement signing](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md), using
   the round origin and the worker's independently reviewed promotion history.
-  Both fields are required together. Empty or conflicting review history holds
-  signing; remote proposals cannot populate it.
+  Both fields are required together. With work signing enabled, the worker
+  [retains independently checked cutoff receipts](OPEN_COMPETITION_REVIEW_HISTORY.md)
+  in this store. Initialize its preserved baseline first. Empty or conflicting
+  promotion history holds signing; proposals cannot approve model contributions.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives

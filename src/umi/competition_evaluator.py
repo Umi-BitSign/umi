@@ -644,6 +644,7 @@ class ContinuousEvaluator:
         self._work_task = None
         self._settlement_task = None
         self.settlement_client = None
+        self.review_store = None
         self.work_provider = None
         self.work_client = None
         self.round_client = None
@@ -652,14 +653,20 @@ class ContinuousEvaluator:
 
             self.round_client = RoundSigningClient(self, config.round_coordinator_origin)
         if config.settlement_review_directory is not None:
+            from .competition_review_history import EvaluatorReviewStore
             from .competition_settlement_transport import SettlementSigningClient
-            from .competition_store import CompetitionStore
+
+            self.review_store = EvaluatorReviewStore(
+                Path(config.settlement_review_directory),
+                policy,
+                limits=config.settlement_replay_limits,
+            )
 
             self.settlement_client = SettlementSigningClient(
                 self,
                 config.round_coordinator_origin,
                 self.round_client.journal,
-                CompetitionStore(Path(config.settlement_review_directory), policy),
+                self.review_store,
                 limits=config.settlement_replay_limits,
             )
         if config.work_signing_chain is not None:

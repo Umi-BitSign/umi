@@ -244,6 +244,18 @@ def _parser() -> argparse.ArgumentParser:
     ):
         cmd = commands.add_parser(name)
         cmd.add_argument("--state", required=True)
+        if name in {
+            "status",
+            "initialize-baseline",
+            "promote",
+            "record-evaluation",
+            "record-independent-evaluation",
+            "round-status",
+        }:
+            cmd.add_argument(
+                "--evaluator-review-limits",
+                help="use an evaluator-only receipt store with these replay limits",
+            )
         if name in {"admit", "promote", "project-weights", "serve-rehearsal", "settle-round"}:
             cmd.add_argument("--snapshot", required=True)
         if name in {"admit", "promote", "record-evaluation", "record-independent-evaluation"}:
@@ -772,7 +784,17 @@ def execute(args: argparse.Namespace) -> dict:
             "quality_gate_passed": qualifies_for_promotion(candidate, incumbent, policy),
             "chain_submission_authorized": False,
         }
-    store = CompetitionStore(Path(args.state).absolute(), policy)
+    if getattr(args, "evaluator_review_limits", None) is not None:
+        from .competition_publication import PublicationReplayLimits
+        from .competition_review_history import EvaluatorReviewStore
+
+        store = EvaluatorReviewStore(
+            Path(args.state).absolute(),
+            policy,
+            limits=_load(args.evaluator_review_limits, PublicationReplayLimits),
+        )
+    else:
+        store = CompetitionStore(Path(args.state).absolute(), policy)
     if args.command == "status":
         return {
             "policy_sha256": digest(policy),

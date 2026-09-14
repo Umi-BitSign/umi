@@ -37,6 +37,10 @@ activate rewards or extend the signed bootstrap sunset.
    - Test failure, restart and recovery on Linux amd64 and arm64. An image update
      or rerun of the fresh installer is insufficient.
 4. End-to-end rehearsal and deployment preparation.
+   - Populate evaluator review histories from independently checked cutoff
+     certificates, recording actual arrival blocks. See
+     [review-history operation](OPEN_COMPETITION_REVIEW_HISTORY.md). Preserve
+     initial baselines locally; reviewed promotion delivery remains separate.
    - Exercise intake, assignment publication, authenticated miner response,
      reference reveal, independent evaluation, promotion, settlement and upgrade
      using synthetic keys without live weights.

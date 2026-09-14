@@ -13,7 +13,7 @@ does not change either deployed bridge validator.
 ## Inputs and local checks
 
 Construct the signer with the running `ContinuousEvaluator`, that evaluator's
-cutoff-signing journal, its locally reviewed `CompetitionStore`, and bounded
+cutoff-signing journal, its local `EvaluatorReviewStore`, and bounded
 `PublicationReplayLimits`. Call `await signer.endorse(preparation)` with an
 [`umi-settlement-preparation/1` proposal](OPEN_COMPETITION_SETTLEMENT_PREPARATION.md).
 
@@ -37,11 +37,12 @@ control group containing any of those identities. Quorum still requires the
 configured number of distinct eligible groups. UID 0 and UID 54 operated by us
 do not become two independent evaluators.
 
-The local review store must have been populated through the preserved-bundle
-and signed rights/quality review path. Merely copying the coordinator's SQLite
-database does not constitute independent review. An empty store blocks signing;
-this component provides no automatic review approval. All known promotion and
-settlement conflicts remain blocking conditions.
+The [local review store](OPEN_COMPETITION_REVIEW_HISTORY.md) receives cutoff and
+roster history during independent work signing, at its actual receipt block.
+Its baseline and promotions still require the preserved-bundle and signed
+rights/quality review path. Copying the coordinator's SQLite database is rejected.
+An empty promotion history blocks signing. This component provides no automatic
+review approval. Known promotion and settlement conflicts remain blocking.
 
 The reviewed histories must agree on the exact promotion record and parent link.
 Legacy v1 records include an observation block, so creating similar records at
@@ -83,8 +84,9 @@ is silently removed to make the remaining roster settle.
 The tests exercise complete 70/30 publication signatures and signing-state
 failure cases. Separate execution tests check model journals and the actual
 authenticated endpoint-response path against the local-evidence verifier.
-This does not yet prove the complete scheduling-to-signed-settlement service
-workflow with both tracks running together.
+The combined service test additionally runs both tracks through scheduling,
+execution, promotion and signed settlement using synthetic data and chain ports.
+It does not establish real-model quality or independent administration.
 
 The delivery tests additionally cover authenticated proposal discovery,
 certificate collection and immutable package publication. The integrated
