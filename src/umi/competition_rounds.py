@@ -676,7 +676,8 @@ class RoundCoordinator:
     async def prepare_work(self, proposal):
         if self.work_queue is None:
             return
-        from .competition_work_plans import RoundWorkAssets, prepare_work_plan
+        from .competition_round_assets import RoundWorkAssetFile, resolve_incumbent
+        from .competition_work_plans import prepare_work_plan
 
         certificate = self.publish_certificate(proposal)
         if certificate is None:
@@ -686,15 +687,24 @@ class RoundCoordinator:
             canonical_json_bytes(self.journal.get("plan", suite_id))
         )
         assets = _read(
-            Path(self.config.work.asset_directory) / (suite_id + ".json"), RoundWorkAssets
-        )
+            Path(self.config.work.asset_directory) / (suite_id + ".json"), RoundWorkAssetFile
+        ).root
         if assets.suite_sha256 != suite_id or digest(private.suite) != suite_id:
             raise ValueError("round work assets differ from the private committed suite")
         plan = prepare_work_plan(
             cutoff=certificate,
             submissions=proposal.submissions,
             suite=private.suite,
-            incumbent=assets.incumbent,
+            incumbent=resolve_incumbent(
+                assets,
+                proposal.cutoff.round,
+                policy=self.policy,
+                archive=(
+                    self.config.promotion_delivery.archive_directory
+                    if self.config.promotion_delivery is not None
+                    else None
+                ),
+            ),
             runtime=assets.runtime,
             policy=self.policy,
         )
