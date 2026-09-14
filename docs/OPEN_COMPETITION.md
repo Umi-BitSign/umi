@@ -5,6 +5,11 @@ participation and optional model contributions. This document describes the
 code that exists and the remaining production integration. Nothing here
 authorizes new weights or changes the current bootstrap.
 
+Launch evaluation uses automatic CER/WER scoring against a
+[private labeled holdout](OPEN_COMPETITION_PRIVATE_HOLDOUT.md). A human ASL
+grading panel is not required. Dataset provenance, training exclusion and
+independently administered evaluator services remain separate requirements.
+
 ## Implemented; successor rewards inactive
 
 - Canonical, hotkey-signed submissions with explicit policy and terms binding.
