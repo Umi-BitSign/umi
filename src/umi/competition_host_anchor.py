@@ -34,7 +34,6 @@ from .competition_supervisor import (
     SuccessorSupervisorOperatorConsent,
     parse_canonical_successor_operator_consent,
     parse_canonical_successor_supervisor_directive_history,
-    parse_canonical_successor_supervisor_directive_page,
     successor_source_config_sha256,
 )
 from .protocol import canonical_json_bytes
@@ -74,7 +73,7 @@ _SOURCE_CONTROLS = (
     (
         activation.INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME,
         "initial_successor_page_path",
-        activation.MAX_SUCCESSOR_DOCUMENT_BYTES,
+        activation.MAX_SUCCESSOR_HISTORY_BYTES,
         frozenset({0o400, 0o440, 0o444}),
     ),
     (
@@ -522,7 +521,7 @@ def _snapshot_anchor(
         worker_limits_bytes=controls[activation.WORKER_LIMITS_FILENAME],
         observer_config_bytes=controls[activation.HOST_OBSERVER_FILENAME],
     )
-    initial_page = parse_canonical_successor_supervisor_directive_page(
+    initial_page = parse_canonical_successor_supervisor_directive_history(
         controls[activation.INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME]
     )
     v3_state = activation._legacy_state(config, consent, legacy_signed)

@@ -48,11 +48,52 @@ Thirteen focused tests passed on the Studio Linux VM, covering 68-update
 catch-up, restart, host verification and HTTP delivery. They took 751.00 seconds.
 The separate Linux exchange test exposed an old page parser in the anchor
 reader. That reader and the target observer now accept the bounded local history;
-their integrated rerun is in progress. Synthetic test authority keys are also
-reused within each generated chain to avoid repeating key derivation.
-This does not enlarge the root-sealed initial v3-to-v4 page or remove cache and
-recovery-registry limits. Initial multi-page installation and long-run storage
-retention still need work before deployment. No live validator was upgraded.
+their integrated rerun passed four cases in 357.99 seconds. Synthetic test
+authority keys are reused within each generated chain. Long-run cache and
+recovery-registry retention still need work before deployment. No live validator
+was upgraded.
+
+### Initial history after multiple feed pages
+
+An initial install can now retain the full signed v3-to-v4 history using the same
+65,536-record and 64 MiB local-history bounds. The root receipt binds its exact
+bytes and size. Both receipt loading and pre-stop checks verify every predecessor
+and signature against the original v3 anchor. The current head must still pass
+the stopped checkpoint's validity checks. A new history file does not reset an
+installed validator's high-water state.
+
+On Linux, collect an inert preparation file into an existing private directory
+owned by the invoking user (mode `0700`):
+
+```sh
+umi-competition --policy successor-policy.json fetch-initial-successor-history \
+  --config /ABSOLUTE/PRIVATE/supervisor.json \
+  --accepted-directive /ABSOLUTE/PRIVATE/accepted-signed-directive.json \
+  --consent /ABSOLUTE/PRIVATE/operator-consent.json \
+  --current-block FINALIZED_PREPARATION_BLOCK \
+  --output /ABSOLUTE/PRIVATE/initial-successor-directive-page.json
+```
+
+Use the consent and retained directive for that exact installed configuration.
+The collector follows bounded HTTPS pages from the configured origin, rejects
+changed cursors and bad signatures, and enforces a total timeout and byte/record
+budgets. It writes a `0400` file through a no-replace rename. A failed publication
+can leave a private `.partial` file for inspection; it never overwrites the
+destination. The printed result includes the content hash and size.
+
+The supplied block only bounds preparation. This command has no owned-finality
+capability, cannot stop a service, and grants no upgrade or weight authority.
+The root upgrade must still verify the sealed inputs, consent, recovery archive,
+actual sandbox and fresh stopped-host observations.
+
+Six Linux tests passed in 507.12 seconds, covering receipt sealing and restart,
+anchor materialization, and initial pre-stop authentication with both one and 69
+signed records. Their ownership/mount ports are synthetic; directory and signed
+history operations execute on Linux. Eight collector tests passed in 427.93
+seconds, covering five-page catch-up, wrong cursors, forged signatures, missing
+pages, budgets, cancellation and wrong legacy binding. The CLI publication and
+revised total-deadline tests are still in progress. Production initial
+installation remains unperformed.
 
 ### Worker and host components
 

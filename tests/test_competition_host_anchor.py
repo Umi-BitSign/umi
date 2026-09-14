@@ -122,6 +122,7 @@ def _materialize(case):
     return anchor.materialize_successor_anchor(**case.kwargs)
 
 
+@pytest.mark.parametrize("activation_case", [0, 68], indirect=True)
 def test_materialize_restart_and_exact_root_owned_layout(anchor_case):
     case = anchor_case
     capability = _materialize(case)

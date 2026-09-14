@@ -56,7 +56,7 @@ from .competition_supervisor import (
     SuccessorSupervisorDirectivePage,
     SuccessorSupervisorOperatorConsent,
     parse_canonical_successor_operator_consent,
-    parse_canonical_successor_supervisor_directive_page,
+    parse_canonical_successor_supervisor_directive_history,
 )
 from .competition_switch_recovery import exclusive_upgrade_operation
 from .competition_upgrade import _fingerprint, _open_without_links, _Reader
@@ -139,7 +139,7 @@ def _controls(config_path: Path, controls: Path) -> _Controls:
         != state
     ):
         raise HostUpgradeError("legacy authority differs from retained consent")
-    page = parse_canonical_successor_supervisor_directive_page(
+    page = parse_canonical_successor_supervisor_directive_history(
         sources[activation.INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME].payload
     )
     if not page.directives:

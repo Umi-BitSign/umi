@@ -494,9 +494,20 @@ class SuccessorSupervisorDirectiveHistory(SuccessorSupervisorDirectivePage):
 
 def successor_continuation_bytes(anchor, directives):
     """Assemble retained signed history after the installation's exact v4 head."""
+    return _successor_history_bytes(anchor, directives, after_version=4)
+
+
+def successor_initial_history_bytes(legacy_anchor, directives):
+    """Assemble initial history after the exact retained v3 transition anchor."""
+    return _successor_history_bytes(legacy_anchor, directives, after_version=3)
+
+
+def _successor_history_bytes(anchor, directives, *, after_version):
     directives = list(directives)
+    if len(directives) > MAX_SUCCESSOR_HISTORY_RECORDS:
+        raise ValidatorSupervisorError("successor_history_capacity_exceeded")
     fields = dict(
-        after_version=4,
+        after_version=after_version,
         after_sequence=anchor.directive.sequence,
         after_directive_sha256=anchor.directive_sha256,
         directives=directives,
@@ -1277,6 +1288,7 @@ __all__ = [
     "parse_canonical_successor_supervisor_directive_page",
     "parse_canonical_successor_supervisor_state",
     "successor_continuation_bytes",
+    "successor_initial_history_bytes",
     "successor_operator_consent_sha256",
     "successor_source_config_sha256",
     "successor_supervisor_directive_digest",

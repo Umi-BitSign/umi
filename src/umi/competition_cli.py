@@ -140,6 +140,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     inspection.add_argument("--service-uid", type=int, required=True)
     inspection.add_argument("--staged-directory")
+    initial_history = commands.add_parser("fetch-initial-successor-history")
+    for name in ("config", "accepted-directive", "consent", "output"):
+        initial_history.add_argument("--" + name, required=True)
+    initial_history.add_argument("--current-block", type=int, required=True)
+    initial_history.add_argument("--timeout-seconds", type=int, default=300)
     for name in ("verify-cutoff-publication", "verify-settlement-publication"):
         certificate = commands.add_parser(name)
         for param in ("certificate", "roster", "replay-limits"):
@@ -459,6 +464,45 @@ def execute(args: argparse.Namespace) -> dict:
                 origin=args.origin, signed=signed, policy=policy, legacy_policy=legacy
             )
         )
+    if args.command == "fetch-initial-successor-history":
+        import hashlib
+
+        from .competition_delivery import HTTPSSuccessorDirectiveFetcher, write_initial_history
+        from .competition_supervisor import (
+            MAX_SUCCESSOR_DOCUMENT_BYTES,
+            parse_canonical_successor_operator_consent,
+            parse_canonical_successor_supervisor_directive_history,
+        )
+        from .validator_supervisor import parse_canonical_validator_supervisor_config
+
+        def bounded_bytes(path):
+            with Path(path).open("rb") as stream:
+                result = stream.read(MAX_SUCCESSOR_DOCUMENT_BYTES + 1)
+            if len(result) > MAX_SUCCESSOR_DOCUMENT_BYTES:
+                raise ValueError("initial history input exceeds its byte limit")
+            return result
+
+        config = parse_canonical_validator_supervisor_config(bounded_bytes(args.config))
+        consent = parse_canonical_successor_operator_consent(bounded_bytes(args.consent))
+        payload = asyncio.run(
+            HTTPSSuccessorDirectiveFetcher(config).fetch_initial_history(
+                legacy_signed_bytes=bounded_bytes(args.accepted_directive),
+                operator_consent=consent,
+                finalized_block=args.current_block,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
+        write_initial_history(Path(args.output), payload)
+        history = parse_canonical_successor_supervisor_directive_history(payload)
+        return {
+            "status": "initial_history_staged",
+            "history_sha256": hashlib.sha256(payload).hexdigest(),
+            "history_size_bytes": len(payload),
+            "directive_count": len(history.directives),
+            "head_sequence": history.head.directive.sequence,
+            "host_upgrade_authorized": False,
+            "chain_submission_authorized": False,
+        }
     if args.command == "inspect-host-upgrade":
         from dataclasses import asdict
 

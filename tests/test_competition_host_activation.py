@@ -19,7 +19,9 @@ from umi.competition_supervisor import (
     SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA,
     SuccessorSupervisorChainTarget,
     SuccessorSupervisorDirectivePage,
+    parse_canonical_successor_supervisor_directive_history,
     successor_continuation_bytes,
+    successor_initial_history_bytes,
     successor_source_config_sha256,
 )
 from umi.competition_supervisor_observer import SuccessorHostObserverConfig
@@ -332,6 +334,7 @@ def _install_weight_rollover(case, rollover) -> None:
 
 @pytest.fixture
 def activation_case(
+    request,
     tmp_path,
     monkeypatch,
     trusted_ports,
@@ -400,15 +403,14 @@ def activation_case(
         valid_through_block=260,
     )
     signed = _signed(directive)
-    initial_page = SuccessorSupervisorDirectivePage(
-        schema=SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA,
-        after_version=3,
-        after_sequence=v3_state.accepted_sequence,
-        after_directive_sha256=v3_state.accepted_directive_sha256,
-        directives=[signed],
-        more=False,
-        head=signed,
+    initial_records = [signed]
+    if extra_records := getattr(request, "param", 0):
+        initial_records.extend(_signed_continuation(signed, extra_records))
+    initial_page = parse_canonical_successor_supervisor_directive_history(
+        successor_initial_history_bytes(legacy_signed, initial_records)
     )
+    signed = initial_page.head
+    directive = signed.directive
     current_page = SuccessorSupervisorDirectivePage(
         schema=SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA,
         after_version=4,
@@ -560,6 +562,7 @@ def activation_case(
     _restore_writable(controls)
 
 
+@pytest.mark.parametrize("activation_case", [0, 68], indirect=True)
 def test_seal_restart_load_and_wallet_free_activation(activation_case):
     case = activation_case
     observer_bytes = (case.anchor / activation.HOST_OBSERVER_FILENAME).read_bytes()
@@ -577,6 +580,12 @@ def test_seal_restart_load_and_wallet_free_activation(activation_case):
     assert inputs.directive_sha256 == case.signed.directive_sha256
     assert inputs.observer_config == case.observer_config
     assert inputs.initial_accepted_at_finalized_block == case.checkpoint.finalized_block
+    assert inputs.initial_page == case.initial_page
+    assert parsed.initial_successor_page_size_bytes == len(canonical_json_bytes(case.initial_page))
+    assert (
+        parsed.initial_successor_page_sha256
+        == hashlib.sha256(canonical_json_bytes(case.initial_page)).hexdigest()
+    )
     assert not hasattr(inputs, "chain_submission_authorized")
 
     active = activation.activate_successor_worker(inputs)

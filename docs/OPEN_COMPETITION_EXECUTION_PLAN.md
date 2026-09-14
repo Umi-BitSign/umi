@@ -147,11 +147,14 @@ Automatic completed-round selection and recovery of signed-but-undelivered
 exports are now implemented in the local publisher's follow mode; verification
 is tracked in its guide. The runtime now assembles its retained continuation for
 delivery and host verification against the original root-sealed v4 anchor.
-Thirteen multi-page/parser/host/delivery tests passed; the Linux exchange and
-target-observer rerun remains in progress. Production HTTPS routing
-and the deployed successor-host handoff remain unfinished. Initial v3-to-v4
-installation still requires one bounded initial page, and long-run retention
-capacity must be rehearsed before deployment.
+Thirteen multi-page/parser/host/delivery tests passed, followed by four Linux
+exchange and target-observer cases. Initial v3-to-v4 installation now accepts
+bounded full histories and has a preparation-only HTTPS collection command.
+Six initial receipt, restart, anchor and pre-stop authentication tests passed
+with one and 69 records; eight collector tests passed. CLI publication and
+revised total-deadline tests remain in progress. Production
+HTTPS routing and the deployed successor-host handoff remain unfinished.
+Long-run retention capacity must be rehearsed before deployment.
 
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through

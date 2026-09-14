@@ -14,6 +14,7 @@ from umi import competition_delivery as delivery
 from umi.competition_package import CompetitionReleaseIdentity
 from umi.competition_supervisor import (
     SuccessorSupervisorDirectivePage,
+    parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
     successor_continuation_bytes,
     verify_signed_successor_supervisor_directive,
@@ -70,6 +71,182 @@ class Responses:
             return httpx.Response(404)
         # Explicit stream exercises raw streamed-body bounds in the real client.
         return httpx.Response(200, stream=httpx.ByteStream(result))
+
+
+@pytest.fixture
+def initial_history_case(successor_case):
+    case = successor_case
+    records = [case.signed, *_signed_continuation(case.signed, 68)]
+    base = case.predecessor.config.directive_url + "/successor"
+    cursor = (
+        3,
+        case.predecessor.signed.directive.sequence,
+        case.predecessor.signed.directive_sha256,
+    )
+    objects = {}
+    for offset in range(0, len(records), 16):
+        batch = records[offset : offset + 16]
+        page = SuccessorSupervisorDirectivePage(
+            schema="umi-validator-supervisor-directive-page/4",
+            after_version=cursor[0],
+            after_sequence=cursor[1],
+            after_directive_sha256=cursor[2],
+            directives=batch,
+            head=batch[-1],
+            more=offset + len(batch) < len(records),
+        )
+        objects[f"{base}/after/{cursor[0]}/{cursor[1]}/{cursor[2]}.json"] = canonical_json_bytes(
+            page
+        )
+        cursor = (4, batch[-1].directive.sequence, batch[-1].directive_sha256)
+    responses = Responses(objects)
+    client = PinnedHTTPSClient(timeout_seconds=1, transport=httpx.MockTransport(responses.handle))
+    fetcher = delivery.HTTPSSuccessorDirectiveFetcher(case.predecessor.config, client=client)
+    return SimpleNamespace(
+        records=records,
+        responses=responses,
+        fetcher=fetcher,
+        arguments=dict(
+            legacy_signed_bytes=case.predecessor.body,
+            operator_consent=case.consent,
+            finalized_block=150,
+        ),
+    )
+
+
+async def test_initial_history_collects_multiple_bounded_network_pages(initial_history_case):
+    case = initial_history_case
+    body = await case.fetcher.fetch_initial_history(**case.arguments)
+    parsed = parse_canonical_successor_supervisor_directive_history(body)
+    assert parsed.after_version == 3
+    assert parsed.directives == case.records
+    assert parsed.head == case.records[-1]
+    assert parsed.schema_ == "umi-validator-supervisor-directive-history/1"
+    assert len(case.responses.requests) == 5
+    with pytest.raises(ValidatorSupervisorError):
+        parse_canonical_successor_supervisor_directive_page(body)
+
+
+@pytest.mark.parametrize(
+    "change", ["cursor", "signature", "missing", "record_budget", "byte_budget"]
+)
+async def test_initial_history_rejects_untrusted_or_over_budget_pages(initial_history_case, change):
+    import json
+
+    case = initial_history_case
+    urls = list(case.responses.objects)
+    arguments = dict(case.arguments)
+    if change == "cursor":
+        case.responses.objects[urls[1]] = case.responses.objects[urls[0]]
+    elif change == "signature":
+        value = json.loads(case.responses.objects[urls[1]])
+        value["directives"][0]["signatures"][0]["signature"] = "0x" + "00" * 64
+        case.responses.objects[urls[1]] = canonical_json_bytes(value)
+    elif change == "missing":
+        del case.responses.objects[urls[1]]
+    elif change == "record_budget":
+        arguments["maximum_records"] = 1
+    else:
+        arguments["maximum_bytes"] = 1024
+    with pytest.raises(
+        (delivery.SuccessorDeliveryError, ValidatorSupervisorError, ValidatorSupervisorAdapterError)
+    ):
+        await case.fetcher.fetch_initial_history(**arguments)
+    assert len(case.responses.requests) <= 2
+
+
+async def test_initial_history_timeout_cancels_pending_fetch(initial_history_case, monkeypatch):
+    case = initial_history_case
+    cancelled = []
+
+    async def stall(**_kwargs):
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(case.fetcher, "fetch_directive_page", stall)
+    with pytest.raises(TimeoutError):
+        await case.fetcher.fetch_initial_history(**case.arguments, timeout_seconds=1)
+    assert cancelled == [True]
+
+
+async def test_initial_history_wrong_legacy_binding_never_fetches(initial_history_case):
+    case = initial_history_case
+    arguments = dict(case.arguments)
+    arguments["operator_consent"] = arguments["operator_consent"].model_copy(
+        update={"predecessor_signed_directive_sha256": "00" * 32}
+    )
+    with pytest.raises(ValueError, match="differs from operator consent"):
+        await case.fetcher.fetch_initial_history(**arguments)
+    assert not case.responses.requests
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="initial control publication uses renameat2")
+def test_initial_history_cli_stages_exact_bytes_without_overwriting(
+    initial_history_case, tmp_path, monkeypatch, policy
+):
+    from umi.competition_cli import _parser, execute
+
+    case = initial_history_case
+    monkeypatch.setattr(delivery, "HTTPSSuccessorDirectiveFetcher", lambda config: case.fetcher)
+    paths = {}
+    for name, body in (
+        ("config", canonical_json_bytes(case.fetcher.config)),
+        ("accepted-directive", case.arguments["legacy_signed_bytes"]),
+        ("consent", canonical_json_bytes(case.arguments["operator_consent"])),
+        ("policy", canonical_json_bytes(policy)),
+    ):
+        path = tmp_path / (name + ".json")
+        path.write_bytes(body)
+        paths[name] = str(path)
+    output = tmp_path / "initial-successor-directive-page.json"
+    arguments = ["--policy", paths["policy"], "fetch-initial-successor-history"]
+    for name in ("config", "accepted-directive", "consent"):
+        arguments.extend(["--" + name, paths[name]])
+    arguments.extend(["--current-block", "150", "--output", str(output)])
+    args = _parser().parse_args(arguments)
+    result = execute(args)
+    body = output.read_bytes()
+    assert output.stat().st_mode & 0o777 == 0o400
+    assert result["history_sha256"] == hashlib.sha256(body).hexdigest()
+    assert result["history_size_bytes"] == len(body)
+    assert result["directive_count"] == 69
+    assert result["host_upgrade_authorized"] is False
+    assert result["chain_submission_authorized"] is False
+    assert parse_canonical_successor_supervisor_directive_history(body).directives == case.records
+    with pytest.raises(FileExistsError):
+        execute(args)
+    assert output.read_bytes() == body
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="initial control publication uses renameat2")
+async def test_initial_history_failed_write_never_publishes(
+    initial_history_case, tmp_path, monkeypatch
+):
+    case = initial_history_case
+    body = await case.fetcher.fetch_initial_history(**case.arguments)
+    output = tmp_path / "initial-successor-directive-page.json"
+
+    def fail_write(*_args):
+        raise OSError("injected failed write")
+
+    monkeypatch.setattr(delivery.os, "write", fail_write)
+    with pytest.raises(OSError, match="injected"):
+        delivery.write_initial_history(output, body)
+    assert not output.exists()
+    assert len(list(tmp_path.glob(".initial-history-*.partial"))) == 1
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="initial control publication uses renameat2")
+async def test_initial_history_refuses_public_parent(initial_history_case, tmp_path):
+    case = initial_history_case
+    body = await case.fetcher.fetch_initial_history(**case.arguments)
+    parent = tmp_path / "public"
+    parent.mkdir(mode=0o755)
+    with pytest.raises(delivery.SuccessorDeliveryError, match="ownership or mode"):
+        delivery.write_initial_history(parent / "history.json", body)
+    assert not list(parent.iterdir())
 
 
 def test_common_platform_successor_routes_are_disjoint_and_wrong_page_is_rejected(
