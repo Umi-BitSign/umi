@@ -249,7 +249,11 @@ umi-competition --policy policy.json verify-settlement-publication \
 ```
 
 The roster is a `PublicationRoster`; the evidence wrapper is
-`PublicationEvidenceInputs` in `competition_cli.py`. Limits use
+`PublicationEvidenceInputs` in `competition_cli.py`. Each entry carries either
+scored independent evidence or a complete independently certified void; both
+remain bound to the exact frozen roster. The settlement and package commands
+accept this same mixed evidence. Scored evaluation commands still reject voids.
+Limits use
 `PublicationReplayLimits` in `competition_publication.py`. A successful replay
 does not prove publication timing or authorize a row. Real evaluation and
 preservation evidence must support the retained settlement.

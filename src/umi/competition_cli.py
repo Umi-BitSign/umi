@@ -13,6 +13,7 @@ from .competition_artifacts import preserve_bundle, verify_bundle_directory
 from .competition_endpoint_execution import EndpointPairedEvidence, RetainedRevealPulse
 from .competition_evidence import IndependentEvaluationEvidence, replay_independent_evaluation
 from .competition_execution import ModelExecutionEvidence
+from .competition_outcomes import OutcomeEvidence
 from .competition_settlement import EvidenceCutoffSchedule
 from .competition_store import AttestedPromotionReview, CompetitionStore
 from .open_competition import (
@@ -48,8 +49,10 @@ class ProjectionInput(StrictProtocolModel):
 
 
 class IndependentReplayEntry(StrictProtocolModel):
+    """A frozen roster entry with scored evidence or an independently certified void."""
+
     submission: SignedSubmission
-    evidence: IndependentEvaluationEvidence
+    evidence: OutcomeEvidence
 
 
 class SettlementInput(StrictProtocolModel):

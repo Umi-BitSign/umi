@@ -159,8 +159,15 @@ a three-entry 70/30 settlement. The endpoint-503 relay, restart, local receipt a
 bounded BLS-cache tests passed together (29 tests). Repeated checks of one
 Quicknet signature caused the relay deadline failure; exact-tuple cryptographic
 verification is now cached while publication and timing checks still run. The
-complete mixed-outcome service lifecycle and candidate CI must pass before this
-item is complete or released. Missing observations still cannot create a void.
+complete service lifecycle now passes both its original scored round and its
+three-entry mixed round (2 tests, 596.68 seconds on the Studio). The mixed round
+retains the disagreeing model's void and settles the healthy endpoint and
+qualifying model at 70/30. Another 125 authorization, exchange, endpoint execution,
+void settlement and cache tests passed. A remaining CLI input mismatch was found:
+its settlement/package wrapper accepted scored evidence only. The wrapper now
+accepts both outcome types; its real command-path regression and candidate CI
+must pass before this item is released. Missing observations still cannot create
+a void. These runs use fixture identities and test-only rights approvals.
 
 The versioned [promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md)
 separates the shared model decision from each operator's actual receipt block
