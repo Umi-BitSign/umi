@@ -70,8 +70,18 @@ class PromotionReview(StrictProtocolModel):
     rights_review_passed: Literal[True]
 
 
+class AgreedPromotionReview(PromotionReview):
+    """Portable reviewed decision; local receipt times are stored separately."""
+
+    schema_: Literal["umi-model-promotion-review/2"] = Field(alias="schema")
+    round_sha256: Hex32
+    submission_sha256: Hex32
+    previous_promotion_sha256: Hex32
+    sequence: Annotated[int, Field(ge=1, le=2**53 - 1)]
+
+
 class AttestedPromotionReview(StrictProtocolModel):
-    review: PromotionReview
+    review: PromotionReview | AgreedPromotionReview
     signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
 
 
@@ -187,6 +197,10 @@ class CompetitionStore:
                 );
                 CREATE TABLE IF NOT EXISTS promotion_sources (
                     sequence INTEGER PRIMARY KEY, round TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS promotion_receipts (
+                    sequence INTEGER PRIMARY KEY, observed_block INTEGER NOT NULL,
+                    evaluation BLOB NOT NULL, review BLOB NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS evidence_cutoff_schedules (
                     round TEXT PRIMARY KEY, round_sequence INTEGER UNIQUE NOT NULL,
@@ -797,7 +811,14 @@ class CompetitionStore:
                 raise ValueError("preserved promotion history is corrupt")
             if sequence == 0:
                 continue
-            evaluation = dict(record["evaluation"])
+            if record["schema"] == "umi-model-baseline/2":
+                if record["sequence"] != sequence:
+                    raise ValueError("agreed promotion sequence is corrupt")
+                attested, observed = self._read_agreed_promotion_receipt(connection, record)
+                evaluation = attested.model_dump(mode="json", by_alias=True)
+            else:
+                evaluation = dict(record["evaluation"])
+                observed = record["promoted_at_block"]
             result_body = dict(evaluation["result"])
             # Earlier prototype records used Pydantic field names in this
             # embedded object. Verify the original record hash above and only
@@ -818,7 +839,6 @@ class CompetitionStore:
             round_ = EvaluationRound.model_validate_json(round_row[0])
             signed = SignedSubmission.model_validate_json(sub_row[0])
             authenticate_evaluation(attested, signed, round_, self.policy)
-            observed = record["promoted_at_block"]
             if (
                 type(observed) is not int
                 or not round_.reveal_block <= observed <= round_.valid_through_block
@@ -829,6 +849,70 @@ class CompetitionStore:
                 "INSERT OR IGNORE INTO promotion_sources VALUES (?, ?)",
                 (sequence, result.round_sha256),
             )
+
+    def _read_agreed_promotion_receipt(self, connection, record, *, maximum_bytes=None):
+        sequence = record["sequence"]
+        size = connection.execute(
+            "SELECT length(CAST(evaluation AS BLOB)) + length(CAST(review AS BLOB)) "
+            "FROM promotion_receipts WHERE sequence=?",
+            (sequence,),
+        ).fetchone()
+        if size is None:
+            raise ValueError("agreed promotion is missing its local receipt")
+        if (
+            type(size[0]) is not int
+            or size[0] <= 0
+            or (maximum_bytes is not None and size[0] > maximum_bytes)
+        ):
+            raise ValueError("agreed promotion receipt exceeds its byte bound")
+        observed, evaluation_bytes, review_bytes = connection.execute(
+            "SELECT observed_block, evaluation, review FROM promotion_receipts WHERE sequence=?",
+            (sequence,),
+        ).fetchone()
+        attested = AttestedResult.model_validate_json(evaluation_bytes)
+        review = AttestedPromotionReview.model_validate_json(review_bytes)
+        if (
+            canonical_json_bytes(attested) != evaluation_bytes
+            or canonical_json_bytes(review) != review_bytes
+        ):
+            raise ValueError("agreed promotion receipt is not canonical")
+        verify_review(review, self.policy)
+        if not isinstance(review.review, AgreedPromotionReview):
+            raise ValueError("agreed promotion requires a versioned local review")
+        previous = connection.execute(
+            "SELECT digest FROM promotions WHERE sequence=?",
+            (sequence - 1,),
+        ).fetchone()
+        if previous is None or record["previous_promotion_sha256"] != previous[0]:
+            raise ValueError("agreed promotion history has an invalid parent")
+        result = attested.result
+        round_row = connection.execute(
+            "SELECT body FROM rounds WHERE digest=?",
+            (result.round_sha256,),
+        ).fetchone()
+        sub_row = connection.execute(
+            "SELECT body FROM submissions WHERE digest=?",
+            (result.submission_sha256,),
+        ).fetchone()
+        if round_row is None or sub_row is None:
+            raise ValueError("agreed promotion lacks its admitted submission or round")
+        round_ = EvaluationRound.model_validate_json(round_row[0])
+        signed = SignedSubmission.model_validate_json(sub_row[0])
+        authenticate_evaluation(attested, signed, round_, self.policy)
+        _validate_agreed_review(review.review, signed, attested, round_)
+        if record != _agreed_promotion_record(signed, attested, review.review):
+            raise ValueError("agreed promotion differs from its local certificates")
+        high_water = connection.execute(
+            "SELECT value FROM metadata WHERE key='observed_block'"
+        ).fetchone()
+        if (
+            type(observed) is not int
+            or not round_.reveal_block <= observed <= round_.valid_through_block
+            or high_water is None
+            or observed > int(high_water[0])
+        ):
+            raise ValueError("promotion receipt exceeds the local observation history")
+        return attested, observed
 
     @staticmethod
     def _hydrate_settlement_heads(connection: sqlite3.Connection) -> None:
@@ -1290,6 +1374,8 @@ class CompetitionStore:
                 or head[3] != (None if contributor is None else identity(contributor))
             ):
                 raise ValueError("independently reviewed promotion head is corrupt")
+            if record["schema"] == "umi-model-baseline/2":
+                self._read_agreed_promotion_receipt(connection, record, maximum_bytes=maximum_bytes)
             return PromotionHeadBinding(
                 sequence=head[0],
                 promotion_sha256=head[1],
@@ -1763,6 +1849,7 @@ class CompetitionStore:
         )
         if not qualifies_for_promotion(candidate, incumbent, self.policy):
             raise ValueError("candidate did not clear every promotion quality gate")
+        review = AttestedPromotionReview.model_validate_json(canonical_json_bytes(review))
         verify_review(review, self.policy)
         if (
             review.review.model_sha256 != sub.model_revision
@@ -1770,6 +1857,9 @@ class CompetitionStore:
             or review.review.evaluation_result_sha256 != digest(attested.result)
         ):
             raise ValueError("promotion review does not bind this paired evaluation")
+        agreed = isinstance(review.review, AgreedPromotionReview)
+        if agreed:
+            _validate_agreed_review(review.review, signed, attested, round_)
         if sub.model_bundle.parent_baseline_sha256 not in {None, round_.incumbent_model_sha256}:
             raise ValueError("candidate declares a different parent baseline")
         verify_preserved_bundle(sub.model_bundle, archive, self.policy)
@@ -1791,6 +1881,13 @@ class CompetitionStore:
             if prior:
                 record = json.loads(prior[0])
                 if record.get("submission_sha256") == digest(sub):
+                    if (agreed or record["schema"] == "umi-model-baseline/2") and (
+                        not agreed
+                        or record != _agreed_promotion_record(signed, attested, review.review)
+                    ):
+                        raise ValueError("agreed promotion retry changes its decision")
+                    if agreed:
+                        self._read_agreed_promotion_receipt(connection, record)
                     return record
                 raise ValueError("model was already promoted; attribution cannot be reassigned")
             if connection.execute(
@@ -1803,6 +1900,11 @@ class CompetitionStore:
             ).fetchone()
             if head is None or head[2] != round_.incumbent_model_sha256:
                 raise ValueError("baseline changed; a fresh paired evaluation is required")
+            if agreed and (
+                review.review.previous_promotion_sha256 != head[1]
+                or review.review.sequence != head[0] + 1
+            ):
+                raise ValueError("agreed promotion does not extend the reviewed history head")
             record = {
                 "schema": "umi-model-baseline/1",
                 "sequence": head[0] + 1,
@@ -1816,6 +1918,17 @@ class CompetitionStore:
                 "promoted_at_block": current_block,
                 "kind": "verified_model_promotion_no_weight",
             }
+            if agreed:
+                record = _agreed_promotion_record(signed, attested, review.review)
+                connection.execute(
+                    "INSERT INTO promotion_receipts VALUES (?, ?, ?, ?)",
+                    (
+                        head[0] + 1,
+                        current_block,
+                        canonical_json_bytes(attested),
+                        canonical_json_bytes(review),
+                    ),
+                )
             connection.execute(
                 "INSERT INTO promotions VALUES (?, ?, ?, ?, ?)",
                 (
@@ -1835,6 +1948,34 @@ class CompetitionStore:
                 (head[0] + 1, digest(round_)),
             )
             return record
+
+
+def _validate_agreed_review(review, signed, attested, round_) -> None:
+    if (
+        review.round_sha256 != digest(round_)
+        or review.submission_sha256 != digest(signed.submission)
+        or review.evaluation_result_sha256 != digest(attested.result)
+        or review.model_sha256 != signed.submission.model_revision
+        or review.incumbent_model_sha256 != round_.incumbent_model_sha256
+    ):
+        raise ValueError("agreed promotion review does not bind its local evaluation")
+
+
+def _agreed_promotion_record(signed, attested, review: AgreedPromotionReview) -> dict:
+    # Quorum certificates and actual observation blocks belong in the local
+    # receipt. Valid signature ordering/supersets cannot fork the shared head.
+    return {
+        "schema": "umi-model-baseline/2",
+        "sequence": review.sequence,
+        "policy_sha256": review.policy_sha256,
+        "model_sha256": signed.submission.model_revision,
+        "contributor_hotkey": signed.submission.hotkey,
+        "previous_promotion_sha256": review.previous_promotion_sha256,
+        "submission_sha256": digest(signed.submission),
+        "evaluation_result": attested.result.model_dump(mode="json", by_alias=True),
+        "review": review.model_dump(mode="json", by_alias=True),
+        "kind": "verified_model_promotion_no_weight",
+    }
 
 
 def _bounded_stored_body(connection, table, key_name, key, maximum_bytes, *, optional=False):

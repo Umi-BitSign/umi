@@ -43,11 +43,15 @@ database does not constitute independent review. An empty store blocks signing;
 this component provides no automatic review approval. All known promotion and
 settlement conflicts remain blocking conditions.
 
-The reviewed histories must agree on the exact promotion record, including its
-agreed observation block and parent link. Independently creating similar records
-at different blocks produces different digests. The deployment rehearsal must
-check this agreement through the review/promotion workflow; this signer never
-substitutes the coordinator's head to resolve a mismatch.
+The reviewed histories must agree on the exact promotion record and parent link.
+Legacy v1 records include an observation block, so creating similar records at
+different blocks produces different digests. The versioned
+[promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md) separates a shared
+v2 decision from each operator's actual receipt block and full certificates.
+The signer revalidates the bounded local receipt before using a v2 head.
+The deployed review/distribution workflow still needs independent-operator
+rehearsal; this signer never substitutes the coordinator's head to resolve a
+mismatch.
 
 ## Evidence timing and restart
 
