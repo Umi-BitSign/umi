@@ -145,9 +145,13 @@ service now retains verified signed exports and exposes the existing cursor and
 artifact routes. Its focused regression is tracked in the publisher guide.
 Automatic completed-round selection and recovery of signed-but-undelivered
 exports are now implemented in the local publisher's follow mode; verification
-is tracked in its guide. Production HTTPS routing and the deployed successor-host
-handoff remain unfinished. The host must assemble fetched continuation history
-from its own root-sealed activation anchor.
+is tracked in its guide. The runtime now assembles its retained continuation for
+delivery and host verification against the original root-sealed v4 anchor.
+Thirteen multi-page/parser/host/delivery tests passed; the Linux exchange and
+target-observer rerun remains in progress. Production HTTPS routing
+and the deployed successor-host handoff remain unfinished. Initial v3-to-v4
+installation still requires one bounded initial page, and long-run retention
+capacity must be rehearsed before deployment.
 
 The [paired endpoint commands](OPEN_COMPETITION_ENDPOINT_EVALUATION.md) derive
 baseline jobs from signed publications, execute the archived incumbent through

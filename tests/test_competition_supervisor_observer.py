@@ -9,16 +9,19 @@ import pytest
 
 from umi import competition_supervisor_observer as observer_module
 from umi.competition_chain_state import validate_owned_weight_observation
+from umi.competition_supervisor import successor_continuation_bytes
 from umi.competition_supervisor_observer import (
     OwnedSuccessorHostObserver,
     SuccessorHostObserverConfig,
     parse_successor_host_observer_config,
     successor_host_observer_config_sha256,
 )
+from umi.competition_supervisor_runtime import SuccessorWorkerSelection
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor import ValidatorSupervisorError
 
+from .test_competition_supervisor import _signed_continuation
 from .test_competition_supervisor_adapters import adapter_case as adapter_case
 from .test_competition_supervisor_adapters import chain as chain
 from .test_competition_supervisor_adapters import chain_config as chain_config
@@ -101,6 +104,30 @@ async def test_initial_runtime_observation_needs_no_target_fetch(observer_case):
     assert [event[0] for event in case.events] == ["construct", "start", "capture", "close"]
     assert case.events[2][2] == ()
     assert case.materializations == 0 and case.container.events == []
+
+
+@pytest.mark.parametrize("different_history", [False, True])
+async def test_long_retained_history_keeps_owned_observation_bound_to_runtime(
+    observer_case, different_history
+):
+    case = observer_case
+    case.select("competition_replay")
+    anchor = case.selection.signed
+    records = _signed_continuation(anchor)
+    body = successor_continuation_bytes(anchor, records)
+    selection = SuccessorWorkerSelection(records[-1], body)
+    files = replace(case.files, current_directive_page_bytes=body)
+    if different_history:
+        files = replace(files, current_directive_page_bytes=case.files.current_directive_page_bytes)
+        with pytest.raises(ValueError, match="retained history"):
+            await case.observer.observe_for(selection, files)
+        assert not case.events
+    else:
+        observation = await case.observer.observe_for(selection, files)
+        validate_owned_weight_observation(observation)
+        assert observation.validator_permit
+        assert case.providers[-1].closed
+    assert not case.materializations and not case.container.events
 
 
 async def test_expired_initial_policy_does_not_gate_read_only_finality(observer_case):

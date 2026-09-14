@@ -34,6 +34,7 @@ from .competition_recovery import (
 )
 from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
+    MAX_SUCCESSOR_HISTORY_BYTES,
     SignedSuccessorSupervisorDirective,
     SuccessorSupervisorDirective,
     SuccessorSupervisorDirectivePage,
@@ -43,6 +44,7 @@ from .competition_supervisor import (
     advance_successor_supervisor_directive_state,
     load_bound_successor_replay_package,
     parse_canonical_successor_operator_consent,
+    parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
     successor_operator_consent_sha256,
     successor_source_config_sha256,
@@ -688,7 +690,7 @@ def load_successor_worker_inputs() -> AuthenticatedSuccessorWorkerInputs:
     initial_page = parse_canonical_successor_supervisor_directive_page(
         control[INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME]
     )
-    current_page = parse_canonical_successor_supervisor_directive_page(
+    current_page = parse_canonical_successor_supervisor_directive_history(
         control[CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME]
     )
     v3_state = _legacy_state(config, consent, legacy_signed)
@@ -1321,7 +1323,7 @@ def _read_bound_controls(
 
 def _read_current_controls(root_fd: int, *, owner: int) -> dict[str, bytes]:
     limits = {
-        CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_DOCUMENT_BYTES,
+        CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_HISTORY_BYTES,
         RELEASE_IDENTITY_FILENAME: MAX_SUCCESSOR_RELEASE_IDENTITY_BYTES,
         WORKER_EXECUTION_FILENAME: MAX_SUCCESSOR_WORKER_EXECUTION_BYTES,
     }
@@ -1964,7 +1966,7 @@ def _control_limit(name: str) -> int:
         OPERATOR_CONSENT_FILENAME: MAX_SUCCESSOR_DOCUMENT_BYTES,
         LEGACY_SIGNED_DIRECTIVE_FILENAME: MAX_SUPERVISOR_DOCUMENT_BYTES,
         INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_DOCUMENT_BYTES,
-        CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_DOCUMENT_BYTES,
+        CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_HISTORY_BYTES,
         SIGNED_HOST_ARTIFACT_FILENAME: 32 * 1024**2,
         RELEASE_IDENTITY_FILENAME: MAX_SUCCESSOR_RELEASE_IDENTITY_BYTES,
         WORKER_EXECUTION_FILENAME: MAX_SUCCESSOR_WORKER_EXECUTION_BYTES,

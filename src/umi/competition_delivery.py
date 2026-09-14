@@ -32,8 +32,10 @@ from .competition_package import (
 )
 from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
+    MAX_SUCCESSOR_HISTORY_BYTES,
     SuccessorSupervisorOperatorConsent,
     load_bound_successor_replay_package,
+    parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
     verify_bound_successor_chain_authorization,
     verify_signed_successor_supervisor_directive_history,
@@ -208,7 +210,7 @@ def _allowed_object_names(name):
     elif name.startswith("release-"):
         final = {"release.bundle"}
     elif name.startswith("controls-"):
-        final = {"page.json", "execution.json", "authorization.json"}
+        final = {"page.json", "history.json", "execution.json", "authorization.json"}
     else:
         raise SuccessorDeliveryError("unknown cache object profile")
     return final | {value + ".partial" for value in final}
@@ -461,18 +463,30 @@ class HTTPSSuccessorArtifactDelivery:
                 os.close(fd)
             os.close(parent)
 
-    async def _small(self, url, path, maximum, *, sha=None, size=None, validate=None):
+    async def _small(
+        self, url, path, maximum, *, sha=None, size=None, validate=None, local_body=None
+    ):
         self._check_lease()
         self._check_object_path(path)
+        if local_body is not None and (
+            not isinstance(local_body, bytes) or not 0 < len(local_body) <= maximum
+        ):
+            raise SuccessorDeliveryError("invalid bounded local continuation")
         if path.exists() or path.is_symlink():
             body = _read(path, maximum, expected_sha256=sha, expected_size=size)
+            if local_body is not None and body != local_body:
+                raise SuccessorDeliveryError("cached continuation differs from retained history")
             if validate is not None:
                 validate(body)
             return body
         partial = path.with_name(path.name + ".partial")
         self._discard_partial(partial, maximum)
-        self._usage(extra_bytes=maximum)
-        body = await self.client.fetch_bytes(url, maximum_bytes=maximum)
+        self._usage(extra_bytes=maximum if local_body is None else len(local_body))
+        body = (
+            await self.client.fetch_bytes(url, maximum_bytes=maximum)
+            if local_body is None
+            else local_body
+        )
         if not isinstance(body, bytes) or not 0 < len(body) <= maximum:
             raise SuccessorDeliveryError("invalid bounded delivery response")
         if (sha is not None and hashlib.sha256(body).hexdigest() != sha) or (
@@ -505,8 +519,13 @@ class HTTPSSuccessorArtifactDelivery:
         self._publish(partial, path, size=len(body), sha256=hashlib.sha256(body).hexdigest())
         return _read(path, maximum, expected_sha256=sha, expected_size=size)
 
-    def _validate_page(self, body, selection):
-        page = parse_canonical_successor_supervisor_directive_page(body)
+    def _validate_page(self, body, selection, *, local_history=False):
+        parse = (
+            parse_canonical_successor_supervisor_directive_history
+            if local_history
+            else parse_canonical_successor_supervisor_directive_page
+        )
+        page = parse(body)
         if page.more or page.head != selection.signed:
             raise SuccessorDeliveryError("delivery history does not end at the selected directive")
         for signed in (*page.directives, page.head):
@@ -537,12 +556,24 @@ class HTTPSSuccessorArtifactDelivery:
         target, release = directive.replay_package, directive.release
         controls = self._object("controls-" + selection.directive_sha256)
         control_base = self.base + "/directives/" + selection.directive_sha256
-        page_bytes = await self._small(
-            control_base + "/page.json",
-            controls / "page.json",
-            MAX_SUCCESSOR_DOCUMENT_BYTES,
-            validate=lambda body: self._validate_page(body, selection),
-        )
+        if selection.continuation_bytes is None:
+            page_bytes = await self._small(
+                control_base + "/page.json",
+                controls / "page.json",
+                MAX_SUCCESSOR_DOCUMENT_BYTES,
+                validate=lambda body: self._validate_page(body, selection),
+            )
+        else:
+            # The runtime supplies the complete signed continuation assembled
+            # from its retained cursor history. No HTTP request can replace it.
+            # The host later checks it against its own root-sealed anchor.
+            page_bytes = await self._small(
+                None,
+                controls / "history.json",
+                MAX_SUCCESSOR_HISTORY_BYTES,
+                validate=lambda body: self._validate_page(body, selection, local_history=True),
+                local_body=selection.continuation_bytes,
+            )
         package_path = self._object("package-" + target.package_sha256)
         package_base = self.base + "/packages/" + target.package_sha256
         manifest_bytes = await self._small(

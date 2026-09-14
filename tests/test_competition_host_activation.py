@@ -19,6 +19,7 @@ from umi.competition_supervisor import (
     SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA,
     SuccessorSupervisorChainTarget,
     SuccessorSupervisorDirectivePage,
+    successor_continuation_bytes,
     successor_source_config_sha256,
 )
 from umi.competition_supervisor_observer import SuccessorHostObserverConfig
@@ -63,6 +64,7 @@ from .test_competition_supervisor import (
     _replace,
     _signed,
     _signed_authorization_target,
+    _signed_continuation,
 )
 from .test_competition_supervisor import successor_release as successor_release
 from .test_competition_worker import worker_capacity as worker_capacity
@@ -769,8 +771,47 @@ def test_links_unknown_entries_and_bounds_are_rejected(activation_case, tmp_path
 
 def test_oversized_current_page_rejected_before_json_parse(activation_case):
     path = activation_case.current / activation.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME
-    _replace_control(path, b"x" * (activation.MAX_SUCCESSOR_DOCUMENT_BYTES + 1))
+    _replace_control(path, b"x" * (activation.MAX_SUCCESSOR_HISTORY_BYTES + 1))
     with pytest.raises(activation.HostActivationError, match="oversized"):
+        activation.load_successor_worker_inputs()
+
+
+def test_complete_local_history_loads_past_one_network_page_and_keeps_root_anchor(activation_case):
+    case = activation_case
+    records = _signed_continuation(case.signed)
+    anchor_bytes = (case.anchor / activation.INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME).read_bytes()
+    _replace_control(
+        case.current / activation.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME,
+        successor_continuation_bytes(case.signed, records),
+    )
+    inputs = activation.load_successor_worker_inputs()
+    assert inputs.directive_sha256 == records[-1].directive_sha256
+    assert inputs.current_page.directives == records
+    assert inputs.initial_page == case.initial_page
+    assert (
+        case.anchor / activation.INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME
+    ).read_bytes() == anchor_bytes
+    assert activation.load_successor_worker_inputs().directive_sha256 == inputs.directive_sha256
+
+
+@pytest.mark.parametrize("fault", ["different_anchor", "bad_signature"])
+def test_complete_history_cannot_replace_anchor_or_bypass_signature_checks(activation_case, fault):
+    case = activation_case
+    records = _signed_continuation(case.signed)
+    anchor = case.signed
+    if fault == "different_anchor":
+        anchor, records = records[0], records[1:]
+    else:
+        signatures = [
+            item.model_copy(update={"signature": "0x" + "00" * 64})
+            for item in records[5].signatures
+        ]
+        records[5] = records[5].model_copy(update={"signatures": signatures})
+    _replace_control(
+        case.current / activation.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME,
+        successor_continuation_bytes(anchor, records),
+    )
+    with pytest.raises((activation.HostActivationError, ValidatorSupervisorError)):
         activation.load_successor_worker_inputs()
 
 

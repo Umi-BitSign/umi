@@ -10,13 +10,16 @@ import pytest
 from umi import competition_supervisor_runtime as runtime
 from umi.competition_supervisor import (
     SuccessorSupervisorDirectivePage,
+    parse_canonical_successor_supervisor_directive_history,
     successor_source_config_sha256,
 )
 from umi.protocol import canonical_json_bytes
+from umi.validator_supervisor import MAX_SUPERVISOR_DIRECTIVES_PER_PAGE
 
 from .test_competition_supervisor import (
     _directive,
     _signed,
+    _signed_continuation,
 )
 from .test_competition_supervisor import (
     package_case as package_case,
@@ -728,4 +731,44 @@ async def test_missing_entire_successor_state_cannot_reset_to_initial_cursor(cas
         async with case.make():
             pytest.fail("deleted v4 history was reset")
     assert not engine.root.exists()
+    assert (case.root / "directive-state.json").read_bytes() == case.old
+
+
+async def test_multi_page_catchup_and_restart_deliver_complete_installation_history(
+    case, monkeypatch
+):
+    page_size = MAX_SUPERVISOR_DIRECTIVES_PER_PAGE
+    first = next_directive(case)
+    records = [first, *_signed_continuation(first, page_size + 3)]
+    selections = []
+    stage = case.adapter.stage
+
+    async def capture(selection):
+        selections.append(selection)
+        await stage(selection)
+
+    monkeypatch.setattr(case.adapter, "stage", capture)
+    limits = runtime.SuccessorRuntimeLimits(
+        maximum_history_records=128, maximum_history_bytes=1024**2
+    )
+    case.observation.block = 160
+    case.fetcher.pending = records[:page_size]
+    case.fetcher.more = True
+    async with case.make(limits=limits) as engine:
+        first = await engine.reconcile()
+        assert first.status == "holding" and first.accepted_sequence == 2 + page_size
+        assert case.adapter.alive is None
+        case.fetcher.pending = records[page_size:]
+        case.fetcher.more = False
+        assert (await engine.reconcile()).status == "started"
+        expected = selections[-1].continuation_bytes
+        parsed = parse_canonical_successor_supervisor_directive_history(expected)
+        assert parsed.directives == records
+        assert parsed.after_directive_sha256 == case.source.signed.directive_sha256
+        assert parsed.head == records[-1]
+    case.fetcher.pending = []
+    async with case.make(limits=limits) as restarted:
+        assert (await restarted.reconcile()).status == "started"
+        assert selections[-1].continuation_bytes == expected
+        assert len(restarted._load_history()[1]) == len(records) + 1
     assert (case.root / "directive-state.json").read_bytes() == case.old

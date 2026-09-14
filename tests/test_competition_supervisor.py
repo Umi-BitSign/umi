@@ -33,7 +33,9 @@ from umi.competition_supervisor import (
     load_bound_successor_replay_package,
     parse_canonical_signed_successor_supervisor_directive,
     parse_canonical_successor_operator_consent,
+    parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
+    successor_continuation_bytes,
     successor_operator_consent_sha256,
     successor_source_config_sha256,
     successor_supervisor_directive_digest,
@@ -50,6 +52,7 @@ from umi.encoding import account_id32
 from umi.policy import LiveChainObservationPin
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor import (
+    MAX_SUPERVISOR_DIRECTIVES_PER_PAGE,
     SUPERVISOR_DIRECTIVE_SIGNATURE_DOMAIN,
     SupervisorDirectiveSignature,
     ValidatorSupervisorError,
@@ -295,10 +298,13 @@ def _directive(
     return SuccessorSupervisorDirective.model_validate(values)
 
 
-def _signed(directive, signer_indexes=(0, 1)) -> SignedSuccessorSupervisorDirective:
+def _signed(
+    directive, signer_indexes=(0, 1), *, wallets=None
+) -> SignedSuccessorSupervisorDirective:
+    wallets = authority_wallets() if wallets is None else wallets
     signatures = []
     for index in signer_indexes:
-        wallet = authority_wallets()[index]
+        wallet = wallets[index]
         scheme, signature = sign_response_digest(
             wallet,
             successor_supervisor_directive_digest(directive),
@@ -982,3 +988,102 @@ def test_release_identity_is_exactly_bound_to_signed_oci_release(successor_case)
     values["release_bundle_sha256"] = "24" * 32
     with pytest.raises(ValidationError):
         SuccessorSupervisorReleaseTarget.model_validate(values)
+
+
+def _signed_continuation(anchor, count=MAX_SUPERVISOR_DIRECTIVES_PER_PAGE + 4):
+    records = []
+    previous = anchor
+    wallets = authority_wallets()
+    for _ in range(count):
+        previous = _signed(
+            previous.directive.model_copy(
+                update={
+                    "sequence": previous.directive.sequence + 1,
+                    "predecessor_version": 4,
+                    "previous_directive_sha256": previous.directive_sha256,
+                }
+            ),
+            wallets=wallets,
+        )
+        records.append(previous)
+    return records
+
+
+def test_local_history_exceeds_one_network_page_without_relaxing_network_parser(successor_case):
+    anchor = successor_case.signed
+    records = _signed_continuation(anchor)
+    body = successor_continuation_bytes(anchor, records)
+    parsed = parse_canonical_successor_supervisor_directive_history(body)
+    assert parsed.schema_ == "umi-validator-supervisor-directive-history/1"
+    assert parsed.after_directive_sha256 == anchor.directive_sha256
+    assert parsed.directives == records and parsed.head == records[-1]
+    assert not parsed.more
+    with pytest.raises(ValidatorSupervisorError):
+        parse_canonical_successor_supervisor_directive_page(body)
+    values = parsed.model_dump(mode="python", by_alias=True)
+    values["schema"] = SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA
+    with pytest.raises(ValidatorSupervisorError):
+        parse_canonical_successor_supervisor_directive_history(canonical_json_bytes(values))
+
+
+@pytest.mark.parametrize("count", [0, 2, MAX_SUPERVISOR_DIRECTIVES_PER_PAGE])
+def test_short_local_history_preserves_network_page_format(successor_case, count):
+    anchor = successor_case.signed
+    records = _signed_continuation(anchor, count)
+    body = successor_continuation_bytes(anchor, records)
+    parsed = parse_canonical_successor_supervisor_directive_history(body)
+    assert parsed == parse_canonical_successor_supervisor_directive_page(body)
+    assert parsed.directives == records
+    assert parsed.head == (records[-1] if records else anchor)
+
+
+def test_local_history_rejects_gaps_reordering_wrong_anchor_and_noncanonical_bytes(successor_case):
+    anchor = successor_case.signed
+    records = _signed_continuation(anchor)
+    parsed = parse_canonical_successor_supervisor_directive_history(
+        successor_continuation_bytes(anchor, records)
+    )
+    values = parsed.model_dump(mode="python", by_alias=True)
+    changes = [
+        {"directives": values["directives"][1:]},
+        {"directives": list(reversed(values["directives"]))},
+        {"directives": [values["directives"][0], *values["directives"]]},
+        {"after_directive_sha256": "99" * 32},
+        {"head": values["directives"][0]},
+        {"more": True},
+    ]
+    for change in changes:
+        with pytest.raises(ValidatorSupervisorError):
+            parse_canonical_successor_supervisor_directive_history(
+                canonical_json_bytes({**values, **change})
+            )
+    for body in (b"[]", b"null", canonical_json_bytes(parsed) + b"\n"):
+        with pytest.raises(ValidatorSupervisorError):
+            parse_canonical_successor_supervisor_directive_history(body)
+
+
+def test_local_history_byte_capacity_is_checked_by_builder_and_parser(successor_case, monkeypatch):
+    from umi import competition_supervisor as supervisor
+
+    anchor = successor_case.signed
+    body = successor_continuation_bytes(anchor, [])
+    monkeypatch.setattr(supervisor, "MAX_SUCCESSOR_HISTORY_BYTES", len(body) - 1)
+    with pytest.raises(ValidatorSupervisorError):
+        successor_continuation_bytes(anchor, [])
+    with pytest.raises(ValidatorSupervisorError):
+        parse_canonical_successor_supervisor_directive_history(body)
+
+
+def test_short_history_above_network_byte_limit_uses_local_format(successor_case, monkeypatch):
+    from umi import competition_supervisor as supervisor
+
+    anchor = successor_case.signed
+    records = _signed_continuation(anchor, 2)
+    body = successor_continuation_bytes(anchor, records)
+    monkeypatch.setattr(supervisor, "MAX_SUCCESSOR_DOCUMENT_BYTES", len(body) - 1)
+    local = successor_continuation_bytes(anchor, records)
+    parsed = parse_canonical_successor_supervisor_directive_history(local)
+    assert parsed.schema_ == "umi-validator-supervisor-directive-history/1"
+    assert parsed.directives == records
+    with pytest.raises(ValidatorSupervisorError):
+        parse_canonical_successor_supervisor_directive_page(body, maximum_bytes=len(body) - 1)

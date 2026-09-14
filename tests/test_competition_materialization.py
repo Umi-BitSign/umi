@@ -16,6 +16,7 @@ from umi import competition_materialization as material
 from umi.competition_host_activation import SuccessorWorkerExecutionLimits
 from umi.competition_supervisor import (
     SuccessorSupervisorDirectivePage,
+    successor_continuation_bytes,
     successor_source_config_sha256,
 )
 from umi.competition_supervisor_adapters import SuccessorArtifactFiles
@@ -30,7 +31,7 @@ from .test_competition_host_anchor import anchor_case as anchor_case
 from .test_competition_recovery import explicit as explicit
 from .test_competition_recovery import limits as limits
 from .test_competition_recovery import trusted_ports as trusted_ports
-from .test_competition_supervisor import _signed
+from .test_competition_supervisor import _signed, _signed_continuation
 from .test_competition_supervisor import package_case as package_case
 from .test_competition_supervisor import package_limits as package_limits
 from .test_competition_supervisor import policy as policy
@@ -839,7 +840,10 @@ def test_staged_capability_cannot_be_rebound(case):
             forged.recheck()
 
 
-def test_genuine_anchor_stage_exchange_and_repair_integration(request, monkeypatch, tmp_path):
+@pytest.mark.parametrize("roll_count", [0, 68])
+def test_genuine_anchor_stage_exchange_and_repair_integration(
+    request, monkeypatch, tmp_path, roll_count
+):
     # The anchor fixture replaces only root-owner/syscall ports with this test
     # account. Its signed controls, receipt, retained recovery and capability
     # verification remain real; no production owner check is bypassed in code.
@@ -885,9 +889,12 @@ def test_genuine_anchor_stage_exchange_and_repair_integration(request, monkeypat
     initial = material.install_initial_successor_current(staged, anchor=anchor)
     assert initial.receipt_sha256 == anchor.receipt_sha256
     assert initial.current_path == item.source_root / "current"
-    files = replace(files, current_directive_page_bytes=canonical_json_bytes(base.current_page))
+    continuation = _signed_continuation(base.signed, roll_count)
+    selected = continuation[-1] if continuation else base.signed
+    body = successor_continuation_bytes(base.signed, continuation)
+    files = replace(files, current_directive_page_bytes=body)
     staged = material.stage_successor_current(
-        selection=SuccessorWorkerSelection(base.signed),
+        selection=SuccessorWorkerSelection(selected, body),
         files=files,
         config=base.config,
         operator_consent=base.consent,
@@ -900,6 +907,9 @@ def test_genuine_anchor_stage_exchange_and_repair_integration(request, monkeypat
     result = material.select_staged_successor_current(staged, anchor=anchor)
     assert result.current_path == item.source_root / "current"
     assert result.retained_previous_path.exists()
+    assert (
+        result.current_path / material.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME
+    ).read_bytes() == body
     anchor.recheck()
     item.source_root.chmod(0o755)
     result.current_path.chmod(0o755)
