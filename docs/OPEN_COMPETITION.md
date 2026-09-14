@@ -38,8 +38,10 @@ authorizes new weights or changes the current bootstrap.
   the settlement or erase evidence.
 - A local HTTP rehearsal API and CLI, with no chain-submit command.
 - A separate Linux rootless-Podman CPU execution adapter. Its command isolation,
-  output bounds and cleanup paths have unit tests. The actual runtime image and
-  host sandbox still require integration rehearsal before production use.
+  output bounds and cleanup paths have unit tests. The supplied community
+  baseline completed one actual Linux ARM64 invocation through the evaluator
+  with bounded private shared memory. This synthetic-video smoke test does not
+  establish ASL accuracy, production throughput or an approved release image.
 - A wallet-free paired-model job runner with finalized boundary reads, retained
   raw-output receipts and an execution journal. Completed retries return the
   original evidence; failed or interrupted jobs cannot automatically rerun.
@@ -96,6 +98,16 @@ authorizes new weights or changes the current bootstrap.
   It uses synthetic chain observations and a startup probe that verifies the
   installed anchor and original process lock. It does not run a live model or
   authorize a production transaction.
+- Continuous round preparation, independent cutoff/work endorsement, evaluator
+  exchange, reviewed promotion delivery and settlement publication. A synthetic
+  two-round rehearsal restarts the coordinator and evaluators, executes the next
+  round against the preserved promotion, and retains both exact 70/30 packages.
+  The miner remains running and discovers the next assignments. Each round still
+  requires its own prepared protected suite and explicit valid schedule.
+- Explicit independently certified voids alongside scored results in complete
+  mixed-outcome settlements. Missing observations or quorum remain holds; a void
+  never assigns a miner-fault score. CLI and immutable-package replay accept both
+  outcomes, and signers recheck conflicts after their final awaited chain read.
 
 Model-bundle verification proves possession and byte integrity. The signed
 review records are evaluator attestations about offline reconstruction and
@@ -123,8 +135,10 @@ independent access to it.
   observation of their receipt times, and an explicit late-conflict recovery
   transition. A local settlement does not prove that no additional conflicting
   certificate exists or authorize a payment.
-- A released CPU inference image and real-model Linux sandbox rehearsal.
-  GPU model execution is not implemented by the CPU adapter.
+- A released, approved CPU inference image and protected-ASL quality/resource
+  rehearsal. One real-model ARM64 synthetic-video smoke test passed; that does
+  not measure ASL accuracy or production capacity. GPU model execution is not
+  implemented by the CPU adapter.
 - A deployed successor miner release, integrated evaluator dispatch and assignment
   feed. Static and feed-backed authorization
   check the signed mapping and existing transport schedule, but do not
@@ -144,9 +158,10 @@ independent access to it.
   See [upgrade requirements](SUCCESSOR_SUPERVISOR_UPGRADE.md). Successor inputs
   must never be relabeled as the frozen bootstrap profile.
 
-The tests use inert model bytes and development signing keys. Their successful
-results are engineering evidence, not evidence of real ASL model improvement,
-commercial rights, independent operator participation or clinical fitness.
+The protocol and lifecycle tests use inert model bytes and development signing
+keys. The separate community-model smoke test uses the supplied real weights and
+a synthetic video. Neither establishes real ASL model improvement, commercial
+rights, independent operator participation or clinical fitness.
 
 ## Policy choices
 

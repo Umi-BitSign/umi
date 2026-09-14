@@ -122,5 +122,12 @@ Tests cover owned snapshot disagreement, signing-window expiry, independent
 hotkey signatures, quorum certificates, lost acknowledgments, crash recovery,
 conflict retention, archive starvation, request replay and byte limits, and
 shutdown cleanup. They use synthetic keys and an in-process HTTP transport.
+The connected two-round rehearsal completes a promotion, restarts the coordinator
+and both evaluators from their retained journals, and executes the next planned
+window against the promoted incumbent. Its miner keeps running and discovers
+the new assignments. Both 70/30 settlement packages and the original round's
+frozen incumbent remain unchanged on retry. Production still requires a supply
+of reviewed plans and protected suites; the coordinator does not create these
+inputs or retime missed windows.
 They do not establish public TLS operation, protected ASL quality, rights
 approval or independent administration of production evaluators.
