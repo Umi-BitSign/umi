@@ -56,7 +56,7 @@ def retain_delivery(journal, value, policy):
         {
             "review": value.review.review.model_dump(mode="json", by_alias=True),
             "round": value.round.model_dump(mode="json", by_alias=True),
-            "submission": value.submission.model_dump(mode="json", by_alias=True),
+            "submission": value.submission.submission.model_dump(mode="json", by_alias=True),
         },
     )
     if journal.get("promotion-certificate", key) is None:

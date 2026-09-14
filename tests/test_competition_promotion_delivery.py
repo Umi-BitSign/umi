@@ -10,7 +10,7 @@ from umi.competition_promotion_delivery import (
 )
 from umi.competition_review_history import EvaluatorReviewStore
 from umi.competition_rounds import RoundJournal, RoundQuery
-from umi.open_competition import digest
+from umi.open_competition import digest, sign_object
 
 from .test_competition_publication import _independent
 from .test_competition_review_history import observe
@@ -161,6 +161,41 @@ def test_unsigned_review_never_reserves_history(setup, tmp_path):
     with pytest.raises(ValueError, match="insufficient independent"):
         retain_delivery(journal, unsigned, s.policy)
     assert not journal.keys("promotion-decision")
+
+
+def test_fresh_valid_submission_signature_cannot_create_a_decision_conflict(setup, tmp_path):
+    s = setup
+    journal = RoundJournal(tmp_path / "resigned", {})
+    retain_delivery(journal, s.delivery, s.policy)
+    resigned = s.model.model_copy(
+        update={"signature": sign_object(s.model.submission, wallet("Alice"))}
+    )
+    retain_delivery(journal, s.delivery.model_copy(update={"submission": resigned}), s.policy)
+    assert journal.get("promotion-decision", "promotion:1")["submission"] == (
+        s.model.submission.model_dump(mode="json", by_alias=True)
+    )
+
+
+@pytest.mark.asyncio
+async def test_completed_peer_evidence_cannot_replace_missing_local_execution(setup):
+    from types import SimpleNamespace
+
+    from umi.competition_promotion_delivery import apply_evaluator_promotion
+
+    class MissingJournal:
+        def settlement_evidence(self, _slot):
+            raise ValueError("local execution missing")
+
+    s = setup
+    worker = SimpleNamespace(
+        policy=s.policy,
+        review_store=s.reviews,
+        journal=MissingJournal(),
+        config=SimpleNamespace(evaluator_hotkey=wallet("Charlie").hotkey.ss58_address),
+    )
+    with pytest.raises(ValueError, match="local execution missing"):
+        await apply_evaluator_promotion(worker, s.delivery)
+    assert s.reviews.baseline()["sequence"] == 0
 
 
 def test_delivery_has_exact_model_round_and_policy_bindings(setup):
