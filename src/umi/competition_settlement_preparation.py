@@ -27,6 +27,7 @@ from .competition_publication import (
     verify_cutoff_publication,
 )
 from .competition_settlement import CompetitionSettlement
+from .competition_void import VoidEvaluationEvidence
 from .open_competition import StrictProtocolModel, digest
 from .protocol import canonical_json_bytes
 
@@ -132,7 +133,11 @@ async def prepare_retained_settlement(*, store, provider, cutoff, suite, limits,
             schema="umi-competition-replay-roster/1", submissions=retained["submissions"]
         ),
         evidence=CompetitionPackageEvidence(
-            schema="umi-competition-replay-evidence/1",
+            schema=(
+                "umi-competition-replay-evidence/2"
+                if any(isinstance(e, VoidEvaluationEvidence) for _, e in retained["evidence"])
+                else "umi-competition-replay-evidence/1"
+            ),
             entries=tuple(
                 CompetitionPackageEvidenceEntry(submission=s, evidence=e)
                 for s, e in retained["evidence"]

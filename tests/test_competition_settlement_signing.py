@@ -278,7 +278,7 @@ async def test_window_expiring_during_final_replay_cannot_sign(setup, monkeypatc
 async def test_missing_execution_cannot_use_coordinator_records(setup, monkeypatch):
     s, signer = setup, setup.signers[0]
 
-    def missing(slot):
+    def missing(slot, *, void=False):
         raise ValueError("local settlement execution evidence is incomplete")
 
     signer.worker.journal = SimpleNamespace(settlement_evidence=missing)

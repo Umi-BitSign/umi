@@ -407,7 +407,8 @@ def test_configuration_rejects_wallet_overlap_and_plain_http(relay):
 
 
 @pytest.mark.asyncio
-async def test_collection_enters_the_closed_round_store_with_original_arrival(relay, tmp_path):
+@pytest.mark.parametrize("arrival", [150, 161])
+async def test_collection_retains_actual_store_arrival_without_backdating(relay, tmp_path, arrival):
     from umi.competition_settlement import EvidenceCutoffSchedule
     from umi.competition_store import CompetitionStore
 
@@ -429,15 +430,15 @@ async def test_collection_enters_the_closed_round_store_with_original_arrival(re
     store.close_round(relay.job.round, current_block=120)
     await finish(relay)
     journal = exchange.ExchangeJournal(relay.config, relay.policy)
-    journal.collect(store)
+    journal.collect(store, observed_block=arrival)
     with journal.transaction() as db:
         assert db.execute("SELECT COUNT(*) FROM collected").fetchone()[0] == 2
     with store._connection() as db:
         rows = db.execute(
             "SELECT first_observed_block FROM independent_evaluation_evidence"
         ).fetchall()
-    assert rows == [(relay.provider.block,)]
-    journal.collect(store)
+    assert rows == [(arrival,)]
+    journal.collect(store, observed_block=arrival + 1)
     with journal.transaction() as db:
         assert db.execute("SELECT COUNT(*) FROM collected").fetchone()[0] == 2
 

@@ -17,6 +17,16 @@ from .competition_evidence import (
     independent_evidence_digest,
     replay_independent_evaluation,
 )
+from .competition_outcomes import (
+    OutcomeEvidence,
+    binding_ids,
+    outcome_binding,
+    outcome_decision_digest,
+    outcome_digest,
+    outcome_storage,
+    parse_outcome,
+    replay_outcome,
+)
 from .competition_publication import (
     CutoffPublication,
     PublicationReplayLimits,
@@ -26,10 +36,11 @@ from .competition_settlement import (
     CompetitionSettlement,
     EvidenceCutoffSchedule,
     PromotionHeadBinding,
-    SettlementResultBinding,
     competition_settlement_digest,
     evidence_cutoff_schedule_digest,
 )
+from .competition_void import VoidEvaluationEvidence
+from .competition_void_retention import VoidEvidenceRetention, hold_outcome_conflict
 from .open_competition import (
     STRATUM_WEIGHTS,
     AttestedResult,
@@ -125,7 +136,7 @@ def verify_review(review: AttestedPromotionReview, policy: CompetitionPolicy) ->
         raise ValueError("promotion review requires evidence identities")
 
 
-class CompetitionStore:
+class CompetitionStore(VoidEvidenceRetention):
     """One policy-bound SQLite store; never a source of chain authorization."""
 
     def __init__(
@@ -219,6 +230,13 @@ class CompetitionStore:
                 );
                 CREATE INDEX IF NOT EXISTS independent_evidence_slot
                     ON independent_evaluation_evidence (round, submission, result);
+                CREATE TABLE IF NOT EXISTS void_evaluation_evidence (
+                    digest TEXT PRIMARY KEY, round TEXT NOT NULL, submission TEXT NOT NULL,
+                    decision TEXT NOT NULL, body BLOB NOT NULL,
+                    first_observed_block INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS void_evidence_slot
+                    ON void_evaluation_evidence (round, submission, decision);
                 CREATE TABLE IF NOT EXISTS competition_settlements (
                     round TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, body BLOB NOT NULL
                 );
@@ -524,29 +542,14 @@ class CompetitionStore:
             "SELECT COUNT(*) FROM evaluation_results WHERE round=? AND submission=?",
             (result.round_sha256, result.submission_sha256),
         ).fetchone()[0]
-        if alternatives > 1:
-            connection.execute(
-                "INSERT OR IGNORE INTO round_conflicts VALUES (?, ?)",
-                (result.round_sha256, observed_block),
-            )
-            if connection.execute(
-                "SELECT 1 FROM competition_settlements WHERE round=?",
-                (result.round_sha256,),
-            ).fetchone():
-                connection.execute(
-                    "INSERT OR IGNORE INTO settlement_disputes VALUES (?, ?)",
-                    (result.round_sha256, observed_block),
-                )
-            source = connection.execute(
-                "SELECT MIN(sequence) FROM promotion_sources WHERE round=?",
-                (result.round_sha256,),
-            ).fetchone()[0]
-            if source is not None:
-                connection.execute(
-                    "INSERT OR IGNORE INTO settlement_disputes "
-                    "SELECT round, ? FROM settlement_heads WHERE promotion_sequence>=?",
-                    (observed_block, source),
-                )
+        if (
+            alternatives > 1
+            or connection.execute(
+                "SELECT 1 FROM void_evaluation_evidence WHERE round=? AND submission=? LIMIT 1",
+                (result.round_sha256, result.submission_sha256),
+            ).fetchone()
+        ):
+            hold_outcome_conflict(connection, result.round_sha256, observed_block)
         return {
             "round_sha256": result.round_sha256,
             "submission_sha256": result.submission_sha256,
@@ -1601,33 +1604,43 @@ class CompetitionStore:
                 binding = prior.get(submission_id)
                 if binding is None:
                     selected = connection.execute(
-                        "SELECT digest FROM independent_evaluation_evidence "
-                        "WHERE round=? AND submission=? "
+                        "SELECT kind,digest FROM ("
+                        "SELECT 'scored' AS kind,digest,first_observed_block "
+                        "FROM independent_evaluation_evidence WHERE round=? AND submission=? "
+                        "UNION ALL SELECT 'void',digest,first_observed_block "
+                        "FROM void_evaluation_evidence WHERE round=? AND submission=?) "
                         "ORDER BY first_observed_block,digest LIMIT 1",
-                        (round_id, submission_id),
+                        (round_id, submission_id, round_id, submission_id),
                     ).fetchone()
                     if selected is None:
                         raise SettlementNotReadyError("complete roster evidence is not retained")
-                    evidence_id = selected[0]
+                    kind, evidence_id = selected
+                    table, decision_column = (
+                        ("void_evaluation_evidence", "decision")
+                        if kind == "void"
+                        else ("independent_evaluation_evidence", "result")
+                    )
                 else:
-                    evidence_id = binding.independent_evidence_sha256
+                    evidence_id = binding_ids(binding)[1]
+                    table, decision_column = outcome_storage(binding)
                 raw = _bounded_stored_body(
                     connection,
-                    "independent_evaluation_evidence",
+                    table,
                     "digest",
                     evidence_id,
                     limits.maximum_evidence_bytes - evidence_bytes,
                 )
                 evidence_bytes += len(raw) + 1
-                independent = IndependentEvaluationEvidence.model_validate_json(raw, strict=True)
+                independent = parse_outcome(json.loads(raw))
                 row = connection.execute(
-                    "SELECT round,submission,result,first_observed_block "
-                    "FROM independent_evaluation_evidence WHERE digest=?",
+                    f"SELECT round,submission,{decision_column},first_observed_block "
+                    f"FROM {table} WHERE digest=?",
                     (evidence_id,),
                 ).fetchone()
-                result_id = digest(independent.attested_result.result)
+                result_id = outcome_decision_digest(independent)
                 if row[:3] != (round_id, submission_id, result_id) or (
-                    independent_evidence_digest(independent) != evidence_id
+                    outcome_digest(independent) != evidence_id
+                    or outcome_storage(independent) != (table, decision_column)
                 ):
                     raise ValueError("settlement material evidence binding mismatch")
                 if type(row[3]) is not int or not round_.reveal_block <= row[3]:
@@ -1635,7 +1648,7 @@ class CompetitionStore:
                 if row[3] > cutoff.evidence_cutoff_block:
                     raise SettlementNotReadyError("roster evidence was first observed after cutoff")
                 if binding is not None and (
-                    binding.result_sha256 != result_id or binding.first_observed_block != row[3]
+                    binding_ids(binding)[0] != result_id or binding.first_observed_block != row[3]
                 ):
                     raise ValueError("retained settlement evidence observation changed")
                 submissions.append(signed)
@@ -1652,7 +1665,7 @@ class CompetitionStore:
         *,
         round_: EvaluationRound,
         suite: EvaluationSuite,
-        evidence: tuple[tuple[SignedSubmission, IndependentEvaluationEvidence], ...],
+        evidence: tuple[tuple[SignedSubmission, OutcomeEvidence], ...],
         snapshot: RegistrationSnapshot,
         current_block: int,
     ) -> dict:
@@ -1663,6 +1676,13 @@ class CompetitionStore:
         invalid: ValueError | None = None
         for signed, independent in evidence:
             try:
+                if isinstance(independent, VoidEvaluationEvidence):
+                    self.record_void_evaluation(
+                        evidence=independent,
+                        suite=suite,
+                        observed_block=current_block,
+                    )
+                    continue
                 # The old quorum certificate is useful conflict evidence even
                 # when the stronger per-evaluator run record later fails.
                 self.record_evaluation(
@@ -1684,9 +1704,7 @@ class CompetitionStore:
         normalized = tuple(
             (
                 SignedSubmission.model_validate_json(canonical_json_bytes(signed)),
-                IndependentEvaluationEvidence.model_validate_json(
-                    canonical_json_bytes(independent), strict=True
-                ),
+                parse_outcome(independent),
             )
             for signed, independent in evidence
         )
@@ -1700,6 +1718,8 @@ class CompetitionStore:
             invalid = None
             for signed, independent in normalized:
                 try:
+                    if isinstance(independent, VoidEvaluationEvidence):
+                        continue  # Already retained with the actual observation above.
                     self._store_independent_evaluation(
                         signed=signed,
                         evidence=independent,
@@ -1715,7 +1735,7 @@ class CompetitionStore:
                 ) from invalid
 
         snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
-        supplied: dict[str, tuple[SignedSubmission, IndependentEvaluationEvidence, str]] = {}
+        supplied: dict[str, tuple[SignedSubmission, OutcomeEvidence, str]] = {}
         for signed, independent in normalized:
             submission_id = digest(signed.submission)
             if submission_id in supplied:
@@ -1723,7 +1743,7 @@ class CompetitionStore:
             supplied[submission_id] = (
                 signed,
                 independent,
-                independent_evidence_digest(independent),
+                outcome_digest(independent),
             )
 
         with self._transaction() as connection:
@@ -1757,39 +1777,43 @@ class CompetitionStore:
                 raise ValueError("settlement observation is outside its fixed usable window")
             _advance_block(connection, current_block)
 
-            replay_entries: list[tuple[SignedSubmission, IndependentEvaluationEvidence]] = []
-            bindings: list[SettlementResultBinding] = []
+            replay_entries = []
+            bindings = []
             for submission_id in round_.roster:
-                _caller_signed, caller_evidence, evidence_id = supplied[submission_id]
+                caller_signed, caller_evidence, evidence_id = supplied[submission_id]
+                table, decision_column = outcome_storage(caller_evidence)
                 row = connection.execute(
-                    "SELECT round, submission, result, body, first_observed_block "
-                    "FROM independent_evaluation_evidence WHERE digest=?",
+                    f"SELECT round, submission, {decision_column}, body, first_observed_block "
+                    f"FROM {table} WHERE digest=?",
                     (evidence_id,),
                 ).fetchone()
                 if row is None:
                     raise ValueError("independent evidence was not durably recorded by cutoff")
-                stored_evidence = IndependentEvaluationEvidence.model_validate_json(
-                    row[3], strict=True
-                )
+                stored_evidence = parse_outcome(json.loads(row[3]))
                 expected = (
                     round_id,
                     submission_id,
-                    digest(caller_evidence.attested_result.result),
+                    outcome_decision_digest(caller_evidence),
                     canonical_json_bytes(caller_evidence),
                 )
-                if (
-                    row[:4] != expected
-                    or independent_evidence_digest(stored_evidence) != evidence_id
-                ):
+                if row[:4] != expected or outcome_digest(stored_evidence) != evidence_id:
                     raise ValueError("stored independent evidence binding is corrupt")
                 if row[4] > cutoff.evidence_cutoff_block:
                     raise ValueError("independent evidence was first observed after cutoff")
-                recorded_signed, recorded_attested = self._recorded_evaluation(
-                    connection, round_id, submission_id
-                )
-                if digest(recorded_attested.result) != row[2]:
-                    raise ValueError("independent evidence differs from recorded quorum result")
-                replay_independent_evaluation(
+                if isinstance(stored_evidence, VoidEvaluationEvidence):
+                    raw = connection.execute(
+                        "SELECT body FROM submissions WHERE digest=?", (submission_id,)
+                    ).fetchone()
+                    recorded_signed = SignedSubmission.model_validate_json(raw[0])
+                else:
+                    recorded_signed, recorded_attested = self._recorded_evaluation(
+                        connection, round_id, submission_id
+                    )
+                    if digest(recorded_attested.result) != row[2]:
+                        raise ValueError("independent evidence differs from recorded quorum result")
+                if recorded_signed != caller_signed:
+                    raise ValueError("settlement changes the retained signed submission")
+                replay_outcome(
                     stored_evidence,
                     recorded_signed,
                     round_,
@@ -1798,14 +1822,7 @@ class CompetitionStore:
                     current_block=current_block,
                 )
                 replay_entries.append((recorded_signed, stored_evidence))
-                bindings.append(
-                    SettlementResultBinding(
-                        submission_sha256=submission_id,
-                        result_sha256=row[2],
-                        independent_evidence_sha256=evidence_id,
-                        first_observed_block=row[4],
-                    )
-                )
+                bindings.append(outcome_binding(submission_id, stored_evidence, row[4]))
 
             head = connection.execute(
                 "SELECT sequence, digest, model, contributor, body FROM promotions "
@@ -1828,15 +1845,22 @@ class CompetitionStore:
                 round_=round_,
                 suite=suite,
                 evaluations=tuple(
-                    (signed, independent.attested_result) for signed, independent in replay_entries
+                    (signed, independent.attested_result)
+                    for signed, independent in replay_entries
+                    if isinstance(independent, IndependentEvaluationEvidence)
                 ),
+                voids=tuple(e for _, e in replay_entries if isinstance(e, VoidEvaluationEvidence)),
                 snapshot=snapshot,
                 current_block=current_block,
                 promoted_model_sha256=baseline["model_sha256"],
                 promoted_hotkey=contributor,
             )
             settlement = CompetitionSettlement(
-                schema="umi-competition-settlement/1",
+                schema=(
+                    "umi-competition-settlement/2"
+                    if any(isinstance(e, VoidEvaluationEvidence) for _, e in replay_entries)
+                    else "umi-competition-settlement/1"
+                ),
                 policy_sha256=digest(self.policy),
                 round_sha256=round_id,
                 cutoff_schedule=cutoff,
@@ -2100,16 +2124,13 @@ def _same_settlement_request(
     *,
     suite: EvaluationSuite,
     snapshot: RegistrationSnapshot,
-    supplied: dict[str, tuple[SignedSubmission, IndependentEvaluationEvidence, str]],
+    supplied: dict[str, tuple[SignedSubmission, OutcomeEvidence, str]],
 ) -> bool:
     if settlement.suite != suite or settlement.registration_snapshot != snapshot:
         return False
-    expected = {
-        item.submission_sha256: (item.result_sha256, item.independent_evidence_sha256)
-        for item in settlement.results
-    }
+    expected = {item.submission_sha256: binding_ids(item) for item in settlement.results}
     actual = {
-        submission_id: (digest(evidence.attested_result.result), evidence_id)
+        submission_id: (outcome_decision_digest(evidence), evidence_id)
         for submission_id, (_signed, evidence, evidence_id) in supplied.items()
     }
     return expected == actual

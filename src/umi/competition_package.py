@@ -20,7 +20,7 @@ from typing import Annotated, Literal, TypeVar
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
-from .competition_evidence import IndependentEvaluationEvidence
+from .competition_outcomes import OutcomeEvidence, parse_outcome
 from .competition_publication import (
     PublicationReplayLimits,
     SignedCutoffPublication,
@@ -35,6 +35,7 @@ from .competition_publication import (
     verify_settlement_publication,
 )
 from .competition_settlement import CompetitionSettlement, competition_settlement_digest
+from .competition_void import VoidEvaluationEvidence
 from .open_competition import CompetitionPolicy, SignedSubmission, StrictProtocolModel, digest
 from .protocol import Hex32, canonical_json_bytes
 
@@ -172,17 +173,22 @@ class CompetitionPackageRoster(StrictProtocolModel):
 
 class CompetitionPackageEvidenceEntry(StrictProtocolModel):
     submission: SignedSubmission
-    evidence: IndependentEvaluationEvidence
+    evidence: OutcomeEvidence
 
 
 class CompetitionPackageEvidence(StrictProtocolModel):
-    schema_: Literal["umi-competition-replay-evidence/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-replay-evidence/1", "umi-competition-replay-evidence/2"] = (
+        Field(alias="schema")
+    )
     entries: Annotated[
         tuple[CompetitionPackageEvidenceEntry, ...], Field(min_length=1, max_length=512)
     ]
 
     @model_validator(mode="after")
     def canonical_order(self) -> Self:
+        has_void = any(isinstance(item.evidence, VoidEvaluationEvidence) for item in self.entries)
+        if has_void != (self.schema_ == "umi-competition-replay-evidence/2"):
+            raise ValueError("mixed void evidence requires package evidence version 2")
         ids = tuple(digest(item.submission.submission) for item in self.entries)
         if ids != tuple(sorted(ids)) or len(set(ids)) != len(ids):
             raise ValueError("package evidence must be sorted and unique")
@@ -240,7 +246,7 @@ def prepare_competition_package(
     settlement_certificate: SignedSettlementPublication,
     retained_settlement: CompetitionSettlement,
     roster: Sequence[SignedSubmission],
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
     replay_limits: PublicationReplayLimits,
     release_identity: CompetitionReleaseIdentity,
     destination_root: Path,
@@ -578,14 +584,14 @@ def _roster(submissions: Sequence[SignedSubmission]) -> CompetitionPackageRoster
 
 
 def _evidence(
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
 ) -> CompetitionPackageEvidence:
     entries = tuple(
         sorted(
             (
                 CompetitionPackageEvidenceEntry(
                     submission=_canonical(SignedSubmission, signed),
-                    evidence=_canonical(IndependentEvaluationEvidence, independent),
+                    evidence=parse_outcome(independent),
                 )
                 for signed, independent in evidence
             ),
@@ -593,14 +599,18 @@ def _evidence(
         )
     )
     return CompetitionPackageEvidence(
-        schema="umi-competition-replay-evidence/1",
+        schema=(
+            "umi-competition-replay-evidence/2"
+            if any(isinstance(e.evidence, VoidEvaluationEvidence) for e in entries)
+            else "umi-competition-replay-evidence/1"
+        ),
         entries=entries,
     )
 
 
 def _evidence_pairs(
     evidence: CompetitionPackageEvidence,
-) -> tuple[tuple[SignedSubmission, IndependentEvaluationEvidence], ...]:
+) -> tuple[tuple[SignedSubmission, OutcomeEvidence], ...]:
     return tuple((item.submission, item.evidence) for item in evidence.entries)
 
 

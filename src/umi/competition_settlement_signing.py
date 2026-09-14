@@ -13,6 +13,7 @@ from .competition_evaluator import (
     order_job,
     validate_evidence_observation,
     validate_order,
+    validate_void_observation,
 )
 from .competition_execution import (
     ModelExecutionEvidence,
@@ -35,6 +36,7 @@ from .competition_rounds import (
     verify_endorsement,
 )
 from .competition_settlement_preparation import MAX_BYTES, validate_preparation
+from .competition_void import VoidEvaluationEvidence, validate_own_void
 from .open_competition import Signature, digest, identity, verify_signature
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -125,7 +127,10 @@ class IndependentSettlementSigner:
         hotkey = worker.config.evaluator_hotkey
         for entry in prepared.evidence.entries:
             slot = execution_slot(round_, entry.submission, hotkey)
-            signed, independent, receipt, own = worker.journal.settlement_evidence(slot)
+            is_void = isinstance(entry.evidence, VoidEvaluationEvidence)
+            signed, independent, receipt, own = worker.journal.settlement_evidence(
+                slot, void=is_void
+            )
             validate_order(signed, worker.policy, worker.legacy)
             order = signed.order
             if (
@@ -134,14 +139,29 @@ class IndependentSettlementSigner:
                 or (independent != entry.evidence)
             ):
                 raise ValueError("settlement differs from the completed local evaluation")
-            validate_evidence_observation(
+            validate_observation = (
+                validate_void_observation if is_void else validate_evidence_observation
+            )
+            validate_observation(
                 receipt,
                 order,
                 independent,
                 hotkey,
                 cutoff_block=settlement.cutoff_schedule.evidence_cutoff_block,
             )
-            validate_local_execution(worker, order, independent, own, settlement.suite, head)
+            if is_void:
+                validate_own_void(
+                    independent.certificate.void,
+                    own_observation=own,
+                    evaluator_hotkey=hotkey,
+                    signed_order=signed,
+                    suite=settlement.suite,
+                    policy=worker.policy,
+                    legacy=worker.legacy,
+                    current_block=head,
+                )
+            else:
+                validate_local_execution(worker, order, independent, own, settlement.suite, head)
 
     def _promotion(self, prepared):
         actual = self.reviews.reviewed_promotion_head(

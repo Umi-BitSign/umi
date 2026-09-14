@@ -9,10 +9,13 @@ each evaluator's own local execution before using this evidence.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .competition_endpoint_execution import EndpointPairedEvidence
+from .competition_evaluator_orders import SignedEvaluationOrder
 from .competition_observations import SignedExecutionAnnouncement, execution_observations
 from .open_competition import (
     CompetitionPolicy,
@@ -22,6 +25,7 @@ from .open_competition import (
     identity,
     verify_signature,
 )
+from .policy import ScoringPolicy
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_VOID_BYTES = 64 * 1024**2
@@ -45,6 +49,41 @@ class EvaluationVoid(StrictProtocolModel):
 class AttestedEvaluationVoid(StrictProtocolModel):
     void: EvaluationVoid
     signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
+
+
+class EvaluationVoidVote(StrictProtocolModel):
+    void: EvaluationVoid
+    signature: Signature
+
+
+class VoidEvaluationEvidence(StrictProtocolModel):
+    schema_: Literal["umi-competition-void-evidence/1"] = Field(alias="schema")
+    order: SignedEvaluationOrder
+    certificate: AttestedEvaluationVoid
+    legacy_policy: ScoringPolicy | None
+
+
+class ScorableObservations(ValueError):
+    """Complete observations agree and must use ordinary scoring."""
+
+
+def void_evidence_digest(evidence):
+    evidence = VoidEvaluationEvidence.model_validate_json(canonical_json_bytes(evidence))
+    return hashlib.sha256(
+        b"umi-competition-void-evidence-v1\0" + canonical_json_bytes(evidence)
+    ).hexdigest()
+
+
+def void_decision_digest(void):
+    """Exclude valid signature variants from the conflict identity."""
+    void = EvaluationVoid.model_validate_json(canonical_json_bytes(void))
+    body = void.model_dump(mode="json", by_alias=True, exclude={"observations"})
+    body["observations"] = [
+        o.announcement.model_dump(mode="json", by_alias=True) for o in void.observations
+    ]
+    return hashlib.sha256(
+        b"umi-competition-void-decision-v1\0" + canonical_json_bytes(body)
+    ).hexdigest()
 
 
 def _eligible(output, policy):
@@ -72,7 +111,7 @@ def _reason(views, policy):
                 != 1
             ):
                 return "observation_disagreement"
-    raise ValueError("complete agreeing scored observations cannot be voided")
+    raise ScorableObservations("complete agreeing scored observations cannot be voided")
 
 
 def propose_evaluation_void(
@@ -108,6 +147,10 @@ def propose_evaluation_void(
             body.evaluator_hotkey
         ):
             raise ValueError("void observation signer or order mismatch")
+        if isinstance(body.evidence, EndpointPairedEvidence) and (
+            body.evidence.publication != order.publication or body.evidence.legacy_policy != legacy
+        ):
+            raise ValueError("void endpoint observation changes the exact assigned publication")
         view = execution_observations(body.evidence, suite, policy, current_block=current_block)
         if view["job"] != order_job(order, body.evaluator_hotkey, policy, legacy):
             raise ValueError("void observation differs from the assigned execution")
@@ -160,3 +203,35 @@ def verify_evaluation_void(attested, **context):
     if sorted(keys) != [identity(o.announcement.evaluator_hotkey) for o in expected.observations]:
         raise ValueError("void decision requires exactly its independent observation signers")
     return attested
+
+
+def replay_void_evidence(evidence, *, suite, policy, current_block):
+    raw = canonical_json_bytes(evidence)
+    if len(raw) > MAX_VOID_BYTES:
+        raise ValueError("void evidence exceeds its byte bound")
+    evidence = VoidEvaluationEvidence.model_validate_json(raw)
+    verify_evaluation_void(
+        evidence.certificate,
+        signed_order=evidence.order,
+        suite=suite,
+        policy=policy,
+        current_block=current_block,
+        legacy=evidence.legacy_policy,
+    )
+    return evidence
+
+
+def authenticate_void_evidence(evidence, *, suite, policy):
+    """Check signed historical statements without inventing an arrival block.
+
+    Replaying at the signed validity boundary checks the historical execution
+    interval. The store must retain its actual current receipt block separately;
+    this helper does not establish timely receipt or present payment eligibility.
+    """
+    evidence = VoidEvaluationEvidence.model_validate_json(canonical_json_bytes(evidence))
+    return replay_void_evidence(
+        evidence,
+        suite=suite,
+        policy=policy,
+        current_block=evidence.order.order.round.valid_through_block,
+    )

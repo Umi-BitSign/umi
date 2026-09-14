@@ -8,6 +8,7 @@ conflicting statement exists elsewhere, or authorize a weight transaction.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 from collections.abc import Sequence
@@ -20,14 +21,14 @@ from typing_extensions import Self
 
 from .competition_evidence import (
     IndependentEvaluationEvidence,
-    independent_evidence_digest,
-    replay_independent_evaluation,
 )
+from .competition_outcomes import OutcomeEvidence, outcome_binding, parse_outcome, replay_outcome
 from .competition_settlement import (
     CompetitionSettlement,
     EvidenceCutoffSchedule,
     competition_settlement_digest,
 )
+from .competition_void import VoidEvaluationEvidence
 from .crypto import sign_response_digest, verify_response_signature
 from .open_competition import (
     CompetitionPolicy,
@@ -224,7 +225,7 @@ def authenticated_roster_digest(
 
 
 def independent_evidence_set_digest(
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
     *,
     maximum_bytes: int,
 ) -> str:
@@ -304,7 +305,7 @@ def build_settlement_publication(
     cutoff_certificate: SignedCutoffPublication,
     retained_settlement: CompetitionSettlement,
     submissions: Sequence[SignedSubmission],
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
     policy: CompetitionPolicy,
     limits: PublicationReplayLimits,
 ) -> SettlementPublication:
@@ -346,7 +347,7 @@ def verify_settlement_publication(
     cutoff_certificate: SignedCutoffPublication,
     policy: CompetitionPolicy,
     submissions: Sequence[SignedSubmission],
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
     retained_settlement: CompetitionSettlement,
     limits: PublicationReplayLimits,
 ) -> SettlementPublication:
@@ -480,7 +481,7 @@ def _validate_settlement_material(
     settlement: CompetitionSettlement,
     cutoff: CutoffPublication,
     submissions: Sequence[SignedSubmission],
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
     policy: CompetitionPolicy,
     limits: PublicationReplayLimits,
 ) -> tuple[tuple[SignedSubmission, ...], str]:
@@ -522,17 +523,16 @@ def _validate_settlement_material(
         normalized_evidence,
         strict=True,
     ):
-        evidence_id = independent_evidence_digest(independent)
         if (
             binding.submission_sha256 != digest(signed.submission)
-            or binding.result_sha256 != digest(independent.attested_result.result)
-            or binding.independent_evidence_sha256 != evidence_id
+            or binding
+            != outcome_binding(digest(signed.submission), independent, binding.first_observed_block)
             or not round_.reveal_block
             <= binding.first_observed_block
             <= settlement.cutoff_schedule.evidence_cutoff_block
         ):
             raise ValueError("settlement result or retained-evidence binding mismatch")
-        replay_independent_evaluation(
+        replay_outcome(
             independent,
             signed,
             round_,
@@ -540,13 +540,15 @@ def _validate_settlement_material(
             policy,
             current_block=settlement.observed_block,
         )
-        replayed.append((signed, independent.attested_result))
+        if isinstance(independent, IndependentEvaluationEvidence):
+            replayed.append((signed, independent.attested_result))
 
     expected_projection = project_weights(
         policy=policy,
         round_=round_,
         suite=settlement.suite,
         evaluations=tuple(replayed),
+        voids=tuple(e for _, e in normalized_evidence if isinstance(e, VoidEvaluationEvidence)),
         snapshot=settlement.registration_snapshot,
         current_block=settlement.observed_block,
         promoted_model_sha256=settlement.promotion_head.model_sha256,
@@ -619,14 +621,14 @@ def _canonical_submissions(
 
 
 def _canonical_evidence(
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
     *,
     maximum_bytes: int,
-) -> tuple[tuple[tuple[SignedSubmission, IndependentEvaluationEvidence], ...], int]:
+) -> tuple[tuple[tuple[SignedSubmission, OutcomeEvidence], ...], int]:
     _positive_bound(maximum_bytes, "maximum evidence bytes", maximum=_MAX_REPLAY_BYTES)
     if not 1 <= len(evidence) <= 512:
         raise ValueError("independent evidence count is outside bounds")
-    normalized: list[tuple[SignedSubmission, IndependentEvaluationEvidence]] = []
+    normalized: list[tuple[SignedSubmission, OutcomeEvidence]] = []
     total = 0
     for signed, independent in evidence:
         signed_body = canonical_json_bytes(signed)
@@ -637,7 +639,7 @@ def _canonical_evidence(
         normalized.append(
             (
                 SignedSubmission.model_validate_json(signed_body, strict=True),
-                IndependentEvaluationEvidence.model_validate_json(evidence_body, strict=True),
+                parse_outcome(json.loads(evidence_body)),
             )
         )
     normalized.sort(key=lambda item: digest(item[0].submission))
@@ -655,7 +657,7 @@ def _roster_digest(submissions: Sequence[SignedSubmission]) -> str:
 
 
 def _evidence_digest(
-    evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+    evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
 ) -> str:
     hasher = hashlib.sha256(_EVIDENCE_SET_DOMAIN)
     hasher.update(len(evidence).to_bytes(4, "big"))
@@ -952,7 +954,7 @@ class PublicationJournal:
         *,
         cutoff_certificate: SignedCutoffPublication,
         submissions: Sequence[SignedSubmission],
-        evidence: Sequence[tuple[SignedSubmission, IndependentEvaluationEvidence]],
+        evidence: Sequence[tuple[SignedSubmission, OutcomeEvidence]],
         retained_settlement: CompetitionSettlement,
         limits: PublicationReplayLimits,
     ) -> dict:

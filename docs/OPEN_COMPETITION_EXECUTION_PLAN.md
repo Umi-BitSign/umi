@@ -150,11 +150,13 @@ authenticated discovery, endorsements and immutable replay packages. The full
 both-track synthetic service lifecycle passed with archive-backed baseline
 selection. This covers one connected round and uses fixture keys and an explicit
 test-only rights review. Independent production operators and real model quality
-remain unverified. Continuous-round failure recovery is also incomplete: scored
-settlement still requires evidence for every frozen entry. The explicit void
-contract in `competition_void.py` retains independently signed attempts and a
-quorum decision, but it is not yet connected to the settlement pipeline. An
-unavailable endpoint must not hold up healthy miners once that path is complete.
+remain unverified. Continuous-round failure recovery is under test. The explicit
+void contract in `competition_void.py` retains independently signed attempts and a
+quorum decision. Evaluator exchange, first-arrival retention, mixed-outcome
+settlement and package replay are connected in the current worktree. A mixed
+three-entry settlement has passed the 70/30 replay test. Broader regression,
+local signer checks and the connected outage lifecycle must pass before this
+item is complete or released. Missing observations still cannot create a void.
 
 The versioned [promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md)
 separates the shared model decision from each operator's actual receipt block
