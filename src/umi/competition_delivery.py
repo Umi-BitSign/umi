@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import os
 import re
+import secrets
 import stat
 import sys
 from contextlib import contextmanager, suppress
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from .competition_host_activation import (
     SuccessorWorkerExecutionLimits,
+    _legacy_state,
     _parse_worker_execution_config,
     _validate_worker_execution_bindings,
 )
@@ -33,10 +35,12 @@ from .competition_package import (
 from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
     MAX_SUCCESSOR_HISTORY_BYTES,
+    MAX_SUCCESSOR_HISTORY_RECORDS,
     SuccessorSupervisorOperatorConsent,
     load_bound_successor_replay_package,
     parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
+    successor_initial_history_bytes,
     verify_bound_successor_chain_authorization,
     verify_signed_successor_supervisor_directive_history,
 )
@@ -44,7 +48,12 @@ from .competition_supervisor_adapters import SuccessorArtifactFiles
 from .competition_supervisor_runtime import SuccessorWorkerSelection
 from .competition_worker import _open_directory_without_links
 from .protocol import canonical_json_bytes
-from .validator_supervisor import ValidatorSupervisorConfig
+from .validator_supervisor import (
+    MAX_JSON_SAFE_INTEGER,
+    ValidatorSupervisorConfig,
+    advance_supervisor_directive_history_state,
+    parse_canonical_signed_supervisor_directive,
+)
 from .validator_supervisor_adapters import PinnedHTTPSClient, _canonical_https_url
 
 _HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -77,6 +86,7 @@ class HTTPSSuccessorDirectiveFetcher:
     """Fetch a bounded page; the runtime authenticates its cursor and history."""
 
     def __init__(self, config: ValidatorSupervisorConfig, *, client=None):
+        self.config = config
         self.base = _canonical_https_url(config.directive_url) + "/successor"
         self.client = client or PinnedHTTPSClient()
 
@@ -94,6 +104,91 @@ class HTTPSSuccessorDirectiveFetcher:
             raise SuccessorDeliveryError("invalid successor feed cursor")
         url = f"{self.base}/after/{after_version}/{after_sequence}/{after_directive_sha256}.json"
         return await self.client.fetch_bytes(url, maximum_bytes=MAX_SUCCESSOR_DOCUMENT_BYTES)
+
+    async def fetch_initial_history(
+        self,
+        *,
+        legacy_signed_bytes: bytes,
+        operator_consent: SuccessorSupervisorOperatorConsent,
+        finalized_block: int,
+        maximum_records: int = MAX_SUCCESSOR_HISTORY_RECORDS,
+        maximum_bytes: int = MAX_SUCCESSOR_HISTORY_BYTES,
+        timeout_seconds: int = 300,
+    ) -> bytes:
+        """Collect authenticated preparation bytes; never authorize a host switch.
+
+        The supplied block is a preparation bound, not owned finality evidence.
+        Installation must still verify the history against its stopped checkpoint.
+        """
+        for value, lower, upper in (
+            (finalized_block, 1, MAX_JSON_SAFE_INTEGER),
+            (maximum_records, 1, MAX_SUCCESSOR_HISTORY_RECORDS),
+            (maximum_bytes, 1024, MAX_SUCCESSOR_HISTORY_BYTES),
+            (timeout_seconds, 1, 86400),
+        ):
+            if type(value) is not int or not lower <= value <= upper:
+                raise SuccessorDeliveryError("initial history limits exceed supported bounds")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        legacy = parse_canonical_signed_supervisor_directive(legacy_signed_bytes)
+        state = _legacy_state(self.config, operator_consent, legacy)
+        if finalized_block < state.accepted_at_finalized_block:
+            raise SuccessorDeliveryError("initial history predates the retained legacy anchor")
+        if (
+            advance_supervisor_directive_history_state(
+                legacy,
+                config=self.config,
+                finalized_block=state.accepted_at_finalized_block,
+                prior_state=state,
+            )
+            != state
+        ):
+            raise SuccessorDeliveryError("legacy authority differs from retained consent")
+
+        async def collect():
+            cursor = (3, legacy.directive.sequence, legacy.directive_sha256)
+            records = []
+            received = 0
+            while True:
+                if loop.time() >= deadline:
+                    raise TimeoutError("initial history collection timed out")
+                body = await self.fetch_directive_page(
+                    after_version=cursor[0],
+                    after_sequence=cursor[1],
+                    after_directive_sha256=cursor[2],
+                )
+                received += len(body)
+                if received > maximum_bytes:
+                    raise SuccessorDeliveryError("initial history exceeds byte budget")
+                page = parse_canonical_successor_supervisor_directive_page(body)
+                if (page.after_version, page.after_sequence, page.after_directive_sha256) != cursor:
+                    raise SuccessorDeliveryError("initial history page cursor differs")
+                if len(records) + len(page.directives) > maximum_records:
+                    raise SuccessorDeliveryError("initial history exceeds record budget")
+                for signed in page.directives:
+                    if loop.time() >= deadline:
+                        raise TimeoutError("initial history collection timed out")
+                    verify_signed_successor_supervisor_directive_history(
+                        signed,
+                        config=self.config,
+                        operator_consent=operator_consent,
+                        finalized_block=finalized_block,
+                    )
+                    records.append(signed)
+                if not page.more:
+                    payload = successor_initial_history_bytes(legacy, records)
+                    if len(payload) > maximum_bytes:
+                        raise SuccessorDeliveryError("initial history exceeds byte budget")
+                    if loop.time() >= deadline:
+                        raise TimeoutError("initial history collection timed out")
+                    return payload
+                cursor = (4, page.head.directive.sequence, page.head.directive_sha256)
+
+        try:
+            return await asyncio.wait_for(collect(), timeout=max(0.0, deadline - loop.time()))
+        except asyncio.TimeoutError as error:
+            # asyncio's timeout type became a built-in alias in Python 3.11.
+            raise TimeoutError("initial history collection timed out") from error
 
 
 def _identity(info):
@@ -200,6 +295,39 @@ def _publish_noreplace(parent, source, destination):
     function.restype = ctypes.c_int
     if function(parent, os.fsencode(source), parent, os.fsencode(destination), 1) != 0:
         raise OSError(ctypes.get_errno(), "delivery publication did not replace existing data")
+
+
+def write_initial_history(path: Path, payload: bytes) -> None:
+    """Publish one inert, sealed preparation file in an owned private directory."""
+    if sys.platform != "linux" or not path.is_absolute():
+        raise SuccessorDeliveryError("initial history output requires an absolute Linux path")
+    history = parse_canonical_successor_supervisor_directive_history(payload)
+    if history.after_version != 3 or history.more or not history.directives:
+        raise SuccessorDeliveryError("initial history does not start at a v3 anchor")
+    parent = _directory(path.parent)
+    descriptor = -1
+    temporary = ".initial-history-" + secrets.token_hex(16) + ".partial"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=parent,
+        )
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("initial history write did not advance")
+            remaining = remaining[written:]
+        os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+        _publish_noreplace(parent, temporary, path.name)
+        os.fsync(parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
 
 
 def _allowed_object_names(name):

@@ -33,6 +33,7 @@ from .test_competition_host_anchor import worker_capacity as worker_capacity
 from .test_competition_host_artifacts import sign as sign_host_artifact
 
 
+@pytest.mark.parametrize("activation_case", [0, 68], indirect=True)
 def test_controls_authenticate_actual_signed_inputs(anchor_case):
     case = anchor_case
     result = upgrade._controls(case.paths.config, case.controls)

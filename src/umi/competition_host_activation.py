@@ -45,7 +45,6 @@ from .competition_supervisor import (
     load_bound_successor_replay_package,
     parse_canonical_successor_operator_consent,
     parse_canonical_successor_supervisor_directive_history,
-    parse_canonical_successor_supervisor_directive_page,
     successor_operator_consent_sha256,
     successor_source_config_sha256,
     verify_bound_successor_chain_authorization,
@@ -157,7 +156,7 @@ class SuccessorInstallationReceipt(StrictProtocolModel):
         int, Field(gt=0, le=MAX_SUCCESSOR_HOST_OBSERVER_CONFIG_BYTES)
     ]
     initial_successor_page_sha256: Hex32
-    initial_successor_page_size_bytes: Annotated[int, Field(gt=0, le=MAX_SUCCESSOR_DOCUMENT_BYTES)]
+    initial_successor_page_size_bytes: Annotated[int, Field(gt=0, le=MAX_SUCCESSOR_HISTORY_BYTES)]
     legacy_installation_sha256: Hex32
     legacy_predecessor_sequence: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
     legacy_predecessor_directive_sha256: Hex32
@@ -475,7 +474,7 @@ def seal_successor_installation_receipt(
     )
     initial_page_bytes = _read_root_control_path(
         initial_successor_page_path,
-        MAX_SUCCESSOR_DOCUMENT_BYTES,
+        MAX_SUCCESSOR_HISTORY_BYTES,
         modes={0o400, 0o440, 0o444},
     )
     host_bytes = _read_root_control_path(
@@ -530,7 +529,7 @@ def seal_successor_installation_receipt(
         != v3_state
     ):
         raise HostActivationError("legacy signed directive differs from its high-water state")
-    initial_page = parse_canonical_successor_supervisor_directive_page(initial_page_bytes)
+    initial_page = parse_canonical_successor_supervisor_directive_history(initial_page_bytes)
     _verify_initial_successor_history(
         initial_page,
         config=config,
@@ -687,7 +686,7 @@ def load_successor_worker_inputs() -> AuthenticatedSuccessorWorkerInputs:
         worker_limits_bytes=control[WORKER_LIMITS_FILENAME],
         observer_config_bytes=control[HOST_OBSERVER_FILENAME],
     )
-    initial_page = parse_canonical_successor_supervisor_directive_page(
+    initial_page = parse_canonical_successor_supervisor_directive_history(
         control[INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME]
     )
     current_page = parse_canonical_successor_supervisor_directive_history(
@@ -1965,7 +1964,7 @@ def _control_limit(name: str) -> int:
         SOURCE_CONFIG_FILENAME: MAX_SUPERVISOR_DOCUMENT_BYTES,
         OPERATOR_CONSENT_FILENAME: MAX_SUCCESSOR_DOCUMENT_BYTES,
         LEGACY_SIGNED_DIRECTIVE_FILENAME: MAX_SUPERVISOR_DOCUMENT_BYTES,
-        INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_DOCUMENT_BYTES,
+        INITIAL_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_HISTORY_BYTES,
         CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME: MAX_SUCCESSOR_HISTORY_BYTES,
         SIGNED_HOST_ARTIFACT_FILENAME: 32 * 1024**2,
         RELEASE_IDENTITY_FILENAME: MAX_SUCCESSOR_RELEASE_IDENTITY_BYTES,
