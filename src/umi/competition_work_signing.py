@@ -16,6 +16,7 @@ from pydantic import Field
 
 from .competition_authorization import EndpointAuthorizationPublication, validate_publication_body
 from .competition_evaluator import EvaluationOrder, validate_order_body
+from .competition_execution import execution_boundary
 from .competition_rounds import (
     CutoffEndorsement,
     RoundJournal,
@@ -210,6 +211,19 @@ class IndependentWorkSigner:
             }:
                 raise ValueError("work signer is not a nominated evaluator")
             self._reserved_cutoff(statement)
+            reviews = getattr(self.worker, "review_store", None)
+            if reviews is not None:
+                snapshot = statement.plan.cutoff.publication.registration_snapshot
+                capture = await self.worker.provider.collect_at(snapshot.block)
+                execution_boundary(capture)
+                head = await self.worker.boundary()
+                self.journal.observe(head.block)
+                reviews.observe_cutoff(
+                    statement.plan.cutoff,
+                    statement.plan.submissions,
+                    snapshot=capture.snapshot,
+                    observed_block=head.block,
+                )
             slot = statement_slot(statement)
             intent = self.journal.get("intent", slot)
             if intent is not None:

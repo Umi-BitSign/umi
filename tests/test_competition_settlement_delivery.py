@@ -388,7 +388,7 @@ async def test_evaluator_config_starts_and_joins_its_settlement_client(
         wallet_name="test",
         hotkey_name="test",
         round_coordinator_origin="https://rounds.example",
-        settlement_review_directory=str(s.store.directory),
+        settlement_review_directory=str(tmp_path / "independent-reviews"),
         settlement_replay_limits=s.limits,
         **fields,
     )
@@ -403,7 +403,9 @@ async def test_evaluator_config_starts_and_joins_its_settlement_client(
             )
     worker = ContinuousEvaluator(config, s.policy, key, s.provider)
     assert isinstance(worker.settlement_client, transport.SettlementSigningClient)
-    assert worker.settlement_client.signer.reviews.path == s.store.path
+    assert worker.settlement_client.signer.reviews is worker.review_store
+    assert worker.review_store.directory == Path(config.settlement_review_directory)
+    assert not worker.review_store.submissions()
     entered = asyncio.Event()
 
     async def pending():

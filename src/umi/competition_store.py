@@ -135,6 +135,7 @@ class CompetitionStore:
         *,
         admission_capacity: AdmissionCapacity | None = None,
         preparation_capacity: RoundPreparationCapacity | None = None,
+        role: Literal["intake", "evaluator_review"] = "intake",
     ):
         if not directory.is_absolute() or directory.is_symlink():
             raise ValueError("competition state directory must be absolute and not a symlink")
@@ -142,6 +143,9 @@ class CompetitionStore:
         if directory.stat().st_mode & 0o077:
             raise ValueError("competition state directory must be private")
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+        if role not in {"intake", "evaluator_review"}:
+            raise ValueError("unknown competition store role")
+        self.role = role
         self.admission_capacity = AdmissionCapacity.model_validate_json(
             canonical_json_bytes(admission_capacity or AdmissionCapacity())
         )
@@ -236,6 +240,20 @@ class CompetitionStore:
                     )
                 elif bound[0] != digest(policy):
                     raise ValueError("state directory is bound to a different competition policy")
+                prior_role = connection.execute(
+                    "SELECT value FROM metadata WHERE key='role'"
+                ).fetchone()
+                if prior_role is None:
+                    if (
+                        role != "intake"
+                        and connection.execute(
+                            "SELECT 1 FROM submissions UNION ALL SELECT 1 FROM rounds LIMIT 1"
+                        ).fetchone()
+                    ):
+                        raise ValueError("existing intake history cannot become evaluator receipts")
+                    connection.execute("INSERT INTO metadata VALUES ('role', ?)", (role,))
+                elif prior_role[0] != role:
+                    raise ValueError("competition state is bound to a different store role")
                 actual_usage = connection.execute(
                     "SELECT COUNT(*), COALESCE(SUM("
                     "length(CAST(body AS BLOB)) + length(CAST(receipt AS BLOB))"
@@ -286,6 +304,7 @@ class CompetitionStore:
             "rehearsal_snapshot", "verifier_attested_finality"
         ] = "rehearsal_snapshot",
     ) -> dict:
+        self._require_intake()
         if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
             raise ValueError("unsupported registration source")
         signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
@@ -630,10 +649,9 @@ class CompetitionStore:
         evidence_id = independent_evidence_digest(evidence)
         body = canonical_json_bytes(evidence)
         with self._transaction() as connection:
-            if not connection.execute(
-                "SELECT 1 FROM evidence_cutoff_schedules WHERE round=?", (round_id,)
-            ).fetchone():
-                raise ValueError("independent evidence requires a pre-fixed cutoff schedule")
+            # Intake uses its pre-fixed ledger schedule. Evaluator review stores
+            # obtain the same deadline from their independently verified cutoff.
+            self._fixed_cutoff(connection, round_id)
             _advance_block(connection, observed_block)
             prior = connection.execute(
                 "SELECT round, submission, result, body, first_observed_block "
@@ -966,6 +984,8 @@ class CompetitionStore:
     ) -> dict:
         """Fix one explicit evidence cutoff before the corresponding round closes."""
 
+        self._require_intake()
+
         round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
         schedule = EvidenceCutoffSchedule.model_validate_json(canonical_json_bytes(schedule))
         round_id = digest(round_)
@@ -1053,6 +1073,7 @@ class CompetitionStore:
         snapshot from its owned provider; this store has no finality port or key.
         An exact retry returns the original preparation without retiming it.
         """
+        self._require_intake()
         snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
         suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
         limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
@@ -1281,6 +1302,7 @@ class CompetitionStore:
         *,
         current_block: int,
     ) -> str:
+        self._require_intake()
         if round_.policy_sha256 != digest(self.policy):
             raise ValueError("round belongs to another policy")
         if not (
@@ -1345,7 +1367,11 @@ class CompetitionStore:
             row = connection.execute(
                 "SELECT body FROM promotions ORDER BY sequence DESC LIMIT 1"
             ).fetchone()
-        return None if row is None else json.loads(row[0])
+            return None if row is None else json.loads(row[0])
+
+    def _require_intake(self):
+        if self.role != "intake":
+            raise ValueError("evaluator review receipts cannot authorize intake operations")
 
     def reviewed_promotion_head(self, round_sha256: str, *, maximum_bytes: int):
         """Read the local accepted promotion head; never import a caller's head."""
@@ -1393,6 +1419,7 @@ class CompetitionStore:
         current_block: int,
     ) -> WeightProjection:
         """Project only a durably closed round with one consistent baseline head."""
+        self._require_intake()
         invalid: ValueError | None = None
         for signed, attested in evaluations:
             try:
@@ -1561,6 +1588,8 @@ class CompetitionStore:
         current_block: int,
     ) -> dict:
         """Persist one immutable no-weight settlement after its fixed evidence cutoff."""
+
+        self._require_intake()
 
         invalid: ValueError | None = None
         for signed, independent in evidence:

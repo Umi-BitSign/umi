@@ -8,10 +8,12 @@ import pytest
 
 from umi import competition_work_plans as plans
 from umi import competition_work_signing as signing
+from umi.competition_artifacts import preserve_bundle
 from umi.competition_authorization import SignedEndpointAuthorization, validate_publication
 from umi.competition_evaluator import SignedEvaluationOrder, validate_order
 from umi.competition_execution import execution_boundary
-from umi.competition_publication import sign_cutoff_publication
+from umi.competition_publication import PublicationReplayLimits, sign_cutoff_publication
+from umi.competition_review_history import EvaluatorReviewStore
 from umi.competition_rounds import CutoffEndorsement, RoundJournal, RoundProposal
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
@@ -107,6 +109,57 @@ def setup(work, tmp_path, monkeypatch):
         model=statement(next(o for o in orders if o.submission.submission.track == "model")),
         endpoint=statement(next(o for o in orders if o.submission.submission.track == "endpoint")),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "snapshot", "unowned", "elapsed", "reservation"])
+async def test_work_signer_records_only_its_independently_checked_cutoff(setup, tmp_path, fault):
+    s = setup
+    signer, worker = s.signers[0], s.workers[0]
+    plan = s.work.plan
+    limits = PublicationReplayLimits(
+        maximum_roster_bytes=16 * 1024**2,
+        maximum_certificate_bytes=16 * 1024**2,
+        maximum_evidence_bytes=16 * 1024**2,
+    )
+    archive = tmp_path / "review-archive"
+    preserve_bundle(plan.incumbent, tmp_path / "incumbent", archive, s.work.policy)
+    worker.review_store = EvaluatorReviewStore(tmp_path / "reviews", s.work.policy, limits=limits)
+    worker.review_store.initialize_baseline(plan.incumbent, archive)
+    calls = []
+
+    async def collect_at(height):
+        calls.append(height)
+        capture = await Provider(height).collect()
+        snap = plan.cutoff.publication.registration_snapshot
+        if fault == "snapshot":
+            snap = snap.model_copy(update={"registrations": ()})
+        provenance = {
+            **capture.provenance,
+            "snapshot_sha256": digest(snap),
+            "block_hash": snap.block_hash,
+        }
+        if fault == "elapsed":
+            worker.provider.block = plan.cutoff.publication.round.evaluation_close_block
+        return replace(capture, snapshot=snap, provenance={} if fault == "unowned" else provenance)
+
+    worker.provider.collect_at = collect_at
+    if fault == "reservation":
+        with signer.cutoffs.transaction() as db:
+            db.execute("DELETE FROM records WHERE kind='vote'")
+    if fault is not None:
+        with pytest.raises(ValueError):
+            await signer.endorse(s.model)
+        assert not worker.review_store.submissions()
+        assert signer.journal.get("vote", signing.statement_slot(s.model)) is None
+    else:
+        vote = await signer.endorse(s.model)
+        assert calls == [plan.cutoff.publication.registration_snapshot.block]
+        entries = worker.review_store.submissions()
+        assert len(entries) == len(plan.submissions)
+        assert all(e["receipt"]["first_observed_block"] == worker.provider.block for e in entries)
+        assert await signer.endorse(s.model) == vote
+        assert worker.review_store.submissions() == entries
 
 
 @pytest.mark.asyncio

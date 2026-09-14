@@ -641,6 +641,10 @@ def create_exchange_app(
     return app
 
 
+class ExchangeUnavailableError(ValueError):
+    """A transport failure can be retried without changing retained work."""
+
+
 async def request_exchange(origin, signed, *, transport=None):
     origin = validate_intake_origin(origin)
     signed = ExchangeRequest.model_validate_json(canonical_json_bytes(signed))
@@ -678,8 +682,10 @@ async def request_exchange(origin, signed, *, transport=None):
 
     try:
         raw = await asyncio.wait_for(fetch(), timeout=50)
-    except (httpx.HTTPError, asyncio.TimeoutError):
-        raise ValueError("exchange request failed") from None
+    except asyncio.TimeoutError:
+        raise ExchangeUnavailableError("exchange request timed out") from None
+    except httpx.HTTPError:
+        raise ExchangeUnavailableError("exchange transport unavailable") from None
     reply = ExchangeReply.model_validate_json(raw)
     if (
         raw != canonical_json_bytes(reply)
