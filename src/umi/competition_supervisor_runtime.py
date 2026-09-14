@@ -27,13 +27,16 @@ from .competition_chain_state import (
 )
 from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
+    MAX_SUCCESSOR_HISTORY_BYTES,
     SignedSuccessorSupervisorDirective,
     SuccessorSupervisorDirectiveState,
     advance_successor_supervisor_directive_history_state,
     advance_successor_supervisor_directive_state,
     parse_canonical_signed_successor_supervisor_directive,
+    parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
     parse_canonical_successor_supervisor_state,
+    successor_continuation_bytes,
     successor_operator_consent_sha256,
     successor_source_config_sha256,
     verify_signed_successor_supervisor_directive,
@@ -241,6 +244,7 @@ class SuccessorWorkerSelection:
     """A signed fixed profile, never a command, mount list or wallet path."""
 
     signed: SignedSuccessorSupervisorDirective
+    continuation_bytes: bytes | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
         parsed = parse_canonical_signed_successor_supervisor_directive(
@@ -248,6 +252,16 @@ class SuccessorWorkerSelection:
         )
         if parsed.directive.mode == "hold":
             raise SuccessorRuntimeError("hold has no worker selection")
+        if self.continuation_bytes is not None:
+            if not isinstance(self.continuation_bytes, bytes) or not (
+                0 < len(self.continuation_bytes) <= MAX_SUCCESSOR_HISTORY_BYTES
+            ):
+                raise SuccessorRuntimeError("selection history exceeds its byte bound")
+            history = parse_canonical_successor_supervisor_directive_history(
+                self.continuation_bytes
+            )
+            if history.more or history.head != parsed:
+                raise SuccessorRuntimeError("selection history does not end at its signed head")
 
     @property
     def directive_sha256(self) -> str:
@@ -870,6 +884,18 @@ class SuccessorSupervisorRuntime:
             except Exception:
                 return await self._hold("successor_reconcile_failed")
 
+    def _selection(self, signed, history):
+        anchor = self.installation.initial_page.head
+        if not history or history[-1] != signed:
+            raise SuccessorRuntimeError("selection lost its retained history head")
+        self._check_capacity(
+            [(item.directive.sequence, canonical_json_bytes(item), 0) for item in history]
+        )
+        continuation = [
+            item for item in history if item.directive.sequence > anchor.directive.sequence
+        ]
+        return SuccessorWorkerSelection(signed, successor_continuation_bytes(anchor, continuation))
+
     async def _reconcile(self):
         self._state, history, worker = self._load_history()
         observation = await self._refresh_observation()
@@ -908,7 +934,7 @@ class SuccessorSupervisorRuntime:
         future_stage_failed = False
         if future is not None and future.directive.mode != "hold":
             try:
-                await self.adapter.stage(SuccessorWorkerSelection(future))
+                await self.adapter.stage(self._selection(future, [*history, *prefix, future]))
             except Exception:
                 # A failed optional pre-stage cannot retire a valid current worker.
                 future_stage_failed = True
@@ -917,7 +943,7 @@ class SuccessorSupervisorRuntime:
             candidate = prefix[-1]
             expired = observation.block > candidate.directive.valid_through_block
             if not expired and candidate.directive.mode != "hold":
-                selection = SuccessorWorkerSelection(candidate)
+                selection = self._selection(candidate, [*history, *prefix])
                 self._current_gates(candidate, observation, starting=True)
                 await self.adapter.stage(selection)
                 observation = await self._refresh_observation()
@@ -976,7 +1002,7 @@ class SuccessorSupervisorRuntime:
         if current.directive.mode == "hold":
             return await self._hold("signed_successor_hold")
         self._current_gates(current, observation, starting=False)
-        selection = SuccessorWorkerSelection(current)
+        selection = self._selection(current, history)
         if worker.phase == "running" and worker.directive_sha256 == current.directive_sha256:
             await self.adapter.preflight(selection, observation)
             observation = await self._refresh_observation()

@@ -34,11 +34,11 @@ from .competition_host_activation import (
 )
 from .competition_package import _limit_for
 from .competition_supervisor import (
-    MAX_SUCCESSOR_DOCUMENT_BYTES,
+    MAX_SUCCESSOR_HISTORY_BYTES,
     SuccessorSupervisorDirectivePage,
     SuccessorSupervisorOperatorConsent,
     load_bound_successor_replay_package,
-    parse_canonical_successor_supervisor_directive_page,
+    parse_canonical_successor_supervisor_directive_history,
     successor_source_config_sha256,
     verify_bound_successor_chain_authorization,
     verify_signed_successor_supervisor_directive_history,
@@ -316,9 +316,9 @@ def _controls(selection, files, config, consent, worker_limits):
     signed = selection.signed
     directive = signed.directive
     page_bytes = files.current_directive_page_bytes
-    if not isinstance(page_bytes, bytes) or len(page_bytes) > MAX_SUCCESSOR_DOCUMENT_BYTES:
+    if not isinstance(page_bytes, bytes) or len(page_bytes) > MAX_SUCCESSOR_HISTORY_BYTES:
         raise SuccessorMaterializationError("current directive page exceeds its bound")
-    page = parse_canonical_successor_supervisor_directive_page(page_bytes)
+    page = parse_canonical_successor_supervisor_directive_history(page_bytes)
     if page.more or page.head != signed:
         raise SuccessorMaterializationError(
             "staging requires the exact complete selected page head"
@@ -556,9 +556,9 @@ def _read_current(path, *, config, consent, worker_limits, limits, allow_owner_w
                     raise SuccessorMaterializationError("current has unexpected entries")
                 names.add(entry.name)
         page_bytes = _read_at(
-            fd, CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME, MAX_SUCCESSOR_DOCUMENT_BYTES
+            fd, CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME, MAX_SUCCESSOR_HISTORY_BYTES
         )
-        page = parse_canonical_successor_supervisor_directive_page(page_bytes)
+        page = parse_canonical_successor_supervisor_directive_history(page_bytes)
         expected = {
             CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME,
             WORKER_EXECUTION_FILENAME,

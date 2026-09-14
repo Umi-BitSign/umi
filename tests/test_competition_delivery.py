@@ -15,6 +15,7 @@ from umi.competition_package import CompetitionReleaseIdentity
 from umi.competition_supervisor import (
     SuccessorSupervisorDirectivePage,
     parse_canonical_successor_supervisor_directive_page,
+    successor_continuation_bytes,
     verify_signed_successor_supervisor_directive,
 )
 from umi.competition_supervisor_runtime import SuccessorWorkerSelection
@@ -36,7 +37,7 @@ from .test_competition_materialization import successor_chain as successor_chain
 from .test_competition_materialization import successor_release as successor_release
 from .test_competition_materialization import v3_predecessor as v3_predecessor
 from .test_competition_materialization import worker_capacity as worker_capacity
-from .test_competition_supervisor import _consent, _directive, _signed
+from .test_competition_supervisor import _consent, _directive, _signed, _signed_continuation
 
 _BUNDLE = b"inert synthetic release; separate OCI tests authenticate real archives"
 
@@ -214,6 +215,37 @@ async def test_fetch_replays_exact_package_without_activation_and_reuses_after_r
     restarted = delivery.HTTPSSuccessorArtifactDelivery(**case.args)
     assert await restarted.fetch(case.selection) == result
     assert case.responses.requests == requests
+
+
+async def test_retained_multi_page_history_is_used_without_remote_page_and_survives_restart(case):
+    anchor = case.selection.signed
+    records = _signed_continuation(anchor)
+    body = successor_continuation_bytes(anchor, records)
+    selected = SuccessorWorkerSelection(records[-1], body)
+    control_base = case.base + "/directives/" + selected.directive_sha256
+    case.responses.objects[control_base + "/execution.json"] = (
+        case.item.files.worker_execution_bytes
+    )
+    result = await case.fetcher.fetch(selected)
+    assert result.current_directive_page_bytes == body
+    assert not any(url.endswith("/page.json") for url in case.responses.requests)
+    requests = list(case.responses.requests)
+    restarted = delivery.HTTPSSuccessorArtifactDelivery(**case.args)
+    assert await restarted.fetch(selected) == result
+    assert case.responses.requests == requests
+
+
+async def test_retained_history_forged_signature_fails_before_package_fetch(case):
+    anchor = case.selection.signed
+    records = _signed_continuation(anchor)
+    signatures = [
+        item.model_copy(update={"signature": "0x" + "00" * 64}) for item in records[3].signatures
+    ]
+    records[3] = records[3].model_copy(update={"signatures": signatures})
+    selected = SuccessorWorkerSelection(records[-1], successor_continuation_bytes(anchor, records))
+    with pytest.raises(ValidatorSupervisorError):
+        await case.fetcher.fetch(selected)
+    assert case.responses.requests == []
 
 
 @pytest.mark.parametrize("name", ["manifest.json", "evidence.json", "policy.json"])

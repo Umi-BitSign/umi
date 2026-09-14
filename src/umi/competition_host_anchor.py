@@ -33,6 +33,7 @@ from .competition_supervisor import (
     SuccessorSupervisorDirectiveState,
     SuccessorSupervisorOperatorConsent,
     parse_canonical_successor_operator_consent,
+    parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
     successor_source_config_sha256,
 )
@@ -408,7 +409,7 @@ def _verify_materialized_current_history(
     anchor: MaterializedSuccessorAnchor,
     page: SuccessorSupervisorDirectivePage,
 ) -> SuccessorSupervisorDirectiveState:
-    page = parse_canonical_successor_supervisor_directive_page(canonical_json_bytes(page))
+    page = parse_canonical_successor_supervisor_directive_history(canonical_json_bytes(page))
     return activation._verify_staged_current_history(
         page,
         config=anchor.config,

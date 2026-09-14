@@ -29,6 +29,33 @@ Contract fixtures cover both architectures; they are not Linux sandbox rehearsal
 
 ## Components and dedicated upgrade command
 
+### Rolling directive history
+
+After installation, the runtime assembles the complete signed continuation from
+its retained journal and the newly verified cursor page. Artifact delivery uses
+those local bytes instead of fetching the selected directive's one-hop page.
+The host still verifies every predecessor and signature against the original
+root-sealed v4 installation anchor. No later directive can replace that anchor.
+
+Network pages remain limited to 64 records and 1 MiB; the feed currently returns
+batches of 16. Local continuations use `umi-validator-supervisor-directive-history/1`
+when they exceed either network-page limit. They are bounded by 65,536 records
+and 64 MiB, with the runtime's configured journal limits enforced separately.
+Smaller continuations keep the existing page encoding. HTTP delivery cannot
+substitute a different local continuation, including through its cache.
+
+Thirteen focused tests passed on the Studio Linux VM, covering 68-update
+catch-up, restart, host verification and HTTP delivery. They took 751.00 seconds.
+The separate Linux exchange test exposed an old page parser in the anchor
+reader. That reader and the target observer now accept the bounded local history;
+their integrated rerun is in progress. Synthetic test authority keys are also
+reused within each generated chain to avoid repeating key derivation.
+This does not enlarge the root-sealed initial v3-to-v4 page or remove cache and
+recovery-registry limits. Initial multi-page installation and long-run storage
+retention still need work before deployment. No live validator was upgraded.
+
+### Worker and host components
+
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;
 it does not reset or reinterpret the existing high-water mark. The weight profile

@@ -192,5 +192,6 @@ The first automatic-publication batch passed 11 cases on the Studio's Linux VM
 in 257.44 seconds. It covers completed-round selection, signed-export recovery,
 expiry, late conflicts, descriptor bindings, scan limits and provider cleanup.
 Two further cases cover unfinished-signature priority and cancellation during
-discovery. Those cases and the combined regression still need a completed run;
-no live publisher service has been installed by this work.
+discovery. All 46 cases in the combined publisher/feed regression passed on the
+Studio Linux VM in 567.77 seconds, with two dependency deprecation warnings.
+No live publisher service has been installed by this work.

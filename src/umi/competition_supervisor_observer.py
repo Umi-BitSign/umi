@@ -34,7 +34,7 @@ from .competition_host_activation import (
 )
 from .competition_supervisor import (
     load_bound_successor_replay_package,
-    parse_canonical_successor_supervisor_directive_page,
+    parse_canonical_successor_supervisor_directive_history,
     verify_bound_successor_chain_authorization,
     verify_signed_successor_supervisor_directive_history,
 )
@@ -163,6 +163,10 @@ class OwnedSuccessorHostObserver:
         initial = self._initial()
         if type(artifacts) is not SuccessorArtifactFiles:
             raise TypeError("host observer requires bounded successor artifact files")
+        if selection.continuation_bytes is not None and (
+            selection.continuation_bytes != artifacts.current_directive_page_bytes
+        ):
+            raise ValueError("observer target differs from the runtime's retained history")
         directive = selection.signed.directive
         verify_signed_successor_supervisor_directive_history(
             selection.signed,
@@ -172,7 +176,7 @@ class OwnedSuccessorHostObserver:
                 directive.issued_at_block, self.installation.checkpoint_finalized_block
             ),
         )
-        page = parse_canonical_successor_supervisor_directive_page(
+        page = parse_canonical_successor_supervisor_directive_history(
             artifacts.current_directive_page_bytes
         )
         if page.more or page.head != selection.signed:

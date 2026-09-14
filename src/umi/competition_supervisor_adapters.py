@@ -35,10 +35,10 @@ from .competition_host_activation import (
 from .competition_package import VerifiedCompetitionPackage
 from .competition_release import VerifiedSuccessorOCI
 from .competition_supervisor import (
-    MAX_SUCCESSOR_DOCUMENT_BYTES,
+    MAX_SUCCESSOR_HISTORY_BYTES,
     load_bound_successor_replay_package,
     parse_canonical_signed_successor_supervisor_directive,
-    parse_canonical_successor_supervisor_directive_page,
+    parse_canonical_successor_supervisor_directive_history,
     verify_bound_successor_chain_authorization,
     verify_signed_successor_supervisor_directive,
     verify_signed_successor_supervisor_directive_history,
@@ -95,7 +95,7 @@ class SuccessorArtifactFiles:
                 raise ValueError("successor artifact paths must be canonical and absolute")
         for value, limit, optional in (
             (self.worker_execution_bytes, _MAX_EXECUTION_BYTES, False),
-            (self.current_directive_page_bytes, MAX_SUCCESSOR_DOCUMENT_BYTES, False),
+            (self.current_directive_page_bytes, MAX_SUCCESSOR_HISTORY_BYTES, False),
             (self.authorization_bytes, _MAX_AUTHORIZATION_BYTES, True),
         ):
             if value is None and optional:
@@ -376,6 +376,10 @@ class ProductionSuccessorRuntimeAdapter:
 
     def _verify(self, selection, files):
         validate_authenticated_successor_installation(self.installation)
+        if selection.continuation_bytes is not None and (
+            selection.continuation_bytes != files.current_directive_page_bytes
+        ):
+            raise SuccessorAdapterError("delivery differs from the runtime's retained history")
         signed, directive = selection.signed, selection.signed.directive
         verify_signed_successor_supervisor_directive_history(
             signed,
@@ -385,7 +389,7 @@ class ProductionSuccessorRuntimeAdapter:
                 directive.issued_at_block, self.installation.checkpoint_finalized_block
             ),
         )
-        page = parse_canonical_successor_supervisor_directive_page(
+        page = parse_canonical_successor_supervisor_directive_history(
             files.current_directive_page_bytes
         )
         if page.more or page.head != signed:

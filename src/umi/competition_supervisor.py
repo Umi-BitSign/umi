@@ -68,6 +68,8 @@ SUCCESSOR_CHAIN_TARGET_SCHEMA = "umi-successor-supervisor-chain-target/1"
 SUCCESSOR_SUPERVISOR_DIRECTIVE_SIGNATURE_DOMAIN = b"umi-validator-supervisor-directive-v4\0"
 SUCCESSOR_OPERATOR_CONSENT_DOMAIN = b"umi-validator-supervisor-operator-consent-v1\0"
 MAX_SUCCESSOR_DOCUMENT_BYTES = 1024 * 1024
+MAX_SUCCESSOR_HISTORY_BYTES = 64 * 1024**2
+MAX_SUCCESSOR_HISTORY_RECORDS = 65536
 MAX_SUCCESSOR_CHAIN_AUTHORIZATION_BYTES = 4 * 1024 * 1024
 MIN_SUCCESSOR_ACTIVATION_HEADROOM_BLOCKS = 2
 MAX_SUCCESSOR_ACTIVATION_HEADROOM_BLOCKS = 100_000
@@ -480,6 +482,43 @@ class SuccessorSupervisorDirectivePage(StrictProtocolModel):
         return self
 
 
+class SuccessorSupervisorDirectiveHistory(SuccessorSupervisorDirectivePage):
+    """Complete local continuation; network cursor pages keep their own limit."""
+
+    schema_: Literal["umi-validator-supervisor-directive-history/1"] = Field(alias="schema")
+    directives: Annotated[
+        list[SignedSuccessorSupervisorDirective], Field(max_length=MAX_SUCCESSOR_HISTORY_RECORDS)
+    ]
+    more: Literal[False] = False
+
+
+def successor_continuation_bytes(anchor, directives):
+    """Assemble retained signed history after the installation's exact v4 head."""
+    directives = list(directives)
+    fields = dict(
+        after_version=4,
+        after_sequence=anchor.directive.sequence,
+        after_directive_sha256=anchor.directive_sha256,
+        directives=directives,
+        more=False,
+        head=directives[-1] if directives else anchor,
+    )
+    payload = None
+    if len(directives) <= MAX_SUPERVISOR_DIRECTIVES_PER_PAGE:
+        page = SuccessorSupervisorDirectivePage(
+            schema=SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA, **fields
+        )
+        payload = canonical_json_bytes(page)
+    if payload is None or len(payload) > MAX_SUCCESSOR_DOCUMENT_BYTES:
+        value = SuccessorSupervisorDirectiveHistory(
+            schema="umi-validator-supervisor-directive-history/1", **fields
+        )
+        payload = canonical_json_bytes(value)
+    if len(payload) > MAX_SUCCESSOR_HISTORY_BYTES:
+        raise ValidatorSupervisorError("successor_history_capacity_exceeded")
+    return payload
+
+
 class SuccessorSupervisorDirectiveState(StrictProtocolModel):
     """Durable v4 high-water with the exact v3 transition anchor."""
 
@@ -586,6 +625,27 @@ def parse_canonical_successor_supervisor_directive_page(
     if canonical_json_bytes(page) != payload:
         raise ValidatorSupervisorError("successor_page_noncanonical")
     return page
+
+
+def parse_canonical_successor_supervisor_directive_history(
+    payload: bytes,
+) -> SuccessorSupervisorDirectivePage | SuccessorSupervisorDirectiveHistory:
+    """Parse local controls, preserving the smaller network-page byte limit."""
+    value = _parse_canonical_json(
+        payload, maximum_bytes=MAX_SUCCESSOR_HISTORY_BYTES, label="successor_history"
+    )
+    if (
+        isinstance(value, dict)
+        and value.get("schema") == SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA
+    ):
+        return parse_canonical_successor_supervisor_directive_page(payload)
+    try:
+        history = SuccessorSupervisorDirectiveHistory.model_validate(value)
+    except Exception as error:
+        raise ValidatorSupervisorError("successor_history_schema_invalid") from error
+    if canonical_json_bytes(history) != payload:
+        raise ValidatorSupervisorError("successor_history_noncanonical")
+    return history
 
 
 def parse_canonical_successor_operator_consent(
@@ -1178,6 +1238,8 @@ __all__ = [
     "MAX_SUCCESSOR_ACTIVATION_HEADROOM_BLOCKS",
     "MAX_SUCCESSOR_CHAIN_AUTHORIZATION_BYTES",
     "MAX_SUCCESSOR_DOCUMENT_BYTES",
+    "MAX_SUCCESSOR_HISTORY_BYTES",
+    "MAX_SUCCESSOR_HISTORY_RECORDS",
     "MIN_SUCCESSOR_ACTIVATION_HEADROOM_BLOCKS",
     "SUCCESSOR_CHAIN_AUTHORIZATION_TARGET_SCHEMA",
     "SUCCESSOR_CHAIN_TARGET_SCHEMA",
@@ -1198,6 +1260,7 @@ __all__ = [
     "SuccessorReplayPackageTarget",
     "SuccessorSupervisorChainTarget",
     "SuccessorSupervisorDirective",
+    "SuccessorSupervisorDirectiveHistory",
     "SuccessorSupervisorDirectivePage",
     "SuccessorSupervisorDirectiveState",
     "SuccessorSupervisorMode",
@@ -1210,8 +1273,10 @@ __all__ = [
     "load_bound_successor_replay_package",
     "parse_canonical_signed_successor_supervisor_directive",
     "parse_canonical_successor_operator_consent",
+    "parse_canonical_successor_supervisor_directive_history",
     "parse_canonical_successor_supervisor_directive_page",
     "parse_canonical_successor_supervisor_state",
+    "successor_continuation_bytes",
     "successor_operator_consent_sha256",
     "successor_source_config_sha256",
     "successor_supervisor_directive_digest",
