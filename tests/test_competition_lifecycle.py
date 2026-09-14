@@ -351,6 +351,7 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
         drivers=drivers,
         reviews=review_stores,
         fetched=fetched,
+        exchange_config=exchange_config,
     )
     packages = Path(config.settlement_delivery.package_directory)
     if packages.exists():
@@ -384,9 +385,7 @@ def completed_voids(driver):
     ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("authorization", ["scored", "void"], indirect=True)
-async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_journals(lifecycle):
+async def complete_first_round(lifecycle):
     s = lifecycle
     item, dispatch = s.item, s.paired.dispatch
     void_count = int(item.unstable is not None)
@@ -567,4 +566,217 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
         assert len([c for c in s.paired.calls if isinstance(c, dict)]) == inference_count
     finally:
         for driver in s.drivers:
+            await driver.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorization", ["scored", "void"], indirect=True)
+async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_journals(lifecycle):
+    await complete_first_round(lifecycle)
+
+
+@pytest.mark.asyncio
+async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(lifecycle):
+    s = lifecycle
+    await complete_first_round(s)
+    item, dispatch = s.item, s.paired.dispatch
+    first_round = canonical_json_bytes(item.round)
+    first_suite = digest(item.suite)
+    first_model = item.round.incumbent_model_sha256
+    packages = Path(s.config.settlement_delivery.certificate_directory)
+    first_path = next(packages.glob("*.package.json"))
+    first_package = first_path.read_bytes()
+    first_calls = len([c for c in s.paired.calls if isinstance(c, dict)])
+
+    # A real second Quicknet pulse, retrieved from the pinned public chain.
+    # https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/public/1001440
+    next_pulse = DrandPulse.from_json(
+        {
+            "round": 1001440,
+            "randomness": "f3f26e281cebb4df390b78bd3f8d062bdbba5ab284107396d22ea7827e23943a",
+            "signature": (
+                "ad7995595d1cce98dcacde09dc1ceeb377508d9cf0e32d43078f1f43397245c37"
+                "a213f897f694f542050ae6ed76c83bd"
+            ),
+        },
+        expected_round=1001440,
+    )
+
+    def next_fixture():
+        return build_authorization_fixture(
+            item.policy,
+            legacy_policy=item.legacy_policy,
+            incumbent_sha256=digest(item.candidate),
+            model_bundle=item.candidate,
+            window_index=1,
+            sequence=2,
+        )
+
+    next_item = next_fixture()
+    dispatch.feed.clock.ns += (
+        (next_pulse.round - next_item.request.reveal_round) * QUICKNET_PERIOD_MS * 1_000_000
+    )
+    next_item = next_fixture()
+    assert next_item.request.reveal_round == next_pulse.round
+    assert next_item.policy == item.policy and next_item.submissions == item.submissions
+    assert next_item.round.submission_close_block > item.round.valid_through_block
+    # Preserve the owned-source test object's old block history for replay.
+    item.finalized_blocks.blocks.update(next_item.finalized_blocks.blocks)
+    item.finalized_blocks.head = next_item.finalized_blocks.head
+    for field in ("request", "suite", "round", "cases", "schedule", "publication"):
+        setattr(item, field, getattr(next_item, field))
+
+    plan = s.plan.model_copy(
+        update={
+            "suite": item.suite,
+            "not_before_block": item.round.submission_close_block,
+            "admission_close_by_block": item.round.submission_close_block,
+            "signing_close_block": item.round.submission_close_block + 1,
+            "evaluation_close_block": item.round.evaluation_close_block,
+            "reveal_block": item.round.reveal_block,
+            "evidence_cutoff_block": item.round.reveal_block + 3,
+            "valid_through_block": item.round.valid_through_block,
+        }
+    )
+    assets = ArchivedRoundWorkAssets(
+        schema="umi-round-work-assets/2",
+        suite_sha256=digest(item.suite),
+        runtime=item.runtime,
+        videos=tuple(a.request.video for a in item.publication.publication.assignments[:3]),
+    )
+    put(Path(s.config.plan_directory) / (digest(item.suite) + ".json"), plan)
+    put(Path(s.config.work.asset_directory) / (digest(item.suite) + ".json"), assets)
+    # Exchange owns the reveal inbox; evaluator inboxes are populated over HTTPS.
+    exchange_reveals = Path(s.exchange_config.reveal_directory)
+    put(exchange_reveals / (digest(item.suite) + ".json"), item.suite)
+
+    # Restart coordinator and both evaluator clients from their existing journals.
+    s.provider.block = item.round.submission_close_block
+    s.coordinator = rounds.RoundCoordinator(
+        s.config,
+        item.policy,
+        s.provider,
+        legacy=item.legacy_policy,
+        transport_provider=dispatch.provider,
+    )
+    app = rounds.create_round_app(
+        s.config,
+        item.policy,
+        provider_factory=lambda *_: s.provider,
+        legacy=item.legacy_policy,
+        transport_provider=dispatch.provider,
+    )
+
+    class NextPulse:
+        async def fetch(self, number):
+            s.fetched.append(number)
+            assert number == next_pulse.round
+            return next_pulse
+
+    restarted = []
+    for driver in s.drivers:
+        new = ContinuousEvaluator(
+            driver.config,
+            item.policy,
+            driver.wallet,
+            OwnedProvider(s.provider.block),
+            legacy=item.legacy_policy,
+            pulse_client=NextPulse(),
+        )
+        for client in (new.round_client, new.work_client, new.settlement_client):
+            client.transport = httpx.ASGITransport(app=app)
+        new.exchange.transport = driver.exchange.transport
+        restarted.append(new)
+    s.drivers = restarted
+    dispatchers = [
+        EndpointDispatcher(
+            dispatch.config.model_copy(update={"evaluator_hotkey": d.config.evaluator_hotkey}),
+            dispatch.feed.journal,
+            dispatch.provider,
+            d.wallet,
+            transport=dispatch.driver.transport,
+        )
+        for d in s.drivers
+    ]
+    try:
+        await s.coordinator.cycle()
+        proposal = next(p for p in s.coordinator.proposals() if p.cutoff.round.sequence == 2)
+        assert proposal.cutoff.round == item.round
+        assert proposal.cutoff.round.incumbent_model_sha256 == digest(item.candidate)
+        s.provider.block = item.request.issued_block
+        for driver in s.drivers:
+            driver.provider.block = s.provider.block
+            await driver.round_client.sync_once()
+        for _ in range(3):
+            for driver in s.drivers:
+                await driver.work_client.sync_once()
+        orders = [
+            _read(p, SignedEvaluationOrder)
+            for p in Path(s.config.work.order_directory).glob("*.json")
+        ]
+        second_orders = [o for o in orders if o.order.round.sequence == 2]
+        assert len(second_orders) == 2
+        assert all(digest(o.order.incumbent) == digest(item.candidate) for o in second_orders)
+        assert all(
+            digest(o.order.incumbent) == first_model for o in orders if o.order.round.sequence == 1
+        )
+        for driver in s.drivers:
+            await driver.exchange.sync_once()
+        for turn in range(6):
+            for driver in s.drivers:
+                await tick(driver)
+            for driver in dispatchers:
+                await driver.poll_once()
+                await driver.drain()
+            await dispatch.miner.competition_authority.poll_once()
+            dispatch.feed.clock.ns += 1
+            if turn == 0:
+                dispatch.feed.clock.ns += dispatch.config.discovery_grace_seconds * 1_000_000_000
+        assert [d._counts["completed"] for d in dispatchers] == [3, 3]
+        s.provider.block = item.round.reveal_block
+        for driver in s.drivers:
+            driver.provider.block = s.provider.block
+        for _ in range(10):
+            for driver in s.drivers:
+                await tick(driver)
+            if all(len(completed(d)) == 4 for d in s.drivers):
+                break
+        assert all(len(completed(d)) == 4 for d in s.drivers)
+        for driver in s.drivers:
+            await driver.exchange.sync_once()
+        s.provider.block = plan.evidence_cutoff_block
+        for driver in s.drivers:
+            driver.provider.block = s.provider.block
+        result = await s.coordinator.cycle()
+        assert result["settlement_prepared"] >= 1 and result["settlement_held"] == 0, result
+        for driver in s.drivers:
+            result = await driver.settlement_client.sync_once()
+            assert result == {"endorsed": 1, "held": 0}, result
+        paths = list(packages.glob("*.package.json"))
+        assert len(paths) == 2 and first_path.read_bytes() == first_package
+        second_path = next(p for p in paths if p != first_path)
+        prepared = _read(second_path, PreparedCompetitionPackage)
+        package = load_competition_package(
+            Path(prepared.package_path),
+            expected_package_sha256=prepared.package_sha256,
+            expected_policy_sha256=digest(item.policy),
+            observed_release=s.config.settlement_delivery.release_identity,
+            limits=s.config.settlement_delivery.package_limits,
+        )
+        assert package.retained_settlement.projection.weights[6] == 45875
+        assert package.retained_settlement.projection.weights[247] == 19660
+        assert not package.chain_submission_authorized
+        prior = second_path.read_bytes()
+        for driver in s.drivers:
+            await tick(driver)
+        assert second_path.read_bytes() == prior and first_path.read_bytes() == first_package
+        assert s.fetched == [ROUND, ROUND, next_pulse.round, next_pulse.round]
+        calls = [c for c in s.paired.calls if isinstance(c, dict)]
+        assert len(calls) == first_calls + 18
+        assert all(digest(c["bundle"]) == digest(item.candidate) for c in calls[first_calls:])
+        assert dispatch.miner.translator.calls == 12
+        retained = s.store.prepared_round(first_suite, s.config.replay_limits)
+        assert canonical_json_bytes(retained["cutoff_publication"]["round"]) == first_round
+    finally:
+        for driver in (*s.drivers, *dispatchers):
             await driver.aclose()
