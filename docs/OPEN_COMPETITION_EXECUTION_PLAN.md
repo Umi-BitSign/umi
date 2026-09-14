@@ -114,6 +114,7 @@ contributor attribution yet.
 - [x] Connect private round plans to owned preparation and independent cutoff signatures.
 - [x] Derive endpoint authorizations and model orders, collect independent work signatures and deliver exact certificates.
 - [x] Prepare unsigned settlements from complete retained evidence with owned current snapshots and exact restart recovery.
+- [ ] Verify archive-backed work selection follows approved promotions while preserving frozen incumbents.
 - [ ] Connect continuous round planning to independent cutoff/order signing and settlement publication.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.

@@ -33,9 +33,10 @@ from umi.competition_package import PreparedCompetitionPackage, load_competition
 from umi.competition_promotion_delivery import ReviewedPromotion
 from umi.competition_publication import PublicationReplayLimits
 from umi.competition_review_history import EvaluatorReviewStore
+from umi.competition_round_assets import ArchivedRoundWorkAssets
 from umi.competition_scheduling import AssignmentPublicationJournal
 from umi.competition_store import AgreedPromotionReview, AttestedPromotionReview, CompetitionStore
-from umi.competition_work_plans import RoundWorkAssets, RoundWorkConfig
+from umi.competition_work_plans import RoundWorkConfig
 from umi.drand import DrandPulse
 from umi.open_competition import digest, sign_object
 from umi.policy import scoring_policy_hash
@@ -198,10 +199,9 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
         valid_through_block=r.valid_through_block,
     )
     put(Path(config.plan_directory) / (digest(item.suite) + ".json"), plan)
-    assets = RoundWorkAssets(
-        schema="umi-round-work-assets/1",
+    assets = ArchivedRoundWorkAssets(
+        schema="umi-round-work-assets/2",
         suite_sha256=digest(item.suite),
-        incumbent=item.baseline,
         runtime=item.runtime,
         videos=tuple(a.request.video for a in item.publication.publication.assignments[:3]),
     )
