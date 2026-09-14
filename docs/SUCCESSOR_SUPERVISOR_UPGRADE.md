@@ -79,8 +79,9 @@ including lossless 68-record reconstruction, prefix storage growth, legacy
 record preservation and atomic insertion failure. The expanded link-validation
 suite passed 11 tests in 476.15 seconds, including missing nodes, broken links
 with recomputed storage checksums, reference/head mismatches and depth bounds.
-The recovery regression remains in progress. The registry still has its
-configured byte and record limits.
+The recovery regression passed 45 tests in 1391.01 seconds. The registry still
+has its configured byte and record limits. All 18 repository checks passed for
+`1448bba`, including the complete Python suites and both Linux architectures.
 
 ### Download history bindings
 
@@ -95,9 +96,32 @@ An existing `history.json` from an earlier version is preserved and checked
 against the supplied bytes on every refetch. A changed continuation for an
 already cached head, corrupt binding or differing legacy file fails closed.
 Older delivery binaries reject the new cache filename; rollback over these
-cache entries is unsupported. The focused delivery regression is running.
-Materialized current copies still need long-run retention work before
-deployment, and package/object capacity limits remain in effect.
+cache entries is unsupported. The focused delivery regression passed five tests
+in 264.03 seconds. Package/object capacity limits remain in effect.
+
+### Retiring redundant materialized inputs
+
+After stopping the worker and reconciling its transactions, the host retires
+cached input trees only when their exact bytes are reconstructable from its
+audited recovery registry and a separately retained, verified delivery package.
+Current inputs, the original root anchor, signed histories, transaction journals
+and delivery packages are preserved. Unstarted, unmatched and partial stages
+are preserved too. An equivalent but byte-different history does not authorize
+removal of the original copy.
+
+A private `retiring-<directive digest>-<random id>` directory records the cleanup
+intent. The host fsyncs that rename before unlinking. Following interruption, it
+revalidates the retained source and every surviving cached file before resuming.
+Missing recovery inputs, extra or changed files, links, and aliases of current
+or recovery inputs stop cleanup. All traversal and accounting limits remain.
+Only exact redundant cache copies are removed; they can be reconstructed from
+the retained sources. Cleanup does not grant weight or activation authority.
+
+The initial 11-test interruption and repeated-round suite passed on the Studio
+in 346.11 seconds. Additional bounded-rescan and inode-alias checks, plus the
+surrounding materializer/adapter regression, are running. Full checks must pass
+before deployment. Older binaries do not recognize an interrupted `retiring-*`
+entry; complete recovery with this version before attempting a rollback.
 
 ### Initial history after multiple feed pages
 

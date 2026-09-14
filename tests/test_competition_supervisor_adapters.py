@@ -165,6 +165,14 @@ def adapter_case(
         async def fetch(self, selection):
             return result.files
 
+        async def retire_redundant(self, retained):
+            assert result.adapter._stopped
+            assert all(
+                item.phase in adapters._TERMINAL for item in result.adapter._attempts().values()
+            )
+            result.retired_records = set(retained)
+            return 0
+
         async def activate(self, selection, files, *, owned_observation):
             assert result.adapter._stopped and result.adapter._recovered is not None
             assert selection.directive_sha256 in result.adapter._records()

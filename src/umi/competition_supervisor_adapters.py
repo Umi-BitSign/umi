@@ -120,6 +120,10 @@ class SuccessorArtifactMaterializer(Protocol):
         """Fetch into immutable staging; never replace the active current view."""
         ...
 
+    async def retire_redundant(self, retained: Mapping) -> int:
+        """Retire cache copies only after their durable recovery sources were audited."""
+        ...
+
     async def activate(
         self,
         selection: SuccessorWorkerSelection,
@@ -732,6 +736,7 @@ class ProductionSuccessorRuntimeAdapter:
             raise SuccessorAdapterError("successor transaction recovery is incomplete")
         if _recovery_journal_snapshot(weight_path, allow_absent_root=True) != attempts_snapshot:
             raise SuccessorAdapterError("stopped weight journal changed during audit")
+        await self.materializer.retire_redundant(records)
         observation = await self.observer.observe()
         validate_authenticated_successor_installation(self.installation)
         if not self._stopped or (await self.container.status()).phase == "running":
