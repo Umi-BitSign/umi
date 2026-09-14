@@ -772,7 +772,34 @@ class ContinuousEvaluator:
             )
             validate_evidence_observation(receipt, order, evidence, self.config.evaluator_hotkey)
             self.journal.put(slot, "independent_observation", receipt)
-        return validate_evidence_observation(receipt, order, evidence, self.config.evaluator_hotkey)
+        receipt = validate_evidence_observation(
+            receipt, order, evidence, self.config.evaluator_hotkey
+        )
+        if self.review_store is not None:
+            retained = self.journal.get(slot, "review_retention", IndependentEvidenceObservation)
+            if retained is not None:
+                validate_evidence_observation(
+                    retained, order, evidence, self.config.evaluator_hotkey
+                )
+                return receipt
+            suite = _read(
+                Path(self.config.reveal_directory) / (order.round.suite_sha256 + ".json"),
+                EvaluationSuite,
+            )
+            # The review database has its own actual arrival time. Never backdate
+            # it to an earlier execution receipt after a crash or delayed replay.
+            current = await self.boundary()
+            self.review_store.record_independent_evaluation(
+                signed=order.submission,
+                evidence=evidence,
+                round_=order.round,
+                suite=suite,
+                observed_block=current.block,
+            )
+            self.journal.put(
+                slot, "review_retention", receipt.model_copy(update={"observed": current})
+            )
+        return receipt
 
     async def advance(self, slot, signed, head):
         order = signed.order

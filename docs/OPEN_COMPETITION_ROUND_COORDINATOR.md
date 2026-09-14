@@ -12,6 +12,9 @@ collects independent signatures before delivery. Optional
 unsigned proposals from complete retained evidence.
 [Settlement delivery](OPEN_COMPETITION_SETTLEMENT_DELIVERY.md) connects those
 proposals to independent signers and publishes verified replay packages.
+Optional [reviewed promotion delivery](OPEN_COMPETITION_PROMOTION_DELIVERY.md)
+applies explicitly approved model reviews to retained independent evidence and
+delivers those decisions to evaluators through the same authenticated connection.
 The service does not activate the 70/30 policy, change bridge weights or extend
 the bridge sunset.
 

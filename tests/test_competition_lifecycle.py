@@ -30,6 +30,7 @@ from umi.competition_evaluator import (
 from umi.competition_exchange import ExchangeConfig, ExchangeUnavailableError, create_exchange_app
 from umi.competition_feed import create_assignment_feed
 from umi.competition_package import PreparedCompetitionPackage, load_competition_package
+from umi.competition_promotion_delivery import ReviewedPromotion
 from umi.competition_publication import PublicationReplayLimits
 from umi.competition_review_history import EvaluatorReviewStore
 from umi.competition_scheduling import AssignmentPublicationJournal
@@ -171,6 +172,10 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
             minimum_issue_ms=1000,
         ),
         settlement_directory=str(tmp_path / "settlements"),
+        promotion_delivery=rounds.PromotionDeliveryConfig(
+            reviewed_directory=str(tmp_path / "reviewed-promotions"),
+            archive_directory=str(setup.archive),
+        ),
         settlement_delivery=rounds.SettlementDeliveryConfig(
             state_directory=str(tmp_path / "settlement-state"),
             certificate_directory=str(tmp_path / "settlement-certificates"),
@@ -430,36 +435,34 @@ async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_
             review=review_body,
             signatures=tuple(sign_object(review_body, w) for w in item.evaluator_wallets[:2]),
         )
-        promotions = []
-        for index, store in enumerate(s.reviews):
-            for signed in item.submissions:
-                store.record_independent_evaluation(
-                    signed=signed,
-                    evidence=results[index][digest(signed.submission)],
-                    round_=item.round,
-                    suite=item.suite,
-                    observed_block=s.provider.block,
-                )
-        for index, store in enumerate((*s.reviews, s.store)):
-            observed = s.provider.block + index
-            promotions.append(
-                store.promote(
-                    signed=item.model_submission,
-                    attested=attested,
-                    round_=item.round,
-                    suite=item.suite,
-                    review=reviewed,
-                    archive=s.paired.archive,
-                    snapshot=snapshot(observed),
-                    current_block=observed,
-                )
-            )
+        value = ReviewedPromotion(
+            schema="umi-reviewed-promotion-delivery/1",
+            review=reviewed,
+            round=item.round,
+            submission=item.model_submission,
+        )
+        put(
+            Path(s.config.promotion_delivery.reviewed_directory)
+            / (digest(reviewed.review) + ".json"),
+            value,
+        )
+        observed_start = s.provider.block
+        s.provider.block = observed_start + 2
+        assert await s.coordinator.apply_promotions() == {
+            "promotions_applied": 1,
+            "promotions_held": 0,
+        }
+        for index, driver in enumerate(s.drivers):
+            driver.provider.block = observed_start + index
+            await driver.round_client.sync_once()
+        promotions = [store.baseline() for store in (*s.reviews, s.store)]
         assert promotions[0] == promotions[1] == promotions[2]
+        assert promotions[0]["sequence"] == 1
         for index, store in enumerate((*s.reviews, s.store)):
             with store._connection() as connection:
                 assert connection.execute(
                     "SELECT observed_block FROM promotion_receipts WHERE sequence=1"
-                ).fetchone() == (s.provider.block + index,)
+                ).fetchone() == (observed_start + index,)
         s.provider.block = s.plan.evidence_cutoff_block
         for driver in s.drivers:
             driver.provider.block = s.provider.block

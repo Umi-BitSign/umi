@@ -28,6 +28,7 @@ from .competition_client import validate_intake_origin
 from .competition_evaluator import Directory, _lock_file, _private, _publish, _read
 from .competition_execution import execution_boundary
 from .competition_package import CompetitionPackageLimits, CompetitionReleaseIdentity
+from .competition_promotion_delivery import ReviewedPromotion
 from .competition_publication import (
     CutoffPublication,
     PublicationReplayLimits,
@@ -106,12 +107,14 @@ class RoundQuery(StrictProtocolModel):
     hotkey: Hotkey
     nonce_unix_ns: Annotated[str, Field(pattern=r"^[1-9][0-9]{0,18}$")]
     after_sequence: Block = 0
+    after_promotion_sequence: Block | None = None
     vote: CutoffEndorsement | None = None
 
     @model_validator(mode="after")
     def parameters(self):
         if int(self.nonce_unix_ns) > 2**63 - 1 or (
-            self.vote is not None and self.after_sequence != 0
+            self.vote is not None
+            and (self.after_sequence != 0 or self.after_promotion_sequence is not None)
         ):
             raise ValueError("invalid round query parameters")
         return self
@@ -133,6 +136,7 @@ class RoundReply(StrictProtocolModel):
     query_sha256: Hex32
     policy_sha256: Hex32
     proposals: Annotated[tuple[RoundProposal, ...], Field(max_length=4)] = ()
+    promotions: Annotated[tuple[ReviewedPromotion, ...], Field(max_length=4)] = ()
     accepted_proposal_sha256: Hex32 | None = None
     chain_submission_authorized: Literal[False] = False
 
@@ -159,6 +163,11 @@ class SettlementDeliveryConfig(StrictProtocolModel):
         return self
 
 
+class PromotionDeliveryConfig(StrictProtocolModel):
+    reviewed_directory: Directory
+    archive_directory: Directory
+
+
 class RoundCoordinatorConfig(StrictProtocolModel):
     schema_: Literal["umi-round-coordinator-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -171,6 +180,7 @@ class RoundCoordinatorConfig(StrictProtocolModel):
     work: RoundWorkConfig | None = None
     settlement_directory: Directory | None = None
     settlement_delivery: SettlementDeliveryConfig | None = None
+    promotion_delivery: PromotionDeliveryConfig | None = None
     maximum_rounds: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
@@ -192,6 +202,16 @@ class RoundCoordinatorConfig(StrictProtocolModel):
         ]
         if self.settlement_directory is not None:
             paths.append(Path(self.settlement_directory).resolve())
+        if self.promotion_delivery is not None:
+            if self.settlement_delivery is None or self.work is None:
+                raise ValueError("review delivery requires work and settlement delivery")
+            paths.extend(
+                Path(p).resolve()
+                for p in (
+                    self.promotion_delivery.reviewed_directory,
+                    self.promotion_delivery.archive_directory,
+                )
+            )
         if self.settlement_delivery is not None:
             if self.settlement_directory is None:
                 raise ValueError("settlement delivery requires automatic preparation")
@@ -603,6 +623,7 @@ class RoundCoordinator:
                     *({"work"} if config.work is None else set()),
                     *({"settlement_directory"} if config.settlement_directory is None else set()),
                     *({"settlement_delivery"} if config.settlement_delivery is None else set()),
+                    *({"promotion_delivery"} if config.promotion_delivery is None else set()),
                 },
             ),
             maximum_rounds=config.maximum_rounds,
@@ -613,6 +634,7 @@ class RoundCoordinator:
         self.new_cursor = ""
         self.work_cursor = 0
         self.settlement_cursor = 0
+        self.promotion_cursor = ""
         self.settlement_queue = None
         if config.settlement_delivery is not None:
             from .competition_settlement_delivery import SettlementQueue
@@ -689,6 +711,11 @@ class RoundCoordinator:
     async def cycle(self):
         async with self.serial:
             capture = await self.capture()
+            promotions = await self.apply_promotions()
+            # Applying a review observes a newer head. Do not reuse the earlier
+            # capture to prepare a round or advance the intake high-water mark.
+            if self.config.promotion_delivery is not None:
+                capture = await self.capture()
             root = Path(self.config.plan_directory)
             _private(root)
             names = []
@@ -728,6 +755,8 @@ class RoundCoordinator:
                 )
             )
             counts = {"prepared": 0, "waiting": 0, "expired": 0, "held": 0}
+            if promotions is not None:
+                counts.update(promotions)
             for name in pending:
                 try:
                     plan = _read(root / name, RoundPlan)
@@ -812,6 +841,72 @@ class RoundCoordinator:
                 **counts,
                 "chain_submission_authorized": False,
             }
+
+    async def apply_promotions(self):
+        from .competition_promotion_delivery import apply_reviewed_promotion, retain_delivery
+
+        config = self.config.promotion_delivery
+        if config is None:
+            return None
+        root = Path(config.reviewed_directory)
+        _private(root)
+        names = []
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if len(names) >= self.config.maximum_rounds:
+                    raise ValueError("review inbox capacity exhausted")
+                names.append(entry.name)
+        names = sorted(n for n in names if n.endswith(".json"))
+        selected = ([n for n in names if n > self.promotion_cursor] or names)[:4]
+        counts = {"promotions_applied": 0, "promotions_held": 0}
+        for name in selected:
+            self.promotion_cursor = name
+            try:
+                value = _read(root / name, ReviewedPromotion)
+                if name != digest(value.review.review) + ".json":
+                    raise ValueError("review filename differs from its decision")
+                retain_delivery(self.journal, value, self.policy)
+                plan = RoundPlan.model_validate_json(
+                    canonical_json_bytes(self.journal.get("plan", value.round.suite_sha256))
+                )
+                await apply_reviewed_promotion(
+                    self.store,
+                    self.provider,
+                    value,
+                    suite=plan.suite,
+                    archive=Path(config.archive_directory),
+                )
+                self.journal.put(
+                    "promotion-applied",
+                    "promotion:" + str(value.review.review.sequence),
+                    {"decision": digest(value.review.review)},
+                )
+                counts["promotions_applied"] += 1
+            except (OSError, ValueError, sqlite3.Error, RuntimeError, asyncio.TimeoutError):
+                counts["promotions_held"] += 1
+        return counts
+
+    def promotion_deliveries(self, after):
+        from .competition_promotion_delivery import validate_delivery
+
+        if after is None or self.config.promotion_delivery is None:
+            return ()
+        result = []
+        keys = sorted(self.journal.keys("promotion-applied"), key=lambda k: int(k.split(":")[1]))
+        for key in keys:
+            if int(key.split(":")[1]) <= after:
+                continue
+            value = validate_delivery(self.journal.get("promotion-certificate", key), self.policy)
+            if self.journal.get("promotion-applied", key) != {
+                "decision": digest(value.review.review)
+            }:
+                raise ValueError("retained review acknowledgment differs")
+            if self.store.accepted_review(value) is None:
+                raise ValueError("review delivery has no accepted local promotion")
+            result.append(value)
+            if len(result) == 4:
+                break
+        return tuple(result)
 
     async def prepare_settlements(self, block):
         from .competition_settlement_preparation import prepare_retained_settlement
@@ -936,6 +1031,7 @@ class RoundCoordinator:
                     query_sha256=digest(query),
                     policy_sha256=digest(self.policy),
                     proposals=selected,
+                    promotions=self.promotion_deliveries(query.after_promotion_sequence),
                 )
             proposals = self.proposals(proposal_id=query.vote.proposal_sha256)
             proposal = next((p for p in proposals if digest(p) == query.vote.proposal_sha256), None)
@@ -1138,13 +1234,24 @@ async def request_round(origin, signed, *, transport=None):
     ):
         raise ValueError("round reply binding mismatch")
     sequences = [p.cutoff.round.sequence for p in reply.proposals]
+    promotion_sequences = [p.review.review.sequence for p in reply.promotions]
+    if promotion_sequences and (
+        signed.query.after_promotion_sequence is None
+        or promotion_sequences != sorted(set(promotion_sequences))
+        or any(s <= signed.query.after_promotion_sequence for s in promotion_sequences)
+    ):
+        raise ValueError("review discovery cursor mismatch")
     if signed.query.vote is None:
         if reply.accepted_proposal_sha256 is not None or (
             sequences != sorted(set(sequences))
             or any(s <= signed.query.after_sequence for s in sequences)
         ):
             raise ValueError("round discovery cursor or reply kind mismatch")
-    elif reply.proposals or (reply.accepted_proposal_sha256 != signed.query.vote.proposal_sha256):
+    elif (
+        reply.proposals
+        or reply.promotions
+        or (reply.accepted_proposal_sha256 != signed.query.vote.proposal_sha256)
+    ):
         raise ValueError("round endorsement acknowledgment mismatch")
     return reply
 
@@ -1163,6 +1270,7 @@ class RoundSigningClient:
             maximum_bytes=worker.config.maximum_journal_bytes,
         )
         self.cursor, self.nonce = 0, 0
+        self.promotion_cursor = 0
         self.limits = PublicationReplayLimits(
             maximum_roster_bytes=MAX_BYTES // 4,
             maximum_certificate_bytes=MAX_BYTES // 4,
@@ -1248,7 +1356,18 @@ class RoundSigningClient:
         return "endorsed"
 
     async def sync_once(self):
-        reply = await self.query(after_sequence=self.cursor)
+        from .competition_promotion_delivery import apply_evaluator_promotion, retain_delivery
+
+        options = {}
+        if getattr(self.worker, "review_store", None) is not None:
+            options["after_promotion_sequence"] = self.promotion_cursor
+        reply = await self.query(after_sequence=self.cursor, **options)
+        for promotion in reply.promotions:
+            # Do not skip an unaccepted history link. The next poll retries it
+            # after evidence, preservation or owned finality becomes available.
+            retain_delivery(self.journal, promotion, self.worker.policy)
+            await apply_evaluator_promotion(self.worker, promotion)
+            self.promotion_cursor = promotion.review.review.sequence
         if not reply.proposals and self.cursor:
             self.cursor = 0
             reply = await self.query(after_sequence=0)

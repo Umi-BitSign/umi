@@ -211,8 +211,11 @@ def test_disabled_settlement_preserves_the_previous_configuration_binding(setup,
             "work",
             "settlement_directory",
             "settlement_delivery",
+            "promotion_delivery",
         },
     )
+    # Historical configurations predate every optional delivery feature.
+    assert "promotion_delivery" not in old_binding
     rounds.RoundJournal(Path(config.state_directory), old_binding)
     driver = rounds.RoundCoordinator(config, s.policy, s.provider)
     assert driver.config.settlement_directory is None

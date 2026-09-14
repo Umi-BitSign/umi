@@ -40,7 +40,8 @@ activate rewards or extend the signed bootstrap sunset.
    - Populate evaluator review histories from independently checked cutoff
      certificates, recording actual arrival blocks. See
      [review-history operation](OPEN_COMPETITION_REVIEW_HISTORY.md). Preserve
-     initial baselines locally; reviewed promotion delivery remains separate.
+     initial baselines locally; use the explicit approved-review input for
+     [automatic promotion delivery](OPEN_COMPETITION_PROMOTION_DELIVERY.md).
    - Exercise intake, assignment publication, authenticated miner response,
      reference reveal, independent evaluation, promotion, settlement and upgrade
      using synthetic keys without live weights.
@@ -146,8 +147,10 @@ both-track execution and independently reviewed promotion rehearsal remains open
 The versioned [promotion agreement](OPEN_COMPETITION_PROMOTION_AGREEMENT.md)
 separates the shared model decision from each operator's actual receipt block
 and full certificates. It preserves legacy history bytes and prevents valid
-endorsement order or supersets from changing the shared head. Automated review
-distribution and the independent-operator deployment rehearsal remain open.
+endorsement order or supersets from changing the shared head. The optional
+[review delivery path](OPEN_COMPETITION_PROMOTION_DELIVERY.md) distributes
+explicitly approved decisions and applies each against local independent evidence.
+The independent-operator deployment rehearsal remains open.
 
 The [round-preparation APIs](OPEN_COMPETITION_ROUND_PREPARATION.md) now freeze
 current registrations, latest accepted submissions, the incumbent and cutoff
