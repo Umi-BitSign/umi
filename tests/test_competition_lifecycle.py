@@ -618,7 +618,12 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(l
     )
     next_item = next_fixture()
     assert next_item.request.reveal_round == next_pulse.round
-    assert next_item.policy == item.policy and next_item.submissions == item.submissions
+    assert next_item.policy == item.policy
+    # sr25519 re-signing may change signature bytes; the retained admission and
+    # its exact original signature remain in the store across both rounds.
+    assert tuple(s.submission for s in next_item.submissions) == tuple(
+        s.submission for s in item.submissions
+    )
     assert next_item.round.submission_close_block > item.round.valid_through_block
     # Preserve the owned-source test object's old block history for replay.
     item.finalized_blocks.blocks.update(next_item.finalized_blocks.blocks)
