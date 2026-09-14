@@ -78,3 +78,10 @@ Automatic delivery and application of reviewed promotion decisions is separate
 work. Real protected-data evaluation, rights approval, independent operators,
 signed activation and finalized incentive verification remain launch gates.
 This implementation does not change the live bridge policy or deadlines.
+
+Exchange timeouts and HTTP transport failures are retryable availability errors.
+The continuous poll loop retries using retained journals and a fresh request
+nonce. Authentication failures and malformed responses remain distinct errors;
+retry never changes a signed case or extends its deadline. The lifecycle test
+allows transport recovery but still requires every result, matching promotion
+heads, the exact 70/30 package, and unchanged inference counts on retries.
