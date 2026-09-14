@@ -62,9 +62,6 @@ async def test_mixed_cli_settle_verify_prepare_replay_and_retry(
             "current-block": 160,
         },
     )
-    # A parseable certificate still needs an actual retained cutoff receipt.
-    with pytest.raises(ValueError, match="first observed after cutoff"):
-        execute(_parser().parse_args(settle_args))
     store.record_void_evaluation(evidence=void, suite=suite, observed_block=150)
     first = execute(_parser().parse_args(settle_args))
     assert execute(_parser().parse_args(settle_args)) == first
@@ -151,6 +148,40 @@ async def test_mixed_cli_settle_verify_prepare_replay_and_retry(
         # Only restore permissions on the directory created by this fixture.
         assert package_path.parent == tmp_path / "packages" and not package_path.is_symlink()
         package_path.chmod(0o700)
+
+
+@pytest.mark.parametrize("arrival", [160, 161])
+async def test_void_cli_uses_actual_first_receipt_and_inclusive_cutoff(mixed, tmp_path, arrival):
+    store, round_, suite, _, pairs, _, _ = mixed
+    argv = arguments(
+        "settle-round",
+        put(tmp_path, "policy.json", store.policy),
+        {
+            "state": store.directory,
+            "inputs": put(
+                tmp_path,
+                "inputs.json",
+                {
+                    "round": round_.model_dump(mode="json", by_alias=True),
+                    "suite": suite.model_dump(mode="json", by_alias=True),
+                    "entries": encoded_entries(pairs),
+                },
+            ),
+            "snapshot": put(tmp_path, "snapshot.json", snapshot(arrival)),
+            "current-block": arrival,
+        },
+    )
+    if arrival == 160:
+        result = execute(_parser().parse_args(argv))
+        assert len(result["results"]) == 3
+        assert result["chain_submission_authorized"] is False
+    else:
+        with pytest.raises(ValueError, match="first observed after cutoff"):
+            execute(_parser().parse_args(argv))
+    with store._connection() as connection:
+        assert connection.execute(
+            "SELECT first_observed_block FROM void_evaluation_evidence"
+        ).fetchall() == [(arrival,)]
 
 
 @pytest.mark.parametrize(
