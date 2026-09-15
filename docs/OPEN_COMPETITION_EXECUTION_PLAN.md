@@ -131,7 +131,8 @@ contributor attribution yet.
 - [x] Verify archive-backed work selection follows approved promotions while preserving frozen incumbents.
 - [x] Connect explicit void certificates through evaluator exchange, fixed-cutoff retention, settlement signing and replay.
 - [x] Connect continuous round planning to independent cutoff/order signing and settlement publication.
-- [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
+- [x] Publish approved [version 1 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS.md) with Sam's reviewer/contact route.
+- [ ] Bind the published terms' exact SHA-256 and license list in the signed launch policy before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
 - [ ] Rehearse integrated protected-data scheduling, evaluator dispatch and evidence publication.
 - [ ] Complete the real-model, selected-cohort evaluation and signed-activation gates.

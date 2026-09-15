@@ -2,14 +2,18 @@
 
 Open-competition intake and rewards are not active yet. This checklist explains
 what to prepare for rights and reconstruction review. It is not a license grant,
-contribution agreement, accepted-license list or approval of a particular model.
+contribution agreement or approval of a particular model. The approved
+[version 1 contribution terms](MODEL_CONTRIBUTION_TERMS.md) publish the 70/30
+allocation and the accepted identifiers for review: `MIT`, `Apache-2.0`,
+`CC-BY-4.0` and `CC-BY-SA-4.0`. An identifier match still requires source-stack
+review and a qualifying promotion.
 
 ## What must be published before intake opens
 
 The signed launch policy must name the accepted model-license identifiers and
-bind the exact contribution terms by SHA-256. UMI must publish those terms, the
-license list, the review route and the supported evaluation resource limits
-before asking contributors to train or submit for this competition. No date is
+bind the exact contribution terms by SHA-256. The terms, license list and Sam's
+review route are published. Supported evaluation resource limits and their
+signed policy bindings must also be published before intake opens. No date is
 committed until those inputs and the deployment checks are ready.
 
 The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its

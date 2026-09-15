@@ -160,9 +160,11 @@ independent access to it.
   The new origin collector and release-gated feed have fixture integration tests;
   they do not yet establish a live protected-data publication workflow.
 - Published license/reconstruction evidence and model-copy review operations.
-  The [contributor checklist](MODEL_CONTRIBUTION_REVIEW.md) is available; the
-  final accepted-license list, contribution terms and staffed review route are
-  still launch inputs, not supplied by that checklist.
+  The [contributor checklist](MODEL_CONTRIBUTION_REVIEW.md), approved
+  [version 1 terms and accepted-license list](MODEL_CONTRIBUTION_TERMS.md), and
+  Sam's expert-referral review route are published. The signed launch policy
+  must bind those exact terms; artifact-specific rights review and promotion
+  remain separate launch requirements.
 - Signed successor policy/activation artifacts and production chain submission.
 - Publication of reviewed host/OCI upgrade artifacts and deployment-specific
   rehearsal. The dedicated upgrade command exists and has native migration tests;
