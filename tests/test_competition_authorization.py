@@ -324,7 +324,7 @@ async def test_exact_signed_assignment_still_uses_owned_legacy_schedule(authoriz
     validate_publication_suite(authorization.publication, authorization.suite, authorization.policy)
 
 
-async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(policy):
+async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(policy, monkeypatch):
     import bittensor as bt
 
     from umi.auth import RequestAuthenticator
@@ -334,6 +334,11 @@ async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(po
     fixture = build_authorization_fixture(
         policy, single_evaluator=True, issue_allowance_seconds=2700
     )
+    issuance = fixture.finalized_blocks.blocks[fixture.request.issued_block]
+    # The assignment spent ten minutes queued, but the request is signed now.
+    now = (issuance.timestamp_ms + 600_000) * 1_000_000
+    monkeypatch.setattr(time, "time_ns", lambda: now)
+    fixture.finalized_blocks.head += 50
     authority = _authority(fixture)
     authority.validate_runtime(**_runtime(fixture))
     admission = await authority.authorize(
@@ -347,7 +352,6 @@ async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(po
         fixture.miner_wallet.hotkey.ss58_address,
         max_age_seconds=fixture.legacy_policy.limits.btauth_max_age_seconds,
     )
-    now = time.time_ns()
     fresh = prepare_request_attempt(
         fixture.request,
         wallet=fixture.validator_wallet,
@@ -366,6 +370,11 @@ async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(po
     with pytest.raises(bt.http_auth.StaleRequest, match="freshness window"):
         authenticator.verify_without_replay(
             dict(stale.auth_headers), stale.request_bytes, method="POST", path=TRANSLATE_PATH
+        )
+    fixture.finalized_blocks.head = fixture.request.deadline_block + 1
+    with pytest.raises(MinerAdmissionError, match="request_block_deadline_elapsed"):
+        await authority.authorize(
+            fixture.request, validator_hotkey=fixture.validator_wallet.hotkey.ss58_address
         )
 
 

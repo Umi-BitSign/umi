@@ -36,8 +36,10 @@ launch. Baseline choice and profile approval do not establish model quality,
 contributor attribution or successful end-to-end qualification.
 
 Use `umi-competition-single-evaluator-transport/1` for the associated transport
-document. It preserves the existing request clock, bounded resources, scoring
-and finality fields, but requires exactly one validator entry with the same
+document. Its default clock, bounded resources, scoring and finality fields
+remain unchanged. An explicit issue allowance can be selected when preparing a
+new transport policy, as described in the [dispatcher guide](OPEN_COMPETITION_DISPATCH.md).
+It requires exactly one validator entry with the same
 hotkey as the competition evaluator. Its administrator ID must represent the
 actual operator. The miner and dispatcher reject a mismatched cohort. The miner
 requires competition mode for this transport; it cannot authorize legacy live
