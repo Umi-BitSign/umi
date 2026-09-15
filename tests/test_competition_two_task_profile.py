@@ -1,7 +1,12 @@
+import hashlib
+import re
 from fractions import Fraction
+from pathlib import Path
 
 import pytest
 
+from umi import scoring
+from umi.competition_scoring import score_single_reference
 from umi.open_competition import (
     CompetitionPolicy,
     EvaluationCase,
@@ -16,7 +21,7 @@ from umi.open_competition import (
     validate_suite_profile,
 )
 from umi.protocol import canonical_json_bytes
-from umi.scoring import score_cer, score_single_reference, score_wer
+from umi.scoring import score_cer, score_wer
 
 from .test_open_competition import (
     attested,
@@ -68,6 +73,14 @@ def test_legacy_serialization_and_reference_contract_remain_strict(policy):
         EvaluationCase(
             case_id="01" * 32, video_sha256="02" * 32, stratum="continuous", references=("hello",)
         )
+
+
+def test_legacy_bootstrap_scoring_source_pin_is_preserved():
+    root = Path(__file__).resolve().parents[1]
+    recipe = (root / "deploy/bootstrap-validator/Dockerfile").read_text()
+    expected = re.search(r'"scoring_source_sha256": "([0-9a-f]{64})"', recipe)
+    assert expected is not None
+    assert hashlib.sha256(Path(scoring.__file__).read_bytes()).hexdigest() == expected.group(1)
 
 
 def test_profile_is_signed_and_suite_versions_cannot_be_mixed(policy):

@@ -246,15 +246,11 @@ def levenshtein(left: Sequence[_Unit], right: Sequence[_Unit]) -> int:
     return previous[-1]
 
 
-def _validated_references(
-    references: Sequence[str], *, single_reference: bool = False
-) -> tuple[str, ...]:
+def _validated_references(references: Sequence[str]) -> tuple[str, ...]:
     if isinstance(references, (str, bytes)):
         raise TypeError("references must be a sequence of strings")
     committed = tuple(references)
-    if single_reference and len(committed) != 1:
-        raise ValueError("a single-reference clip must have exactly one committed reference")
-    if not single_reference and not 3 <= len(committed) <= 5:
+    if not 3 <= len(committed) <= 5:
         raise ValueError("a clip must have between 3 and 5 committed references")
     if any(not isinstance(reference, str) for reference in committed):
         raise TypeError("every reference must be str")
@@ -264,9 +260,9 @@ def _validated_references(
 
 
 def _score_with_trace(
-    metric: Metric, hypothesis: str, references: Sequence[str], *, single_reference: bool = False
+    metric: Metric, hypothesis: str, references: Sequence[str]
 ) -> MetricScoreTrace:
-    committed = _validated_references(references, single_reference=single_reference)
+    committed = _validated_references(references)
     hypothesis_trace = normalization_trace(hypothesis)
     hypothesis_units = (
         hypothesis_trace.tokens
@@ -331,13 +327,6 @@ def score_cer(hypothesis: str, references: Sequence[str]) -> Fraction:
     """Return the best-reference grapheme CER similarity as an exact fraction."""
 
     return score_cer_with_trace(hypothesis, references).score
-
-
-def score_single_reference(metric: Metric, hypothesis: str, reference: str) -> Fraction:
-    """Score one authentic reference for the explicit competition v2 profile."""
-    if metric not in {"wer", "cer"}:
-        raise ValueError("unsupported single-reference metric")
-    return _score_with_trace(metric, hypothesis, (reference,), single_reference=True).score
 
 
 def mean_score(scores: Sequence[ExactValue]) -> Fraction:
@@ -408,7 +397,6 @@ __all__ = [
     "normalize_text",
     "score_cer",
     "score_cer_with_trace",
-    "score_single_reference",
     "score_wer",
     "score_wer_with_trace",
     "utility_score",

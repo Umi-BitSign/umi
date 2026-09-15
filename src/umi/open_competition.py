@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from pydantic import AfterValidator, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from .competition_scoring import score_single_reference
 from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
 from .protocol import (
@@ -29,7 +30,7 @@ from .protocol import (
     StrictProtocolModel,
     canonical_json_bytes,
 )
-from .scoring import STRATUM_WEIGHTS, score_cer, score_single_reference, score_wer
+from .scoring import STRATUM_WEIGHTS, score_cer, score_wer
 
 Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 Bps = Annotated[int, Field(ge=0, le=10_000)]
