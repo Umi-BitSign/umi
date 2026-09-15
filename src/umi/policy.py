@@ -844,10 +844,10 @@ class ScoringPolicy(StrictProtocolModel):
     mechanism_id: Literal[0]
     translation_weights_active: Literal[False]
     activation_block: Annotated[int, Field(ge=0)]
-    minimum_publisher_collateral_alpha_rao: Annotated[int, Field(gt=0)]
-    soak_start_window_index: Annotated[int, Field(ge=0)]
-    validator_capacity_set_root: Hex32
-    validator_cost_schedule_hash: Hex32
+    minimum_publisher_collateral_alpha_rao: Annotated[int, Field(gt=0)] | None
+    soak_start_window_index: Annotated[int, Field(ge=0)] | None
+    validator_capacity_set_root: Hex32 | None
+    validator_cost_schedule_hash: Hex32 | None
     implementation_pins: PolicyImplementationPins
     clock: PolicyClock
     limits: PolicyLimits
@@ -859,6 +859,20 @@ class ScoringPolicy(StrictProtocolModel):
     @model_validator(mode="after")
     def validate_launch_registry_and_profile(self) -> Self:
         limits = self.limits
+        retired_inputs = (
+            self.minimum_publisher_collateral_alpha_rao,
+            self.soak_start_window_index,
+            self.validator_capacity_set_root,
+            self.validator_cost_schedule_hash,
+        )
+        if self.schema_ == SCORING_POLICY_SCHEMA and any(value is None for value in retired_inputs):
+            raise ValueError("legacy scoring policy requires publisher and calibration inputs")
+        if (
+            self.schema_ == SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+            and any(value is None for value in retired_inputs)
+            and not all(value is None for value in retired_inputs)
+        ):
+            raise ValueError("retired competition transport inputs must be absent together")
         if self.schema_ == SCORING_POLICY_SCHEMA and len(self.validator_registry) < 4:
             raise ValueError("legacy scoring policy requires at least four validators")
         if self.schema_ == SINGLE_EVALUATOR_TRANSPORT_SCHEMA and len(self.validator_registry) != 1:
@@ -920,6 +934,42 @@ class ScoringPolicy(StrictProtocolModel):
             raise ValueError("btauth maximum age cannot be shorter than the issue allowance")
         _validate_initial_launch_profile(self.clock, limits, self.thresholds)
         return self
+
+    @classmethod
+    def competition_transport(
+        cls,
+        *,
+        activation_block: int,
+        implementation_pins: PolicyImplementationPins,
+        validator: ValidatorRegistryEntry,
+    ) -> ScoringPolicy:
+        """Prepare the single-evaluator request transport without legacy publishers.
+
+        This document enables neither rewards nor requests by itself. The miner
+        still requires live verifier pins and a matching competition policy;
+        each request needs its signed competition assignment. Model capacity
+        remains an independently verified property of the serving backend.
+        """
+
+        return cls(
+            schema=SINGLE_EVALUATOR_TRANSPORT_SCHEMA,
+            protocol=PROTOCOL_VERSION,
+            netuid=78,
+            mechanism_id=0,
+            translation_weights_active=False,
+            activation_block=activation_block,
+            minimum_publisher_collateral_alpha_rao=None,
+            soak_start_window_index=None,
+            validator_capacity_set_root=None,
+            validator_cost_schedule_hash=None,
+            implementation_pins=implementation_pins,
+            clock=PolicyClock.launch(),
+            limits=PolicyLimits.launch(),
+            thresholds=PolicyThresholds.launch(),
+            validator_registry=[validator],
+            control_group_registry=[],
+            publisher_registry=[],
+        )
 
     @classmethod
     def launch(

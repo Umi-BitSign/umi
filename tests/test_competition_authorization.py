@@ -52,6 +52,7 @@ def build_authorization_fixture(
     sequence=1,
     serving_origin="https://8.8.8.8:443",
     single_evaluator=False,
+    legacy_calibration_inputs=False,
 ):
     """Synthetic signed publication and owned-source test port; no network/files.
 
@@ -72,6 +73,12 @@ def build_authorization_fixture(
             if item["validator_hotkey"] == evaluator_wallets[0].hotkey.ss58_address
         ]
         legacy = ScoringPolicy.model_validate(data)
+        if not legacy_calibration_inputs:
+            legacy = ScoringPolicy.competition_transport(
+                activation_block=legacy.activation_block,
+                implementation_pins=legacy.implementation_pins,
+                validator=legacy.validator_registry[0],
+            )
     policy = policy.model_copy(
         update={
             "valid_from_block": 1000,
