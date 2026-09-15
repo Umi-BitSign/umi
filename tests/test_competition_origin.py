@@ -56,8 +56,12 @@ def origin_chain(chain):
     return chain
 
 
-async def test_origin_collects_proven_bidirectional_registration_and_axon(origin_chain):
+@pytest.mark.parametrize("protocol_tag", [0, 4])
+async def test_origin_collects_proven_bidirectional_registration_and_axon(
+    origin_chain, protocol_tag
+):
     item = origin_chain
+    item.rpc.values[item.axon_key]["protocol"] = protocol_tag
     result = await item.origin_provider.collect_origin(item.signed)
     assert result.uid == 0
     assert result.origin == "https://8.8.8.8:443"
@@ -75,6 +79,24 @@ async def test_origin_collects_proven_bidirectional_registration_and_axon(origin
     with sqlite3.connect(item.origin_provider._path) as db:
         assert db.execute("SELECT COUNT(*) FROM origins").fetchone()[0] == 1
     assert not any(method.startswith("author_") for method, _ in item.rpc.calls)
+
+
+@pytest.mark.parametrize("protocol_tag", [1, 2, 3, 5, 255, -1, 256, True])
+def test_axon_rejects_unknown_or_invalid_protocol_tags(protocol_tag):
+    from umi.competition_origin import _axon_origin
+
+    axon = {
+        "block": 99,
+        "version": 1,
+        "ip": int(ipaddress.ip_address("8.8.8.8")),
+        "port": 443,
+        "ip_type": 4,
+        "protocol": protocol_tag,
+        "placeholder1": 0,
+        "placeholder2": 0,
+    }
+    with pytest.raises(ValueError):
+        _axon_origin(axon, block=100)
 
 
 async def test_dispatch_provider_keeps_transport_attestations_and_origin_proofs_bound(

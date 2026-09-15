@@ -86,8 +86,11 @@ miner fetched it or provide independent publication-time evidence. A restart
 begins grace again and cannot extend the signed issue window.
 
 Before signing, it verifies the current bidirectional UID/hotkey mapping and
-announced public-IP HTTPS origin. A signed hostname must resolve exclusively to
-public addresses including the announced IP, on the same port. The dispatcher
+announced public-IP HTTPS origin. The Axon application tag may be `0` (legacy)
+or `4` (the current SDK's `ServeAxon` default); other tags are rejected. Neither
+tag substitutes for the HTTPS and signed-response checks. A signed hostname must
+resolve exclusively to public addresses including the announced IP, on the same
+port. The dispatcher
 pins that IP while keeping the hostname for TLS/SNI and the HTTP Host header;
 it does not perform a second DNS lookup. It then commits a journal claim.
 Completed work is never resent. Cancellation, deadline or recording failure after the claim
