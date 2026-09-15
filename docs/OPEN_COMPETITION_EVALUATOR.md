@@ -64,6 +64,21 @@ or outbox filesystem; provision quotas and monitor disk usage separately.
 Capacity exhaustion holds work and preserves history. Poll/page/capacity limits
 can be changed without changing the journal's identity or data-path bindings.
 
+For endpoint submissions, an evaluator executes the frozen baseline once per
+round and reuses its completed receipts for other submissions in that same round.
+The reservation binds the round, evaluator, model, runtime and ordered case list.
+Every submission still retains its own evidence and consumes journal capacity.
+The original execution boundaries and outputs remain unchanged. A failed or
+interrupted baseline attempt holds the other consumers; changing miner identity
+cannot trigger another attempt. Reuse never crosses rounds or evaluators.
+Model-contribution jobs retain their existing candidate/incumbent execution order.
+
+Completed historical evidence remains readable after this update. An old round
+with execution attempts but no shared reservation cannot acquire one retroactively;
+use a new round without deleting its history. This avoids selecting among earlier
+baseline attempts. The shared-run path reduces repeated inference; it does not
+establish full-network dispatch throughput or change any signed deadline.
+
 ```sh
 umi-competition --policy /ABSOLUTE/POLICY.json run-evaluator \
   --config /ABSOLUTE/EVALUATOR.json \
