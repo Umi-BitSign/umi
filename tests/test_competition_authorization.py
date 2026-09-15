@@ -54,6 +54,7 @@ def build_authorization_fixture(
     serving_origin="https://8.8.8.8:443",
     single_evaluator=False,
     legacy_calibration_inputs=False,
+    issue_allowance_seconds=300,
 ):
     """Synthetic signed publication and owned-source test port; no network/files.
 
@@ -79,6 +80,7 @@ def build_authorization_fixture(
                 activation_block=legacy.activation_block,
                 implementation_pins=legacy.implementation_pins,
                 validator=legacy.validator_registry[0],
+                issue_allowance_seconds=issue_allowance_seconds,
             )
     policy = policy.model_copy(
         update={
@@ -176,7 +178,10 @@ def build_authorization_fixture(
         submission_close_block=issued - 1,
         evaluation_close_block=issued + schedule.response_deadline_blocks + 1,
         reveal_block=issued + schedule.response_deadline_blocks + 2,
-        valid_through_block=1200 + window_index * legacy.clock.window_stride_blocks,
+        valid_through_block=max(
+            1200 + window_index * legacy.clock.window_stride_blocks,
+            issued + schedule.response_deadline_blocks + 3,
+        ),
     )
     cases = tuple(
         EndpointAuthorizationCase(case_id=c.case_id, video_sha256=c.video_sha256, stratum=c.stratum)
@@ -317,6 +322,51 @@ async def test_exact_signed_assignment_still_uses_owned_legacy_schedule(authoriz
     assert status["publication_timing_proven"] is False
     assert b'"references"' not in canonical_json_bytes(authorization.publication)
     validate_publication_suite(authorization.publication, authorization.suite, authorization.policy)
+
+
+async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(policy):
+    import bittensor as bt
+
+    from umi.auth import RequestAuthenticator
+    from umi.miner import TRANSLATE_PATH
+    from umi.validator import prepare_request_attempt
+
+    fixture = build_authorization_fixture(
+        policy, single_evaluator=True, issue_allowance_seconds=2700
+    )
+    authority = _authority(fixture)
+    authority.validate_runtime(**_runtime(fixture))
+    admission = await authority.authorize(
+        fixture.request, validator_hotkey=fixture.validator_wallet.hotkey.ss58_address
+    )
+    assert admission.window_id == fixture.schedule.window_id
+    assert fixture.schedule.issue_close_round - fixture.schedule.selection_round == 900
+    assert fixture.schedule.response_close_round - fixture.schedule.issue_close_round == 100
+    assert fixture.request.deadline_block == fixture.request.issued_block + 250
+    authenticator = RequestAuthenticator.in_memory(
+        fixture.miner_wallet.hotkey.ss58_address,
+        max_age_seconds=fixture.legacy_policy.limits.btauth_max_age_seconds,
+    )
+    now = time.time_ns()
+    fresh = prepare_request_attempt(
+        fixture.request,
+        wallet=fixture.validator_wallet,
+        miner_hotkey=fixture.miner_wallet.hotkey.ss58_address,
+        nonce_ns=now,
+    )
+    authenticator.verify_without_replay(
+        dict(fresh.auth_headers), fresh.request_bytes, method="POST", path=TRANSLATE_PATH
+    )
+    stale = prepare_request_attempt(
+        fixture.request,
+        wallet=fixture.validator_wallet,
+        miner_hotkey=fixture.miner_wallet.hotkey.ss58_address,
+        nonce_ns=now - 400 * 1_000_000_000,
+    )
+    with pytest.raises(bt.http_auth.StaleRequest, match="freshness window"):
+        authenticator.verify_without_replay(
+            dict(stale.auth_headers), stale.request_bytes, method="POST", path=TRANSLATE_PATH
+        )
 
 
 @pytest.mark.parametrize("mutation", ["different_signer", "extra_evaluator", "larger_quorum"])

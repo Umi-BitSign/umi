@@ -319,6 +319,70 @@ def test_competition_transport_builder_needs_no_legacy_calibration_evidence() ->
     assert ScoringPolicy.model_validate_json(canonical_json_bytes(transport)) == transport
 
 
+def test_competition_issue_allowance_is_explicit_without_widening_authentication() -> None:
+    legacy = make_policy()
+    kwargs = dict(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+    )
+    original = ScoringPolicy.competition_transport(**kwargs)
+    extended = ScoringPolicy.competition_transport(**kwargs, issue_allowance_seconds=2700)
+    assert original.clock.issue_allowance_seconds == 300
+    assert extended.clock.issue_allowance_seconds == 2700
+    assert extended.clock.response_window_seconds == original.clock.response_window_seconds
+    assert extended.clock.window_stride_blocks == original.clock.window_stride_blocks
+    assert extended.limits == original.limits
+    assert extended.limits.btauth_max_age_seconds == 360
+    assert extended.limits.maximum_request_transmissions_per_assignment == 2
+    assert extended.thresholds == original.thresholds
+    assert not extended.translation_weights_active
+    assert scoring_policy_hash(original) != scoring_policy_hash(extended)
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(extended)) == extended
+
+
+@pytest.mark.parametrize("seconds", [True, 299, 2701, 3600, "2700", 2700.0])
+def test_competition_issue_allowance_rejects_out_of_profile_values(seconds) -> None:
+    legacy = make_policy()
+    with pytest.raises(ValidationError):
+        ScoringPolicy.competition_transport(
+            activation_block=legacy.activation_block,
+            implementation_pins=legacy.implementation_pins,
+            validator=legacy.validator_registry[0],
+            issue_allowance_seconds=seconds,
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("clock", "response_window_seconds", 301),
+        ("clock", "window_stride_blocks", 361),
+        ("limits", "btauth_max_age_seconds", 2700),
+        ("limits", "maximum_request_transmissions_per_assignment", 3),
+    ],
+)
+def test_competition_extended_window_does_not_relax_other_profile_fields(section, field, value):
+    legacy = make_policy()
+    transport = ScoringPolicy.competition_transport(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+        issue_allowance_seconds=2700,
+    )
+    data = transport.model_dump(mode="json", by_alias=True)
+    data[section][field] = value
+    with pytest.raises(ValidationError, match="initial launch profile"):
+        ScoringPolicy.model_validate(data)
+
+
+def test_legacy_policy_does_not_accept_competition_issue_allowance() -> None:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["clock"]["issue_allowance_seconds"] = 2700
+    with pytest.raises(ValidationError):
+        ScoringPolicy.model_validate(data)
+
+
 @pytest.mark.parametrize(
     "field",
     [
