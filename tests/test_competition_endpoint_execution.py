@@ -28,8 +28,8 @@ from umi.open_competition import AttestedResult, CaseOutput, aggregate_quality, 
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_authorization import build_authorization_fixture
-from .test_competition_dispatch import authorization as original_authorization
 from .test_competition_dispatch import dispatch as dispatch
+from .test_competition_dispatch import dispatch_legacy_policy
 from .test_competition_execution import boundary
 from .test_competition_feed import feed as feed
 from .test_competition_runner import runtime as runtime
@@ -48,7 +48,7 @@ def authorization(policy, runtime, tmp_path, monkeypatch):
 
     baseline = bundle_at(tmp_path / "baseline")
     policy = policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
-    legacy = original_authorization.__wrapped__(policy).legacy_policy
+    legacy = dispatch_legacy_policy()
     now = 1789300000000000000
     monkeypatch.setattr("time.time_ns", lambda: now)
     monkeypatch.setattr(time, "time", lambda: time.time_ns() / 1_000_000_000)

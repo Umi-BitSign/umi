@@ -159,21 +159,32 @@ differs from `umi_source_tree_sha256`, either checkout is dirty, or the model pr
 or E2E fails. `umi_revision` is the signed composite display value, not an argument
 to `git checkout`.
 
-## 5. Prepare the public IP endpoint
+## 5. Prepare the public HTTPS endpoint
 
-UMI metagraph discovery constructs the miner origin as
-`https://<advertised-ip>:<port>`. The `btcli serve-axon --ip` value is a literal
-public IPv4 or IPv6 address, not a hostname. The Mac therefore needs one of these:
+The chain Axon and `btcli serve-axon --ip` still use a literal public IPv4 or
+IPv6 address and port. The endpoint profile determines how validators use that
+record:
 
-- a publicly routed address and port forwarded to its TLS proxy; or
-- a real IP-level edge with a dedicated public address that forwards to the Mac.
+- The live registration bridge and legacy IP profile connect to
+  `https://<advertised-ip>:<port>` and require a certificate valid for that IP.
+- The open-competition path also accepts a hotkey-signed hostname origin.
+  Follow [miner endpoint IPs and hostnames](MINER_ENDPOINT_HOSTNAMES.md). Its
+  public DNS answers must include the announced Axon IP, and the HTTPS port
+  must match. Validators connect to that verified IP while using the signed
+  hostname for TLS/SNI, certificate verification and the HTTP Host header.
 
-The TLS certificate must be valid for that exact IP address. A hostname-only
-Cloudflare Tunnel is not sufficient because validators will connect to the
-literal address from the serving record. Do not announce the endpoint until an
-external host can reach the advertised address, validate its IP certificate, and
-complete a bounded request through the proxy. The proxy must preserve the exact
-request target, authentication headers, and body bytes.
+For the hostname profile, a Mac with a changing home IP can use a stable reverse
+proxy or tunnel hostname. Announce a public address returned by that proxy's
+DNS, rather than the home's address. If the announced address disappears from
+the evaluator's DNS answers, update the Axon and wait for finalization. Test
+from the evaluator's network because geographically varying answers can hold
+dispatch.
+
+Hostname support does not activate open competition or alter the bridge's
+literal-IP discovery and grouping rules. Do not announce model-serving readiness
+until an external host can validate the chosen profile's TLS certificate and
+complete an authenticated request within the signed limits. The proxy must
+preserve the exact request target, authentication headers and body bytes.
 
 ## 6. Create state and start the miner
 

@@ -26,8 +26,8 @@ from .test_open_competition import policy as policy
 from .test_open_competition import wallet
 
 
-@pytest.fixture
-def authorization(policy, request):
+def dispatch_legacy_policy():
+    """Shared test chain pins, independent of pytest fixture parameters."""
     from umi.grandpa_finality import FINNEY_GENESIS_HASH
 
     legacy = _live_policy(activation_block=1000)
@@ -46,11 +46,24 @@ def authorization(policy, request):
             )
         }
     )
+    return legacy
+
+
+@pytest.fixture
+def authorization(policy, request):
     return build_authorization_fixture(
         policy,
-        legacy_policy=legacy,
+        legacy_policy=dispatch_legacy_policy(),
         serving_origin=getattr(request, "param", "https://8.8.8.8:443"),
     )
+
+
+def test_dispatch_chain_policy_builder_needs_no_pytest_request():
+    from umi.grandpa_finality import FINNEY_GENESIS_HASH
+
+    policy = dispatch_legacy_policy()
+    assert policy.implementation_pins.live_chain.genesis_block_hash == FINNEY_GENESIS_HASH
+    assert policy.implementation_pins.finality_verifier.expected_genesis_hash == FINNEY_GENESIS_HASH
 
 
 @pytest.fixture
