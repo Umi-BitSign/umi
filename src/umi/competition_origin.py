@@ -132,8 +132,10 @@ def _axon_origin(value, *, block: int) -> str:
         raise ValueError("announced Axon has an unsupported shape")
     for name, maximum in bounds.items():
         _uint(value[name], maximum)
-    if not 0 < value["block"] <= block or value["protocol"] != 0:
-        raise ValueError("announced Axon is unserved, future-dated or not TCP")
+    # The current SDK's ServeAxon intent defaults to application tag 4;
+    # existing miners use tag 0. Neither tag replaces HTTPS/TLS verification.
+    if not 0 < value["block"] <= block or value["protocol"] not in {0, 4}:
+        raise ValueError("announced Axon is unserved, future-dated or has an unsupported tag")
     address = ipaddress.ip_address(value["ip"])
     if address.version != value["ip_type"]:
         raise ValueError("announced Axon IP version mismatch")
