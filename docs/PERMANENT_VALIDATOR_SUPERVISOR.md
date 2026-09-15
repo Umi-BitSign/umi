@@ -22,6 +22,16 @@ recorded funder in the signed policy. It does not
 send translation requests. Miner operators should follow
 [current miner operation](CURRENT_MINER_OPERATION.md).
 
+The ongoing bridge policy has no scheduled submission cutoff or sunset. It
+continues until a signed replacement or revocation, subject to its health,
+registration and chain checks. Existing finite policies retain their original
+expiry; installing source alone does not extend an old signed policy.
+
+Ordinary weight-writing validators do not need private evaluation videos or
+labels. Operators nominated for competition evaluation must separately follow
+the [private holdout setup](OPEN_COMPETITION_PRIVATE_HOLDOUT.md#private-storage-and-evaluator-setup).
+Never put the holdout in this checkout, a public release bundle, or a miner mount.
+
 This bridge's first rollout is to UMI's existing UID 0 and UID 54 installations,
 with their submission journals preserved. Existing supervisors need the host
 parser/profile update before accepting it. An unrelated validator with an old
