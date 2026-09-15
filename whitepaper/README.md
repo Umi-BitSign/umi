@@ -70,10 +70,11 @@ It does not prove common human ownership. The
 is not a requirement of the 70/30 successor mechanism specified below.
 
 Bridge weights measure availability only. They establish neither translation
-quality nor successor qualification. The bridge retains the original deadline:
-new submissions stop before block `9,073,731`, with hard sunset `9,075,171`,
-unless superseded sooner by an approved transition. This document does not
-extend that deadline or reopen the retired pilot.
+quality nor successor qualification. A separately signed version3 bridge policy
+can continue until explicitly superseded, with no scheduled expiry. Historical
+version1/2 policies retain their original cutoffs. A new lifetime authorization
+and compatible release are required; this document alone does not activate an
+extension, reopen the retired pilot or launch translation competition.
 
 Version 0.2 supersedes [version 0.1](LEGACY_V0_1.md)'s proposed fixed four-validator,
 three-publisher and 30-day-soak launch gates. It replaces them with a published

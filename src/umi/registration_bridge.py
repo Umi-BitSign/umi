@@ -1,4 +1,4 @@
-"""Short-lived, signed availability bridge for registered SN78 miners.
+"""Signed availability bridge for registered SN78 miners.
 
 This is not model evaluation, pilot admission, or the open competition protocol.
 The owned verifier authenticates the finalized block identity; storage values are
@@ -142,6 +142,20 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
     submission_timeout_seconds: Literal[60]
     submission_headroom_blocks: Literal[64]
 
+    @property
+    def submission_limit(self) -> int:
+        return (
+            self.stop_submitting_block
+            if self.stop_submitting_block is not None
+            else MAX_JSON_INTEGER + 1
+        )
+
+    @property
+    def sunset_limit(self) -> int:
+        return (
+            self.hard_sunset_block if self.hard_sunset_block is not None else MAX_JSON_INTEGER + 1
+        )
+
     @field_validator("coordinator_hotkey")
     @classmethod
     def authority(cls, value: str) -> str:
@@ -152,7 +166,7 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
 
     @model_validator(mode="after")
     def interval(self) -> Self:
-        if self.valid_from_block + self.submission_headroom_blocks >= self.stop_submitting_block:
+        if self.valid_from_block + self.submission_headroom_blocks >= self.submission_limit:
             raise ValueError("registration bridge has no submission interval")
         expected_grouping = {
             "equal_live_coldkey_groups/1": "registered_hotkey_owner_account_id32/1",
@@ -179,10 +193,25 @@ class RegistrationBridgeFundingPolicyBody(RegistrationBridgePolicyBody):
         return self
 
 
+class RegistrationBridgeOngoingPolicyBody(RegistrationBridgeFundingPolicyBody):
+    """Explicitly authorized bridge with no scheduled expiry.
+
+    A signed successor directive or operator stop still retires its writer.
+    Historical v1/v2 policies retain their exact signed expiry semantics.
+    """
+
+    schema_: Literal["umi-registration-bridge-policy-body/3"] = Field(alias="schema")
+    lifetime: Literal["until_superseded"]
+    stop_submitting_block: None
+    hard_sunset_block: None
+
+
 class SignedRegistrationBridgePolicy(StrictProtocolModel):
     schema_: Literal[REGISTRATION_BRIDGE_POLICY_SCHEMA] = Field(alias="schema")
     body: Annotated[
-        RegistrationBridgePolicyBody | RegistrationBridgeFundingPolicyBody,
+        RegistrationBridgePolicyBody
+        | RegistrationBridgeFundingPolicyBody
+        | RegistrationBridgeOngoingPolicyBody,
         Field(discriminator="schema_"),
     ]
     signature_scheme: Literal["sr25519"]
@@ -209,7 +238,7 @@ def verify_registration_bridge_policy(
     _require(type(current_block) is int, "policy_block_invalid")
     _require(signed.body.umi_git_revision == expected_revision, "policy_revision_mismatch")
     _require(
-        signed.body.valid_from_block <= current_block < signed.body.hard_sunset_block,
+        signed.body.valid_from_block <= current_block < signed.body.sunset_limit,
         "policy_inactive",
     )
     _require(
@@ -583,7 +612,7 @@ def validate_registration_bridge_observation(
     refresh = writer.last_update + body.required_activity_cutoff_blocks - body.refresh_margin_blocks
     rate_ready = writer.last_update + body.required_weights_set_rate_limit
     newest_registration = max(p.registered_at_block for p in live)
-    if observation.block_number + body.submission_headroom_blocks >= body.stop_submitting_block:
+    if observation.block_number + body.submission_headroom_blocks >= body.submission_limit:
         action, reason, next_block = "retiring", "submission_cutoff_reached", None
     elif observation.block_number <= newest_registration:
         action, reason, next_block = (
@@ -989,7 +1018,7 @@ class RegistrationBridgeJournal(StrictProtocolModel):
             if self.weight_call is not None and not (
                 self.attempt.preflight_block
                 < self.weight_call.block_number
-                < self.attempt.signed_policy.body.stop_submitting_block
+                < self.attempt.signed_policy.body.submission_limit
             ):
                 raise ValueError("bridge receipt outside attempted interval")
         return self
@@ -1487,7 +1516,7 @@ async def run_registration_bridge_iteration(
         state.store(reconciled, archive=reconciled.phase != journal.phase)
         journal = reconciled
         if before.block_number + policy.body.submission_headroom_blocks >= min(
-            policy.body.stop_submitting_block, directive_valid_through + 1
+            policy.body.submission_limit, directive_valid_through + 1
         ):
             return {
                 "status": "retiring",
@@ -1508,7 +1537,7 @@ async def run_registration_bridge_iteration(
         journal = reconcile_registration_bridge_journal(journal, fresh, now=chain.clock())
         state.store(journal)
         if fresh.block_number + policy.body.submission_headroom_blocks >= min(
-            policy.body.stop_submitting_block, directive_valid_through + 1
+            policy.body.submission_limit, directive_valid_through + 1
         ):
             return {
                 "status": "retiring",
@@ -1584,7 +1613,7 @@ async def run_registration_bridge_iteration(
             )
             _require(
                 after.block_number >= receipt.block_number
-                and receipt.block_number < policy.body.stop_submitting_block
+                and receipt.block_number < policy.body.submission_limit
                 and after.validator_row == attempt.expected_row
                 and writer.last_update == receipt.block_number,
                 "finalized_weight_application_mismatch",
@@ -1649,10 +1678,7 @@ def _validate_directive_interval(policy, valid_from, valid_through):
     _require(
         type(valid_from) is int
         and type(valid_through) is int
-        and policy.body.valid_from_block
-        <= valid_from
-        <= valid_through
-        < policy.body.hard_sunset_block,
+        and policy.body.valid_from_block <= valid_from <= valid_through < policy.body.sunset_limit,
         "supervisor_interval_mismatch",
     )
 

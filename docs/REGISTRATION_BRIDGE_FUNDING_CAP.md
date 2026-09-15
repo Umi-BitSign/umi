@@ -33,6 +33,7 @@ invalidate a previously signed snapshot.
 
 Old signed policies and journals retain their original bytes and allocation
 rules. The update does not ban registrations, change permits, introduce a /24
-network cap, or extend the bridge. Submissions stop before block `9,073,731`;
-the hard sunset remains `9,075,171`. This rule is not made a requirement of the
+network cap, or extend an old signed policy. Version3 can separately authorize
+an ongoing lifetime, as described in [the bridge specification](REGISTRATION_BRIDGE.md).
+This grouping rule is not made a requirement of the
 planned 70% endpoint / 30% model-contribution competition.
