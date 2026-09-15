@@ -336,6 +336,10 @@ class PinnedRuntimeContext:
     def metadata_sha256(self) -> str:
         return self.pin.metadata_sha256
 
+    @property
+    def storage_codec_mode(self) -> str:
+        return "exact_runtime"
+
     def storage_key(self, pallet: str, item: str, params: Sequence[Any] = ()) -> bytes:
         if not isinstance(pallet, str) or not pallet:
             raise ValueError("storage pallet must be a non-empty string")
@@ -367,6 +371,15 @@ class PinnedRuntimeContext:
             raise
         except Exception as error:
             raise ValidatorChainError("storage_value_decode_failed") from error
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedStorageCodecContext(PinnedRuntimeContext):
+    """Approved storage layout, independent of the current runtime version."""
+
+    @property
+    def storage_codec_mode(self) -> str:
+        return "reviewed_storage_codec/1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -649,6 +662,61 @@ class FinalizedProofCollector:
             raise
         except Exception as error:
             raise ValidatorChainError("runtime_metadata_rpc_failed") from error
+
+    async def storage_codec_runtime(
+        self,
+        snapshot: FinalizedSnapshotRef,
+        pin: FinalizedRuntimePin,
+        metadata: bytes,
+    ) -> PinnedRuntimeContext:
+        """Decode current proofs with an approved, immutable storage codec.
+
+        The metadata comes from the operator's hash-bound release artifact, not
+        the RPC's current metadata. Runtime numbers are retained as informational
+        observations. This path makes no claim that the current Wasm or metadata
+        matches the approved codec; exact key proofs, strict SCALE decoding and
+        caller-side state constraints must all still succeed.
+        """
+        if not isinstance(snapshot, FinalizedSnapshotRef) or not isinstance(
+            pin, FinalizedRuntimePin
+        ):
+            raise TypeError("storage codec requires a finalized snapshot and approved pin")
+        if (
+            not isinstance(metadata, bytes)
+            or not metadata
+            or len(metadata) > self._limits.maximum_runtime_metadata_bytes
+            or hashlib.sha256(metadata).hexdigest() != pin.metadata_sha256
+        ):
+            raise ValidatorChainError("storage_codec_metadata_pin_mismatch")
+        version = _mapping(
+            await self._rpc.request("state_getRuntimeVersion", (snapshot.block_hash,)),
+            "runtime_version_invalid",
+        )
+        for name in ("specVersion", "transactionVersion"):
+            if _strict_uint(version.get(name), "runtime_version_invalid", maximum=2**32 - 1) == 0:
+                raise ValidatorChainError("runtime_version_invalid")
+        if (
+            _strict_uint(version.get("stateVersion"), "runtime_state_version_invalid", maximum=255)
+            != 1
+        ):
+            raise ValidatorChainError("runtime_state_version_unsupported")
+        try:
+            codec = bittensor_core.Runtime(
+                metadata, pin.spec_version, pin.transaction_version, ss58_format=pin.ss58_prefix
+            )
+            if codec.constant("System", "SS58Prefix") != pin.ss58_prefix:
+                raise ValidatorChainError("runtime_ss58_prefix_mismatch")
+        except ValidatorChainError:
+            raise
+        except Exception as error:
+            raise ValidatorChainError("storage_codec_initialization_failed") from error
+        return ReviewedStorageCodecContext(
+            snapshot=snapshot,
+            pin=pin,
+            metadata_bytes=metadata,
+            runtime_version_bytes=canonical_json_bytes(dict(version)),
+            _runtime=codec,
+        )
 
     async def storage_evidence(
         self,

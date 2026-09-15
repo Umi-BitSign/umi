@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sqlite3
+import stat
 import time
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
@@ -15,7 +17,7 @@ from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 from websockets.asyncio.client import connect as websocket_connect
 
@@ -78,6 +80,30 @@ class CompetitionChainConfig(StrictProtocolModel):
     collection_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 15
     startup_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 600
     maximum_cache_bytes: Annotated[int, Field(ge=1024, le=1024**3)] = 256 * 1024**2
+    storage_codec_metadata_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_config(self, handler):
+        value = handler(self)
+        # Preserve existing config/journal digests when this mode is not enabled.
+        if self.storage_codec_metadata_path is None:
+            value.pop("storage_codec_metadata_path", None)
+        return value
+
+    @field_validator("storage_codec_metadata_path")
+    @classmethod
+    def codec_path(cls, value):
+        if value is None:
+            return value
+        path = Path(value)
+        if (
+            not path.is_absolute()
+            or path == Path(path.anchor)
+            or "\x00" in value
+            or ".." in path.parts
+        ):
+            raise ValueError("storage codec metadata requires an explicit absolute file path")
+        return value
 
     @field_validator("finality_binary", "chain_spec", "proof_binary", "state_directory")
     @classmethod
@@ -363,6 +389,13 @@ class FinalizedRegistrationProvider:
         self._prefetch: _PrefetchRpc | None = None
         self._registration_rpc: _RegistrationRpc | None = None
         self._latest: RegistrationCapture | None = None
+        self._runtime_pin = FinalizedRuntimePin(
+            metadata_sha256=config.chain_pin.metadata_sha256,
+            spec_version=config.chain_pin.runtime_spec_version,
+            transaction_version=config.chain_pin.transaction_version,
+            state_version=config.chain_pin.state_version,
+        )
+        self._storage_codec = self._load_storage_codec()
         directory = self._cache_directory(config)
         if directory.is_symlink():
             raise ValueError("chain cache directory cannot be a symlink")
@@ -417,12 +450,36 @@ class FinalizedRegistrationProvider:
             )
         self._finality = finality
         self._proofs = proofs
-        self._runtime_pin = FinalizedRuntimePin(
-            metadata_sha256=config.chain_pin.metadata_sha256,
-            spec_version=config.chain_pin.runtime_spec_version,
-            transaction_version=config.chain_pin.transaction_version,
-            state_version=config.chain_pin.state_version,
-        )
+
+    def _load_storage_codec(self):
+        value = self.config.storage_codec_metadata_path
+        if value is None:
+            return None
+        path = Path(value)
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            raise ValueError("storage codec metadata must not traverse symlinks")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 4 * 1024**2:
+                raise ValueError("storage codec metadata is not a bounded regular file")
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                metadata = stream.read(4 * 1024**2 + 1)
+            if (
+                len(metadata) != info.st_size
+                or hashlib.sha256(metadata).hexdigest() != self._runtime_pin.metadata_sha256
+            ):
+                raise ValueError("storage codec metadata does not match the approved chain pin")
+            return metadata
+        finally:
+            os.close(descriptor)
+
+    async def _runtime_context(self, ref):
+        if self._storage_codec is not None:
+            return await self._proofs.storage_codec_runtime(
+                ref, self._runtime_pin, self._storage_codec
+            )
+        return await self._proofs.pinned_runtime(ref, self._runtime_pin)
 
     def _cache_directory(self, config: CompetitionChainConfig) -> Path:
         return Path(config.state_directory)
@@ -590,7 +647,7 @@ class FinalizedRegistrationProvider:
                 and self._latest.snapshot.block_hash == ref.block_hash
             ):
                 return self._latest
-            runtime = await self._proofs.pinned_runtime(ref, self._runtime_pin)
+            runtime = await self._runtime_context(ref)
             if (
                 not isinstance(runtime, PinnedRuntimeContext)
                 or runtime.snapshot != ref
@@ -673,6 +730,11 @@ class FinalizedRegistrationProvider:
                     "finality": json.loads(block.finality_evidence),
                     "runtime_metadata_sha256": runtime.metadata_sha256,
                     "runtime_version": json.loads(runtime.runtime_version_bytes),
+                    **(
+                        {"storage_codec_mode": runtime.storage_codec_mode}
+                        if self._storage_codec is not None
+                        else {}
+                    ),
                     "storage_batches": [
                         {
                             "state_root": batch.evidence.verified_state_root,

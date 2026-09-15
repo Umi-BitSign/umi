@@ -371,7 +371,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             self._check_finality(ref, block)
             self._fresh(block.timestamp_ms)
             self._check_origin_prior(ref)
-            runtime = await self._proofs.pinned_runtime(ref, self._runtime_pin)
+            runtime = await self._runtime_context(ref)
             if (
                 not isinstance(runtime, PinnedRuntimeContext)
                 or runtime.snapshot != ref
@@ -424,6 +424,11 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                     "storage_proof_verifier_sha256": self.config.proof_binary_sha256,
                     "runtime_metadata_sha256": runtime.metadata_sha256,
                     "runtime_version": json.loads(runtime.runtime_version_bytes),
+                    **(
+                        {"storage_codec_mode": runtime.storage_codec_mode}
+                        if self._storage_codec is not None
+                        else {}
+                    ),
                     "storage_batches": [
                         {
                             "state_root": batch.evidence.verified_state_root,
