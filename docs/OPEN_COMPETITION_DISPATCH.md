@@ -40,6 +40,28 @@ must equal those in the transport policy. The observer creates transport-bound
 verified blocks directly. The dispatcher does not relabel competition-bound
 blocks or treat an RPC finalized label as a verified attestation.
 
+### Reading storage across runtime upgrades
+
+For registration and endpoint reads, `chain.storage_codec_metadata_path` can
+name an absolute regular file containing the approved SCALE metadata bytes.
+Its SHA-256 must match `chain.chain_pin.metadata_sha256`. Supply the reviewed
+artifact, not metadata fetched from an untrusted RPC during startup. Symlinks,
+empty files, oversized files and digest mismatches are rejected before creating
+provider state. Use a separate state directory when enabling this mode.
+
+This optional mode derives storage keys and decodes values with the approved
+codec while accepting changed runtime and transaction version numbers. Every
+value still needs a proof under the owned finalized state root, strict decoding,
+and the registration/origin checks. State versions other than 1 remain rejected.
+Evidence identifies the mode as `reviewed_storage_codec/1`; reported runtime
+numbers are RPC observations, not proof that the current runtime semantics match
+the codec. Operators must review changes to the storage layout or its meaning.
+
+This is a storage-read mode only. The weight transport rejects transaction
+encoding with this context before signing. It does not authorize a newer runtime's
+call encoding or transaction extensions. Without the optional field, the existing
+exact-runtime checks and serialized configuration remain unchanged.
+
 ## Run and feed miners
 
 Create the publication directory with mode 0700 under the evaluator account.

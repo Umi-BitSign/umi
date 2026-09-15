@@ -511,6 +511,19 @@ async def test_signing_failure_leaves_durable_intent_and_no_automatic_retry(
     assert not item.encoded
 
 
+async def test_storage_only_codec_never_signs_a_transaction(weight_case, monkeypatch):
+    from umi.validator_chain import PinnedRuntimeContext
+
+    monkeypatch.setattr(
+        PinnedRuntimeContext,
+        "storage_codec_mode",
+        property(lambda self: "reviewed_storage_codec/1"),
+    )
+    with pytest.raises(ValueError, match="storage-only codec"):
+        await _run(weight_case)
+    assert not weight_case.encoded
+
+
 async def test_other_nonce_use_without_exact_row_stays_unknown_even_after_expiry(weight_case):
     item = weight_case
     item.behavior = "noop"

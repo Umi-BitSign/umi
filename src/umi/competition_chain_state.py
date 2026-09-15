@@ -233,6 +233,8 @@ def _binding(observation: OwnedCompetitionChainObservation) -> str:
     }
     values["evidence_sha256"] = observation.evidence_sha256
     values["runtime_metadata_sha256"] = observation.runtime.metadata_sha256
+    if observation.runtime.storage_codec_mode != "exact_runtime":
+        values["storage_codec_mode"] = observation.runtime.storage_codec_mode
     values["runtime_version_sha256"] = hashlib.sha256(
         observation.runtime.runtime_version_bytes
     ).hexdigest()
@@ -455,7 +457,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             block = await self._finality.verified_block_at(ref.block_number)
             self._check_finality(ref, block)
             self._fresh(block.timestamp_ms)
-            runtime = await self._proofs.pinned_runtime(ref, self._runtime_pin)
+            runtime = await self._runtime_context(ref)
             if not isinstance(runtime, PinnedRuntimeContext) or (
                 runtime.snapshot != ref or runtime.pin != self._runtime_pin
             ):
@@ -565,6 +567,11 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     "finality": json.loads(block.finality_evidence),
                     "runtime_metadata_sha256": runtime.metadata_sha256,
                     "runtime_version": json.loads(runtime.runtime_version_bytes),
+                    **(
+                        {"storage_codec_mode": runtime.storage_codec_mode}
+                        if self._storage_codec is not None
+                        else {}
+                    ),
                     "storage_batches": [
                         {
                             "state_root": batch.evidence.verified_state_root,

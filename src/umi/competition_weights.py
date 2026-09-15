@@ -420,6 +420,8 @@ class BittensorCompetitionWeightTransport:
     @staticmethod
     def encode(call, body, observation, signer, *, projection) -> bytes:
         validate_owned_weight_observation(observation)
+        if observation.runtime.storage_codec_mode != "exact_runtime":
+            raise ValueError("a storage-only codec cannot authorize transaction encoding")
         if digest(projection) != body.projection_sha256 or (
             call.module != "SubtensorModule"
             or call.function != "set_mechanism_weights"
