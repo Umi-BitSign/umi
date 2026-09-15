@@ -46,6 +46,7 @@ from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
+from .registration_funding_audit import FundingRoster
 from .registration_funding_snapshot import FundingSnapshot, matching_funders
 from .simple_bootstrap_validator import (
     SIMPLE_BOOTSTRAP_MANIFEST_SHA256,
@@ -206,12 +207,29 @@ class RegistrationBridgeOngoingPolicyBody(RegistrationBridgeFundingPolicyBody):
     hard_sunset_block: None
 
 
+class RegistrationBridgeFrozenPolicyBody(RegistrationBridgeOngoingPolicyBody):
+    """Keep bridge eligibility within one signed finalized registration roster."""
+
+    schema_: Literal["umi-registration-bridge-policy-body/4"] = Field(alias="schema")
+    registration_rule: Literal["frozen_uid_hotkey_registration_block/1"]
+    registration_snapshot: FundingRoster
+
+    @model_validator(mode="after")
+    def registration_interval(self) -> Self:
+        if self.registration_snapshot.finalized_block > self.valid_from_block:
+            raise ValueError("registration snapshot is newer than policy")
+        if [p.uid for p in self.registration_snapshot.participants] != list(range(256)):
+            raise ValueError("registration snapshot must contain the ordered full UID domain")
+        return self
+
+
 class SignedRegistrationBridgePolicy(StrictProtocolModel):
     schema_: Literal[REGISTRATION_BRIDGE_POLICY_SCHEMA] = Field(alias="schema")
     body: Annotated[
         RegistrationBridgePolicyBody
         | RegistrationBridgeFundingPolicyBody
-        | RegistrationBridgeOngoingPolicyBody,
+        | RegistrationBridgeOngoingPolicyBody
+        | RegistrationBridgeFrozenPolicyBody,
         Field(discriminator="schema_"),
     ]
     signature_scheme: Literal["sr25519"]
@@ -593,6 +611,14 @@ def validate_registration_bridge_observation(
         )
         if receipt.available:
             live.append(participant)
+    if isinstance(policy.body, RegistrationBridgeFrozenPolicyBody):
+        retained = {
+            (p.uid, account_id32(p.hotkey), p.registered_at_block)
+            for p in policy.body.registration_snapshot.participants
+        }
+        live = [
+            p for p in live if (p.uid, account_id32(p.hotkey), p.registered_at_block) in retained
+        ]
     _require(bool(live), "no_live_eligible_miners")
     # Historical signed policies retain their exact allocation semantics.
     # A new signed rule is required to enable the IP cap.
