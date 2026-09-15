@@ -309,6 +309,80 @@ async def test_competing_dispatchers_transmit_at_most_once(dispatch):
     assert dispatch.miner.translator.calls == 1
 
 
+async def test_parallel_dispatch_queues_proofs_before_provider_timeout(dispatch, monkeypatch):
+    await ready(dispatch)
+    active = 0
+    peak = 0
+    original_blocks = dispatch.provider.verified_blocks
+    original_origin = dispatch.provider.dispatch_origin
+
+    async def serialized(original, *args):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.001)
+            return await original(*args)
+        finally:
+            active -= 1
+
+    async def blocks(*args):
+        return await serialized(original_blocks, *args)
+
+    async def origin(*args):
+        return await serialized(original_origin, *args)
+
+    monkeypatch.setattr(dispatch.provider, "verified_blocks", blocks)
+    monkeypatch.setattr(dispatch.provider, "dispatch_origin", origin)
+    results = await asyncio.gather(*(dispatch.driver.dispatch_one(dispatch.key) for _ in range(16)))
+    assert peak == 1
+    assert results.count("completed") == 1
+    assert results.count("held") == 15
+    assert dispatch.miner.translator.calls == 1
+
+
+async def test_cancelled_proof_waiter_does_not_call_provider(dispatch, monkeypatch):
+    calls = 0
+
+    async def forbidden(*args):
+        nonlocal calls
+        calls += 1
+        pytest.fail("cancelled proof waiter reached provider")
+
+    monkeypatch.setattr(dispatch.provider, "verified_blocks", forbidden)
+    async with dispatch.driver._proof_gate:
+        task = asyncio.create_task(dispatch.driver._verified_blocks(()))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert calls == 0
+
+
+async def test_assignment_expiring_in_proof_queue_is_not_sent(dispatch):
+    await ready(dispatch)
+    page = dispatch.feed.journal.pending_dispatches(
+        evaluator_hotkey=dispatch.config.evaluator_hotkey
+    )
+    async with dispatch.driver._proof_gate:
+        task = asyncio.create_task(dispatch.driver.dispatch_one(dispatch.key))
+        await asyncio.sleep(0)
+        assert not task.done()
+        dispatch.feed.clock.ns = max(i["issue_close_unix_ms"] for i in page["items"]) * 1_000_000
+    assert await task == "held"
+    status = dispatch.feed.journal.status(dispatch.key)
+    assert status["state"] == "expired" and status["miner_fault"] is False
+    assert dispatch.miner.translator.calls == 0
+
+
+def test_dispatch_concurrency_can_be_raised_without_extending_proof_timeout(dispatch):
+    config = EndpointDispatchConfig.model_validate(
+        {**dispatch.config.model_dump(by_alias=True), "maximum_concurrency": 128}
+    )
+    assert config.maximum_concurrency == 128
+    assert config.chain.collection_timeout_seconds == 15
+
+
 def test_wrong_wallet_rejected(dispatch):
     with pytest.raises(ValueError, match="wallet"):
         EndpointDispatcher(dispatch.config, dispatch.feed.journal, dispatch.provider, wallet("Bob"))
@@ -317,7 +391,7 @@ def test_wrong_wallet_rejected(dispatch):
 @pytest.mark.parametrize(
     "change",
     [
-        {"maximum_concurrency": 9},
+        {"maximum_concurrency": 129},
         {"discovery_grace_seconds": 0},
         {"page_size": 101},
         {"wallet_path": "/"},

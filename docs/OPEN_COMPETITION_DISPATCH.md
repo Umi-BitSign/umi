@@ -35,6 +35,20 @@ most one request per miner runs at a time in this process. Select a timeout that
 fits the reviewed inference and delivery budget. The signed response-close time
 still limits every request; a timeout setting cannot extend it.
 
+`maximum_concurrency` may be raised to 128 after qualifying the host and the
+signed issue window for the intended cohort. The default remains four. Proof
+requests queue before entering the provider's collection timeout and run one at
+a time; miner HTTP requests can overlap. This queue does not extend any signed
+deadline. A request that reaches its issue cutoff while queued remains unclaimed
+and is recorded as infrastructure expiry, not a miner failure.
+
+Budget for every assigned case, not just one request. Six tasks at a 120-second
+inference limit already require at least 720 seconds for one single-worker miner,
+before proof collection and delivery. A 300-second issue window is insufficient.
+For a larger cohort, qualify the shared proof queue, HTTP concurrency, publication
+discovery, and total per-miner serial workload before signing the window. Preserve
+the per-request inference limit; do not edit deadlines after publication.
+
 The chain config keeps the competition-policy digest. Its chain and finality pins
 must equal those in the transport policy. The observer creates transport-bound
 verified blocks directly. The dispatcher does not relabel competition-bound
