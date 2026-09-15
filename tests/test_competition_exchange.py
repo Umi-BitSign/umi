@@ -152,8 +152,7 @@ async def test_same_clients_advance_to_another_round_without_restart(relay):
     suite = relay.suite.model_copy(
         update={
             "cases": tuple(
-                c.model_copy(update={"references": references})
-                for c in relay.suite.cases
+                c.model_copy(update={"references": references}) for c in relay.suite.cases
             )
         }
     )
