@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import sqlite3
 import stat
@@ -242,6 +243,21 @@ def execution_slot(round_, submission, evaluator_hotkey) -> str:
     ).hexdigest()
 
 
+def _incumbent_scope(job: EndpointIncumbentJob) -> str:
+    return hashlib.sha256(
+        b"umi-round-endpoint-incumbent-v1\0"
+        + canonical_json_bytes([digest(job.round), identity(job.evaluator_hotkey)])
+    ).hexdigest()
+
+
+def _incumbent_inputs(job: EndpointIncumbentJob) -> bytes:
+    # A round fixes the whole roster and interval. Only the submitting miner
+    # differs: neither the comparator nor its reference-free inputs may change.
+    inputs = job.model_dump(mode="json", by_alias=True, exclude={"submission"})
+    inputs["evaluator_hotkey"] = identity(job.evaluator_hotkey)
+    return canonical_json_bytes(inputs)
+
+
 def _ordered(boundary: ExecutionBoundary, previous: ExecutionBoundary | None, job) -> None:
     boundary = ExecutionBoundary.model_validate_json(canonical_json_bytes(boundary))
     if not job.round.submission_close_block < boundary.block <= job.round.evaluation_close_block:
@@ -357,6 +373,10 @@ class ExecutionJournal:
                 "CREATE TABLE IF NOT EXISTS pending_steps "
                 "(job_id TEXT PRIMARY KEY, body BLOB NOT NULL)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS endpoint_incumbents "
+                "(scope TEXT PRIMARY KEY, source_job TEXT NOT NULL)"
+            )
 
     @contextmanager
     def _transaction(self):
@@ -436,6 +456,73 @@ class ExecutionJournal:
                 raise ValueError("finished step does not match its retained observation")
             db.execute("INSERT INTO steps VALUES (?,?,?)", (key, index, raw))
             db.execute("DELETE FROM pending_steps WHERE job_id=?", (key,))
+
+    def reuse_endpoint_incumbent(
+        self, job: EndpointIncumbentJob
+    ) -> EndpointIncumbentEvidence | None:
+        """Reserve one comparator attempt per round, or retain its exact receipts.
+
+        Called after reserving this submission, before any external operation.
+        Failed/incomplete source runs hold all consumers; a different miner cannot
+        cause another attempt. Existing per-submission evidence remains readable.
+        Older rounds without this reservation must finish under their old code or
+        be replaced by a new round, never retroactively select a winning attempt.
+        """
+        job = validate_incumbent_job(job, self.policy)
+        key, raw, scope = execution_key(job), canonical_json_bytes(job), _incumbent_scope(job)
+        with self._transaction() as db:
+            own = db.execute("SELECT job, status FROM jobs WHERE id=?", (key,)).fetchone()
+            if own is None or own[1] != "running" or bytes(own[0]) != raw:
+                raise ValueError("incumbent consumer is not reserved for these inputs")
+            if (
+                db.execute("SELECT 1 FROM steps WHERE job_id=?", (key,)).fetchone()
+                or db.execute("SELECT 1 FROM pending_steps WHERE job_id=?", (key,)).fetchone()
+            ):
+                raise ValueError("incumbent consumer already has execution observations")
+            cached = db.execute(
+                "SELECT source_job FROM endpoint_incumbents WHERE scope=?", (scope,)
+            ).fetchone()
+            if cached is None:
+                # Never adopt an arbitrary pre-upgrade run or retry a failed one
+                # just because its round predates the shared reservation table.
+                for (old_raw,) in db.execute("SELECT job FROM jobs WHERE id!=?", (key,)):
+                    if json.loads(old_raw).get("schema") != "umi-endpoint-incumbent-job/1":
+                        continue
+                    old = validate_incumbent_job(
+                        EndpointIncumbentJob.model_validate_json(old_raw), self.policy
+                    )
+                    if _incumbent_scope(old) == scope:
+                        raise ValueError("round has legacy incumbent attempts; use a new round")
+                db.execute("INSERT INTO endpoint_incumbents VALUES (?,?)", (scope, key))
+                return None
+            source_key = cached[0]
+            source = db.execute("SELECT job, status FROM jobs WHERE id=?", (source_key,)).fetchone()
+            if source is None:
+                raise ValueError("shared incumbent source is missing")
+            source_job = validate_incumbent_job(
+                EndpointIncumbentJob.model_validate_json(source[0]), self.policy
+            )
+            if (
+                execution_key(source_job) != source_key
+                or _incumbent_scope(source_job) != scope
+                or _incumbent_inputs(source_job) != _incumbent_inputs(job)
+            ):
+                raise ValueError("shared incumbent assignment conflicts with the reserved round")
+            if source[1] != "complete":
+                raise ValueError(
+                    "shared incumbent is incomplete or failed; automatic rerun refused"
+                )
+            evidence = self._evidence(db, source_job)
+            # Keep the original owned boundaries and runtime observations. Do not
+            # relabel their times as a new execution or reuse across evaluators.
+            for index, step in enumerate(evidence.steps):
+                step_raw = canonical_json_bytes(step)
+                if len(step_raw) > _MAX_STEP_BYTES:
+                    raise ValueError("shared incumbent exceeds reserved receipt capacity")
+                db.execute("INSERT INTO steps VALUES (?,?,?)", (key, index, step_raw))
+            retained = self._evidence(db, job)
+            db.execute("UPDATE jobs SET status='complete' WHERE id=?", (key,))
+            return retained
 
     def observe(self, job: ModelEvaluationJob, pending: PendingExecutionStep) -> None:
         """Retain stdout before awaiting another network/finality operation."""
@@ -597,6 +684,10 @@ async def _run_evaluation(
         return observed
 
     try:
+        if isinstance(job, EndpointIncumbentJob):
+            shared = journal.reuse_endpoint_incumbent(job)
+            if shared is not None:
+                return shared
         if prepare_boundaries is not None:
             await prepare_boundaries()
         await verify_runtime(job.runtime, policy)
