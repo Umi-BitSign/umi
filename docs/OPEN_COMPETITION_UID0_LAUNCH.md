@@ -46,8 +46,10 @@ Existing numerical transport ceilings remain unchanged.
 
 ## Operations and remaining gates
 
-- UID 54 keeps its existing validator service. It is not a second evaluator,
-  independent vote or substitute signer for this policy.
+- UID 54 keeps its existing validator service during preparation. It is not a
+  second evaluator, independent vote or substitute evaluator signer. At an
+  authorized successor transition its weight worker can consume the same
+  certified results without supplying an additional evaluation vote.
 - UID 0 must execute the actual work and retain its signed run evidence.
   A one-signature threshold does not permit fabricated observations, missing
   cases, late publication, changed labels or missing finalized-state checks.

@@ -817,7 +817,7 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
         calls = [c for c in s.paired.calls if isinstance(c, dict)]
         assert len(calls) == first_calls + 9 * len(s.drivers)
         assert all(digest(c["bundle"]) == digest(item.candidate) for c in calls[first_calls:])
-        assert dispatch.miner.translator.calls == 12
+        assert dispatch.miner.translator.calls == 6 * len(s.drivers)
         retained = s.store.prepared_round(first_suite, s.config.replay_limits)
         assert canonical_json_bytes(retained["cutoff_publication"]["round"]) == first_round
     finally:
