@@ -4,7 +4,37 @@ The first 70/30 competition uses automatic CER/WER scoring against fixed English
 references. It does not require a new human ASL grading panel, a person reviewing
 every miner output, or human approval of each score. Existing labeled ASL data
 can supply the references. This choice does not activate the competition or
-change the signed policy, scoring formula, evaluator quorum or bridge sunset.
+change the signed policy, scoring formula, evaluator quorum or bridge lifetime.
+
+## Private storage and evaluator setup
+
+Keep the original archive and an intake record outside Git and public artifact
+storage. Use owner-only directories (0700) and files (0600), preserve provenance
+and attribution, and verify the archive digest at each private backup destination.
+File permissions do not provide encryption or isolation from other processes
+running as the same account. Use an encrypted volume and a separate evaluator
+account when stronger separation is required.
+
+Before extraction, reject absolute paths, parent traversal, symlinks, duplicate
+archive entries and oversized payloads. Verify every member against the supplied
+checksums. Record counts by task, timestamp intervals, reference counts and known
+training exposure without logging the references themselves. For interval-labeled
+source videos, the case input must contain only the labeled interval; a full
+source video must not be scored against one sentence's label.
+
+Archive intake is separate from accepting an `EvaluationSuite`. Retain a candidate
+with `activation_ready: false` if required strata or references are missing.
+Do not duplicate labels, invent paraphrases, or reclassify fingerspelling clips
+to fill a missing short-utterance stratum. Changing that contract requires a
+reviewed policy/code change and scoring rehearsal before activation.
+
+Only after qualification should the coordinator commit the suite. Configure the
+[evaluator](OPEN_COMPETITION_EVALUATOR.md) with a separate `video_directory`
+containing reference-free, hash-named case videos. Keep the archive, manifest,
+labels and provenance outside that directory and every model/miner mount.
+Deliver reference suites through the access-controlled evaluation exchange to
+the policy-selected evaluators. Installing a weight-writing validator does not
+grant access to the holdout.
 
 ## Data needed before activation
 
