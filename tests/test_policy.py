@@ -297,6 +297,54 @@ def test_legacy_policy_cannot_drop_its_publisher_registry() -> None:
         ScoringPolicy.model_validate(data)
 
 
+def test_competition_transport_builder_needs_no_legacy_calibration_evidence() -> None:
+    legacy = make_policy()
+    transport = ScoringPolicy.competition_transport(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+    )
+    assert transport.schema_ == SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+    assert transport.minimum_publisher_collateral_alpha_rao is None
+    assert transport.soak_start_window_index is None
+    assert transport.validator_capacity_set_root is None
+    assert transport.validator_cost_schedule_hash is None
+    assert transport.publisher_registry == transport.control_group_registry == []
+    assert transport.validator_registry == legacy.validator_registry[:1]
+    assert transport.translation_weights_active is False
+    assert transport.clock == legacy.clock
+    assert transport.limits == legacy.limits
+    assert transport.thresholds == legacy.thresholds
+    assert transport.implementation_pins == legacy.implementation_pins
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(transport)) == transport
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "minimum_publisher_collateral_alpha_rao",
+        "soak_start_window_index",
+        "validator_capacity_set_root",
+        "validator_cost_schedule_hash",
+    ],
+)
+def test_legacy_policy_cannot_drop_calibration_inputs(field) -> None:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data[field] = None
+    with pytest.raises(ValidationError, match="requires publisher and calibration inputs"):
+        ScoringPolicy.model_validate(data)
+
+
+def test_competition_transport_cannot_partially_drop_legacy_inputs() -> None:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["schema"] = SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+    data["validator_registry"] = data["validator_registry"][:1]
+    data["publisher_registry"] = data["control_group_registry"] = []
+    data["validator_capacity_set_root"] = None
+    with pytest.raises(ValidationError, match="must be absent together"):
+        ScoringPolicy.model_validate(data)
+
+
 def _live_shadow_policy_data() -> dict:
     data = make_policy().model_dump(mode="json", by_alias=True)
     pins = data["implementation_pins"]

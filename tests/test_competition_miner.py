@@ -201,11 +201,18 @@ async def post_assignment(client, case, *, request=None, evaluator=None, nonce=N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("single_evaluator", [False, True])
+@pytest.mark.parametrize(
+    ("single_evaluator", "legacy_calibration_inputs"),
+    [(False, True), (True, True), (True, False)],
+)
 async def test_authorized_http_request_returns_real_signed_timelocked_response(
-    policy, tmp_path, single_evaluator
+    policy, tmp_path, single_evaluator, legacy_calibration_inputs
 ):
-    case = build_authorization_fixture(policy, single_evaluator=single_evaluator)
+    case = build_authorization_fixture(
+        policy,
+        single_evaluator=single_evaluator,
+        legacy_calibration_inputs=legacy_calibration_inputs,
+    )
     miner = authorized_runtime(case, tmp_path)
     try:
         async with httpx.AsyncClient(
@@ -232,7 +239,10 @@ async def test_authorized_http_request_returns_real_signed_timelocked_response(
         miner.resource_ledger.close()
 
 
-def test_single_evaluator_transport_requires_successor_mode_before_wallet_access(monkeypatch):
+@pytest.mark.parametrize("legacy_calibration_inputs", [False, True])
+def test_single_evaluator_transport_requires_successor_mode_before_wallet_access(
+    monkeypatch, legacy_calibration_inputs
+):
     from .test_policy import make_policy
 
     data = make_policy().model_dump(mode="json", by_alias=True)
@@ -241,6 +251,12 @@ def test_single_evaluator_transport_requires_successor_mode_before_wallet_access
     data["control_group_registry"] = []
     data["validator_registry"] = data["validator_registry"][:1]
     transport = ScoringPolicy.model_validate(data)
+    if not legacy_calibration_inputs:
+        transport = ScoringPolicy.competition_transport(
+            activation_block=transport.activation_block,
+            implementation_pins=transport.implementation_pins,
+            validator=transport.validator_registry[0],
+        )
     monkeypatch.setattr("umi.miner._load_policy", lambda _path: transport)
     monkeypatch.setattr(bt, "Wallet", lambda **kwargs: pytest.fail("wallet access"))
     with pytest.raises(ValueError, match="requires competition mode"):

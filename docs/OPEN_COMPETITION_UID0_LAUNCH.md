@@ -44,6 +44,15 @@ empty. The signed competition assignment path supplies request authority; fake
 publishers are not needed to satisfy the retired three-publisher launch gate.
 Existing numerical transport ceilings remain unchanged.
 
+Use `ScoringPolicy.competition_transport(...)` to prepare this transport from the
+selected validator identity and the actual implementation pins. It serializes
+the retired publisher collateral, soak start, validator capacity-set root and
+validator cost-schedule hash as explicit `null` values. These four fields must
+be absent together. Legacy scoring policies still require all four; existing
+fully populated transport documents retain their original bytes and hashes.
+This does not waive the miner's model-worker capacity checks or the evaluator's
+execution deadlines. Preparation does not sign a policy or authorize rewards.
+
 ## Operations and remaining gates
 
 - UID 54 keeps its existing validator service during preparation. It is not a
