@@ -78,7 +78,7 @@ to a hotkey, copying another miner's announced endpoint can dilute that group's
 share. No UID blacklist, penalty or burn is introduced.
 
 The [IP-cap deployment record](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) records
-the signed release and finalized readback. The original deadline below is unchanged.
+the signed release and finalized readback. Its historical deadline is unchanged.
 
 ## Duration
 
@@ -90,10 +90,19 @@ registrations are checked automatically, but new bindings require a signed
 snapshot refresh. Unknown or multiple-sender histories retain coldkey/IP grouping.
 This is not a permanent requirement of the planned open competition.
 
-The bridge retains the original bootstrap cutoff: no new submissions from
-block `9,073,731`, with hard sunset at `9,075,171`. It may be superseded sooner
-by the open-competition release. It does not silently extend the seven-day
-bootstrap period.
+New policy body version3 supports an explicitly signed `lifetime=until_superseded`,
+with `stop_submitting_block` and `hard_sunset_block` both null. It renews bridge
+weights without a calendar cutoff until a signed successor or operator stop.
+The supervisor directive uses its maximum supported block bound for this mode;
+ordinary finite directives still stop the worker at their own boundary. Policy
+signatures, fresh health and chain checks, rate limits and single-writer locks
+remain required. Allocation and funding-group semantics are unchanged.
+
+Version1/2 policies retain their original submission cutoff `9,073,731` and
+hard sunset `9,075,171`. Installing source alone does not extend them. The ongoing
+policy requires compatible host parsers, a new signature and a published
+successor directive. Check the actual signed feed and finalized row to confirm
+activation. This does not reopen the pilot or activate translation rewards.
 
 ## Miner actions
 

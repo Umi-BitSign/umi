@@ -231,9 +231,9 @@ class CachedTransfers:
         return result
 
 
-async def cycle(roster, api, cache, *, shared_funders=()):
+async def cycle(roster, api, cache, *, shared_funders=(), until_stopped=False):
     cache.record_roster(roster)
-    if roster.finalized_block >= REGISTRATION_BRIDGE_HARD_SUNSET_BLOCK:
+    if not until_stopped and roster.finalized_block >= REGISTRATION_BRIDGE_HARD_SUNSET_BLOCK:
         report = {
             "schema": "umi-registration-funding-watch/1",
             "status": "bridge_ended",
@@ -286,6 +286,11 @@ def main(argv=None):
     key_source.add_argument("--api-key-file", type=Path, help="owner-private credential file")
     parser.add_argument("--shared-funder", action="append", default=[])
     parser.add_argument(
+        "--until-stopped",
+        action="store_true",
+        help="continue the read-only audit past the legacy sunset; keep rate and request budgets",
+    )
+    parser.add_argument(
         "--max-requests", type=int, default=1000, help="persistent lifetime API-call cap"
     )
     args = parser.parse_args(argv)
@@ -314,7 +319,13 @@ def main(argv=None):
             api = BudgetedTransfers(client, cache, max_requests=args.max_requests)
             while True:
                 roster = await asyncio.wait_for(capture_roster(), 120)
-                result = await cycle(roster, api, cache, shared_funders=args.shared_funder)
+                result = await cycle(
+                    roster,
+                    api,
+                    cache,
+                    shared_funders=args.shared_funder,
+                    until_stopped=args.until_stopped,
+                )
                 print(
                     json.dumps(
                         {

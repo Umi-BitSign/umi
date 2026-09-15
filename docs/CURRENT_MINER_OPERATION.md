@@ -55,8 +55,10 @@ funding links to rewards still requires a signed snapshot refresh. Until then,
 new registrations use the existing coldkey/IP rules and cannot inherit a reused
 UID's old funding assertion. Miners do not need a Taostats API key.
 
-The bridge stops new submissions before block `9,073,731`, with hard sunset at
-`9,075,171`, unless replaced sooner. It retains the original bootstrap deadline.
+The ongoing bridge policy renews weights until an explicit replacement is
+activated. This requires the signed version3 lifetime policy; historical
+version1/2 policies retain their original cutoffs. A code update alone does not
+extend an old signed policy.
 See the [signed-policy specification and rollout evidence](REGISTRATION_BRIDGE.md).
 
 ## Later translation competition

@@ -144,6 +144,18 @@ async def test_bridge_sunset_stops_all_new_queries_but_preserves_cache(cache):
     assert cache.db.execute("SELECT COUNT(*) FROM histories").fetchone()[0] == before
 
 
+async def test_explicit_ongoing_audit_continues_past_legacy_sunset(cache):
+    api = histories()
+    late = roster().model_copy(
+        update={"finalized_block": watch.REGISTRATION_BRIDGE_HARD_SUNSET_BLOCK + 1}
+    )
+    result = await watch.cycle(late, api, cache, until_stopped=True)
+    assert result["status"] != "bridge_ended"
+    assert len(api.calls) == 3
+    await watch.cycle(late, api, cache, until_stopped=True)
+    assert len(api.calls) == 3
+
+
 async def test_request_budget_and_restart_throttle_persist(cache, monkeypatch):
     clock, sleeps, calls = [1000.0], [], []
     monkeypatch.setattr(watch.time, "time", lambda: clock[0])

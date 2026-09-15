@@ -7,9 +7,11 @@ coldkey or HTTPS endpoint IP until the new
 [signed funding-cap policy](REGISTRATION_BRIDGE_FUNDING_CAP.md) is deployed.
 Publishing this checker alone does not activate funding-based reward grouping.
 
-The audit is temporary. Its watcher stops querying at finalized block
-`9,075,171`. Stop it earlier if the open competition replaces the bridge. It is
-not a requirement of the planned 70% endpoint / 30% model-contribution mechanism.
+The watcher retains the legacy stop at finalized block `9,075,171` by default.
+For the explicitly authorized ongoing bridge, `--until-stopped` keeps its
+read-only queue running past that cutoff. Persistent API request budgets, rate
+limits and cached results are unchanged. Stop the watcher when replacing the
+bridge. It is not a requirement of the planned 70/30 competition.
 
 ## API key and cost
 
