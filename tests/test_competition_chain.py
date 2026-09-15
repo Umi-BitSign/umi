@@ -570,6 +570,8 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
     monkeypatch.setattr("umi.competition_chain.SubprocessStorageProofVerifier", proof_verifier)
     monkeypatch.setattr("umi.competition_chain._RegistrationRpc", lambda config: chain.rpc)
     owned = FinalizedRegistrationProvider(chain.config, chain.policy, now_ms=lambda: _NOW)
+    assert owned._proofs._limits.maximum_proof_node_bytes == 2 * 1024**2
+    assert owned._proofs._limits.maximum_proof_bytes == 8 * 1024**2
     with pytest.raises(ValueError, match="not running"):
         await owned.collect()
     await owned.start()

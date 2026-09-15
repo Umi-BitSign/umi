@@ -241,6 +241,36 @@ def test_python_preflight_enforces_shape_uniqueness_and_limits(tmp_path: Path) -
         )
 
 
+@pytest.mark.parametrize("size", [3 * 1024 * 1024, 16 * 1024 * 1024])
+def test_preflight_accepts_external_values_up_to_the_value_limit(tmp_path: Path, size: int) -> None:
+    path, digest = executable(tmp_path, "unused")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    value = b"v" * size
+    items = ((b":code", value),)
+    # This tests Python admission only. Actual trie membership is checked in Rust.
+    assert verifier._preflight(state_root=b"r" * 32, items=items, proof=(value,)) == items
+
+
+def test_default_external_value_proof_limits_remain_bounded(tmp_path: Path) -> None:
+    path, digest = executable(tmp_path, "unused")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    limits = SubstrateProofLimits()
+    assert limits.maximum_proof_node_bytes == limits.maximum_value_bytes == 16 * 1024 * 1024
+    assert limits.maximum_proof_bytes == 32 * 1024 * 1024
+    common = {"state_root": b"r" * 32, "items": ((b":code", None),)}
+    with pytest.raises(ValueError, match="node byte limit"):
+        verifier._preflight(proof=(b"v" * (limits.maximum_proof_node_bytes + 1),), **common)
+    with pytest.raises(ValueError, match="total byte limit"):
+        verifier._preflight(
+            proof=(
+                b"a" * limits.maximum_proof_node_bytes,
+                b"b" * limits.maximum_proof_node_bytes,
+                b"c",
+            ),
+            **common,
+        )
+
+
 def test_extrinsics_root_preflight_enforces_body_shape_and_limits(tmp_path: Path) -> None:
     path, digest = executable(tmp_path, "unused")
     verifier = SubprocessStorageProofVerifier(

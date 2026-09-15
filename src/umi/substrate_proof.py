@@ -54,7 +54,8 @@ class SubstrateProofLimits:
     maximum_key_bytes: int = 512
     maximum_value_bytes: int = 16 * 1024 * 1024
     maximum_proof_nodes: int = 4_096
-    maximum_proof_node_bytes: int = 2 * 1024 * 1024
+    # LayoutV1 external values appear as raw proof nodes, including runtime :code.
+    maximum_proof_node_bytes: int = 16 * 1024 * 1024
     maximum_proof_bytes: int = 32 * 1024 * 1024
     maximum_extrinsics: int = 4_096
     maximum_extrinsic_bytes: int = 16 * 1024 * 1024

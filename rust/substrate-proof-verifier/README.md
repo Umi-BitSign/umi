@@ -41,6 +41,16 @@ public state-version-1 proof for the Aura authority set at Finney's official
 GRANDPA warp checkpoint. Tests verify the original proof and reject changed
 values, missing nodes, and modified nodes.
 
+LayoutV1 includes large external values as individual raw proof nodes. The
+per-node ceiling is 16 MiB, matching the storage-value ceiling so runtime
+`:code` membership proofs above 2 MiB can be verified. The complete proof is
+still limited to 32 MiB and 4,096 nodes; the encoded request limit is 160 MiB.
+The Python verifier adapter and general proof collector use the same defaults.
+Tests build real tries with 3 MiB and 16 MiB values and reject modified or
+missing value nodes, nodes over 16 MiB, and proofs over 32 MiB. This does not
+change the narrower limits on bootstrap result/event intake or the successor
+registration and weight collectors (2 MiB per node, 8 MiB per proof).
+
 The Python adapter requires an absolute binary path and its expected SHA-256. Keep
 the release binary and `Cargo.lock` together as activation artifacts.
 

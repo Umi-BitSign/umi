@@ -325,6 +325,7 @@ class FinalizedRegistrationProvider:
                 limits=ProofCollectionLimits(
                     maximum_storage_value_bytes=512,
                     maximum_storage_values_bytes=256 * 512,
+                    maximum_proof_node_bytes=2 * 1024**2,
                     maximum_proof_bytes=8 * 1024**2,
                 ),
             )

@@ -30,6 +30,22 @@ def provider(case, *, config=None, policy=None):
     )
 
 
+async def test_owned_weight_collector_keeps_its_smaller_proof_limits(chain, monkeypatch):
+    item = provider(chain)
+    monkeypatch.setattr(
+        "umi.competition_chain_state.SubprocessStorageProofVerifier",
+        lambda **_: chain.verifier,
+    )
+    try:
+        item._owned = True
+        item._configure_weight_collector()
+        assert item._proofs._limits.maximum_proof_node_bytes == 2 * 1024**2
+        assert item._proofs._limits.maximum_proof_bytes == 8 * 1024**2
+    finally:
+        item._owned = False
+        await item.aclose()
+
+
 async def test_same_config_reuses_namespace_without_rebinding_public_config(chain):
     first = provider(chain)
     path = first._path

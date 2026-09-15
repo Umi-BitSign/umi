@@ -490,6 +490,27 @@ async def test_storage_proof_is_bound_to_requested_block_and_state_root() -> Non
 
 
 @pytest.mark.asyncio
+async def test_collector_accepts_large_external_value_nodes_without_limit_overrides() -> None:
+    value = b"v" * (3 * 1024 * 1024)
+    rpc = _rpc(value="0x" + value.hex(), proof=["0x" + value.hex()])
+    calls = []
+
+    def verify(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    collector = _collector(rpc, verifier=verify)
+    snapshot = await collector.finalized_snapshot()
+    await collector.storage_evidence(snapshot, b":code")
+    assert len(calls) == 1
+    assert calls[0]["expected_value"] == value
+    assert calls[0]["proof"] == (value,)
+    assert calls[0]["state_root"] == bytes.fromhex(snapshot.state_root[2:])
+    assert ProofCollectionLimits().maximum_proof_node_bytes == 16 * 1024 * 1024
+    assert ProofCollectionLimits().maximum_proof_bytes == 32 * 1024 * 1024
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("limits", "proof", "storage_key", "value", "reason_code"),
     [
