@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -878,13 +879,33 @@ async def _finish_recorded_request(
     )
 
 
-def create_app(runtime: MinerRuntime) -> FastAPI:
+def create_app(
+    runtime: MinerRuntime, *, on_background_failure: Callable[[str], None] | None = None
+) -> FastAPI:
     """Create the miner app without performing any chain mutation."""
 
     finality_task: asyncio.Task[None] | None = None
     finality_stop: asyncio.Event | None = None
     assignment_task: asyncio.Task[None] | None = None
     assignment_stop: asyncio.Event | None = None
+
+    def background_finished(task: asyncio.Task[None], name: str, stop: asyncio.Event) -> None:
+        if task.done() and not stop.is_set() and app.state.background_failure is None:
+            # An unexpected clean return or cancellation is also terminal. Let
+            # the host restart this process, with normal startup/store checks.
+            app.state.background_failure = name
+            LOGGER.error("miner_background_service_failed service=%s", name)
+            if on_background_failure is not None:
+                on_background_failure(name)
+
+    def check_background_tasks() -> bool:
+        for task, name, stop in (
+            (finality_task, "finality", finality_stop),
+            (assignment_task, "assignment_feed", assignment_stop),
+        ):
+            if task is not None and stop is not None:
+                background_finished(task, name, stop)
+        return app.state.background_failure is not None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -896,6 +917,9 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
             if runtime.finality_service is not None:
                 finality_stop = asyncio.Event()
                 finality_task = asyncio.create_task(runtime.finality_service.run(finality_stop))
+                finality_task.add_done_callback(
+                    lambda task: background_finished(task, "finality", finality_stop)
+                )
                 await asyncio.sleep(0)
                 if finality_task.done():
                     await finality_task
@@ -904,36 +928,47 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
                 assignment_task = asyncio.create_task(
                     runtime.competition_authority.run(assignment_stop)
                 )
+                assignment_task.add_done_callback(
+                    lambda task: background_finished(task, "assignment_feed", assignment_stop)
+                )
             yield
         finally:
             if assignment_stop is not None:
                 assignment_stop.set()
-            if assignment_task is not None:
-                assignment_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await assignment_task
             if finality_stop is not None:
                 finality_stop.set()
-            if finality_task is not None:
-                with suppress(asyncio.CancelledError):
-                    await finality_task
-            if translator_lifecycle_entered:
-                await _run_translator_lifecycle(runtime, "shutdown")
+            try:
+                if assignment_task is not None:
+                    assignment_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await assignment_task
+            finally:
+                try:
+                    if finality_task is not None:
+                        with suppress(asyncio.CancelledError):
+                            await finality_task
+                finally:
+                    if translator_lifecycle_entered:
+                        await _run_translator_lifecycle(runtime, "shutdown")
 
     app = FastAPI(title="UMI component miner", version="0.1.0", lifespan=lifespan)
+    app.state.background_failure = None
 
     @app.get("/healthz")
-    async def health() -> dict[str, object]:
+    async def health(response: Response) -> dict[str, object]:
+        background_failed = check_background_tasks()
         if runtime.finality_service is None:
             finality_status = "component_authority"
         elif finality_task is None:
             finality_status = "not_started"
+        elif finality_task.cancelled():
+            finality_status = "failed"
         elif finality_task.done():
             finality_status = "failed" if finality_task.exception() is not None else "stopped"
         else:
             finality_status = "running"
         result: dict[str, object] = {
-            "ok": finality_status not in {"failed", "stopped"},
+            "ok": not background_failed and finality_status not in {"failed", "stopped"},
             "netuid": SAFETY_BOUNDARY.netuid,
             "translation_weights_active": False,
             "protocol_conformance": False,
@@ -943,6 +978,10 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
             "window_authority": type(runtime.window_authority).__name__,
             "finality_service": finality_status,
         }
+        if background_failed:
+            result["background_failure"] = app.state.background_failure
+        if not result["ok"]:
+            response.status_code = 503
         if runtime.runtime_mode == "public_component_pilot":
             result["activation_evidence"] = False
         if runtime.competition_authority is not None:
@@ -960,6 +999,8 @@ def create_app(runtime: MinerRuntime) -> FastAPI:
 
     @app.post(TRANSLATE_PATH)
     async def translate(request: Request) -> Response:
+        if check_background_tasks():
+            raise HTTPException(status_code=503, detail="miner_background_service_failed")
         if _header_bytes(request) > runtime.limits.maximum_http_header_bytes:
             raise HTTPException(status_code=431, detail="request headers exceed the ceiling")
         try:
@@ -1543,13 +1584,27 @@ def main() -> None:
     runtime = build_runtime(args)
     import uvicorn
 
+    server = None
+
+    def background_failed(_name: str) -> None:
+        if server is not None:
+            server.should_exit = True
+
     try:
-        uvicorn.run(
-            create_app(runtime),
-            host=args.listen_host,
-            port=args.port,
-            **_uvicorn_limits(runtime),
+        app = create_app(runtime, on_background_failure=background_failed)
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=args.listen_host,
+                port=args.port,
+                **_uvicorn_limits(runtime),
+            )
         )
+        server.run()
+        if app.state.background_failure is not None:
+            raise RuntimeError(f"miner background service stopped: {app.state.background_failure}")
+        if not server.started:
+            raise RuntimeError("miner HTTP startup failed")
     finally:
         runtime.resource_ledger.close()
 

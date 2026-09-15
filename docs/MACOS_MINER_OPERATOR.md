@@ -276,6 +276,14 @@ system sleep, supervise the miner with a restart delay, and test recovery withou
 deleting its SQLite files or lock files. Docker Desktop must be ready before the
 miner starts. Close public ingress whenever `/healthz` is unhealthy.
 
+An unexpected exit of the finality observer or assignment-discovery task makes
+`/healthz` return HTTP503 and rejects new translation requests. The CLI then
+shuts down and exits unsuccessfully so its service manager can restart it.
+Configure a restart delay, for example 120 seconds, to avoid a rapid retry loop.
+Restart retains the SQLite state and repeats normal startup checks; it does not
+substitute RPC observations for verified finality. A running observer alone does
+not prove that its latest finalized record is fresh enough to admit a request.
+
 After the service and TLS proxy pass the external reachability check, publish the
 literal endpoint:
 

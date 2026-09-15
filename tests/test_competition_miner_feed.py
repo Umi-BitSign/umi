@@ -183,11 +183,67 @@ async def test_poll_task_is_cancelled_at_miner_shutdown(feed, tmp_path, monkeypa
             cancelled.set()
 
     monkeypatch.setattr(authority, "run", run)
-    app = create_app(miner)
+    failures = []
+    app = create_app(miner, on_background_failure=failures.append)
     try:
         async with app.router.lifespan_context(app):
             await asyncio.wait_for(entered.wait(), 1)
         assert cancelled.is_set()
+        assert not failures
+    finally:
+        miner.resource_ledger.close()
+
+
+@pytest.mark.parametrize("outcome", ["error", "returned", "cancelled"])
+async def test_terminal_feed_task_stops_serving(feed, tmp_path, monkeypatch, outcome):
+    from contextlib import nullcontext
+
+    from .test_miner_background_lifecycle import ControlledFinality
+    from .test_miner_transport import LifecycleProbeTranslator
+
+    finality = ControlledFinality("normal_stop")
+    translator = LifecycleProbeTranslator(asyncio.Event(), asyncio.Event())
+    miner = replace(
+        dynamic_runtime(feed, tmp_path), translator=translator, finality_service=finality
+    )
+    released, notified = asyncio.Event(), asyncio.Event()
+    failures = []
+
+    async def run(stop):
+        await released.wait()
+        if outcome == "error":
+            raise RuntimeError("private feed diagnostic")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+
+    def failed(name):
+        failures.append(name)
+        notified.set()
+
+    monkeypatch.setattr(miner.competition_authority, "run", run)
+    app = create_app(miner, on_background_failure=failed)
+    expected = (
+        pytest.raises(RuntimeError, match="private feed diagnostic")
+        if outcome == "error"
+        else nullcontext()
+    )
+    try:
+        with expected:
+            async with app.router.lifespan_context(app):
+                released.set()
+                await asyncio.wait_for(notified.wait(), 1)
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url=feed.item.serving_origin
+                ) as client:
+                    health = await client.get("/healthz")
+                    assert health.status_code == 503
+                    assert health.json()["background_failure"] == "assignment_feed"
+                    assert "private feed diagnostic" not in health.text
+                    work = await post_assignment(client, feed.item)
+                    assert work.status_code == 503
+        assert translator.shutdown_entered.is_set()
+        assert finality.finished.is_set()
+        assert failures == ["assignment_feed"]
     finally:
         miner.resource_ledger.close()
 
