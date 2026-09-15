@@ -138,13 +138,16 @@ class _SocketLease:
 class _BatchConnections:
     """Exclusive leases keep the existing single-request RPC ID unambiguous."""
 
-    def __init__(self):
+    def __init__(self, capacity: int = 8):
         self.idle: list[tuple[Any, Any]] = []
-        self.capacity = asyncio.Semaphore(8)
+        self.capacity = asyncio.Semaphore(capacity)
+        self.closed = False
 
     @asynccontextmanager
     async def lease(self):
         async with self.capacity:
+            if self.closed:
+                raise ValueError("registration connection pool is closed")
             lease = _SocketLease(self.idle.pop() if self.idle else None)
             try:
                 yield lease
@@ -156,9 +159,13 @@ class _BatchConnections:
                 raise
             else:
                 if lease.connection is not None:
-                    self.idle.append(lease.connection)
+                    if self.closed:
+                        await lease.connection[0].__aexit__(None, None, None)
+                    else:
+                        self.idle.append(lease.connection)
 
     async def close(self):
+        self.closed = True
         connections, self.idle = self.idle, []
         await asyncio.gather(
             *(context.__aexit__(None, None, None) for context, _ in connections),
@@ -167,23 +174,91 @@ class _BatchConnections:
 
 
 class _RegistrationRpc:
-    def __init__(self, config: CompetitionChainConfig):
+    def __init__(
+        self,
+        config: CompetitionChainConfig,
+        *,
+        persistent: bool = False,
+        bulk_storage_reads: bool = False,
+    ):
         self.config = config
+        self.bulk_storage_reads = bulk_storage_reads
         self._pool: _BatchConnections | None = None
+        # Separate method pools preserve the websocket receive ceiling of each
+        # request. A large metadata socket must not become a storage-value socket.
+        self._persistent_pools = (
+            {
+                method: _BatchConnections(8 if method == "state_getStorageAt" else 1)
+                for method in (
+                    "state_getStorageAt",
+                    "state_queryStorageAt",
+                    "state_getReadProof",
+                    "state_getMetadata",
+                    "state_getRuntimeVersion",
+                    "chain_getHeader",
+                    "chain_getBlockHash",
+                )
+            }
+            if persistent
+            else {}
+        )
+        self._closed = False
+
+    async def storage_values(self, block_hash: str, keys: Sequence[bytes]):
+        if not 1 <= len(keys) <= 256 or any(
+            not isinstance(key, bytes) or not 1 <= len(key) <= 512 for key in keys
+        ):
+            raise ValueError("registration bulk keys exceed bounds")
+        encoded = tuple("0x" + key.hex() for key in keys)
+        if len(set(encoded)) != len(encoded):
+            raise ValueError("registration bulk keys are duplicated")
+        result = await self.request("state_queryStorageAt", (encoded, block_hash))
+        if (
+            not isinstance(result, list)
+            or len(result) != 1
+            or not isinstance(result[0], dict)
+            or set(result[0]) != {"block", "changes"}
+            or result[0]["block"] != block_hash
+        ):
+            raise ValueError("registration bulk result belongs to another block")
+        changes = result[0]["changes"]
+        if not isinstance(changes, list) or len(changes) != len(encoded):
+            raise ValueError("registration bulk result is incomplete")
+        expected = set(encoded)
+        values = {}
+        for change in changes:
+            if not isinstance(change, list) or len(change) != 2:
+                raise ValueError("registration bulk entry is malformed")
+            key, value = change
+            if not isinstance(key, str) or key not in expected or (key, block_hash) in values:
+                raise ValueError("registration bulk key is unexpected or duplicated")
+            if value is not None and (not isinstance(value, str) or len(value) > 1026):
+                raise ValueError("registration storage value exceeds its bound")
+            values[key, block_hash] = value
+        # These are untrusted claims. The collector still verifies their complete
+        # trie multiproof against the owned finalized state root before use.
+        return values
+
+    async def aclose(self):
+        self._closed = True
+        await asyncio.gather(*(pool.close() for pool in self._persistent_pools.values()))
 
     @asynccontextmanager
     async def batch(self):
         if self._pool is not None:
             raise ValueError("registration RPC batch is already active")
-        pool = _BatchConnections()
+        pool = self._persistent_pools.get("state_getStorageAt") or _BatchConnections()
         self._pool = pool
         try:
             yield
         finally:
             self._pool = None
-            await pool.close()
+            if not self._persistent_pools:
+                await pool.close()
 
     async def request(self, method: str, params: Sequence[Any]) -> Any:
+        if self._closed:
+            raise ValueError("registration RPC is closed")
         ceiling = {
             "state_getStorageAt": 2048,
             "state_getReadProof": 17 * 1024**2,
@@ -192,8 +267,11 @@ class _RegistrationRpc:
 
         async with AsyncExitStack() as stack:
             lease = None
-            if method == "state_getStorageAt" and self._pool is not None:
-                lease = await stack.enter_async_context(self._pool.lease())
+            pool = self._persistent_pools.get(method)
+            if pool is None and method == "state_getStorageAt":
+                pool = self._pool
+            if pool is not None:
+                lease = await stack.enter_async_context(pool.lease())
 
             def bounded_connect(*args, **kwargs):
                 kwargs["max_size"] = min(kwargs["max_size"], ceiling)
@@ -223,6 +301,10 @@ class _PrefetchRpc:
         return await self.rpc.request(method, params)
 
     async def prefetch(self, block_hash: str, keys: Sequence[bytes]) -> None:
+        self.values.clear()
+        if getattr(self.rpc, "bulk_storage_reads", False):
+            self.values = await self.rpc.storage_values(block_hash, keys)
+            return
         semaphore = asyncio.Semaphore(8)
 
         async def read(key: bytes) -> tuple[tuple[str, str], Any]:
@@ -279,6 +361,7 @@ class FinalizedRegistrationProvider:
         self._task: asyncio.Task | None = None
         self._closed = False
         self._prefetch: _PrefetchRpc | None = None
+        self._registration_rpc: _RegistrationRpc | None = None
         self._latest: RegistrationCapture | None = None
         directory = self._cache_directory(config)
         if directory.is_symlink():
@@ -317,7 +400,10 @@ class FinalizedRegistrationProvider:
                 binary_path=config.proof_binary,
                 expected_sha256=config.proof_binary_sha256,
             )
-            self._prefetch = _PrefetchRpc(_RegistrationRpc(config))
+            self._registration_rpc = _RegistrationRpc(
+                config, persistent=True, bulk_storage_reads=True
+            )
+            self._prefetch = _PrefetchRpc(self._registration_rpc)
             proofs = FinalizedProofCollector(
                 self._prefetch,
                 finality=finality,
@@ -434,6 +520,8 @@ class FinalizedRegistrationProvider:
             with suppress(asyncio.TimeoutError, asyncio.CancelledError, RuntimeError):
                 await asyncio.wait_for(self._task, timeout=5)
         self._latest = None
+        if self._registration_rpc is not None:
+            await self._registration_rpc.aclose()
 
     async def __call__(self) -> RegistrationSnapshot:
         return (await self.collect()).snapshot
