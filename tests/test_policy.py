@@ -319,7 +319,10 @@ def test_competition_transport_builder_needs_no_legacy_calibration_evidence() ->
     assert ScoringPolicy.model_validate_json(canonical_json_bytes(transport)) == transport
 
 
-def test_competition_issue_allowance_is_explicit_without_widening_authentication() -> None:
+@pytest.mark.parametrize(
+    ("seconds", "stride"), [(300, 360), (2700, 360), (2879, 360), (2880, 720), (5400, 720)]
+)
+def test_competition_issue_allowance_is_explicit_without_widening_authentication(seconds, stride):
     legacy = make_policy()
     kwargs = dict(
         activation_block=legacy.activation_block,
@@ -327,21 +330,21 @@ def test_competition_issue_allowance_is_explicit_without_widening_authentication
         validator=legacy.validator_registry[0],
     )
     original = ScoringPolicy.competition_transport(**kwargs)
-    extended = ScoringPolicy.competition_transport(**kwargs, issue_allowance_seconds=2700)
+    extended = ScoringPolicy.competition_transport(**kwargs, issue_allowance_seconds=seconds)
     assert original.clock.issue_allowance_seconds == 300
-    assert extended.clock.issue_allowance_seconds == 2700
+    assert extended.clock.issue_allowance_seconds == seconds
     assert extended.clock.response_window_seconds == original.clock.response_window_seconds
-    assert extended.clock.window_stride_blocks == original.clock.window_stride_blocks
+    assert extended.clock.window_stride_blocks == stride
     assert extended.limits == original.limits
     assert extended.limits.btauth_max_age_seconds == 360
     assert extended.limits.maximum_request_transmissions_per_assignment == 2
     assert extended.thresholds == original.thresholds
     assert not extended.translation_weights_active
-    assert scoring_policy_hash(original) != scoring_policy_hash(extended)
+    assert (scoring_policy_hash(original) == scoring_policy_hash(extended)) == (seconds == 300)
     assert ScoringPolicy.model_validate_json(canonical_json_bytes(extended)) == extended
 
 
-@pytest.mark.parametrize("seconds", [True, 299, 2701, 3600, "2700", 2700.0])
+@pytest.mark.parametrize("seconds", [True, 299, 5401, 86400, "5400", 5400.0])
 def test_competition_issue_allowance_rejects_out_of_profile_values(seconds) -> None:
     legacy = make_policy()
     with pytest.raises(ValidationError):

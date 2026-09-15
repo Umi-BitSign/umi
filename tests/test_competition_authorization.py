@@ -324,7 +324,10 @@ async def test_exact_signed_assignment_still_uses_owned_legacy_schedule(authoriz
     validate_publication_suite(authorization.publication, authorization.suite, authorization.policy)
 
 
-async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(policy, monkeypatch):
+@pytest.mark.parametrize("issue_seconds", [2700, 5400])
+async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(
+    policy, monkeypatch, issue_seconds
+):
     import bittensor as bt
 
     from umi.auth import RequestAuthenticator
@@ -332,7 +335,7 @@ async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(po
     from umi.validator import prepare_request_attempt
 
     fixture = build_authorization_fixture(
-        policy, single_evaluator=True, issue_allowance_seconds=2700
+        policy, single_evaluator=True, issue_allowance_seconds=issue_seconds
     )
     issuance = fixture.finalized_blocks.blocks[fixture.request.issued_block]
     # The assignment spent ten minutes queued, but the request is signed now.
@@ -345,9 +348,13 @@ async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(po
         fixture.request, validator_hotkey=fixture.validator_wallet.hotkey.ss58_address
     )
     assert admission.window_id == fixture.schedule.window_id
-    assert fixture.schedule.issue_close_round - fixture.schedule.selection_round == 900
+    assert (
+        fixture.schedule.issue_close_round - fixture.schedule.selection_round == issue_seconds // 3
+    )
     assert fixture.schedule.response_close_round - fixture.schedule.issue_close_round == 100
-    assert fixture.request.deadline_block == fixture.request.issued_block + 250
+    assert (
+        fixture.request.deadline_block == fixture.request.issued_block + (issue_seconds + 300) // 12
+    )
     authenticator = RequestAuthenticator.in_memory(
         fixture.miner_wallet.hotkey.ss58_address,
         max_age_seconds=fixture.legacy_policy.limits.btauth_max_age_seconds,

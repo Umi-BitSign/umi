@@ -230,6 +230,23 @@ class PolicyClock(StrictProtocolModel):
             weight_commit_submission_blocks=30,
         )
 
+    @classmethod
+    def competition_transport(cls, issue_allowance_seconds: int = 300) -> PolicyClock:
+        """Extend the issuance period and leave room for response and reveal."""
+        value = cls.launch().model_dump()
+        if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 5400:
+            lifecycle_seconds = (
+                value["anchor_blocks"] * value["target_block_interval_seconds"]
+                + value["selection_finality_buffer_seconds"]
+                + issue_allowance_seconds
+                + value["response_window_seconds"]
+                + value["reveal_margin_seconds"]
+            )
+            stride_seconds = value["window_stride_blocks"] * value["target_block_interval_seconds"]
+            value["window_stride_blocks"] *= lifecycle_seconds // stride_seconds + 1
+        value["issue_allowance_seconds"] = issue_allowance_seconds
+        return cls.model_validate(value)
+
 
 class PolicyLimits(StrictProtocolModel):
     emission_bearing_clips_per_batch: Annotated[int, Field(gt=0)]
@@ -974,12 +991,7 @@ class ScoringPolicy(StrictProtocolModel):
             validator_capacity_set_root=None,
             validator_cost_schedule_hash=None,
             implementation_pins=implementation_pins,
-            clock=PolicyClock.model_validate(
-                {
-                    **PolicyClock.launch().model_dump(),
-                    "issue_allowance_seconds": issue_allowance_seconds,
-                }
-            ),
+            clock=PolicyClock.competition_transport(issue_allowance_seconds),
             limits=PolicyLimits.launch(),
             thresholds=PolicyThresholds.launch(),
             validator_registry=[validator],
@@ -1032,11 +1044,9 @@ def _validate_initial_launch_profile(
 ) -> None:
     expected_clock = PolicyClock.launch()
     if competition_transport:
-        if not 300 <= clock.issue_allowance_seconds <= 2700:
-            raise ValueError("competition issue allowance must be between 300 and 2700 seconds")
-        expected_clock = expected_clock.model_copy(
-            update={"issue_allowance_seconds": clock.issue_allowance_seconds}
-        )
+        if not 300 <= clock.issue_allowance_seconds <= 5400:
+            raise ValueError("competition issue allowance must be between 300 and 5400 seconds")
+        expected_clock = PolicyClock.competition_transport(clock.issue_allowance_seconds)
         # Dispatch signs a fresh btauth nonce only after claiming each request.
         # A longer assignment queue must not extend authentication freshness.
     expected_limits = PolicyLimits.launch()
