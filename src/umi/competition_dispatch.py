@@ -25,6 +25,7 @@ from .competition_authorization import (
     MAX_AUTHORIZATION_BYTES,
     SignedEndpointAuthorization,
     validate_publication,
+    validate_transport_cohort,
 )
 from .competition_chain import CompetitionChainConfig
 from .competition_endpoint import prepare_endpoint_case
@@ -91,6 +92,7 @@ class EndpointDispatchConfig(StrictProtocolModel):
         return self
 
     def check_policies(self, policy, legacy):
+        validate_transport_cohort(policy, legacy)
         if (
             digest(policy) != self.policy_sha256
             or scoring_policy_hash(legacy) != self.legacy_policy_sha256

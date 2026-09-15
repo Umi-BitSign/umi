@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from umi.encoding import account_id32
 from umi.policy import (
     SCORING_POLICY_SCHEMA,
+    SINGLE_EVALUATOR_TRANSPORT_SCHEMA,
     ExactRatio,
     PolicyImplementationPins,
     PublisherControlGroup,
@@ -236,6 +237,64 @@ def test_exact_ratio_requires_reduced_integer_arithmetic() -> None:
         ExactRatio(numerator=2, denominator=20)
     with pytest.raises(ValidationError):
         ExactRatio.model_validate({"numerator": 0.1, "denominator": 1})
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_legacy_policy_still_requires_four_validators(count) -> None:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["validator_registry"] = data["validator_registry"][:count]
+    with pytest.raises(ValidationError, match="at least four"):
+        ScoringPolicy.model_validate(data)
+
+
+def test_single_evaluator_transport_is_explicit_hash_bound_and_not_legacy_activation() -> None:
+    legacy = make_policy()
+    data = legacy.model_dump(mode="json", by_alias=True)
+    data["schema"] = SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+    data["validator_registry"] = data["validator_registry"][:1]
+    data["publisher_registry"] = []
+    data["control_group_registry"] = []
+    transport = ScoringPolicy.model_validate(data)
+    assert len(transport.validator_registry) == 1
+    assert scoring_policy_hash(transport) != scoring_policy_hash(legacy)
+    assert transport.translation_weights_active is False
+    assert transport.clock == legacy.clock
+    assert transport.limits == legacy.limits
+    assert transport.publisher_registry == transport.control_group_registry == []
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(transport)) == transport
+    with pytest.raises(RuntimeError, match="cannot authorize legacy"):
+        validate_live_shadow_runtime(
+            transport,
+            target_triple="aarch64-apple-darwin",
+            storage_proof_verifier_binary="not-opened",
+            finality_verifier_binary="not-opened",
+            finality_chain_spec_path="not-opened",
+        )
+
+
+@pytest.mark.parametrize("count", [2, 3, 4])
+def test_single_evaluator_schema_cannot_disguise_a_larger_cohort(count) -> None:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["schema"] = SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+    data["validator_registry"] = data["validator_registry"][:count]
+    with pytest.raises(ValidationError, match="exactly one"):
+        ScoringPolicy.model_validate(data)
+
+
+def test_single_evaluator_transport_rejects_legacy_publisher_authority() -> None:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["schema"] = SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+    data["validator_registry"] = data["validator_registry"][:1]
+    with pytest.raises(ValidationError, match="must not declare legacy publishers"):
+        ScoringPolicy.model_validate(data)
+
+
+def test_legacy_policy_cannot_drop_its_publisher_registry() -> None:
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["publisher_registry"] = []
+    data["control_group_registry"] = []
+    with pytest.raises(ValidationError, match="publisher registry must match"):
+        ScoringPolicy.model_validate(data)
 
 
 def _live_shadow_policy_data() -> dict:

@@ -17,6 +17,7 @@ from umi.competition_authorization import (
     assignment_challenge_id,
     validate_publication,
     validate_publication_suite,
+    validate_transport_cohort,
 )
 from umi.config import Limits
 from umi.miner_admission import MinerAdmissionError
@@ -29,7 +30,7 @@ from umi.open_competition import (
     digest,
     sign_object,
 )
-from umi.policy import scoring_policy_hash
+from umi.policy import SINGLE_EVALUATOR_TRANSPORT_SCHEMA, ScoringPolicy, scoring_policy_hash
 from umi.protocol import TranslationRequest, canonical_json_bytes
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
@@ -50,6 +51,7 @@ def build_authorization_fixture(
     window_index=0,
     sequence=1,
     serving_origin="https://8.8.8.8:443",
+    single_evaluator=False,
 ):
     """Synthetic signed publication and owned-source test port; no network/files.
 
@@ -58,15 +60,29 @@ def build_authorization_fixture(
     """
     legacy = _live_policy(activation_block=1000) if legacy_policy is None else legacy_policy
     evaluator_wallets = tuple(wallet(f"Validator{i}") for i in range(4))
+    if single_evaluator:
+        evaluator_wallets = evaluator_wallets[:1]
+        data = legacy.model_dump(mode="json", by_alias=True)
+        data["schema"] = SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+        data["publisher_registry"] = []
+        data["control_group_registry"] = []
+        data["validator_registry"] = [
+            item
+            for item in data["validator_registry"]
+            if item["validator_hotkey"] == evaluator_wallets[0].hotkey.ss58_address
+        ]
+        legacy = ScoringPolicy.model_validate(data)
     policy = policy.model_copy(
         update={
             "valid_from_block": 1000,
             "valid_through_block": 2000,
             "minimum_cases_per_stratum": 1,
-            "required_evaluator_groups": 2,
+            "required_evaluator_groups": 1 if single_evaluator else 2,
             "evaluators": tuple(
                 Evaluator(hotkey=w.hotkey.ss58_address, control_group=f"group-{g}")
-                for w, g in zip(evaluator_wallets, (0, 1, 0, 3), strict=True)
+                for w, g in zip(
+                    evaluator_wallets, (0, 1, 0, 3)[: len(evaluator_wallets)], strict=True
+                )
             ),
         }
     )
@@ -286,6 +302,36 @@ async def test_exact_signed_assignment_still_uses_owned_legacy_schedule(authoriz
     assert status["publication_timing_proven"] is False
     assert b'"references"' not in canonical_json_bytes(authorization.publication)
     validate_publication_suite(authorization.publication, authorization.suite, authorization.policy)
+
+
+@pytest.mark.parametrize("mutation", ["different_signer", "extra_evaluator", "larger_quorum"])
+def test_single_evaluator_transport_rejects_a_different_competition_cohort(policy, mutation):
+    fixture = build_authorization_fixture(policy, single_evaluator=True)
+    validate_transport_cohort(fixture.policy, fixture.legacy_policy)
+    evaluator = Evaluator(hotkey=wallet("Validator1").hotkey.ss58_address, control_group="other")
+    updates = {
+        "different_signer": {"evaluators": (evaluator,)},
+        "extra_evaluator": {"evaluators": (*fixture.policy.evaluators, evaluator)},
+        "larger_quorum": {"required_evaluator_groups": 2},
+    }
+    with pytest.raises(ValueError, match="cohort must match"):
+        validate_transport_cohort(
+            fixture.policy.model_copy(update=updates[mutation]), fixture.legacy_policy
+        )
+
+
+def test_single_evaluator_publication_still_requires_the_selected_signature(policy):
+    fixture = build_authorization_fixture(policy, single_evaluator=True)
+    assert len(fixture.publication.signatures) == 1
+    validate_publication(fixture.publication, fixture.policy, fixture.legacy_policy)
+    invalid = _resign(fixture, fixture.publication.publication, signers=[wallet("Validator1")])
+    with pytest.raises(ValueError):
+        validate_publication(invalid, fixture.policy, fixture.legacy_policy)
+    duplicate = fixture.publication.model_copy(
+        update={"signatures": fixture.publication.signatures * 2}
+    )
+    with pytest.raises(ValueError):
+        validate_publication(duplicate, fixture.policy, fixture.legacy_policy)
 
 
 @pytest.mark.parametrize(

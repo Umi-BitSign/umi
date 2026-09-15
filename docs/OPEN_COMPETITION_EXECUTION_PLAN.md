@@ -8,8 +8,10 @@ activate rewards or extend the signed bootstrap sunset.
 Launch quality evaluation uses automatic CER/WER scoring on a private labeled
 holdout. No human ASL grading panel or per-output human review is a launch gate.
 Documented existing annotations may supply references. Training exclusion,
-annotation provenance, data permissions and independent automated evaluator
-groups remain required. Follow the
+annotation provenance and data permissions remain required. The approved initial
+cohort is UID 0 alone, with one disclosed operator group and a quorum of one;
+see the [UID 0 launch profile](OPEN_COMPETITION_UID0_LAUNCH.md). UID 54 keeps its
+existing validator service and does not count as another evaluator. Follow the
 [private-holdout procedure](OPEN_COMPETITION_PRIVATE_HOLDOUT.md); do not treat
 previously used training data as an unseen test set.
 
@@ -27,7 +29,7 @@ previously used training data as an unseen test set.
      witnessed publication timing and protected-suite reveal timing remain
      separate requirements from a local timestamp.
 2. Signed cutoff and settlement publication.
-   - Verify independent evaluator-group signatures and replay the complete
+   - Verify the signed policy's evaluator-group quorum and replay the complete
      retained evidence, roster, registration snapshot and promotion attribution.
    - Retain conflicting certificates across restart; local settlement alone
      must not grant chain-write permission.
@@ -48,23 +50,24 @@ previously used training data as an unseen test set.
    - Test failure, restart and recovery on Linux amd64 and arm64. An image update
      or rerun of the fresh installer is insufficient.
 4. End-to-end rehearsal and deployment preparation.
-   - Populate evaluator review histories from independently checked cutoff
+   - Populate evaluator review histories from policy-certified cutoff
      certificates, recording actual arrival blocks. See
      [review-history operation](OPEN_COMPETITION_REVIEW_HISTORY.md). Preserve
      initial baselines locally; use the explicit approved-review input for
      [automatic promotion delivery](OPEN_COMPETITION_PROMOTION_DELIVERY.md).
    - Exercise intake, assignment publication, authenticated miner response,
-     reference reveal, independent evaluation, promotion, settlement and upgrade
+     reference reveal, selected-cohort evaluation, promotion, settlement and upgrade
      using synthetic keys without live weights.
    - Rehearse the actual CPU image and sandbox with a real model, resource
      enforcement, timeouts and interruption cleanup.
    - Verify HTTPS ingress limits, evidence retention, filesystem quotas and
      archive backup/restore before exposing enrollment.
-5. Reviewed inputs and independent evaluation.
+5. Reviewed inputs and selected-cohort evaluation.
    - Supply protected evaluation data and provenance, contribution terms,
      accepted licenses, the runtime image, numerical limits and validity blocks.
-   - Enroll independently administered evaluators; UID 0 and UID 54 under the
-     same administration do not form independent evaluator groups.
+   - Configure UID 0 as the sole initial evaluator and disclose the single-operator
+     trust assumption. Do not present UID 54 as an independent evaluator.
+     Additional independent groups are a later signed policy change.
    - Preserve a qualifying improved model, reconstruction evidence and rights
      review. Publish the approved baseline artifact and verify restoration.
 6. Activation and public handoff.
@@ -131,7 +134,7 @@ contributor attribution yet.
 - [ ] Publish approved contribution terms, accepted licenses and the reviewer/contact route before intake.
 - [ ] Wire deployed miner assignment discovery into ongoing authorized inference.
 - [ ] Rehearse integrated protected-data scheduling, evaluator dispatch and evidence publication.
-- [ ] Complete the real-model, independent-evaluation and signed-activation gates.
+- [ ] Complete the real-model, selected-cohort evaluation and signed-activation gates.
 
 Publication also requires passing full-regression CI for the candidate revision.
 That gate is tracked by the repository checks, separately from the activation
@@ -556,7 +559,7 @@ no-weight rehearsal profile needs a separate wallet-free mount configuration.
 - A reproducible candidate model artifact and its contributor's public hotkey,
   followed by a qualifying preserved promotion. A demo video is insufficient.
 - Protected evaluation data, rights/provenance review, accepted contribution
-  terms and an independently administered evaluator cohort.
+  terms and the explicitly selected UID 0 evaluator configuration.
 - Explicit numerical/resource limits, release artifacts, validity blocks and
   chain submission requirements in the signed launch policy.
 - Reviewed late-conflict recovery rules and operator consent to the installed
