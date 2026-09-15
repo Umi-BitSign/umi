@@ -88,8 +88,13 @@ summary without exposing confidential or personal material.
 
 Contributors should be able to ask about a proposed source stack before training.
 Include the source inventory above, intended use and outstanding questions.
-UMI must publish the reviewer/contact route before intake opens; an unanswered
-request is not approval, and no turnaround time is promised by this document.
+Sam (`sam0x17`) is the project approval contact. Contact him in the UMI community
+channel to request a preliminary or final contribution review. Sam will refer
+review requests to an expert and arrange a restricted channel for confidential
+evidence when needed. Do not include that evidence in the initial public message.
+Being the contact does not mean an expert has reviewed or approved any model.
+An unanswered request is not approval, and no turnaround time is promised by
+this document.
 
 A preliminary response should distinguish accepted points, missing evidence and
 restrictions needing resolution. Bind it to the disclosed source versions, uses,
