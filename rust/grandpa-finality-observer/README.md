@@ -28,6 +28,14 @@ any configured limit. A stopped subscription cannot deliver another header;
 the observer exits so its supervisor can recover without waiting for a record
 timeout. Recovery still requires a new verified observer run.
 
+Each embedded RPC request has a 60-second deadline. Timestamp reads retry a
+completed light-client RPC error at most twice, after 2 and 4 seconds, against
+the same pinned block. A deadline failure terminates the process without starting
+an overlapping request; malformed timestamp values also fail immediately. No
+header is emitted until its timestamp has been verified and decoded. Longer peer
+outages still require supervisor recovery and may leave explicitly recorded
+history gaps. These bounds do not guarantee peer availability.
+
 ## Security model and bootstrap
 
 Version 0.1 accepts exactly one bootstrap class:
@@ -95,7 +103,7 @@ Current artifact pins are:
 - `fixtures/finney-grandpa-checkpoint-v1.json` SHA-256:
   `b3f2191587a21b57fbe9f56e3a8245e852c06cdebb0a4dd0b878a5242d9a8311`;
 - source-tree SHA-256:
-  `9d961577589d45a52fc9184f3e7bb3d1b85a1bd437e1b94451bfe4a5b4f7b61e`.
+  `1d0ff962feb40163a9f54ac9fc177b15150182c881e2a6d6998ac65c3bf938ec`.
 
 Release binary hashes are target- and release-specific. The primary Linux
 validator hash is fixed by its signed release. An Apple Silicon miner hash is
