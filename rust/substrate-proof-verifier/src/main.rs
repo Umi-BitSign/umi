@@ -16,7 +16,9 @@ const MAX_ITEMS: usize = 4_096;
 const MAX_KEY_BYTES: usize = 512;
 const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROOF_NODES: usize = 4_096;
-const MAX_PROOF_NODE_BYTES: usize = 2 * 1024 * 1024;
+// LayoutV1 stores large values as separate, raw proof nodes. A proof of any
+// permitted value (including :code) must fit; the total proof cap stays 32 MiB.
+const MAX_PROOF_NODE_BYTES: usize = MAX_VALUE_BYTES;
 const MAX_PROOF_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EXTRINSICS: usize = 4_096;
 const MAX_EXTRINSIC_BYTES: usize = 16 * 1024 * 1024;
@@ -426,6 +428,88 @@ mod tests {
     fn verifies_membership_and_non_membership_together() {
         let (root, proof) = fixture();
         assert_eq!(verify_request(&request(root, &proof)), Ok(()));
+    }
+
+    fn large_value_request(size: usize) -> ProofRequest {
+        let value = vec![0x5a; size];
+        let (mut database, mut root) = MemoryDB::<Blake2Hasher>::default_with_root();
+        {
+            let mut trie = TrieDBMutBuilder::<Layout>::new(&mut database, &mut root).build();
+            trie.insert(b":code", &value).expect("insert must succeed");
+        }
+        let mut recorder = Recorder::<Layout>::new();
+        {
+            let trie = TrieDBBuilder::<Layout>::new(&database, &root)
+                .with_recorder(&mut recorder)
+                .build();
+            assert_eq!(
+                trie.get(b":code").expect("lookup must succeed"),
+                Some(value.clone())
+            );
+        }
+        let proof: Vec<Vec<u8>> =
+            StorageProof::new(recorder.drain().into_iter().map(|record| record.data))
+                .into_iter_nodes()
+                .collect();
+        // The value itself is a raw proof node, not a compact path-proof value.
+        assert!(proof.contains(&value));
+        let mut result = request(root, &proof);
+        result.items = vec![ProofItem {
+            key: format!("0x{}", hex::encode(b":code")),
+            value: ClaimedValue::Present(format!("0x{}", hex::encode(value))),
+        }];
+        result
+    }
+
+    #[test]
+    fn verifies_large_external_values_and_rejects_tampering() {
+        for size in [3 * 1024 * 1024, MAX_VALUE_BYTES] {
+            let mut request = large_value_request(size);
+            assert_eq!(verify_request(&request), Ok(()));
+            let index = request
+                .proof
+                .iter()
+                .position(|node| node.len() == 2 + size * 2)
+                .expect("external value node must exist");
+            let original = request.proof[index].pop().expect("value must not be empty");
+            request.proof[index].push('0');
+            assert_eq!(
+                verify_request(&request),
+                Err(VerificationError::InvalidProof)
+            );
+            request.proof[index].pop();
+            request.proof[index].push(original);
+            request.proof.remove(index);
+            assert_eq!(
+                verify_request(&request),
+                Err(VerificationError::InvalidProof)
+            );
+        }
+    }
+
+    #[test]
+    fn large_nodes_still_obey_individual_and_total_caps() {
+        let (root, proof) = fixture();
+        let mut oversized_node = request(root, &proof);
+        oversized_node
+            .proof
+            .push(format!("0x{}", "00".repeat(MAX_PROOF_NODE_BYTES + 1)));
+        assert_eq!(
+            verify_request(&oversized_node),
+            Err(VerificationError::InvalidInput)
+        );
+        drop(oversized_node);
+
+        let mut oversized_total = request(root, &proof);
+        for byte in ["01", "02"] {
+            oversized_total
+                .proof
+                .push(format!("0x{}", byte.repeat(MAX_PROOF_NODE_BYTES)));
+        }
+        assert_eq!(
+            verify_request(&oversized_total),
+            Err(VerificationError::InvalidInput)
+        );
     }
 
     #[test]

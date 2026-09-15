@@ -226,7 +226,8 @@ class ProofCollectionLimits:
     maximum_storage_values_bytes: int = 64 * 1024 * 1024
     maximum_runtime_metadata_bytes: int = 16 * 1024 * 1024
     maximum_proof_nodes: int = 4_096
-    maximum_proof_node_bytes: int = 2 * 1024 * 1024
+    # Match permitted storage values: LayoutV1 can return the value as one node.
+    maximum_proof_node_bytes: int = 16 * 1024 * 1024
     maximum_proof_bytes: int = 32 * 1024 * 1024
 
     def __post_init__(self) -> None:

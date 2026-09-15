@@ -283,6 +283,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 limits=ProofCollectionLimits(
                     maximum_storage_value_bytes=64 * 1024,
                     maximum_storage_values_bytes=1024 * 1024,
+                    maximum_proof_node_bytes=2 * 1024**2,
                     maximum_proof_bytes=8 * 1024**2,
                 ),
             )
