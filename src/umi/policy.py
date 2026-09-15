@@ -34,6 +34,7 @@ from .protocol import (
 )
 
 SCORING_POLICY_SCHEMA = "umi-scoring-policy/1"
+SINGLE_EVALUATOR_TRANSPORT_SCHEMA = "umi-competition-single-evaluator-transport/1"
 SCORING_POLICY_MEDIA_TYPE = "application/vnd.umi.scoring-policy+json"
 
 
@@ -833,9 +834,11 @@ class PolicyImplementationPins(StrictProtocolModel):
 
 
 class ScoringPolicy(StrictProtocolModel):
-    """Canonical policy accepted by the offline rehearsal; active mode is unavailable."""
+    """Canonical legacy scoring or successor transport inputs; neither enables weights."""
 
-    schema_: Literal[SCORING_POLICY_SCHEMA] = Field(alias="schema")
+    schema_: Literal[SCORING_POLICY_SCHEMA, SINGLE_EVALUATOR_TRANSPORT_SCHEMA] = Field(
+        alias="schema"
+    )
     protocol: Literal[PROTOCOL_VERSION]
     netuid: Literal[78]
     mechanism_id: Literal[0]
@@ -849,13 +852,17 @@ class ScoringPolicy(StrictProtocolModel):
     clock: PolicyClock
     limits: PolicyLimits
     thresholds: PolicyThresholds
-    validator_registry: Annotated[list[ValidatorRegistryEntry], Field(min_length=4)]
-    control_group_registry: Annotated[list[PublisherControlGroup], Field(min_length=1)]
-    publisher_registry: Annotated[list[PublisherRegistryEntry], Field(min_length=1)]
+    validator_registry: Annotated[list[ValidatorRegistryEntry], Field(min_length=1)]
+    control_group_registry: list[PublisherControlGroup]
+    publisher_registry: list[PublisherRegistryEntry]
 
     @model_validator(mode="after")
     def validate_launch_registry_and_profile(self) -> Self:
         limits = self.limits
+        if self.schema_ == SCORING_POLICY_SCHEMA and len(self.validator_registry) < 4:
+            raise ValueError("legacy scoring policy requires at least four validators")
+        if self.schema_ == SINGLE_EVALUATOR_TRANSPORT_SCHEMA and len(self.validator_registry) != 1:
+            raise ValueError("single-evaluator transport requires exactly one validator")
         validator_accounts = [
             account_id32(item.validator_hotkey) for item in self.validator_registry
         ]
@@ -868,10 +875,13 @@ class ScoringPolicy(StrictProtocolModel):
         ]
         if len(set(validator_administrators)) != len(validator_administrators):
             raise ValueError("launch validators must have distinct administrator IDs")
-        if len(self.publisher_registry) != limits.max_active_publishers:
-            raise ValueError("publisher registry must match max_active_publishers")
-        if len(self.control_group_registry) != limits.max_active_control_groups:
-            raise ValueError("control-group registry must match max_active_control_groups")
+        if self.schema_ == SCORING_POLICY_SCHEMA:
+            if len(self.publisher_registry) != limits.max_active_publishers:
+                raise ValueError("publisher registry must match max_active_publishers")
+            if len(self.control_group_registry) != limits.max_active_control_groups:
+                raise ValueError("control-group registry must match max_active_control_groups")
+        elif self.publisher_registry or self.control_group_registry:
+            raise ValueError("competition-only transport must not declare legacy publishers")
 
         group_ids = [bytes.fromhex(item.control_group_id) for item in self.control_group_registry]
         if group_ids != sorted(group_ids) or len(set(group_ids)) != len(group_ids):
@@ -1087,6 +1097,8 @@ def validate_live_shadow_runtime(
 
     if not isinstance(policy, ScoringPolicy):
         raise TypeError("policy must be a ScoringPolicy")
+    if policy.schema_ != SCORING_POLICY_SCHEMA:
+        raise RuntimeError("competition transport cannot authorize legacy live calibration")
     pins = policy.implementation_pins
     if pins.pin_profile != "live_shadow_calibration":
         raise RuntimeError("policy is not a live shadow calibration profile")

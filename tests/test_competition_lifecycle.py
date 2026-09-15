@@ -60,6 +60,7 @@ from .test_open_competition import policy as policy
 
 @pytest.fixture
 def authorization(policy, runtime, tmp_path, monkeypatch, request):
+    single_evaluator = getattr(request, "param", "scored") == "single"
     baseline = bundle_at(tmp_path / "baseline")
     candidate = bundle_at(tmp_path / "candidate", "candidate", digest(baseline))
     unstable = (
@@ -93,7 +94,9 @@ def authorization(policy, runtime, tmp_path, monkeypatch, request):
     now = 1789300000000000000
     monkeypatch.setattr(time, "time_ns", lambda: now)
     monkeypatch.setattr(time, "time", lambda: time.time_ns() / 1_000_000_000)
-    initial = build_authorization_fixture(policy, legacy_policy=legacy)
+    initial = build_authorization_fixture(
+        policy, legacy_policy=legacy, single_evaluator=single_evaluator
+    )
     now += (ROUND - initial.request.reveal_round) * QUICKNET_PERIOD_MS * 1_000_000
     item = build_authorization_fixture(
         policy,
@@ -101,6 +104,7 @@ def authorization(policy, runtime, tmp_path, monkeypatch, request):
         incumbent_sha256=digest(baseline),
         model_bundle=candidate,
         extra_model_bundle=unstable,
+        single_evaluator=single_evaluator,
     )
     assert item.request.reveal_round == ROUND
     monkeypatch.setattr(
@@ -389,7 +393,9 @@ async def complete_first_round(lifecycle):
     s = lifecycle
     item, dispatch = s.item, s.paired.dispatch
     void_count = int(item.unstable is not None)
-    inference_count = 18 + 12 * void_count
+    evaluator_count = len(s.drivers)
+    assert evaluator_count == item.policy.required_evaluator_groups
+    inference_count = (9 + 6 * void_count) * evaluator_count
     try:
         result = await s.coordinator.cycle()
         assert result["prepared"] == 1 and result["held"] == 0, result
@@ -427,16 +433,17 @@ async def complete_first_round(lifecycle):
             await driver.exchange.sync_once()
         assert len(list(Path(dispatch.config.publication_directory).glob("*.json"))) == 1
         dispatchers = [dispatch.driver]
-        dispatchers.append(
+        dispatchers.extend(
             EndpointDispatcher(
                 dispatch.config.model_copy(
-                    update={"evaluator_hotkey": s.drivers[1].config.evaluator_hotkey}
+                    update={"evaluator_hotkey": s.drivers[index].config.evaluator_hotkey}
                 ),
                 dispatch.feed.journal,
                 dispatch.provider,
-                item.evaluator_wallets[1],
+                item.evaluator_wallets[index],
                 transport=dispatch.driver.transport,
             )
+            for index in range(1, evaluator_count)
         )
         try:
             for turn in range(6):
@@ -451,7 +458,7 @@ async def complete_first_round(lifecycle):
                     dispatch.feed.clock.ns += (
                         dispatch.config.discovery_grace_seconds * 1_000_000_000
                     )
-            assert [d._counts["completed"] for d in dispatchers] == [3, 3]
+            assert [d._counts["completed"] for d in dispatchers] == [3] * evaluator_count
         finally:
             for driver in dispatchers:
                 await driver.aclose()
@@ -471,16 +478,17 @@ async def complete_first_round(lifecycle):
         results = [
             {e.attested_result.result.submission_sha256: e for e in completed(d)} for d in s.drivers
         ]
-        assert len(results[0]) == 2 and results[0] == results[1]
+        assert len(results[0]) == 2 and all(r == results[0] for r in results)
         void_results = [completed_voids(d) for d in s.drivers]
-        assert len(void_results[0]) == void_count and void_results[0] == void_results[1]
+        assert len(void_results[0]) == void_count
+        assert all(r == void_results[0] for r in void_results)
         if void_count:
             assert void_results[0][0].void.reason == "observation_disagreement"
             assert void_results[0][0].void.submission_sha256 == digest(
                 item.extra_model_submission.submission
             )
-        assert s.fetched == [ROUND, ROUND]
-        assert dispatch.miner.translator.calls == 6
+        assert s.fetched == [ROUND] * evaluator_count
+        assert dispatch.miner.translator.calls == 3 * evaluator_count
         assert len([c for c in s.paired.calls if isinstance(c, dict)]) == inference_count
 
         # Each reviewer uses its own completed evidence and admission history.
@@ -523,13 +531,14 @@ async def complete_first_round(lifecycle):
             driver.provider.block = observed_start + index
             await driver.round_client.sync_once()
         promotions = [store.baseline() for store in (*s.reviews, s.store)]
-        assert promotions[0] == promotions[1] == promotions[2]
+        assert len(promotions) == evaluator_count + 1
+        assert all(p == promotions[0] for p in promotions)
         assert promotions[0]["sequence"] == 1
         for index, store in enumerate((*s.reviews, s.store)):
             with store._connection() as connection:
                 assert connection.execute(
                     "SELECT observed_block FROM promotion_receipts WHERE sequence=1"
-                ).fetchone() == (observed_start + index,)
+                ).fetchone() == (observed_start + (2 if store is s.store else index),)
         s.provider.block = s.plan.evidence_cutoff_block
         for driver in s.drivers:
             driver.provider.block = s.provider.block
@@ -570,12 +579,13 @@ async def complete_first_round(lifecycle):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("authorization", ["scored", "void"], indirect=True)
+@pytest.mark.parametrize("authorization", ["scored", "void", "single"], indirect=True)
 async def test_both_tracks_execute_promote_and_deliver_70_30_from_empty_service_journals(lifecycle):
     await complete_first_round(lifecycle)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authorization", ["scored", "single"], indirect=True)
 async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
     lifecycle, monkeypatch
 ):
@@ -627,6 +637,7 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
             model_bundle=item.candidate,
             window_index=1,
             sequence=2,
+            single_evaluator=len(item.evaluator_wallets) == 1,
         )
 
     next_item = next_fixture()
@@ -756,7 +767,7 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
             # A restarted dispatcher may ingest an old publication first. Each
             # newly discovered publication gets its own full discovery grace.
             dispatch.feed.clock.ns += dispatch.config.discovery_grace_seconds * 1_000_000_000
-        assert [d._counts["completed"] for d in dispatchers] == [3, 3], [
+        assert [d._counts["completed"] for d in dispatchers] == [3] * len(s.drivers), [
             d._counts for d in dispatchers
         ]
         s.provider.block = item.round.reveal_block
@@ -802,11 +813,11 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
         for driver in s.drivers:
             await tick(driver)
         assert second_path.read_bytes() == prior and first_path.read_bytes() == first_package
-        assert s.fetched == [ROUND, ROUND, next_pulse.round, next_pulse.round]
+        assert s.fetched == [ROUND] * len(s.drivers) + [next_pulse.round] * len(s.drivers)
         calls = [c for c in s.paired.calls if isinstance(c, dict)]
-        assert len(calls) == first_calls + 18
+        assert len(calls) == first_calls + 9 * len(s.drivers)
         assert all(digest(c["bundle"]) == digest(item.candidate) for c in calls[first_calls:])
-        assert dispatch.miner.translator.calls == 12
+        assert dispatch.miner.translator.calls == 6 * len(s.drivers)
         retained = s.store.prepared_round(first_suite, s.config.replay_limits)
         assert canonical_json_bytes(retained["cutoff_publication"]["round"]) == first_round
     finally:

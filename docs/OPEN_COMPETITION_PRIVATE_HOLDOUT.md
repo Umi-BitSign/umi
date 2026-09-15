@@ -59,9 +59,11 @@ documented operational claims, not properties a hash or signature proves.
 2. Deliver reference-free video inputs to execution. Keep labels out of miner
    requests, model mounts, logs and public APIs until the committed reveal.
    Models must produce and retain their outputs before reference disclosure.
-3. Have the nominated independent evaluator services reproduce execution and
-   sign the existing result evidence. UID 0 and UID 54 under one administrator
-   still count as one operator group.
+3. Have the policy-selected evaluators execute and sign the result evidence.
+   The initial [UID 0 launch profile](OPEN_COMPETITION_UID0_LAUNCH.md) uses one
+   operator and one signed run. It provides no independent second evaluation.
+   UID 54 does not supply another vote. A later multi-group policy requires
+   reproduction by its independently administered groups.
 4. Reveal evidence only to the audience allowed by the data policy. Restricted
    clips require access-controlled verification; a public digest alone is not
    a publicly reproducible dataset.

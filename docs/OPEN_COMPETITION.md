@@ -7,11 +7,16 @@ authorizes new weights or changes the current bootstrap.
 
 Launch evaluation uses automatic CER/WER scoring against a
 [private labeled holdout](OPEN_COMPETITION_PRIVATE_HOLDOUT.md). A human ASL
-grading panel is not required. Dataset provenance, training exclusion and
-independently administered evaluator services remain separate requirements.
+grading panel is not required. Dataset provenance and training exclusion remain
+required. The approved initial evaluator is UID 0 alone, under the disclosed
+[single-operator launch profile](OPEN_COMPETITION_UID0_LAUNCH.md). This does not
+claim independent reproduction by UID 54 or activate competition rewards.
 
 ## Implemented; successor rewards inactive
 
+- An explicit single-evaluator competition transport, bound to the same signer
+  in the competition policy. It does not relax the historical four-validator
+  calibration profile or require fabricated legacy publisher identities.
 - Canonical, hotkey-signed submissions with explicit policy and terms binding.
 - Registration-snapshot checks, persistent idempotent intake, replacement
   rate limits, and a paginated admission log.
@@ -135,7 +140,7 @@ independent access to it.
   independent backup/restore monitoring. The local retrieval command does not
   provide those services or establish redistribution rights.
 - The protected data pipeline, published capacity policy, round scheduling,
-  independently operated evaluators and authenticated evidence exchange. The
+  the selected UID 0 evaluator and authenticated evidence exchange. The
   paired runner and local aggregation have fixture integration tests, not a
   completed live round or an independent execution rehearsal.
 - Deployment of signed cutoff and settlement publication, finalized

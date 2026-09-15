@@ -21,7 +21,7 @@ from umi.miner_resources import (
     MinerResourceError,
     SQLiteMinerResourceLedger,
 )
-from umi.policy import scoring_policy_hash
+from umi.policy import SINGLE_EVALUATOR_TRANSPORT_SCHEMA, ScoringPolicy, scoring_policy_hash
 from umi.validator import prepare_request_attempt, validate_response_envelope
 
 from .test_competition_authorization import build_authorization_fixture
@@ -201,8 +201,11 @@ async def post_assignment(client, case, *, request=None, evaluator=None, nonce=N
 
 
 @pytest.mark.asyncio
-async def test_authorized_http_request_returns_real_signed_timelocked_response(policy, tmp_path):
-    case = build_authorization_fixture(policy)
+@pytest.mark.parametrize("single_evaluator", [False, True])
+async def test_authorized_http_request_returns_real_signed_timelocked_response(
+    policy, tmp_path, single_evaluator
+):
+    case = build_authorization_fixture(policy, single_evaluator=single_evaluator)
     miner = authorized_runtime(case, tmp_path)
     try:
         async with httpx.AsyncClient(
@@ -227,6 +230,21 @@ async def test_authorized_http_request_returns_real_signed_timelocked_response(p
             assert health["serving_origin_finality_verified"] is False
     finally:
         miner.resource_ledger.close()
+
+
+def test_single_evaluator_transport_requires_successor_mode_before_wallet_access(monkeypatch):
+    from .test_policy import make_policy
+
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["schema"] = SINGLE_EVALUATOR_TRANSPORT_SCHEMA
+    data["publisher_registry"] = []
+    data["control_group_registry"] = []
+    data["validator_registry"] = data["validator_registry"][:1]
+    transport = ScoringPolicy.model_validate(data)
+    monkeypatch.setattr("umi.miner._load_policy", lambda _path: transport)
+    monkeypatch.setattr(bt, "Wallet", lambda **kwargs: pytest.fail("wallet access"))
+    with pytest.raises(ValueError, match="requires competition mode"):
+        build_runtime(SimpleNamespace(policy="reviewed-transport.json"))
 
 
 @pytest.mark.asyncio

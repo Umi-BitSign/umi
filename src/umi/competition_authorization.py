@@ -44,7 +44,7 @@ from .open_competition import (
     identity,
     verify_signature,
 )
-from .policy import ScoringPolicy, scoring_policy_hash
+from .policy import SINGLE_EVALUATOR_TRANSPORT_SCHEMA, ScoringPolicy, scoring_policy_hash
 from .protocol import (
     Hex32,
     StrictProtocolModel,
@@ -57,6 +57,20 @@ from .validator_plans import VerifiedFinalizedAnnouncementPort
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, ceil_div
 
 MAX_AUTHORIZATION_BYTES = 16 * 1024**2
+
+
+def validate_transport_cohort(policy: CompetitionPolicy, transport: ScoringPolicy) -> None:
+    """Bind the explicit single-evaluator transport to the same competition signer."""
+    if transport.schema_ != SINGLE_EVALUATOR_TRANSPORT_SCHEMA:
+        return
+    if (
+        len(transport.validator_registry) != 1
+        or len(policy.evaluators) != 1
+        or policy.required_evaluator_groups != 1
+        or identity(transport.validator_registry[0].validator_hotkey)
+        != identity(policy.evaluators[0].hotkey)
+    ):
+        raise ValueError("single-evaluator transport and competition cohort must match")
 
 
 class EndpointAuthorizationCase(StrictProtocolModel):
@@ -220,6 +234,7 @@ def validate_publication_body(
     body = EndpointAuthorizationPublication.model_validate_json(raw)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     legacy_policy = ScoringPolicy.model_validate_json(canonical_json_bytes(legacy_policy))
+    validate_transport_cohort(policy, legacy_policy)
     policy_sha = digest(policy)
     round_, legacy_sha = body.round, scoring_policy_hash(legacy_policy)
     if (

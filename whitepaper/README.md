@@ -77,7 +77,7 @@ extend that deadline or reopen the retired pilot.
 
 Version 0.2 supersedes [version 0.1](LEGACY_V0_1.md)'s proposed fixed four-validator,
 three-publisher and 30-day-soak launch gates. It replaces them with a published
-evaluation cohort, disclosed control groups, bounded rehearsals, independent
+evaluation cohort, disclosed control groups, bounded rehearsals, policy-selected
 result reproduction and the explicit activation checklist in Section 10.
 This change is a UMI policy revision. It is not evidence that any earlier
 activation gate was completed.
@@ -249,12 +249,20 @@ meaning-changing errors can be misranked by text edit distance.
 
 ### 4.3 Evaluators and trust
 
-A policy lists evaluator hotkeys and independently administered control groups.
+A policy lists evaluator hotkeys and their actual administrative control groups.
 Evaluators are automated execution and signing services; their operators do not
-need to grade ASL outputs. Removing human output grading does not remove the
-separate requirement for independently administered result reproduction.
-Multiple hotkeys controlled by one operator count as one group. UID 0 and UID 54
-under the same administration cannot supply two independent votes.
+need to grade ASL outputs. Multiple hotkeys controlled by one operator count as
+one group. UID 0 and UID 54 under the same administration cannot supply two
+independent votes.
+
+The approved initial launch selects only UID 0, hotkey
+`5Fk765B4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDWsuk`, in one disclosed UMI-operated
+control group, with `required_evaluator_groups = 1`. This initial phase trusts
+one operator's automated evaluation and publication; it does not provide
+independent cross-operator reproduction or resistance to that operator's
+collusion. UID 54 is not a second evaluator or vote. Adding evaluators or raising
+the quorum requires a later explicit signed policy and deployment rehearsal.
+See the [UID 0 launch profile](../docs/OPEN_COMPETITION_UID0_LAUNCH.md).
 
 Evaluators sign the same canonical evaluation result. A quorum certificate
 contains valid signatures from the policy's required number of distinct
@@ -273,7 +281,10 @@ with its own interval, timings and execution-evidence digest. Outputs and
 per-case resource eligibility must agree with the common transcript, and exact
 score replay must agree. The run signer set must match the common certificate
 with one key per authorized control group. This contract has local tests;
-independent production execution and evidence retention still require rehearsal.
+production execution and evidence retention still require rehearsal. In the
+initial single-operator phase there is one signed run record, not an independent
+second run. Later multi-group policies require each selected group to reproduce
+the result.
 Co-signatures and execution-evidence digests alone do not prove a run occurred.
 
 The local paired-model runner now records bounded raw outputs and finalized
@@ -532,14 +543,14 @@ Before activating successor rewards, publish:
 - evaluation-data rights and annotation provenance, dataset validation, split
   isolation and protected-suite procedure, without a mandatory human grading panel;
 - successful endpoint and contributed-model end-to-end evidence, including
-  independently signed run records bound to the common result, and adversarial,
+  signed run records from the selected evaluator cohort bound to the common result, and adversarial,
   timeout, restart, replay and failed-promotion cases;
 - the deterministic row calculation and its finalized-chain preflight;
 - the compatible signed validator release and tested upgrade path;
 - the evidence cutoff, settlement record and late-conflict recovery rules; and
 - monitoring, expiry, incident handling and rollback procedures.
 
-The policy fixes the rehearsal duration and minimum independent evidence
+The policy fixes the rehearsal duration and minimum evaluator evidence
 before it begins. Rehearsal output cannot be relabeled as production evidence.
 A change affecting scoring or trust invalidates the affected evidence and
 requires a new bounded rehearsal.

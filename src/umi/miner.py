@@ -25,6 +25,7 @@ from .competition_authorization import (
     MAX_AUTHORIZATION_BYTES,
     EndpointAuthorizationAuthority,
     SignedEndpointAuthorization,
+    validate_transport_cohort,
 )
 from .competition_miner_feed import FeedEndpointAuthorizationAuthority
 from .config import SAFETY_BOUNDARY, Limits
@@ -45,7 +46,12 @@ from .miner_resources import (
 from .model_scheduler import WindowCoalescingTranslator
 from .nonce import NonceStoreAuthorizationError, NonceStoreCapacityError, NonceStoreError
 from .open_competition import CompetitionPolicy
-from .policy import ScoringPolicy, scoring_policy_hash, validate_scoring_runtime
+from .policy import (
+    SINGLE_EVALUATOR_TRANSPORT_SCHEMA,
+    ScoringPolicy,
+    scoring_policy_hash,
+    validate_scoring_runtime,
+)
 from .protocol import (
     PROTOCOL_VERSION,
     RESPONSE_ENVELOPE_SCHEMA,
@@ -1142,9 +1148,13 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
                     maximum_bytes=MAX_AUTHORIZATION_BYTES,
                 )
             )
+    policy = _load_policy(args.policy)
+    if competition_policy is not None:
+        validate_transport_cohort(competition_policy, policy)
+    elif policy.schema_ == SINGLE_EVALUATOR_TRANSPORT_SCHEMA:
+        raise ValueError("single-evaluator transport requires competition mode")
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path)
     hotkey_ss58, scheme = _identity(wallet)
-    policy = _load_policy(args.policy)
     policy_hash = scoring_policy_hash(policy)
     allowed_validator_hotkeys = frozenset(
         item.validator_hotkey for item in policy.validator_registry
