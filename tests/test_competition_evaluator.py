@@ -174,7 +174,8 @@ async def test_two_workers_execute_agree_sign_and_continue_into_later_round(setu
     quality, baseline = replay_independent_evaluation(
         first, setup.job.submission, setup.job.round, setup.suite, setup.policy, current_block=150
     )
-    assert aggregate_quality(quality) == 1 and aggregate_quality(baseline) == 0
+    assert aggregate_quality(quality, setup.policy) == 1
+    assert aggregate_quality(baseline, setup.policy) == 0
 
     # A new signed round advances on the same running workers. No CLI/job calls.
     next_round = setup.job.round.model_copy(

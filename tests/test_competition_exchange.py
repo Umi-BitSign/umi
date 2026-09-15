@@ -144,10 +144,15 @@ async def test_two_evaluators_agree_over_authenticated_http_without_file_copy(re
 @pytest.mark.asyncio
 async def test_same_clients_advance_to_another_round_without_restart(relay):
     await finish(relay)
+    references = (
+        ("hello again",)
+        if relay.policy.schema_ == "umi-open-competition-policy/2"
+        else ("hello again", "hi again", "greetings again")
+    )
     suite = relay.suite.model_copy(
         update={
             "cases": tuple(
-                c.model_copy(update={"references": ("hello again", "hi again", "greetings again")})
+                c.model_copy(update={"references": references})
                 for c in relay.suite.cases
             )
         }
