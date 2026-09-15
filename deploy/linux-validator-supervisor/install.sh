@@ -447,6 +447,13 @@ printf '%s  %s\n' "$uv_binary_sha256" "$uv_source" | sha256sum --check --status 
 supervisor_created=true
 git -c safe.directory="$source_root" clone --no-local --no-hardlinks --no-checkout \
   "$source_root" "$supervisor_root"
+# A fresh operator clone may hold the release only in refs/remotes/origin,
+# which this second clone does not copy. Fetch the exact checked commit from
+# that same local source without changing its branches or following a channel.
+git -c safe.directory="$source_root" -c safe.directory="$supervisor_root" \
+  -C "$supervisor_root" fetch --no-tags --no-recurse-submodules \
+  -- "$source_root" "$release_revision" \
+  || fail "could not fetch the current release revision from the source repository"
 git -c safe.directory="$supervisor_root" -C "$supervisor_root" \
   checkout --detach "$release_revision"
 [ "$(git -c safe.directory="$supervisor_root" -C "$supervisor_root" rev-parse HEAD)" \

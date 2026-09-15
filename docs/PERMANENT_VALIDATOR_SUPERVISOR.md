@@ -102,6 +102,15 @@ signatures or mismatched release bindings still fail before any legacy writer
 is stopped. Release publishers must update the pin and both signed manifests in
 one commit; the deployment tests verify their signatures and revision bindings.
 
+The installer explicitly fetches the pinned commit from the same local source
+repository into its installed clone. This also works when a fresh source clone
+holds the release only under a remote-tracking branch. An older installer can
+fail at checkout with `reference is not a tree` or `unable to read tree` despite
+the commit existing in the operator's checkout. That failure precedes legacy
+shutdown. Retry using a fresh, reviewed main checkout; do not change the release
+pin or delete a running installation. The release need not be an ancestor of
+the installer's `main` commit.
+
 The installer is safe to rerun after a failure that occurs before the legacy
 shutdown boundary. It removes the source tree and isolated hotkey that it staged
 during that attempt. Once it begins retiring a named legacy service, it keeps
