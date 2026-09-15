@@ -568,7 +568,14 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
     )
     monkeypatch.setattr("umi.competition_chain.DurableGrandpaFinalityPort", durable_port)
     monkeypatch.setattr("umi.competition_chain.SubprocessStorageProofVerifier", proof_verifier)
-    monkeypatch.setattr("umi.competition_chain._RegistrationRpc", lambda config: chain.rpc)
+
+    async def close_rpc():
+        pass
+
+    monkeypatch.setattr(chain.rpc, "aclose", close_rpc, raising=False)
+    monkeypatch.setattr(
+        "umi.competition_chain._RegistrationRpc", lambda config, **kwargs: chain.rpc
+    )
     owned = FinalizedRegistrationProvider(chain.config, chain.policy, now_ms=lambda: _NOW)
     assert owned._proofs._limits.maximum_proof_node_bytes == 2 * 1024**2
     assert owned._proofs._limits.maximum_proof_bytes == 8 * 1024**2
@@ -786,9 +793,10 @@ def pooled_sockets(monkeypatch):
             self.closed = True
 
     def connect(endpoint, **kwargs):
-        assert kwargs["max_size"] == 2048
+        assert kwargs["max_size"] in (2048, 17 * 1024**2, 33 * 1024**2, 1024**2)
         assert kwargs["proxy"] is None
         connection = Connection()
+        connection.max_size = kwargs["max_size"]
         state.connections.append(connection)
         return connection
 
@@ -831,3 +839,65 @@ async def test_cancelled_batch_closes_all_leased_sockets(chain_config, pooled_so
     assert all(connection.closed for connection in state.connections)
     assert not any(connection.socket.busy for connection in state.connections)
     assert rpc.values == {}
+
+
+async def test_persistent_storage_connections_survive_batches_until_close(
+    chain_config, pooled_sockets
+):
+    state, _ = pooled_sockets
+    transport = _RegistrationRpc(chain_config, persistent=True)
+    rpc = _PrefetchRpc(transport)
+    for block in (1, 2, 3):
+        await rpc.prefetch(_hash(block), tuple(bytes([i]) for i in range(64)))
+        assert len(rpc.values) == 64
+    assert state.requests == 192
+    assert 1 <= len(state.connections) <= 8
+    assert not any(connection.closed for connection in state.connections)
+    await transport.aclose()
+    assert all(connection.closed for connection in state.connections)
+    with pytest.raises(ValueError, match="closed"):
+        await transport.request("state_getStorageAt", ("0x01", _hash(1)))
+
+
+async def test_persistent_rpc_discards_protocol_error_without_retry(chain_config, pooled_sockets):
+    state, _ = pooled_sockets
+    transport = _RegistrationRpc(chain_config, persistent=True)
+    state.invalid_next = True
+    with pytest.raises(RuntimeError, match="proof_rpc_response_invalid"):
+        await transport.request("state_getStorageAt", ("0x01", _hash(1)))
+    assert state.requests == 1 and state.connections[0].closed
+    assert await transport.request("state_getStorageAt", ("0x02", _hash(1))) == "0x00"
+    assert len(state.connections) == 2
+    await transport.aclose()
+    assert all(connection.closed for connection in state.connections)
+
+
+async def test_persistent_rpc_keeps_method_receive_limits_separate(chain_config, pooled_sockets):
+    state, _ = pooled_sockets
+    transport = _RegistrationRpc(chain_config, persistent=True)
+    methods = ("state_getStorageAt", "state_getReadProof", "state_getMetadata")
+    for _ in range(3):
+        for method in methods:
+            assert await transport.request(method, ()) == "0x00"
+    assert len(state.connections) == 3
+    assert [c.max_size for c in state.connections] == [2048, 17 * 1024**2, 33 * 1024**2]
+    await transport.aclose()
+    assert all(connection.closed for connection in state.connections)
+
+
+async def test_persistent_rpc_cancelled_reads_close_and_can_reconnect(chain_config, pooled_sockets):
+    state, started = pooled_sockets
+    transport = _RegistrationRpc(chain_config, persistent=True)
+    rpc = _PrefetchRpc(transport)
+    state.blocked = True
+    task = asyncio.create_task(rpc.prefetch(_hash(1), tuple(bytes([i]) for i in range(64))))
+    await asyncio.wait_for(started.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert all(connection.closed for connection in state.connections)
+    state.blocked = False
+    await rpc.prefetch(_hash(2), (b"a",))
+    assert len(rpc.values) == 1
+    await transport.aclose()
+    assert all(connection.closed for connection in state.connections)
