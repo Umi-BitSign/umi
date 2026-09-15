@@ -54,10 +54,11 @@ It does not prove common human ownership. The
 is not a requirement of the 70/30 successor mechanism specified below.
 
 Bridge weights measure availability only. They establish neither translation
-quality nor successor qualification. The bridge retains the original deadline:
-new submissions stop before block \path|9,073,731|, with hard sunset \path|9,075,171|,
-unless superseded sooner by an approved transition. This document does not
-extend that deadline or reopen the retired pilot.
+quality nor successor qualification. A separately signed version3 bridge policy
+can continue until explicitly superseded, with no scheduled expiry. Historical
+version1/2 policies retain their original cutoffs. A new lifetime authorization
+and compatible release are required; this document alone does not activate an
+extension, reopen the retired pilot or launch translation competition.
 
 Version 0.2 supersedes \href{https://github.com/Umi-BitSign/umi/blob/main/whitepaper/LEGACY_V0_1.md}{version 0.1}\textquotesingle s proposed fixed four-validator,
 three-publisher and 30-day-soak launch gates. It replaces them with a published
@@ -215,19 +216,27 @@ describes required inputs, annotation checks, split isolation and suite retireme
 
 \subsection{Deterministic quality}\label{42-deterministic-quality}
 
-Reuse UMI\textquotesingle s exact text normalization and best-reference CER/WER implementation.
-Each case has three to five committed English references.
+Reuse UMI\textquotesingle s exact text normalization and CER/WER implementation. The approved
+initial launch uses \path|umi-open-competition-policy/2| with
+\path|umi-competition-suite/2|: each case has exactly one authentic committed English
+reference. Historical version 1 keeps its three-to-five-reference contract.
 CER measures edit distance between normalized graphemes, excluding whitespace;
 WER uses normalized word tokens. For each reference, let \path|d| be the edit
 distance and \path|n| its number of scoring units. Its similarity is
 \path|max(0, 1 - d / max(1, n))|. The case score is the highest similarity across
 the committed references.
 
-The initial successor profile uses CER for fingerspelling, weighted 15\%;
-WER for short utterances, weighted 35\%; and WER for continuous signing,
-weighted 50\%. Compute the arithmetic mean of the case scores within each
+The initial version 2 profile uses CER for fingerspelling with exact weight
+\path|3/13|, and WER for continuous signing with exact weight \path|10/13|. These preserve
+the original 15:50 relative weights across the two available tasks. Short
+utterances are outside this launch profile. Version 1 retains its 15\%/35\%/50\%
+three-task weights. Compute the arithmetic mean of the case scores within each
 stratum, then sum those means multiplied by their respective weights.
 Every required stratum must meet the policy\textquotesingle s minimum case count.
+Suites contain at least three cases in total. Policy and suite versions must
+match; unknown or extra strata are rejected. The two-task score is not directly
+comparable to a historical three-task score. This change does not alter the
+70/30 reward split or the approved 120-second inference limit.
 The normalization and scoring functions are defined in
 \href{https://github.com/Umi-BitSign/umi/blob/main/src/umi/scoring.py}{scoring.py}.
 

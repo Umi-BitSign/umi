@@ -12,6 +12,13 @@ required. The approved initial evaluator is UID 0 alone, under the disclosed
 [single-operator launch profile](OPEN_COMPETITION_UID0_LAUNCH.md). This does not
 claim independent reproduction by UID 54 or activate competition rewards.
 
+The approved initial scoring profile is policy/suite version 2: one authentic
+reference per clip, fingerspelling CER weighted 3/13 and continuous-signing WER
+weighted 10/13. Version 1 retains its three-task, three-to-five-reference rules.
+Scheduling and replay must use the same versioned policy. The 70/30 reward split
+and 120-second launch inference limit are unchanged. See the private-holdout
+procedure for preparation and disclosure requirements.
+
 ## Implemented; successor rewards inactive
 
 - An explicit single-evaluator competition transport, bound to the same signer

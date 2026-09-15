@@ -37,8 +37,10 @@ from .open_competition import (
     ModelBundle,
     SignedSubmission,
     digest,
+    has_case_coverage,
     identity,
     validate_bundle_policy,
+    validate_suite_profile,
 )
 from .policy import ScoringPolicy, require_live_chain_observation, scoring_policy_hash
 from .protocol import (
@@ -138,10 +140,7 @@ def validate_work_plan(plan, policy):
     if (
         len({c.case_id for c in plan.cases}) != len(plan.cases)
         or len({c.video_sha256 for c in plan.cases}) != len(plan.cases)
-        or any(
-            sum(c.stratum == s for c in plan.cases) < policy.minimum_cases_per_stratum
-            for s in ("fingerspelling", "short_utterance", "continuous")
-        )
+        or not has_case_coverage(plan.cases, policy)
     ):
         raise ValueError("work plan cases lack unique complete stratum coverage")
     return plan
@@ -149,6 +148,7 @@ def validate_work_plan(plan, policy):
 
 def prepare_work_plan(*, cutoff, submissions, suite, incumbent, runtime, policy):
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    validate_suite_profile(suite, policy)
     plan = validate_work_plan(
         WorkPlan(
             schema="umi-round-work-plan/1",

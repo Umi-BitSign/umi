@@ -214,19 +214,27 @@ describes required inputs, annotation checks, split isolation and suite retireme
 
 ### 4.2 Deterministic quality
 
-Reuse UMI's exact text normalization and best-reference CER/WER implementation.
-Each case has three to five committed English references.
+Reuse UMI's exact text normalization and CER/WER implementation. The approved
+initial launch uses `umi-open-competition-policy/2` with
+`umi-competition-suite/2`: each case has exactly one authentic committed English
+reference. Historical version 1 keeps its three-to-five-reference contract.
 CER measures edit distance between normalized graphemes, excluding whitespace;
 WER uses normalized word tokens. For each reference, let `d` be the edit
 distance and `n` its number of scoring units. Its similarity is
 `max(0, 1 - d / max(1, n))`. The case score is the highest similarity across
 the committed references.
 
-The initial successor profile uses CER for fingerspelling, weighted 15%;
-WER for short utterances, weighted 35%; and WER for continuous signing,
-weighted 50%. Compute the arithmetic mean of the case scores within each
+The initial version 2 profile uses CER for fingerspelling with exact weight
+`3/13`, and WER for continuous signing with exact weight `10/13`. These preserve
+the original 15:50 relative weights across the two available tasks. Short
+utterances are outside this launch profile. Version 1 retains its 15%/35%/50%
+three-task weights. Compute the arithmetic mean of the case scores within each
 stratum, then sum those means multiplied by their respective weights.
 Every required stratum must meet the policy's minimum case count.
+Suites contain at least three cases in total. Policy and suite versions must
+match; unknown or extra strata are rejected. The two-task score is not directly
+comparable to a historical three-task score. This change does not alter the
+70/30 reward split or the approved 120-second inference limit.
 The normalization and scoring functions are defined in
 [scoring.py](../src/umi/scoring.py).
 

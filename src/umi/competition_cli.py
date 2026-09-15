@@ -826,8 +826,8 @@ def execute(args: argparse.Namespace) -> dict:
             current_block=args.current_block,
         )
         return {
-            "candidate_quality": str(aggregate_quality(candidate)),
-            "incumbent_quality": str(aggregate_quality(incumbent)),
+            "candidate_quality": str(aggregate_quality(candidate, policy)),
+            "incumbent_quality": str(aggregate_quality(incumbent, policy)),
             "quality_gate_passed": qualifies_for_promotion(candidate, incumbent, policy),
             "chain_submission_authorized": False,
         }

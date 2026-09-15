@@ -32,7 +32,6 @@ from .miner_admission import (
     ProofBackedMinerWindowAuthority,
 )
 from .open_competition import (
-    STRATUM_WEIGHTS,
     CompetitionPolicy,
     EvaluationRound,
     EvaluationSuite,
@@ -41,7 +40,9 @@ from .open_competition import (
     SignedSubmission,
     Stratum,
     digest,
+    has_case_coverage,
     identity,
+    validate_suite_profile,
     verify_signature,
 )
 from .policy import SINGLE_EVALUATOR_TRANSPORT_SCHEMA, ScoringPolicy, scoring_policy_hash
@@ -280,10 +281,7 @@ def validate_publication_body(
     if (
         len({c.case_id for c in body.cases}) != len(body.cases)
         or len({c.video_sha256 for c in body.cases}) != len(body.cases)
-        or any(
-            sum(c.stratum == s for c in body.cases) < policy.minimum_cases_per_stratum
-            for s in STRATUM_WEIGHTS
-        )
+        or not has_case_coverage(body.cases, policy)
     ):
         raise ValueError("authorization has duplicate cases/videos or insufficient coverage")
     legacy_keys = {identity(v.validator_hotkey) for v in legacy_policy.validator_registry}
@@ -358,6 +356,7 @@ def validate_publication_suite(
     """Check the signed reference-free case list against the suite after reveal."""
     publication = SignedEndpointAuthorization.model_validate_json(canonical_json_bytes(publication))
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    validate_suite_profile(suite, policy)
     body = publication.publication
     if (
         body.policy_sha256 != digest(policy)
