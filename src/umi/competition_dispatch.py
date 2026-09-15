@@ -56,7 +56,7 @@ class EndpointDispatchConfig(StrictProtocolModel):
     wallet_path: Annotated[str, Field(min_length=1, max_length=4096)]
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     discovery_grace_seconds: Annotated[int, Field(ge=5, le=60)] = 10
-    maximum_concurrency: Annotated[int, Field(ge=1, le=8)] = 4
+    maximum_concurrency: Annotated[int, Field(ge=1, le=128)] = 4
     page_size: Annotated[int, Field(ge=1, le=100)] = 32
     request_timeout_seconds: Annotated[int, Field(ge=1, le=600)] = 180
     no_weight: Literal[True] = True
@@ -220,6 +220,13 @@ class EndpointDispatcher:
         self._counts = {"completed": 0, "held": 0, "uncertain": 0}
         self._publications = set()
         self._publication_cursor = None
+        # Queue before the provider starts its bounded proof-collection timer.
+        # HTTP requests may overlap; one owned observer collects proofs at a time.
+        self._proof_gate = asyncio.Lock()
+
+    async def _verified_blocks(self, heights):
+        async with self._proof_gate:
+            return await self.provider.verified_blocks(heights)
 
     async def ingest_once(self):
         """Read one immutable quorum-signed inbox file; errors never retime work.
@@ -291,7 +298,7 @@ class EndpointDispatcher:
                 }
             )
         )
-        head, blocks = await self.provider.verified_blocks(announcements)
+        head, blocks = await self._verified_blocks(announcements)
         self.journal.publish(publication, observed=head, announcements=blocks)
         # The journal reserves all outcome space before this file is accepted.
         self._publications.add(name)
@@ -309,7 +316,7 @@ class EndpointDispatcher:
             if identity(assignment.evaluator_hotkey) != identity(self.config.evaluator_hotkey):
                 raise ValueError("assignment belongs to another evaluator")
             heights = tuple(sorted({a.request.issued_block for a in body.assignments}))
-            head, issuances = await self.provider.verified_blocks(heights)
+            head, issuances = await self._verified_blocks(heights)
             self.journal.observe(observed=head, issuances=issuances)
             # Start grace only when this entire signed publication is retrievable.
             self.journal.releasable_publication(status["publication_sha256"])
@@ -324,7 +331,10 @@ class EndpointDispatcher:
             signed = next(
                 s for s in body.submissions if digest(s.submission) == assignment.submission_sha256
             )
-            origin = await self.provider.dispatch_origin(signed, assignment.request.issued_block)
+            async with self._proof_gate:
+                origin = await self.provider.dispatch_origin(
+                    signed, assignment.request.issued_block
+                )
             if not isinstance(origin, DispatchOrigin) or (
                 origin.capture.submission_sha256 != digest(signed.submission)
                 or identity(origin.capture.hotkey) != identity(signed.submission.hotkey)
