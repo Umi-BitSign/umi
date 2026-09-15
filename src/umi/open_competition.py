@@ -10,14 +10,17 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from fractions import Fraction
 from pathlib import PurePosixPath
+from types import MappingProxyType
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from .competition_scoring import score_single_reference
 from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
 from .protocol import (
@@ -33,6 +36,11 @@ Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 Bps = Annotated[int, Field(ge=0, le=10_000)]
 Stratum = Literal["fingerspelling", "short_utterance", "continuous"]
 Track = Literal["endpoint", "model"]
+TWO_TASK_POLICY_SCHEMA = "umi-open-competition-policy/2"
+TWO_TASK_SUITE_SCHEMA = "umi-competition-suite/2"
+TWO_TASK_WEIGHTS = MappingProxyType(
+    {"fingerspelling": Fraction(3, 13), "continuous": Fraction(10, 13)}
+)
 
 
 def _hotkey(value: str) -> str:
@@ -58,7 +66,9 @@ class Evaluator(StrictProtocolModel):
 
 
 class CompetitionPolicy(StrictProtocolModel):
-    schema_: Literal["umi-open-competition-policy/1"] = Field(alias="schema")
+    schema_: Literal["umi-open-competition-policy/1", "umi-open-competition-policy/2"] = Field(
+        alias="schema"
+    )
     network: Literal["finney"]
     netuid: Literal[78]
     sequence: Annotated[int, Field(ge=1, le=2**32 - 1)]
@@ -83,6 +93,10 @@ class CompetitionPolicy(StrictProtocolModel):
     contribution_terms_sha256: Hex32
     accepted_model_licenses: Annotated[tuple[str, ...], Field(min_length=1, max_length=32)]
     evaluation_runtime_sha256: Hex32
+
+    @property
+    def stratum_weights(self) -> Mapping[str, Fraction]:
+        return TWO_TASK_WEIGHTS if self.schema_ == TWO_TASK_POLICY_SCHEMA else STRATUM_WEIGHTS
 
     @model_validator(mode="after")
     def validate_policy(self) -> Self:
@@ -335,20 +349,53 @@ class EvaluationCase(StrictProtocolModel):
     references: Annotated[tuple[ReferenceText, ...], Field(min_length=3, max_length=5)]
 
 
+class SingleReferenceEvaluationCase(EvaluationCase):
+    stratum: Literal["fingerspelling", "continuous"]
+    references: Annotated[tuple[ReferenceText, ...], Field(min_length=1, max_length=1)]
+
+
 class EvaluationSuite(StrictProtocolModel):
     """Revealed replay input; never mount this object into a model sandbox."""
 
-    schema_: Literal["umi-competition-suite/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-suite/1", "umi-competition-suite/2"] = Field(alias="schema")
     policy_sha256: Hex32
-    cases: Annotated[tuple[EvaluationCase, ...], Field(min_length=3, max_length=2048)]
+    cases: Annotated[
+        tuple[EvaluationCase | SingleReferenceEvaluationCase, ...],
+        Field(min_length=3, max_length=2048),
+    ]
 
     @model_validator(mode="after")
     def unique_cases(self) -> Self:
+        if self.schema_ == TWO_TASK_SUITE_SCHEMA:
+            if any(len(c.references) != 1 or c.stratum not in TWO_TASK_WEIGHTS for c in self.cases):
+                raise ValueError("v2 suite requires one reference and only its two task strata")
+        elif any(not 3 <= len(c.references) <= 5 for c in self.cases):
+            raise ValueError("v1 suite requires three to five references per case")
         if len({c.case_id for c in self.cases}) != len(self.cases):
             raise ValueError("evaluation case IDs must be unique")
         if len({c.video_sha256 for c in self.cases}) != len(self.cases):
             raise ValueError("duplicate evaluation video")
         return self
+
+
+def has_case_coverage(cases: Sequence[Any], policy: CompetitionPolicy) -> bool:
+    """Check reference-free coverage without accepting extra, unscored strata."""
+    return {c.stratum for c in cases} == set(policy.stratum_weights) and all(
+        sum(c.stratum == stratum for c in cases) >= policy.minimum_cases_per_stratum
+        for stratum in policy.stratum_weights
+    )
+
+
+def validate_suite_profile(suite: EvaluationSuite, policy: CompetitionPolicy) -> None:
+    expected = (
+        TWO_TASK_SUITE_SCHEMA
+        if policy.schema_ == TWO_TASK_POLICY_SCHEMA
+        else "umi-competition-suite/1"
+    )
+    if suite.schema_ != expected or suite.policy_sha256 != digest(policy):
+        raise ValueError("evaluation suite scoring profile or policy binding mismatch")
+    if not has_case_coverage(suite.cases, policy):
+        raise ValueError("insufficient evaluation coverage in a required stratum")
 
 
 class EvaluationRound(StrictProtocolModel):
@@ -430,6 +477,7 @@ def _quality(
     *,
     incumbent: bool = False,
 ) -> dict[str, Fraction]:
+    validate_suite_profile(suite, policy)
     expected_ids = [c.case_id for c in suite.cases]
     if [o.case_id for o in outputs] != expected_ids:
         raise ValueError("outputs must cover the complete suite in canonical order")
@@ -445,16 +493,27 @@ def _quality(
         if incumbent and not valid:
             raise ValueError("incumbent execution failed; evaluation is void")
         scorer = score_cer if case.stratum == "fingerspelling" else score_wer
-        strata[case.stratum].append(
-            scorer(output.hypothesis, case.references) if valid else Fraction(0)
-        )
-    if any(len(strata[s]) < policy.minimum_cases_per_stratum for s in STRATUM_WEIGHTS):
-        raise ValueError("insufficient evaluation coverage in a required stratum")
-    return {s: sum(strata[s], Fraction(0)) / len(strata[s]) for s in STRATUM_WEIGHTS}
+        if not valid:
+            score = Fraction(0)
+        elif policy.schema_ == TWO_TASK_POLICY_SCHEMA:
+            score = score_single_reference(
+                "cer" if case.stratum == "fingerspelling" else "wer",
+                output.hypothesis,
+                case.references[0],
+            )
+        else:
+            score = scorer(output.hypothesis, case.references)
+        strata[case.stratum].append(score)
+    return {s: sum(strata[s], Fraction(0)) / len(strata[s]) for s in policy.stratum_weights}
 
 
-def aggregate_quality(strata: dict[str, Fraction]) -> Fraction:
-    return sum((strata[s] * w for s, w in STRATUM_WEIGHTS.items()), Fraction(0))
+def aggregate_quality(
+    strata: dict[str, Fraction], policy: CompetitionPolicy | None = None
+) -> Fraction:
+    weights = STRATUM_WEIGHTS if policy is None else policy.stratum_weights
+    if set(strata) != set(weights):
+        raise ValueError("quality strata do not match the scoring profile")
+    return sum((strata[s] * w for s, w in weights.items()), Fraction(0))
 
 
 def authenticate_evaluation(
@@ -519,6 +578,7 @@ def validate_evaluation_suite(
     policy: CompetitionPolicy,
 ) -> None:
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    validate_suite_profile(suite, policy)
     if suite.policy_sha256 != digest(policy) or round_.suite_sha256 != digest(suite):
         raise ValueError("evaluation suite binding mismatch")
     expected = [case.case_id for case in suite.cases]
@@ -527,11 +587,6 @@ def validate_evaluation_suite(
         for outputs in (attested.result.candidate, attested.result.incumbent)
     ):
         raise ValueError("outputs must cover the complete suite in canonical order")
-    if any(
-        sum(case.stratum == stratum for case in suite.cases) < policy.minimum_cases_per_stratum
-        for stratum in STRATUM_WEIGHTS
-    ):
-        raise ValueError("insufficient evaluation coverage in a required stratum")
 
 
 def replay_evaluation(
@@ -560,10 +615,10 @@ def qualifies_for_promotion(
     policy: CompetitionPolicy,
 ) -> bool:
     return (
-        aggregate_quality(candidate) >= Fraction(policy.minimum_score_bps, 10_000)
-        and aggregate_quality(candidate) - aggregate_quality(incumbent)
+        aggregate_quality(candidate, policy) >= Fraction(policy.minimum_score_bps, 10_000)
+        and aggregate_quality(candidate, policy) - aggregate_quality(incumbent, policy)
         >= Fraction(policy.promotion_margin_bps, 10_000)
-        and all(candidate[s] >= incumbent[s] for s in STRATUM_WEIGHTS)
+        and all(candidate[s] >= incumbent[s] for s in policy.stratum_weights)
     )
 
 
@@ -649,14 +704,14 @@ def project_weights(
             promoted_hotkey is not None
             and identity(promoted_hotkey) in by_key
             and round_.incumbent_model_sha256 == promoted_model_sha256
-            and aggregate_quality(incumbent) >= Fraction(policy.minimum_score_bps, 10_000)
+            and aggregate_quality(incumbent, policy) >= Fraction(policy.minimum_score_bps, 10_000)
         ):
             # Preserved baseline inference remains possible without the original
             # contributor running a server or renewing its old upload receipt.
             model_recipient = identity(promoted_hotkey)
         if key not in by_key:
             continue  # Deregistration never transfers a score to a reused UID.
-        quality = aggregate_quality(candidate)
+        quality = aggregate_quality(candidate, policy)
         if quality < Fraction(policy.minimum_score_bps, 10_000):
             continue
         if sub.track == "endpoint":

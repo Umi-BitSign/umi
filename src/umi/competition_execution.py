@@ -32,7 +32,6 @@ from .competition_runner import (
     verify_runtime,
 )
 from .open_competition import (
-    STRATUM_WEIGHTS,
     Block,
     CaseOutput,
     CompetitionPolicy,
@@ -46,8 +45,10 @@ from .open_competition import (
     Stratum,
     _quality,
     digest,
+    has_case_coverage,
     identity,
     validate_bundle_policy,
+    validate_suite_profile,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -195,10 +196,7 @@ def _validate_job(job, policy, model, track):
         sub.hotkey
     ):
         raise ValueError("unauthorized or self-evaluating model execution job")
-    if any(
-        sum(c.stratum == s for c in job.cases) < policy.minimum_cases_per_stratum
-        for s in STRATUM_WEIGHTS
-    ):
+    if not has_case_coverage(job.cases, policy):
         raise ValueError("model execution job has insufficient stratum coverage")
     if track == "model":
         validate_bundle_policy(sub.model_bundle, policy)
@@ -659,6 +657,7 @@ def revealed_execution_observations(evidence, suite, policy, *, current_block: i
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     validate_execution(evidence, policy)
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    validate_suite_profile(suite, policy)
     job = evidence.job
     if (
         type(current_block) is not int

@@ -28,6 +28,13 @@ runtime, data, rights, terms, numerical limits and other required inputs must be
 supplied and verified before signing. Recheck UID 0's hotkey and permit against
 finalized chain state at deployment; do not infer identity from its UID alone.
 
+The approved scoring profile is `umi-open-competition-policy/2` paired with
+`umi-competition-suite/2`. It uses authentic single references, fingerspelling
+CER weighted 3/13 and continuous-signing WER weighted 10/13. Michael's supplied
+model is the intended baseline. Keep `maximum_inference_ms` at `120000` for
+launch. Baseline choice and profile approval do not establish model quality,
+contributor attribution or successful end-to-end qualification.
+
 Use `umi-competition-single-evaluator-transport/1` for the associated transport
 document. It preserves the existing request clock, bounded resources, scoring
 and finality fields, but requires exactly one validator entry with the same

@@ -58,12 +58,21 @@ have been held back from training and tuning. Public development examples are
 separate from the protected pool. Prefer an independently held pool; if a
 contributor supplies it, disclose that access and any influence on selection.
 
-## Existing input contract
+## Approved launch input contract
 
 `EvaluationSuite` binds the policy hash and distinct case/video identities.
-Each `EvaluationCase` currently needs three to five English references and one
-of the required strata: fingerspelling, short utterance or continuous signing.
-The policy sets the minimum count per stratum; all three must meet it.
+The approved `umi-open-competition-policy/2` and `umi-competition-suite/2`
+profile uses one authentic English reference per case, with fingerspelling and
+continuous signing as its two required tasks. Their exact score weights are
+3/13 and 10/13, respectively. Each task must meet the policy's minimum case count,
+and the suite must contain at least three cases overall. Short utterances are
+not scored under this profile. It preserves the 70/30 reward split and the
+120-second launch inference deadline.
+
+Historical version 1 retains three to five references, all three required tasks,
+and the 15%/35%/50% weights. A version 1 suite cannot be replayed as version 2,
+or the reverse. New weights apply only through the newly signed policy, not by
+reinterpretation of retained results.
 
 Check actual video readability, hashes, label presence, annotation provenance,
 stratum assignment and duplicate records before committing a suite. Existing
@@ -72,11 +81,11 @@ there is no requirement to recruit a new panel to regrade every clip. Automatic
 format checks cannot establish that a label translates the ASL correctly.
 Document annotation limitations and exclude known mismatches before commitment.
 
-If the supplied corpus has only one reference per clip, report that mismatch
-before activation. Do not repeat one label or generate unverified paraphrases
-to make it look as though the required references exist. Changing the reference
-contract needs an explicit specification/code revision and a new scoring
-rehearsal. Do not silently pad or relax it in the dataset importer.
+Use the supplied reference unchanged under version 2. Do not repeat one label or
+generate unverified paraphrases to satisfy version 1. A single reference can
+penalize otherwise valid paraphrases, so disclose this limitation. The revised
+profile still requires scoring rehearsal before activation; preparation alone
+does not authorize rewards.
 
 The runtime verifies case identities and reference structure. Training exposure,
 annotation correctness, permissions and actual operator independence are

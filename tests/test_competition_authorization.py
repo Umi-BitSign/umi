@@ -27,6 +27,7 @@ from umi.open_competition import (
     EvaluationSuite,
     Evaluator,
     SignedSubmission,
+    SingleReferenceEvaluationCase,
     digest,
     sign_object,
 )
@@ -144,15 +145,22 @@ def build_authorization_fixture(
         )
     )
     video_bytes = tuple(f"inert-endpoint-video-{i}".encode() for i in range(case_count))
+    two_task = policy.schema_ == "umi-open-competition-policy/2"
+    case_type = SingleReferenceEvaluationCase if two_task else EvaluationCase
+    strata = (
+        ("fingerspelling", "continuous")
+        if two_task
+        else ("fingerspelling", "short_utterance", "continuous")
+    )
     suite = EvaluationSuite(
-        schema="umi-competition-suite/1",
+        schema="umi-competition-suite/2" if two_task else "umi-competition-suite/1",
         policy_sha256=digest(policy),
         cases=tuple(
-            EvaluationCase(
+            case_type(
                 case_id=f"{window_index * 1000 + i + 1:064x}",
                 video_sha256=hashlib.sha256(video_bytes[i]).hexdigest(),
-                stratum=("fingerspelling", "short_utterance", "continuous")[i % 3],
-                references=("hello", "hi", "greetings"),
+                stratum=strata[i % len(strata)],
+                references=("hello",) if two_task else ("hello", "hi", "greetings"),
             )
             for i in range(case_count)
         ),

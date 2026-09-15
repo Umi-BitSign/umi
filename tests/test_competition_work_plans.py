@@ -25,8 +25,9 @@ from .test_open_competition import bundle_at, submission, wallet
 from .test_open_competition import policy as policy
 
 
-@pytest.fixture
-def setup(policy, runtime, tmp_path):
+@pytest.fixture(params=("umi-open-competition-policy/1", "umi-open-competition-policy/2"))
+def setup(policy, runtime, tmp_path, request):
+    policy = policy.model_copy(update={"schema_": request.param})
     incumbent = bundle_at(tmp_path / "incumbent")
     candidate = bundle_at(tmp_path / "candidate", "candidate", digest(incumbent))
     item = build_authorization_fixture(
@@ -195,7 +196,13 @@ def test_different_private_suite_cannot_reuse_cutoff(setup):
     changed = setup.item.suite.model_copy(
         update={
             "cases": tuple(
-                c.model_copy(update={"references": ("changed", "wrong", "other")})
+                c.model_copy(
+                    update={
+                        "references": ("changed",)
+                        if len(c.references) == 1
+                        else ("changed", "wrong", "other")
+                    }
+                )
                 for c in setup.item.suite.cases
             )
         }

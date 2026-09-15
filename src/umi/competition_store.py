@@ -42,7 +42,6 @@ from .competition_settlement import (
 from .competition_void import VoidEvaluationEvidence
 from .competition_void_retention import VoidEvidenceRetention, hold_outcome_conflict
 from .open_competition import (
-    STRATUM_WEIGHTS,
     AttestedResult,
     CompetitionPolicy,
     EvaluationResult,
@@ -64,6 +63,7 @@ from .open_competition import (
     replay_evaluation,
     validate_admission,
     validate_evaluation_suite,
+    validate_suite_profile,
     verify_signature,
 )
 from .protocol import canonical_json_bytes
@@ -1149,12 +1149,12 @@ class CompetitionStore(VoidEvidenceRetention):
         snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
         suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
         limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
-        if suite.policy_sha256 != digest(self.policy) or any(
-            sum(case.stratum == stratum for case in suite.cases)
-            < self.policy.minimum_cases_per_stratum
-            for stratum in STRATUM_WEIGHTS
-        ):
-            raise ValueError("round suite has the wrong policy or insufficient stratum coverage")
+        try:
+            validate_suite_profile(suite, self.policy)
+        except ValueError as error:
+            raise ValueError(
+                "round suite has the wrong policy or insufficient stratum coverage"
+            ) from error
         window = {
             "evaluation_close_block": evaluation_close_block,
             "reveal_block": reveal_block,

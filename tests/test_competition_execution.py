@@ -31,6 +31,7 @@ from umi.open_competition import (
     CaseOutput,
     EvaluationCase,
     EvaluationSuite,
+    SingleReferenceEvaluationCase,
     aggregate_quality,
     digest,
     sign_object,
@@ -42,29 +43,40 @@ runtime = runtime_fixture
 chain_config = chain_config_fixture
 
 
-@pytest.fixture
-def setup(policy, runtime, tmp_path, monkeypatch):
-    policy = policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
+@pytest.fixture(params=("umi-open-competition-policy/1", "umi-open-competition-policy/2"))
+def setup(policy, runtime, tmp_path, monkeypatch, request):
+    policy = policy.model_copy(
+        update={"schema_": request.param, "evaluation_runtime_sha256": digest(runtime)}
+    )
+    two_task = request.param == "umi-open-competition-policy/2"
+    strata = (
+        ("fingerspelling", "continuous", "continuous")
+        if two_task
+        else ("fingerspelling", "short_utterance", "continuous")
+    )
+    case_type = SingleReferenceEvaluationCase if two_task else EvaluationCase
     incumbent = bundle_at(tmp_path / "incumbent")
     candidate = bundle_at(tmp_path / "candidate", "candidate", digest(incumbent))
     signed = submission(policy, bundle=candidate)
     videos = tmp_path / "videos"
     videos.mkdir()
     cases = []
-    for i, stratum in enumerate(("fingerspelling", "short_utterance", "continuous")):
+    for i, stratum in enumerate(strata):
         video = f"inert-video-{i}".encode()
         video_sha = hashlib.sha256(video).hexdigest()
         (videos / (video_sha + ".mp4")).write_bytes(video)
         cases.append(
-            EvaluationCase(
+            case_type(
                 case_id=f"{i:064x}",
                 video_sha256=video_sha,
                 stratum=stratum,
-                references=("hello", "hi", "greetings"),
+                references=("hello",) if two_task else ("hello", "hi", "greetings"),
             )
         )
     suite = EvaluationSuite(
-        schema="umi-competition-suite/1", policy_sha256=digest(policy), cases=tuple(cases)
+        schema="umi-competition-suite/2" if two_task else "umi-competition-suite/1",
+        policy_sha256=digest(policy),
+        cases=tuple(cases),
     )
     round_ = round_for(policy, suite, (signed,), incumbent=digest(incumbent))
     job = execution.ModelEvaluationJob(
@@ -177,8 +189,8 @@ async def test_paired_execution_retains_outputs_and_replays_into_independent_evi
     quality, incumbent = replay_independent_evaluation(
         evidence, job.submission, job.round, suite, policy, current_block=150
     )
-    assert aggregate_quality(quality) == 1
-    assert aggregate_quality(incumbent) == 0
+    assert aggregate_quality(quality, policy) == 1
+    assert aggregate_quality(incumbent, policy) == 0
     # No references or wallet is passed to the execution adapter or retained job.
     for call in calls:
         if isinstance(call, dict):
