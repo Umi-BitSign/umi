@@ -1,5 +1,9 @@
 # Temporary live-miner rewards
 
+The [registration freeze policy](REGISTRATION_BRIDGE_FREEZE.md) adds a signed
+snapshot gate for bridge rewards. Its release must be activated and verified on
+chain before describing the freeze as live.
+
 The temporary bridge has replaced the frozen two-miner pilot policy on UMI's
 UID 0 and UID 54 validators. Both have finalized rows under the shared-coldkey,
 HTTPS-IP or recorded-funder rule. See the
