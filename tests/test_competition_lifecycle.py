@@ -45,8 +45,8 @@ from umi.protocol import canonical_json_bytes
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
 from .test_competition_authorization import build_authorization_fixture
-from .test_competition_dispatch import authorization as original_authorization
 from .test_competition_dispatch import dispatch as dispatch
+from .test_competition_dispatch import dispatch_legacy_policy
 from .test_competition_endpoint_execution import paired_setup as paired_setup
 from .test_competition_evaluator import completed, put
 from .test_competition_package import package_limits as package_limits
@@ -89,7 +89,7 @@ def authorization(policy, runtime, tmp_path, monkeypatch, request):
         monkeypatch.setattr("tests.test_competition_lifecycle.snapshot", with_eve)
         monkeypatch.setattr("tests.test_competition_evaluator.snapshot", with_eve)
     policy = policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
-    legacy = original_authorization.__wrapped__(policy).legacy_policy
+    legacy = dispatch_legacy_policy()
     now = 1789300000000000000
     monkeypatch.setattr(time, "time_ns", lambda: now)
     monkeypatch.setattr(time, "time", lambda: time.time_ns() / 1_000_000_000)

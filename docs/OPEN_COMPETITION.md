@@ -78,8 +78,10 @@ independently administered evaluator services remain separate requirements.
   See [the dispatcher guide](OPEN_COMPETITION_DISPATCH.md). Protected round
   production and independent evidence publication still need deployment rehearsal.
 - An owned-finality endpoint collector that verifies `Axons`, `Uids` and `Keys`
-  under one pinned state root, requires a matching public literal-IP HTTPS
-  origin, and retains bounded evidence with integrity and rollback checks.
+  under one pinned state root. HTTPS origins may use a public IP or a signed
+  hostname whose public DNS answers include the announced IP. The transport
+  connects to that IP with the signed hostname for TLS. Evidence is bounded
+  and checked for integrity and rollback.
 - Quorum-signed cutoff and settlement contracts, complete deterministic replay,
   and a durable publication journal. Alternate valid signature sets do not
   change the semantic statement; conflicting statements hold the round.
@@ -213,10 +215,14 @@ umi-competition --policy policy.json check-endpoint-origin \
   --submission signed-endpoint.json --chain-config endpoint-chain.json
 ```
 
-Use a dedicated private state directory in `endpoint-chain.json`. This checks
-the public literal IP and port recorded in the signed submission against the
-finalized Axon. A DNS name is not an Axon binding in this profile. TLS identity,
-availability and authenticated miner responses still need transport checks.
+Use a dedicated private state directory in `endpoint-chain.json`. IP origins
+must match the finalized Axon. For DNS origins, the port must match and the
+resolved public addresses must include the finalized Axon IP. The hostname is
+bound by the miner's signed submission; DNS is recorded as a local observation,
+not a chain storage proof. The dispatcher connects to the captured IP without
+resolving the hostname again, retaining the hostname for TLS verification and
+HTTP routing. TLS identity, availability and authenticated miner responses still
+need transport checks. See [hostname requirements](MINER_ENDPOINT_HOSTNAMES.md).
 The storage layout is defined by the pinned runtime metadata; see the
 [Subtensor storage definitions](https://github.com/opentensor/subtensor/blob/main/pallets/subtensor/src/lib.rs).
 

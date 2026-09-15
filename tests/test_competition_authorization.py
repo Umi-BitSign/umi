@@ -49,6 +49,7 @@ def build_authorization_fixture(
     extra_model_bundle=None,
     window_index=0,
     sequence=1,
+    serving_origin="https://8.8.8.8:443",
 ):
     """Synthetic signed publication and owned-source test port; no network/files.
 
@@ -99,7 +100,6 @@ def build_authorization_fixture(
     finality = FinalizedPort(
         head=issued, blocks={announcement.height: announcement, issuance.height: issuance}
     )
-    serving_origin = "https://8.8.8.8:443"
     sub = submission(policy, start=1000, end=1900).submission.model_copy(
         update={"endpoint_url": serving_origin}
     )

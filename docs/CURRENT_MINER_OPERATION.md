@@ -71,6 +71,11 @@ to serve translation requests or enter the model-contribution track. Translation
 requests need the [protocol miner connected to a working model](MINER_MODEL_INTEGRATION.md).
 A health-only keepalive cannot answer them.
 
+The open-competition endpoint path supports
+[hotkey-signed HTTPS hostnames as well as literal IPs](MINER_ENDPOINT_HOSTNAMES.md).
+That support does not change the current bridge's IP-certificate requirement or
+make a hostname-only keepalive eligible for bridge rewards.
+
 Before spending compute on a model contribution, read the
 [provenance and rights checklist](MODEL_CONTRIBUTION_REVIEW.md). The final
 accepted-license list and contribution terms still need publication before
