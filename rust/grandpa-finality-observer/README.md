@@ -23,7 +23,10 @@ The process reads one canonical JSON configuration from standard input, closes
 the input protocol after that object, and writes RFC 8785 JSON records one per
 line to standard output. Bounded diagnostics go only to standard error. It exits
 on rollback, a post-baseline ancestry gap, a chain-spec, checkpoint, or genesis
-mismatch, a timestamp failure, or any configured limit.
+mismatch, a timestamp failure, a terminal `chainHead_v1_follow` stop event, or
+any configured limit. A stopped subscription cannot deliver another header;
+the observer exits so its supervisor can recover without waiting for a record
+timeout. Recovery still requires a new verified observer run.
 
 ## Security model and bootstrap
 
@@ -92,7 +95,7 @@ Current artifact pins are:
 - `fixtures/finney-grandpa-checkpoint-v1.json` SHA-256:
   `b3f2191587a21b57fbe9f56e3a8245e852c06cdebb0a4dd0b878a5242d9a8311`;
 - source-tree SHA-256:
-  `404c5e6df105a242a6ac0342d9a688fc073c1929728c10221b37ad864cb7e58e`.
+  `9d961577589d45a52fc9184f3e7bb3d1b85a1bd437e1b94451bfe4a5b4f7b61e`.
 
 Release binary hashes are target- and release-specific. The primary Linux
 validator hash is fixed by its signed release. An Apple Silicon miner hash is

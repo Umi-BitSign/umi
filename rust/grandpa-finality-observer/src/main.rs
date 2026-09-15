@@ -474,6 +474,8 @@ enum FollowEvent {
         #[serde(rename = "prunedBlockHashes")]
         pruned_block_hashes: Vec<String>,
     },
+    #[serde(rename = "stop")]
+    Stop,
     #[serde(other)]
     Other,
 }
@@ -1109,6 +1111,10 @@ async fn observe(config: &Config, chain_spec: ChainSpecMaterial) -> Result<(), O
                 }
                 (finalized_block_hashes, false)
             }
+            // A stopped follow subscription will not deliver more headers.
+            // Exit so the supervisor can recover instead of waiting until its
+            // record timeout while the HTTP process remains alive.
+            FollowEvent::Stop => return Err(ObserverError::SubscriptionEnded),
             FollowEvent::BestBlockChanged { .. } | FollowEvent::Other => continue,
         };
 
@@ -1436,6 +1442,15 @@ async fn main() {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn terminal_follow_event_is_not_ignored_as_an_extension() {
+        let event: FollowEvent = serde_json::from_str(r#"{"event":"stop"}"#).unwrap();
+        assert!(matches!(event, FollowEvent::Stop));
+        let extension: FollowEvent =
+            serde_json::from_str(r#"{"event":"futureCompatibleNotification"}"#).unwrap();
+        assert!(matches!(extension, FollowEvent::Other));
+    }
 
     fn finney_fixture() -> Value {
         serde_json::from_str(include_str!(
