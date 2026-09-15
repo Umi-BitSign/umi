@@ -623,6 +623,15 @@ class _RpcClient:
 
 
 @pytest.mark.asyncio
+async def test_bulk_storage_rpc_has_one_mib_receive_limit() -> None:
+    result = [{"block": _hash(1), "changes": [["0x61", None]]}]
+    connect = _FakeConnect(json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}))
+    rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=connect)
+    assert await rpc.request("state_queryStorageAt", (("0x61",), _hash(1))) == result
+    assert connect.calls[0][1]["max_size"] == 1024 * 1024
+
+
+@pytest.mark.asyncio
 async def test_bittensor_adapter_owns_a_bounded_connection() -> None:
     response = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "result": {"number": "0x2a"}},

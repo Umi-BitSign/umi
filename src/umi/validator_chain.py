@@ -44,6 +44,7 @@ _RPC_RESPONSE_LIMITS = {
     "state_getReadProof": 65 * _MIB,
     "state_getRuntimeVersion": _MIB,
     "state_getStorageAt": 129 * _MIB,
+    "state_queryStorageAt": _MIB,
 }
 
 

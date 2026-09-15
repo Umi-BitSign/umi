@@ -901,3 +901,75 @@ async def test_persistent_rpc_cancelled_reads_close_and_can_reconnect(chain_conf
     assert len(rpc.values) == 1
     await transport.aclose()
     assert all(connection.closed for connection in state.connections)
+
+
+async def test_bulk_prefetch_uses_one_exact_block_request(chain_config, monkeypatch):
+    rpc = _RegistrationRpc(chain_config, bulk_storage_reads=True)
+    calls = []
+
+    async def request(method, params):
+        calls.append((method, params))
+        return [{"block": _hash(1), "changes": [["0x62", None], ["0x61", "0x01"]]}]
+
+    monkeypatch.setattr(rpc, "request", request)
+    prefetch = _PrefetchRpc(rpc)
+    await prefetch.prefetch(_hash(1), (b"a", b"b"))
+    assert calls == [("state_queryStorageAt", (("0x61", "0x62"), _hash(1)))]
+    assert await prefetch.request("state_getStorageAt", ("0x61", _hash(1))) == "0x01"
+    assert await prefetch.request("state_getStorageAt", ("0x62", _hash(1))) is None
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        [],
+        [{"block": _hash(2), "changes": [["0x61", "0x01"]]}],
+        [{"block": _hash(1), "changes": []}],
+        [{"block": _hash(1), "changes": [["0x62", "0x01"]]}],
+        [{"block": _hash(1), "changes": [["0x61", "0x01"]], "extra": True}],
+        [{"block": _hash(1), "changes": [["0x61", 1]]}],
+        [{"block": _hash(1), "changes": [["0x61", "0x" + "00" * 513]]}],
+        [{"block": _hash(1), "changes": [["0x61"]]}],
+        [{"block": _hash(1), "changes": [[[], "0x01"]]}],
+    ],
+)
+async def test_bulk_prefetch_rejects_malformed_or_mismatched_results(
+    chain_config, monkeypatch, result
+):
+    rpc = _RegistrationRpc(chain_config, bulk_storage_reads=True)
+
+    async def request(method, params):
+        return result
+
+    monkeypatch.setattr(rpc, "request", request)
+    prefetch = _PrefetchRpc(rpc)
+    prefetch.values["0x61", _hash(0)] = "0xff"
+    with pytest.raises(ValueError):
+        await prefetch.prefetch(_hash(1), (b"a",))
+    assert prefetch.values == {}
+
+
+async def test_bulk_prefetch_rejects_duplicate_result_keys(chain_config, monkeypatch):
+    rpc = _RegistrationRpc(chain_config, bulk_storage_reads=True)
+
+    async def request(method, params):
+        return [{"block": _hash(1), "changes": [["0x61", "0x01"], ["0x61", "0x01"]]}]
+
+    monkeypatch.setattr(rpc, "request", request)
+    with pytest.raises(ValueError, match="duplicated"):
+        await rpc.storage_values(_hash(1), (b"a", b"b"))
+
+
+@pytest.mark.parametrize(
+    "keys", [(), (b"a", b"a"), (b"",), (b"a" * 513,), tuple(bytes([i % 256]) for i in range(257))]
+)
+async def test_bulk_prefetch_rejects_invalid_keys_before_network(chain_config, monkeypatch, keys):
+    rpc = _RegistrationRpc(chain_config, bulk_storage_reads=True)
+
+    async def request(method, params):
+        pytest.fail("invalid keys reached RPC")
+
+    monkeypatch.setattr(rpc, "request", request)
+    with pytest.raises(ValueError):
+        await rpc.storage_values(_hash(1), keys)
