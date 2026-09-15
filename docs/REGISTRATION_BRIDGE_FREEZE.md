@@ -25,7 +25,8 @@ A code merge alone does not activate the freeze. Activation requires the signed
 policy and release, adoption by the validators, and finalized weight readback.
 Historical v1/v2/v3 policies keep their original meaning. The freeze continues
 until replaced by an explicitly signed successor policy.
-# Audit-history capacity
+
+## Audit-history capacity
 
 The worker retains every submission transition and receipt. Its bounded history
 allowance is now 512 MiB and 4,096 files. The earlier 64 MiB allowance filled on

@@ -3,14 +3,16 @@
 import pytest
 
 import umi.registration_bridge as bridge
+from tests import test_registration_bridge_runtime as runtime
 from tests.test_registration_bridge_runtime import (
     Chain,
     applied_observation,
     run,
-    signed_policy,  # noqa: F401
-    wallet,  # noqa: F401
     writer_observation,
 )
+
+signed_policy = runtime.signed_policy
+wallet = runtime.wallet
 
 
 def test_snapshot_retains_more_than_old_byte_limit(tmp_path, monkeypatch):
@@ -36,7 +38,7 @@ def test_snapshot_retains_more_than_old_byte_limit(tmp_path, monkeypatch):
 
 
 def test_archive_write_keeps_byte_ceiling_and_existing_receipt(
-    tmp_path, monkeypatch, signed_policy, wallet  # noqa: F811
+    tmp_path, monkeypatch, signed_policy, wallet
 ):
     with bridge.RegistrationBridgeState(tmp_path.resolve() / "state") as state:
         before = writer_observation(wallet)
