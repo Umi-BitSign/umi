@@ -103,8 +103,36 @@ for platform in linux/amd64 linux/arm64; do
 done
 ```
 
+For a native Podman build, preserve the same fully qualified repository tag
+when exporting. Saving only an image ID produces an unnamed archive that loads
+successfully but cannot be resolved through the signed `oci_repository@sha256`
+reference used by the supervisor:
+
+```sh
+# Use the matching repository, revision, architecture and profile from above.
+# Set image_id to the inspected ID of the native build.
+tag="${repository}:competition-${profile_name}-${revision}-${architecture}"
+if podman image exists "$tag"; then
+  test "$(podman image inspect --format '{{.Id}}' "$tag")" = "$image_id"
+else
+  podman tag "$image_id" "$tag"
+fi
+test "$(podman image inspect --format '{{.Id}}' "$tag")" = "$image_id"
+podman save --format=oci-archive --output "$archive" "$tag"
+```
+
+Do not replace an existing tag that points to a different image. Use a new
+output path for each export, and recheck the source labels and every archive
+digest before signing. A different archive changes the signed archive hash even
+when its image manifest is unchanged.
+
 For each archive, verify that the OCI index contains exactly one manifest for
-the requested platform. Record the manifest descriptor digest as
+the requested platform and retains the intended fully qualified repository tag.
+Load the archive into a clean rehearsal image store and verify that
+`podman image inspect "$repository@sha256:$oci_manifest_sha256"` resolves the
+expected image. An existing named image can otherwise mask a broken export.
+Run the production inert sandbox probe against that loaded image without a
+wallet mount or worker activation. Record the manifest descriptor digest as
 `oci_manifest_sha256`, and record the whole archive's SHA-256 and byte length as
 `oci_archive_sha256` and `oci_archive_size_bytes`. Inspect the config blob and
 require these exact values before preparing a release manifest:
