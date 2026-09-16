@@ -37,3 +37,15 @@ The reviewed funding snapshot is unchanged. New registrations use the existing
 coldkey/IP checks; new funding assertions need a later signed snapshot refresh.
 Registration and endpoint health do not guarantee immediate incentives, recovery
 of registration fees, or protection from deregistration.
+
+## Finalized row observation
+
+At finalized block 9,081,691, UID 0's last update was 9,081,682 and UID 54's
+was 9,081,658. Both were permitted and had 243 positive destinations, compared
+with 226 under the preceding frozen row. Neither row assigned weight to UID 0.
+These were RPC reads pinned to a finalized block, not storage-proof verification.
+
+At that same check, 226 UIDs still had positive consensus and incentive. The
+new rows were finalized, but that observation did not establish positive
+incentives for all 243 destinations. Consensus updates and other validators
+still determine the economic result.
