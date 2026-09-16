@@ -585,14 +585,14 @@ def execute(args: argparse.Namespace) -> dict:
     if args.command == "prepare-endpoint-incumbent":
         from .competition_authorization import SignedEndpointAuthorization
         from .competition_endpoint_execution import prepare_incumbent_job
-        from .competition_runner import OfflineCpuRuntime
+        from .competition_runner import OFFLINE_RUNTIME
         from .policy import ScoringPolicy
 
         return prepare_incumbent_job(
             publication=_load(args.publication, SignedEndpointAuthorization),
             submission_sha256=args.submission_sha256,
             incumbent=_load(args.incumbent, ModelBundle),
-            runtime=_load(args.runtime, OfflineCpuRuntime),
+            runtime=_load(args.runtime, OFFLINE_RUNTIME),
             evaluator_hotkey=args.evaluator_hotkey,
             policy=policy,
             legacy_policy=_load(args.legacy_policy, ScoringPolicy),
@@ -735,9 +735,9 @@ def execute(args: argparse.Namespace) -> dict:
         )
         return receipt.model_dump(mode="json", by_alias=True)
     if args.command == "run-offline-case":
-        from .competition_runner import OfflineCpuRuntime, evaluate_offline_case
+        from .competition_runner import OFFLINE_RUNTIME, evaluate_offline_case
 
-        runtime = _load(args.runtime, OfflineCpuRuntime)
+        runtime = _load(args.runtime, OFFLINE_RUNTIME)
         bundle = _load(args.manifest, ModelBundle)
         with Path(args.video).open("rb") as stream:
             video = stream.read(runtime.maximum_video_bytes + 1)

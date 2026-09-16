@@ -28,7 +28,7 @@ from .competition_publication import (
     SignedCutoffPublication,
     verify_cutoff_publication,
 )
-from .competition_runner import OfflineCpuRuntime
+from .competition_runner import OfflineRuntime
 from .competition_scheduling import _clock
 from .open_competition import (
     CompetitionPolicy,
@@ -63,7 +63,7 @@ class WorkPlan(StrictProtocolModel):
     cutoff: SignedCutoffPublication
     submissions: Annotated[tuple[SignedSubmission, ...], Field(min_length=1, max_length=512)]
     incumbent: ModelBundle
-    runtime: OfflineCpuRuntime
+    runtime: OfflineRuntime
     cases: Annotated[tuple[ExecutionCase, ...], Field(min_length=3, max_length=2048)]
     evaluators: Annotated[tuple[Hotkey, ...], Field(min_length=1, max_length=64)]
     chain_submission_authorized: Literal[False] = False
@@ -83,7 +83,7 @@ class RoundWorkAssets(StrictProtocolModel):
     schema_: Literal["umi-round-work-assets/1"] = Field(alias="schema")
     suite_sha256: Hex32
     incumbent: ModelBundle
-    runtime: OfflineCpuRuntime
+    runtime: OfflineRuntime
     videos: Annotated[tuple[Video, ...], Field(min_length=3, max_length=2048)]
 
 

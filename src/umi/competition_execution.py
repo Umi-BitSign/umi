@@ -27,7 +27,7 @@ from .competition_chain import RegistrationCapture
 from .competition_evidence import EvaluatorRunRecord
 from .competition_runner import (
     OfflineCaseExecution,
-    OfflineCpuRuntime,
+    OfflineRuntime,
     execute_offline_case,
     validate_case_execution,
     verify_runtime,
@@ -70,7 +70,7 @@ class ModelEvaluationJob(StrictProtocolModel):
     round: EvaluationRound
     submission: SignedSubmission
     incumbent: ModelBundle
-    runtime: OfflineCpuRuntime
+    runtime: OfflineRuntime
     evaluator_hotkey: Hotkey
     cases: Annotated[tuple[ExecutionCase, ...], Field(min_length=3, max_length=2048)]
 
