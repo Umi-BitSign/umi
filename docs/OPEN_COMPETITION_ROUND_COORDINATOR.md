@@ -66,6 +66,41 @@ expires; the service never rewrites its deadlines or turns delay into miner faul
 Retained preparation is recovered with its original roster and windows after a
 crash. Replacing a used plan creates a durable conflict hold.
 
+### Seven-day contribution intake
+
+The first contribution round targets seven days of intake. Its intake opening
+and its roster-closing window are different times. `not_before_block` is the
+earliest block at which the coordinator may **close the roster**, not the time
+at which miners may start submitting. Once that block arrives, the coordinator
+may prepare the round on its next successful poll; it does not wait until
+`admission_close_by_block`. Set the earliest close at or after the announced
+end of intake, with a bounded polling margin before the latest close.
+
+For an intake opening at block `I` and evaluation ending at block `E`, an early
+submission must remain valid through `E`. Check both:
+
+```text
+policy.maximum_submission_lifetime_blocks >= E - I
+submission.valid_through_block >= E
+```
+
+The policy's own validity must cover the complete round, including reveal,
+evidence cutoff and settlement. A larger lifetime cap does not extend existing
+signed submissions. A miner with a shorter submission needs to sign and admit
+a higher-sequence replacement before the roster closes. Publish these
+requirements before intake; do not silently extend a signature's validity.
+
+At a planning assumption of 12 seconds per block, seven days is 50,400 blocks.
+The staged 7,200-block rehearsal lifetime cannot cover that intake plus its
+evaluation window for an opening-day submission. Set the launch lifetime and
+all cutoffs together. Block cutoffs are authoritative; wall-clock dates are
+estimates. These figures are planning examples, not an activated schedule.
+
+Round preparation excludes submissions that expire before evaluation ends,
+even if they are still current at roster close. Such an exclusion is not a
+failed translation or a zero-quality score. Do not advertise an admission
+receipt alone as a guarantee of inclusion in the first round.
+
 ```sh
 umi-competition --policy /ABSOLUTE/POLICY.json serve-round-coordinator \
   --config /ABSOLUTE/ROUND-COORDINATOR.json
