@@ -214,7 +214,10 @@ def test_serve_intake_uses_one_loopback_worker_without_proxy_trust(config, polic
     calls = []
     app = object()
     monkeypatch.setattr("umi.competition_service.create_intake_app", lambda *_: app)
-    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(
+        "umi.competition_service_supervision.serve_with_finality_supervision",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
     serve_intake(config, policy)
     assert calls == [
         (

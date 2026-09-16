@@ -364,6 +364,9 @@ async def test_evaluator_work_lifecycle_drains_task_and_closes_both_observers(
     config = evaluator_config(setup, tmp_path)
 
     class Owned:
+        def ensure_observer_running(self):
+            pass
+
         def __init__(self, name):
             self.name = name
 

@@ -483,6 +483,7 @@ async def run_dispatch(config, policy, legacy_policy, *, once=False, report=None
             handlers.append(sig)
         await provider.start()
         while not stop.is_set():
+            provider.ensure_observer_running()
             status = await dispatcher.poll_once()
             if report is not None:
                 report(status)

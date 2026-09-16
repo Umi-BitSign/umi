@@ -1124,6 +1124,9 @@ def create_round_app(
                 os.close(lease)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.state.finality_providers = (provider,) + (
+        (coordinator.transport_provider,) if coordinator.transport_provider is not None else ()
+    )
     if coordinator.work_queue is not None:
         from .competition_work_transport import attach_work_route
 
@@ -1395,10 +1398,10 @@ class RoundSigningClient:
 
 
 def serve_rounds(config, policy, *, legacy=None):
-    import uvicorn
+    from .competition_service_supervision import serve_with_finality_supervision
 
     config = RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
-    uvicorn.run(
+    serve_with_finality_supervision(
         create_round_app(
             config,
             policy,

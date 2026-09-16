@@ -118,6 +118,14 @@ references and request bodies are not printed. Alert on repeated failures,
 held plans, missed windows and capacity exhaustion. Shutdown joins the polling
 task before closing the finality provider and releasing the instance lock.
 
+Run coordinator, intake, exchange, dispatcher and evaluator commands under a
+service manager with failure restart and rate limits. A terminated owned
+observer now exits the parent service even when no work is queued. HTTP shutdown
+drains requests before closing providers; journals are retained. A live observer
+waiting for a head is not restarted by this check. Freshness and proof checks
+continue to reject unusable observations. An active process alone does not prove
+that the service has a fresh finalized head.
+
 Tests cover owned snapshot disagreement, signing-window expiry, independent
 hotkey signatures, quorum certificates, lost acknowledgments, crash recovery,
 conflict retention, archive starvation, request replay and byte limits, and
