@@ -174,6 +174,31 @@ async def test_lost_ack_retry_reuses_vote_after_signing_window_and_restart(setup
 
 
 @pytest.mark.asyncio
+async def test_cutoff_vote_retains_signed_owned_proof_for_later_work(setup):
+    proposal = await prepare(setup)
+    client = setup.clients[0]
+    await client.endorse(proposal)
+    raw = client.journal.get("owned-proof", "1")
+    assert raw is not None
+    assert (
+        rounds.verified_local_cutoff_snapshot(
+            raw, proposal, setup.policy, setup.workers[0].config.evaluator_hotkey
+        )
+        == proposal.cutoff.registration_snapshot
+    )
+    setup.provider.block = 131
+    await client.endorse(proposal)
+    assert client.journal.get("owned-proof", "1") == raw
+    assert setup.workers[0].provider.history == [120]
+    altered = json.loads(canonical_json_bytes(raw))
+    altered["proof"]["observed"]["block"] += 1
+    with pytest.raises(ValueError):
+        rounds.verified_local_cutoff_snapshot(
+            altered, proposal, setup.policy, setup.workers[0].config.evaluator_hotkey
+        )
+
+
+@pytest.mark.asyncio
 async def test_proof_failure_does_not_reserve_sequence_or_sign(setup):
     proposal = await prepare(setup)
     provider = setup.workers[0].provider

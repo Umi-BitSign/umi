@@ -27,6 +27,11 @@ contributor reward. The worker does not choose a new initial baseline from an
 incoming work proposal. The baseline, policy and later signed promotions must
 agree across participating operators.
 
+Repeat this initialization check when creating a replacement review directory.
+Copying evaluator configuration and preserving the archive does not initialize
+the new database. Confirm its baseline history before preparing the first round;
+an empty review store cannot endorse work against the coordinator's incumbent.
+
 The review store has a persistent role separate from the coordinator's intake.
 Opening an intake database as evaluator history is rejected. Existing manually
 seeded rehearsal databases cannot be reclassified. Keep them as historical test
@@ -37,8 +42,21 @@ live bridge validator uses this successor store.
 
 Before signing a work proposal, the evaluator checks its own prior cutoff vote
 and suite reservation. It verifies the quorum certificate over the exact roster
-and schedule, and obtains the cutoff registration snapshot from its own
-historical finality provider. It then reads its current finalized head.
+and schedule, and checks the cutoff registration snapshot against its own retained
+proof observation. The round signer records a locally signed proof receipt while
+the snapshot is fresh, before signing the cutoff vote. That receipt binds the
+exact proposal, owned execution boundary and observation boundary. Work signing
+checks the original vote, suite reservation, proof-receipt signature and snapshot
+binding, then reads a fresh current finalized head. This permits a verified
+historical cutoff to remain usable after its original snapshot stops being a
+fresh head. The execution and issue deadlines remain unchanged.
+
+Old journals without a proof receipt still require a fresh independent collection
+from the historical finality provider. A missing receipt cannot be created
+retrospectively from coordinator data. Invalid or mismatched retained receipts
+hold work rather than triggering a fallback. These evaluator-local receipts are
+signed observations, not portable finality proofs or proof of independent
+administration.
 
 The store atomically retains the signed cutoff, complete signed roster and
 actual receipt block. The first receipt must arrive before evaluation closes.

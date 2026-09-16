@@ -14,8 +14,14 @@ from umi.competition_evaluator import SignedEvaluationOrder, validate_order
 from umi.competition_execution import execution_boundary
 from umi.competition_publication import PublicationReplayLimits, sign_cutoff_publication
 from umi.competition_review_history import EvaluatorReviewStore
-from umi.competition_rounds import CutoffEndorsement, RoundJournal, RoundProposal
-from umi.open_competition import digest
+from umi.competition_rounds import (
+    CutoffEndorsement,
+    LocalCutoffProof,
+    RoundJournal,
+    RoundProposal,
+    SignedLocalCutoffProof,
+)
+from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_evaluator import Provider
@@ -180,6 +186,92 @@ async def test_independent_signatures_authorize_both_tracks(setup):
         assert b'"references"' not in canonical_json_bytes(statement)
         assert statement.chain_submission_authorized is False
     assert all(len(s.transport_provider.calls) == 2 for s in setup.signers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [None, "tamper", "wrong_signer", "wrong_proposal", "expired", "missing_vote", "stale_head"],
+)
+async def test_retained_owned_cutoff_proof_survives_historical_age_not_current_checks(
+    setup, tmp_path, fault
+):
+    s = setup
+    signer, worker = s.signers[0], s.workers[0]
+    plan = s.work.plan
+    limits = PublicationReplayLimits(
+        maximum_roster_bytes=16 * 1024**2,
+        maximum_certificate_bytes=16 * 1024**2,
+        maximum_evidence_bytes=16 * 1024**2,
+    )
+    archive = tmp_path / "proof-review-archive"
+    preserve_bundle(plan.incumbent, tmp_path / "incumbent", archive, s.work.policy)
+    worker.review_store = EvaluatorReviewStore(
+        tmp_path / "proof-reviews", s.work.policy, limits=limits
+    )
+    worker.review_store.initialize_baseline(plan.incumbent, archive)
+    slot = str(plan.cutoff.publication.round.sequence)
+    proposal = RoundProposal.model_validate_json(
+        canonical_json_bytes(signer.cutoffs.get("intent", slot))
+    )
+    snap = plan.cutoff.publication.registration_snapshot
+    capture = await Provider(snap.block).collect()
+    capture = replace(
+        capture,
+        snapshot=snap,
+        provenance={
+            **capture.provenance,
+            "snapshot_sha256": digest(snap),
+            "block_hash": snap.block_hash,
+        },
+    )
+    proof = LocalCutoffProof(
+        schema="umi-local-cutoff-proof/1",
+        proposal_sha256=digest(proposal),
+        registration=execution_boundary(capture),
+        observed=execution_boundary(capture),
+    )
+    if fault == "wrong_proposal":
+        proof = proof.model_copy(update={"proposal_sha256": "ab" * 32})
+    key = wallet("Eve") if fault == "wrong_signer" else worker.wallet
+    signed = SignedLocalCutoffProof(proof=proof, signature=sign_object(proof, key))
+    if fault == "tamper":
+        signed = signed.model_copy(
+            update={"proof": proof.model_copy(update={"proposal_sha256": "cd" * 32})}
+        )
+    signer.cutoffs.put("owned-proof", slot, signed)
+    if fault == "missing_vote":
+        with signer.cutoffs.transaction() as db:
+            db.execute("DELETE FROM records WHERE kind='vote'")
+    if fault == "expired":
+        worker.provider.block = plan.cutoff.publication.round.evaluation_close_block
+    if fault == "stale_head":
+
+        async def stale_head():
+            raise ValueError("owned finalized head is stale")
+
+        worker.boundary = stale_head
+
+    async def expired_historical_read(height):
+        pytest.fail("retained independently signed cutoff must not be recollected as a fresh head")
+
+    worker.provider.collect_at = expired_historical_read
+    if fault is not None:
+        with pytest.raises(ValueError):
+            await signer.endorse(s.model)
+        assert signer.journal.get("vote", signing.statement_slot(s.model)) is None
+        assert not worker.review_store.submissions()
+    else:
+        vote = await signer.endorse(s.model)
+        assert worker.review_store.submissions()
+        restarted = signing.IndependentWorkSigner(
+            worker,
+            signer.cutoffs,
+            legacy=s.work.item.legacy_policy,
+            transport_provider=signer.transport_provider,
+            minimum_issue_ms=1000,
+        )
+        assert await restarted.endorse(s.model) == vote
 
 
 @pytest.mark.asyncio
