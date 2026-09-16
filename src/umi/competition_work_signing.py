@@ -21,6 +21,7 @@ from .competition_rounds import (
     CutoffEndorsement,
     RoundJournal,
     RoundProposal,
+    verified_local_cutoff_snapshot,
     verify_endorsement,
 )
 from .competition_work_plans import (
@@ -136,6 +137,7 @@ class IndependentWorkSigner:
             or proposal.submissions != statement.plan.submissions
         ):
             raise ValueError("work signer cutoff reservation differs from this plan")
+        return proposal
 
     async def _endpoint_window(self, statement):
         body = statement.body
@@ -210,18 +212,28 @@ class IndependentWorkSigner:
                 identity(k) for k in statement.plan.evaluators
             }:
                 raise ValueError("work signer is not a nominated evaluator")
-            self._reserved_cutoff(statement)
+            proposal = self._reserved_cutoff(statement)
             reviews = getattr(self.worker, "review_store", None)
             if reviews is not None:
                 snapshot = statement.plan.cutoff.publication.registration_snapshot
-                capture = await self.worker.provider.collect_at(snapshot.block)
-                execution_boundary(capture)
+                retained = self.cutoffs.get("owned-proof", str(statement.body.round.sequence))
+                if retained is None:
+                    # Older journals have no authenticated proof receipt. They
+                    # still require an independent fresh collection, never a
+                    # coordinator snapshot substituted for local verification.
+                    capture = await self.worker.provider.collect_at(snapshot.block)
+                    execution_boundary(capture)
+                    snapshot = capture.snapshot
+                else:
+                    snapshot = verified_local_cutoff_snapshot(
+                        retained, proposal, self.worker.policy, self.worker.config.evaluator_hotkey
+                    )
                 head = await self.worker.boundary()
                 self.journal.observe(head.block)
                 reviews.observe_cutoff(
                     statement.plan.cutoff,
                     statement.plan.submissions,
-                    snapshot=capture.snapshot,
+                    snapshot=snapshot,
                     observed_block=head.block,
                 )
             slot = statement_slot(statement)

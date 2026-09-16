@@ -26,7 +26,7 @@ from starlette.responses import Response
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_client import validate_intake_origin
 from .competition_evaluator import Directory, _lock_file, _private, _publish, _read
-from .competition_execution import execution_boundary
+from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_package import CompetitionPackageLimits, CompetitionReleaseIdentity
 from .competition_promotion_delivery import ReviewedPromotion
 from .competition_publication import (
@@ -1269,6 +1269,43 @@ async def request_round(origin, signed, *, transport=None):
     return reply
 
 
+class LocalCutoffProof(StrictProtocolModel):
+    """Evaluator-local receipt for the owned proof checked before its cutoff vote.
+
+    This is not a portable finality proof or an authority to issue work. The
+    signature binds a retained local observation across separate signing tasks.
+    """
+
+    schema_: Literal["umi-local-cutoff-proof/1"] = Field(alias="schema")
+    proposal_sha256: Hex32
+    registration: ExecutionBoundary
+    observed: ExecutionBoundary
+
+
+class SignedLocalCutoffProof(StrictProtocolModel):
+    proof: LocalCutoffProof
+    signature: Signature
+
+
+def verified_local_cutoff_snapshot(raw, proposal, policy, evaluator_hotkey):
+    receipt = SignedLocalCutoffProof.model_validate_json(canonical_json_bytes(raw))
+    proof = receipt.proof
+    verify_signature(proof, receipt.signature)
+    snapshot = proposal.cutoff.registration_snapshot
+    if (
+        identity(receipt.signature.hotkey) != identity(evaluator_hotkey)
+        or proof.proposal_sha256 != digest(proposal)
+        or proof.registration.block != snapshot.block
+        or proof.registration.block_hash != snapshot.block_hash
+        or proof.registration.snapshot_sha256 != digest(snapshot)
+        or not snapshot.block
+        <= proof.observed.block
+        <= min(proposal.signing_close_block, snapshot.block + policy.maximum_snapshot_age_blocks)
+    ):
+        raise ValueError("local cutoff proof differs from its original owned observation")
+    return snapshot
+
+
 class RoundSigningClient:
     def __init__(self, worker, origin, *, transport=None):
         self.worker, self.origin, self.transport = worker, validate_intake_origin(origin), transport
@@ -1329,7 +1366,7 @@ class RoundSigningClient:
             ):
                 raise ValueError("round proposal snapshot is not recent")
             capture = await worker.provider.collect_at(snapshot.block)
-            execution_boundary(capture)
+            registration_boundary = execution_boundary(capture)
             if capture.snapshot != snapshot:
                 raise ValueError("independent registration snapshot differs from proposal")
             current = await worker.boundary()
@@ -1347,6 +1384,25 @@ class RoundSigningClient:
             self.journal.put(
                 "suite", proposal.cutoff.round.suite_sha256, {"proposal": digest(proposal)}
             )
+            prior_proof = self.journal.get("owned-proof", slot)
+            if prior_proof is None:
+                proof = LocalCutoffProof(
+                    schema="umi-local-cutoff-proof/1",
+                    proposal_sha256=digest(proposal),
+                    registration=registration_boundary,
+                    observed=current,
+                )
+                prior_proof = SignedLocalCutoffProof(
+                    proof=proof, signature=sign_object(proof, worker.wallet)
+                )
+                verified_local_cutoff_snapshot(
+                    prior_proof, proposal, worker.policy, worker.config.evaluator_hotkey
+                )
+                self.journal.put("owned-proof", slot, prior_proof)
+            else:
+                verified_local_cutoff_snapshot(
+                    prior_proof, proposal, worker.policy, worker.config.evaluator_hotkey
+                )
             vote = CutoffEndorsement(
                 proposal_sha256=digest(proposal),
                 signature=sign_cutoff_publication(proposal.cutoff, worker.wallet),
