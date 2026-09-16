@@ -16,7 +16,7 @@ from pydantic import Field
 
 from .competition_authorization import EndpointAuthorizationPublication, validate_publication_body
 from .competition_evaluator import EvaluationOrder, validate_order_body
-from .competition_execution import execution_boundary
+from .competition_execution import registration_boundary
 from .competition_rounds import (
     CutoffEndorsement,
     RoundJournal,
@@ -223,7 +223,7 @@ class IndependentWorkSigner:
                     # still require an independent fresh collection, never a
                     # coordinator snapshot substituted for local verification.
                     capture = await self.worker.provider.collect_at(snapshot.block)
-                    execution_boundary(capture)
+                    registration_boundary(capture)
                     snapshot = capture.snapshot
                 else:
                     snapshot = verified_local_cutoff_snapshot(
