@@ -29,6 +29,7 @@ from .competition_authorization import (
     validate_transport_cohort,
 )
 from .competition_miner_feed import FeedEndpointAuthorizationAuthority
+from .competition_miner_finality import CompetitionMinerFinality
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
 from .grandpa_finality_supervisor import DurableGrandpaFinalityPort
@@ -110,7 +111,7 @@ class MinerRuntime:
         repr=False,
         compare=False,
     )
-    finality_service: DurableGrandpaFinalityPort | None = field(
+    finality_service: DurableGrandpaFinalityPort | CompetitionMinerFinality | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -206,9 +207,14 @@ class MinerRuntime:
         if not callable(getattr(self.window_authority, "authorize", None)):
             raise TypeError("window authority must implement request authorization")
         if self.finality_service is not None and not isinstance(
-            self.finality_service, DurableGrandpaFinalityPort
+            self.finality_service, (DurableGrandpaFinalityPort, CompetitionMinerFinality)
         ):
             raise TypeError("finality service must be the durable GRANDPA implementation")
+        if (
+            isinstance(self.finality_service, CompetitionMinerFinality)
+            and self.runtime_mode != "competition_no_weight"
+        ):
+            raise ValueError("historical miner finality requires competition mode")
         if not self.allowed_validator_hotkeys:
             raise ValueError("at least one policy validator hotkey is required")
         from .encoding import account_id32
@@ -1157,6 +1163,9 @@ async def _run_translator_lifecycle(runtime: MinerRuntime, operation: str) -> No
 def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     import bittensor as bt
 
+    chain_config_path = getattr(args, "competition_chain_config", None)
+    if chain_config_path is not None and getattr(args, "competition_policy", None) is None:
+        raise ValueError("competition chain configuration requires a competition policy")
     feed_origin = getattr(args, "competition_feed", None)
     if feed_origin is not None and getattr(args, "competition_authorization", None) is not None:
         raise ValueError("choose either a competition feed or a static authorization")
@@ -1250,17 +1259,35 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     finality_pin = policy.implementation_pins.finality_verifier
     if finality_pin is None:
         raise ValueError("miner live policy is missing its finality-verifier pin")
-    finality = DurableGrandpaFinalityPort.from_policy(
-        policy,
-        target_triple=args.target_triple,
-        binary_path=args.finality_verifier_binary,
-        chain_spec_path=args.finality_chain_spec,
-        state_path=args.finality_state,
-        initial_minimum_finalized_block=max(
-            finality_pin.bootstrap_block_number,
-            policy.activation_block - 1,
-        ),
-    )
+    if chain_config_path is not None:
+        from .competition_chain import CompetitionChainConfig
+
+        if competition_policy is None:
+            raise ValueError("competition chain configuration requires a competition policy")
+        chain_config = CompetitionChainConfig.model_validate_json(
+            _read_startup_file(chain_config_path, label="competition chain configuration")
+        )
+        if (
+            chain_config.target_triple != args.target_triple
+            or chain_config.finality_binary != args.finality_verifier_binary
+            or chain_config.chain_spec != args.finality_chain_spec
+        ):
+            raise ValueError(
+                "competition chain configuration differs from miner verifier arguments"
+            )
+        finality = CompetitionMinerFinality(chain_config, competition_policy, policy)
+    else:
+        finality = DurableGrandpaFinalityPort.from_policy(
+            policy,
+            target_triple=args.target_triple,
+            binary_path=args.finality_verifier_binary,
+            chain_spec_path=args.finality_chain_spec,
+            state_path=args.finality_state,
+            initial_minimum_finalized_block=max(
+                finality_pin.bootstrap_block_number,
+                policy.activation_block - 1,
+            ),
+        )
     competition_authority = None
     if competition_policy is not None:
         authority_inputs = dict(
@@ -1498,6 +1525,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy", required=True, help="canonical inactive scoring policy")
     parser.add_argument(
         "--competition-policy", help="reviewed successor policy for weight-disabled requests"
+    )
+    parser.add_argument(
+        "--competition-chain-config",
+        help="canonical owned-finality/archive-proof configuration for historical admission",
     )
     assignment_source = parser.add_mutually_exclusive_group()
     assignment_source.add_argument(
