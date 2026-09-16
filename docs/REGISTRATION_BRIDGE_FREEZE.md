@@ -1,5 +1,10 @@
 # Registration bridge reward freeze
 
+Historical policy: signed directive sequence 18 lifted this freeze on
+September 16, 2026. See the [reopening record](REGISTRATION_BRIDGE_REOPENED_2026-09-16.md).
+The description below records the superseded policy; its signed bytes and
+receipts remain unchanged.
+
 The signed `umi-registration-bridge-policy-body/4` policy restricts bridge
 reward eligibility to the registrations in its finalized snapshot. It matches
 UID, hotkey, and registration block. Replacing a UID or re-registering a hotkey

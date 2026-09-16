@@ -7,6 +7,12 @@ pilot rule. It checks registered SN78 miners' HTTPS availability and gives each
 qualifying coldkey/IP/funding group an equal total weight, divided among its passing UIDs.
 It does not score translations or require a running model.
 
+The temporary registration-snapshot freeze was
+[lifted on September 16](REGISTRATION_BRIDGE_REOPENED_2026-09-16.md).
+New and re-registered hotkeys can qualify after finalization and health checks.
+The observed registration fee floor was 0.75 TAO at block 9,081,644;
+check the current quote before paying. Registration does not guarantee rewards.
+
 Both UMI validators, UID 0 and UID 54, have finalized bridge rows. See the
 [funding-cap deployment record](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
 for the applied policy and exact rows. The earlier
