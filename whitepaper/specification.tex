@@ -233,8 +233,9 @@ utterances are outside this launch profile. Version 1 retains its 15\%/35\%/50\%
 three-task weights. Compute the arithmetic mean of the case scores within each
 stratum, then sum those means multiplied by their respective weights.
 Every required stratum must meet the policy\textquotesingle s minimum case count.
-Suites contain at least three cases in total. Policy and suite versions must
-match; unknown or extra strata are rejected. The two-task score is not directly
+Suites contain at least three cases in total. Policy version 1 uses suite version
+1; policy versions 2 and 3 use suite version 2. Unknown or extra strata are
+rejected. The two-task score is not directly
 comparable to a historical three-task score. This change does not alter the
 70/30 reward split or the approved 120-second inference limit.
 The normalization and scoring functions are defined in
@@ -469,10 +470,11 @@ activate a split. Endpoint and model-contribution shares sum to 10,000.
 
 The approved initial launch allocation is 7,000 basis points (70\%) for endpoint
 service and 3,000 (30\%) for the current promoted model\textquotesingle s contributor. Both
-reward tracks launch together. The signed activation policy must carry that
-allocation, and activation requires a qualifying preserved promotion with an
-eligible contributor. Approval of the allocation does not activate rewards or
-change the historical bootstrap.
+tracks open together. Under the September 16 approved version 3 policy rule,
+the unallocated model share is burned until a model qualifies. The imported
+baseline receives no special award. The first contribution review targets a
+seven-day round whose exact cutoffs must be published before intake opens.
+Approval of the allocation does not activate rewards or change the bootstrap.
 
 For each closed round, qualifying endpoint submissions receive their share
 in proportion to their exact quality scores. Scores below the policy floor
@@ -489,11 +491,20 @@ not winner-takes-all subnet emissions. A contributor may separately operate
 an endpoint and qualify for the service share. There are no automatic
 perpetual royalties after replacement.
 
-If a nonzero track allocation has no qualifying recipient, the round cannot
-produce a successor row under the initial profile. It must report the reason
-and refrain from submission. It must not quietly donate the missing share,
-normalize it onto another track, fabricate scores or redirect it to an
-owner UID. A later policy may define a different explicit fallback.
+Version 3 includes the unawarded model share in the complete row at an explicit
+burn destination. The provider proves the registered subnet-owner hotkey and
+Burn mode at the same finalized state root, and the weight worker rechecks them
+before writing. Missing or changed proof holds the write. This burns the miner
+incentive directed there, not the separate owner cut or validator dividends.
+Consensus and chain emission rules determine actual payments; a 70/30 weight
+allocation does not guarantee the same split of historical subnet emission.
+See the implementation\textquotesingle s model-allocation document for the proof contract.
+
+Versions 1 and 2 retain their missing-recipient hold. Version 3 still holds a
+round with no qualifying endpoint evidence, or an already awarded contributor
+that loses eligibility. The unawarded share never accrues for retroactive payout
+and never moves to endpoints. Model promotion retains its rights and quality
+checks; an endpoint score alone cannot qualify an artifact for preservation.
 
 Resolve recipients against a common finalized SN78 snapshot. Merge both
 track contributions by current UID, normalize the complete vector using

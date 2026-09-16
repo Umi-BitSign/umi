@@ -12,7 +12,8 @@ required. The approved initial evaluator is UID 0 alone, under the disclosed
 [single-operator launch profile](OPEN_COMPETITION_UID0_LAUNCH.md). This does not
 claim independent reproduction by UID 54 or activate competition rewards.
 
-The approved initial scoring profile is policy/suite version 2: one authentic
+The approved initial scoring profile uses suite version 2 and policy version 2
+or 3: one authentic
 reference per clip, fingerspelling CER weighted 3/13 and continuous-signing WER
 weighted 10/13. Version 1 retains its three-task, three-to-five-reference rules.
 Scheduling and replay must use the same versioned policy. The 70/30 reward split
@@ -193,11 +194,11 @@ promoted model's contributor for the initial open-competition launch. This
 allocation must be included in the reviewed signed launch policy; this document
 does not activate it or change the existing bootstrap.
 
-The operator selected a simultaneous launch of endpoint and model-contribution
-rewards. Activation therefore requires a qualifying preserved promotion with an
-eligible contributor, plus qualifying endpoint evidence. Do not silently
-substitute an endpoint-only launch or
-assign the imported baseline a contributor to bypass this requirement.
+The operator approved opening both tracks with 70% endpoint allocation and
+burning the unallocated 30% until a model qualifies. Policy version 3 makes this
+explicit and proves the burn destination. The first contribution review targets
+a seven-day round with published cutoffs. See the
+[model allocation rule](OPEN_COMPETITION_MODEL_ALLOCATION.md).
 
 The contribution share belongs to the current promoted model's registered
 contributor while fresh evaluation qualifies it. The evaluator can run the
@@ -205,12 +206,11 @@ archived incumbent even when that contributor has no inference server online.
 The endpoint share is proportional to qualifying exact quality scores. A new
 promotion replaces model attribution prospectively, without perpetual royalties.
 
-An allocated track with no qualifying recipient blocks row projection. The
-initial profile never silently moves that share to another track or burns it.
-The imported initial baseline has no contributor or model-reward recipient.
-Until the first qualifying promotion, the model track must have zero basis
-points or no successor row can be produced. A later change to that split needs
-a new signed policy; promotion does not change the allocation automatically.
+Versions 1 and 2 still block projection when an allocated track has no qualifying
+recipient. Version 3 burns the unawarded model share at its proved destination;
+it never normalizes that share onto endpoints. The imported initial baseline has
+no contributor. After an award, a contributor eligibility failure retains the
+existing hold. A round without qualifying endpoint evidence also remains held.
 The activation policy must also choose explicit quality/resource bounds,
 evaluation groups, licenses, submission cadence and expiry.
 

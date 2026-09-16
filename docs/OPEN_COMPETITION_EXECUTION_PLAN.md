@@ -1,7 +1,9 @@
 # Open-competition execution plan
 
-The approved launch runs both reward tracks together: 70% endpoint service and
-30% for the current qualifying promoted model's contributor. The imported
+The approved launch opens both tracks: 70% endpoint service and 30% for the
+current qualifying promoted model's contributor. Until the first promotion,
+version 3 burns the unallocated 30% under the explicit
+[model allocation rule](OPEN_COMPETITION_MODEL_ALLOCATION.md). The imported
 baseline has no contributor attribution. Neither this plan nor local tests
 activate rewards or extend the signed bootstrap sunset.
 
@@ -104,9 +106,10 @@ The Studio miner is serving in no-weight competition mode. The connected real
 round still needs to prove assignment discovery, authenticated inference,
 evaluation and retained evidence. The imported baseline remains
 `initial_reference_no_reward`, with no promoted contributor attribution.
-The simultaneous 70/30 policy needs a qualifying improved model and its
-model-specific rights approval before it can settle both reward tracks. Passing
-the minimum score alone does not satisfy the promotion margin or stratum checks.
+The approved version 3 launch can settle 70% endpoint and 30% verified burn
+before a model qualifies. Publish the seven-day first contribution round's exact
+cutoffs before intake. Model payment still needs a qualifying improvement and
+model-specific rights approval; the minimum score alone is insufficient.
 
 - [x] Durable assignment publication/claim journal and expiry tests.
 - [x] Owned-finality endpoint origin proof and adversarial tests.

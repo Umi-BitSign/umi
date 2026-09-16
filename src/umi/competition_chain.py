@@ -29,6 +29,7 @@ from .grandpa_finality_supervisor import (
     GrandpaFinalitySupervisorError,
 )
 from .open_competition import (
+    BurnDestination,
     CompetitionPolicy,
     Hex32,
     Registration,
@@ -54,6 +55,32 @@ from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
+
+
+def model_burn_storage_reads(policy):
+    if policy.unallocated_model_burn is None:
+        return ()
+    return (
+        StorageReadSpec("SubtensorModule", "SubnetOwnerHotkey", (78,)),
+        StorageReadSpec("SubtensorModule", "RecycleOrBurn", (78,)),
+    )
+
+
+def verified_model_burn_destination(policy, values, registrations):
+    """Use only decoded storage claims proved against the caller's owned root."""
+    destination = policy.unallocated_model_burn
+    if destination is None:
+        return None
+    owner = _hotkey(values[StorageReadSpec("SubtensorModule", "SubnetOwnerHotkey", (78,))])
+    mode = values[StorageReadSpec("SubtensorModule", "RecycleOrBurn", (78,))]
+    if mode != "Burn" or account_id32(owner) != account_id32(destination.hotkey):
+        raise ValueError("model burn owner or mode differs from signed policy")
+    if not any(
+        r.uid == destination.uid and account_id32(r.hotkey) == account_id32(owner)
+        for r in registrations
+    ):
+        raise ValueError("model burn destination registration changed")
+    return BurnDestination(uid=destination.uid, hotkey=destination.hotkey, mode="Burn")
 
 
 class _AwaitingFinality(ValueError):
@@ -687,6 +714,7 @@ class FinalizedRegistrationProvider:
                     StorageReadSpec("Timestamp", "Now"),
                     StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
                     StorageReadSpec("SubtensorModule", "SubnetworkN", (78,)),
+                    *model_burn_storage_reads(self.policy),
                 ),
             )
             batches.append(base)
@@ -740,13 +768,17 @@ class FinalizedRegistrationProvider:
             if newest.block_number - ref.block_number > self.policy.maximum_snapshot_age_blocks:
                 raise ValueError("registration snapshot became stale during proof collection")
             self._fresh(timestamp)
+            registrations = tuple(
+                Registration(uid=uid, hotkey=hotkey) for uid, hotkey in enumerate(hotkeys)
+            )
             snapshot = RegistrationSnapshot(
                 network="finney",
                 netuid=78,
                 block=ref.block_number,
                 block_hash=ref.block_hash,
-                registrations=tuple(
-                    Registration(uid=uid, hotkey=hotkey) for uid, hotkey in enumerate(hotkeys)
+                registrations=registrations,
+                burn_destination=verified_model_burn_destination(
+                    self.policy, values, registrations
                 ),
             )
             evidence = canonical_json_bytes(
@@ -860,8 +892,21 @@ class FinalizedRegistrationProvider:
             raise ValueError("registration storage proof uses another runtime or state root")
         if {read.spec for read in batch.reads} != set(specs) or len(batch.reads) != len(specs):
             raise ValueError("registration storage response is incomplete or duplicated")
-        if any(read.raw_value is None for read in batch.reads):
+        if any(
+            read.raw_value is None
+            and not (
+                self.policy.unallocated_model_burn is not None
+                and read.spec == StorageReadSpec("SubtensorModule", "RecycleOrBurn", (78,))
+                and read.decoded_value == "Burn"
+            )
+            for read in batch.reads
+        ):
             raise ValueError("registration storage membership is incomplete")
+        # RecycleOrBurn is ValueQuery storage. Verified non-membership can
+        # decode to Burn through the pinned metadata default. The collector
+        # verifies that absence against the same state root before decoding;
+        # this exception never supplies a local fallback or permits missing
+        # owner, UID mapping, timestamp, or registration claims.
         return batch
 
     def _check_prior(self, ref: FinalizedSnapshotRef) -> None:

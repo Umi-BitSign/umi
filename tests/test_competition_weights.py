@@ -35,6 +35,7 @@ from umi.validator_chain import ValidatorChainError
 from .test_competition_chain import _hash, _Runtime
 from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
+from .test_competition_model_burn import burn_policy
 from .test_competition_package import package_case as package_case
 from .test_competition_package import package_limits as package_limits
 from .test_competition_package import release_identity as release_identity
@@ -402,6 +403,32 @@ async def test_observation_cannot_be_deserialized_rebound_or_expired(weight_case
     ):
         with pytest.raises(ValueError, match="owned proof"):
             validate_owned_weight_observation(changed)
+
+
+async def test_weight_provider_reproves_burn_destination_before_submission(weight_case):
+    item = weight_case
+    # Isolate proof acquisition from the older package fixture. No transaction.
+    policy = burn_policy(item.policy, owner="Alice", uid=6)
+    item.provider.policy = policy
+    item.finality.policy = policy
+    item.rpc.values[("SubtensorModule", "SubnetOwnerHotkey", (78,))] = wallet(
+        "Alice"
+    ).hotkey.ss58_address
+    item.rpc.values[("SubtensorModule", "RecycleOrBurn", (78,))] = "Burn"
+    observation = await item.provider.collect_weights(item.hotkey, item.recipients)
+    assert observation.burn_destination == policy.unallocated_model_burn
+    validate_owned_weight_observation(observation)
+    with pytest.raises(ValueError, match="owned proof"):
+        validate_owned_weight_observation(replace(observation, burn_destination=None))
+    item.rpc.values[("SubtensorModule", "RecycleOrBurn", (78,))] = "Recycle"
+    with pytest.raises(ValueError, match="burn owner or mode"):
+        await item.provider.collect_weights(item.hotkey, item.recipients)
+    item.rpc.values[("SubtensorModule", "RecycleOrBurn", (78,))] = "Burn"
+    item.rpc.values[("SubtensorModule", "SubnetOwnerHotkey", (78,))] = wallet(
+        "Bob"
+    ).hotkey.ss58_address
+    with pytest.raises(ValueError, match="burn owner or mode"):
+        await item.provider.collect_weights(item.hotkey, item.recipients)
 
 
 def test_authorization_domain_and_scope_binding(weight_case):

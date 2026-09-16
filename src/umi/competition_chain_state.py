@@ -22,7 +22,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .chain_evidence import FinalizedSnapshotRef
-from .competition_chain import FinalizedRegistrationProvider, _AwaitingFinality, _hotkey, _uint
+from .competition_chain import (
+    FinalizedRegistrationProvider,
+    _AwaitingFinality,
+    _hotkey,
+    _uint,
+    model_burn_storage_reads,
+    verified_model_burn_destination,
+)
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -35,7 +42,7 @@ from .grandpa_finality_supervisor import (
     GrandpaFinalitySupervisorError,
     GrandpaFinalitySupervisorLimits,
 )
-from .open_competition import Registration, digest
+from .open_competition import BurnDestination, Registration, digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import MAX_CODE_BYTES, ExecutedRuntimeContext, RuntimeMetadataExecutor
 from .simple_bootstrap_validator import _manifest_anchor_state
@@ -194,6 +201,7 @@ class OwnedCompetitionChainObservation:
     expires_monotonic_ns: int
     runtime: PinnedRuntimeContext = field(repr=False)
     evidence: bytes = field(repr=False)
+    burn_destination: BurnDestination | None = None
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
 
@@ -225,6 +233,11 @@ def _binding(observation: OwnedCompetitionChainObservation) -> str:
         if name not in {"runtime", "evidence", "_issuer", "_binding", "snapshot"}
     }
     values["registrations"] = [item.model_dump(mode="json") for item in observation.registrations]
+    values["burn_destination"] = (
+        observation.burn_destination.model_dump(mode="json")
+        if observation.burn_destination is not None
+        else None
+    )
     values["captured_monotonic_ns"] = str(observation.captured_monotonic_ns)
     values["expires_monotonic_ns"] = str(observation.expires_monotonic_ns)
     values["snapshot"] = {
@@ -552,6 +565,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 StorageReadSpec("System", "Account", (hotkey,)),
                 StorageReadSpec("Commitments", "CommitmentOf", (78, hotkey)),
                 StorageReadSpec("SubtensorModule", "SubnetworkN", (78,)),
+                *model_burn_storage_reads(self.policy),
             )
             base = await self._weight_read(runtime, specs)
             values = [read.decoded_value for read in base.reads]
@@ -583,6 +597,11 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             if uid >= registered_uid_count:
                 raise ValueError("validator UID exceeds finalized registration count")
             all_registrations = {uid: Registration(uid=uid, hotkey=hotkey)}
+            if self.policy.unallocated_model_burn is not None:
+                burn = self.policy.unallocated_model_burn
+                if burn.uid == uid and account_id32(burn.hotkey) != account_id32(hotkey):
+                    raise ValueError("validator/burn mapping collision")
+                all_registrations[burn.uid] = Registration(uid=burn.uid, hotkey=burn.hotkey)
             for item in recipients:
                 if item.uid in all_registrations and (
                     account_id32(item.hotkey) != account_id32(all_registrations[item.uid].hotkey)
@@ -699,6 +718,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 chain_config_sha256=digest(self.config),
                 runtime=runtime,
                 evidence=evidence,
+                burn_destination=verified_model_burn_destination(
+                    self.policy, by_spec, tuple(all_registrations.values())
+                ),
                 captured_monotonic_ns=time.monotonic_ns(),
                 expires_monotonic_ns=time.monotonic_ns()
                 + max(0, block.timestamp_ms + self.config.maximum_head_age_ms - self._now_ms())
