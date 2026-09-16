@@ -268,6 +268,34 @@ def test_expired_issue_window_is_never_retimed(setup):
     assert canonical_json_bytes(setup.plan) == before
 
 
+@pytest.mark.parametrize("recheck", [False, True])
+def test_issuance_before_selection_cannot_be_signed_or_blessed_by_later_head(setup, recheck):
+    before = canonical_json_bytes(setup.plan)
+    selection = QUICKNET_GENESIS_MS + (setup.item.schedule.selection_round - 1) * QUICKNET_PERIOD_MS
+    early = replace(setup.options["issuance"], timestamp_ms=selection - 1)
+    options = {**setup.options, "issuance": early, "now_ms": selection - 1}
+    if recheck:
+        options.update(
+            now_ms=selection + 90_000,
+            verification_head=replace(
+                early, height=early.height + 8, timestamp_ms=selection + 90_000
+            ),
+        )
+    with pytest.raises(ValueError, match="usable original issue window"):
+        plans.endpoint_proposals(**options)
+    assert canonical_json_bytes(setup.plan) == before
+
+
+def test_issuance_at_selection_boundary_preserves_original_time_and_height(setup):
+    selection = QUICKNET_GENESIS_MS + (setup.item.schedule.selection_round - 1) * QUICKNET_PERIOD_MS
+    issuance = replace(setup.options["issuance"], timestamp_ms=selection)
+    result = plans.endpoint_proposals(
+        **{**setup.options, "issuance": issuance, "now_ms": selection}
+    )
+    assert result
+    assert all(a.request.issued_block == issuance.height for p in result for a in p.assignments)
+
+
 @pytest.mark.parametrize(
     "fault", [None, "stale", "future", "earlier", "policy", "unowned", "same_height", "expired"]
 )

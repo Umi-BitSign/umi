@@ -23,7 +23,7 @@ from pydantic import Field, model_validator
 from typing_extensions import Self
 
 from .competition_artifacts import verify_preserved_bundle
-from .competition_chain import RegistrationCapture
+from .competition_chain import OwnedFinalityStale, RegistrationCapture
 from .competition_evidence import EvaluatorRunRecord
 from .competition_runner import (
     OfflineCaseExecution,
@@ -55,6 +55,24 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _MAX_EVIDENCE_BYTES = 208 * 1024**2
 _MAX_STEP_BYTES = 48 * 1024
+_FRESH_BOUNDARY_WAIT_SECONDS = 300
+_FRESH_BOUNDARY_POLL_SECONDS = 1
+
+
+async def _fresh_execution_boundary(provider):
+    """Wait for a fresh owned head, without rerunning inference or relaxing proof checks."""
+
+    async def collect():
+        while True:
+            try:
+                return await asyncio.wait_for(provider(), timeout=20)
+            except OwnedFinalityStale:
+                # The caller already retained completed model output. Only this
+                # typed freshness condition is recoverable; proof/binding faults,
+                # provider timeouts and cancellation still fail the job.
+                await asyncio.sleep(_FRESH_BOUNDARY_POLL_SECONDS)
+
+    return await asyncio.wait_for(collect(), timeout=_FRESH_BOUNDARY_WAIT_SECONDS)
 
 
 class ExecutionCase(StrictProtocolModel):
@@ -677,7 +695,7 @@ async def _run_evaluation(
 
     async def boundary():
         nonlocal previous
-        observed = await asyncio.wait_for(boundary_provider(), timeout=20)
+        observed = await _fresh_execution_boundary(boundary_provider)
         observed = ExecutionBoundary.model_validate_json(canonical_json_bytes(observed))
         _ordered(observed, previous, job)
         previous = observed

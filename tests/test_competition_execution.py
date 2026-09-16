@@ -442,6 +442,77 @@ async def test_completed_stdout_is_retained_even_if_post_run_finality_fails(setu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stale_at", [1, 2, 3, 4])
+async def test_temporary_stale_finality_waits_without_repeating_model_runs(
+    setup, tmp_path, monkeypatch, stale_at
+):
+    monkeypatch.setattr(execution, "_FRESH_BOUNDARY_POLL_SECONDS", 0)
+    calls = 0
+
+    async def source():
+        nonlocal calls
+        calls += 1
+        if stale_at <= calls < stale_at + 3:
+            raise execution.OwnedFinalityStale("owned finalized head is stale")
+        return boundary()
+
+    evidence, journal = await run_job(setup, tmp_path, source=source)
+    assert len(evidence.steps) == 6
+    assert len([call for call in setup[-1] if isinstance(call, dict)]) == 6
+    assert calls == 15  # Two successful boundaries per invocation plus three waits.
+    assert journal.status(execution.execution_key(setup[1]))["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_stale_finality_wait_is_bounded_and_retains_pending_output(
+    setup, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(execution, "_FRESH_BOUNDARY_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(execution, "_FRESH_BOUNDARY_POLL_SECONDS", 0)
+    calls = 0
+
+    async def source():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise execution.OwnedFinalityStale("owned finalized head is stale")
+        return boundary()
+
+    with pytest.raises(asyncio.TimeoutError):
+        await run_job(setup, tmp_path, source=source)
+    journal = execution.ExecutionJournal(tmp_path / "journal", setup[0])
+    status = journal.status(execution.execution_key(setup[1]))
+    assert status["status"] == "failed"
+    assert status["retained_steps"] == 0
+    assert status["pending_observations"] == 1
+    assert len([call for call in setup[-1] if isinstance(call, dict)]) == 1
+    with pytest.raises(ValueError, match="automatic rerun refused"):
+        await run_job(setup, tmp_path, source=source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered_block", [124, 141])
+async def test_freshness_recovery_still_rejects_rollback_or_closed_round(
+    setup, tmp_path, monkeypatch, recovered_block
+):
+    monkeypatch.setattr(execution, "_FRESH_BOUNDARY_POLL_SECONDS", 0)
+    calls = 0
+
+    async def source():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return boundary()
+        if calls == 2:
+            raise execution.OwnedFinalityStale("owned finalized head is stale")
+        return boundary(recovered_block)
+
+    with pytest.raises(ValueError):
+        await run_job(setup, tmp_path, source=source)
+    assert len([call for call in setup[-1] if isinstance(call, dict)]) == 1
+
+
+@pytest.mark.asyncio
 async def test_json_escaped_stdout_fits_reserved_capacity(setup, tmp_path):
     policy, job, *_ = setup
     policy = policy.model_copy(update={"maximum_output_bytes": 4096})
