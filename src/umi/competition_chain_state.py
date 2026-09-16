@@ -16,6 +16,7 @@ import re
 import stat
 import time
 import weakref
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ from .grandpa_finality_supervisor import (
 )
 from .open_competition import Registration, digest
 from .protocol import canonical_json_bytes
+from .runtime_metadata import MAX_CODE_BYTES, ExecutedRuntimeContext, RuntimeMetadataExecutor
 from .simple_bootstrap_validator import _manifest_anchor_state
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
@@ -238,7 +240,23 @@ def _binding(observation: OwnedCompetitionChainObservation) -> str:
     values["runtime_version_sha256"] = hashlib.sha256(
         observation.runtime.runtime_version_bytes
     ).hexdigest()
+    if isinstance(observation.runtime, ExecutedRuntimeContext):
+        values["runtime_execution"] = _runtime_execution_evidence(observation.runtime)
     return hashlib.sha256(canonical_json_bytes(values)).hexdigest()
+
+
+def _runtime_execution_evidence(runtime: ExecutedRuntimeContext) -> dict:
+    evidence = runtime.code_evidence
+    return {
+        "executor_sha256": runtime.executor_sha256,
+        "block": evidence.snapshot.block_number,
+        "block_hash": evidence.snapshot.block_hash,
+        "parent_hash": evidence.snapshot.parent_hash,
+        "state_root": evidence.verified_state_root,
+        "key": "0x" + evidence.storage_key.hex(),
+        "value": "0x" + evidence.value.hex(),
+        "proof": ["0x" + node.hex() for node in evidence.proof],
+    }
 
 
 def validate_owned_weight_observation(observation: OwnedCompetitionChainObservation) -> None:
@@ -260,6 +278,8 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
     In-process port injections exist only for tests. Production configuration
     never accepts an observation JSON file or an alternative authority adapter.
     """
+
+    _supports_executed_runtime = True
 
     def __init__(self, *args, **kwargs):
         self._cache_lease = None
@@ -289,6 +309,63 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     maximum_proof_bytes=8 * 1024**2,
                 ),
             )
+        self._runtime_executor = None
+        self._runtime_proofs = None
+        if self.config.runtime_metadata_binary is not None:
+            self._runtime_executor = RuntimeMetadataExecutor(
+                binary_path=Path(self.config.runtime_metadata_binary),
+                expected_sha256=self.config.runtime_metadata_binary_sha256,
+            )
+            # A separate raw-key collector prevents an enlarged :code ceiling
+            # from weakening ordinary account/weight storage limits.
+            self._runtime_proofs = (
+                FinalizedProofCollector(
+                    BittensorRawJsonRpc(SimpleNamespace(endpoint=self.config.rpc_url)),
+                    finality=self._finality,
+                    verifier=SubprocessStorageProofVerifier(
+                        binary_path=self.config.proof_binary,
+                        expected_sha256=self.config.proof_binary_sha256,
+                    ),
+                    limits=ProofCollectionLimits(
+                        maximum_storage_keys=1,
+                        maximum_storage_value_bytes=MAX_CODE_BYTES,
+                        maximum_storage_values_bytes=MAX_CODE_BYTES,
+                        maximum_proof_node_bytes=MAX_CODE_BYTES,
+                        maximum_proof_bytes=MAX_CODE_BYTES + 1024**2,
+                    ),
+                )
+                if self._owned
+                else self._proofs
+            )
+
+    async def _runtime_context(self, ref):
+        if self._runtime_executor is None:
+            return await super()._runtime_context(ref)
+        evidence = await self._runtime_proofs.storage_evidence(ref, b":code")
+        task = asyncio.create_task(asyncio.to_thread(self._runtime_executor.execute, ref, evidence))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Retain the collection lock until the bounded subprocess exits.
+            # A cancelled collection must not leave concurrent executors behind.
+            with suppress(Exception):
+                await task
+            raise
+
+    def _validate_runtime_context(self, runtime, ref):
+        if not isinstance(runtime, PinnedRuntimeContext) or runtime.snapshot != ref:
+            raise ValueError("weight runtime binding mismatch")
+        if self._runtime_executor is None:
+            if isinstance(runtime, ExecutedRuntimeContext) or runtime.pin != self._runtime_pin:
+                raise ValueError("weight runtime binding mismatch")
+        elif (
+            type(runtime) is not ExecutedRuntimeContext
+            or runtime.executor_sha256 != self.config.runtime_metadata_binary_sha256
+            or runtime.code_evidence.snapshot != ref
+            or runtime.code_evidence.verified_state_root != ref.state_root
+            or runtime.code_evidence.storage_key != b":code"
+        ):
+            raise ValueError("weight executed runtime binding mismatch")
 
     def _release_cache_lease(self):
         if self._cache_lease is not None:
@@ -458,10 +535,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             self._check_finality(ref, block)
             self._fresh(block.timestamp_ms)
             runtime = await self._runtime_context(ref)
-            if not isinstance(runtime, PinnedRuntimeContext) or (
-                runtime.snapshot != ref or runtime.pin != self._runtime_pin
-            ):
-                raise ValueError("weight runtime binding mismatch")
+            self._validate_runtime_context(runtime, ref)
             specs = (
                 StorageReadSpec("Timestamp", "Now"),
                 StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
@@ -569,7 +643,12 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     "runtime_version": json.loads(runtime.runtime_version_bytes),
                     **(
                         {"storage_codec_mode": runtime.storage_codec_mode}
-                        if self._storage_codec is not None
+                        if runtime.storage_codec_mode != "exact_runtime"
+                        else {}
+                    ),
+                    **(
+                        {"runtime_execution": _runtime_execution_evidence(runtime)}
+                        if isinstance(runtime, ExecutedRuntimeContext)
                         else {}
                     ),
                     "storage_batches": [
