@@ -61,18 +61,33 @@ _FRESH_BOUNDARY_POLL_SECONDS = 1
 
 async def _fresh_execution_boundary(provider):
     """Wait for a fresh owned head, without rerunning inference or relaxing proof checks."""
-
-    async def collect():
-        while True:
-            try:
-                return await asyncio.wait_for(provider(), timeout=20)
-            except OwnedFinalityStale:
-                # The caller already retained completed model output. Only this
-                # typed freshness condition is recoverable; proof/binding faults,
-                # provider timeouts and cancellation still fail the job.
-                await asyncio.sleep(_FRESH_BOUNDARY_POLL_SECONDS)
-
-    return await asyncio.wait_for(collect(), timeout=_FRESH_BOUNDARY_WAIT_SECONDS)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _FRESH_BOUNDARY_WAIT_SECONDS
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        attempt = asyncio.ensure_future(provider())
+        try:
+            # Nested wait_for can swallow outer cancellation on Python 3.10
+            # when the provider completes in the same loop turn. Own the task
+            # explicitly so the overall deadline and cancellation both survive.
+            done, _ = await asyncio.wait((attempt,), timeout=min(20, remaining))
+            if not done or loop.time() >= deadline:
+                raise asyncio.TimeoutError
+            return attempt.result()
+        except OwnedFinalityStale:
+            # Only typed staleness is recoverable. Proof/binding faults,
+            # provider timeouts and cancellation still fail the job.
+            pass
+        finally:
+            if not attempt.done():
+                attempt.cancel()
+            await asyncio.gather(attempt, return_exceptions=True)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.sleep(min(_FRESH_BOUNDARY_POLL_SECONDS, remaining))
 
 
 class ExecutionCase(StrictProtocolModel):
