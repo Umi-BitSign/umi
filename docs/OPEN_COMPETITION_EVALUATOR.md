@@ -62,6 +62,14 @@ rehearsal. Returned data remains untrusted until the local verifier checks it
 against an owned finalized state root. Keep the collection timeout and proof
 checks enabled; changing the RPC endpoint does not grant finality authority.
 
+The owned observer retains the configured startup allowance for its first
+verified record. Subsequent records must arrive within the smaller of that
+allowance and `maximum_head_age_ms` (at most 120 seconds). An idle stream exits
+with `record_timeout`, terminates its child process and lets the service manager
+restart from retained finality history. It does not accept a stale head, erase
+evidence or extend a signed round. This bounds idle-stream detection, not the
+time required to reconnect and obtain fresh proofs.
+
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives
 only its existing fixed model/video mounts, never this configuration, the

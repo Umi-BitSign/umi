@@ -459,7 +459,10 @@ class FinalizedRegistrationProvider:
                 target_triple=config.target_triple,
                 binary_path=config.finality_binary,
                 chain_spec_path=config.chain_spec,
-                record_timeout_seconds=config.startup_timeout_seconds,
+                record_timeout_seconds=min(
+                    config.startup_timeout_seconds, config.maximum_head_age_ms / 1000
+                ),
+                first_record_timeout_seconds=config.startup_timeout_seconds,
             )
             finality = DurableGrandpaFinalityPort(
                 observer=observer,

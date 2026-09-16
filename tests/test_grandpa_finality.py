@@ -109,14 +109,18 @@ def _record(
     }
 
 
-def _write_fixture_executable(path: Path) -> str:
+def _write_fixture_executable(
+    path: Path, *, initial_delay: float = 0, stall_after_output: float = 0
+) -> str:
     source = f'''#!{sys.executable}
 import hashlib
 import json
 import rfc8785
 import sys
+import time
 
 config = json.load(sys.stdin)
+time.sleep({initial_delay!r})
 number = config["minimum_finalized_block"]
 if number < 64:
     compact = bytes([number << 2])
@@ -162,6 +166,8 @@ record["transcript_digest"] = hashlib.sha256(
     b"umi-grandpa-finality-attestation-v1\\0" + rfc8785.dumps(unsigned)
 ).hexdigest()
 sys.stdout.buffer.write(rfc8785.dumps(record) + b"\\n")
+sys.stdout.buffer.flush()
+time.sleep({stall_after_output!r})
 '''
     path.write_text(source, encoding="utf-8")
     path.chmod(0o500)
@@ -201,6 +207,62 @@ def test_subprocess_adapter_accepts_canonical_attestation(
     assert records[0].sequence == 0
     assert records[0].block.number == 10
     assert records[0].ancestry_complete_since_previous is False
+
+
+def test_bootstrap_allowance_does_not_delay_idle_observer_termination(tmp_path, monkeypatch):
+    binary = tmp_path / "delayed-observer"
+    binary_hash = _write_fixture_executable(binary, initial_delay=0.5, stall_after_output=60)
+    chain_spec = tmp_path / "finney.json"
+    chain_spec.write_bytes(b"{}")
+    selected = GrandpaFinalityObserver(
+        binary_path=binary,
+        expected_binary_sha256=binary_hash,
+        chain_spec_path=chain_spec,
+        expected_chain_spec_sha256=hashlib.sha256(b"{}").hexdigest(),
+        expected_genesis_hash=f"0x{'33' * 32}",
+        bootstrap_block_number=1,
+        bootstrap_block_hash=f"0x{'44' * 32}",
+        record_timeout_seconds=0.1,
+        first_record_timeout_seconds=5,
+    )
+    processes = []
+    popen = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    records = selected.attestations(
+        minimum_finalized_block=10, maximum_records=2, startup_timeout_seconds=5
+    )
+    assert next(records).block.number == 10
+    # The first valid record survives a startup longer than the idle budget.
+    # No next record arrives; the child must be reaped before reporting failure.
+    with pytest.raises(GrandpaFinalityObserverError) as caught:
+        next(records)
+    assert caught.value.reason_code == "record_timeout"
+    assert len(processes) == 1 and processes[0].poll() is not None
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, float("nan"), float("inf"), "1"])
+def test_rejects_invalid_first_record_timeout(observer, value):
+    with pytest.raises(ValueError, match="first_record_timeout_seconds"):
+        GrandpaFinalityObserver(
+            binary_path=observer._binary_path,
+            expected_binary_sha256=observer._expected_binary_sha256,
+            chain_spec_path=observer._chain_spec_path,
+            expected_chain_spec_sha256=observer._expected_chain_spec_sha256,
+            expected_genesis_hash=observer._expected_genesis_hash,
+            bootstrap_block_number=observer.bootstrap_block_number,
+            bootstrap_block_hash=observer.bootstrap_block_hash,
+            first_record_timeout_seconds=value,
+        )
+
+
+def test_omitted_first_record_timeout_preserves_legacy_budget(observer):
+    assert observer._first_record_timeout_seconds == observer._record_timeout_seconds == 2.0
 
 
 def test_observer_executes_private_descriptor_copies_when_sources_are_swapped(
@@ -509,7 +571,10 @@ def test_policy_pin_is_the_only_production_bootstrap_source(
         binary_path=binary,
         chain_spec_path=chain_spec,
         record_timeout_seconds=2,
+        first_record_timeout_seconds=10,
     )
+    assert bound._record_timeout_seconds == 2
+    assert bound._first_record_timeout_seconds == 10
     config, _encoded = bound._config(
         minimum_finalized_block=FINNEY_BOOTSTRAP_BLOCK_NUMBER + 1,
         maximum_records=1,
