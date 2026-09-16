@@ -35,6 +35,11 @@
 !rust/substrate-proof-verifier/src/**
 !rust/substrate-proof-verifier/fixtures/
 !rust/substrate-proof-verifier/fixtures/**
+!rust/runtime-metadata/
+!rust/runtime-metadata/Cargo.toml
+!rust/runtime-metadata/Cargo.lock
+!rust/runtime-metadata/src/
+!rust/runtime-metadata/src/**
 
 # Defense in depth for ignored files accidentally placed below an allowed path.
 **/.env

@@ -23,8 +23,18 @@ cargo test --locked --manifest-path rust/runtime-metadata/Cargo.toml
 cargo build --release --locked --manifest-path rust/runtime-metadata/Cargo.toml
 ```
 
-This does not activate runtime-independent signing. The resulting context has
-mode `executed_runtime/1`; the existing weight transport rejects it. Integration
-still needs a signed executor pin, proof-backed collection at the current owned
-header, retained execution evidence, release packaging and transaction replay
-tests. No current policy or validator service changes when this helper is built.
+The weight provider can opt into read-only collection with the paired
+`runtime_metadata_binary` and `runtime_metadata_binary_sha256` configuration
+fields. It obtains `:code` at its owned finalized snapshot using a separate
+bounded proof collector, then retains the code, proof and executor digest with
+the observation. This mode cannot be combined with a storage-only codec. Other
+registration providers reject it rather than silently ignoring it. Leaving both
+fields absent preserves existing configuration digests and exact-runtime reads.
+
+The resulting context has mode `executed_runtime/1`. Weight signing requires a
+separate signed `required_runtime_metadata_executor_sha256_by_target` map and
+matching chain configuration. Legacy authorizations reject it. Executor files
+must be included in the signed host artifact and worker image; see the
+[worker deployment guide](../../deploy/linux-competition-worker/README.md).
+No current policy or validator service changes when this helper is built or the
+read-only collector is tested.

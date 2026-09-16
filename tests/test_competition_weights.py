@@ -525,6 +525,330 @@ async def test_unapproved_codec_never_signs_a_transaction(weight_case, monkeypat
     assert not weight_case.encoded
 
 
+@pytest.fixture
+def executed_weight_case(weight_case, monkeypatch, tmp_path):
+    from umi.runtime_metadata import RuntimeMetadataExecutor
+    from umi.validator_chain import FinalizedProofCollector
+
+    item = weight_case
+    item.config = item.provider.config = item.config.model_copy(
+        update={
+            "runtime_metadata_binary": str(tmp_path / "executor"),
+            "runtime_metadata_binary_sha256": "a" * 64,
+        }
+    )
+    item.provider._configure_weight_collector()
+    original = item.rpc.request
+    item.code = b"fixture wasm"
+    item.executed_metadata = b"meta\x0e-new-runtime"
+    item.executed_spec_version = 459
+    item.executed_transaction_version = 2
+
+    async def request(method, params):
+        assert method not in ("state_getMetadata", "state_getRuntimeVersion")
+        if method == "state_getStorageAt" and params[0] == "0x3a636f6465":
+            assert params[1] == item.finality.ref.block_hash
+            return "0x" + item.code.hex()
+        return await original(method, params)
+
+    monkeypatch.setattr(item.rpc, "request", request)
+    item.provider._runtime_proofs = FinalizedProofCollector(
+        item.rpc,
+        finality=item.finality,
+        verifier=lambda **kwargs: kwargs["proof"] == (b"proof",),
+    )
+
+    class ExecutedCodec(_SigningRuntime):
+        def __init__(self, metadata, spec_version, transaction_version, *, ss58_format):
+            assert metadata == item.executed_metadata
+            assert (spec_version, transaction_version, ss58_format) == (
+                item.executed_spec_version,
+                item.executed_transaction_version,
+                42,
+            )
+            self.spec_version, self.transaction_version = spec_version, transaction_version
+
+    monkeypatch.setattr("umi.runtime_metadata.bittensor_core.Runtime", ExecutedCodec)
+
+    def invoke(self, code):
+        assert code == item.code
+        return (
+            canonical_json_bytes(
+                {
+                    "schema": "umi-runtime-metadata-execution/1",
+                    "runtime_code_sha256": hashlib.sha256(code).hexdigest(),
+                    "metadata_sha256": hashlib.sha256(item.executed_metadata).hexdigest(),
+                    "metadata_hex": item.executed_metadata.hex(),
+                    "spec_version": item.executed_spec_version,
+                    "transaction_version": item.executed_transaction_version,
+                    "state_version": 1,
+                    "chain_submission_authorized": False,
+                }
+            )
+            + b"\n"
+        )
+
+    monkeypatch.setattr(RuntimeMetadataExecutor, "_invoke", invoke)
+    return item
+
+
+async def test_executed_runtime_weight_collection_retains_proof(executed_weight_case):
+    item = executed_weight_case
+    observation = await item.provider.collect_weights(item.hotkey, item.recipients)
+    validate_owned_weight_observation(observation)
+    assert observation.runtime.pin.spec_version == 459
+    assert observation.runtime.pin.transaction_version == 2
+    assert observation.runtime.pin != item.provider._runtime_pin
+    evidence = json.loads(observation.evidence)
+    assert evidence["storage_codec_mode"] == "executed_runtime/1"
+    execution = evidence["runtime_execution"]
+    assert execution["value"] == "0x" + item.code.hex()
+    assert execution["state_root"] == observation.snapshot.state_root
+    assert execution["key"] == "0x3a636f6465"
+    assert execution["executor_sha256"] == "a" * 64
+    assert execution["proof"] == ["0x" + b"proof".hex()]
+
+
+async def test_real_executed_context_remains_non_signing(executed_weight_case):
+    item = executed_weight_case
+    with pytest.raises(ValueError, match="absent from signed authorization"):
+        await _run(item)
+    assert not item.encoded
+
+
+def _authorize_executed_runtime(item, pins=None):
+    body = item.body.model_copy(
+        update={
+            "required_runtime_metadata_executor_sha256_by_target": pins
+            or {item.config.target_triple: item.config.runtime_metadata_binary_sha256}
+        }
+    )
+    item.signed = sign_competition_weight_authorization(body, wallet("Ferdie"))
+    item.body = item.signed.authorization
+
+
+async def test_signed_execution_policy_signs_exact_row_and_recovers_once(executed_weight_case):
+    item = executed_weight_case
+    _authorize_executed_runtime(item)
+    outcome = await _run(item)
+    assert outcome.status == "recovered_effect" and outcome.exact_row_currently_applied
+    assert outcome.submitted_by_this_attempt and len(item.encoded) == 1
+    assert not (await _run(item)).submitted_by_this_attempt
+    assert len(item.encoded) == 1
+    with sqlite3.connect(item.worker.path) as db:
+        evidence = [row[0] for row in db.execute("SELECT body FROM evidence")]
+    captures = [json.loads(raw) for raw in evidence if raw.startswith(b"{")]
+    assert any(
+        value.get("runtime_execution", {}).get("executor_sha256") == "a" * 64 for value in captures
+    )
+
+
+async def test_executed_unknown_submission_never_retries(executed_weight_case):
+    item = executed_weight_case
+    _authorize_executed_runtime(item)
+    item.behavior = "disconnect"
+    with pytest.raises(ConnectionError):
+        await _run(item)
+    assert (await _run(item)).status == "unknown"
+    _advance(item, 180, applied=True)
+    _advance(item, 201)
+    assert (await _run(item)).status == "recovered_effect"
+    assert len(item.encoded) == 1
+
+
+@pytest.mark.parametrize("changed", ["code", "metadata", "spec_version", "transaction_version"])
+async def test_runtime_change_after_signing_never_broadcasts(
+    executed_weight_case, monkeypatch, changed
+):
+    item = executed_weight_case
+    _authorize_executed_runtime(item)
+    encode = item.transport.encode
+
+    def upgrade_after_signing(*args, **kwargs):
+        encoded = encode(*args, **kwargs)
+        _advance(item, 171)
+        if changed == "code":
+            item.code += b" upgraded"
+        elif changed == "metadata":
+            item.executed_metadata += b" upgraded"
+        elif changed == "spec_version":
+            item.executed_spec_version += 1
+        else:
+            item.executed_transaction_version += 1
+        return encoded
+
+    monkeypatch.setattr(item.transport, "encode", upgrade_after_signing)
+    with pytest.raises(ValueError, match="preflight changed before broadcast"):
+        await _run(item)
+    assert not item.encoded
+    with sqlite3.connect(item.worker.path) as db:
+        retained = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+    assert retained["phase"] == "signed"
+    assert retained["signed_extrinsic"] is not None
+    # A restart reconciles the frozen attempt without signing or sending again.
+    assert not (await _run(item)).submitted_by_this_attempt
+    assert not item.encoded
+
+
+async def test_wrong_signed_executor_never_signs(executed_weight_case):
+    item = executed_weight_case
+    _authorize_executed_runtime(item, {item.config.target_triple: "b" * 64})
+    with pytest.raises(ValueError, match="differs from signed authorization"):
+        await _run(item)
+    assert not item.encoded
+
+
+async def test_execution_authority_cannot_downgrade_to_exact_codec(weight_case):
+    item = weight_case
+    _authorize_executed_runtime(item, {item.config.target_triple: "a" * 64})
+    with pytest.raises(ValueError, match="differs from signed authorization"):
+        await _run(item)
+    assert not item.encoded
+
+
+@pytest.mark.parametrize("pins", [{}, {"other": "a" * 64}, {"aarch64-apple-darwin": "invalid"}])
+def test_signed_execution_map_requires_complete_valid_targets(weight_case, pins):
+    value = json.loads(canonical_json_bytes(weight_case.body))
+    value["required_runtime_metadata_executor_sha256_by_target"] = pins
+    with pytest.raises(ValueError):
+        CompetitionWeightAuthorizationBody.model_validate(value)
+
+
+def test_legacy_authorization_bytes_omit_execution_policy(weight_case):
+    original = canonical_json_bytes(weight_case.body)
+    assert b"required_runtime_metadata_executor_sha256_by_target" not in original
+    assert (
+        canonical_json_bytes(CompetitionWeightAuthorizationBody.model_validate_json(original))
+        == original
+    )
+
+
+def test_executor_hash_is_signed_not_an_unsigned_option(executed_weight_case):
+    item = executed_weight_case
+    legacy_digest = competition_weight_authorization_digest(item.body)
+    _authorize_executed_runtime(item)
+    assert competition_weight_authorization_digest(item.body) != legacy_digest
+    changed = item.signed.model_copy(
+        update={
+            "authorization": item.body.model_copy(
+                update={
+                    "required_runtime_metadata_executor_sha256_by_target": {
+                        item.config.target_triple: "b" * 64
+                    }
+                }
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="signature"):
+        verify_competition_weight_authorization(
+            changed, trusted_authority_hotkeys=item.context.authority_hotkeys, package=item.package
+        )
+
+
+async def test_runtime_code_bad_proof_never_executes(executed_weight_case, monkeypatch):
+    item = executed_weight_case
+    item.rpc.bad_proof = True
+    monkeypatch.setattr(
+        item.provider._runtime_executor, "execute", lambda *args: pytest.fail("unproven execution")
+    )
+    with pytest.raises(ValidatorChainError, match="storage_proof_verification_failed"):
+        await item.provider.collect_weights(item.hotkey, item.recipients)
+
+
+async def test_cancelled_collection_waits_for_bounded_executor(executed_weight_case, monkeypatch):
+    import threading
+
+    item = executed_weight_case
+    entered, release = threading.Event(), threading.Event()
+    execute = item.provider._runtime_executor.execute
+
+    def paused(*args):
+        entered.set()
+        assert release.wait(5), "test did not release executor"
+        return execute(*args)
+
+    monkeypatch.setattr(item.provider._runtime_executor, "execute", paused)
+    task = asyncio.create_task(item.provider.collect_weights(item.hotkey, item.recipients))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert not task.done()
+        assert item.provider._lock.locked()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not item.provider._lock.locked()
+
+
+@pytest.mark.parametrize("changed", ["executor", "proof", "mode", "snapshot"])
+async def test_executed_observation_binding_detects_changes(executed_weight_case, changed):
+    from umi.chain_evidence import StorageEvidence
+    from umi.validator_chain import PinnedRuntimeContext
+
+    item = executed_weight_case
+    observation = await item.provider.collect_weights(item.hotkey, item.recipients)
+    runtime = observation.runtime
+    if changed == "executor":
+        changed_runtime = replace(runtime, executor_sha256="b" * 64)
+    elif changed == "proof":
+        evidence = StorageEvidence(
+            snapshot=runtime.snapshot,
+            storage_key=b":code",
+            value=item.code,
+            proof=(b"different",),
+            verifier=lambda **kwargs: True,
+        )
+        changed_runtime = replace(runtime, code_evidence=evidence)
+    elif changed == "snapshot":
+        object.__setattr__(
+            runtime.code_evidence, "snapshot", replace(runtime.snapshot, block_number=171)
+        )
+        changed_runtime = runtime
+    else:
+        changed_runtime = PinnedRuntimeContext(
+            snapshot=runtime.snapshot,
+            pin=runtime.pin,
+            metadata_bytes=runtime.metadata_bytes,
+            runtime_version_bytes=runtime.runtime_version_bytes,
+            _runtime=runtime._runtime,
+        )
+    with pytest.raises(ValueError, match="owned proof adapter"):
+        validate_owned_weight_observation(replace(observation, runtime=changed_runtime))
+
+
+@pytest.mark.parametrize("changed", ["executor", "mode", "snapshot"])
+async def test_collector_rejects_execution_binding_mismatch(
+    executed_weight_case, monkeypatch, changed
+):
+    from umi.validator_chain import PinnedRuntimeContext
+
+    item = executed_weight_case
+    runtime = await item.provider._runtime_context(item.finality.ref)
+    if changed == "executor":
+        runtime = replace(runtime, executor_sha256="b" * 64)
+    elif changed == "snapshot":
+        object.__setattr__(
+            runtime.code_evidence, "snapshot", replace(runtime.snapshot, block_number=171)
+        )
+    else:
+        runtime = PinnedRuntimeContext(
+            snapshot=runtime.snapshot,
+            pin=runtime.pin,
+            metadata_bytes=runtime.metadata_bytes,
+            runtime_version_bytes=runtime.runtime_version_bytes,
+            _runtime=runtime._runtime,
+        )
+
+    async def context(ref):
+        return runtime
+
+    monkeypatch.setattr(item.provider, "_runtime_context", context)
+    with pytest.raises(ValueError, match="executed runtime binding mismatch"):
+        await item.provider.collect_weights(item.hotkey, item.recipients)
+
+
 async def test_other_nonce_use_without_exact_row_stays_unknown_even_after_expiry(weight_case):
     item = weight_case
     item.behavior = "noop"

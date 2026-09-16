@@ -81,6 +81,8 @@ class CompetitionChainConfig(StrictProtocolModel):
     startup_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 600
     maximum_cache_bytes: Annotated[int, Field(ge=1024, le=1024**3)] = 256 * 1024**2
     storage_codec_metadata_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+    runtime_metadata_binary: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+    runtime_metadata_binary_sha256: Hex32 | None = None
 
     @model_serializer(mode="wrap")
     def serialize_legacy_config(self, handler):
@@ -88,9 +90,13 @@ class CompetitionChainConfig(StrictProtocolModel):
         # Preserve existing config/journal digests when this mode is not enabled.
         if self.storage_codec_metadata_path is None:
             value.pop("storage_codec_metadata_path", None)
+        if self.runtime_metadata_binary is None:
+            value.pop("runtime_metadata_binary", None)
+        if self.runtime_metadata_binary_sha256 is None:
+            value.pop("runtime_metadata_binary_sha256", None)
         return value
 
-    @field_validator("storage_codec_metadata_path")
+    @field_validator("storage_codec_metadata_path", "runtime_metadata_binary")
     @classmethod
     def codec_path(cls, value):
         if value is None:
@@ -130,6 +136,13 @@ class CompetitionChainConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def pinned_finney(self) -> Self:
+        if (self.runtime_metadata_binary is None) != (self.runtime_metadata_binary_sha256 is None):
+            raise ValueError("runtime metadata execution requires both an executable and its hash")
+        if (
+            self.runtime_metadata_binary is not None
+            and self.storage_codec_metadata_path is not None
+        ):
+            raise ValueError("runtime execution and storage-only decoding are mutually exclusive")
         if (
             self.chain_pin.genesis_block_hash != FINNEY_GENESIS_HASH
             or self.finality_pin.expected_genesis_hash != FINNEY_GENESIS_HASH
@@ -366,6 +379,8 @@ class FinalizedRegistrationProvider:
     hash-pinned GRANDPA sidecar and storage verifier, never an RPC finality label.
     """
 
+    _supports_executed_runtime = False
+
     def __init__(
         self,
         config: CompetitionChainConfig,
@@ -376,6 +391,8 @@ class FinalizedRegistrationProvider:
         now_ms: Callable[[], int] | None = None,
     ):
         self.config = CompetitionChainConfig.model_validate_json(canonical_json_bytes(config))
+        if self.config.runtime_metadata_binary is not None and not self._supports_executed_runtime:
+            raise ValueError("runtime metadata execution is only supported by the weight provider")
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         if self.config.policy_sha256 != digest(self.policy):
             raise ValueError("chain configuration belongs to another competition policy")

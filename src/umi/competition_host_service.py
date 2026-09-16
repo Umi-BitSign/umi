@@ -26,6 +26,7 @@ from .competition_worker_cli import (
     WORKER_FINALITY_BINARY,
     WORKER_FINALITY_STATE_ROOT,
     WORKER_PROOF_BINARY,
+    WORKER_RUNTIME_METADATA_BINARY,
 )
 
 _PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
@@ -87,6 +88,15 @@ def validate_host_service_resources(signed_host, observer):
             WORKER_CHAIN_SPEC,
         ),
     )
+    if getattr(observer, "runtime_metadata_binary", None) is not None:
+        requirements += (
+            (
+                "artifacts/umi-runtime-metadata",
+                observer.runtime_metadata_binary_sha256,
+                0o555,
+                WORKER_RUNTIME_METADATA_BINARY,
+            ),
+        )
     for name, sha, mode, _ in requirements:
         if name not in records or records[name].sha256 != sha or records[name].mode != mode:
             raise ValueError("host manifest lacks the exact installed observer resource")
