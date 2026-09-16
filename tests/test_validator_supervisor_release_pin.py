@@ -56,7 +56,7 @@ def test_legacy_ongoing_operator_bundle_remains_valid() -> None:
     assert bundle.signed_policy.body.lifetime == "until_superseded"
 
 
-def test_first_install_pin_matches_published_frozen_operator_bundle() -> None:
+def test_legacy_frozen_operator_bundle_remains_valid() -> None:
     # Captured from the signed sequence-17 release. Retain older signed fixtures
     # above so advancing the installer does not erase compatibility coverage.
     payload = (
@@ -68,11 +68,26 @@ def test_first_install_pin_matches_published_frozen_operator_bundle() -> None:
         "a747d99ce82980cc90f9c3262ccd7172ccd1d0fdb829842895c4be86781d6ed8"
     )
     bundle = _parse_bootstrap_input_bundle(payload)
+    assert bundle.signed_policy.body.umi_git_revision == "c322687639e6e5f6ee6b26e1b105b7443a166607"
+    assert bundle.signed_policy.body.lifetime == "until_superseded"
+    assert bundle.signed_policy.body.registration_snapshot.finalized_block == 9_076_034
+
+
+def test_first_install_pin_matches_published_churn_operator_bundle() -> None:
+    payload = (
+        (ROOT / "tests/fixtures/validator-supervisor/churn-registration-bridge.json")
+        .read_bytes()
+        .removesuffix(b"\n")
+    )
+    assert hashlib.sha256(payload).hexdigest() == (
+        "52261aad8957cb7b2823ad688754e9ad567a0e9a06c9dd92003c277f36e8faa6"
+    )
+    bundle = _parse_bootstrap_input_bundle(payload)
     assert (DEPLOYMENT / "CURRENT_RELEASE_REVISION").read_text().strip() == (
         bundle.signed_policy.body.umi_git_revision
     )
     assert bundle.signed_policy.body.lifetime == "until_superseded"
-    assert bundle.signed_policy.body.registration_snapshot.finalized_block == 9_076_034
+    assert getattr(bundle.signed_policy.body, "registration_snapshot", None) is None
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
