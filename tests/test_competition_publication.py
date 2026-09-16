@@ -111,7 +111,16 @@ def _certificate(publication):
     return SignedSettlementPublication(publication=publication, signatures=signatures)
 
 
-def _scenario(policy, root, limits, *, settle=True):
+def _scenario(
+    policy,
+    root,
+    limits,
+    *,
+    settle=True,
+    promote_model=True,
+    snapshot_factory=snapshot,
+    suite_factory=suite_for,
+):
     archive = root / "archive"
     baseline = bundle_at(root / "baseline")
     candidate = bundle_at(root / "candidate", "candidate", digest(baseline))
@@ -124,9 +133,9 @@ def _scenario(policy, root, limits, *, settle=True):
     endpoint = submission(policy, name="Bob")
     submissions = tuple(sorted((model, endpoint), key=lambda item: digest(item.submission)))
     for signed in submissions:
-        store.admit(signed, snapshot(), 110)
+        store.admit(signed, snapshot_factory(), 110)
 
-    suite = suite_for(policy)
+    suite = suite_factory(policy)
     round_ = round_for(policy, suite, submissions, digest(baseline))
     schedule = EvidenceCutoffSchedule(
         schema="umi-competition-evidence-cutoff/1",
@@ -152,20 +161,24 @@ def _scenario(policy, root, limits, *, settle=True):
         )
 
     model_result = attested[submissions.index(model)]
-    promotion = store.promote(
-        signed=model,
-        attested=model_result,
-        round_=round_,
-        suite=suite,
-        review=review_for(policy, model, round_, model_result),
-        archive=archive,
-        snapshot=snapshot(150),
-        current_block=150,
+    promotion = (
+        store.promote(
+            signed=model,
+            attested=model_result,
+            round_=round_,
+            suite=suite,
+            review=review_for(policy, model, round_, model_result),
+            archive=archive,
+            snapshot=snapshot_factory(150),
+            current_block=150,
+        )
+        if promote_model
+        else store.baseline()
     )
     cutoff_publication = build_cutoff_publication(
         round_=round_,
         cutoff_schedule=schedule,
-        registration_snapshot=snapshot(),
+        registration_snapshot=snapshot_factory(),
         submissions=submissions,
         policy=policy,
         limits=limits,
@@ -189,7 +202,7 @@ def _scenario(policy, root, limits, *, settle=True):
                 round_=round_,
                 suite=suite,
                 evidence=evidence,
-                snapshot=snapshot(160),
+                snapshot=snapshot_factory(160),
                 current_block=160,
             )
         ),

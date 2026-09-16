@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import AfterValidator, Field, field_validator, model_validator
+from pydantic import AfterValidator, Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_scoring import score_single_reference
@@ -37,6 +37,7 @@ Bps = Annotated[int, Field(ge=0, le=10_000)]
 Stratum = Literal["fingerspelling", "short_utterance", "continuous"]
 Track = Literal["endpoint", "model"]
 TWO_TASK_POLICY_SCHEMA = "umi-open-competition-policy/2"
+BURN_POLICY_SCHEMA = "umi-open-competition-policy/3"
 TWO_TASK_SUITE_SCHEMA = "umi-competition-suite/2"
 TWO_TASK_WEIGHTS = MappingProxyType(
     {"fingerspelling": Fraction(3, 13), "continuous": Fraction(10, 13)}
@@ -65,10 +66,20 @@ class Evaluator(StrictProtocolModel):
     control_group: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")]
 
 
+class BurnDestination(StrictProtocolModel):
+    """Registered subnet-owner hotkey whose miner incentive is burned by Subtensor."""
+
+    uid: Annotated[int, Field(ge=0, le=255)]
+    hotkey: Hotkey
+    mode: Literal["Burn"] = "Burn"
+
+
 class CompetitionPolicy(StrictProtocolModel):
-    schema_: Literal["umi-open-competition-policy/1", "umi-open-competition-policy/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-open-competition-policy/1",
+        "umi-open-competition-policy/2",
+        "umi-open-competition-policy/3",
+    ] = Field(alias="schema")
     network: Literal["finney"]
     netuid: Literal[78]
     sequence: Annotated[int, Field(ge=1, le=2**32 - 1)]
@@ -93,13 +104,29 @@ class CompetitionPolicy(StrictProtocolModel):
     contribution_terms_sha256: Hex32
     accepted_model_licenses: Annotated[tuple[str, ...], Field(min_length=1, max_length=32)]
     evaluation_runtime_sha256: Hex32
+    unallocated_model_burn: BurnDestination | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.unallocated_model_burn is None:
+            value.pop("unallocated_model_burn", None)
+        return value
 
     @property
     def stratum_weights(self) -> Mapping[str, Fraction]:
-        return TWO_TASK_WEIGHTS if self.schema_ == TWO_TASK_POLICY_SCHEMA else STRATUM_WEIGHTS
+        return (
+            STRATUM_WEIGHTS if self.schema_ == "umi-open-competition-policy/1" else TWO_TASK_WEIGHTS
+        )
 
     @model_validator(mode="after")
     def validate_policy(self) -> Self:
+        if (self.schema_ == BURN_POLICY_SCHEMA) != (self.unallocated_model_burn is not None):
+            raise ValueError("unallocated model burn requires explicit policy version 3")
+        if self.unallocated_model_burn is not None and (
+            not self.model_reward_bps or self.unallocated_model_burn.uid >= self.maximum_uids
+        ):
+            raise ValueError("model burn destination or allocation is outside policy bounds")
         if self.endpoint_reward_bps + self.model_reward_bps != 10_000:
             raise ValueError("reward allocations must sum to 10000 basis points")
         if self.valid_through_block <= self.valid_from_block:
@@ -298,6 +325,14 @@ class RegistrationSnapshot(StrictProtocolModel):
     block: Block
     block_hash: BlockHash
     registrations: Annotated[tuple[Registration, ...], Field(max_length=256)]
+    burn_destination: BurnDestination | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.burn_destination is None:
+            value.pop("burn_destination", None)
+        return value
 
     @model_validator(mode="after")
     def unique_registrations(self) -> Self:
@@ -305,6 +340,12 @@ class RegistrationSnapshot(StrictProtocolModel):
         keys = [identity(r.hotkey) for r in self.registrations]
         if len(set(uids)) != len(uids) or len(set(keys)) != len(keys):
             raise ValueError("registration snapshot has duplicate identity or UID")
+        if self.burn_destination is not None and not any(
+            r.uid == self.burn_destination.uid
+            and identity(r.hotkey) == identity(self.burn_destination.hotkey)
+            for r in self.registrations
+        ):
+            raise ValueError("burn destination lacks its exact registered identity")
         return self
 
 
@@ -389,7 +430,7 @@ def has_case_coverage(cases: Sequence[Any], policy: CompetitionPolicy) -> bool:
 def validate_suite_profile(suite: EvaluationSuite, policy: CompetitionPolicy) -> None:
     expected = (
         TWO_TASK_SUITE_SCHEMA
-        if policy.schema_ == TWO_TASK_POLICY_SCHEMA
+        if policy.schema_ in {TWO_TASK_POLICY_SCHEMA, BURN_POLICY_SCHEMA}
         else "umi-competition-suite/1"
     )
     if suite.schema_ != expected or suite.policy_sha256 != digest(policy):
@@ -495,7 +536,7 @@ def _quality(
         scorer = score_cer if case.stratum == "fingerspelling" else score_wer
         if not valid:
             score = Fraction(0)
-        elif policy.schema_ == TWO_TASK_POLICY_SCHEMA:
+        elif policy.schema_ in {TWO_TASK_POLICY_SCHEMA, BURN_POLICY_SCHEMA}:
             score = score_single_reference(
                 "cer" if case.stratum == "fingerspelling" else "wer",
                 output.hypothesis,
@@ -658,6 +699,8 @@ def project_weights(
     This intentionally returns no signed transaction or activation authority.
     Every frozen roster member requires a scored result or a replayable void.
     """
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
     if not 0 <= current_block - snapshot.block <= policy.maximum_snapshot_age_blocks:
         raise ValueError("weight snapshot is stale or from the future")
     # Lazy imports avoid a cycle through the execution contract. An exclusion
@@ -724,8 +767,25 @@ def project_weights(
             model_recipient = key
     if policy.endpoint_reward_bps and not endpoint_scores:
         raise ValueError("endpoint allocation has no qualifying recipient")
+    if policy.unallocated_model_burn is not None:
+        burn_key = identity(policy.unallocated_model_burn.hotkey)
+        if burn_key in endpoint_scores or (
+            promoted_hotkey is not None and identity(promoted_hotkey) == burn_key
+        ):
+            raise ValueError("burn destination cannot receive miner or contributor rewards")
     if policy.model_reward_bps and model_recipient is None:
-        raise ValueError("model allocation lacks a freshly evaluated promoted contributor")
+        destination = policy.unallocated_model_burn
+        # This fallback covers an unawarded model pool only. A previously awarded
+        # contributor becoming stale or deregistered retains the legacy hold.
+        if destination is None or promoted_hotkey is not None:
+            raise ValueError("model allocation lacks a freshly evaluated promoted contributor")
+        if (
+            snapshot.burn_destination != destination
+            or identity(destination.hotkey) not in by_key
+            or by_key[identity(destination.hotkey)].uid != destination.uid
+        ):
+            raise ValueError("unallocated model share lacks its verified burn destination")
+        model_recipient = identity(destination.hotkey)
     amounts: dict[str, Fraction] = defaultdict(Fraction)
     total_quality = sum(endpoint_scores.values(), Fraction(0))
     for key, score in endpoint_scores.items():

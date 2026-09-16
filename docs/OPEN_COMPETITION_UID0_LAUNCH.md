@@ -71,8 +71,9 @@ execution deadlines. Preparation does not sign a policy or authorize rewards.
 - UID 0 must execute the actual work and retain its signed run evidence.
   A one-signature threshold does not permit fabricated observations, missing
   cases, late publication, changed labels or missing finalized-state checks.
-- Both reward tracks still launch together at 70/30. Model preservation,
-  contribution rights and qualifying promotion are unchanged requirements.
+- Both tracks open at 70/30. Version 3 burns the unallocated model share until
+  a model qualifies, under the [allocation rule](OPEN_COMPETITION_MODEL_ALLOCATION.md).
+  Model payment still requires preservation, contribution rights and promotion.
 - The Studio miner must still pass authenticated requests, supported-workload
   deadlines, recovery and capacity checks. This policy change does not extend
   its inference timeout or establish baseline accuracy.

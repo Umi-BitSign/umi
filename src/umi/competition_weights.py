@@ -304,7 +304,14 @@ def verify_competition_weight_authorization(
     if (policy.endpoint_reward_bps, policy.model_reward_bps) != (7000, 3000):
         raise ValueError("joint launch requires the approved 70/30 reward policy")
     if package.retained_settlement.promotion_head.contributor_hotkey is None:
-        raise ValueError("joint launch requires a real qualifying promoted contributor")
+        destination = policy.unallocated_model_burn
+        if (
+            destination is None
+            or package.retained_settlement.registration_snapshot.burn_destination != destination
+        ):
+            raise ValueError(
+                "joint launch requires a qualifying contributor or verified model burn"
+            )
     return body
 
 
@@ -388,6 +395,10 @@ def validate_weight_preflight(
     for item in row.allocations:
         if registrations.get(item.uid) != account_id32(item.hotkey):
             raise ValueError("settlement recipient registration changed")
+    if package.policy.unallocated_model_burn is not None and (
+        observation.burn_destination != package.policy.unallocated_model_burn
+    ):
+        raise ValueError("model burn destination changed before weight submission")
     expected_tuple = (
         authorization.required_mechanism_count,
         authorization.required_commit_reveal_enabled,

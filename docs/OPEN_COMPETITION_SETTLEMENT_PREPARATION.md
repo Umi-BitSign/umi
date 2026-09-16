@@ -62,8 +62,9 @@ After the first settlement, retries use its exact evidence identities and
 original snapshot. A newer snapshot or another signature ordering does not
 rewrite history. A crash after the database commit can be repaired by publishing
 the same retained proposal. Original round expiry still applies. The existing
-70/30 projection rejects an absent model contributor; there is no automatic
-endpoint-only fallback.
+version 1/2 projection rejects an absent model contributor. Version 3 supports
+the explicit [unallocated-model burn](OPEN_COMPETITION_MODEL_ALLOCATION.md),
+with finalized proof of its destination. There is no endpoint-only fallback.
 
 Each read uses one SQLite snapshot and checks stored sizes before loading
 bodies. The existing replay limits also bound the combined roster and evidence;
