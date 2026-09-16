@@ -38,7 +38,7 @@ from .competition_origin import (
 )
 from .competition_scheduling import AssignmentPublicationJournal, assignment_key
 from .config import Limits
-from .finalized_ancestry import MAXIMUM_DISTANCE, recover_header_path
+from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -138,6 +138,7 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
         if pins.live_chain != config.chain_pin or pins.finality_verifier != config.finality_pin:
             raise ValueError("origin and transport verifier pins differ")
         super().__init__(config, policy, **test_ports)
+        self._ancestry_headers = HeaderPathCache()
 
     def _finality_policy_hash(self):
         return scoring_policy_hash(self.legacy_policy)
@@ -158,7 +159,9 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
         if anchor is None or anchor.height > head.height:
             raise ValueError("historical issuance lacks an owned finalized anchor")
         self._check_finality_context(anchor)
-        ref, headers = await recover_header_path(anchor, height, self._registration_rpc.request)
+        ref, headers = await recover_header_path(
+            anchor, height, self._registration_rpc.request, cache=self._ancestry_headers
+        )
         runtime = await self._runtime_context(ref)
         if runtime.snapshot != ref or runtime.pin != self._runtime_pin:
             raise ValueError("historical timestamp runtime binding mismatch")
