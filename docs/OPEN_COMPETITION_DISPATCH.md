@@ -49,6 +49,24 @@ For a larger cohort, qualify the shared proof queue, HTTP concurrency, publicati
 discovery, and total per-miner serial workload before signing the window. Preserve
 the per-request inference limit; do not edit deadlines after publication.
 
+For the single-evaluator competition transport, prepare a new policy with an
+explicit `issue_allowance_seconds` between 300 and 5400. The builder
+`ScoringPolicy.competition_transport(...)` defaults to the original 300 seconds
+for compatibility. The extended allowance changes the transport-policy hash;
+coordinator, evaluator, feed and miner must all use that new policy before any
+assignments are signed. Existing assignments retain their original deadlines.
+Legacy scoring-policy clocks remain fixed.
+
+The clock derives the smallest whole multiple of the original 360-block stride
+that contains issuance, responses and reveal. The 5400-second (90-minute) issue
+allowance therefore uses a 720-block stride, about 144 minutes at the target
+block interval. The response window stays 300 seconds, and the model's separately
+configured 120-second inference limit is unchanged. Authentication still accepts
+only the original 360-second nonce age: the dispatcher signs a fresh nonce after
+claiming each request, rather than when the entire round was prepared. A
+5400-second allowance is an available bound, not evidence that a full cohort can
+finish. Measure publication, proof and request throughput before selecting it.
+
 The chain config keeps the competition-policy digest. Its chain and finality pins
 must equal those in the transport policy. The observer creates transport-bound
 verified blocks directly. The dispatcher does not relabel competition-bound

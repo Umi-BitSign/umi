@@ -230,6 +230,23 @@ class PolicyClock(StrictProtocolModel):
             weight_commit_submission_blocks=30,
         )
 
+    @classmethod
+    def competition_transport(cls, issue_allowance_seconds: int = 300) -> PolicyClock:
+        """Extend the issuance period and leave room for response and reveal."""
+        value = cls.launch().model_dump()
+        if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 5400:
+            lifecycle_seconds = (
+                value["anchor_blocks"] * value["target_block_interval_seconds"]
+                + value["selection_finality_buffer_seconds"]
+                + issue_allowance_seconds
+                + value["response_window_seconds"]
+                + value["reveal_margin_seconds"]
+            )
+            stride_seconds = value["window_stride_blocks"] * value["target_block_interval_seconds"]
+            value["window_stride_blocks"] *= lifecycle_seconds // stride_seconds + 1
+        value["issue_allowance_seconds"] = issue_allowance_seconds
+        return cls.model_validate(value)
+
 
 class PolicyLimits(StrictProtocolModel):
     emission_bearing_clips_per_batch: Annotated[int, Field(gt=0)]
@@ -930,9 +947,17 @@ class ScoringPolicy(StrictProtocolModel):
         ):
             raise ValueError("launch requires exactly one publisher per control group")
 
-        if limits.btauth_max_age_seconds < self.clock.issue_allowance_seconds:
+        if (
+            self.schema_ == SCORING_POLICY_SCHEMA
+            and limits.btauth_max_age_seconds < self.clock.issue_allowance_seconds
+        ):
             raise ValueError("btauth maximum age cannot be shorter than the issue allowance")
-        _validate_initial_launch_profile(self.clock, limits, self.thresholds)
+        _validate_initial_launch_profile(
+            self.clock,
+            limits,
+            self.thresholds,
+            competition_transport=self.schema_ == SINGLE_EVALUATOR_TRANSPORT_SCHEMA,
+        )
         return self
 
     @classmethod
@@ -942,6 +967,7 @@ class ScoringPolicy(StrictProtocolModel):
         activation_block: int,
         implementation_pins: PolicyImplementationPins,
         validator: ValidatorRegistryEntry,
+        issue_allowance_seconds: int = 300,
     ) -> ScoringPolicy:
         """Prepare the single-evaluator request transport without legacy publishers.
 
@@ -949,6 +975,8 @@ class ScoringPolicy(StrictProtocolModel):
         still requires live verifier pins and a matching competition policy;
         each request needs its signed competition assignment. Model capacity
         remains an independently verified property of the serving backend.
+        An explicit issue allowance can accommodate serial cases and the shared
+        proof queue. It changes the policy digest, never an existing assignment.
         """
 
         return cls(
@@ -963,7 +991,7 @@ class ScoringPolicy(StrictProtocolModel):
             validator_capacity_set_root=None,
             validator_cost_schedule_hash=None,
             implementation_pins=implementation_pins,
-            clock=PolicyClock.launch(),
+            clock=PolicyClock.competition_transport(issue_allowance_seconds),
             limits=PolicyLimits.launch(),
             thresholds=PolicyThresholds.launch(),
             validator_registry=[validator],
@@ -1011,8 +1039,16 @@ def _validate_initial_launch_profile(
     clock: PolicyClock,
     limits: PolicyLimits,
     thresholds: PolicyThresholds,
+    *,
+    competition_transport: bool = False,
 ) -> None:
     expected_clock = PolicyClock.launch()
+    if competition_transport:
+        if not 300 <= clock.issue_allowance_seconds <= 5400:
+            raise ValueError("competition issue allowance must be between 300 and 5400 seconds")
+        expected_clock = PolicyClock.competition_transport(clock.issue_allowance_seconds)
+        # Dispatch signs a fresh btauth nonce only after claiming each request.
+        # A longer assignment queue must not extend authentication freshness.
     expected_limits = PolicyLimits.launch()
     expected_thresholds = PolicyThresholds.launch()
     if clock != expected_clock:
