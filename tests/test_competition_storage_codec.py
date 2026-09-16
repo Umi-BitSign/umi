@@ -45,7 +45,50 @@ def version_bump(monkeypatch, rpc):
 def test_legacy_config_serialization_unchanged(chain_config):
     raw = canonical_json_bytes(chain_config)
     assert b"storage_codec_metadata_path" not in raw
+    assert b"runtime_metadata_binary" not in raw
     assert canonical_json_bytes(CompetitionChainConfig.model_validate_json(raw)) == raw
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"runtime_metadata_binary": "/tmp/executor"},
+        {"runtime_metadata_binary_sha256": "a" * 64},
+        {"runtime_metadata_binary": "relative", "runtime_metadata_binary_sha256": "a" * 64},
+        {"runtime_metadata_binary": "/", "runtime_metadata_binary_sha256": "a" * 64},
+        {"runtime_metadata_binary": "/tmp/../executor", "runtime_metadata_binary_sha256": "a" * 64},
+        {"runtime_metadata_binary": "/tmp/executor", "runtime_metadata_binary_sha256": "invalid"},
+        {
+            "runtime_metadata_binary": "/tmp/executor",
+            "runtime_metadata_binary_sha256": "a" * 64,
+            "storage_codec_metadata_path": "/tmp/metadata",
+        },
+    ],
+)
+def test_executed_runtime_requires_one_explicit_pinned_mode(chain_config, fields):
+    body = json.loads(canonical_json_bytes(chain_config))
+    body.update(fields)
+    with pytest.raises(ValueError):
+        CompetitionChainConfig.model_validate(body)
+    copied = chain_config.model_copy(update=fields)
+    with pytest.raises(ValueError):
+        CompetitionChainConfig.model_validate_json(canonical_json_bytes(copied))
+
+
+def test_registration_provider_cannot_silently_ignore_execution_config(chain, tmp_path):
+    state = tmp_path / "rejected-state"
+    config = chain.config.model_copy(
+        update={
+            "runtime_metadata_binary": str(tmp_path / "executor"),
+            "runtime_metadata_binary_sha256": "a" * 64,
+            "state_directory": str(state),
+        }
+    )
+    with pytest.raises(ValueError, match="only supported by the weight provider"):
+        FinalizedRegistrationProvider(
+            config, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
+    assert not state.exists()
 
 
 @pytest.mark.parametrize("path", ["relative.scale", "/", "/tmp/../codec", "/tmp/\x00codec"])

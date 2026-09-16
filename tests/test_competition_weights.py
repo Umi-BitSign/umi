@@ -511,17 +511,207 @@ async def test_signing_failure_leaves_durable_intent_and_no_automatic_retry(
     assert not item.encoded
 
 
-async def test_storage_only_codec_never_signs_a_transaction(weight_case, monkeypatch):
+@pytest.mark.parametrize("mode", ["reviewed_storage_codec/1", "executed_runtime/1"])
+async def test_unapproved_codec_never_signs_a_transaction(weight_case, monkeypatch, mode):
     from umi.validator_chain import PinnedRuntimeContext
 
     monkeypatch.setattr(
         PinnedRuntimeContext,
         "storage_codec_mode",
-        property(lambda self: "reviewed_storage_codec/1"),
+        property(lambda self: mode),
     )
     with pytest.raises(ValueError, match="storage-only codec"):
         await _run(weight_case)
     assert not weight_case.encoded
+
+
+@pytest.fixture
+def executed_weight_case(weight_case, monkeypatch, tmp_path):
+    from umi.runtime_metadata import RuntimeMetadataExecutor
+    from umi.validator_chain import FinalizedProofCollector
+
+    item = weight_case
+    item.config = item.provider.config = item.config.model_copy(
+        update={
+            "runtime_metadata_binary": str(tmp_path / "executor"),
+            "runtime_metadata_binary_sha256": "a" * 64,
+        }
+    )
+    item.provider._configure_weight_collector()
+    original = item.rpc.request
+    item.code = b"fixture wasm"
+
+    async def request(method, params):
+        assert method not in ("state_getMetadata", "state_getRuntimeVersion")
+        if method == "state_getStorageAt" and params[0] == "0x3a636f6465":
+            assert params[1] == item.finality.ref.block_hash
+            return "0x" + item.code.hex()
+        return await original(method, params)
+
+    monkeypatch.setattr(item.rpc, "request", request)
+    item.provider._runtime_proofs = FinalizedProofCollector(
+        item.rpc,
+        finality=item.finality,
+        verifier=lambda **kwargs: kwargs["proof"] == (b"proof",),
+    )
+
+    class ExecutedCodec(_SigningRuntime):
+        def __init__(self, metadata, spec_version, transaction_version, *, ss58_format):
+            assert metadata == b"meta\x0e-new-runtime"
+            assert (spec_version, transaction_version, ss58_format) == (459, 2, 42)
+            self.spec_version, self.transaction_version = spec_version, transaction_version
+
+    metadata = b"meta\x0e-new-runtime"
+    monkeypatch.setattr("umi.runtime_metadata.bittensor_core.Runtime", ExecutedCodec)
+
+    def invoke(self, code):
+        assert code == item.code
+        return (
+            canonical_json_bytes(
+                {
+                    "schema": "umi-runtime-metadata-execution/1",
+                    "runtime_code_sha256": hashlib.sha256(code).hexdigest(),
+                    "metadata_sha256": hashlib.sha256(metadata).hexdigest(),
+                    "metadata_hex": metadata.hex(),
+                    "spec_version": 459,
+                    "transaction_version": 2,
+                    "state_version": 1,
+                    "chain_submission_authorized": False,
+                }
+            )
+            + b"\n"
+        )
+
+    monkeypatch.setattr(RuntimeMetadataExecutor, "_invoke", invoke)
+    return item
+
+
+async def test_executed_runtime_weight_collection_retains_proof(executed_weight_case):
+    item = executed_weight_case
+    observation = await item.provider.collect_weights(item.hotkey, item.recipients)
+    validate_owned_weight_observation(observation)
+    assert observation.runtime.pin.spec_version == 459
+    assert observation.runtime.pin.transaction_version == 2
+    assert observation.runtime.pin != item.provider._runtime_pin
+    evidence = json.loads(observation.evidence)
+    assert evidence["storage_codec_mode"] == "executed_runtime/1"
+    execution = evidence["runtime_execution"]
+    assert execution["value"] == "0x" + item.code.hex()
+    assert execution["state_root"] == observation.snapshot.state_root
+    assert execution["key"] == "0x3a636f6465"
+    assert execution["executor_sha256"] == "a" * 64
+    assert execution["proof"] == ["0x" + b"proof".hex()]
+
+
+async def test_real_executed_context_remains_non_signing(executed_weight_case):
+    item = executed_weight_case
+    with pytest.raises(ValueError, match="storage-only codec"):
+        await _run(item)
+    assert not item.encoded
+
+
+async def test_runtime_code_bad_proof_never_executes(executed_weight_case, monkeypatch):
+    item = executed_weight_case
+    item.rpc.bad_proof = True
+    monkeypatch.setattr(
+        item.provider._runtime_executor, "execute", lambda *args: pytest.fail("unproven execution")
+    )
+    with pytest.raises(ValidatorChainError, match="storage_proof_verification_failed"):
+        await item.provider.collect_weights(item.hotkey, item.recipients)
+
+
+async def test_cancelled_collection_waits_for_bounded_executor(executed_weight_case, monkeypatch):
+    import threading
+
+    item = executed_weight_case
+    entered, release = threading.Event(), threading.Event()
+    execute = item.provider._runtime_executor.execute
+
+    def paused(*args):
+        entered.set()
+        assert release.wait(5), "test did not release executor"
+        return execute(*args)
+
+    monkeypatch.setattr(item.provider._runtime_executor, "execute", paused)
+    task = asyncio.create_task(item.provider.collect_weights(item.hotkey, item.recipients))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert not task.done()
+        assert item.provider._lock.locked()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not item.provider._lock.locked()
+
+
+@pytest.mark.parametrize("changed", ["executor", "proof", "mode", "snapshot"])
+async def test_executed_observation_binding_detects_changes(executed_weight_case, changed):
+    from umi.chain_evidence import StorageEvidence
+    from umi.validator_chain import PinnedRuntimeContext
+
+    item = executed_weight_case
+    observation = await item.provider.collect_weights(item.hotkey, item.recipients)
+    runtime = observation.runtime
+    if changed == "executor":
+        changed_runtime = replace(runtime, executor_sha256="b" * 64)
+    elif changed == "proof":
+        evidence = StorageEvidence(
+            snapshot=runtime.snapshot,
+            storage_key=b":code",
+            value=item.code,
+            proof=(b"different",),
+            verifier=lambda **kwargs: True,
+        )
+        changed_runtime = replace(runtime, code_evidence=evidence)
+    elif changed == "snapshot":
+        object.__setattr__(
+            runtime.code_evidence, "snapshot", replace(runtime.snapshot, block_number=171)
+        )
+        changed_runtime = runtime
+    else:
+        changed_runtime = PinnedRuntimeContext(
+            snapshot=runtime.snapshot,
+            pin=runtime.pin,
+            metadata_bytes=runtime.metadata_bytes,
+            runtime_version_bytes=runtime.runtime_version_bytes,
+            _runtime=runtime._runtime,
+        )
+    with pytest.raises(ValueError, match="owned proof adapter"):
+        validate_owned_weight_observation(replace(observation, runtime=changed_runtime))
+
+
+@pytest.mark.parametrize("changed", ["executor", "mode", "snapshot"])
+async def test_collector_rejects_execution_binding_mismatch(
+    executed_weight_case, monkeypatch, changed
+):
+    from umi.validator_chain import PinnedRuntimeContext
+
+    item = executed_weight_case
+    runtime = await item.provider._runtime_context(item.finality.ref)
+    if changed == "executor":
+        runtime = replace(runtime, executor_sha256="b" * 64)
+    elif changed == "snapshot":
+        object.__setattr__(
+            runtime.code_evidence, "snapshot", replace(runtime.snapshot, block_number=171)
+        )
+    else:
+        runtime = PinnedRuntimeContext(
+            snapshot=runtime.snapshot,
+            pin=runtime.pin,
+            metadata_bytes=runtime.metadata_bytes,
+            runtime_version_bytes=runtime.runtime_version_bytes,
+            _runtime=runtime._runtime,
+        )
+
+    async def context(ref):
+        return runtime
+
+    monkeypatch.setattr(item.provider, "_runtime_context", context)
+    with pytest.raises(ValueError, match="executed runtime binding mismatch"):
+        await item.provider.collect_weights(item.hotkey, item.recipients)
 
 
 async def test_other_nonce_use_without_exact_row_stays_unknown_even_after_expiry(weight_case):
