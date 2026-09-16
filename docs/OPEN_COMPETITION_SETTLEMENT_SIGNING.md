@@ -90,7 +90,10 @@ It does not establish real-model quality or independent administration.
 
 The delivery tests additionally cover authenticated proposal discovery,
 certificate collection and immutable package publication. The integrated
-protected-data rehearsal, independent operators, reviewed terms/rights,
-qualifying model promotion, signed activation and finalized incentive evidence
-remain launch requirements. Importing Michael's baseline grants no contributor
-reward by itself.
+protected-data rehearsal, reviewed launch inputs, signed activation and finalized
+incentive evidence remain launch requirements. The approved initial evaluator
+cohort is UID 0 alone, with one disclosed operator group. Version 3 permits
+70% endpoint allocation and 30% verified burn before the first promotion;
+model-specific rights approval and a qualifying promotion are required before
+paying the contributor share. Importing Michael's baseline grants no contributor
+reward by itself. See the [allocation rule](OPEN_COMPETITION_MODEL_ALLOCATION.md).
