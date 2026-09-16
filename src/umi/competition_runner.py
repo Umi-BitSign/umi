@@ -1,4 +1,4 @@
-"""CPU offline-model evaluation boundary for a separate wallet-free Linux host.
+"""Offline-model evaluation boundary for a separate wallet-free worker.
 
 Runtime integration is explicit and opt-in. This module is not wired into the
 installed bootstrap supervisor. Unit tests do not certify a host's isolation.
@@ -19,10 +19,11 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 from typing_extensions import Self
 
 from .competition_artifacts import verify_preserved_bundle
+from .competition_native import OfflineMpsRuntime
 from .open_competition import CaseOutput, CompetitionPolicy, ModelBundle, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -48,6 +49,10 @@ class OfflineCpuRuntime(StrictProtocolModel):
         if self.scratch_bytes > self.memory_bytes // 4:
             raise ValueError("scratch space exceeds one quarter of the memory budget")
         return self
+
+
+OfflineRuntime = Annotated[OfflineCpuRuntime | OfflineMpsRuntime, Field(discriminator="schema_")]
+OFFLINE_RUNTIME = TypeAdapter(OfflineRuntime)
 
 
 class EvaluationInfrastructureError(RuntimeError):
@@ -235,7 +240,12 @@ async def _small_command(arguments: tuple[str, ...], *, timeout: float = 10) -> 
                 await process.wait()
 
 
-async def verify_runtime(runtime: OfflineCpuRuntime, policy: CompetitionPolicy) -> None:
+async def verify_runtime(runtime: OfflineRuntime, policy: CompetitionPolicy) -> None:
+    if isinstance(runtime, OfflineMpsRuntime):
+        from .competition_native import verify_native_runtime
+
+        await verify_native_runtime(runtime, policy)
+        return
     if sys.platform != "linux" or os.geteuid() == 0:
         raise EvaluationInfrastructureError("offline evaluation requires a non-root Linux operator")
     if digest(runtime) != policy.evaluation_runtime_sha256:
@@ -276,7 +286,7 @@ async def execute_offline_case(
     *,
     bundle: ModelBundle,
     archive: Path,
-    runtime: OfflineCpuRuntime,
+    runtime: OfflineRuntime,
     policy: CompetitionPolicy,
     case_id: Hex32,
     video_sha256: Hex32,
@@ -284,12 +294,24 @@ async def execute_offline_case(
 ) -> OfflineCaseExecution:
     """Run a verified model on one clip, with no reference text passed to it.
 
-    Cold start and container initialization are included in the case deadline.
+    Cold start and sandbox initialization are included in the case deadline.
     The only supported entrypoint is one declared Python inference file that
     reads argv[1] and emits one UTF-8 English hypothesis to stdout.
     """
+    runtime = OFFLINE_RUNTIME.validate_json(canonical_json_bytes(runtime))
+    if isinstance(runtime, OfflineMpsRuntime):
+        from .competition_native import execute_native_case
+
+        return await execute_native_case(
+            bundle=bundle,
+            archive=archive,
+            runtime=runtime,
+            policy=policy,
+            case_id=case_id,
+            video_sha256=video_sha256,
+            video=video,
+        )
     bundle = ModelBundle.model_validate_json(canonical_json_bytes(bundle))
-    runtime = OfflineCpuRuntime.model_validate_json(canonical_json_bytes(runtime))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if (
         len(video) > runtime.maximum_video_bytes

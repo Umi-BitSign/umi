@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from pydantic import Field, RootModel
 
 from .competition_evaluator import _read
-from .competition_runner import OfflineCpuRuntime
+from .competition_runner import OfflineRuntime
 from .competition_work_plans import RoundWorkAssets
 from .open_competition import EvaluationRound, ModelBundle, digest, validate_bundle_policy
 from .protocol import Hex32, StrictProtocolModel, Video, canonical_json_bytes
@@ -21,7 +21,7 @@ from .protocol import Hex32, StrictProtocolModel, Video, canonical_json_bytes
 class ArchivedRoundWorkAssets(StrictProtocolModel):
     schema_: Literal["umi-round-work-assets/2"] = Field(alias="schema")
     suite_sha256: Hex32
-    runtime: OfflineCpuRuntime
+    runtime: OfflineRuntime
     videos: Annotated[tuple[Video, ...], Field(min_length=3, max_length=2048)]
 
 

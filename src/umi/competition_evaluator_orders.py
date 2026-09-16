@@ -8,7 +8,7 @@ from pydantic import Field
 
 from .competition_authorization import SignedEndpointAuthorization
 from .competition_execution import ExecutionCase
-from .competition_runner import OfflineCpuRuntime
+from .competition_runner import OfflineRuntime
 from .open_competition import EvaluationRound, Hotkey, ModelBundle, Signature, SignedSubmission
 from .protocol import StrictProtocolModel
 
@@ -18,7 +18,7 @@ class EvaluationOrder(StrictProtocolModel):
     round: EvaluationRound
     submission: SignedSubmission
     incumbent: ModelBundle
-    runtime: OfflineCpuRuntime
+    runtime: OfflineRuntime
     cases: Annotated[tuple[ExecutionCase, ...], Field(min_length=3, max_length=2048)]
     evaluators: Annotated[tuple[Hotkey, ...], Field(min_length=1, max_length=64)]
     publication: SignedEndpointAuthorization | None = None
