@@ -892,8 +892,21 @@ class FinalizedRegistrationProvider:
             raise ValueError("registration storage proof uses another runtime or state root")
         if {read.spec for read in batch.reads} != set(specs) or len(batch.reads) != len(specs):
             raise ValueError("registration storage response is incomplete or duplicated")
-        if any(read.raw_value is None for read in batch.reads):
+        if any(
+            read.raw_value is None
+            and not (
+                self.policy.unallocated_model_burn is not None
+                and read.spec == StorageReadSpec("SubtensorModule", "RecycleOrBurn", (78,))
+                and read.decoded_value == "Burn"
+            )
+            for read in batch.reads
+        ):
             raise ValueError("registration storage membership is incomplete")
+        # RecycleOrBurn is ValueQuery storage. Verified non-membership can
+        # decode to Burn through the pinned metadata default. The collector
+        # verifies that absence against the same state root before decoding;
+        # this exception never supplies a local fallback or permits missing
+        # owner, UID mapping, timestamp, or registration claims.
         return batch
 
     def _check_prior(self, ref: FinalizedSnapshotRef) -> None:

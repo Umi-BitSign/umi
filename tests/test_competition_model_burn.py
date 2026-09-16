@@ -1,5 +1,6 @@
 from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from umi.open_competition import (
 from umi.protocol import canonical_json_bytes
 from umi.validator_chain import ValidatorChainError
 
+from .test_competition_chain import _Runtime
 from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_package import package_limits as package_limits
@@ -303,6 +305,51 @@ async def test_owned_provider_proves_burn_owner_and_mode_in_same_capture(burn_ch
     keys = [key for batch in burn_chain.verifier.checked for key, _ in batch["items"]]
     assert any(b"SubnetOwnerHotkey" in k for k in keys)
     assert any(b"RecycleOrBurn" in k for k in keys)
+
+
+@pytest.mark.parametrize("default", ["Burn", "Recycle", None])
+@pytest.mark.parametrize("bad_proof", [False, True])
+async def test_burn_storage_absence_requires_verified_metadata_default(
+    burn_chain, monkeypatch, default, bad_proof
+):
+    original = _Runtime.storage_entry
+
+    def storage_entry(self, pallet, item):
+        if (pallet, item) == ("SubtensorModule", "RecycleOrBurn") and default is not None:
+            return SimpleNamespace(
+                modifier="Default", default_bytes=canonical_json_bytes(default), value_type="json"
+            )
+        return original(self, pallet, item)
+
+    monkeypatch.setattr(_Runtime, "storage_entry", storage_entry)
+    del burn_chain.rpc.values[("SubtensorModule", "RecycleOrBurn", (78,))]
+    burn_chain.rpc.bad_proof = bad_proof
+    if default != "Burn" or bad_proof:
+        with pytest.raises((ValueError, ValidatorChainError)):
+            await burn_chain.provider.collect()
+    else:
+        capture = await burn_chain.provider.collect()
+        assert capture.snapshot.burn_destination == burn_chain.policy.unallocated_model_burn
+        assert any(
+            b"RecycleOrBurn" in key and value is None
+            for batch in burn_chain.verifier.checked
+            for key, value in batch["items"]
+        )
+
+
+async def test_default_burn_does_not_allow_missing_owner(burn_chain, monkeypatch):
+    original = _Runtime.storage_entry
+
+    def storage_entry(self, pallet, item):
+        if (pallet, item) == ("SubtensorModule", "RecycleOrBurn"):
+            return SimpleNamespace(modifier="Default", default_bytes=b'"Burn"', value_type="json")
+        return original(self, pallet, item)
+
+    monkeypatch.setattr(_Runtime, "storage_entry", storage_entry)
+    del burn_chain.rpc.values[("SubtensorModule", "RecycleOrBurn", (78,))]
+    del burn_chain.rpc.values[("SubtensorModule", "SubnetOwnerHotkey", (78,))]
+    with pytest.raises(ValueError, match="membership is incomplete"):
+        await burn_chain.provider.collect()
 
 
 @pytest.mark.parametrize("mutation", ["recycle", "missing", "owner", "uid", "proof"])

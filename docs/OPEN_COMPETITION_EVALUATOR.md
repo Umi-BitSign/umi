@@ -6,9 +6,10 @@ independent evaluators. It produces the existing `IndependentEvaluationEvidence`
 used by settlement replay. Optional settlement signing returns endorsements to
 the coordinator. The worker does not submit weights.
 
-The imported baseline still has no contributor attribution. Running this worker
-does not activate the approved simultaneous 70/30 reward policy or satisfy its
-protected-data, rights-review and independent-operator launch gates.
+The imported baseline still has no contributor attribution. The approved
+[70/30 launch rule](OPEN_COMPETITION_MODEL_ALLOCATION.md) burns the unallocated
+model share until a model qualifies. Running this worker does not activate
+weights or satisfy the launch profile's evaluation and review requirements.
 
 Scoring is automatic; no human ASL judge is part of the work-order path.
 The [private holdout](OPEN_COMPETITION_PRIVATE_HOLDOUT.md) supplies committed
@@ -50,6 +51,16 @@ Use one hotkey per worker and a dedicated configuration with schema
   [retains independently checked cutoff receipts](OPEN_COMPETITION_REVIEW_HISTORY.md)
   in this store. Initialize its preserved baseline first. Empty or conflicting
   promotion history holds signing; proposals cannot approve model contributions.
+
+Configure an archive-capable `rpc_url` for providers that recover historical
+transport headers and timestamp proofs. The ordinary public entrypoint can
+return a historical value while rejecting its trie proof because the state was
+discarded. Test both `state_queryStorageAt` and `state_getReadProof` at the oldest
+height the signed window can require. The public
+`wss://archive.chain.opentensor.ai:443` served those proofs in the launch
+rehearsal. Returned data remains untrusted until the local verifier checks it
+against an owned finalized state root. Keep the collection timeout and proof
+checks enabled; changing the RPC endpoint does not grant finality authority.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives
