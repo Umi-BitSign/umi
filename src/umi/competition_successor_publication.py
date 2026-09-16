@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_package import (
@@ -63,6 +63,9 @@ class SuccessorPublicationWeightParameters(StrictProtocolModel):
 
     required_finality_verifier_sha256_by_target: dict[str, Hex32]
     required_storage_proof_verifier_sha256_by_target: dict[str, Hex32]
+    required_runtime_metadata_executor_sha256_by_target: (
+        Annotated[dict[str, Hex32], Field(min_length=1, max_length=8)] | None
+    ) = None
     weights_version_key: Annotated[int, Field(ge=1, le=2**64 - 1)]
     required_min_allowed_weights: Annotated[int, Field(ge=1, le=256)]
     required_max_allowed_uids: Annotated[int, Field(ge=1, le=256)]
@@ -70,8 +73,21 @@ class SuccessorPublicationWeightParameters(StrictProtocolModel):
     required_weights_rate_limit: Annotated[int, Field(ge=0, le=2**53 - 1)]
     mortality_period: Annotated[int, Field(ge=4, le=4096)]
 
+    @model_serializer(mode="wrap")
+    def preserve_legacy_parameters(self, handler):
+        value = handler(self)
+        if self.required_runtime_metadata_executor_sha256_by_target is None:
+            value.pop("required_runtime_metadata_executor_sha256_by_target", None)
+        return value
+
     @model_validator(mode="after")
     def coherent_bounds(self) -> Self:
+        pins = self.required_runtime_metadata_executor_sha256_by_target
+        if pins is not None and (
+            set(pins) != set(self.required_finality_verifier_sha256_by_target)
+            or set(pins) != set(self.required_storage_proof_verifier_sha256_by_target)
+        ):
+            raise ValueError("publication runtime execution must cover every verifier target")
         if self.mortality_period & (self.mortality_period - 1):
             raise ValueError("publication mortality must be a power of two")
         if self.required_min_allowed_weights > self.required_max_allowed_uids:

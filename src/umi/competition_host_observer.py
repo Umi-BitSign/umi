@@ -50,6 +50,7 @@ from .competition_worker_cli import (
     WORKER_FINALITY_BINARY,
     WORKER_FINALITY_STATE_ROOT,
     WORKER_PROOF_BINARY,
+    WORKER_RUNTIME_METADATA_BINARY,
 )
 from .encoding import account_id32
 from .open_competition import digest
@@ -216,6 +217,15 @@ class StoppedUpgradeObserver:
                 0o444,
             ),
         )
+        if observer.chain.runtime_metadata_binary is not None:
+            self._resources += (
+                (
+                    host_tree.path / "artifacts/umi-runtime-metadata",
+                    WORKER_RUNTIME_METADATA_BINARY,
+                    observer.chain.runtime_metadata_binary_sha256,
+                    0o555,
+                ),
+            )
         for source, _, sha, mode in self._resources:
             record = records.get(str(source.relative_to(host_tree.path)))
             if record is None or record.sha256 != sha or record.mode != mode:

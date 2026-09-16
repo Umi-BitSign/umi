@@ -1,8 +1,8 @@
 """Derive a codec from proof-backed Wasm without trusting RPC metadata.
 
-This is a read-only building block. It does not enable successor signing: the
-signing path rejects its distinct mode until a signed policy explicitly binds
-the execution verifier and its production integration is complete.
+This is a read-only building block. The signing path requires a separate signed
+authorization that explicitly binds the execution verifier, plus matching
+installed configuration. Constructing this codec does not grant that authority.
 """
 
 from __future__ import annotations

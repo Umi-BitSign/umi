@@ -171,6 +171,26 @@ def test_unit_paths_cannot_inject_systemd_tokens(value):
         service._path(value)
 
 
+@pytest.mark.parametrize("changed", [None, "missing", "hash", "mode"])
+def test_runtime_executor_resource_is_signed_and_readonly(case, changed):
+    chain = case.anchor.observer_config.chain
+    chain.runtime_metadata_binary = str(service.WORKER_RUNTIME_METADATA_BINARY)
+    chain.runtime_metadata_binary_sha256 = "bb" * 32
+    record = SimpleNamespace(path="artifacts/umi-runtime-metadata", sha256="bb" * 32, mode=0o555)
+    if changed != "missing":
+        case.signed.manifest.files.append(record)
+    if changed == "hash":
+        record.sha256 = "cc" * 32
+    if changed == "mode":
+        record.mode = 0o777
+    if changed:
+        with pytest.raises(ValueError, match="host manifest lacks"):
+            _plan(case)
+    else:
+        text = _plan(case).drop_in_bytes.decode()
+        assert "artifacts/umi-runtime-metadata:/opt/umi/bin/umi-runtime-metadata" in text
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

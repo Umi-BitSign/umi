@@ -50,7 +50,12 @@ def test_successor_image_contains_bounded_chain_verifiers_at_fixed_paths() -> No
     dockerfile = (DEPLOYMENT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "rust:1.98.0-bookworm@sha256:" in dockerfile
-    assert dockerfile.count("cargo +1.98.0 build --locked --release") == 2
+    assert dockerfile.count("cargo +1.98.0 build --locked --release") == 3
+    assert "/opt/umi/bin/umi-runtime-metadata" in dockerfile
+    assert (
+        "COPY rust/grandpa-finality-observer/vendor /build/grandpa-finality-observer/vendor"
+        in dockerfile
+    )
     assert "cargo +1.98.0 test --locked --release" in dockerfile
     assert "/opt/umi/bin/umi-grandpa-finality-observer --conformance-self-test" in dockerfile
     assert "printf '' | /opt/umi/bin/umi-substrate-proof-verifier" in dockerfile
@@ -72,6 +77,9 @@ def test_successor_image_sources_are_in_the_bounded_docker_context() -> None:
         "!rust/grandpa-finality-observer/src/**",
         "!rust/grandpa-finality-observer/fixtures/**",
         "!rust/grandpa-finality-observer/vendor/**",
+        "!rust/runtime-metadata/Cargo.toml",
+        "!rust/runtime-metadata/Cargo.lock",
+        "!rust/runtime-metadata/src/**",
     )
 
     assert all(item in patterns for item in required)

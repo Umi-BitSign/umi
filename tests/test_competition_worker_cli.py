@@ -62,6 +62,37 @@ def denied(*args, **kwargs):
     pytest.fail("wallet-free replay touched a chain, wallet, subprocess or network port")
 
 
+@pytest.mark.parametrize("path", ["/tmp/executor", str(cli.WORKER_RUNTIME_METADATA_BINARY)])
+def test_execution_and_observer_runtime_path_is_fixed(weight_inputs, policy, path):
+    from umi.competition_supervisor_observer import SuccessorHostObserverConfig
+
+    config = weight_inputs.inputs.worker_execution_config.weights
+    body = config.model_dump(mode="json", by_alias=True)
+    body["chain"].update(runtime_metadata_binary=path, runtime_metadata_binary_sha256="a" * 64)
+    if path != str(cli.WORKER_RUNTIME_METADATA_BINARY):
+        with pytest.raises(ValueError, match="fixed worker path"):
+            cli.SuccessorWeightExecutionConfig.model_validate(body)
+    else:
+        result = cli.SuccessorWeightExecutionConfig.model_validate(body)
+        assert result.chain.runtime_metadata_binary == path
+    # Check the host path independently of the worker configuration validator.
+    from umi.competition_chain import CompetitionChainConfig
+
+    chain = CompetitionChainConfig.model_validate(body["chain"])
+    if path != str(cli.WORKER_RUNTIME_METADATA_BINARY):
+        with pytest.raises(ValueError, match="fixed observer path"):
+            SuccessorHostObserverConfig(
+                schema="umi-successor-host-observer-config/1", chain=chain, policy=policy
+            )
+    else:
+        assert (
+            SuccessorHostObserverConfig(
+                schema="umi-successor-host-observer-config/1", chain=chain, policy=policy
+            ).chain
+            == chain
+        )
+
+
 async def test_replay_profile_runs_real_replay_without_wallet_or_network(inputs, monkeypatch):
     monkeypatch.setattr(cli, "_load_hotkey", denied)
     monkeypatch.setattr(cli, "_activate", denied)

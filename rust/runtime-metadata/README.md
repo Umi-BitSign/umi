@@ -31,8 +31,10 @@ the observation. This mode cannot be combined with a storage-only codec. Other
 registration providers reject it rather than silently ignoring it. Leaving both
 fields absent preserves existing configuration digests and exact-runtime reads.
 
-This does not activate runtime-independent signing. The resulting context has
-mode `executed_runtime/1`; the existing weight transport rejects it. Integration
-still needs signed executor authorization, release packaging and transaction
-replay tests. No current policy or validator service changes when this helper is
-built or the read-only collector is tested.
+The resulting context has mode `executed_runtime/1`. Weight signing requires a
+separate signed `required_runtime_metadata_executor_sha256_by_target` map and
+matching chain configuration. Legacy authorizations reject it. Executor files
+must be included in the signed host artifact and worker image; see the
+[worker deployment guide](../../deploy/linux-competition-worker/README.md).
+No current policy or validator service changes when this helper is built or the
+read-only collector is tested.

@@ -858,6 +858,47 @@ def test_rolling_config_cannot_exceed_root_sealed_ceiling(activation_case):
         activation.load_successor_worker_inputs()
 
 
+@pytest.mark.parametrize("mode", ["matched", "unsigned", "wrong_hash", "downgrade"])
+def test_host_requires_signed_runtime_execution_choice(activation_case, mode):
+    from umi.competition_worker_cli import WORKER_RUNTIME_METADATA_BINARY
+
+    case = activation_case
+    rollover = _weight_rollover(case)
+    weights = rollover.execution.weights
+    chain = weights.chain
+    body = rollover.body
+    if mode != "downgrade":
+        chain = chain.model_copy(
+            update={
+                "runtime_metadata_binary": str(WORKER_RUNTIME_METADATA_BINARY),
+                "runtime_metadata_binary_sha256": "ab" * 32,
+            }
+        )
+    if mode != "unsigned":
+        body = body.model_copy(
+            update={
+                "required_runtime_metadata_executor_sha256_by_target": {
+                    chain.target_triple: ("cd" if mode == "wrong_hash" else "ab") * 32
+                }
+            }
+        )
+    execution = rollover.execution.model_copy(
+        update={"weights": weights.model_copy(update={"chain": chain})}
+    )
+    kwargs = dict(
+        execution=execution,
+        directive=rollover.directive,
+        release_identity=case.release_identity,
+        authorization_body=body,
+        limits=case.limits,
+    )
+    if mode == "matched":
+        activation._validate_worker_execution_bindings(**kwargs)
+    else:
+        with pytest.raises(activation.HostActivationError, match="runtime execution differs"):
+            activation._validate_worker_execution_bindings(**kwargs)
+
+
 def test_later_weight_page_uses_owned_head_without_resealing_root_anchor(
     activation_case, monkeypatch
 ):

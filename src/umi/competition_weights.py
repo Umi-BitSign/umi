@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal
 
 import bittensor as bt
 from bittensor._transport.contract import SignedExtrinsic
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_chain import CompetitionChainConfig
@@ -54,6 +54,7 @@ from .encoding import account_id32
 from .open_competition import Hex32, Hotkey, Registration, Signature, StrictProtocolModel, digest
 from .policy import LiveChainObservationPin
 from .protocol import canonical_json_bytes
+from .runtime_metadata import ExecutedRuntimeContext
 
 Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 _AUTH_DOMAIN = b"umi-competition-weight-authorization-v1\0"
@@ -145,6 +146,9 @@ class CompetitionWeightAuthorizationBody(StrictProtocolModel):
     required_storage_proof_verifier_sha256_by_target: Annotated[
         dict[str, Hex32], Field(min_length=1, max_length=8)
     ]
+    required_runtime_metadata_executor_sha256_by_target: (
+        Annotated[dict[str, Hex32], Field(min_length=1, max_length=8)] | None
+    ) = None
     network: Literal["finney"]
     netuid: Literal[78]
     mechanism_id: Literal[0]
@@ -161,8 +165,21 @@ class CompetitionWeightAuthorizationBody(StrictProtocolModel):
     mortality_period: Annotated[int, Field(ge=4, le=4096)]
     late_conflict_action: Literal["hold_no_automatic_correction"]
 
+    @model_serializer(mode="wrap")
+    def preserve_legacy_authorization(self, handler):
+        value = handler(self)
+        if self.required_runtime_metadata_executor_sha256_by_target is None:
+            value.pop("required_runtime_metadata_executor_sha256_by_target", None)
+        return value
+
     @model_validator(mode="after")
     def validate_bounds(self) -> Self:
+        pins = self.required_runtime_metadata_executor_sha256_by_target
+        if pins is not None and (
+            set(pins) != set(self.required_finality_verifier_sha256_by_target)
+            or set(pins) != set(self.required_storage_proof_verifier_sha256_by_target)
+        ):
+            raise ValueError("runtime execution must cover every authorized verifier target")
         if not self.signed_at_block <= self.valid_from_block < self.valid_through_block:
             raise ValueError("invalid successor authorization interval")
         if self.mortality_period & (self.mortality_period - 1):
@@ -178,6 +195,34 @@ class SignedCompetitionWeightAuthorization(StrictProtocolModel):
     schema_: Literal["umi-signed-competition-weight-authorization/1"] = Field(alias="schema")
     authorization: CompetitionWeightAuthorizationBody
     signature: Signature
+
+
+def validate_runtime_execution_authorization(chain_config, authorization) -> None:
+    """A new signed executor pin is required to opt out of exact-runtime mode."""
+    pins = authorization.required_runtime_metadata_executor_sha256_by_target
+    if pins is None:
+        if chain_config.runtime_metadata_binary is not None:
+            raise ValueError("runtime execution is absent from signed authorization")
+        return
+    target = chain_config.target_triple
+    if (
+        target not in pins
+        or chain_config.runtime_metadata_binary is None
+        or chain_config.runtime_metadata_binary_sha256 != pins[target]
+        or chain_config.storage_codec_metadata_path is not None
+    ):
+        raise ValueError("runtime execution differs from signed authorization")
+
+
+def _validate_signing_runtime(runtime, authorization) -> None:
+    pins = authorization.required_runtime_metadata_executor_sha256_by_target
+    if pins is None:
+        if runtime.storage_codec_mode != "exact_runtime":
+            raise ValueError("a storage-only codec cannot authorize transaction encoding")
+    elif (
+        type(runtime) is not ExecutedRuntimeContext or runtime.executor_sha256 not in pins.values()
+    ):
+        raise ValueError("signed runtime execution is missing or has a different executor")
 
 
 def competition_weight_authorization_digest(body: CompetitionWeightAuthorizationBody) -> str:
@@ -315,6 +360,8 @@ def validate_weight_preflight(
         raise ValueError("weight observation belongs to another installed chain configuration")
     if chain_config.chain_pin != authorization.chain_pin:
         raise ValueError("signed successor runtime pin differs from owned provider")
+    validate_runtime_execution_authorization(chain_config, authorization)
+    _validate_signing_runtime(observation.runtime, authorization)
     target = chain_config.target_triple
     if (
         authorization.required_finality_verifier_sha256_by_target.get(target)
@@ -420,8 +467,7 @@ class BittensorCompetitionWeightTransport:
     @staticmethod
     def encode(call, body, observation, signer, *, projection) -> bytes:
         validate_owned_weight_observation(observation)
-        if observation.runtime.storage_codec_mode != "exact_runtime":
-            raise ValueError("a storage-only codec cannot authorize transaction encoding")
+        _validate_signing_runtime(observation.runtime, body)
         if digest(projection) != body.projection_sha256 or (
             call.module != "SubtensorModule"
             or call.function != "set_mechanism_weights"

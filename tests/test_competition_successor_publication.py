@@ -76,6 +76,37 @@ def build(case, package, block=160, **changes):
     return case.builder.build(package.prepared, **args)
 
 
+def test_publication_explicitly_signs_executor_pin(publication_case, package_case, tmp_path):
+    case = publication_case
+    target = case.plan.release.replay_release_identity.target_triple
+    assert b"required_runtime_metadata_executor_sha256_by_target" not in canonical_json_bytes(
+        case.plan
+    )
+    pins = {target: "23" * 32}
+    parameters = case.plan.weights.model_copy(
+        update={"required_runtime_metadata_executor_sha256_by_target": pins}
+    )
+    plan = case.plan.model_copy(update={"weights": parameters})
+    builder = SuccessorRoundPublicationBuilder(tmp_path / "executed-publication", plan)
+    case.builder = builder
+    signed = build(case, package_case)
+    assert signed.intent.authorization.required_runtime_metadata_executor_sha256_by_target == pins
+    assert (
+        signed.authorization.authorization.required_runtime_metadata_executor_sha256_by_target
+        == pins
+    )
+    builder = SuccessorRoundPublicationBuilder(tmp_path / "executed-publication", plan)
+    assert canonical_json_bytes(builder.history()[0]) == canonical_json_bytes(signed)
+
+
+@pytest.mark.parametrize("pins", [{}, {"other": "23" * 32}])
+def test_publication_rejects_incomplete_executor_targets(publication_case, pins):
+    parameters = publication_case.plan.weights.model_dump()
+    parameters["required_runtime_metadata_executor_sha256_by_target"] = pins
+    with pytest.raises(ValueError):
+        SuccessorPublicationWeightParameters.model_validate(parameters)
+
+
 @pytest.fixture
 def next_package(package_case, policy, replay_limits, package_limits, release_identity):
     """A later real settlement keeps the first round's promoted beneficiary."""

@@ -605,9 +605,104 @@ async def test_executed_runtime_weight_collection_retains_proof(executed_weight_
 
 async def test_real_executed_context_remains_non_signing(executed_weight_case):
     item = executed_weight_case
-    with pytest.raises(ValueError, match="storage-only codec"):
+    with pytest.raises(ValueError, match="absent from signed authorization"):
         await _run(item)
     assert not item.encoded
+
+
+def _authorize_executed_runtime(item, pins=None):
+    body = item.body.model_copy(
+        update={
+            "required_runtime_metadata_executor_sha256_by_target": pins
+            or {item.config.target_triple: item.config.runtime_metadata_binary_sha256}
+        }
+    )
+    item.signed = sign_competition_weight_authorization(body, wallet("Ferdie"))
+    item.body = item.signed.authorization
+
+
+async def test_signed_execution_policy_signs_exact_row_and_recovers_once(executed_weight_case):
+    item = executed_weight_case
+    _authorize_executed_runtime(item)
+    outcome = await _run(item)
+    assert outcome.status == "recovered_effect" and outcome.exact_row_currently_applied
+    assert outcome.submitted_by_this_attempt and len(item.encoded) == 1
+    assert not (await _run(item)).submitted_by_this_attempt
+    assert len(item.encoded) == 1
+    with sqlite3.connect(item.worker.path) as db:
+        evidence = [row[0] for row in db.execute("SELECT body FROM evidence")]
+    captures = [json.loads(raw) for raw in evidence if raw.startswith(b"{")]
+    assert any(
+        value.get("runtime_execution", {}).get("executor_sha256") == "a" * 64 for value in captures
+    )
+
+
+async def test_executed_unknown_submission_never_retries(executed_weight_case):
+    item = executed_weight_case
+    _authorize_executed_runtime(item)
+    item.behavior = "disconnect"
+    with pytest.raises(ConnectionError):
+        await _run(item)
+    assert (await _run(item)).status == "unknown"
+    _advance(item, 180, applied=True)
+    _advance(item, 201)
+    assert (await _run(item)).status == "recovered_effect"
+    assert len(item.encoded) == 1
+
+
+async def test_wrong_signed_executor_never_signs(executed_weight_case):
+    item = executed_weight_case
+    _authorize_executed_runtime(item, {item.config.target_triple: "b" * 64})
+    with pytest.raises(ValueError, match="differs from signed authorization"):
+        await _run(item)
+    assert not item.encoded
+
+
+async def test_execution_authority_cannot_downgrade_to_exact_codec(weight_case):
+    item = weight_case
+    _authorize_executed_runtime(item, {item.config.target_triple: "a" * 64})
+    with pytest.raises(ValueError, match="differs from signed authorization"):
+        await _run(item)
+    assert not item.encoded
+
+
+@pytest.mark.parametrize("pins", [{}, {"other": "a" * 64}, {"aarch64-apple-darwin": "invalid"}])
+def test_signed_execution_map_requires_complete_valid_targets(weight_case, pins):
+    value = json.loads(canonical_json_bytes(weight_case.body))
+    value["required_runtime_metadata_executor_sha256_by_target"] = pins
+    with pytest.raises(ValueError):
+        CompetitionWeightAuthorizationBody.model_validate(value)
+
+
+def test_legacy_authorization_bytes_omit_execution_policy(weight_case):
+    original = canonical_json_bytes(weight_case.body)
+    assert b"required_runtime_metadata_executor_sha256_by_target" not in original
+    assert (
+        canonical_json_bytes(CompetitionWeightAuthorizationBody.model_validate_json(original))
+        == original
+    )
+
+
+def test_executor_hash_is_signed_not_an_unsigned_option(executed_weight_case):
+    item = executed_weight_case
+    legacy_digest = competition_weight_authorization_digest(item.body)
+    _authorize_executed_runtime(item)
+    assert competition_weight_authorization_digest(item.body) != legacy_digest
+    changed = item.signed.model_copy(
+        update={
+            "authorization": item.body.model_copy(
+                update={
+                    "required_runtime_metadata_executor_sha256_by_target": {
+                        item.config.target_triple: "b" * 64
+                    }
+                }
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="signature"):
+        verify_competition_weight_authorization(
+            changed, trusted_authority_hotkeys=item.context.authority_hotkeys, package=item.package
+        )
 
 
 async def test_runtime_code_bad_proof_never_executes(executed_weight_case, monkeypatch):
