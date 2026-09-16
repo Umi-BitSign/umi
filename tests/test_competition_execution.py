@@ -474,6 +474,7 @@ async def test_stale_finality_wait_is_bounded_and_retains_pending_output(
     async def source():
         nonlocal calls
         calls += 1
+        assert calls < 10_000, "deadline failed to stop stale provider retries"
         if calls > 1:
             raise execution.OwnedFinalityStale("owned finalized head is stale")
         return boundary()
@@ -488,6 +489,40 @@ async def test_stale_finality_wait_is_bounded_and_retains_pending_output(
     assert len([call for call in setup[-1] if isinstance(call, dict)]) == 1
     with pytest.raises(ValueError, match="automatic rerun refused"):
         await run_job(setup, tmp_path, source=source)
+
+
+@pytest.mark.asyncio
+async def test_boundary_cancellation_survives_simultaneous_provider_completion():
+    async def source():
+        task.cancel()
+        return boundary()
+
+    task = asyncio.create_task(execution._fresh_execution_boundary(source))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_boundary_cleans_up_pending_provider_on_timeout_or_cancellation(monkeypatch, cancel):
+    monkeypatch.setattr(execution, "_FRESH_BOUNDARY_WAIT_SECONDS", 0.02)
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def source():
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopped.set()
+
+    task = asyncio.create_task(execution._fresh_execution_boundary(source))
+    await started.wait()
+    if cancel:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else asyncio.TimeoutError):
+        await task
+    assert stopped.is_set()
 
 
 @pytest.mark.asyncio
