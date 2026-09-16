@@ -23,7 +23,7 @@ from pydantic import Field, model_validator
 from typing_extensions import Self
 
 from .competition_artifacts import verify_preserved_bundle
-from .competition_chain import RegistrationCapture
+from .competition_chain import OwnedFinalityStale, RegistrationCapture
 from .competition_evidence import EvaluatorRunRecord
 from .competition_runner import (
     OfflineCaseExecution,
@@ -55,6 +55,39 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _MAX_EVIDENCE_BYTES = 208 * 1024**2
 _MAX_STEP_BYTES = 48 * 1024
+_FRESH_BOUNDARY_WAIT_SECONDS = 300
+_FRESH_BOUNDARY_POLL_SECONDS = 1
+
+
+async def _fresh_execution_boundary(provider):
+    """Wait for a fresh owned head, without rerunning inference or relaxing proof checks."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _FRESH_BOUNDARY_WAIT_SECONDS
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        attempt = asyncio.ensure_future(provider())
+        try:
+            # Nested wait_for can swallow outer cancellation on Python 3.10
+            # when the provider completes in the same loop turn. Own the task
+            # explicitly so the overall deadline and cancellation both survive.
+            done, _ = await asyncio.wait((attempt,), timeout=min(20, remaining))
+            if not done or loop.time() >= deadline:
+                raise asyncio.TimeoutError
+            return attempt.result()
+        except OwnedFinalityStale:
+            # Only typed staleness is recoverable. Proof/binding faults,
+            # provider timeouts and cancellation still fail the job.
+            pass
+        finally:
+            if not attempt.done():
+                attempt.cancel()
+            await asyncio.gather(attempt, return_exceptions=True)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.sleep(min(_FRESH_BOUNDARY_POLL_SECONDS, remaining))
 
 
 class ExecutionCase(StrictProtocolModel):
@@ -677,7 +710,7 @@ async def _run_evaluation(
 
     async def boundary():
         nonlocal previous
-        observed = await asyncio.wait_for(boundary_provider(), timeout=20)
+        observed = await _fresh_execution_boundary(boundary_provider)
         observed = ExecutionBoundary.model_validate_json(canonical_json_bytes(observed))
         _ordered(observed, previous, job)
         previous = observed

@@ -87,6 +87,10 @@ class _AwaitingFinality(ValueError):
     """The owned source has not yet reached the configured startup head."""
 
 
+class OwnedFinalityStale(ValueError):
+    """The owned observer is running, but its verified head is too old."""
+
+
 class CompetitionChainConfig(StrictProtocolModel):
     schema_: Literal["umi-competition-chain-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -869,7 +873,7 @@ class FinalizedRegistrationProvider:
     def _fresh(self, timestamp: int) -> None:
         now = _uint(self._now_ms(), 2**53 - 1)
         if timestamp < now - self.config.maximum_head_age_ms:
-            raise ValueError("owned finalized head is stale")
+            raise OwnedFinalityStale("owned finalized head is stale")
         if timestamp > now + self.config.maximum_future_skew_ms:
             raise ValueError("owned finalized head is in the future")
 

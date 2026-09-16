@@ -248,8 +248,13 @@ def endpoint_proposals(
         announcement_timestamp_ms=announcement.timestamp_ms,
         scoring_policy_hash=scoring_policy_hash(legacy),
     )
+    selection_ms = QUICKNET_GENESIS_MS + (schedule.selection_round - 1) * QUICKNET_PERIOD_MS
     issue_close_ms = QUICKNET_GENESIS_MS + (schedule.issue_close_round - 1) * QUICKNET_PERIOD_MS
-    if issuance.height <= schedule.closing_block or now_ms + minimum_issue_ms >= issue_close_ms:
+    if (
+        issuance.height <= schedule.closing_block
+        or not selection_ms <= issuance.timestamp_ms < issue_close_ms
+        or now_ms + minimum_issue_ms >= issue_close_ms
+    ):
         raise ValueError("work preparation lacks a usable original issue window")
     round_ = plan.cutoff.publication.round
     if (
