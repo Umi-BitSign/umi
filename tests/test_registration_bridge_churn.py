@@ -271,7 +271,7 @@ def test_churn_attempt_restart_keeps_exact_receipt_and_no_duplicate_send(
                 raise OSError("endpoint unavailable")
             return b"ok"
 
-        chain = Chain(state, [applied, applied])
+        chain = Chain(state, [applied, applied, applied])
         if receipt_returned:
             assert run(signed_policy, wallet, chain, state, request=probe)["status"] == "wait"
             assert state.load().phase == "applied" and len(chain.receipts) == 1
