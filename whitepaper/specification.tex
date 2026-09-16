@@ -233,8 +233,9 @@ utterances are outside this launch profile. Version 1 retains its 15\%/35\%/50\%
 three-task weights. Compute the arithmetic mean of the case scores within each
 stratum, then sum those means multiplied by their respective weights.
 Every required stratum must meet the policy\textquotesingle s minimum case count.
-Suites contain at least three cases in total. Policy and suite versions must
-match; unknown or extra strata are rejected. The two-task score is not directly
+Suites contain at least three cases in total. Policy version 1 uses suite version
+1; policy versions 2 and 3 use suite version 2. Unknown or extra strata are
+rejected. The two-task score is not directly
 comparable to a historical three-task score. This change does not alter the
 70/30 reward split or the approved 120-second inference limit.
 The normalization and scoring functions are defined in
