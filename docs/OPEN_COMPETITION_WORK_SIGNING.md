@@ -126,6 +126,15 @@ signature was already retained. A late first arrival cannot establish quorum.
 Certificates are retained before file delivery. Recovery republishes the exact
 certificate only while its original window is usable.
 
+Historical issuance recovery keeps a process-local LRU cache of hash-checked
+headers, bounded to 2,048 entries and 1 MiB of encoded header bytes (stored as
+hexadecimal strings). A collection timeout retains completed header reads so
+the next attempt can make progress. Every use rehashes the complete path from
+an owned observer anchor and counts cached bytes toward the path limit. The
+cache supplies no timestamps, storage proofs or finality authority. Timestamp
+membership and current-head freshness are checked on every attempt. Restart
+may discard this cache; it does not erase durable journals or extend deadlines.
+
 ## HTTP and resource bounds
 
 Serve `POST /v1/competition/work` behind HTTPS alongside the existing round

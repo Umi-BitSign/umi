@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 
 from .chain_evidence import FinalizedSnapshotRef
 from .grandpa_finality import EVIDENCE_CLASS, _decode_header
@@ -20,6 +21,42 @@ MAXIMUM_HEADER_BYTES = 64 * 1024
 MAXIMUM_PATH_BYTES = 1024 * 1024
 _HASH = re.compile(r"0x[0-9a-f]{64}")
 _HEX = re.compile(r"0x(?:[0-9a-f]{2})*")
+
+
+class HeaderPathCache:
+    """Bounded encoded-header hints, rehashed against an owned anchor on every use.
+
+    Completed header reads survive cancellation of a collection attempt. This
+    cache grants no finality authority and contains no timestamps or state proofs.
+    """
+
+    def __init__(self):
+        self._headers: OrderedDict[str, str] = OrderedDict()
+        self._bytes = 0
+
+    def get(self, block_hash):
+        value = self._headers.get(block_hash)
+        if value is not None:
+            self._headers.move_to_end(block_hash)
+        return value
+
+    def remember(self, block_hash, encoded):
+        decoded = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+        if decoded["hash"] != block_hash:
+            raise ValueError("cached header hash mismatch")
+        size = (len(encoded) - 2) // 2
+        if size > MAXIMUM_PATH_BYTES:
+            raise ValueError("cached header exceeds path byte bound")
+        previous = self._headers.pop(block_hash, None)
+        if previous is not None:
+            self._bytes -= (len(previous) - 2) // 2
+        while self._headers and (
+            len(self._headers) >= MAXIMUM_DISTANCE or self._bytes + size > MAXIMUM_PATH_BYTES
+        ):
+            _, old = self._headers.popitem(last=False)
+            self._bytes -= (len(old) - 2) // 2
+        self._headers[block_hash] = encoded
+        self._bytes += size
 
 
 def _compact(value):
@@ -76,7 +113,9 @@ def encode_rpc_header(value):
     return "0x" + encoded.hex()
 
 
-async def recover_header_path(anchor, height, request, *, maximum_distance=MAXIMUM_DISTANCE):
+async def recover_header_path(
+    anchor, height, request, *, maximum_distance=MAXIMUM_DISTANCE, cache=None
+):
     if not isinstance(anchor, VerifiedFinalizedBlock):
         raise TypeError("ancestry requires an owned verified anchor")
     if (
@@ -100,13 +139,17 @@ async def recover_header_path(anchor, height, request, *, maximum_distance=MAXIM
     path, total = [], 0
     for expected_height in range(anchor.height - 1, height - 1, -1):
         expected_hash = decoded["parent_hash"]
-        encoded = encode_rpc_header(await request("chain_getHeader", (expected_hash,)))
+        encoded = cache.get(expected_hash) if cache is not None else None
+        if encoded is None:
+            encoded = encode_rpc_header(await request("chain_getHeader", (expected_hash,)))
         total += (len(encoded) - 2) // 2
         if total > MAXIMUM_PATH_BYTES:
             raise ValueError("historical header path exceeds byte bound")
         decoded = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
         if decoded["hash"] != expected_hash or decoded["number"] != expected_height:
             raise ValueError("historical header does not match finalized ancestry")
+        if cache is not None:
+            cache.remember(expected_hash, encoded)
         path.append(encoded)
     return FinalizedSnapshotRef(
         decoded["number"], decoded["hash"], decoded["parent_hash"], decoded["state_root"]
