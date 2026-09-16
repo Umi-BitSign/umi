@@ -1,0 +1,20 @@
+[package]
+name = "umi-runtime-metadata"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+hex = "=0.4.3"
+libc = "=0.2.189"
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+smoldot = { path = "../grandpa-finality-observer/vendor/smoldot-2.2.0", default-features = false, features = ["std"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = true

@@ -511,13 +511,14 @@ async def test_signing_failure_leaves_durable_intent_and_no_automatic_retry(
     assert not item.encoded
 
 
-async def test_storage_only_codec_never_signs_a_transaction(weight_case, monkeypatch):
+@pytest.mark.parametrize("mode", ["reviewed_storage_codec/1", "executed_runtime/1"])
+async def test_unapproved_codec_never_signs_a_transaction(weight_case, monkeypatch, mode):
     from umi.validator_chain import PinnedRuntimeContext
 
     monkeypatch.setattr(
         PinnedRuntimeContext,
         "storage_codec_mode",
-        property(lambda self: "reviewed_storage_codec/1"),
+        property(lambda self: mode),
     )
     with pytest.raises(ValueError, match="storage-only codec"):
         await _run(weight_case)
