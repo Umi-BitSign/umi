@@ -307,6 +307,24 @@ async def test_lost_ack_retry_after_restart_keeps_exact_original_signature(setup
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("statement", ["authorization", "endpoint"])
+async def test_delayed_first_endorsement_keeps_original_open_window(setup, statement):
+    signer = setup.signers[0]
+    body = getattr(setup, statement)
+    before = canonical_json_bytes(body)
+    setup.clock.now += 90_000
+    signer.transport_provider.head = replace(
+        signer.transport_provider.head,
+        height=signer.transport_provider.head.height + 8,
+        timestamp_ms=setup.clock.now,
+    )
+    vote = await signer.endorse(body)
+    assert vote is not None
+    assert canonical_json_bytes(body) == before
+    assert signer.transport_provider.blocks[1] == setup.work.options["issuance"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("statement", ["model", "authorization", "endpoint"])
 async def test_expired_first_signing_is_rejected_without_reservation(setup, statement):
     statement = getattr(setup, statement)
@@ -391,6 +409,7 @@ async def test_transport_window_must_be_independently_reconstructed(setup):
         signer.transport_provider.blocks[0],
         replace(signer.transport_provider.blocks[1], block_hash="0x" + "ab" * 32),
     )
+    signer.transport_provider.head = signer.transport_provider.blocks[1]
     with pytest.raises(ValueError, match="independently derived"):
         await signer.endorse(setup.authorization)
 

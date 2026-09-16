@@ -198,11 +198,14 @@ def endpoint_proposals(
     now_ms,
     minimum_issue_ms,
     submission_sha256=None,
+    verification_head=None,
 ):
     """Build one miner-audience proposal per endpoint from a current owned window.
 
     The caller obtains both blocks from its own transport-bound provider. A
     remotely supplied block dictionary must never be promoted to this type.
+    Rechecking an existing proposal may supply a fresh owned verification head
+    while retaining its original issuance and all original window boundaries.
     """
     plan = validate_work_plan(plan, policy)
     legacy = ScoringPolicy.model_validate_json(canonical_json_bytes(legacy))
@@ -217,8 +220,18 @@ def endpoint_proposals(
         )
     ):
         raise ValueError("work preparation needs explicit bounded issue-time allowance")
-    if not now_ms - 60_000 <= issuance.timestamp_ms <= now_ms + 5_000:
-        raise ValueError("work preparation issuance is not fresh")
+    if verification_head is None:
+        if not now_ms - 60_000 <= issuance.timestamp_ms <= now_ms + 5_000:
+            raise ValueError("work preparation issuance is not fresh")
+    else:
+        _verified_transport_block(verification_head, legacy)
+        if (
+            verification_head.height < issuance.height
+            or verification_head.timestamp_ms < issuance.timestamp_ms
+            or not now_ms - 60_000 <= verification_head.timestamp_ms <= now_ms + 5_000
+            or (verification_head.height == issuance.height and verification_head != issuance)
+        ):
+            raise ValueError("work verification head is stale or inconsistent with issuance")
     if (
         issuance.height < legacy.activation_block
         or announcement.timestamp_ms > issuance.timestamp_ms
