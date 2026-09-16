@@ -1597,6 +1597,23 @@ async def run_registration_bridge_iteration(
         )
         journal = state.initialize(before, now=chain.clock())
         if journal.phase == "receipt_returned":
+            # A full retained-history audit can outlive the snapshot's freshness
+            # limit. Reobserve after it; never relax the age or receipt checks.
+            refreshed = await chain.observation_with_client(
+                client, validator_hotkey=signer.ss58_address
+            )
+            state.require_unchanged()
+            _require(refreshed.block_number >= before.block_number, "journal_finality_rollback")
+            _require(
+                refreshed.block_number != before.block_number
+                or refreshed.block_hash == before.block_hash,
+                "journal_finality_equivocation",
+            )
+            before = refreshed
+            _require(
+                directive_valid_from <= before.block_number <= directive_valid_through,
+                "supervisor_directive_inactive",
+            )
             await chain.verify_finalized_receipt_with_client(
                 client, journal.weight_call, observation=before
             )

@@ -234,10 +234,74 @@ def test_returned_receipt_survives_post_submit_rpc_failure_and_recovers_without_
         assert state.load().weight_call.block_number == BLOCK + 1
     with bridge.RegistrationBridgeState(root) as state:
         after = applied_observation(wallet, signed_policy)
-        chain = Chain(state, [after, after])
+        chain = Chain(state, [after, after, after])
         assert run(signed_policy, wallet, chain, state)["status"] == "wait"
         assert state.load().phase == "applied"
         assert len(chain.receipts) == 1 and not chain.client.calls
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (None, None),
+        ("stale", "finalized_head_stale_or_future"),
+        ("rollback", "journal_finality_rollback"),
+        ("equivocation", "journal_finality_equivocation"),
+        ("row", "retained_finalized_receipt_effect_not_visible"),
+        ("expired", "supervisor_directive_inactive"),
+        ("runtime_gate", "commit_reveal_enabled_changed"),
+    ],
+)
+def test_receipt_recovery_refreshes_after_slow_history_without_weakening_checks(
+    tmp_path, signed_policy, wallet, monkeypatch, change, reason
+):
+    root = tmp_path.resolve() / "state"
+    before = writer_observation(wallet)
+    with bridge.RegistrationBridgeState(root) as state:
+        failed = Chain(state, [before, before, TimeoutError("lost post-receipt observation")])
+        with pytest.raises(TimeoutError):
+            run(signed_policy, wallet, failed, state)
+        receipt = state.load().weight_call
+    with bridge.RegistrationBridgeState(root) as state:
+        first = applied_observation(wallet, signed_policy)
+        later = NOW + timedelta(seconds=signed_policy.body.maximum_finalized_age_seconds + 1)
+        fresh = first.model_copy(
+            update={
+                "block_number": BLOCK + 2,
+                "block_hash": "0x" + "33" * 32,
+                "block_timestamp_ms": int(later.timestamp() * 1000),
+            }
+        )
+        if change == "stale":
+            fresh = fresh.model_copy(update={"block_timestamp_ms": NOW_MS})
+        elif change == "rollback":
+            fresh = fresh.model_copy(update={"block_number": BLOCK})
+        elif change == "equivocation":
+            fresh = fresh.model_copy(update={"block_number": first.block_number})
+        elif change == "row":
+            fresh = fresh.model_copy(update={"validator_row": []})
+        elif change == "expired":
+            fresh = fresh.model_copy(update={"block_number": signed_policy.body.hard_sunset_block})
+        elif change == "runtime_gate":
+            fresh = fresh.model_copy(update={"commit_reveal_enabled": True})
+        chain = Chain(state, [first, fresh, fresh])
+        initialize = state.initialize
+
+        def slow_history(*args, **kwargs):
+            result = initialize(*args, **kwargs)
+            chain.now = later
+            return result
+
+        monkeypatch.setattr(state, "initialize", slow_history)
+        if reason is None:
+            assert run(signed_policy, wallet, chain, state)["status"] == "wait"
+            assert state.load().phase == "applied"
+        else:
+            with pytest.raises(bridge.RegistrationBridgeError, match=reason):
+                run(signed_policy, wallet, chain, state)
+            assert state.load().phase == "receipt_returned"
+        assert state.load().weight_call == receipt
+        assert not chain.client.calls
 
 
 @pytest.mark.parametrize(
