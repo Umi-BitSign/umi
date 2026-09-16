@@ -540,6 +540,9 @@ def executed_weight_case(weight_case, monkeypatch, tmp_path):
     item.provider._configure_weight_collector()
     original = item.rpc.request
     item.code = b"fixture wasm"
+    item.executed_metadata = b"meta\x0e-new-runtime"
+    item.executed_spec_version = 459
+    item.executed_transaction_version = 2
 
     async def request(method, params):
         assert method not in ("state_getMetadata", "state_getRuntimeVersion")
@@ -557,11 +560,14 @@ def executed_weight_case(weight_case, monkeypatch, tmp_path):
 
     class ExecutedCodec(_SigningRuntime):
         def __init__(self, metadata, spec_version, transaction_version, *, ss58_format):
-            assert metadata == b"meta\x0e-new-runtime"
-            assert (spec_version, transaction_version, ss58_format) == (459, 2, 42)
+            assert metadata == item.executed_metadata
+            assert (spec_version, transaction_version, ss58_format) == (
+                item.executed_spec_version,
+                item.executed_transaction_version,
+                42,
+            )
             self.spec_version, self.transaction_version = spec_version, transaction_version
 
-    metadata = b"meta\x0e-new-runtime"
     monkeypatch.setattr("umi.runtime_metadata.bittensor_core.Runtime", ExecutedCodec)
 
     def invoke(self, code):
@@ -571,10 +577,10 @@ def executed_weight_case(weight_case, monkeypatch, tmp_path):
                 {
                     "schema": "umi-runtime-metadata-execution/1",
                     "runtime_code_sha256": hashlib.sha256(code).hexdigest(),
-                    "metadata_sha256": hashlib.sha256(metadata).hexdigest(),
-                    "metadata_hex": metadata.hex(),
-                    "spec_version": 459,
-                    "transaction_version": 2,
+                    "metadata_sha256": hashlib.sha256(item.executed_metadata).hexdigest(),
+                    "metadata_hex": item.executed_metadata.hex(),
+                    "spec_version": item.executed_spec_version,
+                    "transaction_version": item.executed_transaction_version,
                     "state_version": 1,
                     "chain_submission_authorized": False,
                 }
@@ -648,6 +654,40 @@ async def test_executed_unknown_submission_never_retries(executed_weight_case):
     _advance(item, 201)
     assert (await _run(item)).status == "recovered_effect"
     assert len(item.encoded) == 1
+
+
+@pytest.mark.parametrize("changed", ["code", "metadata", "spec_version", "transaction_version"])
+async def test_runtime_change_after_signing_never_broadcasts(
+    executed_weight_case, monkeypatch, changed
+):
+    item = executed_weight_case
+    _authorize_executed_runtime(item)
+    encode = item.transport.encode
+
+    def upgrade_after_signing(*args, **kwargs):
+        encoded = encode(*args, **kwargs)
+        _advance(item, 171)
+        if changed == "code":
+            item.code += b" upgraded"
+        elif changed == "metadata":
+            item.executed_metadata += b" upgraded"
+        elif changed == "spec_version":
+            item.executed_spec_version += 1
+        else:
+            item.executed_transaction_version += 1
+        return encoded
+
+    monkeypatch.setattr(item.transport, "encode", upgrade_after_signing)
+    with pytest.raises(ValueError, match="preflight changed before broadcast"):
+        await _run(item)
+    assert not item.encoded
+    with sqlite3.connect(item.worker.path) as db:
+        retained = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+    assert retained["phase"] == "signed"
+    assert retained["signed_extrinsic"] is not None
+    # A restart reconciles the frozen attempt without signing or sending again.
+    assert not (await _run(item)).submitted_by_this_attempt
+    assert not item.encoded
 
 
 async def test_wrong_signed_executor_never_signs(executed_weight_case):

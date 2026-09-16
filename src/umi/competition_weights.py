@@ -214,6 +214,16 @@ def validate_runtime_execution_authorization(chain_config, authorization) -> Non
         raise ValueError("runtime execution differs from signed authorization")
 
 
+def _signing_runtime_identity(runtime) -> tuple:
+    """Compare signing semantics across blocks, excluding changing proof roots."""
+    execution = (
+        (runtime.executor_sha256, hashlib.sha256(runtime.code_evidence.value).hexdigest())
+        if isinstance(runtime, ExecutedRuntimeContext)
+        else None
+    )
+    return runtime.storage_codec_mode, runtime.pin, runtime.runtime_version_bytes, execution
+
+
 def _validate_signing_runtime(runtime, authorization) -> None:
     pins = authorization.required_runtime_metadata_executor_sha256_by_target
     if pins is None:
@@ -906,6 +916,8 @@ class CompetitionWeightWorker:
                 before_send.validator_nonce != attempt["nonce"]
                 or before_send.validator_uid != observation.validator_uid
                 or before_send.block >= attempt["era_death"]
+                or _signing_runtime_identity(before_send.runtime)
+                != _signing_runtime_identity(observation.runtime)
             ):
                 raise ValueError("signed successor preflight changed before broadcast")
             validate_authenticated_successor_activation(
