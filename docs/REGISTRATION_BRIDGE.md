@@ -1,8 +1,10 @@
 # Temporary live-miner rewards
 
-The [registration freeze policy](REGISTRATION_BRIDGE_FREEZE.md) adds a signed
-snapshot gate for bridge rewards. Its release must be activated and verified on
-chain before describing the freeze as live.
+The temporary registration freeze was lifted by signed directive sequence 18
+on September 16. New and re-registered hotkeys can qualify under the existing
+health and grouping rules. See the
+[reopening record](REGISTRATION_BRIDGE_REOPENED_2026-09-16.md).
+The [freeze specification](REGISTRATION_BRIDGE_FREEZE.md) remains historical.
 
 The temporary bridge has replaced the frozen two-miner pilot policy on UMI's
 UID 0 and UID 54 validators. Both have finalized rows under the shared-coldkey,
