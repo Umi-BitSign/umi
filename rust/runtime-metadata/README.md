@@ -23,8 +23,16 @@ cargo test --locked --manifest-path rust/runtime-metadata/Cargo.toml
 cargo build --release --locked --manifest-path rust/runtime-metadata/Cargo.toml
 ```
 
+The weight provider can opt into read-only collection with the paired
+`runtime_metadata_binary` and `runtime_metadata_binary_sha256` configuration
+fields. It obtains `:code` at its owned finalized snapshot using a separate
+bounded proof collector, then retains the code, proof and executor digest with
+the observation. This mode cannot be combined with a storage-only codec. Other
+registration providers reject it rather than silently ignoring it. Leaving both
+fields absent preserves existing configuration digests and exact-runtime reads.
+
 This does not activate runtime-independent signing. The resulting context has
 mode `executed_runtime/1`; the existing weight transport rejects it. Integration
-still needs a signed executor pin, proof-backed collection at the current owned
-header, retained execution evidence, release packaging and transaction replay
-tests. No current policy or validator service changes when this helper is built.
+still needs signed executor authorization, release packaging and transaction
+replay tests. No current policy or validator service changes when this helper is
+built or the read-only collector is tested.
