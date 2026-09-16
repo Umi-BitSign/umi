@@ -22,6 +22,26 @@ def test_whitepaper_status_matches_typeset_cover() -> None:
     assert markdown_match.group(1) == latex_match.group(1)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "whitepaper/README.md",
+        "whitepaper/specification.tex",
+        "docs/OPEN_COMPETITION_UID0_LAUNCH.md",
+        "docs/OPEN_COMPETITION_PRIVATE_HOLDOUT.md",
+    ],
+)
+def test_approved_launch_uses_burn_policy_with_single_reference_suite(path):
+    text = (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
+    assert "umi-open-competition-policy/3" in text
+    assert "umi-competition-suite/2" in text
+    assert not re.search(
+        r"(?:initial launch uses|approved scoring profile is)\s+"
+        r"(?:`|\\path\|)umi-open-competition-policy/2",
+        text,
+    )
+
+
 @pytest.fixture
 def pandoc_convert():
     executable = shutil.which("pandoc")
