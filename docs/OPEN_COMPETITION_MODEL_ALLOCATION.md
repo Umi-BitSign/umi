@@ -25,6 +25,12 @@ mapping or mode change holds the write. A caller-supplied UID or a JSON snapshot
 alone is not a burn proof. The destination cannot also receive endpoint or
 contributor rewards in this policy.
 
+`RecycleOrBurn` may be absent from storage when its runtime default is `Burn`.
+That requires a verified non-membership proof and decoding through the bound
+runtime metadata. A missing RPC value alone is insufficient. Owner and UID
+mapping claims still require membership; an optional or `Recycle` default is
+rejected.
+
 Subtensor withholds miner incentive directed to its registered subnet-owner
 hotkey; in `Burn` mode it burns that incentive. This does not burn the separate
 subnet-owner cut or validator dividends. See the
