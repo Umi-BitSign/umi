@@ -57,8 +57,11 @@ bounded signing reads and legacy compatibility. The combined service test uses
 different local promotion blocks before its predeclared evidence cutoff.
 
 These tests use synthetic model and rights inputs. Launch still requires real
-protected-data execution, model-specific rights and provenance review, a
-qualifying model and signed activation. The approved
+protected-data execution, reviewed launch inputs and signed activation. A
+qualifying contributed model and its specific rights and provenance review are
+required before awarding the model share. Until then, version 3 burns the
+unallocated 30% under the [allocation rule](OPEN_COMPETITION_MODEL_ALLOCATION.md).
+The approved
 [initial evaluator profile](OPEN_COMPETITION_UID0_LAUNCH.md) uses UID 0 alone,
 with one disclosed operator group and a quorum of one. UID 54 operated by us
 does not supply an independent vote. Additional evaluator groups require a

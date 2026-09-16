@@ -70,8 +70,9 @@ previously used training data as an unseen test set.
    - Configure UID 0 as the sole initial evaluator and disclose the single-operator
      trust assumption. Do not present UID 54 as an independent evaluator.
      Additional independent groups are a later signed policy change.
-   - Preserve a qualifying improved model, reconstruction evidence and rights
-     review. Publish the approved baseline artifact and verify restoration.
+   - Publish the approved baseline artifact and verify restoration. The baseline
+     remains unrewarded. Before awarding the contributor share, preserve a
+     qualifying improved model, reconstruction evidence and rights review.
 6. Activation and public handoff.
    - Approve and sign the complete 70/30 policy and successor transition after
      the prior gates pass. Do not fall back silently to endpoint-only rewards.
@@ -578,12 +579,16 @@ no-weight rehearsal profile needs a separate wallet-free mount configuration.
 
 ## Inputs still needed before activation
 
-- A reproducible candidate model artifact and its contributor's public hotkey,
-  followed by a qualifying preserved promotion. A demo video is insufficient.
+- A reproducible baseline artifact and successful real-model rehearsal. A demo
+  video is insufficient. An eligible contributor hotkey and qualifying preserved
+  promotion are required before awarding the model share, not before activation
+  under version 3's approved unallocated-share burn rule.
 - Protected evaluation data, rights/provenance review, accepted contribution
   terms and the explicitly selected UID 0 evaluator configuration.
 - Explicit numerical/resource limits, release artifacts, validity blocks and
   chain submission requirements in the signed launch policy.
+- Exact cutoffs for the seven-day first contribution round and proof of the
+  configured unallocated-share burn destination.
 - Reviewed late-conflict recovery rules and operator consent to the installed
   host upgrade and shared-feed transition timing.
 
