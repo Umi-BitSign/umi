@@ -268,6 +268,40 @@ def test_expired_issue_window_is_never_retimed(setup):
     assert canonical_json_bytes(setup.plan) == before
 
 
+@pytest.mark.parametrize(
+    "fault", [None, "stale", "future", "earlier", "policy", "unowned", "same_height", "expired"]
+)
+def test_original_proposal_recheck_requires_fresh_owned_head_and_open_window(setup, fault):
+    options = setup.options
+    original = plans.endpoint_proposals(**options)
+    now = options["now_ms"] + 90_000
+    head = replace(options["issuance"], height=options["issuance"].height + 8, timestamp_ms=now)
+    if fault == "stale":
+        head = replace(head, timestamp_ms=now - 60_001)
+    elif fault == "future":
+        head = replace(head, timestamp_ms=now + 5_001)
+    elif fault == "earlier":
+        head = replace(head, height=options["issuance"].height - 1)
+    elif fault == "policy":
+        head = replace(head, scoring_policy_hash="ff" * 32)
+    elif fault == "unowned":
+        head = {"height": head.height}
+    elif fault == "same_height":
+        head = replace(head, height=options["issuance"].height)
+    elif fault == "expired":
+        now = QUICKNET_GENESIS_MS + (setup.item.schedule.issue_close_round - 1) * QUICKNET_PERIOD_MS
+        head = replace(head, timestamp_ms=now)
+    changed = {**options, "now_ms": now, "verification_head": head}
+    if fault is not None:
+        with pytest.raises((ValueError, TypeError)):
+            plans.endpoint_proposals(**changed)
+    else:
+        assert plans.endpoint_proposals(**changed) == original
+        # Creating new work still requires a fresh issuance block.
+        with pytest.raises(ValueError, match="issuance is not fresh"):
+            plans.endpoint_proposals(**{**options, "now_ms": now})
+
+
 def test_endpoint_order_waits_for_quorum_and_rejects_duplicate_publication(setup):
     publications = sign_publications(setup, plans.endpoint_proposals(**setup.options))
     with pytest.raises(ValueError, match="duplicate"):

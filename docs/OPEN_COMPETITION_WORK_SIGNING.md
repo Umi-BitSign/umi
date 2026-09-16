@@ -33,6 +33,13 @@ integer from 1 through 300,000 ms and must be shorter than the transport policy'
 issue allowance when endpoint work is prepared. Choose it to cover observed
 signing and delivery latency. An undersized margin does not extend a deadline.
 
+Creating a proposal requires a fresh owned issuance block. Endorsing an existing
+proposal instead requires a fresh owned head and verified historical issuance
+and announcement blocks from that same provider. The signer reconstructs the
+original request unchanged and checks that its original issue window still has
+the required margin. A delayed endorsement does not retime issuance, deadlines
+or the evaluation window. Stale heads and expired issue windows remain holds.
+
 Each canonical `<suite-digest>.json` asset file has schema
 `umi-round-work-assets/1`, `suite_sha256`, the full `incumbent` bundle,
 the pinned CPU `runtime`, and one `Video` descriptor per suite case, in the
