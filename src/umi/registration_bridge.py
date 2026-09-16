@@ -588,12 +588,32 @@ def validate_registration_bridge_observation(
     *,
     expected_revision: str,
     now: datetime,
+    health_observation: RegistrationBridgeObservation | None = None,
 ) -> RegistrationBridgeDecision:
     writer = validate_registration_bridge_chain(
         policy, observation, expected_revision=expected_revision, now=now
     )
-    candidates = _registered_candidates(observation)
-    expected_health = [p for p in candidates if p.origin is not None]
+    probed = health_observation if health_observation is not None else observation
+    _require(probed.validator_hotkey == observation.validator_hotkey, "health_writer_changed")
+    _require(observation.block_number >= probed.block_number, "health_finality_rollback")
+    _require(
+        observation.block_number != probed.block_number
+        or observation.block_hash == probed.block_hash,
+        "health_finality_equivocation",
+    )
+    if observation.block_number == probed.block_number:
+        _require(
+            registration_bridge_roster_sha256(observation)
+            == registration_bridge_roster_sha256(probed),
+            "health_roster_equivocation",
+        )
+    prior_writer = next(p for p in probed.participants if p.hotkey == probed.validator_hotkey)
+    _require(
+        _health_registration_identity(writer) == _health_registration_identity(prior_writer),
+        "health_writer_registration_changed",
+    )
+    current = {p.uid: p for p in _registered_candidates(observation)}
+    expected_health = [p for p in _registered_candidates(probed) if p.origin is not None]
     _require([h.uid for h in health] == [p.uid for p in expected_health], "health_coverage_changed")
     live = []
     for receipt, participant in zip(health, expected_health, strict=True):
@@ -612,8 +632,14 @@ def validate_registration_bridge_observation(
             and receipt.available == (receipt.body_sha256 is not None),
             "health_result_invalid",
         )
-        if receipt.available:
-            live.append(participant)
+        candidate = current.get(participant.uid)
+        if (
+            receipt.available
+            and candidate is not None
+            and _health_registration_identity(candidate)
+            == _health_registration_identity(participant)
+        ):
+            live.append(candidate)
     if isinstance(policy.body, RegistrationBridgeFrozenPolicyBody):
         retained = {
             (p.uid, account_id32(p.hotkey), p.registered_at_block)
@@ -670,6 +696,18 @@ def validate_registration_bridge_observation(
         eligible_coldkey_count=coldkey_count,
         validator_uid=writer.uid,
         validator_last_update=writer.last_update,
+    )
+
+
+def _health_registration_identity(participant: RegistrationBridgeParticipant) -> tuple:
+    """Bind a probe to its registration; unrelated weight writes may advance."""
+    return (
+        participant.uid,
+        account_id32(participant.hotkey),
+        account_id32(participant.coldkey),
+        participant.registered_at_block,
+        participant.origin,
+        participant.validator_permit,
     )
 
 
@@ -1021,12 +1059,31 @@ class RegistrationBridgeAttempt(StrictProtocolModel):
         return self
 
 
+class RegistrationBridgeChurnAttempt(RegistrationBridgeAttempt):
+    """Retain the original probe snapshot alongside the final submission roster.
+
+    Historical attempts keep their exact bytes and hash. Only a changed roster
+    needs this additional evidence; receipts are never relabeled as fresh probes.
+    """
+
+    health_observation: RegistrationBridgeObservation
+
+    @model_validator(mode="after")
+    def probe_snapshot(self) -> Self:
+        if (
+            self.health_observation.validator_hotkey != self.validator_hotkey
+            or self.health_observation.block_number >= self.preflight_block
+        ):
+            raise ValueError("bridge probe snapshot does not precede the same writer's submission")
+        return self
+
+
 class RegistrationBridgeJournal(StrictProtocolModel):
     schema_: Literal[REGISTRATION_BRIDGE_JOURNAL_SCHEMA] = Field(alias="schema")
     validator_hotkey: str
     legacy_journal_sha256: Hex32 | None
     phase: Literal["idle", "submitting", "outcome_unknown", "receipt_returned", "applied"]
-    attempt: RegistrationBridgeAttempt | None
+    attempt: RegistrationBridgeChurnAttempt | RegistrationBridgeAttempt | None
     weight_call: BootstrapExtrinsicReference | None
     last_observed_block: PositiveInt
     last_observed_block_hash: BlockHash
@@ -1488,7 +1545,7 @@ class RegistrationBridgeState:
         return journal
 
 
-def _new_attempt(policy, observation, decision, health):
+def _new_attempt(policy, observation, decision, health, *, health_observation=None):
     body = {
         "signed_policy": policy.model_dump(mode="json", by_alias=True),
         "policy_sha256": registration_bridge_policy_sha256(policy),
@@ -1502,10 +1559,16 @@ def _new_attempt(policy, observation, decision, health):
         "expected_row": decision.expected_row,
         "health": [h.model_dump(mode="json") for h in health],
     }
+    attempt_type = RegistrationBridgeAttempt
+    if health_observation is not None and (
+        registration_bridge_roster_sha256(health_observation) != decision.roster_sha256
+    ):
+        body["health_observation"] = health_observation.model_dump(mode="json")
+        attempt_type = RegistrationBridgeChurnAttempt
     body["attempt_id"] = hashlib.sha256(
         b"umi-registration-bridge-attempt-v1\0" + canonical_json_bytes(body)
     ).hexdigest()
-    return RegistrationBridgeAttempt.model_validate(body)
+    return attempt_type.model_validate(body)
 
 
 async def run_registration_bridge_iteration(
@@ -1534,6 +1597,23 @@ async def run_registration_bridge_iteration(
         )
         journal = state.initialize(before, now=chain.clock())
         if journal.phase == "receipt_returned":
+            # A full retained-history audit can outlive the snapshot's freshness
+            # limit. Reobserve after it; never relax the age or receipt checks.
+            refreshed = await chain.observation_with_client(
+                client, validator_hotkey=signer.ss58_address
+            )
+            state.require_unchanged()
+            _require(refreshed.block_number >= before.block_number, "journal_finality_rollback")
+            _require(
+                refreshed.block_number != before.block_number
+                or refreshed.block_hash == before.block_hash,
+                "journal_finality_equivocation",
+            )
+            before = refreshed
+            _require(
+                directive_valid_from <= before.block_number <= directive_valid_through,
+                "supervisor_directive_inactive",
+            )
             await chain.verify_finalized_receipt_with_client(
                 client, journal.weight_call, observation=before
             )
@@ -1556,12 +1636,13 @@ async def run_registration_bridge_iteration(
         state.require_unchanged()
         fresh = await chain.observation_with_client(client, validator_hotkey=signer.ss58_address)
         state.require_unchanged()
-        _require(
-            registration_bridge_roster_sha256(fresh) == registration_bridge_roster_sha256(before),
-            "roster_changed_during_health_checks",
-        )
         decision = validate_registration_bridge_observation(
-            policy, fresh, health, expected_revision=expected_revision, now=chain.clock()
+            policy,
+            fresh,
+            health,
+            expected_revision=expected_revision,
+            now=chain.clock(),
+            health_observation=before,
         )
         journal = reconcile_registration_bridge_journal(journal, fresh, now=chain.clock())
         state.store(journal)
@@ -1583,7 +1664,7 @@ async def run_registration_bridge_iteration(
             }
         call = build_registration_bridge_call(decision)
         _submission_freshness(policy, fresh, health, now=chain.clock())
-        attempt = _new_attempt(policy, fresh, decision, health)
+        attempt = _new_attempt(policy, fresh, decision, health, health_observation=before)
         journal = RegistrationBridgeJournal(
             schema=REGISTRATION_BRIDGE_JOURNAL_SCHEMA,
             validator_hotkey=signer.ss58_address,
@@ -1602,7 +1683,12 @@ async def run_registration_bridge_iteration(
             legacy_digest == journal.legacy_journal_sha256, "legacy_journal_changed_before_submit"
         )
         validate_registration_bridge_observation(
-            policy, fresh, health, expected_revision=expected_revision, now=chain.clock()
+            policy,
+            fresh,
+            health,
+            expected_revision=expected_revision,
+            now=chain.clock(),
+            health_observation=before,
         )
         _submission_freshness(policy, fresh, health, now=chain.clock())
         try:
@@ -1754,13 +1840,13 @@ async def _run_cli(args):
                 fresh = await chain.observation_with_client(
                     client, validator_hotkey=expected_hotkey
                 )
-                _require(
-                    registration_bridge_roster_sha256(fresh)
-                    == registration_bridge_roster_sha256(before),
-                    "roster_changed_during_health_checks",
-                )
                 decision = validate_registration_bridge_observation(
-                    policy, fresh, health, expected_revision=revision, now=chain.clock()
+                    policy,
+                    fresh,
+                    health,
+                    expected_revision=revision,
+                    now=chain.clock(),
+                    health_observation=before,
                 )
                 print(
                     canonical_json_bytes(

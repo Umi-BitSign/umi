@@ -17,6 +17,7 @@ from tests.test_registration_bridge import (
     NOW_MS,
     REVISION,
     decision,
+    health,
     observation,
     policy_body,
     replace_participant,
@@ -233,17 +234,83 @@ def test_returned_receipt_survives_post_submit_rpc_failure_and_recovers_without_
         assert state.load().weight_call.block_number == BLOCK + 1
     with bridge.RegistrationBridgeState(root) as state:
         after = applied_observation(wallet, signed_policy)
-        chain = Chain(state, [after, after])
+        chain = Chain(state, [after, after, after])
         assert run(signed_policy, wallet, chain, state)["status"] == "wait"
         assert state.load().phase == "applied"
         assert len(chain.receipts) == 1 and not chain.client.calls
 
 
 @pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (None, None),
+        ("stale", "finalized_head_stale_or_future"),
+        ("rollback", "journal_finality_rollback"),
+        ("equivocation", "journal_finality_equivocation"),
+        ("row", "retained_finalized_receipt_effect_not_visible"),
+        ("expired", "supervisor_directive_inactive"),
+        ("runtime_gate", "commit_reveal_enabled_changed"),
+    ],
+)
+def test_receipt_recovery_refreshes_after_slow_history_without_weakening_checks(
+    tmp_path, signed_policy, wallet, monkeypatch, change, reason
+):
+    root = tmp_path.resolve() / "state"
+    before = writer_observation(wallet)
+    with bridge.RegistrationBridgeState(root) as state:
+        failed = Chain(state, [before, before, TimeoutError("lost post-receipt observation")])
+        with pytest.raises(TimeoutError):
+            run(signed_policy, wallet, failed, state)
+        receipt = state.load().weight_call
+    with bridge.RegistrationBridgeState(root) as state:
+        first = applied_observation(wallet, signed_policy)
+        later = NOW + timedelta(seconds=signed_policy.body.maximum_finalized_age_seconds + 1)
+        fresh = first.model_copy(
+            update={
+                "block_number": BLOCK + 2,
+                "block_hash": "0x" + "33" * 32,
+                "block_timestamp_ms": int(later.timestamp() * 1000),
+            }
+        )
+        if change == "stale":
+            fresh = fresh.model_copy(update={"block_timestamp_ms": NOW_MS})
+        elif change == "rollback":
+            fresh = fresh.model_copy(update={"block_number": BLOCK})
+        elif change == "equivocation":
+            fresh = fresh.model_copy(update={"block_number": first.block_number})
+        elif change == "row":
+            fresh = fresh.model_copy(update={"validator_row": []})
+        elif change == "expired":
+            fresh = fresh.model_copy(update={"block_number": signed_policy.body.hard_sunset_block})
+        elif change == "runtime_gate":
+            fresh = fresh.model_copy(update={"commit_reveal_enabled": True})
+        chain = Chain(state, [first, fresh, fresh])
+        initialize = state.initialize
+
+        def slow_history(*args, **kwargs):
+            result = initialize(*args, **kwargs)
+            chain.now = later
+            return result
+
+        monkeypatch.setattr(state, "initialize", slow_history)
+        if reason is None:
+            assert run(signed_policy, wallet, chain, state)["status"] == "wait"
+            assert state.load().phase == "applied"
+        else:
+            with pytest.raises(bridge.RegistrationBridgeError, match=reason):
+                run(signed_policy, wallet, chain, state)
+            assert state.load().phase == "receipt_returned"
+        assert state.load().weight_call == receipt
+        assert not chain.client.calls
+
+
+@pytest.mark.parametrize(
     "change", ["hotkey", "coldkey", "origin", "permit", "registration", "owner"]
 )
-def test_changed_roster_after_probe_holds_without_any_send(tmp_path, signed_policy, wallet, change):
-    before = writer_observation(wallet)
+def test_changed_miner_after_probe_excludes_only_that_registration(
+    tmp_path, signed_policy, wallet, change
+):
+    before = writer_observation(wallet, block_number=BLOCK - 1, block_hash="0x" + "33" * 32)
     changes = {
         "hotkey": {"hotkey": dev_wallet("//ReplacementMiner").hotkey.ss58_address},
         "coldkey": {"coldkey": dev_wallet("//ReplacementOwner").hotkey.ss58_address},
@@ -263,13 +330,33 @@ def test_changed_roster_after_probe_holds_without_any_send(tmp_path, signed_poli
         if change == "owner"
         else replace_participant(before, 6, **changes[change])
     )
+    after = after.model_copy(update={"block_number": BLOCK, "block_hash": "0x" + "11" * 32})
+    expected = decision(signed_policy, after, health(after, failed={6})).expected_row
+    applied = replace_participant(
+        after.model_copy(
+            update={
+                "block_number": BLOCK + 1,
+                "block_hash": "0x" + "22" * 32,
+                "validator_row": expected,
+            }
+        ),
+        54,
+        last_update=BLOCK + 1,
+    )
     with bridge.RegistrationBridgeState(tmp_path.resolve() / "state") as state:
-        chain = Chain(state, [before, after])
-        with pytest.raises(
-            bridge.RegistrationBridgeError, match="roster_changed_during_health_checks"
-        ):
-            run(signed_policy, wallet, chain, state)
-        assert not chain.client.calls and state.load().phase == "idle"
+        chain = Chain(state, [before, after, applied])
+        assert run(signed_policy, wallet, chain, state)["status"] == "submitted"
+        journal = state.load()
+        assert len(chain.client.calls) == 1 and journal.phase == "applied"
+        assert journal.attempt.expected_row == expected
+        assert expected[6][1] == 0 and expected[10][1] > 0
+        assert isinstance(journal.attempt, bridge.RegistrationBridgeChurnAttempt)
+        assert journal.attempt.health_observation == before
+        assert journal.attempt.roster == after.participants
+        raw = canonical_json_bytes(journal)
+        assert (
+            canonical_json_bytes(bridge.RegistrationBridgeJournal.model_validate_json(raw)) == raw
+        )
 
 
 @pytest.mark.parametrize("mutation", ["delete", "replace", "rootmode", "lockmode", "archive"])

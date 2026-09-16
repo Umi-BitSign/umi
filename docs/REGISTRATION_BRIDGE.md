@@ -1,8 +1,10 @@
 # Temporary live-miner rewards
 
-The [registration freeze policy](REGISTRATION_BRIDGE_FREEZE.md) adds a signed
-snapshot gate for bridge rewards. Its release must be activated and verified on
-chain before describing the freeze as live.
+The temporary registration freeze was lifted by signed directive sequence 18
+on September 16. New and re-registered hotkeys can qualify under the existing
+health and grouping rules. See the
+[reopening record](REGISTRATION_BRIDGE_REOPENED_2026-09-16.md).
+The [freeze specification](REGISTRATION_BRIDGE_FREEZE.md) remains historical.
 
 The temporary bridge has replaced the frozen two-miner pilot policy on UMI's
 UID 0 and UID 54 validators. Both have finalized rows under the shared-coldkey,
@@ -30,6 +32,27 @@ non-public or multicast destinations are rejected. One failed endpoint excludes
 that miner from the current row, without disqualifying the healthy miners.
 The validator rechecks the finalized roster after the health probes. A batch
 failure or zero passing miners holds submissions instead of inventing a row.
+
+The churn-tolerant worker compares registrations individually between the
+probe snapshot and the submission snapshot. A changed hotkey, coldkey,
+registration block, endpoint or validator permit excludes that entry from the
+current row. Newly owner-associated hotkeys are also excluded. Other passing,
+unchanged miners continue receiving weights, with the same coldkey/IP/funding
+group rules. New or changed entries need their own health checks on a later
+pass; a replacement never inherits the old registration's health result.
+
+This fallback uses the completed current probe batch, not a cached weight row.
+Both snapshots and the original receipts are retained for audit when the roster
+changes. Health freshness, rate limits, writer permits, finalized-chain checks
+and uncertain-transaction recovery protections still apply. It cannot guarantee
+submission if every eligible registration changes, no endpoint passes, or the
+chain is unavailable. There is no automatic burn fallback or emergency self-weight.
+
+This behavior requires a signed host/worker release rollout. Existing releases
+still hold the entire batch on roster changes. Historical journals keep their
+original bytes; new churn attempts add the original health observation. An old
+worker cannot read these new attempts and must not be restarted over that state
+or given an empty journal to bypass recovery checks.
 
 Adding live UIDs under the same coldkey, IP, or matched funding group does not
 create extra group budgets. This is not proof of independent operators. Shared
