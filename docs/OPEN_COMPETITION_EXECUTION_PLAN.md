@@ -80,15 +80,33 @@ previously used training data as an unseen test set.
 
 ## Work in this execution
 
-The supplied community model now has a verified ZIP importer and a Linux CPU
-adapter in [reference-model PR #1](https://github.com/Umi-BitSign/umi-reference-model/pull/1).
-One real ARM64 invocation through the actual evaluator completed in 231,638 ms
-on a synthetic two-second clip. It required explicit runtime v2 support for
-bounded private shared memory. This is functional evidence only; protected ASL
-quality, production throughput, independent evaluation and rights approval remain
-open. The private object-store backup has been downloaded and reconstructed with
-the exact original ZIP checksum. There is no public baseline download or promoted
-contributor attribution yet.
+The supplied community model has a ZIP importer and a Linux CPU adapter in
+[reference-model PR #1](https://github.com/Umi-BitSign/umi-reference-model/pull/1).
+The approved launch inference limit remains 120 seconds. An earlier 231-second
+synthetic-clip run predates the current deployment and does not establish its
+performance. Qualification requires the actual launch image, supported clips,
+resource limits and authenticated requests described below.
+
+As of September 16, candidate `814d197b097ef2782afe77cb232320b83677363d`
+has replay and weight images plus replacement-host bundles for Linux amd64 and
+arm64. Both native host bundles passed byte-for-byte readback, the production
+root-owned staging checks, repeated-stage reuse and unprivileged CLI execution
+in isolated mount and network namespaces. The replacement bundles include
+Python 3.12.14 and its standard library. Non-root Bookworm container checks on
+both architectures verified the bundled interpreter, standard-library and UMI
+imports, plus both host CLI entrypoints. Earlier system-Python bundles failed
+that portability check and must not be used for release. These staging rehearsals
+used test-only authority keys. The candidate artifacts remain unsigned by the
+installed release authorities and have not replaced the live bridge validators.
+This verifies packaging, not live settlement or reward activation.
+
+The Studio miner is serving in no-weight competition mode. The connected real
+round still needs to prove assignment discovery, authenticated inference,
+evaluation and retained evidence. The imported baseline remains
+`initial_reference_no_reward`, with no promoted contributor attribution.
+The simultaneous 70/30 policy needs a qualifying improved model and its
+model-specific rights approval before it can settle both reward tracks. Passing
+the minimum score alone does not satisfy the promotion margin or stratum checks.
 
 - [x] Durable assignment publication/claim journal and expiry tests.
 - [x] Owned-finality endpoint origin proof and adversarial tests.

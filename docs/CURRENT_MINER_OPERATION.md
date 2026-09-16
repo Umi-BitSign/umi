@@ -79,9 +79,11 @@ That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
 Before spending compute on a model contribution, read the
-[provenance and rights checklist](MODEL_CONTRIBUTION_REVIEW.md). The final
-accepted-license list and contribution terms still need publication before
-intake opens. Endpoint service does not require contributing private weights.
+[provenance and rights checklist](MODEL_CONTRIBUTION_REVIEW.md) and the approved
+[version 1 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS.md).
+The launch policy must bind their exact version and hash before intake opens.
+Published terms do not approve an individual model's rights or award it the
+contribution share. Endpoint service does not require contributing private weights.
 
 ## Reading payout dashboards
 

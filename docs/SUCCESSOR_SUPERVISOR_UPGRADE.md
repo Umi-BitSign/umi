@@ -193,6 +193,16 @@ unsigned entries, symlinks, writable files and non-root ownership. Every parent
 directory must also remain root-owned and not group/world-writable. This verifies
 staged bytes only; it does not prove a sandbox rehearsal or authorize a service stop.
 
+The release host tree must include the interpreter's standard library and
+required runtime libraries, not only a copied virtual-environment executable.
+A system-Python venv can pass on its Ubuntu build host while failing on Debian.
+Bind `pyvenv.cfg`, entrypoint shebangs and package import paths to the final
+revision directory, and include those bytes in the manifest. Verify imports and
+both host CLI entrypoints as an unprivileged user on the supported platforms
+before signing. The September 16 candidate bundles use a self-contained Python
+3.12.14 runtime; native amd64 and arm64 checks passed on Ubuntu hosts and in
+Bookworm containers. These packaging checks do not authorize installation.
+
 `competition_host_bundle` stages those bytes without executing them. Its bounded
 format is a fixed magic header followed by each signed manifest file in order;
 the signed manifest supplies every path, length, hash and mode. The stager
