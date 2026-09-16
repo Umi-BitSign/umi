@@ -389,21 +389,37 @@ def verify_settlement_publication(
         certificate.signatures,
         policy=policy,
         roster=normalized_roster,
-        forbidden_hotkeys=_settlement_recipients(publication),
+        forbidden_hotkeys=_settlement_recipients(publication, policy),
     )
     return publication
 
 
-def _settlement_recipients(publication):
-    contributor = publication.settlement.promotion_head.contributor_hotkey
+def _settlement_recipients(publication, policy):
+    settlement = publication.settlement
+    contributor = settlement.promotion_head.contributor_hotkey
+    destination = policy.unallocated_model_burn
+
+    def burned(allocation):
+        # A policy-bound, chain-verified burn pays no miner or contributor.
+        # Roster membership remains disqualifying even for this hotkey.
+        return (
+            contributor is None
+            and destination is not None
+            and settlement.registration_snapshot.burn_destination == destination
+            and allocation.uid == destination.uid
+            and identity(allocation.hotkey) == identity(destination.hotkey)
+            and int(allocation.numerator) * 10_000
+            == policy.model_reward_bps * int(allocation.denominator)
+        )
+
     return tuple(
-        a.hotkey for a in publication.settlement.projection.allocations if a.raw_weight > 0
+        a.hotkey for a in settlement.projection.allocations if a.raw_weight > 0 and not burned(a)
     ) + (() if contributor is None else (contributor,))
 
 
 def settlement_signer_eligible(hotkey, publication, policy, submissions):
     return identity(hotkey) in _publication_groups(
-        policy, submissions, _settlement_recipients(publication)
+        policy, submissions, _settlement_recipients(publication, policy)
     )
 
 
