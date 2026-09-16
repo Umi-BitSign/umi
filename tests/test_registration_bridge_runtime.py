@@ -17,6 +17,7 @@ from tests.test_registration_bridge import (
     NOW_MS,
     REVISION,
     decision,
+    health,
     observation,
     policy_body,
     replace_participant,
@@ -242,8 +243,10 @@ def test_returned_receipt_survives_post_submit_rpc_failure_and_recovers_without_
 @pytest.mark.parametrize(
     "change", ["hotkey", "coldkey", "origin", "permit", "registration", "owner"]
 )
-def test_changed_roster_after_probe_holds_without_any_send(tmp_path, signed_policy, wallet, change):
-    before = writer_observation(wallet)
+def test_changed_miner_after_probe_excludes_only_that_registration(
+    tmp_path, signed_policy, wallet, change
+):
+    before = writer_observation(wallet, block_number=BLOCK - 1, block_hash="0x" + "33" * 32)
     changes = {
         "hotkey": {"hotkey": dev_wallet("//ReplacementMiner").hotkey.ss58_address},
         "coldkey": {"coldkey": dev_wallet("//ReplacementOwner").hotkey.ss58_address},
@@ -263,13 +266,33 @@ def test_changed_roster_after_probe_holds_without_any_send(tmp_path, signed_poli
         if change == "owner"
         else replace_participant(before, 6, **changes[change])
     )
+    after = after.model_copy(update={"block_number": BLOCK, "block_hash": "0x" + "11" * 32})
+    expected = decision(signed_policy, after, health(after, failed={6})).expected_row
+    applied = replace_participant(
+        after.model_copy(
+            update={
+                "block_number": BLOCK + 1,
+                "block_hash": "0x" + "22" * 32,
+                "validator_row": expected,
+            }
+        ),
+        54,
+        last_update=BLOCK + 1,
+    )
     with bridge.RegistrationBridgeState(tmp_path.resolve() / "state") as state:
-        chain = Chain(state, [before, after])
-        with pytest.raises(
-            bridge.RegistrationBridgeError, match="roster_changed_during_health_checks"
-        ):
-            run(signed_policy, wallet, chain, state)
-        assert not chain.client.calls and state.load().phase == "idle"
+        chain = Chain(state, [before, after, applied])
+        assert run(signed_policy, wallet, chain, state)["status"] == "submitted"
+        journal = state.load()
+        assert len(chain.client.calls) == 1 and journal.phase == "applied"
+        assert journal.attempt.expected_row == expected
+        assert expected[6][1] == 0 and expected[10][1] > 0
+        assert isinstance(journal.attempt, bridge.RegistrationBridgeChurnAttempt)
+        assert journal.attempt.health_observation == before
+        assert journal.attempt.roster == after.participants
+        raw = canonical_json_bytes(journal)
+        assert (
+            canonical_json_bytes(bridge.RegistrationBridgeJournal.model_validate_json(raw)) == raw
+        )
 
 
 @pytest.mark.parametrize("mutation", ["delete", "replace", "rootmode", "lockmode", "archive"])
