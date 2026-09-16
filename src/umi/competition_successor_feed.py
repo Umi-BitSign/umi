@@ -40,6 +40,7 @@ from .competition_rounds import RoundJournal
 from .competition_successor_publication import (
     SignedSuccessorRoundPublication,
     SuccessorRoundPublicationPlan,
+    publication_round_advances,
     verify_successor_round_publication,
 )
 from .competition_supervisor import (
@@ -161,7 +162,7 @@ class SuccessorPublicationFeed:
         )
 
     def _history(self):
-        cursor, last_round, records = self._initial(), 0, []
+        cursor, records = self._initial(), []
         keys = self.journal.keys("delivery")
         if len(keys) > self.config.maximum_rounds:
             raise ValueError("successor feed round capacity exceeded")
@@ -176,10 +177,12 @@ class SuccessorPublicationFeed:
                 or item.intent.sequence != cursor[1] + 1
                 or item.intent.predecessor_version != cursor[0]
                 or item.signed.directive.previous_directive_sha256 != cursor[2]
-                or item.intent.round_sequence <= last_round
+                or not publication_round_advances(
+                    self.config.plan, records[-1].publication if records else None, item
+                )
             ):
                 raise ValueError("successor feed history is discontinuous")
-            cursor, last_round = self._cursor(record), item.intent.round_sequence
+            cursor = self._cursor(record)
             records.append(record)
         return records
 
@@ -214,10 +217,8 @@ class SuccessorPublicationFeed:
                 publication.intent.sequence != cursor[1] + 1
                 or publication.intent.predecessor_version != cursor[0]
                 or publication.signed.directive.previous_directive_sha256 != cursor[2]
-                or (
-                    history
-                    and publication.intent.round_sequence
-                    <= history[-1].publication.intent.round_sequence
+                or not publication_round_advances(
+                    self.config.plan, history[-1].publication if history else None, publication
                 )
                 or len(history) >= self.config.maximum_rounds
             ):

@@ -16,7 +16,8 @@ Use a canonical, private `umi-successor-publisher-config/1` JSON file containing
 
 - `plan`: the fixed policy digest, supervisor trust configuration, operator
   consent, release identity, verifier pins, weight requirements and validity
-  limits from `umi-successor-round-publication-plan/1`.
+  limits from `umi-successor-round-publication-plan/1`, or the explicitly
+  renewal-enabled `/2` described below.
 - `chain`: the process-owned finality/proof configuration. Its policy, chain
   family and selected verifier hashes must match the plan.
 - `intake_directory`: the existing retained competition store. Missing intake
@@ -146,6 +147,49 @@ back to another package after a validation failure.
 The feed remains a separate wallet-free process. Automatic signing does not
 install a TLS route, activate a host or establish miner incentive on chain.
 
+## Bounded renewal of an unchanged settlement
+
+The default version 1 plan signs each completed round once. A validator's
+single-use authorization cannot refresh that row a second time. Deployments
+where evaluation takes longer than the chain activity window must account for
+this before activation.
+
+To permit recurring row refreshes, use `umi-successor-round-publication-plan/2`
+and set `renewal_interval_blocks` in both the signing and delivery plans. This
+is an explicit change to the plan's identity. Do not overwrite a version 1 plan
+inside an existing journal. Version 1 canonical bytes and retry behavior remain
+unchanged.
+
+With `--follow-config`, the publisher first recovers incomplete delivery or an
+unexpired partial signing attempt, then prefers a newer completed round. If no
+newer round exists and the configured interval has elapsed since the last
+authorization's signing block, it can renew the latest unchanged package.
+Renewal performs package replay, current retained-source conflict checks and
+fresh owned-finality checks before signing. Each renewal has a new directive
+sequence, predecessor and single-use authorization ID. It does not resubmit an
+old transaction or change the package's allocation.
+
+The validity limit remains the earliest of the plan, policy, original round,
+snapshot-age limit and new authorization's maximum lifetime. Renewal never
+extends the underlying round or snapshot. If the remaining window is too short,
+the follower waits for a current completed round. A conflict or changed recipient
+registration still blocks submission. This feature does not authorize a fallback
+allocation after failed validation.
+
+Choose an interval no shorter than the configured chain weight rate limit and
+short enough to allow replay, feed delivery and finalization before the activity
+cutoff. The plan requires mortality and activation headroom within its maximum
+authorization lifetime; that check alone does not prove sufficient operating
+margin. Measure the complete deployed path. The weight worker independently
+checks the actual chain rate limit and allows at most one transaction per
+authorization.
+
+Signing, delivery and worker attempt journals retain every renewal. Include
+renewals in their capacity budgets, even where a limit is named `maximum_rounds`.
+Reaching a limit stops new work without deleting old receipts. Retain the exact
+sealed package for retries and catch-up. Fresh evaluation rounds and their
+original expiry schedule are still required for ongoing operation.
+
 ## Current checks and recovery
 
 The publisher fully replays the package and checks the current local intake
@@ -164,10 +208,15 @@ to terminate before releasing the local service lock.
 
 Historical publications remain readable from the signing journal. The current
 publisher refuses to return an expired publication as an activation candidate.
-It never extends a round or moves its original signing time forward to make it
-usable again.
+It never extends a round or changes a retained authorization's signing time.
+A version 2 renewal creates a separate authorization only while the original
+round remains usable.
 
 ## Verification scope
+
+Run the release publisher and these signing/feed tests on Linux. The unchanged
+version 1 publisher reproduces a database-locking failure on the Studio's native
+macOS environment; Linux guest tests do not qualify native macOS publishing.
 
 The signing-core and current-gate tests passed 19 cases on the Studio's Linux
 VM. They use synthetic authority keys and real replayed fixture packages. Tests
