@@ -103,6 +103,11 @@ incumbent, runtime and reference-free cases. An endpoint proposal additionally
 requires independent proof of its exact original issuance and announcement
 blocks through the worker's own transport observer. The worker rederives the
 whole request schedule and rejects any mismatch or elapsed issue window.
+If that observer missed an issuance header during restart, it may use the
+bounded [ancestry recovery](OPEN_COMPETITION_DISPATCH.md#evidence-and-recovery)
+from its own later verified header. This proves the historical header and chain
+timestamp, not local receipt before a deadline. Cutoff votes and suite
+reservations must still exist in the worker's original journal.
 The protected suite's commitment is checked during coordinator preparation;
 its reference-free projection is replayed against the suite after reveal.
 An opaque commitment alone cannot prove the hidden references before reveal.

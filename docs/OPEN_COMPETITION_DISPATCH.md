@@ -134,6 +134,27 @@ SIGTERM and SIGINT cancel in-flight work and close the observer.
 
 ## Evidence and recovery
 
+If an observer restart missed an exact historical issuance header, the transport
+provider can recover its identity from the nearest later header retained by that
+same owned observer. It fetches headers by the expected parent hash, reconstructs
+their SCALE encoding, and verifies every hash and height back to the requested
+block. It then verifies `Timestamp.Now` membership against the recovered state
+root using the configured storage codec and proof verifier.
+
+Recovery is limited to 2,048 parent links, 64 KiB per header and 1 MiB for the
+encoded path. The existing collection timeout and evidence-cache quota also
+apply. A fresh owned head is required before and after recovery. Headers before
+the configured minimum remain unavailable. Invalid proofs or exhausted limits
+hold work rather than accepting an RPC finality claim.
+
+The provider retains this derivation separately as
+`umi-owned-finalized-ancestor/1`, with evidence class
+`verified_finalized_ancestry`. It never inserts a replacement observer record or
+claims when the historical header was locally received. Original journal gaps
+remain visible. Consumers that require an original local acceptance receipt
+still cannot use a recovered header. This recovery does not extend a signed
+deadline, reopen expired work, or authorize a resend.
+
 The dispatcher waits until the entire publication is retrievable, then gives
 miners the configured discovery grace. This delay does not prove that every
 miner fetched it or provide independent publication-time evidence. A restart

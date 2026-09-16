@@ -8,12 +8,14 @@ transport evidence requires independent replay after the protected suite reveal.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import signal
 import stat
 import time
 from collections import OrderedDict
-from contextlib import suppress
+from contextlib import closing, suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -36,10 +38,12 @@ from .competition_origin import (
 )
 from .competition_scheduling import AssignmentPublicationJournal, assignment_key
 from .config import Limits
+from .finalized_ancestry import MAXIMUM_DISTANCE, recover_header_path
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import prepare_request_attempt, send_prepared_request
+from .validator_chain import StorageReadSpec
 from .validator_plans import VerifiedFinalizedBlock
 
 
@@ -143,6 +147,87 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
             {"chain": digest(self.config), "transport_policy": self._finality_policy_hash()}
         )
 
+    async def _recover_historical_block(self, height, head):
+        if not self._owned or self._registration_rpc is None:
+            raise ValueError("owned issuance is unavailable")
+        if height < self.config.minimum_finalized_block:
+            raise ValueError("historical issuance precedes configured minimum")
+        anchor = await self._finality.verified_block_after(
+            height, maximum_distance=MAXIMUM_DISTANCE
+        )
+        if anchor is None or anchor.height > head.height:
+            raise ValueError("historical issuance lacks an owned finalized anchor")
+        self._check_finality_context(anchor)
+        ref, headers = await recover_header_path(anchor, height, self._registration_rpc.request)
+        runtime = await self._runtime_context(ref)
+        if runtime.snapshot != ref or runtime.pin != self._runtime_pin:
+            raise ValueError("historical timestamp runtime binding mismatch")
+        batch = await self._read(runtime, (StorageReadSpec("Timestamp", "Now"),))
+        timestamp = batch.reads[0].decoded_value
+        if type(timestamp) is not int or not 0 < timestamp <= anchor.timestamp_ms:
+            raise ValueError("historical timestamp is invalid or newer than its anchor")
+        evidence = canonical_json_bytes(
+            {
+                "schema": "umi-owned-finalized-ancestor/1",
+                "evidence_class": "verified_finalized_ancestry",
+                "offline_finality_proof": False,
+                "scoring_policy_hash": anchor.scoring_policy_hash,
+                "chain_observation": anchor.chain_observation.model_dump(mode="json"),
+                "finality_verifier_sha256": anchor.finality_verifier_sha256,
+                "block": ref.block_number,
+                "block_hash": ref.block_hash,
+                "anchor": json.loads(anchor.finality_evidence),
+                "anchor_sha256": anchor.finality_evidence_sha256,
+                "headers": headers,
+                "metadata_sha256": runtime.metadata_sha256,
+                "storage_proof_verifier_sha256": self.config.proof_binary_sha256,
+                "state_root": batch.evidence.verified_state_root,
+                "claims": [
+                    {
+                        "key": "0x" + c.storage_key.hex(),
+                        "value": None if c.value is None else "0x" + c.value.hex(),
+                    }
+                    for c in batch.evidence.claims
+                ],
+                "proof": ["0x" + node.hex() for node in batch.evidence.proof],
+                "timestamp_ms": timestamp,
+            }
+        )
+        block = VerifiedFinalizedBlock(
+            height=ref.block_number,
+            block_hash=ref.block_hash,
+            state_root=ref.state_root,
+            timestamp_ms=timestamp,
+            scoring_policy_hash=anchor.scoring_policy_hash,
+            chain_observation=anchor.chain_observation,
+            finality_verifier_sha256=anchor.finality_verifier_sha256,
+            finality_evidence=evidence,
+            finality_evidence_sha256=hashlib.sha256(evidence).hexdigest(),
+        )
+        # Retain the derivation separately. Never insert a synthetic observer row
+        # or local acceptance time. Cache reads do not substitute for verification.
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute(
+                "SELECT body FROM artifacts WHERE digest=?", (block.finality_evidence_sha256,)
+            ).fetchone()
+            if prior is not None and prior[0] != evidence:
+                raise ValueError("historical evidence digest conflict")
+            if prior is None:
+                used = db.execute("SELECT COALESCE(SUM(length(body)),0) FROM artifacts").fetchone()[
+                    0
+                ]
+                used += db.execute(
+                    "SELECT COALESCE(SUM(length(evidence)),0) FROM captures"
+                ).fetchone()[0]
+                if used + len(evidence) > self.config.maximum_cache_bytes:
+                    raise ValueError("historical evidence cache capacity exhausted")
+                db.execute(
+                    "INSERT INTO artifacts VALUES (?,?)", (block.finality_evidence_sha256, evidence)
+                )
+            db.commit()
+        return block
+
     async def verified_blocks(self, heights=()):
         if (
             not isinstance(heights, tuple)
@@ -170,13 +255,28 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
                 blocks = []
                 for height in heights:
                     block = await self._finality.verified_block_at(height)
+                    if block is None:
+                        block = await self._recover_historical_block(height, head)
+                    else:
+                        self._check_finality_context(block)
                     # Same process-owned source, same pins; old issuance need not be fresh.
                     if not isinstance(block, VerifiedFinalizedBlock) or block.height != height:
                         raise ValueError("owned issuance is unavailable")
-                    self._check_finality_context(block)
                     if block.timestamp_ms > head.timestamp_ms:
                         raise ValueError("issuance is newer than the verified head")
                     blocks.append(block)
+                # Network recovery may take time. Return a fresh owned head, and
+                # never reinterpret historical proof as historical receipt timing.
+                newest = await self._proofs.finalized_snapshot()
+                if (
+                    not isinstance(newest, FinalizedSnapshotRef)
+                    or newest.block_number < ref.block_number
+                    or (newest.block_number == ref.block_number and newest != ref)
+                ):
+                    raise ValueError("dispatch finalized head rolled back or changed")
+                head = await self._finality.verified_block_at(newest.block_number)
+                self._check_finality(newest, head)
+                self._fresh(head.timestamp_ms)
                 return head, tuple(blocks)
 
         return await asyncio.wait_for(collect(), timeout=self.config.collection_timeout_seconds)

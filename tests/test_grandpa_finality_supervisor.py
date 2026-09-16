@@ -358,6 +358,11 @@ async def test_restart_gap_is_explicit_and_exact_consumers_fail_closed(
     assert await port.verified_identity_at(13) is None
     assert await port.verified_identities(11, 13) is None
     assert await port.verified_scan_interval(11, 13) is None
+    assert (await port.verified_block_after(11, maximum_distance=2)).height == 13
+    assert await port.verified_block_after(11, maximum_distance=1) is None
+    assert await port.verified_block_after(13, maximum_distance=2) is None
+    with pytest.raises(ValueError):
+        await port.verified_block_after(11, maximum_distance=2049)
 
 
 def test_conflicting_replay_and_wrong_store_binding_fail_closed(
