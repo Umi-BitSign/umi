@@ -41,7 +41,7 @@ def test_legacy_runtime_independent_operator_bundle_remains_valid() -> None:
     assert bundle.signed_policy.body.umi_git_revision == "0d00b0a72a4724f0a5b66f103bbf2cc1770856f2"
 
 
-def test_first_install_pin_matches_published_ongoing_operator_bundle() -> None:
+def test_legacy_ongoing_operator_bundle_remains_valid() -> None:
     # The actual signed sequence-15 input bundle, not a generated policy fixture.
     payload = (
         (ROOT / "tests/fixtures/validator-supervisor/ongoing-registration-bridge.json")
@@ -52,10 +52,27 @@ def test_first_install_pin_matches_published_ongoing_operator_bundle() -> None:
         "4eacbdb87fa73cd334e50ada624a618c84ac12eece96dcd66a1a39978b182dd5"
     )
     bundle = _parse_bootstrap_input_bundle(payload)
+    assert bundle.signed_policy.body.umi_git_revision == "833774770dd6b3a89979987043230eeebf8cdcf7"
+    assert bundle.signed_policy.body.lifetime == "until_superseded"
+
+
+def test_first_install_pin_matches_published_frozen_operator_bundle() -> None:
+    # Captured from the signed sequence-17 release. Retain older signed fixtures
+    # above so advancing the installer does not erase compatibility coverage.
+    payload = (
+        (ROOT / "tests/fixtures/validator-supervisor/frozen-registration-bridge.json")
+        .read_bytes()
+        .removesuffix(b"\n")
+    )
+    assert hashlib.sha256(payload).hexdigest() == (
+        "a747d99ce82980cc90f9c3262ccd7172ccd1d0fdb829842895c4be86781d6ed8"
+    )
+    bundle = _parse_bootstrap_input_bundle(payload)
     assert (DEPLOYMENT / "CURRENT_RELEASE_REVISION").read_text().strip() == (
         bundle.signed_policy.body.umi_git_revision
     )
     assert bundle.signed_policy.body.lifetime == "until_superseded"
+    assert bundle.signed_policy.body.registration_snapshot.finalized_block == 9_076_034
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

@@ -66,7 +66,10 @@ REGISTRATION_BRIDGE_HARD_SUNSET_BLOCK = 9_075_171
 REGISTRATION_BRIDGE_JOURNAL_SCHEMA = "umi-registration-bridge-journal/1"
 MAX_JSON_INTEGER = 2**53 - 1
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
-MAX_HISTORY_FILES = 512
+# Retain every transition and its recovery protections. These are resource
+# ceilings, not a retention policy; archival needs a separate verified design.
+MAX_HISTORY_FILES = 4096
+MAX_HISTORY_BYTES = 512 * 1024 * 1024
 _FINALITY_HASHES = {
     "x86_64": "cd696ea86acd691112413a7909b6bf469f90042747c87b9350f01dacfe4ae8c3",
     "aarch64": "b263758fb273aed83868e986f4738ff14008996b200226e34c14633a863e5587",
@@ -1257,7 +1260,7 @@ class RegistrationBridgeState:
                 result[str(path.relative_to(self.root))] = None
                 continue
             total += len(raw)
-            _require(total <= 64 * 1024 * 1024, "history_byte_capacity_reached")
+            _require(total <= MAX_HISTORY_BYTES, "history_byte_capacity_reached")
             meta = path.lstat()
             result[str(path.relative_to(self.root))] = (
                 meta.st_dev,
@@ -1395,7 +1398,7 @@ class RegistrationBridgeState:
                         "history_file_unsafe",
                     )
                     total += item.st_size
-                    _require(total + len(raw) <= 64 * 1024 * 1024, "history_byte_capacity_reached")
+                    _require(total + len(raw) <= MAX_HISTORY_BYTES, "history_byte_capacity_reached")
             path = history / f"{journal.attempt.attempt_id}-{journal.phase}.json"
             existing = _read_bytes(path, private=True, optional=True)
             if existing is None:
