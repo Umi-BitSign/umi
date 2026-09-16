@@ -40,6 +40,7 @@ jobs:
         run: |
           cargo +1.98.0 audit --file rust/substrate-proof-verifier/Cargo.lock
           cargo +1.98.0 audit --file rust/grandpa-finality-observer/Cargo.lock
+          cargo +1.98.0 audit --file rust/runtime-metadata/Cargo.lock
 
   verify:
     runs-on: ubuntu-latest
@@ -176,6 +177,38 @@ jobs:
 
       - name: Build release verifier
         run: cargo +1.98.0 build --locked --release
+
+  runtime-metadata:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust/runtime-metadata
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
+
+      - name: Check formatting and lint
+        run: |
+          cargo +1.98.0 fmt -- --check
+          cargo +1.98.0 clippy --locked --all-targets -- -D warnings
+
+      - name: Test and build executor
+        run: |
+          cargo +1.98.0 test --locked
+          cargo +1.98.0 build --locked --release
+
+      - name: Check bounded invalid-input rejection
+        run: |
+          set +e
+          timeout 10s target/release/umi-runtime-metadata </dev/null >result.json 2>reason.txt
+          result=$?
+          set -e
+          test "$result" = 1
+          test ! -s result.json
+          grep -qx code_size_limit reason.txt
 
   grandpa-finality-observer:
     runs-on: ubuntu-latest
