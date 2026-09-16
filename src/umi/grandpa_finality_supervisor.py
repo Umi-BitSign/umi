@@ -438,6 +438,27 @@ class DurableGrandpaFinalityPort:
             return None
         return self._plan_block(stored)
 
+    async def verified_block_after(
+        self, height: int, *, maximum_distance: int
+    ) -> VerifiedFinalizedBlock | None:
+        """Nearest retained original observer header for bounded ancestry recovery."""
+        height = _positive_uint(height, "historical header height")
+        maximum_distance = _positive_uint(maximum_distance, "historical header distance")
+        if maximum_distance > 2048:
+            raise ValueError("historical header distance exceeds bound")
+
+        def nearest():
+            with self._connect(read_only=True) as db:
+                row = db.execute(
+                    "SELECT height FROM finalized_headers WHERE height>? AND height<=? "
+                    "ORDER BY height LIMIT 1",
+                    (height, height + maximum_distance),
+                ).fetchone()
+            return None if row is None else row[0]
+
+        found = await asyncio.to_thread(nearest)
+        return None if found is None else await self.verified_block_at(found)
+
     async def verified_acceptance_time_at(self, height: int) -> int | None:
         """Return the transaction-captured local acceptance time in Unix milliseconds.
 
