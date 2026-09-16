@@ -43,6 +43,13 @@ back to exact-runtime or storage-only decoding. A failed proof, execution limit,
 unsupported runtime or changed application constraint holds the submission.
 Building the image does not change any deployed authorization.
 
+The successor sandbox keeps `/tmp` non-executable. Hash-verified helper copies
+use a separate 128 MiB executable tmpfs at `/run/umi-pinned-artifacts`; the
+staging library creates and checks a private, worker-owned child directory.
+`UMI_PINNED_ARTIFACT_STAGE` selects that child without changing the location of
+ordinary temporary files. The inert installation rehearsal verifies these mount
+properties and starts a staged proof helper without a wallet or network access.
+
 ## Build unsigned OCI archives
 
 Use a clean checkout at the exact revision intended for review. Install uv

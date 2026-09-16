@@ -226,6 +226,11 @@ async def test_exact_release_load_and_inert_rehearsal(setup):
     assert "--cap-drop=ALL" in run and "--mount" not in run
     assert "--entrypoint" in run and containers.PYTHON in run
     assert "--image-volume=ignore" in run and "--log-driver=none" in run
+    assert any(arg.startswith("--tmpfs=/tmp:rw,noexec,") for arg in run)
+    assert (
+        "--tmpfs=/run/umi-pinned-artifacts:rw,exec,nosuid,nodev,size=134217728,mode=1777"
+    ) in run
+    assert "--env=UMI_PINNED_ARTIFACT_STAGE=/run/umi-pinned-artifacts/private" in run
     assert containers.HOTKEY_PATH not in run
     assert "-I" in run and not any(
         isinstance(node, ast.Assert) for node in ast.walk(ast.parse(containers._REHEARSAL))
