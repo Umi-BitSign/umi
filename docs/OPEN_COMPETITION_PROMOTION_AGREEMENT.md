@@ -57,6 +57,9 @@ bounded signing reads and legacy compatibility. The combined service test uses
 different local promotion blocks before its predeclared evidence cutoff.
 
 These tests use synthetic model and rights inputs. Launch still requires real
-protected data, reviewed terms and provenance, independently administered
-evaluators, a qualifying model and signed activation. UID 0 and UID 54 operated
-by us remain one administration. No live reward policy changes through this API.
+protected-data execution, model-specific rights and provenance review, a
+qualifying model and signed activation. The approved
+[initial evaluator profile](OPEN_COMPETITION_UID0_LAUNCH.md) uses UID 0 alone,
+with one disclosed operator group and a quorum of one. UID 54 operated by us
+does not supply an independent vote. Additional evaluator groups require a
+later signed policy. No live reward policy changes through this API.
