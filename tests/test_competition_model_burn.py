@@ -6,6 +6,7 @@ import pytest
 
 from umi.competition_chain import FinalizedRegistrationProvider
 from umi.competition_package import load_competition_package, prepare_competition_package
+from umi.competition_publication import settlement_signer_eligible
 from umi.competition_weights import (
     CompetitionWeightAuthorizationBody,
     sign_competition_weight_authorization,
@@ -14,6 +15,7 @@ from umi.competition_weights import (
 from umi.open_competition import (
     BurnDestination,
     CompetitionPolicy,
+    Evaluator,
     Registration,
     RegistrationSnapshot,
     digest,
@@ -117,6 +119,7 @@ def test_awarded_model_replaces_burn_without_changing_endpoint_share(policy):
     assert row.weights[0] == 0
 
 
+@pytest.mark.parametrize("burn_owner", ["Ferdie", "Charlie"])
 def test_unawarded_share_survives_signed_settlement_and_package_replay(
     policy,
     tmp_path,
@@ -124,8 +127,9 @@ def test_unawarded_share_survives_signed_settlement_and_package_replay(
     package_limits,
     release_identity,
     chain_config,
+    burn_owner,
 ):
-    policy = burn_policy(policy)
+    policy = burn_policy(policy, owner=burn_owner)
 
     def current_snapshot(block=110):
         return burn_snapshot(policy).model_copy(
@@ -228,6 +232,90 @@ def test_unawarded_share_survives_signed_settlement_and_package_replay(
             )
     finally:
         path.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "policy_absent",
+        "proof_absent",
+        "wrong_uid",
+        "wrong_share",
+        "contributor",
+        "roster",
+        "paid_group",
+    ],
+)
+def test_burn_signer_exception_does_not_exempt_paid_or_unproven_recipients(
+    policy, tmp_path, replay_limits, mutation
+):
+    policy = burn_policy(policy, owner="Charlie")
+
+    def current_snapshot(block=110):
+        return burn_snapshot(policy).model_copy(
+            update={"block": block, "block_hash": "0x" + f"{block:064x}"}
+        )
+
+    scenario = _scenario(
+        policy,
+        tmp_path,
+        replay_limits,
+        promote_model=False,
+        snapshot_factory=current_snapshot,
+        suite_factory=launch_suite,
+    )
+    publication = scenario.settlement_publication
+    signer = wallet("Charlie").hotkey.ss58_address
+    roster = scenario.submissions
+    assert settlement_signer_eligible(signer, publication, policy, roster)
+    settlement = publication.settlement
+    if mutation == "policy_absent":
+        policy = policy.model_copy(update={"unallocated_model_burn": None})
+    elif mutation == "proof_absent":
+        settlement = settlement.model_copy(
+            update={
+                "registration_snapshot": settlement.registration_snapshot.model_copy(
+                    update={"burn_destination": None}
+                )
+            }
+        )
+    elif mutation in {"wrong_uid", "wrong_share"}:
+        allocations = tuple(
+            a.model_copy(
+                update={"uid": 99}
+                if mutation == "wrong_uid"
+                else {"numerator": "4", "denominator": "10"}
+            )
+            if a.hotkey == signer
+            else a
+            for a in settlement.projection.allocations
+        )
+        settlement = settlement.model_copy(
+            update={
+                "projection": settlement.projection.model_copy(update={"allocations": allocations})
+            }
+        )
+    elif mutation == "contributor":
+        settlement = settlement.model_copy(
+            update={
+                "promotion_head": settlement.promotion_head.model_copy(
+                    update={"contributor_hotkey": signer}
+                )
+            }
+        )
+    elif mutation == "roster":
+        roster = (*roster, submission(policy, name="Charlie"))
+    elif mutation == "paid_group":
+        policy = policy.model_copy(
+            update={
+                "evaluators": (
+                    *policy.evaluators,
+                    Evaluator(hotkey=wallet("Bob").hotkey.ss58_address, control_group="c"),
+                )
+            }
+        )
+    publication = publication.model_copy(update={"settlement": settlement})
+    assert not settlement_signer_eligible(signer, publication, policy, roster)
 
 
 @pytest.mark.parametrize("mutation", ["absent", "different", "reused", "stale"])
