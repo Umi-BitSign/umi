@@ -91,8 +91,12 @@ As of September 16, candidate `814d197b097ef2782afe77cb232320b83677363d`
 has replay and weight images plus replacement-host bundles for Linux amd64 and
 arm64. Both native host bundles passed byte-for-byte readback, the production
 root-owned staging checks, repeated-stage reuse and unprivileged CLI execution
-in isolated mount and network namespaces. These staging rehearsals used
-test-only authority keys. The candidate artifacts remain unsigned by the
+in isolated mount and network namespaces. The replacement bundles include
+Python 3.12.14 and its standard library. Non-root Bookworm container checks on
+both architectures verified the bundled interpreter, standard-library and UMI
+imports, plus both host CLI entrypoints. Earlier system-Python bundles failed
+that portability check and must not be used for release. These staging rehearsals
+used test-only authority keys. The candidate artifacts remain unsigned by the
 installed release authorities and have not replaced the live bridge validators.
 This verifies packaging, not live settlement or reward activation.
 
