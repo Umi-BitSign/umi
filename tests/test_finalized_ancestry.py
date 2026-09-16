@@ -11,7 +11,7 @@ import pytest
 
 from umi.chain_evidence import FinalizedSnapshotRef
 from umi.competition_dispatch import DispatchFinalityProvider
-from umi.finalized_ancestry import encode_rpc_header, recover_header_path
+from umi.finalized_ancestry import HeaderPathCache, encode_rpc_header, recover_header_path
 from umi.protocol import canonical_json_bytes
 from umi.validator_chain import FinalizedProofCollector
 from umi.validator_plans import VerifiedFinalizedBlock
@@ -92,6 +92,72 @@ async def test_recovers_only_a_hash_linked_ancestor(ancestry):
     )
     assert len(path) == len(calls) == 3
     assert calls == [by_height[h] for h in range(first + 3, first, -1)]
+
+
+async def test_cancelled_walk_retains_progress_and_rechecks_the_complete_path(ancestry):
+    first, _, by_height, anchor, request, calls = ancestry
+    cache = HeaderPathCache()
+    waiting = asyncio.Event()
+
+    async def interrupted(method, params):
+        if params[0] == by_height[first + 1]:
+            waiting.set()
+            await asyncio.Future()
+        return await request(method, params)
+
+    task = asyncio.create_task(recover_header_path(anchor, first, interrupted, cache=cache))
+    await asyncio.wait_for(waiting.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(calls) == len(cache._headers) == 2
+    recovered, path = await recover_header_path(anchor, first, request, cache=cache)
+    assert recovered.block_hash == by_height[first]
+    assert len(path) == len(calls) == 4
+    # Already downloaded headers were not requested again.
+    assert calls == [by_height[h] for h in range(first + 3, first - 1, -1)]
+    expected, uncached_path = await recover_header_path(anchor, first, request)
+    assert (recovered, path) == (expected, uncached_path)
+
+
+async def test_cached_header_never_replaces_anchor_hash_validation(ancestry):
+    first, headers, by_height, anchor, request, _ = ancestry
+    cache = HeaderPathCache()
+    await recover_header_path(anchor, first, request, cache=cache)
+    cache._headers[by_height[first + 3]] = encode_rpc_header(headers[by_height[first + 2]])
+    with pytest.raises(ValueError, match="ancestry"):
+        await recover_header_path(anchor, first, request, cache=cache)
+    with pytest.raises(ValueError, match="anchor identity"):
+        await recover_header_path(
+            replace(anchor, block_hash="0x" + "ff" * 32), first, request, cache=cache
+        )
+
+
+async def test_cached_bytes_count_toward_path_limit(ancestry, monkeypatch):
+    first, _, _, anchor, request, _ = ancestry
+    cache = HeaderPathCache()
+    await recover_header_path(anchor, first, request, cache=cache)
+    monkeypatch.setattr("umi.finalized_ancestry.MAXIMUM_PATH_BYTES", 100)
+    with pytest.raises(ValueError, match="path exceeds"):
+        await recover_header_path(anchor, first, request, cache=cache)
+
+
+def test_progress_cache_evicts_to_both_count_and_byte_bounds(ancestry, monkeypatch):
+    _, headers, _, _, _, _ = ancestry
+    cache = HeaderPathCache()
+    monkeypatch.setattr("umi.finalized_ancestry.MAXIMUM_DISTANCE", 2)
+    for key, header in headers.items():
+        cache.remember(key, encode_rpc_header(header))
+        assert len(cache._headers) <= 2
+    last = next(reversed(headers))
+    encoded = encode_rpc_header(headers[last])
+    size = (len(encoded) - 2) // 2
+    monkeypatch.setattr("umi.finalized_ancestry.MAXIMUM_PATH_BYTES", size)
+    cache.remember(last, encoded)
+    assert list(cache._headers) == [last]
+    assert cache._bytes == size
+    with pytest.raises(ValueError, match="hash mismatch"):
+        cache.remember("0x" + "ff" * 32, encoded)
 
 
 @pytest.mark.parametrize("field", ["parentHash", "stateRoot", "extrinsicsRoot", "number", "digest"])
@@ -222,6 +288,7 @@ def recovery(chain):
 
     source = chain.provider
     source._owned = True
+    source._ancestry_headers = HeaderPathCache()
     source._registration_rpc = Rpc()
     source._finality = Finality()
     source._proofs = FinalizedProofCollector(
@@ -264,6 +331,25 @@ async def test_dispatch_recovers_with_timestamp_proof_and_retains_derivation(rec
     assert "chain_getFinalizedHead" not in recovery.state.calls
     _, (again,) = await DispatchFinalityProvider.verified_blocks(source, (height,))
     assert again == block
+    assert recovery.state.calls.count("chain_getHeader") >= 3
+    assert len(source._ancestry_headers._headers) == 3
+    # Header reuse still performs a new timestamp storage proof.
+    assert recovery.state.roots == [bytes.fromhex(block.state_root[2:])] * 2
+
+
+@pytest.mark.parametrize("mutation", ["proof", "timestamp", "stale"])
+async def test_warm_header_cache_does_not_waive_freshness_or_timestamp_proofs(recovery, mutation):
+    source, height = recovery.source, recovery.first + 1
+    await DispatchFinalityProvider.verified_blocks(source, (height,))
+    assert source._ancestry_headers._headers
+    if mutation == "proof":
+        recovery.state.bad_proof = True
+    elif mutation == "timestamp":
+        recovery.state.bad_timestamp = True
+    else:
+        recovery.chain.clock.now += 120_001
+    with pytest.raises((ValueError, RuntimeError)):
+        await DispatchFinalityProvider.verified_blocks(source, (height,))
 
 
 @pytest.mark.parametrize(
