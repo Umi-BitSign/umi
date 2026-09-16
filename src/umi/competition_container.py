@@ -132,7 +132,8 @@ def _require_empty_container_cgroup(container_id: str) -> None:
 
 # Fixed signed-image code: no model imports, network, wallet, or retained state.
 _REHEARSAL = r"""
-import json, os, pathlib, sys
+import hashlib, json, os, pathlib, stat, subprocess, sys
+from umi.pinned_artifact import PinnedArtifact, staged_pinned_artifacts
 def require(condition):
     if not condition:
         raise RuntimeError('successor sandbox contract failed')
@@ -152,6 +153,20 @@ require({line.split(':')[0].strip() for line in devices} <= {'lo'})
 require(not pathlib.Path('/run/umi-successor-hotkey').exists())
 probe = pathlib.Path('/tmp/umi-inert-rehearsal')
 probe.write_bytes(b'ok'); probe.unlink()
+require(os.statvfs('/tmp').f_flag & os.ST_NOEXEC)
+stage = pathlib.Path('/run/umi-pinned-artifacts/private')
+require(os.environ.get('UMI_PINNED_ARTIFACT_STAGE') == str(stage))
+source = pathlib.Path('/opt/umi/bin/umi-substrate-proof-verifier')
+artifact = PinnedArtifact('proof', source, hashlib.sha256(source.read_bytes()).hexdigest(),
+                          128 * 1024**2, executable=True)
+with staged_pinned_artifacts((artifact,)) as staged:
+    require(staged['proof'].parent.parent == stage)
+    require(stage.stat().st_uid == os.geteuid())
+    require(stat.S_IMODE(stage.stat().st_mode) == 0o700)
+    require(not os.statvfs(stage).f_flag & os.ST_NOEXEC)
+    subprocess.run([str(staged['proof'])], input=b'', stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=10, check=True)
+require(not list(stage.iterdir()))
 result = {'schema': 'umi-successor-sandbox-rehearsal/1', 'ok': True}
 print(json.dumps(result, separators=(',', ':')))
 """.strip()
@@ -483,6 +498,8 @@ class PodmanSuccessorContainer:
             f"--memory-swap={cfg.worker_memory_bytes}",
             f"--pids-limit={cfg.worker_pids_limit}",
             f"--tmpfs=/tmp:rw,noexec,nosuid,nodev,size={self.limits.temporary_bytes},mode=1777",
+            "--tmpfs=/run/umi-pinned-artifacts:rw,exec,nosuid,nodev,size=134217728,mode=1777",
+            "--env=UMI_PINNED_ARTIFACT_STAGE=/run/umi-pinned-artifacts/private",
         )
 
     async def rehearse(self, release: VerifiedSuccessorOCI) -> None:

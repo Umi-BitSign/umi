@@ -45,6 +45,7 @@ from .competition_worker_cli import (
     WORKER_FINALITY_BINARY,
     WORKER_FINALITY_STATE_ROOT,
     WORKER_PROOF_BINARY,
+    WORKER_RUNTIME_METADATA_BINARY,
     SuccessorWorkerExecutionConfig,
 )
 from .encoding import account_id32
@@ -62,6 +63,8 @@ class SuccessorHostObserverConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def exact_policy_and_paths(self) -> Self:
+        if self.chain.runtime_metadata_binary not in (None, str(WORKER_RUNTIME_METADATA_BINARY)):
+            raise ValueError("runtime metadata executor must use the fixed observer path")
         if self.chain.policy_sha256 != digest(self.policy):
             raise ValueError("host observer configuration binds a different initial policy")
         actual = (

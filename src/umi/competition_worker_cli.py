@@ -44,6 +44,7 @@ WORKER_FINALITY_STATE_ROOT = Path("/var/lib/umi-competition/finality")
 WORKER_HOTKEY_FILE = Path("/run/umi-successor-hotkey/hotkey")
 WORKER_FINALITY_BINARY = Path("/opt/umi/bin/umi-grandpa-finality-observer")
 WORKER_PROOF_BINARY = Path("/opt/umi/bin/umi-substrate-proof-verifier")
+WORKER_RUNTIME_METADATA_BINARY = Path("/opt/umi/bin/umi-runtime-metadata")
 WORKER_CHAIN_SPEC = Path("/opt/umi/raw_spec_finney.json")
 _MAX_KEYFILE_BYTES = 128 * 1024
 _MAX_STDOUT_BYTES = 128 * 1024
@@ -57,6 +58,8 @@ class SuccessorWeightExecutionConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def fixed_paths_and_target(self) -> Self:
+        if self.chain.runtime_metadata_binary not in (None, str(WORKER_RUNTIME_METADATA_BINARY)):
+            raise ValueError("runtime metadata executor must use the fixed worker path")
         observed = (
             self.chain.finality_binary,
             self.chain.proof_binary,

@@ -146,6 +146,15 @@ def staged_pinned_artifacts(
     names = tuple(specification.name for specification in specifications)
     if len(set(names)) != len(names):
         raise ValueError("pinned artifact names must be unique")
+    if staging_directory is None:
+        staging_directory = os.environ.get("UMI_PINNED_ARTIFACT_STAGE")
+        if staging_directory is not None:
+            parent = Path(staging_directory)
+            if not parent.is_absolute():
+                raise PinnedArtifactError("unsafe_stage_parent")
+            # The dedicated tmpfs starts empty. Only create its private child,
+            # never missing ancestors or a fallback on another filesystem.
+            parent.mkdir(mode=0o700, exist_ok=True)
     if staging_directory is not None:
         parent = Path(staging_directory)
         metadata = parent.lstat()

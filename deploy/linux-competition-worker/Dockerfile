@@ -19,6 +19,13 @@ COPY rust/substrate-proof-verifier/fixtures ./fixtures
 RUN cargo +1.98.0 test --locked --release \
     && cargo +1.98.0 build --locked --release
 
+WORKDIR /build/runtime-metadata
+COPY rust/runtime-metadata/Cargo.toml rust/runtime-metadata/Cargo.lock ./
+COPY rust/runtime-metadata/src ./src
+COPY rust/grandpa-finality-observer/vendor /build/grandpa-finality-observer/vendor
+RUN cargo +1.98.0 test --locked --release \
+    && cargo +1.98.0 build --locked --release
+
 FROM ghcr.io/astral-sh/uv:0.12.9@sha256:8b940d3a9d65bed080436972241af2e21c84b5e8c9193f7014ed71479ee795ff AS uv
 FROM docker.io/library/python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
 
@@ -71,6 +78,9 @@ COPY --from=rust-builder \
 COPY --from=rust-builder \
   /build/proof/target/release/umi-substrate-proof-verifier \
   /opt/umi/bin/umi-substrate-proof-verifier
+COPY --from=rust-builder \
+  /build/runtime-metadata/target/release/umi-runtime-metadata \
+  /opt/umi/bin/umi-runtime-metadata
 # Podman 4.9 does not support ADD --checksum. The next RUN verifies these bytes
 # before either verifier executes or the image can finish building.
 ADD https://raw.githubusercontent.com/opentensor/subtensor/da06f033663896ef2fdbbfc3ecc68ca908fba0f5/chainspecs/raw_spec_finney.json \
@@ -78,6 +88,7 @@ ADD https://raw.githubusercontent.com/opentensor/subtensor/da06f033663896ef2fdbb
 RUN chmod 0555 \
       /opt/umi/bin/umi-grandpa-finality-observer \
       /opt/umi/bin/umi-substrate-proof-verifier \
+      /opt/umi/bin/umi-runtime-metadata \
     && chmod 0444 /opt/umi/raw_spec_finney.json \
     && printf '%s  %s\n' \
       f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105 \

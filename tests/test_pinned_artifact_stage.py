@@ -51,3 +51,38 @@ def test_staging_parent_symlink_is_rejected(tmp_path):
         staged_pinned_artifacts((item,), staging_directory=link),
     ):
         pytest.fail("staging symlink accepted")
+
+
+def test_environment_stage_uses_same_private_parent_checks(tmp_path, monkeypatch):
+    item = specification(tmp_path)
+    parent = tmp_path.resolve() / "private-stage"
+    monkeypatch.setenv("UMI_PINNED_ARTIFACT_STAGE", str(parent))
+    with staged_pinned_artifacts((item,)) as staged:
+        assert staged["binary"].parent.parent == parent
+    assert not list(parent.iterdir())
+    parent.chmod(0o755)
+    with (
+        pytest.raises(PinnedArtifactError, match="unsafe_stage_parent"),
+        staged_pinned_artifacts((item,)),
+    ):
+        pytest.fail("unsafe environment stage accepted")
+
+
+def test_explicit_stage_takes_precedence_over_environment(tmp_path, monkeypatch):
+    item = specification(tmp_path)
+    parent = tmp_path.resolve() / "private-stage"
+    parent.mkdir(mode=0o700)
+    monkeypatch.setenv("UMI_PINNED_ARTIFACT_STAGE", "/missing-environment-stage")
+    with staged_pinned_artifacts((item,), staging_directory=parent) as staged:
+        assert staged["binary"].parent.parent == parent
+
+
+@pytest.mark.parametrize("value", ["", ".", "relative-stage"])
+def test_relative_environment_stage_is_rejected(tmp_path, monkeypatch, value):
+    item = specification(tmp_path)
+    monkeypatch.setenv("UMI_PINNED_ARTIFACT_STAGE", value)
+    with (
+        pytest.raises((PinnedArtifactError, FileNotFoundError)),
+        staged_pinned_artifacts((item,)),
+    ):
+        pytest.fail("relative environment stage accepted")

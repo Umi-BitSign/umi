@@ -10,7 +10,8 @@ supervisor. It supports two separately identified image profiles:
   validator hotkey.
 
 Both profiles contain the same reviewed program, CPython 3.12.14 environment,
-locked Python dependencies, finality observer, storage-proof verifier and pinned
+locked Python dependencies, finality observer, storage-proof verifier, bounded
+runtime-metadata executor and pinned
 Finney chain specification. The signed release target and image label select one
 profile. The host supplies the corresponding fixed CLI mode; neither the image
 label nor a caller-provided command grants chain authority.
@@ -22,8 +23,32 @@ The worker paths are fixed:
 /opt/umi/.venv/bin/python
 /opt/umi/bin/umi-grandpa-finality-observer
 /opt/umi/bin/umi-substrate-proof-verifier
+/opt/umi/bin/umi-runtime-metadata
 /opt/umi/raw_spec_finney.json
 ```
+
+Runtime-independent weight signing requires an explicit
+`required_runtime_metadata_executor_sha256_by_target` map in the signed weight
+authorization. The paired chain configuration fields `runtime_metadata_binary`
+and `runtime_metadata_binary_sha256` must match that target, using the fixed path
+above. The signed host artifact must also contain the executable at
+`artifacts/umi-runtime-metadata` with mode `0555` and the same digest. Host observer
+and worker configurations each bind their executor; neither may select an
+arbitrary path. Runtime code is read with a storage proof from the owned finalized
+header and executed locally. RPC metadata cannot select the signing codec.
+
+An authorization without this map retains exact-runtime signing. Enabling the
+configuration alone is rejected. A policy that requires execution cannot fall
+back to exact-runtime or storage-only decoding. A failed proof, execution limit,
+unsupported runtime or changed application constraint holds the submission.
+Building the image does not change any deployed authorization.
+
+The successor sandbox keeps `/tmp` non-executable. Hash-verified helper copies
+use a separate 128 MiB executable tmpfs at `/run/umi-pinned-artifacts`; the
+staging library creates and checks a private, worker-owned child directory.
+`UMI_PINNED_ARTIFACT_STAGE` selects that child without changing the location of
+ordinary temporary files. The inert installation rehearsal verifies these mount
+properties and starts a staged proof helper without a wallet or network access.
 
 ## Build unsigned OCI archives
 

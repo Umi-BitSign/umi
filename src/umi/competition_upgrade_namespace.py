@@ -23,6 +23,7 @@ from .competition_worker_cli import (
     WORKER_FINALITY_BINARY,
     WORKER_FINALITY_STATE_ROOT,
     WORKER_PROOF_BINARY,
+    WORKER_RUNTIME_METADATA_BINARY,
 )
 from .protocol import canonical_json_bytes
 from .validator_supervisor import ValidatorSupervisorConfig
@@ -252,6 +253,9 @@ def prepare_upgrade_observer_namespace(
         (host_tree.path / "artifacts/umi-substrate-proof-verifier", WORKER_PROOF_BINARY, 0o555),
         (host_tree.path / "artifacts/raw_spec_finney.json", WORKER_CHAIN_SPEC, 0o444),
     )
+    runtime_helper = host_tree.path / "artifacts/umi-runtime-metadata"
+    if runtime_helper.exists():
+        resources += ((runtime_helper, WORKER_RUNTIME_METADATA_BINARY, 0o555),)
     opened: list[int] = []
     try:
         for source, _, mode in resources:

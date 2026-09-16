@@ -49,7 +49,10 @@ from .competition_supervisor import (
     successor_source_config_sha256,
     verify_bound_successor_chain_authorization,
 )
-from .competition_weights import SignedCompetitionWeightAuthorization
+from .competition_weights import (
+    SignedCompetitionWeightAuthorization,
+    validate_runtime_execution_authorization,
+)
 from .competition_worker import CompetitionWorkerCapacity
 from .encoding import account_id32
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
@@ -1474,6 +1477,12 @@ def _validate_worker_execution_bindings(
         != chain.proof_binary_sha256
     ):
         raise HostActivationError("worker chain config differs from signed successor authority")
+    try:
+        validate_runtime_execution_authorization(chain, authorization_body)
+    except ValueError as error:
+        raise HostActivationError(
+            "worker runtime execution differs from signed authority"
+        ) from error
 
 
 def _parse_release_identity(payload: bytes) -> CompetitionReleaseIdentity:
