@@ -27,6 +27,9 @@ model_setup = model_setup_fixture
 
 
 class Provider:
+    def ensure_observer_running(self):
+        pass
+
     def __init__(self, block=125):
         self.block, self.calls = block, 0
 

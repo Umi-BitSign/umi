@@ -134,6 +134,7 @@ def create_intake_app(
         registration_source="verifier_attested_finality",
         limits=config.api_limits,
     )
+    app.state.finality_providers = (provider,)
 
     @app.get("/v1/competition/readiness")
     async def readiness():
@@ -179,13 +180,13 @@ def create_intake_app(
 
 
 def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) -> None:
-    import uvicorn
+    from .competition_service_supervision import serve_with_finality_supervision
 
     config = CompetitionServiceConfig.model_validate_json(canonical_json_bytes(config))
     app = create_intake_app(config, policy)
     # Terminate TLS at a reviewed reverse proxy. Never trust forwarded headers or
     # accept a request-selected source of finality. One process owns this cache.
-    uvicorn.run(
+    serve_with_finality_supervision(
         app,
         host=config.host,
         port=config.port,

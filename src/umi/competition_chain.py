@@ -552,6 +552,15 @@ class FinalizedRegistrationProvider:
         if self._owned and self._task is None:
             self._task = asyncio.create_task(self._finality.run(self._stop))
 
+    def ensure_observer_running(self) -> None:
+        """Detect terminal observer failure without treating stale heads as exit."""
+        if self._closed:
+            raise RuntimeError("owned_finality_provider_closed")
+        if self._owned and (self._task is None or self._task.done()):
+            if self._task is not None and not self._task.cancelled():
+                self._task.exception()  # Retrieve it, but never expose its text.
+            raise RuntimeError("owned_finality_observer_stopped")
+
     async def wait_ready(self) -> RegistrationCapture:
         """Wait for one complete owned capture after start(), without hiding faults.
 

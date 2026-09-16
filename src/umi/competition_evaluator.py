@@ -1226,6 +1226,9 @@ async def run_evaluator(config, policy, *, legacy=None, once=False, report=None)
             await worker.work_provider.start()
 
         async def cycle():
+            provider.ensure_observer_running()
+            if worker.work_provider is not None:
+                worker.work_provider.ensure_observer_running()
             result = await worker.poll_once()
             if once:
                 await asyncio.gather(*worker._tasks.values(), return_exceptions=True)

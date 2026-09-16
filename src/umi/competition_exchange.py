@@ -609,6 +609,7 @@ def create_exchange_app(
         openapi_url=None,
         lifespan=lifespan,
     )
+    app.state.finality_providers = (provider,)
     capacity = asyncio.Semaphore(2)
     serial = asyncio.Lock()
 
@@ -966,9 +967,9 @@ class EvaluatorExchangeClient:
 
 
 def serve_exchange(config, policy, *, legacy=None):
-    import uvicorn
+    from .competition_service_supervision import serve_with_finality_supervision
 
     app = create_exchange_app(config, policy, legacy=legacy)
-    uvicorn.run(
+    serve_with_finality_supervision(
         app, host=config.host, port=config.port, workers=1, access_log=False, log_level="warning"
     )
