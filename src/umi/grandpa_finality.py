@@ -214,6 +214,7 @@ class GrandpaFinalityObserver:
         bootstrap_block_number: int,
         bootstrap_block_hash: str,
         record_timeout_seconds: float = 900.0,
+        first_record_timeout_seconds: float | None = None,
         limits: GrandpaFinalityLimits | None = None,
         staging_directory: str | os.PathLike[str] | None = None,
     ) -> None:
@@ -249,6 +250,18 @@ class GrandpaFinalityObserver:
         ):
             raise ValueError("record_timeout_seconds must be a positive finite number")
         self._record_timeout_seconds = float(record_timeout_seconds)
+        if first_record_timeout_seconds is not None and (
+            isinstance(first_record_timeout_seconds, bool)
+            or not isinstance(first_record_timeout_seconds, (int, float))
+            or not math.isfinite(first_record_timeout_seconds)
+            or first_record_timeout_seconds <= 0
+        ):
+            raise ValueError("first_record_timeout_seconds must be a positive finite number")
+        self._first_record_timeout_seconds = (
+            self._record_timeout_seconds
+            if first_record_timeout_seconds is None
+            else float(first_record_timeout_seconds)
+        )
         self._assert_file_integrity(
             self._binary_path,
             expected_sha256=self._expected_binary_sha256,
@@ -303,6 +316,7 @@ class GrandpaFinalityObserver:
         binary_path: str | os.PathLike[str],
         chain_spec_path: str | os.PathLike[str],
         record_timeout_seconds: float = 900.0,
+        first_record_timeout_seconds: float | None = None,
         limits: GrandpaFinalityLimits | None = None,
     ) -> GrandpaFinalityObserver:
         """Construct only from an exact reviewed ``FinalityVerifierPin``.
@@ -347,6 +361,7 @@ class GrandpaFinalityObserver:
             bootstrap_block_number=pin.bootstrap_block_number,
             bootstrap_block_hash=f"0x{pin.bootstrap_block_hash}",
             record_timeout_seconds=record_timeout_seconds,
+            first_record_timeout_seconds=first_record_timeout_seconds,
             limits=limits,
         )
 
@@ -541,7 +556,15 @@ class GrandpaFinalityObserver:
             while expected_sequence < maximum_records:
                 if stop_requested is not None and stop_requested():
                     return
-                deadline = time.monotonic() + self._record_timeout_seconds
+                # Bootstrap may take longer than steady-state block delivery.
+                # A stalled follow stream must not receive another bootstrap
+                # allowance after each successfully verified record.
+                timeout = (
+                    self._first_record_timeout_seconds
+                    if expected_sequence == 0
+                    else self._record_timeout_seconds
+                )
+                deadline = time.monotonic() + timeout
                 line: bytes | None = None
                 while line is None:
                     if stop_requested is not None and stop_requested():
