@@ -215,16 +215,18 @@ describes required inputs, annotation checks, split isolation and suite retireme
 ### 4.2 Deterministic quality
 
 Reuse UMI's exact text normalization and CER/WER implementation. The approved
-initial launch uses `umi-open-competition-policy/2` with
+initial launch uses `umi-open-competition-policy/3` with
 `umi-competition-suite/2`: each case has exactly one authentic committed English
-reference. Historical version 1 keeps its three-to-five-reference contract.
+reference. Version 3 retains version 2's scoring profile and adds the verified
+burn destination for the unallocated model share. Historical version 1 keeps
+its three-to-five-reference contract.
 CER measures edit distance between normalized graphemes, excluding whitespace;
 WER uses normalized word tokens. For each reference, let `d` be the edit
 distance and `n` its number of scoring units. Its similarity is
 `max(0, 1 - d / max(1, n))`. The case score is the highest similarity across
 the committed references.
 
-The initial version 2 profile uses CER for fingerspelling with exact weight
+The two-task scoring profile uses CER for fingerspelling with exact weight
 `3/13`, and WER for continuous signing with exact weight `10/13`. These preserve
 the original 15:50 relative weights across the two available tasks. Short
 utterances are outside this launch profile. Version 1 retains its 15%/35%/50%
