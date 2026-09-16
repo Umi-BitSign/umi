@@ -199,6 +199,35 @@ async def test_cutoff_vote_retains_signed_owned_proof_for_later_work(setup):
 
 
 @pytest.mark.asyncio
+async def test_cutoff_keeps_ancestor_registration_separate_from_current_observation(setup):
+    proposal = await prepare(setup)
+
+    def recovered(capture):
+        return replace(
+            capture,
+            provenance={**capture.provenance, "evidence_class": "verified_finalized_ancestry"},
+        )
+
+    setup.workers[0].provider.historical_change = recovered
+    client = setup.clients[0]
+    assert await client.endorse(proposal) == "endorsed"
+    raw = client.journal.get("owned-proof", "1")
+    receipt = rounds.SignedLocalCutoffProof.model_validate(raw)
+    assert receipt.proof.registration.source == "verified_finalized_ancestry"
+    assert receipt.proof.observed.source == "verifier_attested_finality"
+    assert (
+        rounds.verified_local_cutoff_snapshot(
+            raw, proposal, setup.policy, setup.workers[0].config.evaluator_hotkey
+        )
+        == proposal.cutoff.registration_snapshot
+    )
+    changed = json.loads(canonical_json_bytes(raw))
+    changed["proof"]["observed"]["source"] = "verified_finalized_ancestry"
+    with pytest.raises(ValueError):
+        rounds.SignedLocalCutoffProof.model_validate(changed)
+
+
+@pytest.mark.asyncio
 async def test_proof_failure_does_not_reserve_sequence_or_sign(setup):
     proposal = await prepare(setup)
     provider = setup.workers[0].provider

@@ -17,8 +17,8 @@ from .competition_evaluator import (
 )
 from .competition_execution import (
     ModelExecutionEvidence,
-    execution_boundary,
     execution_slot,
+    registration_boundary,
     run_record_from_execution,
 )
 from .competition_publication import (
@@ -214,7 +214,7 @@ class IndependentSettlementSigner:
             else:
                 snapshot = publication.settlement.registration_snapshot
                 capture = await worker.provider.collect_at(snapshot.block)
-                execution_boundary(capture)
+                registration_boundary(capture)
                 if capture.snapshot != snapshot:
                     raise ValueError("independent settlement registration snapshot differs")
                 # Recheck local conflict and promotion state after the awaited proof.

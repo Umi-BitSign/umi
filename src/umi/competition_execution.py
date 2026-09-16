@@ -122,10 +122,10 @@ class EndpointIncumbentJob(ModelEvaluationJob):
     schema_: Literal["umi-endpoint-incumbent-job/1"] = Field(alias="schema")
 
 
-class ExecutionBoundary(StrictProtocolModel):
+class RegistrationBoundary(StrictProtocolModel):
     """Reference into the owned provider's retained proof cache."""
 
-    source: Literal["verifier_attested_finality"]
+    source: Literal["verifier_attested_finality", "verified_finalized_ancestry"]
     block: Block
     block_hash: Annotated[str, Field(pattern=r"^0x[0-9a-f]{64}$")]
     state_root: Annotated[str, Field(pattern=r"^0x[0-9a-f]{64}$")]
@@ -133,13 +133,20 @@ class ExecutionBoundary(StrictProtocolModel):
     evidence_sha256: Hex32
 
 
-def execution_boundary(capture: RegistrationCapture) -> ExecutionBoundary:
+class ExecutionBoundary(RegistrationBoundary):
+    """Execution timing requires a current original observer capture."""
+
+    source: Literal["verifier_attested_finality"]
+
+
+def registration_boundary(capture: RegistrationCapture) -> RegistrationBoundary:
     """Call only with a capture from the process-owned finalized provider."""
     snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(capture.snapshot))
     p = capture.provenance
     if (
         p.get("schema") != "umi-competition-registration-provenance/1"
-        or p.get("evidence_class") != "verifier_attested_finality"
+        or p.get("evidence_class")
+        not in {"verifier_attested_finality", "verified_finalized_ancestry"}
         or p.get("offline_finality_proof") is not False
         or p.get("chain_submission_authorized") is not False
         or p.get("snapshot_sha256") != digest(snapshot)
@@ -147,13 +154,19 @@ def execution_boundary(capture: RegistrationCapture) -> ExecutionBoundary:
         or p.get("block_hash") != snapshot.block_hash
     ):
         raise ValueError("execution boundary has inconsistent registration provenance")
-    return ExecutionBoundary(
-        source="verifier_attested_finality",
+    return RegistrationBoundary(
+        source=p["evidence_class"],
         block=snapshot.block,
         block_hash=snapshot.block_hash,
         state_root=p["state_root"],
         snapshot_sha256=digest(snapshot),
         evidence_sha256=p["evidence_sha256"],
+    )
+
+
+def execution_boundary(capture: RegistrationCapture) -> ExecutionBoundary:
+    return ExecutionBoundary.model_validate_json(
+        canonical_json_bytes(registration_boundary(capture))
     )
 
 

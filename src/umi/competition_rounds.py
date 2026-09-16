@@ -26,7 +26,12 @@ from starlette.responses import Response
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_client import validate_intake_origin
 from .competition_evaluator import Directory, _lock_file, _private, _publish, _read
-from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_execution import (
+    ExecutionBoundary,
+    RegistrationBoundary,
+    execution_boundary,
+    registration_boundary,
+)
 from .competition_package import CompetitionPackageLimits, CompetitionReleaseIdentity
 from .competition_promotion_delivery import ReviewedPromotion
 from .competition_publication import (
@@ -1278,7 +1283,7 @@ class LocalCutoffProof(StrictProtocolModel):
 
     schema_: Literal["umi-local-cutoff-proof/1"] = Field(alias="schema")
     proposal_sha256: Hex32
-    registration: ExecutionBoundary
+    registration: RegistrationBoundary
     observed: ExecutionBoundary
 
 
@@ -1366,7 +1371,7 @@ class RoundSigningClient:
             ):
                 raise ValueError("round proposal snapshot is not recent")
             capture = await worker.provider.collect_at(snapshot.block)
-            registration_boundary = execution_boundary(capture)
+            registration_proof = registration_boundary(capture)
             if capture.snapshot != snapshot:
                 raise ValueError("independent registration snapshot differs from proposal")
             current = await worker.boundary()
@@ -1389,7 +1394,7 @@ class RoundSigningClient:
                 proof = LocalCutoffProof(
                     schema="umi-local-cutoff-proof/1",
                     proposal_sha256=digest(proposal),
-                    registration=registration_boundary,
+                    registration=registration_proof,
                     observed=current,
                 )
                 prior_proof = SignedLocalCutoffProof(

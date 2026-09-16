@@ -23,6 +23,7 @@ from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
 from .encoding import account_id32
+from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
 from .grandpa_finality import EVIDENCE_CLASS, FINNEY_GENESIS_HASH, GrandpaFinalityObserver
 from .grandpa_finality_supervisor import (
     DurableGrandpaFinalityPort,
@@ -437,6 +438,7 @@ class FinalizedRegistrationProvider:
         self._prefetch: _PrefetchRpc | None = None
         self._registration_rpc: _RegistrationRpc | None = None
         self._latest: RegistrationCapture | None = None
+        self._registration_ancestry_headers = HeaderPathCache()
         self._runtime_pin = FinalizedRuntimePin(
             metadata_sha256=config.chain_pin.metadata_sha256,
             spec_version=config.chain_pin.runtime_spec_version,
@@ -683,24 +685,65 @@ class FinalizedRegistrationProvider:
             self._fresh(block.timestamp_ms)
             self._check_prior(ref)
             head = ref
+            ancestry = None
             if height is not None and height != head.block_number:
                 if not 0 <= head.block_number - height <= self.policy.maximum_snapshot_age_blocks:
                     raise ValueError("requested registration block is future or stale")
                 identity = await self._finality.verified_identity_at(height)
-                if (
+                if identity is None:
+                    if not self._owned or self._registration_rpc is None:
+                        raise ValueError("owned historical finalized identity is unavailable")
+                    anchor = await self._finality.verified_block_after(
+                        height,
+                        maximum_distance=min(
+                            MAXIMUM_DISTANCE, self.policy.maximum_snapshot_age_blocks
+                        ),
+                    )
+                    if (
+                        not isinstance(anchor, VerifiedFinalizedBlock)
+                        or anchor.height > head.block_number
+                    ):
+                        raise ValueError("owned historical finalized anchor is unavailable")
+                    self._check_finality_context(anchor)
+                    ref, headers = await recover_header_path(
+                        anchor,
+                        height,
+                        self._registration_rpc.request,
+                        maximum_distance=min(
+                            MAXIMUM_DISTANCE, self.policy.maximum_snapshot_age_blocks
+                        ),
+                        cache=self._registration_ancestry_headers,
+                    )
+                    block = anchor
+                    ancestry = {
+                        "schema": "umi-registration-finalized-ancestry/1",
+                        "evidence_class": "verified_finalized_ancestry",
+                        "offline_finality_proof": False,
+                        "anchor": json.loads(anchor.finality_evidence),
+                        "anchor_sha256": anchor.finality_evidence_sha256,
+                        "headers": headers,
+                        "snapshot": {
+                            "block": ref.block_number,
+                            "block_hash": ref.block_hash,
+                            "parent_hash": ref.parent_hash,
+                            "state_root": ref.state_root,
+                        },
+                    }
+                elif (
                     not isinstance(identity, VerifiedFinalizedBlockIdentity)
                     or identity.snapshot.block_number != height
                 ):
                     raise ValueError("owned historical finalized identity is unavailable")
-                ref = identity.snapshot
-                block = await self._finality.verified_block_at(height)
-                self._check_finality(ref, block)
-                if (
-                    identity.finality_verifier_sha256 != block.finality_verifier_sha256
-                    or identity.finality_evidence_sha256 != block.finality_evidence_sha256
-                ):
-                    raise ValueError("owned historical finalized evidence binding mismatch")
-                self._fresh(block.timestamp_ms)
+                else:
+                    ref = identity.snapshot
+                    block = await self._finality.verified_block_at(height)
+                    self._check_finality(ref, block)
+                    if (
+                        identity.finality_verifier_sha256 != block.finality_verifier_sha256
+                        or identity.finality_evidence_sha256 != block.finality_evidence_sha256
+                    ):
+                        raise ValueError("owned historical finalized evidence binding mismatch")
+                    self._fresh(block.timestamp_ms)
             if (
                 height is None
                 and self._latest is not None
@@ -729,7 +772,11 @@ class FinalizedRegistrationProvider:
             if values[StorageReadSpec("SubtensorModule", "NetworksAdded", (78,))] is not True:
                 raise ValueError("SN78 registration subnet is unavailable")
             timestamp = _uint(values[StorageReadSpec("Timestamp", "Now")], 2**53 - 1)
-            if timestamp != block.timestamp_ms:
+            if ancestry is not None:
+                if not 0 < timestamp <= block.timestamp_ms:
+                    raise ValueError("historical timestamp is invalid or newer than its anchor")
+                self._fresh(timestamp)
+            elif timestamp != block.timestamp_ms:
                 raise ValueError("proven timestamp differs from owned finalized header")
             count = _uint(values[StorageReadSpec("SubtensorModule", "SubnetworkN", (78,))], 256)
             if count == 0:
@@ -792,7 +839,9 @@ class FinalizedRegistrationProvider:
                 {
                     "schema": "umi-competition-registration-evidence/1",
                     "snapshot": snapshot.model_dump(mode="json"),
-                    "finality": json.loads(block.finality_evidence),
+                    "finality": ancestry
+                    if ancestry is not None
+                    else json.loads(block.finality_evidence),
                     "runtime_metadata_sha256": runtime.metadata_sha256,
                     "runtime_version": json.loads(runtime.runtime_version_bytes),
                     **(
@@ -825,7 +874,9 @@ class FinalizedRegistrationProvider:
                 snapshot,
                 {
                     "schema": "umi-competition-registration-provenance/1",
-                    "evidence_class": EVIDENCE_CLASS,
+                    "evidence_class": EVIDENCE_CLASS
+                    if ancestry is None
+                    else "verified_finalized_ancestry",
                     "offline_finality_proof": False,
                     "genesis_block_hash": "0x" + FINNEY_GENESIS_HASH,
                     "block": ref.block_number,
@@ -835,7 +886,9 @@ class FinalizedRegistrationProvider:
                     "snapshot_sha256": digest(snapshot),
                     "evidence_sha256": evidence_id,
                     "metadata_sha256": runtime.metadata_sha256,
-                    "finality_evidence_sha256": block.finality_evidence_sha256,
+                    "finality_evidence_sha256": block.finality_evidence_sha256
+                    if ancestry is None
+                    else digest(ancestry),
                     "finality_verifier_sha256": block.finality_verifier_sha256,
                     "storage_proof_verifier_sha256": self.config.proof_binary_sha256,
                     "chain_submission_authorized": False,
