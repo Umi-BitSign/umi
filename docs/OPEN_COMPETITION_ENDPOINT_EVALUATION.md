@@ -112,3 +112,31 @@ quorum-signed orders and prepares independent evidence through signed peer
 agreement. It requires coordinator order/reveal delivery and private peer
 transport. Settlement publication remains a separate stage; the dispatcher
 alone does not perform those steps.
+
+## Miner historical-header admission
+
+A miner starting after a transport window opens may not have that window's
+announcement header in its local observer journal. Observers can also skip an
+exact issuance height. This produces `finalized_history_unavailable` even when
+the HTTP health endpoint and assignment feed are current.
+
+For the no-weight competition miner, `--competition-chain-config` accepts a
+canonical `umi-competition-chain-config/1` document. It uses the same owned
+observer, bounded hash-linked ancestry recovery and timestamp storage-proof
+verification as the dispatcher. Configure an archive-capable proof RPC, the
+reviewed storage-proof verifier and metadata decoder, and a dedicated private
+state directory. The finality target, binary and chain spec must match the
+miner's other verifier arguments. The configuration is rejected outside
+competition mode.
+
+This path starts one observer and owns its shutdown. An old block is accepted
+only through a retained verified header or a verified path to the process-owned
+finalized anchor, with its timestamp proved against the recovered state root.
+Failed proofs, stale heads and out-of-bound recovery remain request rejections.
+It does not reset nonce or assignment journals, trust evaluator-supplied headers,
+or authorize chain submissions.
+
+The existing Darwin finality-only artifact does not include a storage-proof
+verifier. Historical admission therefore needs separately qualified artifacts
+for the selected host target before this configuration can be deployed there.
+A unit-test pass alone does not qualify those artifacts or the running miner.
