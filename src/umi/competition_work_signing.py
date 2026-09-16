@@ -181,6 +181,7 @@ class IndependentWorkSigner:
             now_ms=time.time_ns() // 1_000_000,
             minimum_issue_ms=self.minimum_issue_ms,
             submission_sha256=digest(body.submissions[0].submission),
+            verification_head=head,
         )
         if expected != (body,):
             raise ValueError("work authorization differs from the independently derived window")
