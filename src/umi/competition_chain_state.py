@@ -19,7 +19,6 @@ import weakref
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import (
@@ -30,6 +29,7 @@ from .competition_chain import (
     model_burn_storage_reads,
     verified_model_burn_destination,
 )
+from .competition_weight_rpc import WeightProofRpc
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -48,7 +48,6 @@ from .runtime_metadata import MAX_CODE_BYTES, ExecutedRuntimeContext, RuntimeMet
 from .simple_bootstrap_validator import _manifest_anchor_state
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
-    BittensorRawJsonRpc,
     FinalizedProofCollector,
     PinnedRuntimeContext,
     ProofCollectionLimits,
@@ -296,6 +295,8 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
 
     def __init__(self, *args, **kwargs):
         self._cache_lease = None
+        self._weight_rpc = None
+        self._runtime_rpc = None
         try:
             super().__init__(*args, **kwargs)
             self._configure_weight_collector()
@@ -308,8 +309,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         # Replace only this successor provider's collector, not historical code.
         if self._owned:
             self._prefetch = None
+            self._weight_rpc = WeightProofRpc(self.config)
             self._proofs = FinalizedProofCollector(
-                BittensorRawJsonRpc(SimpleNamespace(endpoint=self.config.rpc_url)),
+                self._weight_rpc,
                 finality=self._finality,
                 verifier=SubprocessStorageProofVerifier(
                     binary_path=self.config.proof_binary,
@@ -331,9 +333,11 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             )
             # A separate raw-key collector prevents an enlarged :code ceiling
             # from weakening ordinary account/weight storage limits.
+            if self._owned:
+                self._runtime_rpc = WeightProofRpc(self.config)
             self._runtime_proofs = (
                 FinalizedProofCollector(
-                    BittensorRawJsonRpc(SimpleNamespace(endpoint=self.config.rpc_url)),
+                    self._runtime_rpc,
                     finality=self._finality,
                     verifier=SubprocessStorageProofVerifier(
                         binary_path=self.config.proof_binary,
@@ -473,7 +477,12 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         try:
             await super().aclose()
         finally:
-            self._release_cache_lease()
+            try:
+                for rpc in (self._weight_rpc, self._runtime_rpc):
+                    if rpc is not None:
+                        await rpc.aclose()
+            finally:
+                self._release_cache_lease()
 
     async def collect(self):
         raise ValueError("weight collection needs an explicit validator and recipients")
@@ -731,7 +740,12 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             return observation
 
     async def _weight_read(self, runtime, specs) -> VerifiedStorageBatch:
-        batch = await self._proofs.storage_reads(runtime, specs)
+        if self._weight_rpc is None:
+            batch = await self._proofs.storage_reads(runtime, specs)
+        else:
+            keys = tuple(runtime.storage_key(spec.pallet, spec.item, spec.params) for spec in specs)
+            async with self._weight_rpc.read_batch(runtime.snapshot.block_hash, keys):
+                batch = await self._proofs.storage_reads(runtime, specs)
         if (
             not isinstance(batch, VerifiedStorageBatch)
             or batch.runtime != runtime
