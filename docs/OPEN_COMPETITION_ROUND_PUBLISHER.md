@@ -16,8 +16,8 @@ Use a canonical, private `umi-successor-publisher-config/1` JSON file containing
 
 - `plan`: the fixed policy digest, supervisor trust configuration, operator
   consent, release identity, verifier pins, weight requirements and validity
-  limits from `umi-successor-round-publication-plan/1`, or the explicitly
-  renewal-enabled `/2` described below.
+  limits from `umi-successor-round-publication-plan/1`, the renewal-enabled `/2`,
+  or the bounded settlement-reuse `/3` described below.
 - `chain`: the process-owned finality/proof configuration. Its policy, chain
   family and selected verifier hashes must match the plan.
 - `intake_directory`: the existing retained competition store. Missing intake
@@ -174,8 +174,8 @@ fresh owned-finality checks before signing. Each renewal has a new directive
 sequence, predecessor and single-use authorization ID. It does not resubmit an
 old transaction or change the package's allocation.
 
-The validity limit remains the earliest of the plan, policy, original round,
-snapshot-age limit and new authorization's maximum lifetime. Renewal never
+For version 2, the validity limit remains the earliest of the plan, policy,
+original round, snapshot-age limit and new authorization's maximum lifetime. Renewal never
 extends the underlying round or snapshot. If the remaining window is too short,
 the follower waits for a current completed round. A conflict or changed recipient
 registration still blocks submission. This feature does not authorize a fallback
@@ -194,6 +194,43 @@ renewals in their capacity budgets, even where a limit is named `maximum_rounds`
 Reaching a limit stops new work without deleting old receipts. Retain the exact
 sealed package for retries and catch-up. Fresh evaluation rounds and their
 original expiry schedule are still required for ongoing operation.
+
+## Reusing a settled round with current recipient checks
+
+Version 2 cannot support a reward interval longer than the original settlement
+registration snapshot's freshness window. That window is at most 360 blocks,
+regardless of how long the signed round remains valid. Renewing its authorization
+does not remove that limit.
+
+To use a completed round for an explicitly longer reward interval, select
+`umi-successor-round-publication-plan/3` and supply both
+`renewal_interval_blocks` and `maximum_settlement_reuse_blocks`. The latter is
+measured from the original settlement observation, never from a restart or the
+most recent renewal. It must fit the reviewed scoring cadence. Each new
+authorization still expires at the earliest of this reuse limit, the original
+round, policy, plan and per-authorization lifetime. It cannot revive an expired
+round or change a retained allocation, score, label or signature.
+
+The managed publisher obtains a new owned finalized registration capture after
+replay and before each signature and final publication. Every projected
+recipient must still have the same UID and hotkey, and the configured burn
+destination must still match. A removed or reassigned recipient, changed burn
+destination, stale proof or retained evidence conflict prevents publication.
+Unrelated registration changes do not invalidate the unchanged recipient set.
+The weight worker independently repeats its fresh registration, burn, permit,
+runtime, rate-limit and authorization checks before a chain write.
+
+Version 3 requires the managed current-recipient gate even for the first
+publication. The signing builder rejects ungated use. Versions 1 and 2 retain
+their original serialization and snapshot-limited semantics; they cannot opt in
+by adding the version 3 field. Do not replace a plan inside an existing journal.
+Feed delivery must use exactly the same version 3 plan as the publisher.
+
+This separates the age of scored results from the freshness of chain state.
+It does not generate new evaluations or admit new miners into an already closed
+roster. Publish the next roster-close and evaluation windows so new submissions
+can enter a later round. A recipient change still requires a current settlement;
+this mode does not invent replacement recipients or an alternative weight row.
 
 ## Current checks and recovery
 

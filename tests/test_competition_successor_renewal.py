@@ -48,8 +48,8 @@ def enable_builder(case, tmp_path):
     return case
 
 
-def enable_follow(case, tmp_path):
-    plan = renewal_plan(case.publisher.builder.plan)
+def enable_follow(case, tmp_path, plan=None):
+    plan = plan or renewal_plan(case.publisher.builder.plan)
     builder = SuccessorRoundPublicationBuilder(tmp_path / "renewal-follow-signing", plan)
     publisher = CurrentSuccessorRoundPublisher(
         builder, case.guarded.store, case.guarded.replay, case.provider
@@ -67,12 +67,274 @@ def test_legacy_plan_bytes_and_retries_do_not_opt_in(publication_case, package_c
     case = publication_case
     raw = canonical_json_bytes(case.plan)
     assert b"renewal_interval_blocks" not in raw
+    assert b"maximum_settlement_reuse_blocks" not in raw
     assert canonical_json_bytes(SuccessorRoundPublicationPlan.model_validate_json(raw)) == raw
     first = build(case, package_case)
     with pytest.raises(ValueError, match="version 2"):
         build(case, package_case, 162, renew=True)
     assert canonical_json_bytes(build(case, package_case, 163)) == canonical_json_bytes(first)
     assert len(case.builder.history()) == 1
+
+
+def fresh_reuse_plan(plan, maximum=40):
+    raw = json.loads(canonical_json_bytes(renewal_plan(plan)))
+    raw.update(
+        schema="umi-successor-round-publication-plan/3",
+        maximum_settlement_reuse_blocks=maximum,
+    )
+    return SuccessorRoundPublicationPlan.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "schema,maximum",
+    [
+        ("umi-successor-round-publication-plan/1", 40),
+        ("umi-successor-round-publication-plan/2", 40),
+        ("umi-successor-round-publication-plan/3", None),
+        ("umi-successor-round-publication-plan/3", 0),
+        ("umi-successor-round-publication-plan/3", True),
+        ("umi-successor-round-publication-plan/3", 3),
+        ("umi-successor-round-publication-plan/3", 1_000_001),
+    ],
+)
+def test_settlement_reuse_requires_explicit_bounded_version_3(publication_case, schema, maximum):
+    raw = json.loads(canonical_json_bytes(renewal_plan(publication_case.plan)))
+    raw.update(schema=schema, maximum_settlement_reuse_blocks=maximum)
+    with pytest.raises(ValueError):
+        SuccessorRoundPublicationPlan.model_validate(raw)
+
+
+def test_version_2_keeps_original_bytes_and_snapshot_limit(publication_case, package_case):
+    from umi.competition_successor_publication import publication_valid_through
+
+    plan = renewal_plan(publication_case.plan)
+    raw = canonical_json_bytes(plan)
+    assert b"maximum_settlement_reuse_blocks" not in raw
+    assert canonical_json_bytes(SuccessorRoundPublicationPlan.model_validate_json(raw)) == raw
+    package = publication_case.builder._load(package_case.prepared)
+    assert publication_valid_through(plan, package, 160) == 170
+    with pytest.raises(PublicationWindowUnavailable):
+        publication_valid_through(plan, package, 172)
+
+
+def test_reuse_cannot_sign_without_current_recipient_gate(publication_case, package_case, tmp_path):
+    case = publication_case
+    case.builder = SuccessorRoundPublicationBuilder(
+        tmp_path / "fresh-reuse", fresh_reuse_plan(case.plan)
+    )
+    with pytest.raises(ValueError, match="current recipient gate"):
+        build(case, package_case)
+    assert not case.builder.journal.keys("intent")
+    assert not case.builder.journal.keys("authorization")
+
+
+@pytest.mark.parametrize("maximum,expires", [(20, 180), (40, 200), (1000, 200)])
+async def test_fresh_reuse_survives_old_snapshot_age_but_not_original_limits(
+    automatic, package_case, tmp_path, maximum, expires
+):
+    plan = fresh_reuse_plan(automatic.publisher.builder.plan, maximum)
+    c = enable_follow(automatic, tmp_path, plan)
+    completed(c, package_case)
+    assert (await c.service.tick())["status"] == "published"
+    first = c.feed.history()[0]
+    assert first.intent.authorization.valid_through_block == expires
+    c.provider.block = 172  # Historical settlement snapshot expired at 170.
+    assert (await c.service.tick())["status"] == "published"
+    second = c.feed.history()[1]
+    assert second.intent.package == first.intent.package
+    assert second.intent.authorization.valid_through_block == expires
+    assert second.intent.authorization.signed_at_block == 172
+    assert (
+        second.intent.authorization.authorization_id != first.intent.authorization.authorization_id
+    )
+    c.feed = SuccessorPublicationFeed(c.feed_config)
+    assert c.feed.history() == (first, second)
+    c.provider.block = expires - 3
+    assert (await c.service.tick())["status"] == "waiting_for_current_round"
+    assert len(c.publisher.builder.history()) == 2
+
+
+def change_capture(capture, registrations=None, burn=None):
+    from umi.competition_chain import RegistrationCapture
+    from umi.open_competition import digest
+
+    changes = {}
+    if registrations is not None:
+        changes["registrations"] = registrations
+    if burn is not None:
+        changes["burn_destination"] = burn
+    snapshot = capture.snapshot.model_copy(update=changes)
+    return RegistrationCapture(
+        snapshot, {**capture.provenance, "snapshot_sha256": digest(snapshot)}
+    )
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_fresh_reuse_rechecks_recipient_identity_before_any_signature(
+    automatic, package_case, tmp_path, monkeypatch, missing
+):
+    from .test_open_competition import wallet
+
+    c = enable_follow(automatic, tmp_path, fresh_reuse_plan(automatic.publisher.builder.plan))
+    completed(c, package_case)
+    original = c.provider.collect
+
+    async def changed():
+        capture = await original()
+        entries = capture.snapshot.registrations
+        entries = (
+            entries[1:]
+            if missing
+            else (
+                entries[0].model_copy(update={"hotkey": wallet("Ferdie").hotkey.ss58_address}),
+                *entries[1:],
+            )
+        )
+        return change_capture(capture, entries)
+
+    monkeypatch.setattr(c.provider, "collect", changed)
+    with pytest.raises(ValueError, match="recipient registration changed"):
+        await c.service.tick()
+    assert not c.publisher.builder.journal.keys("authorization")
+    assert not c.feed.history()
+
+
+async def test_fresh_reuse_rechecks_recipients_between_partial_signatures(
+    automatic, package_case, tmp_path, monkeypatch
+):
+    c = enable_follow(automatic, tmp_path, fresh_reuse_plan(automatic.publisher.builder.plan))
+    completed(c, package_case)
+    original = c.provider.collect
+
+    async def changes_after_authorization():
+        capture = await original()
+        if c.publisher.builder.journal.keys("authorization"):
+            return change_capture(capture, ())
+        return capture
+
+    monkeypatch.setattr(c.provider, "collect", changes_after_authorization)
+    with pytest.raises(ValueError, match="recipient registration changed"):
+        await c.service.tick()
+    assert c.publisher.builder.journal.keys("authorization") == ["2:1"]
+    assert not c.publisher.builder.journal.keys("directive_signature")
+    assert not c.feed.history()
+
+
+async def test_nonrecipient_churn_does_not_stop_unchanged_row_reuse(
+    automatic, package_case, tmp_path, monkeypatch
+):
+    from umi.open_competition import Registration
+
+    from .test_open_competition import wallet
+
+    c = enable_follow(automatic, tmp_path, fresh_reuse_plan(automatic.publisher.builder.plan))
+    completed(c, package_case)
+    await c.service.tick()
+    original = c.provider.collect
+
+    async def nonrecipient():
+        capture = await original()
+        extra = Registration(uid=71, hotkey=wallet("Ferdie").hotkey.ss58_address)
+        return change_capture(
+            capture,
+            tuple(sorted((*capture.snapshot.registrations, extra), key=lambda entry: entry.uid)),
+        )
+
+    monkeypatch.setattr(c.provider, "collect", nonrecipient)
+    c.provider.block = 172
+    assert (await c.service.tick())["status"] == "published"
+    assert len(c.feed.history()) == 2
+
+
+@pytest.mark.parametrize("burn_state", ["current", "missing", "changed"])
+async def test_reuse_of_real_burn_package_requires_current_burn_proof(
+    guarded, policy, replay_limits, package_limits, release_identity, tmp_path, burn_state
+):
+    from pathlib import Path
+
+    from umi.competition_chain import RegistrationCapture
+    from umi.competition_package import prepare_competition_package
+    from umi.open_competition import BurnDestination, digest
+
+    from .test_competition_model_burn import burn_policy, burn_snapshot
+    from .test_competition_publication import _scenario
+    from .test_competition_successor_publication import authority_wallets
+    from .test_competition_two_task_profile import launch_suite
+    from .test_open_competition import wallet
+
+    policy = burn_policy(policy)
+
+    def current_snapshot(block=110):
+        return burn_snapshot(policy).model_copy(
+            update={"block": block, "block_hash": "0x" + f"{block:064x}"}
+        )
+
+    scenario = _scenario(
+        policy,
+        tmp_path / "burn-scenario",
+        replay_limits,
+        promote_model=False,
+        snapshot_factory=current_snapshot,
+        suite_factory=launch_suite,
+    )
+    prepared = prepare_competition_package(
+        policy=policy,
+        cutoff_certificate=scenario.cutoff_certificate,
+        settlement_certificate=scenario.settlement_certificate,
+        retained_settlement=scenario.settlement,
+        roster=scenario.submissions,
+        evidence=scenario.evidence,
+        replay_limits=replay_limits,
+        release_identity=release_identity,
+        destination_root=tmp_path / "burn-packages",
+        limits=package_limits,
+    )
+    try:
+        plan = fresh_reuse_plan(guarded.builder.plan).model_copy(
+            update={"policy_sha256": digest(policy)}
+        )
+        builder = SuccessorRoundPublicationBuilder(tmp_path / "burn-signing", plan)
+        provider = guarded.provider
+        provider.policy = policy
+        provider.config = provider.config.model_copy(update={"policy_sha256": digest(policy)})
+        provider.block = 172
+        original = provider.collect
+
+        async def collect():
+            capture = await original()
+            snap = current_snapshot(provider.block)
+            if burn_state != "current":
+                target = (
+                    None
+                    if burn_state == "missing"
+                    else BurnDestination(uid=6, hotkey=wallet("Alice").hotkey.ss58_address)
+                )
+                snap = snap.model_copy(update={"burn_destination": target})
+            return RegistrationCapture(
+                snap, {**capture.provenance, "snapshot_sha256": digest(snap)}
+            )
+
+        provider.collect = collect
+        publisher = CurrentSuccessorRoundPublisher(
+            builder, scenario.store, guarded.replay, provider
+        )
+        kwargs = {
+            "authorization_wallet": authority_wallets()[0],
+            "directive_wallets": authority_wallets()[:2],
+        }
+        if burn_state == "current":
+            signed = await publisher.build(prepared, **kwargs)
+            assert signed.intent.authorization.signed_at_block == 172
+            assert signed.intent.authorization.valid_through_block == 200
+            assert scenario.settlement.promotion_head.contributor_hotkey is None
+            assert scenario.settlement.projection.weights[0] == 19661
+            assert scenario.settlement.projection.weights[247] == 45874
+        else:
+            with pytest.raises(ValueError, match="burn destination changed"):
+                await publisher.build(prepared, **kwargs)
+            assert not builder.journal.keys("authorization")
+    finally:
+        Path(prepared.package_path).chmod(0o700)
 
 
 @pytest.mark.parametrize(
