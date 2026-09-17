@@ -1,0 +1,21 @@
+{
+  "name": "umi-competition-clips",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.config.json",
+    "test": "vitest run",
+    "check": "npm run types && npm run typecheck && npm test && wrangler deploy --dry-run --outdir dist"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.1.11",
+    "@types/node": "24.10.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.133.0"
+  },
+  "overrides": { "sharp": "0.35.4" }
+}
