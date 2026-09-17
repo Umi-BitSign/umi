@@ -2,7 +2,7 @@
 
 This Worker serves selected MP4 clips from a private R2 bucket. It has no upload,
 listing, labels, signing or model-execution route. Each URL contains a random
-256-bit capability and an explicit access window of at most 24 hours. Changing
+256-bit capability and an explicit access window of at most seven days. Changing
 the window or any other path segment selects a different, absent R2 object.
 The service itself has no rehearsal deadline and can accept new selected clips
 without a restart or code deployment.
@@ -37,8 +37,9 @@ Prepare a mode-0600 JSON manifest outside the repository:
 }
 ```
 
-Use real timestamps covering the signed dispatch and response window; the
-example is not an active grant. Files must be private, owned regular files.
+Use the shortest practical timestamps that cover the complete signed dispatch,
+response and evaluation window plus a bounded recovery margin; the example is
+not an active grant. Files must be private, owned regular files.
 Upload only explicitly selected clips. Never upload labels or the unused pool.
 The uploader checks MP4 framing, size and the manifest's hash before upload.
 

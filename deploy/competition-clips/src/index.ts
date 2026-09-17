@@ -1,5 +1,5 @@
 const MAX_BYTES = 16 * 1024 * 1024;
-const MAX_WINDOW_SECONDS = 86400;
+const MAX_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 const PATH = /^\/v1\/clips\/([1-9][0-9]{9})\/([1-9][0-9]{9})\/([0-9a-f]{64})\/([0-9a-f]{64})\.mp4$/;
 const HEADERS = {
   "Cache-Control": "no-store, private",
