@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "umi-successor-feed-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "logpush": false,
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false },
+  },
+  "r2_buckets": [{ "binding": "FEED", "bucket_name": "umi-public-evidence" }],
+  "vars": {
+    "ENABLED": "false",
+    "SOURCE_ORIGIN": "https://api.umi.vision",
+    "CHANNEL_ID": "a3ca19a108fe7d1a8e53a2db76f480ebe237b7942595f23135d6e11889ed40c0",
+    "PLATFORM": "linux-amd64",
+    "INITIAL_CURSOR": "3/19/3a44f887902b07e05cd9db2c217bd98af56990f911b1508bf6d1507488020dc0",
+  },
+  // Enable only after the source feed, artifacts and operator handoff are ready.
+  "triggers": { "crons": [] },
+}

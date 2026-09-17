@@ -23,6 +23,7 @@ from umi.competition_successor_feed import (
 )
 from umi.competition_successor_publication import SuccessorRoundPublicationBuilder
 from umi.competition_supervisor import (
+    parse_canonical_successor_supervisor_directive_history,
     parse_canonical_successor_supervisor_directive_page,
     successor_source_config_sha256,
 )
@@ -160,6 +161,44 @@ def test_two_rounds_restart_exact_artifacts_and_no_private_descriptor(
         first.authorization
     )
     assert c.feed.read(prefix + "/execution.json")[0] == canonical_json_bytes(c.config.execution)
+
+
+@pytest.mark.asyncio
+async def test_relay_one_hop_links_and_empty_tail_collect_complete_initial_history(
+    feed_case, package_case, next_package, v3_predecessor
+):
+    c = feed_case
+    first = _retain(c, package_case)
+    second = _retain(c, next_package, 245)
+    objects = {}
+    previous = _after(c)
+    for item in (first, second):
+        body, _ = c.feed.read(f"directives/{item.signed.directive_sha256}/page.json")
+        page = parse_canonical_successor_supervisor_directive_page(body)
+        # The relay changes only the unsigned page envelope. Its explicit empty
+        # tail allows catch-up to continue past old, now-expired directives.
+        objects[previous] = canonical_json_bytes(page.model_copy(update={"more": True}))
+        previous = _after(c, item)
+    objects[previous] = c.feed.read(previous)[0]
+    requested = []
+    base = c.config.plan.supervisor.directive_url + "/successor/"
+
+    async def request(req):
+        route = str(req.url).removeprefix(base)
+        requested.append(route)
+        return httpx.Response(200, stream=httpx.ByteStream(objects[route]))
+
+    client = PinnedHTTPSClient(timeout_seconds=60, transport=httpx.MockTransport(request))
+    fetcher = HTTPSSuccessorDirectiveFetcher(c.config.plan.supervisor, client=client)
+    result = await fetcher.fetch_initial_history(
+        legacy_signed_bytes=v3_predecessor.body,
+        operator_consent=c.config.plan.consent,
+        finalized_block=250,
+    )
+    history = parse_canonical_successor_supervisor_directive_history(result)
+    assert history.directives == [first.signed, second.signed]
+    assert history.head == second.signed
+    assert requested == [_after(c), _after(c, first), _after(c, second)]
 
 
 def test_missing_predecessor_and_unlisted_files_rejected(feed_case, package_case, next_package):
