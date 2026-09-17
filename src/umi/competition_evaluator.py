@@ -1095,6 +1095,24 @@ class ContinuousEvaluator:
         self._output(order, "void", certificate)
         return "complete"
 
+    def _order_needs_boundary(self, slot):
+        void = self.journal.get(slot, "void", VoidEvaluationEvidence)
+        if void is not None:
+            return self.journal.get(slot, "void_observation", VoidEvidenceObservation) is None or (
+                self.review_store is not None
+                and self.journal.get(slot, "void_review_retention", VoidEvidenceObservation) is None
+            )
+        final = self.journal.get(slot, "independent", IndependentEvaluationEvidence)
+        if final is not None:
+            return self.journal.get(
+                slot, "independent_observation", IndependentEvidenceObservation
+            ) is None or (
+                self.review_store is not None
+                and self.journal.get(slot, "review_retention", IndependentEvidenceObservation)
+                is None
+            )
+        return True
+
     async def poll_once(self):
         counts = {"held": 0, "waiting": 0, "complete": 0, "expired": 0, "executing": 0}
         if self.settlement_client is not None:
@@ -1145,17 +1163,18 @@ class ContinuousEvaluator:
                 self.ingest_once()
             except (OSError, ValueError, RuntimeError):
                 counts["held"] += 1
-        try:
-            head = (await self.boundary()).block
-        except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
-            return {
-                "status": "waiting_finality",
-                "no_weight": True,
-                "chain_submission_authorized": False,
-            }
-        for slot, signed, conflict in self.journal.orders(
-            after=self._order_cursor, limit=self.config.page_size
-        ):
+        orders = self.journal.orders(after=self._order_cursor, limit=self.config.page_size)
+        head = 0
+        if any(not conflict and self._order_needs_boundary(slot) for slot, _, conflict in orders):
+            try:
+                head = (await self.boundary()).block
+            except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+                return {
+                    "status": "waiting_finality",
+                    "no_weight": True,
+                    "chain_submission_authorized": False,
+                }
+        for slot, signed, conflict in orders:
             self._order_cursor = slot
             if conflict:
                 if slot in self._tasks:

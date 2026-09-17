@@ -167,6 +167,38 @@ def completed(driver):
 
 
 @pytest.mark.asyncio
+async def test_idle_poll_does_not_capture_unused_registration_evidence(
+    model_setup, chain_config, tmp_path
+):
+    policy, _, _, archive, videos, _ = model_setup
+    driver = make_driver(
+        tmp_path / "idle", chain_config, policy, archive, videos, wallet("Charlie")
+    )
+
+    result = await driver.poll_once()
+
+    assert result["status"] == "poll_complete"
+    assert result["in_flight"] == 0
+    assert driver.provider.calls == 0
+    await driver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_terminal_order_poll_reuses_retained_observation_without_new_boundary(setup):
+    await execute(setup.drivers)
+    await agree(setup)
+    first = setup.drivers[0]
+    calls = first.provider.calls
+
+    result = await first.poll_once()
+
+    assert result["complete"] == 1
+    assert first.provider.calls == calls
+    for driver in setup.drivers:
+        await driver.aclose()
+
+
+@pytest.mark.asyncio
 async def test_two_workers_execute_agree_sign_and_continue_into_later_round(setup):
     await execute(setup.drivers)
     assert sum(isinstance(c, dict) for c in setup.calls) == 12
@@ -327,7 +359,9 @@ async def test_conflicting_order_keeps_hold_across_restart(setup):
     with pytest.raises(ValueError, match="conflicting"):
         first.journal.admit(other, execution_key(changed))
     fresh = worker.ContinuousEvaluator(first.config, first.policy, first.wallet, first.provider)
+    calls = first.provider.calls
     assert (await fresh.poll_once())["held"] == 1
+    assert first.provider.calls == calls
     assert not setup.calls
 
 
