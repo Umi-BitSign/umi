@@ -1,0 +1,16 @@
+{
+  "name": "umi-studio-miner-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "types": "wrangler types",
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260917.1",
+    "typescript": "7.0.2",
+    "wrangler": "^4.133.0"
+  }
+}
