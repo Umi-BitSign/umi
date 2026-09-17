@@ -197,6 +197,7 @@ class EvaluatorConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
     page_size: Annotated[int, Field(ge=1, le=16)] = 4
+    maximum_parallel_jobs: Annotated[int, Field(ge=1, le=4)] = 1
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     no_weight: Literal[True] = True
 
@@ -437,6 +438,7 @@ class EvaluatorJournal:
                     exclude={
                         "maximum_orders",
                         "maximum_journal_bytes",
+                        "maximum_parallel_jobs",
                         "page_size",
                         "poll_seconds",
                         *(
@@ -860,9 +862,9 @@ class ContinuousEvaluator:
                 return "scheduled"
             if head > order.round.evaluation_close_block:
                 return "expired"
-            if not self._tasks:
+            if slot not in self._tasks and len(self._tasks) < self.config.maximum_parallel_jobs:
                 self._tasks[slot] = asyncio.create_task(self._execute(job))
-            return "executing"
+            return "executing" if slot in self._tasks else "scheduled"
         if state["status"] != "complete":
             return "executing" if slot in self._tasks else "held"
         if head < order.round.reveal_block:

@@ -286,6 +286,39 @@ async def test_unknown_execution_cannot_restart_automatically(setup):
 
 
 @pytest.mark.asyncio
+async def test_parallel_execution_is_explicitly_bounded_and_full_queue_stays_scheduled(
+    setup, monkeypatch
+):
+    first = setup.drivers[0]
+    first.config = first.config.model_copy(update={"maximum_parallel_jobs": 2})
+    entered = []
+    both_started = asyncio.Event()
+
+    async def stalled(job):
+        entered.append(execution_key(job))
+        if len(entered) == 2:
+            both_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(first, "_execute", stalled)
+    for sequence in (2, 3):
+        round_ = setup.job.round.model_copy(update={"sequence": sequence})
+        job = setup.job.model_copy(update={"round": round_})
+        order = signed_order(job, setup.wallets)
+        put(Path(first.config.order_directory) / (digest(order.order) + ".json"), order)
+
+    status = await first.poll_once()
+    await asyncio.wait_for(both_started.wait(), 2)
+    assert status["in_flight"] == 2
+    assert len(first._tasks) == 2
+    assert len(entered) == 2
+    assert status["waiting"] == 1
+    await first.poll_once()
+    assert len(first._tasks) == len(entered) == 2
+    await first.aclose()
+
+
+@pytest.mark.asyncio
 async def test_conflicting_order_keeps_hold_across_restart(setup):
     first = setup.drivers[0]
     first.ingest_once()

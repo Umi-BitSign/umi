@@ -87,13 +87,18 @@ verifier's state. Paths cannot traverse symlinks. The model container receives
 only its existing fixed model/video mounts, never this configuration, the
 hotkey, peer evidence, or reference suite.
 
-Defaults are a five-second poll, one CPU job at a time, four retained orders per
-poll, 1,024 retained orders, and 1 GiB logical capacity for each of the evaluator
-and execution journals. Files and individual exported objects are limited to
-64 MiB. These limits do not bound SQLite overhead, the archive, verifier cache
-or outbox filesystem; provision quotas and monitor disk usage separately.
-Capacity exhaustion holds work and preserves history. Poll/page/capacity limits
-can be changed without changing the journal's identity or data-path bindings.
+Defaults are a five-second poll, `maximum_parallel_jobs: 1`, four retained orders
+per poll, 1,024 retained orders, and 1 GiB logical capacity for each of the
+evaluator and execution journals. At most four CPU jobs may be configured in
+parallel. Raise that bound only after timing the pinned runtime on the actual
+host: concurrent jobs share CPU, memory and accelerator capacity, and a slower
+job does not receive a deadline extension. A full queue stays scheduled until a
+slot is free; it is not recorded as a failed execution attempt. Files and
+individual exported objects are limited to 64 MiB. These limits do not bound
+SQLite overhead, the archive, verifier cache or outbox filesystem; provision
+quotas and monitor disk usage separately. Capacity exhaustion holds work and
+preserves history. Poll/page/concurrency/capacity limits can be changed without
+changing the journal's identity or data-path bindings.
 
 For endpoint submissions, an evaluator executes the frozen baseline once per
 round and reuses its completed receipts for other submissions in that same round.
