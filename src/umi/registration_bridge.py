@@ -1043,7 +1043,10 @@ async def run_registration_bridge_iteration(
         validate_registration_bridge_chain(
             policy, before, expected_revision=expected_revision, now=chain.clock()
         )
-        journal = state.initialize(before, now=chain.clock())
+        # Retained-history verification is bounded but disk-heavy. Keep it off
+        # the event loop so the owned finality observer can continue ingesting
+        # heads while recovery audits old receipts.
+        journal = await asyncio.to_thread(state.initialize, before, now=chain.clock())
         if journal.phase == "receipt_returned":
             # A full retained-history audit can outlive the snapshot's freshness
             # limit. Reobserve after it; never relax the age or receipt checks.
