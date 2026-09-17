@@ -296,8 +296,8 @@ def test_certificate_breach_recovery_is_wallet_free_and_path_constrained() -> No
     manager = (DEPLOYMENT / "manage.sh").read_text(encoding="utf-8")
     bootstrap = compose.split("  bootstrap:\n", 1)[1].split("  validator:\n", 1)[0]
     assert "UMI_WALLET_ROOT" not in bootstrap
-    assert "reconcile 64_LOWERCASE_HEX_WINDOW_ID" in (
-        ROOT / "docs" / "MACOS_VALIDATOR_OPERATOR.md"
+    assert "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/MACOS_VALIDATOR_OPERATOR.md" in (
+        ROOT / "docs" / "reference" / "legacy.md"
     ).read_text(encoding="utf-8")
     assert "certificate-breach-recovery/$UMI_RECOVERY_WINDOW_ID" in entrypoint
     assert "incident-bundles/$UMI_RECOVERY_WINDOW_ID" in entrypoint
@@ -327,13 +327,12 @@ def test_docker_context_is_allowlisted_and_excludes_ignored_credentials() -> Non
     assert all(pattern in dockerignore for pattern in required)
 
 
-def test_apple_silicon_validator_docs_name_one_initial_cohort_target() -> None:
-    validator_guide = (ROOT / "docs" / "MACOS_VALIDATOR_OPERATOR.md").read_text(encoding="utf-8")
-    miner_guide = (ROOT / "docs" / "MACOS_MINER_OPERATOR.md").read_text(encoding="utf-8")
+def test_apple_silicon_docs_preserve_target_limits_and_archive_old_validator_steps() -> None:
+    validator_guide = (ROOT / "docs" / "reference" / "legacy.md").read_text(encoding="utf-8")
+    miner_guide = (ROOT / "docs" / "miners" / "macos.md").read_text(encoding="utf-8")
     assert "bounded `linux/amd64` Docker Desktop route" in miner_guide
     assert "colima start" not in miner_guide
     assert "Do not substitute a native ARM64 Linux VM" in miner_guide
-    assert "real Apple Silicon run" in validator_guide
-    assert "UMI_DEPLOYMENT_ID" in validator_guide
-    assert "does not implement release rotation" in validator_guide
-    assert "initialize a fresh deployment as an upgrade" in validator_guide
+    assert "../PERMANENT_VALIDATOR_SUPERVISOR.md" in validator_guide
+    assert "macos-validator-operator" in validator_guide
+    assert "Do not\nfollow their installation or enrollment steps" in validator_guide

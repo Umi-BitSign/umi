@@ -27,8 +27,8 @@ def test_whitepaper_status_matches_typeset_cover() -> None:
     [
         "whitepaper/README.md",
         "whitepaper/specification.tex",
-        "docs/OPEN_COMPETITION_UID0_LAUNCH.md",
-        "docs/OPEN_COMPETITION_PRIVATE_HOLDOUT.md",
+        "docs/competition/launch.md",
+        "docs/operators/private-holdout.md",
     ],
 )
 def test_approved_launch_uses_burn_policy_with_single_reference_suite(path):

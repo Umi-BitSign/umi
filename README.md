@@ -2,533 +2,60 @@
 
 UMI develops ASL-to-English translation through endpoint competition and
 reproducible public model contributions. Endpoint miners may keep their models
-private. Contributors can submit licensed, runnable model bundles for evaluation
-and promotion into successive public UMI baselines.
+private; contributors can submit runnable, licensed artifacts for promotion
+into successive public baselines.
 
-The longer-term protocol can expand to other directions and forms of human-machine
-interaction only when each task has an independently useful output and a
-reproducible, adversarially tested mechanism. Each later task requires a separate
-protocol extension.
+Start with the [documentation](docs/README.md).
 
-- [UMI whitepaper (PDF)](whitepaper/UMI-Whitepaper.pdf)
-- [LaTeX publication source](whitepaper/main.tex)
-- [Plain-text protocol source](whitepaper/README.md)
-- [Open competition implementation and rehearsal](docs/OPEN_COMPETITION.md)
-- [Historical version 0.1 specification](whitepaper/LEGACY_V0_1.md)
-- [bitsign product MVP](roadmap/bitsign-mvp/README.md)
-- [public observer API contract](docs/DASHBOARD_API.md)
-- [what miners should run now](docs/CURRENT_MINER_OPERATION.md)
-- [temporary live-miner policy and activation](docs/REGISTRATION_BRIDGE.md)
-- [miner model integration](docs/MINER_MODEL_INTEGRATION.md)
-- [Apple Silicon miner operator](docs/MACOS_MINER_OPERATOR.md)
-- [Linux x86_64 validator operator](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
-- [Apple Silicon validator operator](docs/MACOS_VALIDATOR_OPERATOR.md)
-- [publisher batch operator](docs/PUBLISHER_BATCH_OPERATOR.md)
-- [publisher availability operator](docs/PUBLISHER_AVAILABILITY_OPERATOR.md)
-- [reference mirror and delivery service](docs/MIRROR_SERVICE_OPERATOR.md)
-- [public validator audit-bundle publication](docs/AUDIT_BUNDLE_PUBLICATION_OPERATOR.md)
-- [inactive live-shadow release operator](docs/SHADOW_CALIBRATION_OPERATOR.md)
-- [inactive calibration launch checklist](docs/INACTIVE_LAUNCH_CHECKLIST.md)
-- [seven-day bootstrap service-weight addendum](docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
-- [shared-validator bootstrap supersession](docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
-- [bootstrap service-weight operator, historical](docs/BOOTSTRAP_WEIGHT_OPERATOR.md)
-- [emergency direct-bootstrap cutover, historical](docs/EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md)
-- [legacy validator transition hold](docs/LEGACY_VALIDATOR_TRANSITION.md)
-- [first public post-reveal result deployment](deploy/first-public-result/README.md)
+- [Miners: what to run now](docs/CURRENT_MINER_OPERATION.md)
+- [Validators: installation, updates and troubleshooting](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
+- [Competition and the 70/30 allocation](docs/OPEN_COMPETITION.md)
+- [Model contributions](docs/contributors/models.md)
+- [Whitepaper](whitepaper/README.md) and [PDF](whitepaper/UMI-Whitepaper.pdf)
 
-## Current status
+## Network phase
 
-The version 0.2 whitepaper defines the successor design. The code includes signed
-submission intake, model preservation and promotion, evaluation and settlement,
-and a separately authorized weight worker. The successor supervisor supports
-per-round input updates and recovery from interrupted host upgrades.
-The public competition service is not deployed, and the installed validators
-still use their signed registration-bridge policy. No successor reward allocation
-has been activated. See the
-[implementation checklist](docs/OPEN_COMPETITION.md) for the tested scope and
-remaining production work.
+The temporary registration bridge uses live HTTPS health checks and shared
+coldkey/IP/funding groups. It does not score translations. The public-endpoint
+pilot is closed. The ongoing bridge policy has no scheduled calendar sunset;
+historical finite policies retain their original expiry.
 
-Historical guides that refer to whitepaper Section 14 describe
-[version 0.1](whitepaper/LEGACY_V0_1.md), not the successor activation procedure.
-The registration bridge has its own signed policy and retains the original sunset.
+Open-competition rewards have not been activated. Code, tests, a running miner
+and staged release artifacts are not a finalized competition row. The
+[launch checklist](docs/competition/launch.md) defines the remaining activation
+evidence. Check current chain state before making payout claims.
 
-SN78 is active on mainnet, but UMI translation weights are not. The public-endpoint
-pilot is closed. A signed [temporary registration bridge](docs/REGISTRATION_BRIDGE.md)
-replaces its frozen two-miner reward rule with live-miner availability checks and
-equal total weight per qualifying coldkey/IP/funding group. It retains the original bootstrap
-sunset. Both UID 0 and UID 54 have finalized bridge rows. The
-[September 12 activation readback](docs/REGISTRATION_BRIDGE_ACTIVATION_2026-09-12.md)
-shows positive consensus and incentive for 16 miners from the initial row.
-The [funding-cap readback](docs/REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
-records the later policy, which also groups common pre-registration senders
-bound in its signed snapshot. This is not proof of one person per group.
-New registration checks are automatic; publishing new funding links still
-requires a signed snapshot refresh.
+## Development
 
-Registered non-validator miners need a healthy chain-announced HTTPS `/healthz`
-endpoint. No pilot, manual opt-in, or running model is required for the bridge.
-It does not issue translation requests or measure model quality. See
-[what miners should run now](docs/CURRENT_MINER_OPERATION.md) for the exact checks.
-The old `/api/v1/bootstrap-service` endpoint describes the retired pilot and
-cannot attest to this replacement's activation or eligibility.
+Python 3.10 through 3.14 are supported. Install FFmpeg and FFprobe with your
+operating-system package manager, then:
 
-There are four distinct executable paths:
-
-```text
-component test
-validator hotkey
-  -> canonical btauth/1 request
-  -> POST /v1/translate
-  -> bounded video fetch + configured model
-  -> timelocked, miner-signed response
-  -> Quicknet reveal
-  -> exact CER/WER
-  -> content-addressed local replay bundle
-
-offline release and conformance rehearsal
-canonical window evidence
-  -> policy and runtime-pin verification
-  -> pool quorum and deterministic selection
-  -> assignment, request, and sealed-response roots
-  -> canary, spent-state, rolling-score, and weight projection
-  -> bounded seven-stage audit bundle
-  -> no chain write
-
-installed inactive live shadow
-signed, hash-pinned release + private operator bindings
-  -> owned smoldot finality + proof-verified chain reads
-  -> certified mirror retrieval and authenticated miner delivery
-  -> three finalized transcript anchors and live btauth/1 requests
-  -> response and ground-truth timelock reveal
-  -> persistent spent, publisher-fault, rolling-score, and monitoring state
-  -> exact projected row + signed calibration or incident bundle
-  -> no weight-call capability
-
-temporary registration-bridge weights
-signed bridge policy + hash-pinned release directive
-  -> finalized registration, owner, permit, and serving roster
-  -> bounded public HTTPS health checks and finalized roster recheck
-  -> merge live UIDs by coldkey, HTTPS IP or signed funding link (ports ignored)
-  -> equal total weight per connected group, split among its live UIDs
-  -> exact direct 256-entry row from the installed validator
-  -> finalized row and LastUpdate as the public receipt
-  -> automatic renewal before the activity cutoff, ending at hard sunset
-```
-
-All four paths target the `bittensor` v11 HTTP model. They do not use the removed
-Axon/Dendrite/Synapse classes.
-
-The repository also supplies the publisher batch builder, availability workflow,
-pool-anchor operator, and authenticated content-addressed mirror and delivery
-service required by the live path. The validator's seven stages use durable
-receipts and persistent protocol state. A quorum-certified mirror-child loss is a
-terminal `certificate_breach`, not an infinite retry: after the signed incident is
-published, an installed reconciliation command accepts only the originally
-committed objects, applies the public retirement and objective-fault transition
-without scoring the failed window, and releases only that incident's intake hold.
-
-These four historical paths remain available. They do not implement all of the
-version 0.2 model-contribution mechanism. The separately versioned
-`umi-reference-model` repository contains the public baseline and its release
-evidence. It is a replacement target for contributors, not activation evidence.
-
-On supported Linux release targets, every FFmpeg and FFprobe child enters a finite
-address-space, CPU, and core-dump envelope before the pinned executable runs. A
-wall-clock deadline kills the complete process group. Darwin reserves a very large
-shared virtual-address region, so local component tooling on macOS still needs an
-outer memory sandbox when it inspects untrusted media. Public validator releases
-target Linux.
-
-Apple Silicon is supported as a native miner target through an additive finality
-artifact covered by the base release signatures. A Mac can also operate a
-validator through the supplied fixed-resource Linux container, using the same
-signed `linux/amd64` release target as the initial Linux cohort. This does not
-enable or imply a host-native Darwin validator runtime. See the
-[macOS miner guide](docs/MACOS_MINER_OPERATOR.md) and
-[macOS validator guide](docs/MACOS_VALIDATOR_OPERATOR.md).
-
-The shipped version 0.1 shadow release fixes `translation_weights_active` to
-`false` and has no weight-call builder, signer or submitter. Version 0.2 requires
-the implementation and activation evidence listed in its own whitepaper.
-The temporary registration bridge is a separate,
-narrowly bounded path governed by its [signed policy](docs/REGISTRATION_BRIDGE.md).
-The original pilot addendum and shared-validator supersession are historical
-records, not the bridge's eligibility rule.
-
-`component_test_no_weight` and `shadow_rehearsal_no_weight` remain local engineering
-results; neither is activation evidence. A correctly deployed installed path may
-produce `calibration_no_weight` only after completing and replaying all seven live
-stages under the signed inactive policy. The component validator also lacks a
-finalized receipt-block proof, so it checks the Quicknet response-close boundary
-without claiming the request's earlier block deadline.
-
-## Install
-
-Python 3.10 through 3.14 is supported. FFmpeg and FFprobe are required for policy
-construction, shadow rehearsal, media inspection, and the full test suite. Install
-the `ffmpeg` package with your operating-system package manager first, for example
-`brew install ffmpeg` on macOS or `sudo apt-get install ffmpeg` on Ubuntu.
-
-```bash
+```sh
 python3 -m venv .venv
-source .venv/bin/activate
+. .venv/bin/activate
 python -m pip install uv==0.12.9
 uv sync --locked --extra dev
-```
-
-The runtime is pinned to `bittensor==11.1.0`; the SDK, wallet, and `btcli` now ship
-as one package. `uv.lock` is the reviewed dependency lock used by CI and release
-verification.
-
-## Owned Finney finality
-
-The live operator does not trust a provider RPC's `finalized` label. Its pinned
-Rust sidecar embeds smoldot and connects to Finney peers directly. Version 0.1
-accepts only the official subtensor
-`grandpaWarpSyncCheckpoint` at block 8,867,448, bound by exact chain-spec,
-checkpoint, source, lockfile, fixture, and release-binary hashes. The sidecar
-requires smoldot to select that exact checkpoint and to advance beyond it before
-emitting an attestation. Genesis and legacy `lightSyncState` fallback are rejected.
-
-This checkpoint is an explicit governed weak-subjectivity assumption. Subsequent
-warp and GRANDPA verification is performed locally, but the emitted evidence is a
-hash-pinned verifier attestation rather than portable GRANDPA proof bytes. Remote
-storage reads are accepted only after the independent proof verifier binds them to
-an attested state root. The unsigned transcript and local acceptance-receipt hash
-chain are replay evidence, not standalone finality authority: activation evidence
-must come directly from running the exact pinned sidecar over its peer-to-peer
-path. See
-[the finality observer notes](rust/grandpa-finality-observer/README.md) for the
-exact assumptions, patches, and artifact pins.
-
-## Build the inactive live-shadow release
-
-The release builder produces the canonical weight-disabled calibration policy and
-keeps wallet names, local paths, state directories, and private mirror headers out
-of the public release. Publisher-capacity signing and each final artifact write run the
-pinned smoldot observer and storage-proof collector directly; `--check` is strictly
-offline and cannot authorize a release. Follow the complete two-pass workflow in
-the [shadow calibration operator guide](docs/SHADOW_CALIBRATION_OPERATOR.md).
-
-## Run the public observer API
-
-The observer API gives `umi.vision` one read-only source for finalized SN78 state:
-
-```bash
-umi-observer \
-  --listen-host 127.0.0.1 \
-  --port 8092 \
-  --trusted-host api.umi.vision \
-  --bundle-feed-config /etc/umi/observer-bundle-feed.json \
-  --pilot-feed-config /etc/umi/observer-pilot-feed.json \
-  --bootstrap-service-feed-config /etc/umi/observer-bootstrap-service-feed.json
-```
-
-It collects one internally consistent finalized block in the background and
-atomically publishes the last complete snapshot. Public requests read the cache;
-they do not trigger chain calls, miner probes, or artifact fetches. The process
-loads no wallet and contains no signing or transaction path.
-Run it on an always-on host; the `umi.vision` Vercel route is a same-origin proxy,
-not the background collector.
-
-The API exposes network state and public participant economics. Existing
-incentive, dividend, and emission values are labeled `unverified` until the required
-UMI cutover audit classifies them. They are never presented as UMI translation
-performance. Released validator bundles appear only after bounded HTTPS retrieval
-and independent production replay. Their scores remain validator-local; they are
-not merged into a consensus leaderboard. Once a released reveal result is fully
-replayed, a bounded solution feed exposes every assignment with hypotheses,
-references, exact scores or failure reasons, and content-addressed evidence
-locators. It never exposes raw video or private consent data. Feeds without conforming evidence
-remain explicit empty states.
-Bootstrap status distinguishes an authorized active service row from observed
-economic effect. The latter stays false if another active validator has a different
-row or any frozen eligible miner lacks nonzero native consensus or incentive.
-See the [dashboard API contract](docs/DASHBOARD_API.md) for endpoint schemas,
-Vercel integration, exact number handling, and deployment controls. The
-[first-result deployment runbook](deploy/first-public-result/README.md) provides
-the hardened Caddy, Cloudflare Tunnel, and systemd configuration for publishing
-the first weight-disabled post-reveal result.
-
-While independent publishers and validators are still unavailable, the separate
-[`/api/v1/pilots` component path](docs/COMPONENT_PILOT.md) can publish a real
-model's signed hypotheses, revealed references, exact scores, and immutable replay
-bundle. It stays `component_test_no_weight`, never appears under `/windows`, and
-cannot be presented as protocol conformance or activation evidence. The
-[external-miner component pilot](docs/EXTERNAL_MINER_COMPONENT_PILOT.md) provides
-the one-command path for the pinned public S1 model and licensed `ASL BOOK` asset;
-it runs locally and explicitly does not prove the miner's public axon.
-The [public-endpoint miner pilot](docs/PUBLIC_ENDPOINT_MINER_PILOT.md) is closed.
-Its historical evidence remains replayable, but miners should not enroll or sign
-readiness challenges. Miners participating in the registration bridge should keep
-the HTTPS health endpoint described in the
-[current miner instructions](docs/CURRENT_MINER_OPERATION.md). The pilot was a component test only. It did not
-create a protocol window, submit weights, satisfy an
-activation gate, or become validator input.
-
-## Run the certified mirror data plane
-
-The repository includes a reference authenticated mirror and short-lived miner
-delivery service for each certified window. It serves only the immutable certified
-tree, gives each registered validator one private bearer and one durable issuance,
-and exposes only deterministic opaque delivery tokens before their expiry. It has
-no chain or weight-write capability. See the
-[mirror service operator guide](docs/MIRROR_SERVICE_OPERATOR.md) for private config,
-TLS/reverse-proxy isolation, offline checking, rotation, and the bounded selection
-proof limitation.
-
-## Translation backend
-
-The miner requires a trusted model backend and has no placeholder fallback. A
-compatible model can run as an in-process `module:callable`. A model with a separate
-Torch, Core ML, Python, or native dependency stack can run behind the local Unix
-socket adapter described in the [model integration guide](docs/MINER_MODEL_INTEGRATION.md).
-Both paths receive verified video bytes and the parsed request and must return an
-English string. An in-process callable must be asynchronous by default:
-
-```python
-async def translate(video: bytes, request) -> str:
-    return await your_model.translate_asl(video)
-```
-
-If fetching, decoding, or inference fails, the miner emits a signed, timelocked
-error response whose score is zero.
-
-Inference concurrency defaults to the policy validator count. An explicit
-`--max-inference-concurrency` must be a positive multiple of that count. The miner
-divides those slots equally among policy validators, so one validator cannot consume
-another validator's reserved capacity. A synchronous plugin requires the explicit
-`--allow-unsafe-sync-translator` flag and runs in a dedicated bounded thread pool.
-Python cannot terminate a hung worker thread, so such a backend must implement its
-own cancellation and the operator must restart a process whose backend does not
-return. The isolated sidecar helper accepts cooperative async callbacks and binds
-its own inference deadline into the capacity descriptor. When the model artifact
-is fixed, pass its lowercase SHA-256 digest through `--model-revision`; the value
-is audit metadata and has no score weight. A versioned in-process callable must
-declare the same digest through its `model_revision` property. It may also expose
-async `startup()` and `shutdown()` hooks, which the miner runs under a bounded
-lifecycle timeout before serving and during shutdown. Waiting for a model slot is
-bounded separately from inference itself.
-
-An in-process model may explicitly enable `--coalesce-window-video-inference`
-with `--max-backend-workers` when its output depends only on the signed window,
-verified video, task, policy, and model revision. Matching requests then share one
-bounded model job while their envelopes remain separately bound to each validator
-and request. The mode is rejected for the request-digest-bound Unix-socket
-transport and must not be used with a request-sensitive backend.
-
-The miner requires a canonical inactive scoring policy and two durable SQLite
-stores. The policy supplies the validator registry, authentication window, request
-limits, and response limits. `--nonce-db` retains accepted `btauth/1` nonces, while
-`--assignment-db` retains resource counters, verified clip bytes through response
-close, and the first encrypted response for each assignment. An exact retry returns
-the same signed ciphertext without fetching the clip or running inference again.
-Store the policy in a directory owned by the miner account and not writable by
-group or other users. The policy must be a regular, single-link file owned by that
-account and not group- or world-writable. Put each SQLite store in an owner-only
-mode-`0700` directory; the database, journal, shared-memory, and lock files must be
-regular, single-link, owner-only mode-`0600` files. Startup rejects symlinks,
-hardlinks, unsafe modes, owner mismatches, and replaced database files.
-Run exactly one UMI protocol process for each serving hotkey and database pair.
-The assignment database holds an OS advisory lock for that process's lifetime, and
-a second process fails startup. Use `--max-inference-concurrency` for concurrency
-inside the process and a separately supervised model sidecar for dependency or
-process isolation. The lock file persists across restarts; do not delete it. The OS
-releases the lock when the process exits, including after a crash. Same-host
-multi-process and multi-host sharing are unsupported in version 0.1.
-
-## Run an offline shadow rehearsal
-
-The shadow input is one exact RFC 8785 `umi-shadow-rehearsal/1` object. Its strict
-schema is `ShadowRehearsalEvidence` in `src/umi/shadow.py`. It contains the inactive
-policy, three publisher pools, the availability quorum, a verified Quicknet pulse,
-public and revealed batch material, a miner panel, validator-signed request
-transcripts, and miner-signed rehearsal responses.
-
-Run and independently verify it with:
-
-```bash
-umi-protocol run-shadow-rehearsal \
-  --input window.json \
-  --output shadow-runs/window-0
-
-umi-protocol verify-rehearsal-bundle \
-  --bundle shadow-runs/window-0
-```
-
-The command refuses noncanonical input, mismatched local dependency bytes,
-import-shadowed modules, active policies, and a nonempty output directory. The
-bundle embeds its canonical source evidence, and verification reruns the complete
-rehearsal into a fresh directory and requires an identical canonical manifest. It
-prints false values for translation-weight activation, protocol conformance, and
-activation evidence.
-
-A portable static fixture is intentionally not checked in because the local
-rehearsal policy binds the exact UMI source tree, Python runtime, installed package
-bytes, and FFmpeg binaries. The complete executable fixture constructor and
-adversarial cases are in `tests/test_shadow.py`. To exercise that path on a new
-checkout, run:
-
-```bash
-pytest -q tests/test_shadow.py
-```
-
-Other read-only protocol tools are discoverable with `umi-protocol --help`. They
-hash inactive policies, inspect media, verify public batches and publisher-capacity
-signatures, and verify rehearsal bundles. None signs or broadcasts a chain call.
-
-## Run a component test
-
-First run the local smoke flow. It uses development hotkeys, an
-in-process HTTP transport, fixture video bytes, and a deterministic translator. It
-makes no chain write and normally completes in under 20 seconds. Both the run and
-replay need outbound access to fetch published Quicknet round signatures:
-
-```bash
-umi-demo --output component-runs/demo
-umi-validator replay --bundle component-runs/demo/bundle
-```
-
-This checks signed requests, response and ground-truth timelocks, exact scoring,
-bundle creation, and independent replay. It does not test media decoding or a real
-translation model.
-
-For a model-backed component test, create the named wallets and hotkeys with
-`btcli`, then prepare a case from a JSON array of `umi-asl/0.1` requests and its
-matching canonical `umi-ground-truth/1` object:
-
-```bash
-btcli subnets register \
-  --netuid 78 \
-  --network finney \
-  --wallet umi \
-  --wallet-hotkey miner \
-  --mev-shield
-```
-
-Registration is needed only once per hotkey and spends the live registration cost.
-The pinned client requires MEV Shield for this coldkey-signed registration intent.
-Review the live cost before submitting it.
-
-```bash
-umi-validator prepare \
-  --requests requests.json \
-  --ground-truth ground-truth.json \
-  --output component-runs/case-001
-```
-
-The prepared directory contains the public requests and encrypted ground truth;
-it does not contain reference plaintext.
-
-Start the miner with the policy-bound validator registry and an exact video-origin
-allowlist:
-
-```bash
-umi-miner \
-  --wallet-name umi \
-  --hotkey miner \
-  --policy /absolute/config/shadow-policy.json \
-  --target-triple x86_64-unknown-linux-musl \
-  --finality-verifier-binary /absolute/release/artifacts/sha256/DIGEST/umi-grandpa-finality-observer \
-  --finality-chain-spec /absolute/release/artifacts/sha256/DIGEST/finney-chain-spec.json \
-  --finality-state /var/lib/umi/miner-finality.sqlite3 \
-  --translator your_package.model:translator \
-  --model-revision 64_LOWERCASE_HEX_CHARACTERS \
-  --video-origin https://delivery-a.example.org \
-  --video-origin https://delivery-b.example.org:8443 \
-  --video-origin https://delivery-c.example.org \
-  --nonce-db /var/lib/umi/miner-nonces.sqlite3 \
-  --assignment-db /var/lib/umi/miner-assignments.sqlite3 \
-  --listen-host 127.0.0.1 \
-  --port 8091
-```
-
-Take the target triple, finality binary, chain spec, and scoring policy from the
-verified inactive release. Use one `--video-origin` for every delivery origin in
-that release's mirror-discovery rule and no other origin. The scheme, host, and
-effective port are checked as one tuple; ports are not shared across hosts. Start
-the miner early enough for its owned finality observer to reach the policy activation block.
-Use `--translator-unix-socket` instead of `--translator` when the model runs in
-the isolated process described below.
-
-Expose that loopback service through a TLS edge or reverse proxy with a publicly
-trusted certificate for the exact advertised IP address, a 16 KiB header cap,
-bounded connection and request rates, and finite header/body read timeouts. UMI
-rejects cleartext transport to public miner endpoints. The proxy must forward the
-exact request target, authentication headers, and body bytes without normalization.
-Direct public Uvicorn listening leaves encryption, header-level slow connections,
-and volumetric filtering outside the application boundary.
-
-[Let's Encrypt IP-address certificates](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)
-are publicly available but expire after roughly six days. Automate renewal and
-proxy reload before serving. Certbot 5.4 or later can request one after port 80 is
-routed to the proxy's ACME webroot:
-
-```bash
-sudo certbot certonly \
-  --preferred-profile shortlived \
-  --webroot \
-  --webroot-path /var/www/acme \
-  --ip-address YOUR_PUBLIC_IP \
-  --deploy-hook 'systemctl reload your-umi-tls-proxy'
-```
-
-Each `--video-origin` is an HTTPS origin with no path, query, user information, or
-fragment. Omit the port only for 443. Production fetches resolve the allowlisted
-hostname once per attempt, reject any non-public result, pin the connection to one
-deterministic IP, and preserve the original Host authority and TLS SNI. Proxy
-environment variables are ignored. Operators should use a controlled DNS resolver
-and keep the allowlist narrow.
-
-After the service is reachable, replace `YOUR_PUBLIC_IP` and publish its endpoint:
-
-```bash
-btcli tx serve-axon \
-  --netuid 78 \
-  --ip YOUR_PUBLIC_IP \
-  --port 443 \
-  --network finney \
-  --wallet umi \
-  --wallet-hotkey miner \
-  --no-mev-shield
-```
-
-The serving call is hotkey-signed, so this profile submits it without MEV Shield.
-The miner process itself makes no chain call.
-
-Run the validator. Omitting `--miner-url` performs read-only SN78 metagraph
-discovery; an explicit origin is useful for a local component test:
-
-```bash
-umi-validator run-once \
-  --case component-runs/case-001 \
-  --output component-runs/run-001 \
-  --wallet-name umi \
-  --hotkey validator \
-  --miner-hotkey 5F... \
-  --miner-url http://127.0.0.1:8091
-```
-
-The runner waits for the common Quicknet round, opens ground truth and miner
-responses together, retains every failed assignment as zero, and writes a local
-content-addressed evidence bundle. The CLI prints the score summary and scoring
-object hash. Replay checks the recorded Python, Unicode, regex, and scorer versions
-before recomputing without contacting the miner or model. It still contacts
-Quicknet for the public round signatures needed to open the timelocks:
-
-```bash
-umi-validator replay --bundle component-runs/run-001
-```
-
-## Verify
-
-```bash
 make check
-python -m pip wheel . --no-deps --wheel-dir dist
 ```
 
-## License
+The dependency lock uses Bittensor 11.1.0. Miners use its HTTP protocol, not the
+removed Axon/Dendrite/Synapse Python classes. Model execution belongs on an
+appropriately provisioned host, separate from private evaluator labels.
 
-UMI-authored code is licensed under the [Apache License 2.0](LICENSE). The
-[third-party notices](THIRD_PARTY_NOTICES.md) identify vendored components that
-retain other upstream terms and describe the per-binary release license closures.
+See the [model adapter](docs/miners/model.md),
+[CLI recipes](docs/reference/commands.md),
+[owned-finality verifier](rust/grandpa-finality-observer/README.md) and
+[observer API](docs/reference/dashboard-api.md) for component details.
+The public model lives in
+[umi-reference-model](https://github.com/Umi-BitSign/umi-reference-model).
+Product planning lives under [bitsign MVP](roadmap/bitsign-mvp/README.md).
+
+## Historical material and license
+
+[Retired runbooks and dated deployment reports](docs/reference/legacy.md) are
+available at their preserved Git revision. They are not current installation
+instructions. The [version 0.1 specification](whitepaper/LEGACY_V0_1.md) remains
+available for interpreting old signed evidence.
+
+UMI-authored code is [Apache-2.0](LICENSE). See
+[third-party notices](THIRD_PARTY_NOTICES.md) for inherited terms.

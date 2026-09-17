@@ -30,10 +30,10 @@ inference service. Future tasks require their own evaluation and reward policy.
 The frozen two-miner pilot bootstrap is retired. Its signed manifest and
 historical evidence remain unchanged; see the
 \href{https://github.com/Umi-BitSign/umi/blob/main/docs/BOOTSTRAP_WEIGHT_ADDENDUM.md}{bootstrap addendum} and
-\href{https://github.com/Umi-BitSign/umi/blob/main/docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md}{shared-validator supersession}.
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/reference/legacy.md\#shared-validator-bootstrap-supersession}{shared-validator supersession}.
 It was replaced by the separately signed
-\href{https://github.com/Umi-BitSign/umi/blob/main/docs/REGISTRATION_BRIDGE.md}{temporary registration bridge}.
-The \href{https://github.com/Umi-BitSign/umi/blob/main/docs/REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md}{September 13 deployment record}
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/operators/bridge.md}{temporary registration bridge}.
+The \href{https://github.com/Umi-BitSign/umi/blob/main/docs/reference/legacy.md\#registration-bridge-funding-cap-2026-09-13}{September 13 deployment record}
 records funding-grouped bridge rows finalized by validators UID 0 and UID 54.
 
 The bridge checks registered miners\textquotesingle{} chain-announced HTTPS health endpoints.
@@ -50,7 +50,7 @@ affect weights only after a signed snapshot refresh. Validators and miners
 do not each need a Taostats API key. Shared-sender grouping can combine
 independent exchange customers, and separate funding sources can evade it.
 It does not prove common human ownership. The
-\href{https://github.com/Umi-BitSign/umi/blob/main/docs/REGISTRATION_BRIDGE_FUNDING_CAP.md}{funding-cap rule} is temporary and
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/operators/bridge.md}{funding-cap rule} is temporary and
 is not a requirement of the 70/30 successor mechanism specified below.
 
 Bridge weights measure availability only. They establish neither translation
@@ -211,7 +211,7 @@ a hash alone public reproducibility.
 
 Data collection and labeling can be developed separately. They receive no
 implicit share of this policy\textquotesingle s miner rewards. The
-\href{https://github.com/Umi-BitSign/umi/blob/main/docs/OPEN_COMPETITION_PRIVATE_HOLDOUT.md}{private-holdout launch procedure}
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/operators/private-holdout.md\#open-competition-private-holdout}{private-holdout launch procedure}
 describes required inputs, annotation checks, split isolation and suite retirement.
 
 \subsection{Deterministic quality}\label{42-deterministic-quality}
@@ -284,7 +284,7 @@ one operator\textquotesingle s automated evaluation and publication; it does not
 independent cross-operator reproduction or resistance to that operator\textquotesingle s
 collusion. UID 54 is not a second evaluator or vote. Adding evaluators or raising
 the quorum requires a later explicit signed policy and deployment rehearsal.
-See the \href{https://github.com/Umi-BitSign/umi/blob/main/docs/OPEN_COMPETITION_UID0_LAUNCH.md}{UID 0 launch profile}.
+See the \href{https://github.com/Umi-BitSign/umi/blob/main/docs/competition/launch.md}{UID 0 launch profile}.
 
 Evaluators sign the same canonical evaluation result. A quorum certificate
 contains valid signatures from the policy\textquotesingle s required number of distinct
@@ -446,7 +446,7 @@ remain separate from permission to run inference.
 Before contribution intake opens, publish the accepted-license list, exact
 contribution terms, review route and required provenance evidence. The signed
 policy binds the list and terms; matching a license identifier is not rights
-clearance. The \href{https://github.com/Umi-BitSign/umi/blob/main/docs/MODEL_CONTRIBUTION_REVIEW.md}{contributor review checklist}
+clearance. The \href{https://github.com/Umi-BitSign/umi/blob/main/docs/contributors/models.md\#model-contribution-review}{contributor review checklist}
 describes source lineage, permissions, reconstruction and decision records.
 Research-only, non-commercial or unspecified source permissions need explicit
 review; they are not automatically cleared by a new license on the bundle.
@@ -514,6 +514,16 @@ exact rational arithmetic, and produce canonical u16 raw weights.
 Publish both the rational allocation and resulting raw row. Validators
 must recheck policy validity, registration and chain requirements before
 signing. Finalized consensus and incentive determine actual payouts.
+
+A completed round may support repeated weight updates during its published
+reward interval. A version 3 publication plan sets an explicit maximum age for
+reusing that settlement, measured from its original observation. Each renewal
+has fresh single-use transaction authority and remains bounded by the original
+round, policy and plan expiry. The publisher and weight worker check recipient
+UID/hotkey mappings and the burn destination against fresh finalized state.
+Unrelated registration changes do not invalidate an unchanged recipient set.
+Reusing scores never admits a miner into a closed roster or extends its signed
+evaluation deadlines; new submissions enter a subsequent announced round.
 
 A projected row is not a submitted or economically effective row.
 Observer status reports those states separately. The mechanism does not

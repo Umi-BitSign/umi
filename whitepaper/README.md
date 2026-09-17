@@ -46,10 +46,10 @@ inference service. Future tasks require their own evaluation and reward policy.
 The frozen two-miner pilot bootstrap is retired. Its signed manifest and
 historical evidence remain unchanged; see the
 [bootstrap addendum](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and
-[shared-validator supersession](../docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md).
+[shared-validator supersession](../docs/reference/legacy.md#shared-validator-bootstrap-supersession).
 It was replaced by the separately signed
-[temporary registration bridge](../docs/REGISTRATION_BRIDGE.md).
-The [September 13 deployment record](../docs/REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
+[temporary registration bridge](../docs/operators/bridge.md).
+The [September 13 deployment record](../docs/reference/legacy.md#registration-bridge-funding-cap-2026-09-13)
 records funding-grouped bridge rows finalized by validators UID 0 and UID 54.
 
 The bridge checks registered miners' chain-announced HTTPS health endpoints.
@@ -66,7 +66,7 @@ affect weights only after a signed snapshot refresh. Validators and miners
 do not each need a Taostats API key. Shared-sender grouping can combine
 independent exchange customers, and separate funding sources can evade it.
 It does not prove common human ownership. The
-[funding-cap rule](../docs/REGISTRATION_BRIDGE_FUNDING_CAP.md) is temporary and
+[funding-cap rule](../docs/operators/bridge.md) is temporary and
 is not a requirement of the 70/30 successor mechanism specified below.
 
 Bridge weights measure availability only. They establish neither translation
@@ -209,7 +209,7 @@ a hash alone public reproducibility.
 
 Data collection and labeling can be developed separately. They receive no
 implicit share of this policy's miner rewards. The
-[private-holdout launch procedure](../docs/OPEN_COMPETITION_PRIVATE_HOLDOUT.md)
+[private-holdout launch procedure](../docs/operators/private-holdout.md#open-competition-private-holdout)
 describes required inputs, annotation checks, split isolation and suite retirement.
 
 ### 4.2 Deterministic quality
@@ -274,7 +274,7 @@ one operator's automated evaluation and publication; it does not provide
 independent cross-operator reproduction or resistance to that operator's
 collusion. UID 54 is not a second evaluator or vote. Adding evaluators or raising
 the quorum requires a later explicit signed policy and deployment rehearsal.
-See the [UID 0 launch profile](../docs/OPEN_COMPETITION_UID0_LAUNCH.md).
+See the [UID 0 launch profile](../docs/competition/launch.md).
 
 Evaluators sign the same canonical evaluation result. A quorum certificate
 contains valid signatures from the policy's required number of distinct
@@ -426,7 +426,7 @@ remain separate from permission to run inference.
 Before contribution intake opens, publish the accepted-license list, exact
 contribution terms, review route and required provenance evidence. The signed
 policy binds the list and terms; matching a license identifier is not rights
-clearance. The [contributor review checklist](../docs/MODEL_CONTRIBUTION_REVIEW.md)
+clearance. The [contributor review checklist](../docs/contributors/models.md#model-contribution-review)
 describes source lineage, permissions, reconstruction and decision records.
 Research-only, non-commercial or unspecified source permissions need explicit
 review; they are not automatically cleared by a new license on the bundle.

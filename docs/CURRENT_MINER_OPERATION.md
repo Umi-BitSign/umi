@@ -1,25 +1,21 @@
+[Documentation](README.md) / Miners
+
 # What SN78 miners should run now
 
 ## Temporary live-miner rewards
 
-The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen two-miner
+The [registration bridge](operators/bridge.md) replaces the frozen two-miner
 pilot rule. It checks registered SN78 miners' HTTPS availability and gives each
 qualifying coldkey/IP/funding group an equal total weight, divided among its passing UIDs.
 It does not score translations or require a running model.
 
-The temporary registration-snapshot freeze was
-[lifted on September 16](REGISTRATION_BRIDGE_REOPENED_2026-09-16.md).
-New and re-registered hotkeys can qualify after finalization and health checks.
-The observed registration fee floor was 0.75 TAO at block 9,081,644;
-check the current quote before paying. Registration does not guarantee rewards.
+The temporary registration-snapshot freeze has been lifted. New and re-registered
+hotkeys can qualify after finalization and health checks. Check the current
+registration quote before paying; registration does not guarantee rewards.
 
-Both UMI validators, UID 0 and UID 54, have finalized bridge rows. See the
-[funding-cap deployment record](REGISTRATION_BRIDGE_FUNDING_CAP_2026-09-13.md)
-for the applied policy and exact rows. The earlier
-[IP-cap readback](REGISTRATION_BRIDGE_IP_CAP_2026-09-12.md) is historical.
-Inclusion in a row is not proof that a miner has already received a payout.
-Use the [current-row diagnostic](REGISTRATION_BRIDGE_HEALTH.md) for freshness;
-the deployment records above are dated snapshots.
+Use the [current-row diagnostic](operators/bridge.md#check-current-rows) for
+freshness. Historical deployment reports do not establish current incentives,
+and inclusion in a row is not proof of a received payout.
 
 ## Miner requirements
 
@@ -47,7 +43,7 @@ Passing UIDs sharing a coldkey, HTTPS endpoint IP, or a common recorded
 pre-registration sender in the signed funding snapshot form one group.
 Connections are transitive and ports are ignored. Each group gets the same
 total raw weight, split among its passing UIDs. See the
-[funding-cap rule](REGISTRATION_BRIDGE_FUNDING_CAP.md).
+[funding-cap rule](operators/bridge.md).
 
 This does not prove human or machine identity. Shared hosting or NAT can group
 independent miners together. Shared exchange withdrawal wallets can also group
@@ -65,7 +61,7 @@ The ongoing bridge policy renews weights until an explicit replacement is
 activated. This requires the signed version3 lifetime policy; historical
 version1/2 policies retain their original cutoffs. A code update alone does not
 extend an old signed policy.
-See the [signed-policy specification and rollout evidence](REGISTRATION_BRIDGE.md).
+See the [signed-policy specification and rollout evidence](operators/bridge.md).
 
 ## Later translation competition
 
@@ -76,16 +72,16 @@ production rewards or replace the bridge policy.
 
 UMI will publish the miner instructions and signed policy before asking miners
 to serve translation requests or enter the model-contribution track. Translation
-requests need the [protocol miner connected to a working model](MINER_MODEL_INTEGRATION.md).
+requests need the [protocol miner connected to a working model](miners/model.md#miner-model-integration).
 A health-only keepalive cannot answer them.
 
 The open-competition endpoint path supports
-[hotkey-signed HTTPS hostnames as well as literal IPs](MINER_ENDPOINT_HOSTNAMES.md).
+[hotkey-signed HTTPS hostnames as well as literal IPs](miners/model.md#miner-endpoint-hostnames).
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
 Before spending compute on a model contribution, read the
-[provenance and rights checklist](MODEL_CONTRIBUTION_REVIEW.md) and the approved
+[provenance and rights checklist](contributors/models.md#model-contribution-review) and the approved
 [version 1 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS.md).
 The launch policy must bind their exact version and hash before intake opens.
 Published terms do not approve an individual model's rights or award it the
