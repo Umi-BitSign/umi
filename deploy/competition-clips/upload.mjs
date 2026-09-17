@@ -92,11 +92,14 @@ async function main() {
       assert.equal(body.length, video.bytes);
       assert.equal(createHash("sha256").update(body).digest("hex"), video.sha256);
       const key = new URL(receipt.videos[i].url).pathname.slice(1);
-      await platform.env.CLIPS.put(key, body, {
-        onlyIf: new Headers({ "If-None-Match": "*" }),
-        sha256: video.sha256,
-        httpMetadata: { contentType: "video/mp4", cacheControl: "no-store, private" },
-      });
+      const existing = await platform.env.CLIPS.head(key);
+      if (!existing) {
+        await platform.env.CLIPS.put(key, body, {
+          onlyIf: new Headers({ "If-None-Match": "*" }),
+          sha256: video.sha256,
+          httpMetadata: { contentType: "video/mp4", cacheControl: "no-store, private" },
+        });
+      }
       const stored = await platform.env.CLIPS.get(key);
       assert(stored && stored.size === video.bytes && stored.checksums.sha256);
       const hash = createHash("sha256");
