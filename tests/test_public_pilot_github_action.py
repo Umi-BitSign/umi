@@ -687,10 +687,9 @@ def test_retired_campaign_has_no_enrollment_form() -> None:
         scripts = tomllib.load(handle)["project"]["scripts"]
 
     assert "This campaign closed on 2026-09-11" in operator_guide
-    assert "Enrollment is closed" in operator_guide
-    assert "The enrollment issue form has been removed" in operator_guide
-    assert "outstanding" in operator_guide
-    assert "challenges authorize no work" in operator_guide
-    assert operator_guide.count('umi-public-pilot-miner" authorize') == 2
+    assert "pilot is closed" in operator_guide
+    assert "enrollment issue form has been removed" in operator_guide
+    assert "Outstanding readiness challenges authorize\nno work" in operator_guide
+    assert 'umi-public-pilot-miner" authorize' not in operator_guide
     assert scripts["umi-public-pilot-miner"] == "umi.public_pilot_miner:main"
     assert scripts["umi-public-pilot-controller"] == "umi.public_pilot_controller:main"

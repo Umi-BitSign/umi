@@ -26,12 +26,10 @@ def test_public_pilot_caddy_proxy_is_bounded_and_exact() -> None:
     assert "rewrite" not in config
 
 
-def test_public_pilot_runbook_links_proxy_and_bounds_remote_probe() -> None:
+def test_public_pilot_runbook_does_not_invite_new_probes() -> None:
     runbook = (ROOT / "docs" / "PUBLIC_ENDPOINT_MINER_PILOT.md").read_text()
 
-    assert "deploy/public-endpoint-pilot/Caddyfile.example" in runbook
-    assert "--connect-timeout 10" in runbook
-    assert "--max-time 30" in runbook
-    assert "--max-filesize 65536" in runbook
-    assert "Caddy 2.10.0 or later is required" in runbook
-    assert "valid for six days" in runbook
+    assert "Public-endpoint pilot is closed" in runbook
+    assert "CURRENT_MINER_OPERATION.md" in runbook
+    assert "OPEN_COMPETITION.md" in runbook
+    assert "```" not in runbook

@@ -54,13 +54,16 @@ from umi.public_pilot_journal import (
 from .factories import dev_wallet
 
 
-def test_public_pilot_runbook_binds_r2_handoffs_to_the_archive_digest() -> None:
+def test_public_pilot_runbook_preserves_the_historical_handoff_procedure() -> None:
     runbook = Path(__file__).resolve().parents[1] / "docs" / "PUBLIC_ENDPOINT_MINER_PILOT.md"
     text = runbook.read_text(encoding="utf-8")
 
-    assert "public-pilot-cases/ARCHIVE_SHA256/sealed-case.tar.gz" in text
-    assert "MUST be new and MUST NOT be overwritten" in text
-    assert "without repository or R2 credentials" in text
+    assert "Do not open pilot enrollment issues" in text
+    assert "CURRENT_MINER_OPERATION.md" in text
+    assert (
+        "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/PUBLIC_ENDPOINT_MINER_PILOT.md"
+        in text
+    )
 
 
 def test_coordinator_possession_preflight_accepts_the_expected_private_hotkey() -> None:

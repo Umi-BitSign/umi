@@ -1,5 +1,8 @@
 # Public-endpoint pilot is closed
 
+This campaign closed on 2026-09-11. Outstanding readiness challenges authorize
+no work; the enrollment issue form has been removed.
+
 Do not open pilot enrollment issues, sign readiness challenges or spend compute
 on expired pilot cases. Follow the [current miner instructions](CURRENT_MINER_OPERATION.md)
 and the [competition overview](OPEN_COMPETITION.md).
