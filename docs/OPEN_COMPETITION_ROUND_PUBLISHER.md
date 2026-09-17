@@ -71,7 +71,12 @@ python -m umi.competition_successor_feed \
 ```
 
 It binds loopback only. The operator must route the installed directive origin's
-`/successor` path to this service through HTTPS. Supply only its delivery journal,
+`/successor` path to this service through HTTPS. For configurations whose installed
+origin is R2, use the disabled-by-default
+[successor feed relay](../deploy/successor-feed-relay/README.md) to copy this
+service's public protocol objects to that existing address. Do not change an
+installed trust configuration merely to point it at a new origin.
+Supply only its delivery journal,
 configuration and the exact sealed package directories. Do not mount signing
 wallets, authority state or the intake database into this process. Release
 archives continue to use their separately signed immutable URLs.
