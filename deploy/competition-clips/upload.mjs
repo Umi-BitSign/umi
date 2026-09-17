@@ -4,8 +4,8 @@ import { constants } from "node:fs";
 import { open, lstat } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
-import { getPlatformProxy } from "wrangler";
+
+const REQUEST_TIMEOUT_MS = 120_000;
 
 async function privateRead(path, maximum) {
   assert(isAbsolute(path));
@@ -22,9 +22,11 @@ async function privateRead(path, maximum) {
 }
 
 async function main() {
-  const [input, output, originText] = process.argv.slice(2);
-  assert.equal(process.argv.length, 5);
-  assert(isAbsolute(input) && isAbsolute(output));
+  const [input, output, originText, tokenPath] = process.argv.slice(2);
+  assert.equal(process.argv.length, 6);
+  assert(isAbsolute(input) && isAbsolute(output) && isAbsolute(tokenPath));
+  const uploadToken = (await privateRead(tokenPath, 256)).toString("utf8").trim();
+  assert(/^[0-9a-f]{64}$/.test(uploadToken));
   const origin = new URL(originText);
   assert(origin.protocol === "https:" && origin.href === `${origin.origin}/`);
   assert(!origin.username && !origin.password && !origin.port);
@@ -82,33 +84,43 @@ async function main() {
     assert.equal(item.url, `${origin.origin}${url.pathname}`);
     assert(new RegExp(`^/v1/clips/${start}/${end}/[0-9a-f]{64}/${video.sha256}[.]mp4$`).test(url.pathname));
   }
-  const platform = await getPlatformProxy({
-    configPath: fileURLToPath(new URL("./wrangler.upload.jsonc", import.meta.url)),
-    persist: false, remoteBindings: true, envFiles: [],
-  });
-  try {
-    for (const [i, video] of prepared.entries()) {
-      const body = await privateRead(video.path, 16 * 1024 * 1024);
-      assert.equal(body.length, video.bytes);
-      assert.equal(createHash("sha256").update(body).digest("hex"), video.sha256);
-      const key = new URL(receipt.videos[i].url).pathname.slice(1);
-      const existing = await platform.env.CLIPS.head(key);
-      if (!existing) {
-        await platform.env.CLIPS.put(key, body, {
-          onlyIf: new Headers({ "If-None-Match": "*" }),
-          sha256: video.sha256,
-          httpMetadata: { contentType: "video/mp4", cacheControl: "no-store, private" },
-        });
-      }
-      const stored = await platform.env.CLIPS.get(key);
-      assert(stored && stored.size === video.bytes && stored.checksums.sha256);
-      const hash = createHash("sha256");
-      let total = 0;
-      for await (const chunk of stored.body) { total += chunk.length; assert(total <= video.bytes); hash.update(chunk); }
-      assert(total === video.bytes && hash.digest("hex") === video.sha256);
+  for (const [i, video] of prepared.entries()) {
+    const body = await privateRead(video.path, 16 * 1024 * 1024);
+    assert.equal(body.length, video.bytes);
+    assert.equal(createHash("sha256").update(body).digest("hex"), video.sha256);
+    const url = receipt.videos[i].url;
+    const uploaded = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${uploadToken}`,
+        "Content-Type": "video/mp4",
+        "Content-Length": String(body.length),
+      },
+      body,
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    assert([200, 201].includes(uploaded.status));
+    await uploaded.body?.cancel();
+
+    const stored = await fetch(url, {
+      headers: { Accept: "video/mp4" },
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    assert.equal(stored.status, 200);
+    assert.equal(Number(stored.headers.get("Content-Length")), video.bytes);
+    assert(stored.body);
+    const hash = createHash("sha256");
+    let total = 0;
+    for await (const chunk of stored.body) {
+      total += chunk.length;
+      assert(total <= video.bytes);
+      hash.update(chunk);
     }
-    console.log(JSON.stringify({ status: "selected_clips_uploaded_and_verified", count: prepared.length }));
-  } finally { await platform.dispose(); }
+    assert(total === video.bytes && hash.digest("hex") === video.sha256);
+  }
+  console.log(JSON.stringify({ status: "selected_clips_uploaded_and_verified", count: prepared.length }));
 }
 
 main().catch(() => {
