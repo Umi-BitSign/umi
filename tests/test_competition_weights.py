@@ -1323,3 +1323,68 @@ async def test_weight_startup_does_not_hide_proof_failure(weight_case, monkeypat
     with pytest.raises(ValueError, match="proof invalid"):
         await item.provider.wait_weights_ready(item.hotkey, item.recipients)
     assert attempts == 1 and not item.encoded
+
+
+async def test_weight_provider_uses_pooled_transport_and_keeps_proof_checks(
+    weight_case, monkeypatch
+):
+    item = weight_case
+    connections = []
+
+    class Connection:
+        closed = False
+        request = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            self.closed = True
+
+        async def send(self, raw):
+            assert not self.closed
+            self.request = json.loads(raw)
+
+        async def recv(self):
+            request = self.request
+            if request["method"] == "state_queryStorageAt":
+                keys, block = request["params"]
+                result = [
+                    {
+                        "block": block,
+                        "changes": [
+                            [key, await item.rpc.request("state_getStorageAt", [key, block])]
+                            for key in keys
+                        ],
+                    }
+                ]
+            else:
+                result = await item.rpc.request(request["method"], request["params"])
+            return json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result})
+
+    def connect(*args, **kwargs):
+        socket = Connection()
+        connections.append(socket)
+        return socket
+
+    monkeypatch.setattr("umi.competition_chain.websocket_connect", connect)
+    monkeypatch.setattr(
+        "umi.competition_chain_state.SubprocessStorageProofVerifier", lambda **kwargs: item.verifier
+    )
+    # Keep fixture finality/codec/verifier ports, but wire the real owned
+    # collector and transport exactly as production construction does.
+    item.provider._owned = True
+    item.provider._configure_weight_collector()
+    item.provider._owned = False
+    for _ in range(3):
+        observation = await item.provider.collect_weights(item.hotkey, item.recipients)
+        validate_owned_weight_observation(observation)
+    assert len(connections) == 6
+    assert not any(socket.closed for socket in connections)
+    assert item.verifier.checked and not item.encoded
+    item.rpc.bad_proof = True
+    with pytest.raises(ValidatorChainError, match="storage_proof_verification_failed"):
+        await item.provider.collect_weights(item.hotkey, item.recipients)
+    await item.provider.aclose()
+    assert all(socket.closed for socket in connections)
+    assert not item.encoded

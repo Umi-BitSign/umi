@@ -220,6 +220,15 @@ Unrelated registration changes do not invalidate the unchanged recipient set.
 The weight worker independently repeats its fresh registration, burn, permit,
 runtime, rate-limit and authorization checks before a chain write.
 
+Weight proof collection reuses exclusive, method-specific WebSocket connections
+and fetches up to 512 requested storage values in batches of at most 256 keys.
+Every batch must name the exact owned finalized block and contain every requested
+key once. These are untrusted values until the existing complete trie multiproof
+and runtime decoder accept them. Wrong-block, missing, duplicate and oversized
+responses fail the collection. Connection reuse does not extend snapshot freshness,
+retry a failed proof, or authorize a transaction. Runtime-code reads use separate
+connections and retain their separate byte limits. Shutdown closes the sockets.
+
 Version 3 requires the managed current-recipient gate even for the first
 publication. The signing builder rejects ungated use. Versions 1 and 2 retain
 their original serialization and snapshot-limited semantics; they cannot opt in
