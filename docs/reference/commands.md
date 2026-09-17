@@ -2,8 +2,75 @@
 
 # Competition CLI reference
 
-These are operator and local-rehearsal recipes. They are not launch authorization
-or a public enrollment URL. Start with the [launch checklist](../competition/launch.md).
+These are operator and local-rehearsal recipes except for the explicitly marked
+live first-round intake section. Start with the
+[launch checklist](../competition/launch.md).
+
+<a id="live-first-round-intake"></a>
+
+## Live first-round intake
+
+The reviewed origin is `https://api.umi.vision`. Read the bounded status and
+finalized registration head, then extract the exact canonical policy:
+
+```sh
+origin=https://api.umi.vision
+curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/status" > competition-status.json
+jq -c '.policy' competition-status.json > competition-policy.json
+head_block="$(curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/readiness" | jq -r '.registration_source.block')"
+```
+
+Set the three operator values below. `model_revision` is the SHA-256 revision of
+the exact model served at the credential-free HTTPS origin. Then prepare the
+canonical endpoint submission:
+
+```sh
+hotkey=YOUR_REGISTERED_HOTKEY
+endpoint=https://YOUR_PUBLIC_ORIGIN
+model_revision=YOUR_64_HEX_MODEL_REVISION
+
+jq -n -c \
+  --arg hotkey "$hotkey" --arg endpoint "$endpoint" \
+  --arg model_revision "$model_revision" --argjson from "$head_block" \
+  '{schema:"umi-competition-submission/1",network:"finney",netuid:78,
+    policy_sha256:"81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0",
+    hotkey:$hotkey,track:"endpoint",sequence:1,valid_from_block:$from,
+    valid_through_block:9156243,model_revision:$model_revision,
+    endpoint_url:$endpoint,model_bundle:null,
+    accepted_terms_sha256:"61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62"}' \
+  > submission.json
+```
+
+The fixed validity end covers the first evaluation close and is within the
+policy's 72,000-block lifetime for submissions admitted during the announced
+intake. Do not reuse this template after the first roster closes.
+
+Sign with the registered hotkey only, save the public object, and submit it:
+
+```sh
+umi-competition --policy competition-policy.json sign-submission \
+  --submission submission.json \
+  --wallet-name YOUR_WALLET --hotkey-name YOUR_HOTKEY \
+  --wallet-path /ABSOLUTE/PATH/TO/WALLETS > signed-submission.json
+
+umi-competition --policy competition-policy.json submit \
+  --submission signed-submission.json --origin "$origin" \
+  | tee admission-receipt.json
+```
+
+Success is `accepted_no_weight`. Keep the exact signed submission and receipt,
+and keep the endpoint, model revision and registered hotkey available through
+evaluation. A receipt does not promise inclusion, score or payment. To replace a
+submission, increment its sequence and wait at least 360 blocks after the prior
+acceptance. Never upload a seed phrase, coldkey or wallet file.
+
+The model-contribution track uses the same live origin and cutoffs. It requires
+`track: "model"`, a complete `model_bundle`, `endpoint_url: null`, and a
+`model_revision` equal to the canonical bundle digest. Read the
+[model preparation and rights checklist](../contributors/models.md) before
+uploading or signing a model submission.
 
 ## Assignment and publication rehearsal
 

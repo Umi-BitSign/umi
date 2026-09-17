@@ -3,8 +3,34 @@
 # Competition launch configuration
 
 This is the single launch checklist. It replaces the rolling execution diary
-and separate launch-profile and allocation notes. It does not activate rewards.
-The registration bridge remains separate until a signed successor is installed.
+and separate launch-profile and allocation notes. Public intake is live, but an
+admission receipt does not activate rewards. The registration bridge remains
+separate until a signed successor is installed.
+
+## Live first-round schedule
+
+The authoritative cutoffs are blocks, not wall-clock estimates:
+
+| Event | Block |
+|---|---:|
+| Public intake observed live | `9,085,463` |
+| Earliest roster close after seven days | `9,135,843` |
+| Latest roster close | `9,135,903` |
+| Work-signing close | `9,135,963` |
+| Evaluation close | `9,156,243` |
+| Protected-reference reveal | `9,156,263` |
+| Evidence cutoff | `9,156,383` |
+| Round validity end | `9,156,983` |
+
+The policy digest is
+`81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`;
+the accepted contribution-terms digest is
+`61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62`.
+The live intake and bounded status API use `https://api.umi.vision`. A first-round
+submission must be admitted before roster close and remain valid through at
+least block `9,156,243`. A higher-sequence replacement must satisfy the policy's
+360-block replacement interval. The intake receipt remains `accepted_no_weight`
+until evaluation, settlement, signed release and finalized-row checks complete.
 
 ## Approved policy
 

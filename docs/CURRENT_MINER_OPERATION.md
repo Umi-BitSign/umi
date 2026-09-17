@@ -63,17 +63,21 @@ version1/2 policies retain their original cutoffs. A code update alone does not
 extend an old signed policy.
 See the [signed-policy specification and rollout evidence](operators/bridge.md).
 
-## Later translation competition
+## Open translation-competition intake
 
 The [version 0.2 successor design](../whitepaper/README.md) adds self-service
 endpoint participation and an optional reproducible-model contribution track.
-The [rehearsal tooling](OPEN_COMPETITION.md) does not open either track for
-production rewards or replace the bridge policy.
+Public intake for its first round is now live. It does not replace the bridge or
+activate competition weights by itself. The first roster closes between blocks
+`9,135,843` and `9,135,903`, and admitted submissions must remain valid through
+the evaluation close at block `9,156,243`.
 
-UMI will publish the miner instructions and signed policy before asking miners
-to serve translation requests or enter the model-contribution track. Translation
-requests need the [protocol miner connected to a working model](miners/model.md#miner-model-integration).
-A health-only keepalive cannot answer them.
+Translation requests need the
+[protocol miner connected to a working model](miners/model.md#miner-model-integration).
+A health-only keepalive cannot answer them. Use the exact live policy and
+[submission procedure](reference/commands.md#live-first-round-intake). Keep the
+saved `accepted_no_weight` receipt; it establishes admission only, not quality or
+earnings.
 
 The open-competition endpoint path supports
 [hotkey-signed HTTPS hostnames as well as literal IPs](miners/model.md#miner-endpoint-hostnames).
@@ -83,7 +87,7 @@ make a hostname-only keepalive eligible for bridge rewards.
 Before spending compute on a model contribution, read the
 [provenance and rights checklist](contributors/models.md#model-contribution-review) and the approved
 [version 1 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS.md).
-The launch policy must bind their exact version and hash before intake opens.
+The live policy binds their exact version and hash.
 Published terms do not approve an individual model's rights or award it the
 contribution share. Endpoint service does not require contributing private weights.
 
