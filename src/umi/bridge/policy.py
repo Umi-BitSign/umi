@@ -102,7 +102,7 @@ class RegistrationBridgePolicyBody(StrictProtocolModel):
     required_weights_set_rate_limit: Literal[100]
     required_min_allowed_weights: Literal[256]
     required_max_allowed_uids: Literal[256]
-    maximum_finalized_age_seconds: Annotated[int, Field(ge=120, le=600)]
+    maximum_finalized_age_seconds: Literal[120]
     refresh_margin_blocks: Literal[120]
     submission_era_period: Literal[8]
     submission_timeout_seconds: Literal[60]
