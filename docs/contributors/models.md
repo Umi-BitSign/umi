@@ -1,0 +1,140 @@
+[Documentation](../README.md) / Contribute a model
+
+# Contribute a model
+
+- [Model contributions: prepare before spending compute](#model-contribution-review)
+
+<a id="model-contribution-review"></a>
+
+## Model contributions: prepare before spending compute
+
+Open-competition intake and rewards are not active yet. This checklist explains
+what to prepare for rights and reconstruction review. It is not a license grant,
+contribution agreement or approval of a particular model. The approved
+[version 1 contribution terms](../MODEL_CONTRIBUTION_TERMS.md) publish the 70/30
+allocation and the accepted identifiers for review: `MIT`, `Apache-2.0`,
+`CC-BY-4.0` and `CC-BY-SA-4.0`. An identifier match still requires source-stack
+review and a qualifying promotion.
+
+<a id="model-contribution-review--what-must-be-published-before-intake-opens"></a>
+
+### What must be published before intake opens
+
+The signed launch policy must name the accepted model-license identifiers and
+bind the exact contribution terms by SHA-256. The terms, license list and Sam's
+review route are published. Supported evaluation resource limits and their
+signed policy bindings must also be published before intake opens. No date is
+committed until those inputs and the deployment checks are ready.
+
+The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its
+weights and portable bundle. The separate
+[community candidate](https://github.com/Umi-BitSign/umi-reference-model/blob/main/community/README.md)
+records the supplied SHuBERT model's MIT declaration and retains separate
+wrapper, DINO and ByT5 notices. It does not inherit S1's CC BY-SA label. Neither
+candidate defines the launch allowlist or clears every upstream model and
+dataset. Do not remove attribution, change inherited license labels, or assume
+a new bundle license overrides upstream restrictions.
+
+The code checks `license_id` against `CompetitionPolicy.accepted_model_licenses`
+and binds `accepted_terms_sha256` to the policy. Those checks establish agreement
+with a published policy, not the truth of a rights claim. Promotion also requires
+a signed rights review with retained supporting evidence.
+
+<a id="model-contribution-review--evidence-checklist"></a>
+
+### Evidence checklist
+
+For each source, identify the exact version and how it was used. A link to a
+mutable repository or a statement that data is public is not enough.
+
+- **Model lineage:** base model, parent baseline, adapters and other inherited
+  weights; repository and immutable revision or digest; original license text,
+  attribution and any access or commercial-use agreement.
+- **Training data:** dataset name, version, source and acquisition date; relevant
+  license or access terms; permission or consent records where applicable;
+  restrictions on training, commercial use, redistribution and use of personal
+  information. Include synthetic-data sources and relevant provider terms.
+- **Changes:** which sources were used for training, validation or testing;
+  material filtering, labeling, preprocessing and fine-tuning steps. Distinguish
+  unavailable evidence from a claim that no restriction exists.
+- **Permission evidence:** the actual terms or written authorization relied on,
+  who granted it, what it covers, and any expiry or conditions. Identify unresolved
+  third-party, privacy, consent or attribution questions.
+- **Reconstruction:** weights or a complete reproducible base-plus-adapter
+  package; architecture/config, tokenizer/processor, inference code, dependency
+  versions, entrypoint, file hashes and resource requirements.
+- **Proposed distribution:** the bundle license, required notices, what UMI may
+  preserve and publish, and evidence supporting commercial inference,
+  modification and redistribution. Describe incompatibilities rather than
+  selecting a convenient license identifier.
+
+Do not post private datasets, identifiable patient or signer records, credentials
+or confidential agreements in public issues. Use public metadata and document
+digests for coordination; agree a restricted evidence channel with the reviewer
+when needed. Review should request relevant evidence, not unnecessary personal
+information or the contributor's entire training corpus.
+
+<a id="model-contribution-review--how-review-should-decide"></a>
+
+### How review should decide
+
+Review the proposed bundle's rights and the underlying model/data restrictions
+separately. Then check whether the intended preservation, publication and product
+uses are supported together. Successful inference, a high score, a valid archive
+hash or an evaluator signature does not answer these questions.
+
+Research-only, non-commercial and unspecified permissions are not automatically
+accepted. For example, CC BY-NC limits uses covered by that license to
+non-commercial purposes; it also warns that other rights can matter.
+See the [CC BY-NC 4.0 terms](https://creativecommons.org/licenses/by-nc/4.0/).
+
+These source categories need case-specific review, not an assumption that all
+resulting weights are either prohibited or unrestricted. Relevant written
+permission from the rights holder, a separate commercial agreement, or a
+documented legal assessment may resolve a concern. It must cover the actual
+source and proposed use. Unresolved material restrictions hold promotion; a
+reviewer must not mark them passed merely because the model can be downloaded.
+Qualified legal review is needed where the applicable rights are uncertain.
+
+The review record should identify the model and evidence digests, governing
+policy and terms, reviewer, decision, reasons and unresolved conditions. The
+underlying evidence must remain available to authorized independent reviewers.
+A hash with no accessible supporting record is insufficient. Publish a decision
+summary without exposing confidential or personal material.
+
+<a id="model-contribution-review--preliminary-review"></a>
+
+### Preliminary review
+
+Contributors should be able to ask about a proposed source stack before training.
+Include the source inventory above, intended use and outstanding questions.
+Sam (`sam0x17`) is the project approval contact. Contact him in the UMI community
+channel to request a preliminary or final contribution review. Sam will refer
+review requests to an expert and arrange a restricted channel for confidential
+evidence when needed. Do not include that evidence in the initial public message.
+Being the contact does not mean an expert has reviewed or approved any model.
+An unanswered request is not approval, and no turnaround time is promised by
+this document.
+
+A preliminary response should distinguish accepted points, missing evidence and
+restrictions needing resolution. Bind it to the disclosed source versions, uses,
+policy and terms. If those facts are unchanged, carry the reviewed evidence into
+the final review rather than asking for the same material again. Explain any
+reopened question. New facts, omissions or changed restrictions can require
+reassessment, and the final artifact still needs reconstruction and rights
+review. Preliminary feedback cannot guarantee promotion, rewards or legal immunity.
+
+<a id="model-contribution-review--endpoint-service-is-a-different-track"></a>
+
+### Endpoint service is a different track
+
+An endpoint miner can keep its model private. Endpoint participation does not by
+itself grant UMI a copy, redistribution rights or the model-contribution share.
+It still requires acceptance of the applicable published terms and lawful use
+of the model and data for the service offered. Keeping weights private does not
+remove privacy, consent, access-agreement or commercial-use restrictions.
+
+Contributors seeking the 30% model track additionally need a preserved,
+reconstructible, rights-reviewed artifact that qualifies for promotion. Endpoint
+scores compete for the 70% service track. Both tracks launch together only after
+the [activation gates](../competition/launch.md) pass.

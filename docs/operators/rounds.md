@@ -1,0 +1,458 @@
+[Documentation](../README.md) / Schedule and authorize rounds
+
+# Schedule and authorize rounds
+
+- [Round coordinator and cutoff signing](#open-competition-round-coordinator)
+- [Round preparation](#open-competition-round-preparation)
+- [Automatic work proposals and independent signing](#open-competition-work-signing)
+
+<a id="open-competition-round-coordinator"></a>
+
+## Round coordinator and cutoff signing
+
+The private coordinator prepares rounds from the current admitted roster and
+collects cutoff signatures from independently operated evaluators. Each evaluator
+rechecks the proposed registration snapshot through its own finalized-state
+provider before signing. The coordinator has no wallet.
+
+With the optional [work-signing configuration](rounds.md#open-competition-work-signing),
+this service also generates endpoint authorizations and evaluation orders and
+collects independent signatures before delivery. Optional
+[settlement preparation](settlement.md#open-competition-settlement-preparation) produces
+unsigned proposals from complete retained evidence.
+[Settlement delivery](settlement.md#open-competition-settlement-delivery) connects those
+proposals to independent signers and publishes verified replay packages.
+Optional [reviewed promotion delivery](promotion.md#open-competition-promotion-delivery)
+applies explicitly approved model reviews to retained independent evidence and
+delivers those decisions to evaluators through the same authenticated connection.
+The service does not activate the 70/30 policy, change bridge weights or extend
+the bridge sunset.
+
+<a id="open-competition-round-coordinator--operator-inputs"></a>
+
+### Operator inputs
+
+Prepare the existing intake store with the reviewed competition policy,
+preserved incumbent and accepted submissions. Use a private configuration with
+schema `umi-round-coordinator-config/1`:
+
+- `policy_sha256` and `chain`: the same reviewed policy digest and owned-finality
+  configuration. Proof collection must finish within 15 seconds.
+- `state_directory`: durable coordinator journal, nonce database and process lock.
+- `intake_directory`: the existing competition store.
+- `plan_directory`: private, canonical `RoundPlan` JSON files, named
+  `<suite-digest>.json`.
+- `certificate_directory`: private output files named `<round-digest>.cutoff.json`.
+- `replay_limits`: explicit `maximum_roster_bytes`, `maximum_evidence_bytes` and
+  `maximum_certificate_bytes`. Roster and certificate limits cannot exceed 4 MiB.
+- `no_weight: true`.
+- Optional `settlement_directory`: private unsigned settlement proposals after
+  evidence cutoff. This directory must be separate from all other state and
+  delivery paths. See the [settlement guide](settlement.md#open-competition-settlement-preparation).
+- Optional `settlement_delivery`: signature-collection state, certificate/package
+  output, explicit package limits and reviewed release identity. Requires
+  `settlement_directory`; see the [delivery guide](settlement.md#open-competition-settlement-delivery).
+- Optional `work`: separate work state, reviewed per-suite assets, output
+  directories, transport-bound finality and an explicit issue margin. See the
+  [work-signing guide](rounds.md#open-competition-work-signing) and pass its transport
+  policy through `--legacy-policy` when enabled.
+
+All directories, including the finality provider's state, must be separate,
+absolute and owned by the service user. Directories use mode `0700`; input files
+use `0600`. Publish complete files by atomic rename. Symlinks, hardlinks and
+group/world-readable inputs are rejected. Do not mount a wallet into this service.
+
+Each plan has schema `umi-round-plan/1`, the committed private `suite` including
+its references, and explicit block windows:
+
+```text
+not_before_block <= admission_close_by_block
+                 < signing_close_block < evaluation_close_block
+                 < reveal_block <= evidence_cutoff_block <= valid_through_block
+```
+
+Supply reviewed windows long enough for proof collection, independent signatures,
+publication and execution. The policy's snapshot-age limit also bounds cutoff
+signing. No default block schedule is a production authorization. A delayed plan
+expires; the service never rewrites its deadlines or turns delay into miner fault.
+Retained preparation is recovered with its original roster and windows after a
+crash. Replacing a used plan creates a durable conflict hold.
+
+<a id="open-competition-round-coordinator--seven-day-contribution-intake"></a>
+
+#### Seven-day contribution intake
+
+The first contribution round targets seven days of intake. Its intake opening
+and its roster-closing window are different times. `not_before_block` is the
+earliest block at which the coordinator may **close the roster**, not the time
+at which miners may start submitting. Once that block arrives, the coordinator
+may prepare the round on its next successful poll; it does not wait until
+`admission_close_by_block`. Set the earliest close at or after the announced
+end of intake, with a bounded polling margin before the latest close.
+
+For an intake opening at block `I` and evaluation ending at block `E`, an early
+submission must remain valid through `E`. Check both:
+
+```text
+policy.maximum_submission_lifetime_blocks >= E - I
+submission.valid_through_block >= E
+```
+
+The policy's own validity must cover the complete round, including reveal,
+evidence cutoff and settlement. A larger lifetime cap does not extend existing
+signed submissions. A miner with a shorter submission needs to sign and admit
+a higher-sequence replacement before the roster closes. Publish these
+requirements before intake; do not silently extend a signature's validity.
+
+At a planning assumption of 12 seconds per block, seven days is 50,400 blocks.
+The staged 7,200-block rehearsal lifetime cannot cover that intake plus its
+evaluation window for an opening-day submission. Set the launch lifetime and
+all cutoffs together. Block cutoffs are authoritative; wall-clock dates are
+estimates. These figures are planning examples, not an activated schedule.
+
+Round preparation excludes submissions that expire before evaluation ends,
+even if they are still current at roster close. Such an exclusion is not a
+failed translation or a zero-quality score. Do not advertise an admission
+receipt alone as a guarantee of inclusion in the first round.
+
+```sh
+umi-competition --policy /ABSOLUTE/POLICY.json serve-round-coordinator \
+  --config /ABSOLUTE/ROUND-COORDINATOR.json
+```
+
+The service binds loopback, default `127.0.0.1:8101`. Put authenticated transport
+behind HTTPS at `POST /v1/competition/rounds`. The proxy must enforce the 16 KiB
+request limit, reject compressed requests, and disable body logging and caching.
+Request authentication is the named evaluator hotkey's short-lived signature;
+there is no additional upload key. Responses contain no protected references.
+
+<a id="open-competition-round-coordinator--independent-evaluators"></a>
+
+### Independent evaluators
+
+Set `round_coordinator_origin` to the credential-free HTTPS origin in each
+[continuous evaluator](evaluation.md#open-competition-evaluator) configuration. Each worker
+uses its existing hotkey and its own finality provider. It compares the complete
+exact-block registration snapshot, then rechecks freshness before reserving and
+signing the cutoff. Merely trusting the coordinator's RPC response is insufficient.
+
+Reservations and signatures persist in the worker's private `round-signing/`
+journal. A failed initial proof leaves no signing reservation. A conflicting
+proposal for a reserved sequence or suite is held across restart. Retried votes
+reuse their exact signed bytes. The coordinator accepts a late retry only if it
+already retained that same vote inside the original signing window.
+
+Discovery pages contain at most four currently signable proposals. Expired rounds
+remain stored for exact retry checks but do not precede new rounds in discovery.
+New plans and plans whose admission window has opened are processed ahead of
+archive maintenance. A failed proposal does not stop a worker attempting the
+other proposals in its page.
+
+The cutoff quorum uses distinct policy control groups and excludes evaluator
+groups with a submission in that round. Two hotkeys under one administration
+remain one group. The first valid certificate is retained unchanged; additional
+votes do not rewrite it. The signature authenticates the cutoff statement, not
+independently witnessed publication timing or permission to write chain weights.
+
+<a id="open-competition-round-coordinator--capacity-operations-and-verification"></a>
+
+### Capacity, operations and verification
+
+Defaults are a five-second poll, 1,024 retained rounds, and 1 GiB of logical
+journal data. Individual journal records are bounded at 16 MiB; a proposal is
+bounded at 4 MiB. Two HTTP requests can occupy the service at once. SQLite
+overhead, rollback files, certificates and the plan directory require additional
+disk space and filesystem quotas. Capacity exhaustion preserves history and
+holds new work. Never delete journals to make an old round current again.
+
+The command emits bounded JSON poll summaries: `round_poll_complete` with an
+owned finalized block and counts, or `round_poll_failed`. Exception details,
+references and request bodies are not printed. Alert on repeated failures,
+held plans, missed windows and capacity exhaustion. Shutdown joins the polling
+task before closing the finality provider and releasing the instance lock.
+
+Run coordinator, intake, exchange, dispatcher and evaluator commands under a
+service manager with failure restart and rate limits. A terminated owned
+observer now exits the parent service even when no work is queued. HTTP shutdown
+drains requests before closing providers; journals are retained. A live observer
+waiting for a head is not restarted by this check. Freshness and proof checks
+continue to reject unusable observations. An active process alone does not prove
+that the service has a fresh finalized head.
+
+Tests cover owned snapshot disagreement, signing-window expiry, independent
+hotkey signatures, quorum certificates, lost acknowledgments, crash recovery,
+conflict retention, archive starvation, request replay and byte limits, and
+shutdown cleanup. They use synthetic keys and an in-process HTTP transport.
+The connected two-round rehearsal completes a promotion, restarts the coordinator
+and both evaluators from their retained journals, and executes the next planned
+window against the promoted incumbent. Its miner keeps running and discovers
+the new assignments. Both 70/30 settlement packages and the original round's
+frozen incumbent remain unchanged on retry. Production still requires a supply
+of reviewed plans and protected suites; the coordinator does not create these
+inputs or retime missed windows.
+They do not establish public TLS operation, protected ASL quality, rights
+approval or independent administration of production evaluators.
+
+
+<a id="open-competition-round-preparation"></a>
+
+## Round preparation
+
+These are internal coordinator APIs. They produce unsigned inputs for the
+existing cutoff-publication contract. They do not schedule protected data,
+collect quorum signatures, publish evaluator orders or authorize weights.
+
+<a id="open-competition-round-preparation--one-finalized-snapshot"></a>
+
+### One finalized snapshot
+
+`FinalizedRegistrationProvider.collect_at(height)` rechecks complete SN78
+membership at a recent exact height. A coordinator and an independent evaluator
+can therefore compare the same snapshot even when their latest heads differ.
+
+The historical header must already be in the caller's owned finality verifier.
+The method verifies its header/evidence binding, pinned runtime, storage proofs
+and inverse UID mapping. Both the current head and the requested snapshot must
+pass the existing wall-clock freshness checks; the requested height must also
+fit the policy's snapshot-age limit. It never accepts a header supplied by the
+coordinator as finality evidence.
+
+Historical reads retain their own evidence without replacing the latest intake
+snapshot or lowering the persistent head guard. Exact-block reads reprove
+membership even if that height was captured earlier. Existing caches remain
+usable, and their highest captured block still prevents rollback.
+
+<a id="open-competition-round-preparation--atomic-roster-and-cutoff"></a>
+
+### Atomic roster and cutoff
+
+`CompetitionStore.prepare_round(...)` takes that registration snapshot, the
+private evaluation suite, explicit evaluation/reveal/cutoff/expiry blocks and
+publication byte limits. In one SQLite transaction it:
+
+- Selects the latest accepted submission for each current hotkey and track.
+  A submission must remain valid through evaluation close. An expired
+  replacement never revives an older submission.
+- Excludes hotkeys no longer registered at the supplied snapshot. Their earlier
+  admission records remain intact.
+- Reads the preserved, unconflicted incumbent and assigns the next round sequence.
+- Fixes the evidence cutoff and freezes the complete selected roster at the
+  snapshot block, then retains the unsigned cutoff publication and signed
+  submission bodies.
+
+The caller must obtain the snapshot from its owned provider. The store itself
+cannot verify finality. Its output remains `chain_submission_authorized: false`
+and contains no protected references or evaluator signatures.
+
+A submission racing the freeze is either included in that round or explicitly
+rejected at the closed admission boundary. It can be submitted in a later block
+for a later round. Concurrent preparations cannot freeze different rosters at
+the same boundary.
+
+The suite digest identifies an exact retry. Restarting or retrying later returns
+the original preparation, including its original deadlines. Changing those
+deadlines for the same suite is rejected. The eventual publisher must check
+that sufficient time remains before signing or dispatching; an old preparation
+does not become timely because it was retrieved again.
+
+`RoundPreparationCapacity` bounds retained preparations (default 1,024 records
+and 1 GiB of preparation bodies). Publication byte limits are checked before
+reading a large roster into memory. A storage or byte-limit failure rolls back
+the cutoff, round and suite reservation together. It does not remove earlier
+preparations. Ordinary admission and existing proof-cache limits still apply.
+
+<a id="open-competition-round-preparation--remaining-integration"></a>
+
+### Remaining integration
+
+The [continuous coordinator](rounds.md#open-competition-round-coordinator) now consumes
+private plans, calls these APIs and obtains independent cutoff signatures.
+Operators still supply fresh protected suites and reviewed round windows.
+The work-signing configuration below connects order signing and delivery to the
+exchange. Completed rounds then need signed settlement publication and successor
+input materialization. These internal methods do not change the live bridge policy.
+
+
+<a id="open-competition-work-signing"></a>
+
+## Automatic work proposals and independent signing
+
+The round coordinator can derive endpoint authorizations and evaluation orders
+from a retained quorum cutoff. Evaluators discover the proposals, check their
+own cutoff reservations and current finalized state, and sign the exact bodies.
+The coordinator publishes only after the nominated independent groups agree.
+Neither the coordinator nor the exchange has a wallet.
+
+This connects round preparation to the existing dispatcher and evaluator inboxes.
+It does not publish settlements, approve model rights, activate rewards, or
+change the live registration bridge. The imported baseline still has no
+contributor attribution.
+
+<a id="open-competition-work-signing--coordinator-configuration"></a>
+
+### Coordinator configuration
+
+Add `work` to the private `umi-round-coordinator-config/1` configuration:
+
+| Field | Purpose |
+| --- | --- |
+| `state_directory` | Work intents, signatures, certificates, nonce store and finalized high-water mark |
+| `asset_directory` | Private per-suite `RoundWorkAssets` files |
+| `order_directory` | Exact signed orders consumed by the evaluator exchange |
+| `publication_directory` | Exact signed endpoint authorizations |
+| `transport_chain` | A separate owned-finality configuration bound to the same competition policy |
+| `legacy_policy_sha256` | Digest of the reviewed endpoint transport policy |
+| `minimum_issue_ms` | Explicit signing/publication margin before the transport issue deadline |
+
+All these directories and both observers' state directories must be separate,
+absolute, owned by the service user and mode `0700`. Files use mode `0600`.
+The transport observer must use the transport policy's actual chain and verifier
+pins; its collection timeout cannot exceed 15 seconds. The issue margin is an
+integer from 1 through 300,000 ms and must be shorter than the transport policy's
+issue allowance when endpoint work is prepared. Choose it to cover observed
+signing and delivery latency. An undersized margin does not extend a deadline.
+
+Creating a proposal requires a fresh owned issuance block. Endorsing an existing
+proposal instead requires a fresh owned head and verified historical issuance
+and announcement blocks from that same provider. The signer reconstructs the
+original request unchanged and checks that its original issue window still has
+the required margin. A delayed endorsement does not retime issuance, deadlines
+or the evaluation window. Stale heads and expired issue windows remain holds.
+
+Each canonical `<suite-digest>.json` asset file has schema
+`umi-round-work-assets/1`, `suite_sha256`, the full `incumbent` bundle,
+the pinned CPU `runtime`, and one `Video` descriptor per suite case, in the
+same order. Video hashes and sizes are checked against the suite projection
+and runtime limit. These are reviewed inputs, not values generated by the
+service. Keep the private suite and its references in the existing round plan.
+
+For ongoing model promotion, use `umi-round-work-assets/2` with the same fields
+except `incumbent`, which must be omitted. This requires the coordinator's
+[reviewed promotion delivery](promotion.md#open-competition-promotion-delivery) configuration.
+The coordinator reads the manifest from that preserved archive by the exact
+incumbent digest frozen in the round. New rounds therefore follow the approved
+promotion history without rewriting future asset files or restarting services.
+Already frozen rounds keep their original incumbent, including after restart.
+No current-head alias or miner-supplied download URL is used.
+
+Missing, noncanonical or mismatched manifests hold work. The coordinator reads
+manifest metadata; each evaluator still verifies the model bytes before running
+them. Schema v1 remains supported with its explicit incumbent binding. Neither
+format approves a model or changes the protected suite or signed deadlines.
+
+```sh
+umi-competition --policy /ABSOLUTE/POLICY.json serve-round-coordinator \
+  --config /ABSOLUTE/ROUND-COORDINATOR.json \
+  --legacy-policy /ABSOLUTE/TRANSPORT-POLICY.json
+```
+
+Use the same `order_directory` in the wallet-free
+[evaluator exchange](exchange.md#open-competition-exchange). Each evaluator's exchange
+client delivers the signed order into its local inbox and the enclosed endpoint
+authorization into its dispatcher's publication inbox. The dispatcher's existing
+origin proof, discovery grace and request-window checks still apply.
+
+<a id="open-competition-work-signing--evaluator-configuration"></a>
+
+### Evaluator configuration
+
+In each [continuous evaluator](evaluation.md#open-competition-evaluator), configure:
+
+- `round_coordinator_origin`: the credential-free HTTPS origin for both cutoff
+  and work discovery.
+- `work_signing_chain`: a dedicated transport-bound owned observer, with its
+  own separate state directory and collection timeout at most 15 seconds.
+- `work_minimum_issue_ms`: the same reviewed issue margin as the coordinator.
+- The existing endpoint `legacy_policy_sha256` and `dispatch_directory`, plus
+  that exact transport policy passed to `run-evaluator`.
+- `exchange_origin` and `assignment_directory` for automatic signed-order and
+  endpoint-authorization delivery.
+
+No extra API credential or manual signature upload is needed. The worker uses
+only its configured hotkey. Work signing has a separate `work-signing/` journal
+inside evaluator state. Its policy, signer, transport policy and issue margin
+are bound across restarts. Existing configurations that omit the new fields
+remain valid; adding or changing bound inputs is not an in-place journal reset.
+Preserve existing state and use the reviewed migration procedure for deployed
+services.
+
+<a id="open-competition-work-signing--selection-deadlines-and-recovery"></a>
+
+### Selection, deadlines and recovery
+
+The full signed roster and cutoff accompany each reference-free work plan.
+Evaluator selection is deterministic among the cutoff's actual signers: one
+representative per control group, excluding groups with a miner submission in
+the round. The plan selects exactly the policy's required number of groups.
+Every selected group must sign. Another hotkey from our own administration
+cannot replace an unavailable independent evaluator.
+
+Before its first signature, a worker requires its own retained cutoff intent,
+cutoff vote and original suite reservation. It checks the complete roster,
+incumbent, runtime and reference-free cases. An endpoint proposal additionally
+requires independent proof of its exact original issuance and announcement
+blocks through the worker's own transport observer. The worker rederives the
+whole request schedule and rejects any mismatch or elapsed issue window.
+If that observer missed an issuance header during restart, it may use the
+bounded [ancestry recovery](dispatch.md#open-competition-dispatch--evidence-and-recovery)
+from its own later verified header. This proves the historical header and chain
+timestamp, not local receipt before a deadline. Cutoff votes and suite
+reservations must still exist in the worker's original journal.
+The protected suite's commitment is checked during coordinator preparation;
+its reference-free projection is replayed against the suite after reveal.
+An opaque commitment alone cannot prove the hidden references before reveal.
+
+Model orders can enter signing immediately after cutoff certification. Each
+endpoint first needs an authorization quorum, then an order quorum. All requests
+must fit the frozen evaluation interval. A retained endpoint intent keeps its
+original issuance after restart; the service never chooses a later time to make
+that same work usable. A missed window is held as coordinator evidence.
+
+The signing slot binds policy, round sequence, submission and statement kind.
+Changed bytes create a persistent conflict hold. A failed initial proof creates
+no signing reservation. A retained exact signature can be retried after expiry,
+but the coordinator accepts a late acknowledgment retry only when that same
+signature was already retained. A late first arrival cannot establish quorum.
+Certificates are retained before file delivery. Recovery republishes the exact
+certificate only while its original window is usable.
+
+Historical issuance recovery keeps a process-local LRU cache of hash-checked
+headers, bounded to 2,048 entries and 1 MiB of encoded header bytes (stored as
+hexadecimal strings). A collection timeout retains completed header reads so
+the next attempt can make progress. Every use rehashes the complete path from
+an owned observer anchor and counts cached bytes toward the path limit. The
+cache supplies no timestamps, storage proofs or finality authority. Timestamp
+membership and current-head freshness are checked on every attempt. Restart
+may discard this cache; it does not erase durable journals or extend deadlines.
+
+<a id="open-competition-work-signing--http-and-resource-bounds"></a>
+
+### HTTP and resource bounds
+
+Serve `POST /v1/competition/work` behind HTTPS alongside the existing round
+route. Enforce a 16 KiB request limit, reject compressed bodies, disable body
+logging and caches, and preserve hotkey-signature authentication. Requests use
+durably checked short-lived nonces. Responses contain at most four statements,
+each bounded at 16 MiB, and never contain suite references. The total response
+bound is 64 MiB plus 8 KiB. Requests have bounded read and queue-operation times;
+the service admits two work requests at once.
+
+Model execution and cutoff/work polling use separate tasks. An unavailable
+coordinator does not interrupt an already accepted CPU job. Shutdown joins those
+tasks before closing both observers and releasing the evaluator's process lock.
+Poll summaries report held work without printing request bodies or exceptions.
+
+The coordinator's retained-round limit also bounds retained work intents and
+certificates in its separate work journal. An endpoint consumes two intents;
+a model submission consumes one. Each statement repeats its complete frozen
+plan, so provision for actual roster and case counts. Defaults are 1,024 retained
+intents and 1 GiB logical work-journal data. Files, observer state, SQLite overhead
+and rollback space require separate quotas. Exhaustion holds new work and never
+evicts evidence. Monitor capacity before accepting another round.
+
+Tests exercise both tracks through authenticated in-process HTTP, real synthetic
+hotkey signatures, exact retries, conflicts, expired publication, lost delivery,
+owned-provider disagreement, capacity guards and shutdown failure. They do not
+establish public TLS deployment, protected ASL quality or independent production
+operators. Settlement publication and the reviewed simultaneous 70/30 activation
+remain on the [execution plan](../competition/launch.md).

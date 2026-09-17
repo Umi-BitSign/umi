@@ -1,0 +1,746 @@
+[Documentation](../README.md) / Observer API reference
+
+# Observer API reference
+
+- [UMI public observer API](#dashboard-api)
+
+<a id="dashboard-api"></a>
+
+## UMI public observer API
+
+This API is the read-only data source for the public SN78 page on `umi.vision`.
+It observes finalized chain state and can ingest released inactive-validator audit
+bundles. A publisher index is discovery only: the observer downloads the bounded
+manifest and complete object tree, checks canonical encoding, byte counts, hashes,
+route and release bindings, and independently runs the production bundle replay
+verifier before exposing a record.
+
+The chain remains authoritative. The API is a versioned index with explicit source
+and freshness metadata, not a validator input or a second consensus system.
+
+<a id="dashboard-api--current-public-contract"></a>
+
+### Current public contract
+
+The base path is `/api/v1`. Every data response includes:
+
+- `schema`, a versioned response schema;
+- `generated_at`, the time the complete snapshot was collected;
+- `freshness`, either `fresh` or `stale`;
+- `snapshot_age_seconds`;
+- `finalized_head_age_seconds`, measured from the finalized block timestamp;
+- `sources`, including the exact finalized block and verification method;
+- `protocol_state.validator_input_eligible: false` where protocol state appears.
+
+The chain source carries `storage_proofs_verified: false`. The collector pins every
+read to a finalized block and cross-checks the block header, but this API does not
+claim to verify Substrate storage proofs.
+
+The current chain snapshot, network, and participant schemas are
+`umi-observer-snapshot/2`, `umi-observer-network/2`, and
+`umi-observer-participants/2`. Version 2 adds the finalized subnet-owner AccountId32,
+all permitted-validator MechId 0 rows, and each participant's normalized public
+HTTPS serving origin. The HTTP route base remains `/api/v1`.
+
+`X-UMI-Contract-Revision` and the `dashboard_static` source artifact hash identify
+the immutable API safety contract and its conservative default protocol state. The
+revision is SHA-256 of compact, key-sorted JSON for these facts:
+
+```json
+{"activation_evidence_available":false,"api_version":"v1","chain_result_classification":"unverified","conformance_evidence_available":false,"economic_era":"unverified","expected_chain_name":"UMI","mechanism_id":0,"netuid":78,"phase":"pre_public_calibration","protocol":"umi-asl/0.1","scoring_policy_hash":null,"section_14_gate_credit":false,"service_weight_evidence_sha256":null,"service_weight_kind":null,"service_weights_active":false,"service_weights_economically_effective":false,"specification_version":"0.1","translation_weights_active":false,"validator_input_eligible":false}
+```
+
+That static revision is not a hash of the returned, evidence-derived
+`protocol_state`. Once at least one released bundle has passed complete production
+replay and exposes a nonempty, complete reveal solution set, the returned phase is
+`shadow_calibration`, `conformance_evidence_available` is true, and the unique
+verified scoring-policy hash is exposed when all such windows agree. Earlier
+releases without a complete solution set remain visible without advancing those
+fields. Translation weights and activation evidence remain false. The released-bundle sources and
+`X-UMI-Dataset-Revision`, not the static contract revision, bind this dynamic state.
+
+For chain-only responses, `X-UMI-Dataset-Revision` is the finalized block hash.
+For a response containing released bundles, it is SHA-256 of canonical JSON binding
+that block hash to the sorted manifest hashes cited by that response. ETags cover
+the exact response body.
+
+| Endpoint | Initial contents |
+|---|---|
+| `GET /api/v1/status` | Service readiness, UMI phase, finalized block, and outstanding gap codes |
+| `GET /api/v1/network` | SN78 topology, owner AccountId32, validator rows, epoch, runtime, commit-reveal state, emission flags, counts, and selected hyperparameters |
+| `GET /api/v1/participants` | Public UID, hotkey, role, normalized chain-announced serving origin, chain economics, and explicit UMI-score unavailability |
+| `GET /api/v1/leaderboard` | Separate native chain-economics ranking and empty UMI translation leaderboard |
+| `GET /api/v1/windows` | Fully replayed validator-local calibration and incident windows |
+| `GET /api/v1/windows/{window_id}` | One released validator window; add `?validator=<AccountId32 hex>` when several validators published the same window |
+| `GET /api/v1/windows/{window_id}/solutions` | A bounded page of every assignment from one fully replayed reveal result; add the validator query when needed |
+| `GET /api/v1/pilots` | Explicitly nonconforming, no-weight component pilots, separate from protocol windows |
+| `GET /api/v1/pilots/{pilot_id}` | One replayed local or public-endpoint component pilot and its evidence boundary |
+| `GET /api/v1/pilots/{pilot_id}/solutions` | Replayed hypotheses, references, scores, failures, and evidence for one pilot |
+| `GET /api/v1/bootstrap-service` | Current fail-closed bootstrap service-weight status, exact eligible miners, and immutable evidence locators |
+| `GET /api/v1/validator-directives/{validator_account_id32}/after/{sequence}/{cursor}.json` | Exact cache-disabled supervisor directive page for one configured validator channel |
+| `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
+| `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
+| `GET /api/v1/incidents` | Reason records from fully replayed public incident bundles |
+
+Incident records leave `published_at` null because the append-only publisher index
+does not assert a wall-clock publication time. `observer_verified_at` is when this
+observer completed replay and durably accepted the bundle; it is not a publisher
+timestamp. `audit_release_block` is the protocol release boundary.
+
+<a id="dashboard-api--validator-supervisor-directive-feed"></a>
+
+### Validator supervisor directive feed
+
+The optional `--directive-feed-config` adds the public transport required by the
+permanent validator supervisor. It is independent of observer chain freshness and
+never authorizes a directive itself. Each response is read from the local
+publication tree, limited to 1 MiB, parsed as exact RFC 8785 JSON, bound to the
+requested cursor and validator AccountId32, and checked against the configured
+channel and threshold-signature set before any byte is returned. Validators repeat
+the checks against their stricter local consent configuration.
+
+File reads, JSON parsing, and signature verification run outside the FastAPI event
+loop behind a fixed four-operation public gate. A fifth concurrent public operation
+receives a 503 instead of entering an unbounded queue. `/readyz` has a separate
+single-operation gate, so public saturation cannot consume its capacity. Public
+reads have a five-second response watchdog and readiness has a thirty-second
+watchdog. A timed-out worker keeps its slot until its thread actually exits; the
+service never treats a still-running read as spare capacity.
+
+The canonical config uses
+`umi-observer-validator-directive-feed-config/1`; the checked example is
+`docs/examples/observer-validator-directive-feed-config.json`. It pins the exact
+sequence-1 hold directive and initial-page hashes plus a minimum reachable readiness
+head for every channel. Channels are sorted by `validator_account_id32`, and the
+AccountId32 must decode from the named validator hotkey. The route tree is:
+
+```text
+<route_root>/<validator_account_id32>/after/<sequence>/<cursor>.json
+```
+
+`cursor` is `initial` only at sequence zero and is otherwise the prior directive's
+lowercase SHA-256. The service rereads and revalidates the selected file on each
+request, so an authority can atomically replace affected cursor pages when it
+publishes a later signed directive without restarting the observer. Production
+installs use `root:root` ownership, `0444` files, and `0755` directories. The
+observer service receives the tree through a read-only systemd path and cannot
+publish or modify directives.
+
+Readiness rereads the exact startup-pinned config, verifies every initial hold, then
+walks signed, contiguous cursor pages beginning after sequence 1 until it reaches a
+terminal page. The configured readiness head must occur on that chain. A newer
+signed terminal head is allowed, so ordinary page publication needs no restart;
+raising the minimum readiness head requires a reviewed config replacement and
+observer restart. Missing or changed config, an absent or invalid cursor page, an
+unreachable pinned head, a chain longer than 256 pages, saturation, or watchdog
+expiry makes `/readyz` return 503.
+
+Successful responses preserve the exact file bytes and include
+`X-UMI-Directive-Page-SHA256`, `X-UMI-Directive-Head`, and
+`X-UMI-Directive-Sequence`. They use `Content-Encoding: identity` and
+`Cache-Control: no-cache, no-store, must-revalidate, no-transform`. Queries,
+redirects, transformed responses, unconfigured validators, unsafe files, invalid
+signatures, and cursor mismatches do not produce a directive body. Cloudflare must
+bypass cache and transformations for `/api/v1/validator-directives/*`.
+The deployment check in
+`deploy/first-public-result/check-directive-route.py` verifies the captured public
+body and response headers against hashes copied from the signed release record. A
+`DYNAMIC` or `BYPASS` response is only a behavioral sample; it does not prove which
+Cloudflare rules produced that result. The deployment runbook therefore also
+requires an exported Cloudflare Trace covering the active cache, compression,
+transformation, Worker/Page Rule, and rate-limit configuration.
+
+<a id="dashboard-api--released-bundle-feed"></a>
+
+### Released bundle feed
+
+Start the observer with `--bundle-feed-config /etc/umi/observer-bundle-feed.json`.
+The example at `docs/examples/observer-bundle-feed-config.json` is the production
+shape. Each target points to the exact local audit-publication config used for that
+validator. Startup authenticates its signed validator configuration, release
+manifest, scoring policy, finality verifier, storage-proof verifier, and production
+replay ports. The configured public origin must byte-match that publication config.
+The observer has no wallet-loading or chain-write capability.
+
+The observer resolves every HTTPS origin itself, rejects the request if any DNS
+answer is non-public, pins the connection to one verified public address, preserves
+the original Host and TLS SNI names, disables redirects, proxies, and content
+encoding, and applies absolute time, header, object, file-count, and total-bundle
+limits. A later DNS change cannot redirect an in-progress refresh.
+
+Download, replay, projection, and database promotion run on one dedicated worker
+thread, not on the public API event loop. A canceled refresh reuses the same
+in-flight job instead of starting another. Public snapshots use an immutable
+metadata cache, and solution pages use bounded indexed reads. The feed config also
+sets `maximum_state_database_bytes`; the production example caps the SQLite page
+count at 4 GiB.
+
+Accepted index entries are append-only per validator. A restart resumes after the
+last fully verified entry. Rollback, prefix mutation, duplicate windows, a future
+`audit_release_block`, or any account, path, policy, release, manifest, object, tree,
+or replay mismatch rejects the refresh. The API retains the last verified records
+and reports each target in `bundle_feed_health` as `current`, `degraded`, `stale`,
+or `not_started`; unverified candidate bytes are never visible.
+
+Each refresh admits at most `maximum_new_entries_per_refresh` new routes. When the
+public index has a larger verified backlog, the accepted prefix remains visible but
+the target reports `degraded` with `feed_backlog_pending`. It returns to `current`
+only after the complete observed index has been replayed and stored. A failure in a
+later route preserves the accepted prefix and replaces the backlog code with the
+bounded failure code.
+
+Every `/windows` row is scoped by `validator_account_id32` and says
+`score_scope: validator_local`. `validator_local_scores` contains exact rational
+accuracy and utility values from that validator's replayed weight-build object. It
+has no rank. Different validator samples may legitimately disagree, so the API
+does not merge them, choose a winner, or describe them as consensus. Native chain
+economics remain in the separate `leaderboard.chain_economics` object.
+
+Each window row also carries an `evidence` locator for its signed public index
+entry, bundle manifest, tree digest, exact audit-release block hash, and, when
+reached, the exact reveal-stage manifest and reveal result.
+
+<a id="dashboard-api--component-pilot-feed"></a>
+
+### Component pilot feed
+
+The public SN78 endpoint campaign closed on 2026-09-11. These routes retain its
+completed evidence for audit and replay. Their availability does not reopen
+enrollment or authorize another public-endpoint challenge, case, or request. Local
+component-pilot records continue to use the same read-only namespace.
+
+The optional `--pilot-feed-config` reads completed `umi-component-bundle/1`
+directories from local disk. This is a separate evidence class and namespace. It
+never adds a `/windows` record, changes `protocol_state`, supplies activation
+evidence, or becomes a validator input.
+
+The observer requires the config, bundle roots, object directory, and files to be
+owned by its service user and not group- or world-writable. It rejects symlinks,
+noncanonical config or manifest bytes, unknown schema fields, more than 256 pilots,
+more than 14 solutions per pilot, and more than 128 MiB across the feed. Only one
+public-endpoint pilot for a decoded miner account and campaign ID is accepted;
+changing the SS58 prefix does not create another identity. Before listening, the
+observer verifies every referenced object and reruns request-auth, miner-signature,
+timelock, binding, and exact-score replay. It then holds the verified manifest and
+object bytes as an immutable startup snapshot.
+
+The pilot ID is SHA-256 of the exact canonical bundle manifest. Object URLs use
+their own SHA-256 digests and return immutable cache headers. The solutions response
+links every result to its request, authentication record, optional response
+evidence, revealed ground truth, and scoring object. Invalid plaintext is not
+projected as a valid hypothesis.
+
+Every pilot record says `component_test_no_weight`, carries false translation-
+weight, conformance, activation-evidence, and validator-input flags, and lists every
+canonical stage that the component runner did not reach. See
+[`COMPONENT_PILOT.md`](legacy.md#component-pilot) for the operator and independent-replay
+commands.
+
+`pilot_profile` distinguishes a local in-process run from a request sent to the
+registered miner's public endpoint. Local records publish
+`umi-validator replay --bundle ./bundle`; public-endpoint records publish
+`umi-public-pilot replay --bundle ./bundle`, which also verifies the signed endpoint
+attachment. Public records expose `coordinator_signature_verified: true` and
+`coordinator_attested_origin_match: true`. These assert that the observer verified
+the coordinator signature and that the two origins in that signed attestation
+match. Both origins must be the same normalized, globally routable IP with an
+explicit HTTPS port. They do not claim portable storage-proof verification; the
+chain evidence binds `network: finney` and the Finney genesis block hash while
+keeping `storage_proofs_verified: false`.
+
+The pilot list, detail, and solutions response schemas are
+`umi-observer-pilots/2`, `umi-observer-pilot/2`, and
+`umi-observer-pilot-solutions/2`. The HTTP route base remains `/api/v1`.
+
+<a id="dashboard-api--bootstrap-service-weight-feed"></a>
+
+### Bootstrap service-weight feed
+
+The optional `--bootstrap-service-feed-config` accepts the current
+`umi-observer-simple-bootstrap-feed-config/1` shape. It loads the frozen signed
+eligibility manifest and coordinator-signed common lease from immutable local
+paths. It requires the component pilot feed because every eligible miner is
+cross-checked against an independently replayed successful public-endpoint pilot.
+The source status is `bootstrap_current_state_verified`.
+
+`service_weights_active` becomes true only while the signed lease is active and
+one or more currently permitted validators have the exact authorized row in one
+finalized SN78 snapshot. The observer verifies the lease's mechanism count,
+256-UID domain, owner fence, tempo, effective activity cutoff, empty pending
+queue, subnet-owner mapping, miner UID and endpoint mappings, validator permits,
+`LastUpdate` values, and byte-identical 256-entry MechId 0 rows. A different
+active row from another validator is reported in `warning_codes` and does not
+invalidate an exact row. Lease expiry, UID reassignment, row expiry, overwrite,
+or required chain-tuple drift makes the status false on the next snapshot.
+
+`service_weights_economically_effective` is a separate, conservative current-state
+check. It becomes true only when `service_weights_active` is true, every miner in
+the frozen manifest has nonzero native consensus and incentive in the same
+finalized snapshot, and no active validator has a nonempty MechId 0 row that differs
+from the authorized row. It does not attribute a particular economic value to one
+validator. A true value establishes only the observable conditions above.
+
+`GET /api/v1/bootstrap-service` includes the same boolean inside `protocol_state`
+and adds an `economic_effect` object. Failed checks list the mismatched validator
+UIDs and the eligible miner UIDs whose consensus or incentive is zero or unavailable:
+
+```json
+{
+  "economically_effective": false,
+  "reason_codes": [
+    "bootstrap_service_eligible_miner_consensus_zero",
+    "bootstrap_service_eligible_miner_incentive_zero",
+    "bootstrap_service_mismatched_active_row_present"
+  ],
+  "mismatched_active_validator_uids": [200],
+  "zero_consensus_eligible_miner_uids": [6, 247],
+  "unavailable_consensus_eligible_miner_uids": [],
+  "zero_incentive_eligible_miner_uids": [6, 247],
+  "unavailable_incentive_eligible_miner_uids": []
+}
+```
+
+When the authorized service row is inactive, the object fails closed with
+`bootstrap_service_inactive`. The existing `service_weights_active` field keeps its
+signed lease meaning; clients must not use it alone as evidence that the bootstrap
+row controls current incentives.
+
+The current record carries `evidence_class: "finalized_chain_state"` and lists
+every validator whose exact row is active. There is no validator-uploaded terminal
+bundle in this profile. The signed manifest and lease bind the authorized row;
+the current finalized permit, row, and `LastUpdate` are its public receipt. This
+evidence does not claim raw-event or portable storage-proof verification.
+
+The historical `umi-observer-bootstrap-service-feed-config/1` shape and its
+`umi-bootstrap-direct-publication/2` terminal bundles remain readable. They do
+not take precedence over a configured current shared-bootstrap lease.
+
+The immutable routes are
+`/api/v1/bootstrap-service/{publication_id}/bundle/manifest.json` and
+`/api/v1/bootstrap-service/{publication_id}/bundle/objects/{sha256}`. This evidence
+class is `bootstrap_service_binary`; it never populates the UMI translation
+leaderboard, never becomes validator input, and receives no Section 14 gate credit.
+
+`/windows/{window_id}/solutions` is
+available only when that released bundle contains a fully replayed normal reveal
+result with a complete nonempty assignment set. It returns every successful
+assignment and every explicit failure, including validator/window/policy/release
+binding, miner identity and root, outer disposition, protocol-valid response
+status, hypothesis or error, committed references when ground truth is valid,
+metric and canary classification, exact rational score and trace, and
+content-addressed links to the request, response, decryption, and ground-truth
+evidence objects. A canonical plaintext with invalid request or envelope bindings
+is not described as valid and its hypothesis is not projected; auditors can inspect
+the linked exact bytes and the recorded zero reason.
+
+Solution pages never include raw video bytes, private consent records, or
+participant identity data. The projected fields do not repeat the expired video
+delivery URL contained in the protocol's exact signed request evidence. Public
+post-reveal references and canary evidence are included because they are part of
+the released scoring evidence. The endpoint is validator-local evidence, not a
+canonical cross-validator ranking.
+
+The public validator index remains a convenient read-only interface for independent
+observers:
+
+`GET <origin>/validators/<validator_account_id32>/index.json`
+
+For each entry, fetch `<relative_path>/manifest.json` and every manifest object at
+`<relative_path>/objects/<sha256>`. Consumers must independently enforce the same
+canonical JSON, byte accounting, tree digest, index bindings, release-height, and
+full replay checks. Treating HTTP 200 or an index signature as bundle verification
+is incorrect.
+
+`HEAD` is supported on every public data endpoint. `POST`, `PUT`, `PATCH`, and
+`DELETE` are not. `/openapi.json` contains the machine-readable GET contract.
+
+The service also exposes:
+
+- `GET /healthz`, which reports process liveness only;
+- `GET /readyz`, which returns `503` until an acceptably recent complete snapshot
+  exists.
+
+<a id="dashboard-api--status-example"></a>
+
+### Status example
+
+Values below are illustrative. Clients must use the returned block and timestamps.
+
+```json
+{
+  "schema": "umi-observer-status/1",
+  "generated_at": "2026-09-01T16:00:00Z",
+  "freshness": "fresh",
+  "snapshot_age_seconds": 3,
+  "finalized_head_age_seconds": 18,
+  "sources": [
+    {
+      "source_id": "bittensor-finalized-sn78",
+      "source_kind": "chain_finalized",
+      "verification_status": "finalized_read",
+      "block": {
+        "number": "8973539",
+        "hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "parent_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "state_root": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "timestamp": "2026-09-01T15:59:48Z",
+        "finalized": true,
+        "storage_proofs_verified": false
+      },
+      "policy_hash": null,
+      "artifact_sha256": null,
+      "validator_input_eligible": false
+    },
+    {
+      "source_id": "umi-observer-contract-2e246ab90349c8b4",
+      "source_kind": "dashboard_static",
+      "verification_status": "repository_static",
+      "block": null,
+      "policy_hash": null,
+      "artifact_sha256": "2e246ab90349c8b4892d203cf64eaae36a92a8c9c84bfb1c31173ecdfb4ad0d5",
+      "validator_input_eligible": false
+    }
+  ],
+  "service": "umi-observer-api",
+  "api_version": "v1",
+  "service_status": "ready",
+  "protocol_state": {
+    "protocol": "umi-asl/0.1",
+    "specification_version": "0.1",
+    "phase": "pre_public_calibration",
+    "netuid": 78,
+    "mechanism_id": 0,
+    "translation_weights_active": false,
+    "service_weights_active": false,
+    "service_weights_economically_effective": false,
+    "service_weight_kind": null,
+    "service_weight_evidence_sha256": null,
+    "section_14_gate_credit": false,
+    "scoring_policy_hash": null,
+    "conformance_evidence_available": false,
+    "activation_evidence_available": false,
+    "economic_era": "unverified",
+    "chain_result_classification": "unverified",
+    "expected_chain_name": "UMI",
+    "chain_identity_matches_expected": false,
+    "validator_input_eligible": false
+  },
+  "finalized_block": {
+    "number": "8973539",
+    "hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "parent_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+    "state_root": "0x3333333333333333333333333333333333333333333333333333333333333333",
+    "timestamp": "2026-09-01T15:59:48Z",
+    "finalized": true,
+    "storage_proofs_verified": false
+  },
+  "outstanding_gap_codes": [
+    "activation_gates_not_passed",
+    "active_scoring_policy_unavailable",
+    "public_calibration_not_started",
+    "released_audit_bundle_feed_unavailable",
+    "umi_weight_cutover_unverified"
+  ]
+}
+```
+
+<a id="dashboard-api--exact-quantities"></a>
+
+### Exact quantities
+
+JavaScript cannot exactly represent every chain integer. Block heights, epochs,
+token atomic units, and similar `u64` values are base-10 strings. Do not convert
+them to `number`; use `BigInt` where arithmetic is needed.
+
+Token quantities are explicit about their asset:
+
+```json
+{
+  "raw": "9007199254740992",
+  "decimals": 9,
+  "unit": "rao",
+  "asset": "subnet_alpha"
+}
+```
+
+TAO and subnet alpha are different assets and must not be added together. Render a
+human value by placing nine decimal digits, but retain and sort by `raw`.
+
+Current chain fractions use their exact `PerU16` representation:
+
+```json
+{
+  "raw_numerator": "32767",
+  "raw_denominator": "65535",
+  "display_decimal": "0.49999237048905165178912031738765545128557259479667",
+  "unit": "per_u16"
+}
+```
+
+Sort by `BigInt(raw_numerator)`, not `display_decimal`. Future UMI scores use exact
+string numerators and denominators as well.
+
+The network exchange rate likewise includes exact `tao_reserve_rao` and
+`subnet_alpha_reserve_rao` strings. Its `display_decimal` is derived for rendering;
+the reserve pair remains authoritative.
+
+Network lifecycle flags have narrow meanings:
+
+- `subnet_exists` is the finalized `NetworksAdded` registration flag;
+- `subnet_started` means the owner's one-shot start call has enabled staking,
+  alpha trading, and participant emissions;
+- `subnet_emission_enabled` is the separate root-controlled switch for TAO-side
+  pool injection.
+
+<a id="dashboard-api--participants-and-pagination"></a>
+
+### Participants and pagination
+
+Use `role=all`, `role=miner`, or `role=validator`. `limit` is from 1 through 512.
+
+```text
+GET /api/v1/participants?role=miner&limit=100
+```
+
+When `page.next_cursor` is non-null, pass it unchanged on the next request. The
+cursor binds the role and finalized block, so a page cannot be mixed with a newer
+snapshot. A changed snapshot returns `409 cursor_snapshot_changed`; start again
+without a cursor.
+
+Participant rows intentionally omit coldkeys, personal identity data, commitments,
+hypotheses, references, signatures, and video URLs. `serving_origin` is the exact
+normalized public HTTPS origin derived from the finalized chain announcement, or
+null when no usable public origin can be derived. `serving_announced` means a
+nonzero endpoint is registered on chain. Neither field claims the endpoint was
+probed or is reachable.
+`chain_active` is the metagraph's chain-state flag. It must not be rendered as
+"online," "healthy," or "reachable."
+
+The fields under `chain_metrics` are native chain observations. They are never UMI
+translation scores. Until released score evidence exists, every row has:
+
+```json
+{
+  "umi_translation": {
+    "availability": "unavailable",
+    "reason_code": "released_umi_score_evidence_unavailable",
+    "miner_root": null,
+    "accuracy": null,
+    "utility": null,
+    "rank": null,
+    "audit_bundle_sha256": null,
+    "audit_release_block": null
+  }
+}
+```
+
+<a id="dashboard-api--leaderboards"></a>
+
+### Leaderboards
+
+`chain_economics` orders miner-role UIDs by the finalized native incentive
+numerator, descending, with UID as the display-order tie-breaker. It is marked
+`classification: unverified` and `derivation_status: dashboard_derived`. The API
+does not call current values legacy, bootstrap, or UMI results until the required
+cutover audit establishes their origin. This ranking helps operators inspect
+current SN78 economics, but it is not UMI translation performance or a
+chain-provided rank.
+
+When at least two incentive values differ, `chain_rank` uses competition ranking:
+exact ties receive the same rank and `incentive_tie_size` reports the group size.
+When all observed values are equal, `ranking_status` is
+`no_economic_separation`, every `chain_rank` is null, and UID order is not a rank.
+
+`umi_translation` is a separate object. Inactive-policy bundles contain
+validator-local samples, so they do not populate this consensus-style leaderboard.
+Use `/windows` for those scores. A future activated-policy contract would need a
+separate evidence rule before this leaderboard can become available. The site must
+keep chain economics, validator-local samples, and any later consensus result
+visibly distinct.
+
+```json
+{
+  "chain_economics": {
+    "classification": "unverified",
+    "derivation_status": "dashboard_derived",
+    "ranking_basis": "native_incentive_per_u16_descending",
+    "tie_breaker": "uid_ascending",
+    "ranking_status": "no_economic_separation",
+    "reason_code": "all_observed_incentives_equal",
+    "source_ids": ["bittensor-finalized-sn78"],
+    "excluded_missing_incentive": 0,
+    "entries": [
+      {
+        "chain_rank": null,
+        "incentive_tie_size": 1,
+        "uid": 12,
+        "hotkey": "5ExampleHotkey",
+        "chain_active": true,
+        "serving_announced": true,
+        "incentive": {
+          "raw_numerator": "32767",
+          "raw_denominator": "65535",
+          "display_decimal": "0.49999237048905165178912031738765545128557259479667",
+          "unit": "per_u16"
+        },
+        "dividends": null,
+        "emission": null
+      }
+    ]
+  },
+  "umi_translation": {
+    "availability": "not_started",
+    "reason_code": "public_calibration_not_started",
+    "entries": []
+  }
+}
+```
+
+<a id="dashboard-api--vercel-integration"></a>
+
+### Vercel integration
+
+Run `umi-observer` on a separate always-on host. A Vercel function is only the
+same-origin proxy; it must not run the background collector. Prefer that server-side
+route on `umi.vision` rather than browser requests to the observer origin. This
+needs no CORS permission and avoids exposing deployment details.
+
+Use an endpoint allowlist. Do not accept an arbitrary upstream URL or concatenate a
+user-supplied path.
+
+```ts
+const upstreamPaths = {
+  status: "/api/v1/status",
+  network: "/api/v1/network",
+  participants: "/api/v1/participants",
+  leaderboard: "/api/v1/leaderboard",
+  windows: "/api/v1/windows",
+  pilots: "/api/v1/pilots",
+  gates: "/api/v1/activation-gates",
+  benchmarks: "/api/v1/benchmarks",
+  incidents: "/api/v1/incidents",
+} as const;
+
+export async function fetchObserver(
+  key: keyof typeof upstreamPaths,
+  query = "",
+): Promise<Response> {
+  const base = process.env.UMI_OBSERVER_BASE_URL;
+  if (!base) throw new Error("UMI_OBSERVER_BASE_URL is not configured");
+
+  return fetch(`${base}${upstreamPaths[key]}${query}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+}
+```
+
+Treat window and pilot detail, solution, manifest, and object routes as separately
+allowlisted templates. Parse `window_id`, `validator`, `pilot_id`, and an evidence
+object's `sha256` as exactly 64 lowercase hexadecimal characters. Construct only
+the documented `/api/v1/windows/<window_id>`,
+`/api/v1/windows/<window_id>/solutions`, `/api/v1/pilots/<pilot_id>`,
+`/api/v1/pilots/<pilot_id>/solutions`,
+`/api/v1/pilots/<pilot_id>/bundle/manifest.json`, and
+`/api/v1/pilots/<pilot_id>/bundle/objects/<sha256>`,
+`/api/v1/bootstrap-service`,
+`/api/v1/bootstrap-service/<publication_id>/bundle/manifest.json`, and
+`/api/v1/bootstrap-service/<publication_id>/bundle/objects/<sha256>` forms on the server. Accept
+only the documented query fields (`validator`, bounded `limit`, and an opaque
+returned `cursor`) and never forward an arbitrary browser-supplied path. Window
+solution pages allow 1 through 50 records; pilot solution pages allow 1 through
+14.
+
+Pass only parsed, allowlisted query fields to the participant route. Preserve the
+upstream `ETag`, `Cache-Control`, `X-UMI-Contract-Revision`,
+`X-UMI-Dataset-Revision`, and `X-UMI-Finalized-Block` headers in the Vercel
+response. Preserve `X-UMI-Pilot-Bundle` on pilot manifest and object responses,
+and `X-UMI-Bootstrap-Bundle` on bootstrap manifest and object responses.
+Render all returned strings as text; do not insert API values as HTML.
+
+If the browser must call the observer directly, configure exact origins:
+
+```text
+--cors-origin https://umi.vision \
+--cors-origin https://www.umi.vision
+```
+
+Preview domains are not wildcarded. Add a particular preview origin only when it
+is intentionally trusted. CORS is browser policy, not API authentication.
+Direct browser responses expose `ETag`, `X-UMI-Contract-Revision`,
+`X-UMI-Dataset-Revision`, `X-UMI-Finalized-Block`, and
+`X-UMI-Pilot-Bundle` and `X-UMI-Bootstrap-Bundle` to allowed origins.
+
+<a id="dashboard-api--deployment"></a>
+
+### Deployment
+
+Install the repository package and run the observer behind an HTTPS reverse proxy:
+
+```bash
+umi-observer \
+  --listen-host 127.0.0.1 \
+  --port 8092 \
+  --network finney \
+  --trusted-host api.umi.vision \
+  --bundle-feed-config /etc/umi/observer-bundle-feed.json \
+  --pilot-feed-config /etc/umi/observer-pilot-feed.json \
+  --bootstrap-service-feed-config /etc/umi/observer-bootstrap-service-feed.json
+```
+
+If the reverse proxy preserves an internal Host header, add that exact host with a
+second `--trusted-host`. Never use a wildcard. The process needs outbound read
+access to a Bittensor RPC endpoint. It needs no wallet files, hotkey, coldkey,
+signing service, transaction permissions, or Bittensor token-symbol disk cache.
+The observer skips the SDK token-symbol cache and places downloaded runtime
+metadata in a process-private temporary directory instead of the operator's normal
+Bittensor home cache. Operators may set `BITTENSOR_RUNTIME_CACHE_DIR` to an
+observer-owned directory when a persistent cache is preferred.
+
+Useful controls:
+
+```text
+--fresh-for-seconds 24
+--maximum-stale-seconds 120
+--refresh-interval-seconds 12
+--refresh-timeout-seconds 45
+--finalized-head-timeout-seconds 20
+--maximum-finalized-head-age-seconds 120
+--maximum-future-block-skew-seconds 30
+--log-level info
+```
+
+A collection failure leaves the last complete snapshot intact and marks it stale.
+A partial collection is never published. Once the maximum stale interval passes,
+data endpoints and `/readyz` return a bounded `503 snapshot_unavailable` response.
+Public request handlers only read the cache and never trigger an RPC call, miner
+probe, or artifact fetch. Safe structured refresh failures and the last successful
+block are written to the process log; raw exception text is not.
+
+<a id="dashboard-api--score-and-evidence-boundaries"></a>
+
+### Score and evidence boundaries
+
+Do not populate `umi_translation` from chain incentive, dividend, or emission
+values. Those values belong only in `chain_economics`. Do not ingest
+`umi-component-bundle/1` or `umi-shadow-rehearsal-bundle/2` as calibration
+evidence. A component bundle may appear only through the isolated `/pilots` feed
+described above; it remains an engineering result that expressly denies protocol
+conformance and activation evidence.
+
+The evidence reader verifies every content-addressed object, binds the
+bundle to its validator, window, policy, and finalized chain proofs, and quarantines
+it until its protocol-defined `audit_release_block`. Public counts, pagination,
+errors, ETags, and metrics must not reveal quarantined outcomes. Only then may the
+API expose translation scores, terminal window state, activation evidence, or
+incidents. The response schema also requires every released score or window to cite
+a `released_audit_bundle` source with the same artifact hash, and rejects a release
+block above the response's finalized-chain source.
+
+Window and incident results are capped at 256 entries per response and include a
+cursor-bound `page` object. A cursor binds the complete verified feed revision and
+feed kind. Adding a verified entry invalidates an older cursor with
+`409 cursor_snapshot_changed`; clients restart at the first page. Invalid offsets
+and cross-feed cursors fail with a bounded `422`. Solution results use the same
+cursor rules with a stricter 50-record page ceiling; the cursor binds the exact
+validator, window, and verified bundle manifest.

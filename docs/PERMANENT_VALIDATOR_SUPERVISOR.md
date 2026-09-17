@@ -1,4 +1,9 @@
+[Documentation](README.md) / Validator supervisor
+
 # Install the UMI validator supervisor
+
+[Install](#install) | [Check the service](#check-the-service) |
+[Automatic updates](#what-is-automatic) | [Troubleshooting](#troubleshooting)
 
 This is the one-time installation path for SN78 validators. Every validator uses
 the same command and signed release stream. There is no validator-specific
@@ -9,6 +14,10 @@ x86_64 or arm64. It requires Podman 4.3.0 or later with `crun`; the installer
 installs or verifies both. The host should have at least 8 CPU cores, 16 GiB RAM,
 and 100 GiB of local storage. A GPU is not required.
 
+On a Mac, provision a supported Linux VM and follow this guide inside it.
+There is no native Darwin validator-supervisor installation path. The retired
+Docker calibration guide is not the current validator setup.
+
 Ubuntu 22.04's distribution package is Podman 3.4.4, below this requirement.
 Use Ubuntu 24.04 or later, or Debian 12 or later. Installing a third-party Podman
 build on Ubuntu 22.04 is outside the supported installation path. Do not bypass
@@ -16,7 +25,7 @@ the Podman version check or install Ubuntu 24.04 packages into Ubuntu 22.04.
 See the official [Ubuntu 22.04 package](https://packages.ubuntu.com/jammy/podman)
 and [Ubuntu 24.04 package](https://packages.ubuntu.com/noble/podman) listings.
 
-The [registration bridge](REGISTRATION_BRIDGE.md) replaces the frozen-pilot
+The [registration bridge](operators/bridge.md) replaces the frozen-pilot
 worker with temporary live-miner weights grouped by coldkey, HTTPS IP or a
 recorded funder in the signed policy. It does not
 send translation requests. Miner operators should follow
@@ -29,7 +38,7 @@ expiry; installing source alone does not extend an old signed policy.
 
 Ordinary weight-writing validators do not need private evaluation videos or
 labels. Operators nominated for competition evaluation must separately follow
-the [private holdout setup](OPEN_COMPETITION_PRIVATE_HOLDOUT.md#private-storage-and-evaluator-setup).
+the [private holdout setup](operators/private-holdout.md#open-competition-private-holdout--private-storage-and-evaluator-setup).
 Never put the holdout in this checkout, a public release bundle, or a miner mount.
 
 This bridge's first rollout is to UMI's existing UID 0 and UID 54 installations,
@@ -43,10 +52,10 @@ installation proves that weights were submitted.
 
 ### Optional temporary funding audit
 
-Operators running the separate [registration-funding audit](REGISTRATION_FUNDING_AUDIT.md)
+Operators running the separate [registration-funding audit](operators/funding-audit.md#registration-funding-audit)
 need a Taostats API key. The deployed weight-writing validator does not require
 one. UMI runs one cached audit worker on the coordinator; validators do not each
-need to repeat the scan. The [funding-cap policy](REGISTRATION_BRIDGE_FUNDING_CAP.md)
+need to repeat the scan. The [funding-cap policy](operators/bridge.md)
 carries the reviewed funding snapshot and its report digest. The audit cannot
 change weights without a new signed policy and directive. New registration
 checks are automatic; publishing new funding bindings is still a separate step.
@@ -264,8 +273,42 @@ local policy permits the existing typed shadow and translation profile names,
 but the current worker implements bootstrap only. The open-competition
 successor needs new host-side input and durable-state contracts, a compatible
 worker and a consented host upgrade. An image update alone cannot perform that
-transition. See [successor upgrade requirements](SUCCESSOR_SUPERVISOR_UPGRADE.md).
+transition. See [successor upgrade requirements](validators/successor-upgrade.md#successor-supervisor-upgrade).
 Do not rerun the fresh-install script over an existing supervisor installation.
+
+## Troubleshooting
+
+A running supervisor and a present container do not prove that the worker is
+writing weights. Check the worker reason code and the finalized `LastUpdate`.
+Supervisor `durable_hold:false` applies only to the supervisor's own journal.
+
+| Observation | Meaning and next step |
+| --- | --- |
+| `prior_submission_outcome_unknown` | An earlier attempt has no confirmed successful receipt. The current bridge worker does not clear this automatically. Preserve its journal; do not reinstall, erase state or start another writer. |
+| `validator_not_registered` | The configured hotkey is not currently registered. Verify its public identity and registration; a service restart does not register it. |
+| `validator_permit_missing` | Registration alone is insufficient to write weights. Verify the current permit. |
+| `operator_input_bundle_invalid` | Signed input validation failed; this is separate from a missing permit. Do not edit the bundle or bypass checks. |
+| `common_host_artifact_binding_mismatch` | The host artifact does not match the installation binding. Follow the failed-install retry guidance above. |
+| Unit changed on disk | Run `sudo systemctl daemon-reload` to refresh systemd's unit definition. This does not restart the process, upgrade the release or clear a worker hold. |
+
+For an unknown submission, report only this bounded journal summary with your
+public hotkey. It reads no wallet. Keep the full journal private and unchanged.
+
+```sh
+sudo jq '{validator_hotkey, phase, last_observed_block, updated_at_unix_ms, attempt_id: .attempt.attempt_id, preflight_block: .attempt.preflight_block, prior_last_update: .attempt.prior_last_update, weight_call}' /var/lib/umi-validator-worker-state/registration-bridge-journal.json
+```
+
+The missing outcome may reflect a timeout, disconnect, interrupted process or
+submission failure. The reason code alone cannot identify which happened.
+The current bridge records an attempt before submission but not signed bytes,
+nonce and exact era. A matching row or elapsed time alone therefore cannot
+clear its hold. A returned finalized receipt follows a separate verification
+and recovery path. See [bridge diagnostics](operators/bridge.md#unknown-submissions).
+
+For routine signed container updates, leave the supervisor running. A Git pull,
+restart or rerun of the installer is not a host-upgrade procedure. Use the
+[state-preserving host upgrade](validators/successor-upgrade.md) when an explicitly
+announced transition requires one.
 
 ## Security boundary
 
@@ -285,11 +328,10 @@ use the isolated validator hotkey for transactions that the chain permits. An
 operator who no longer accepts that delegation must stop the service and rotate
 the hotkey if compromise is suspected.
 
-The registration-bridge policy pins its eligibility rule, required chain tuple,
-and sunset. The worker recomputes the live-miner row and renews it before the
-effective 360-block activity cutoff while submissions remain authorized. It
-does not extend the original bootstrap deadline. Invalid, expired, rolled-back,
-or incompatible directives fail closed.
+The registration-bridge policy pins eligibility, chain requirements and lifetime.
+The ongoing profile renews until replaced or stopped; historical finite policies
+retain their expiry. Freshness, submission and recovery checks still apply.
+Invalid, expired, rolled-back or incompatible directives fail closed.
 
 ## Public artifact layout
 

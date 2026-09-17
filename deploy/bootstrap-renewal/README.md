@@ -7,6 +7,6 @@ preserved manual seed history. The controller publishes sequence 4 as its first
 automatic renewal, then later renewals for the exact same pinned worker and frozen
 service row.
 
-Use [the operator runbook](../../docs/BOOTSTRAP_RENEWAL_OPERATOR.md). Do not point
+Use [the operator runbook](../../docs/reference/legacy.md#bootstrap-renewal-operator). Do not point
 the service at a branch checkout or start it before completing the adoption
 checks.
