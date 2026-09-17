@@ -1,6 +1,7 @@
 """Wallet-free feed routes, with synthetic signatures and real fixture replay."""
 
 import asyncio
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -355,6 +356,7 @@ def test_tampered_package_and_changed_execution_hold_delivery(feed_case, package
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="artifact delivery uses renameat2")
 async def test_existing_https_consumer_fetches_replayed_weight_package(feed_case, package_case):
     c = feed_case
     signed = _retain(c, package_case)

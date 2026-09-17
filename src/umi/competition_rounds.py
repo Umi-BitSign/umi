@@ -8,6 +8,7 @@ signing. Cutoff certificates alone do not authorize execution or weights.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import sqlite3
@@ -325,8 +326,11 @@ class RoundJournal:
         self.root, self.maximum_rounds, self.maximum_bytes = root, maximum_rounds, maximum_bytes
         _private(root)
         self.path = root / "rounds.sqlite3"
+        self.lock_path = root / "rounds.lock"
         self._check_files()
-        os.close(os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600))
+        for path in (self.path, self.lock_path):
+            os.close(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600))
+        self._check_files()
         with self.transaction() as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (body BLOB NOT NULL)")
             raw = canonical_json_bytes(binding)
@@ -413,8 +417,9 @@ class RoundJournal:
 
     def _check_files(self):
         _private(self.root)
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            p = Path(str(self.path) + suffix)
+        paths = [Path(str(self.path) + suffix) for suffix in ("", "-journal", "-wal", "-shm")]
+        paths.append(self.lock_path)
+        for p in paths:
             if p.is_symlink():
                 raise ValueError("round journal symlink")
             if p.exists():
@@ -425,6 +430,30 @@ class RoundJournal:
                     or (s.st_uid != os.getuid() or s.st_mode & 0o077)
                 ):
                     raise ValueError("round journal must be private and owned")
+
+    @contextmanager
+    def locked(self):
+        """Serialize compound operations without locking the SQLite file.
+
+        BSD ``flock`` interacts with SQLite's byte-range locks on macOS. The
+        private sibling file keeps the process mutex independent of SQLite's
+        transaction locks on every supported platform.
+        """
+        self._check_files()
+        descriptor = os.open(
+            self.lock_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._check_files()
+            opened = os.fstat(descriptor)
+            current = self.lock_path.stat()
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise ValueError("round journal lock identity changed")
+            yield
+        finally:
+            os.close(descriptor)
 
     @contextmanager
     def transaction(self):

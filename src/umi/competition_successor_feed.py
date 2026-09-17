@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fcntl
 import hashlib
-import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -121,16 +119,8 @@ class SuccessorPublicationFeed:
     def _locked(self):
         if digest(self.config) != self._config_digest:
             raise ValueError("successor feed configuration changed")
-        self.journal._check_files()
-        fd = os.open(self.journal.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.journal._check_files()
-            if os.fstat(fd).st_ino != self.journal.path.stat().st_ino:
-                raise ValueError("successor feed journal changed")
+        with self.journal.locked():
             yield
-        finally:
-            os.close(fd)
 
     def _initial(self):
         consent = self.config.plan.consent

@@ -9,9 +9,7 @@ wallets in the wallet-free round coordinator.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
-import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -437,17 +435,8 @@ class SuccessorRoundPublicationBuilder:
 
     @contextmanager
     def _locked(self):
-        # Lock the already-owned journal file rather than an unvalidated new path.
-        self.journal._check_files()
-        fd = os.open(self.journal.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.journal._check_files()
-            if os.fstat(fd).st_ino != self.journal.path.stat().st_ino:
-                raise ValueError("publication journal identity changed")
+        with self.journal.locked():
             yield
-        finally:
-            os.close(fd)
 
     def _load(self, prepared):
         prepared = _canonical(PreparedCompetitionPackage, prepared)
