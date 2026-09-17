@@ -104,7 +104,9 @@ class SuccessorPublicationWeightParameters(StrictProtocolModel):
 class SuccessorRoundPublicationPlan(StrictProtocolModel):
     """Fixed operator-selected policy, release and signing limits for a channel."""
 
-    schema_: Literal["umi-successor-round-publication-plan/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-successor-round-publication-plan/1", "umi-successor-round-publication-plan/2"
+    ] = Field(alias="schema")
     policy_sha256: Hex32
     supervisor: ValidatorSupervisorConfig
     consent: SuccessorSupervisorOperatorConsent
@@ -116,9 +118,27 @@ class SuccessorRoundPublicationPlan(StrictProtocolModel):
     valid_through_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
     maximum_lifetime_blocks: Annotated[int, Field(ge=4, le=100_000)]
     minimum_activation_headroom_blocks: Annotated[int, Field(ge=2, le=100_000)]
+    renewal_interval_blocks: Annotated[int, Field(ge=1, le=100_000)] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_single_use_plan(self, handler):
+        value = handler(self)
+        if self.renewal_interval_blocks is None:
+            value.pop("renewal_interval_blocks", None)
+        return value
 
     @model_validator(mode="after")
     def fixed_controls(self) -> Self:
+        interval = self.renewal_interval_blocks
+        if (self.schema_ == "umi-successor-round-publication-plan/2") != (interval is not None):
+            raise ValueError("renewal requires an explicit version 2 publication plan")
+        if interval is not None and (
+            interval < self.weights.required_weights_rate_limit
+            or interval
+            + max(self.weights.mortality_period, self.minimum_activation_headroom_blocks)
+            > self.maximum_lifetime_blocks
+        ):
+            raise ValueError("renewal interval lacks rate-limit or activation headroom")
         config, consent = self.supervisor, self.consent
         if (
             consent.source_config_sha256 != successor_source_config_sha256(config)
@@ -159,6 +179,22 @@ class SignedSuccessorRoundPublication(StrictProtocolModel):
     intent: SuccessorRoundPublicationIntent
     authorization: SignedCompetitionWeightAuthorization
     signed: SignedSuccessorSupervisorDirective
+
+
+def publication_round_advances(plan, previous, current):
+    """Accept a newer round, or an explicitly authorized same-package renewal."""
+    if previous is None or current.intent.round_sequence > previous.intent.round_sequence:
+        return True
+    interval = plan.renewal_interval_blocks
+    return (
+        interval is not None
+        and current.intent.round_sequence == previous.intent.round_sequence
+        and current.intent.package == previous.intent.package
+        and current.intent.authorization.signed_at_block
+        >= previous.intent.authorization.signed_at_block + interval
+        and current.intent.authorization.authorization_id
+        != previous.intent.authorization.authorization_id
+    )
 
 
 def _package_target(package, limits):
@@ -356,7 +392,7 @@ def verify_successor_round_publication(plan, publication, package=None):
 
 
 class SuccessorRoundPublicationBuilder:
-    """Durably sign one byte-stable update per round, without distributing it."""
+    """Retain byte-stable updates and explicitly enabled bounded renewals."""
 
     def __init__(
         self,
@@ -443,11 +479,10 @@ class SuccessorRoundPublicationBuilder:
         return verify_successor_round_publication(self.plan, publication, package)
 
     def history(self):
-        prior, sequence, version, last_round = (
+        prior, sequence, version = (
             self.plan.consent.predecessor_directive_sha256,
             self.plan.consent.predecessor_sequence,
             3,
-            0,
         )
         result = []
         for key in sorted(self.journal.keys("publication"), key=int):
@@ -460,14 +495,13 @@ class SuccessorRoundPublicationBuilder:
                 or item.intent.sequence != sequence + 1
                 or item.intent.predecessor_version != version
                 or item.intent.authorization.predecessor_directive_sha256 != prior
-                or item.intent.round_sequence <= last_round
+                or not publication_round_advances(self.plan, result[-1] if result else None, item)
             ):
                 raise ValueError("publication history is not one increasing predecessor chain")
-            prior, sequence, version, last_round = (
+            prior, sequence, version = (
                 item.signed.directive_sha256,
                 item.intent.sequence,
                 4,
-                item.intent.round_sequence,
             )
             result.append(item)
         return result
@@ -531,6 +565,7 @@ class SuccessorRoundPublicationBuilder:
         authorization_wallet,
         directive_wallets,
         current_gate=None,
+        renew=False,
     ):
         """Caller must supply its current owned head; never an API request's block."""
         with self._locked():
@@ -559,17 +594,30 @@ class SuccessorRoundPublicationBuilder:
                         raise ValueError("publication lost its original activation window")
 
             current()
-            for item in history:
+            if type(renew) is not bool or (renew and self.plan.renewal_interval_blocks is None):
+                raise ValueError("renewal requires an explicit version 2 publication plan")
+            previous_round = None
+            for item in reversed(history):
                 if item.intent.round_sequence == package.manifest.round_sequence:
                     self.journal.put(
                         "round", str(item.intent.round_sequence), package.package_sha256
                     )
                     verified = self._verify(item, package)
+                    if renew:
+                        previous_round = item
+                        break
                     # Offline history remains readable; the guarded publisher
                     # must not return it as a current activation after expiry.
                     current(item.authorization.authorization)
                     return verified
-            if history and package.manifest.round_sequence <= history[-1].intent.round_sequence:
+            if renew and (previous_round is None or previous_round != history[-1]):
+                raise ValueError("only the latest published round can be renewed")
+            if renew and finalized_block < (
+                previous_round.intent.authorization.signed_at_block
+                + self.plan.renewal_interval_blocks
+            ):
+                raise PublicationWindowUnavailable("publication renewal is not due")
+            if history and package.manifest.round_sequence < history[-1].intent.round_sequence:
                 raise ValueError("cannot publish an older round after a newer round")
             prior = history[-1] if history else None
             sequence = (
@@ -671,6 +719,8 @@ class SuccessorRoundPublicationBuilder:
                 signed=signed,
             )
             self._verify(publication, package)
+            if not publication_round_advances(self.plan, prior, publication):
+                raise ValueError("publication does not advance its round or renewal interval")
             current(intent.authorization)
             self.journal.put("publication", str(sequence), publication)
             return publication

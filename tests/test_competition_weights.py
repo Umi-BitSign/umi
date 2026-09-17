@@ -501,6 +501,75 @@ async def test_process_restart_retains_single_use_attempt_and_proofs(weight_case
     assert all(hashlib.sha256(raw).hexdigest() == identity for identity, raw in evidence)
 
 
+async def test_same_package_renewal_requires_fresh_authority_and_keeps_single_use(
+    weight_case, monkeypatch
+):
+    item = weight_case
+    first = await _run(item)
+    assert first.exact_row_currently_applied and len(item.encoded) == 1
+    renewed = item.body.model_copy(
+        update={
+            "authorization_id": "97" * 32,
+            "predecessor_directive_sha256": item.context.directive_sha256,
+            "signed_at_block": 180,
+            "valid_from_block": 180,
+        }
+    )
+    signed = sign_competition_weight_authorization(renewed, wallet("Ferdie"))
+    _advance(item, 180)
+    with pytest.raises(ValueError, match="rate limit"):
+        await _run(item, authorization=signed)
+    assert len(item.encoded) == 1
+
+    class RenewalRuntime(_SigningRuntime):
+        def signature_payload(self, call, **kwargs):
+            assert kwargs["era"] == {"period": 16, "current": 182}
+            assert kwargs["nonce"] == 5
+            assert kwargs["tip"] == 0 and kwargs["tip_asset_id"] is None
+            assert kwargs["era_block_hash"] == bytes.fromhex(_hash(182)[2:])
+            return hashlib.blake2b(call + b"renewal", digest_size=32).digest()
+
+        def encode_signed_extrinsic(self, call, **kwargs):
+            assert kwargs["signature_version"] == 1
+            assert kwargs["public_key"] == wallet("Eve").hotkey.public_key
+            assert len(kwargs["signature"]) == 64 and kwargs["nonce"] == 5
+            encoded = b"fixture-renewal-scale:" + call + kwargs["signature"]
+            return encoded, hashlib.blake2b(encoded, digest_size=32).digest()
+
+    class RenewalTransport(BittensorCompetitionWeightTransport):
+        def __init__(self):
+            pass
+
+        async def submit(self, encoded, signer):
+            with sqlite3.connect(item.worker.path) as db:
+                stored = [json.loads(row[0]) for row in db.execute("SELECT body FROM attempts")]
+            attempt = next(a for a in stored if a["authorization_id"] == renewed.authorization_id)
+            assert attempt["phase"] == "signed"
+            assert bytes.fromhex(attempt["signed_extrinsic"][2:]) == encoded
+            item.encoded.append(encoded)
+            _advance(item, 183, applied=True, nonce=6)
+            return SimpleNamespace(success=True)
+
+    monkeypatch.setattr("umi.validator_chain.bittensor_core.Runtime", RenewalRuntime)
+    item.transport = RenewalTransport()
+    _advance(item, 182)
+    second = await _run(item, authorization=signed)
+    assert second.exact_row_currently_applied and second.submitted_by_this_attempt
+    assert len(item.encoded) == 2 and item.encoded[0] != item.encoded[1]
+    old = item.worker
+    item.worker = CompetitionWeightWorker(
+        old.state_root,
+        package_limits=old.package_limits,
+        replay_worker=old.replay_worker,
+        maximum_attempts=old.maximum_attempts,
+        maximum_evidence_bytes=old.maximum_evidence_bytes,
+        submission_timeout_seconds=old.submission_timeout_seconds,
+    )
+    assert not (await _run(item, authorization=signed)).submitted_by_this_attempt
+    assert not (await _run(item)).submitted_by_this_attempt
+    assert len(item.encoded) == 2
+
+
 @pytest.mark.parametrize("corruption", ["attempt", "missing_evidence", "proof", "oversize"])
 async def test_corrupt_durable_state_never_retries(weight_case, corruption):
     item = weight_case

@@ -178,7 +178,19 @@ class AutomaticSuccessorPublisher:
                     raise ValueError("unfinished publication has lost its completed package")
                 return prepared
             newer = [number for number in rounds if number > last_round]
-            return rounds[max(newer)] if newer else None
+            if newer:
+                return rounds[max(newer)]
+            interval = builder.plan.renewal_interval_blocks
+            if (
+                signed
+                and interval is not None
+                and (block >= signed[-1].intent.authorization.signed_at_block + interval)
+            ):
+                prepared = rounds.get(last_round)
+                if prepared != self.source.prepared_for(signed[-1].intent.package):
+                    raise ValueError("renewal has lost its original completed package")
+                return prepared
+            return None
 
     async def tick(self):
         async with self._serial:
@@ -206,6 +218,9 @@ class AutomaticSuccessorPublisher:
                 prepared,
                 authorization_wallet=self.authorization_wallet,
                 directive_wallets=self.directive_wallets,
+                renew=bool(
+                    signed and prepared == self.source.prepared_for(signed[-1].intent.package)
+                ),
             )
             await self.feed.retain_async(publication, prepared)
             return self._status("published", publication.intent.round_sequence)

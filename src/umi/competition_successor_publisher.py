@@ -102,7 +102,7 @@ class CurrentSuccessorRoundPublisher:
             raise ValueError("publisher package differs from current retained source")
         self.replay.verify_publication_unchanged(result)
 
-    async def build(self, prepared, *, authorization_wallet, directive_wallets):
+    async def build(self, prepared, *, authorization_wallet, directive_wallets, renew=False):
         """Return a current signed round, with durable partial-signature recovery.
 
         Heavy replay runs off the event loop. Each signing boundary asks the
@@ -150,6 +150,7 @@ class CurrentSuccessorRoundPublisher:
                     authorization_wallet=authorization_wallet,
                     directive_wallets=directive_wallets,
                     current_gate=gate,
+                    renew=renew,
                 )
 
             task = asyncio.create_task(asyncio.to_thread(work))
