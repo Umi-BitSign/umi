@@ -1,8 +1,0 @@
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "umi-competition-clips-upload-local",
-  "compatibility_date": "2026-09-16",
-  "r2_buckets": [
-    { "binding": "CLIPS", "bucket_name": "umi-competition-clips", "remote": true }
-  ]
-}
