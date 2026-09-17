@@ -7,9 +7,16 @@ The successor mechanism has two tracks. Qualifying translation endpoints share
 model's contributor receives 30%. Until the first promotion, that 30% is burned.
 The imported baseline has no contributor award or founding-model exception.
 
-Competition rewards have not been activated. Until the signed transition is
-verified on chain, miners should follow the [current bridge instructions](CURRENT_MINER_OPERATION.md).
-A healthy endpoint or accepted submission is not proof of evaluation or payment.
+Public intake is live at `https://api.umi.vision`. The first roster is scheduled
+to close between blocks `9,135,843` and `9,135,903`; its evaluation closes at
+block `9,156,243`. A submission intended for this round must remain valid through
+at least `9,156,243`. The exact policy digest is
+`81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`.
+
+Competition rewards have not yet replaced the registration bridge. Until the
+signed transition is verified on chain, miners should keep following the
+[current bridge instructions](CURRENT_MINER_OPERATION.md) as well. A healthy
+endpoint or `accepted_no_weight` receipt proves neither evaluation nor payment.
 
 ## Endpoint miners
 
@@ -17,11 +24,12 @@ Run the [protocol miner with a working model](miners/model.md). The endpoint
 track supports a public HTTPS IP or a hotkey-signed hostname bound to its
 chain-announced IP. A keepalive alone cannot answer translation requests.
 
-Once public intake and the signed policy are announced, sign your submission
-with the registered hotkey. It binds your endpoint, model revision, policy and
-accepted terms. No seed phrase, coldkey or personal API key is submitted.
-See [submission commands](reference/commands.md#local-rehearsal-commands).
-The examples are not a live intake address.
+Sign your submission with the registered hotkey. It binds your endpoint, model
+revision, policy and accepted terms. No seed phrase, coldkey or personal API key
+is submitted. The live origin and complete procedure are in the
+[submission commands](reference/commands.md#live-first-round-intake). A valid
+receipt has status `accepted_no_weight`; keep it and keep the submitted model and
+endpoint unchanged and online through evaluation.
 
 ## Model contributors
 
