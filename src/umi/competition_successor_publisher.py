@@ -15,7 +15,8 @@ from pathlib import Path
 from .competition_chain import CompetitionChainConfig
 from .competition_execution import execution_boundary
 from .competition_package import PreparedCompetitionPackage
-from .open_competition import digest
+from .encoding import account_id32
+from .open_competition import RegistrationSnapshot, digest
 from .protocol import canonical_json_bytes
 
 
@@ -60,7 +61,7 @@ class CurrentSuccessorRoundPublisher:
             },
         )
 
-    async def _head(self):
+    async def _head(self, package=None):
         if digest(self.provider.config) != self._config_sha256:
             raise ValueError("publisher finalized provider configuration changed")
         capture = await asyncio.wait_for(self.provider.collect(), timeout=self._collection_timeout)
@@ -68,6 +69,21 @@ class CurrentSuccessorRoundPublisher:
         plan = self.builder.plan
         if not plan.valid_from_block <= head.block <= plan.valid_through_block:
             raise ValueError("publisher plan is not current")
+        if package is not None and plan.maximum_settlement_reuse_blocks is not None:
+            snapshot = RegistrationSnapshot.model_validate_json(
+                canonical_json_bytes(capture.snapshot)
+            )
+            if digest(snapshot) != head.snapshot_sha256:
+                raise ValueError("publisher recipient capture changed")
+            registrations = {
+                entry.uid: account_id32(entry.hotkey) for entry in snapshot.registrations
+            }
+            for entry in package.retained_settlement.projection.allocations:
+                if registrations.get(entry.uid) != account_id32(entry.hotkey):
+                    raise ValueError("settlement recipient registration changed")
+            burn = package.policy.unallocated_model_burn
+            if burn is not None and snapshot.burn_destination != burn:
+                raise ValueError("model burn destination changed before publication")
         return head
 
     def _source(self, package, result):
@@ -133,7 +149,7 @@ class CurrentSuccessorRoundPublisher:
                 def gate(package):
                     check_stopped()
                     self._source(package, result)
-                    pending = asyncio.run_coroutine_threadsafe(self._head(), loop)
+                    pending = asyncio.run_coroutine_threadsafe(self._head(package), loop)
                     try:
                         head = pending.result(timeout=self._collection_timeout + 1)
                     finally:

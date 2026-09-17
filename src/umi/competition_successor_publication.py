@@ -105,7 +105,9 @@ class SuccessorRoundPublicationPlan(StrictProtocolModel):
     """Fixed operator-selected policy, release and signing limits for a channel."""
 
     schema_: Literal[
-        "umi-successor-round-publication-plan/1", "umi-successor-round-publication-plan/2"
+        "umi-successor-round-publication-plan/1",
+        "umi-successor-round-publication-plan/2",
+        "umi-successor-round-publication-plan/3",
     ] = Field(alias="schema")
     policy_sha256: Hex32
     supervisor: ValidatorSupervisorConfig
@@ -119,19 +121,29 @@ class SuccessorRoundPublicationPlan(StrictProtocolModel):
     maximum_lifetime_blocks: Annotated[int, Field(ge=4, le=100_000)]
     minimum_activation_headroom_blocks: Annotated[int, Field(ge=2, le=100_000)]
     renewal_interval_blocks: Annotated[int, Field(ge=1, le=100_000)] | None = None
+    maximum_settlement_reuse_blocks: Annotated[int, Field(ge=1, le=1_000_000)] | None = None
 
     @model_serializer(mode="wrap")
     def preserve_single_use_plan(self, handler):
         value = handler(self)
         if self.renewal_interval_blocks is None:
             value.pop("renewal_interval_blocks", None)
+        if self.maximum_settlement_reuse_blocks is None:
+            value.pop("maximum_settlement_reuse_blocks", None)
         return value
 
     @model_validator(mode="after")
     def fixed_controls(self) -> Self:
         interval = self.renewal_interval_blocks
-        if (self.schema_ == "umi-successor-round-publication-plan/2") != (interval is not None):
-            raise ValueError("renewal requires an explicit version 2 publication plan")
+        if (self.schema_ != "umi-successor-round-publication-plan/1") != (interval is not None):
+            raise ValueError("renewal requires an explicit version 2 or 3 publication plan")
+        reuse = self.maximum_settlement_reuse_blocks
+        if (self.schema_ == "umi-successor-round-publication-plan/3") != (reuse is not None):
+            raise ValueError("settlement reuse requires an explicit version 3 publication plan")
+        if reuse is not None and reuse < max(
+            self.weights.mortality_period, self.minimum_activation_headroom_blocks
+        ):
+            raise ValueError("settlement reuse lacks activation headroom")
         if interval is not None and (
             interval < self.weights.required_weights_rate_limit
             or interval
@@ -238,11 +250,20 @@ def publication_valid_through(plan, package, block):
         raise PublicationWindowUnavailable(
             "publication is outside its policy or precedes settlement"
         )
+    # Snapshot freshness is checked when the settlement is produced and replayed.
+    # Version 3 permits bounded reuse of that immutable result, with fresh
+    # recipient checks at each publisher signing boundary and each chain write.
+    # Older plans retain their exact original snapshot-based expiry semantics.
+    reuse_limit = (
+        settlement.registration_snapshot.block + policy.maximum_snapshot_age_blocks
+        if plan.maximum_settlement_reuse_blocks is None
+        else settlement.observed_block + plan.maximum_settlement_reuse_blocks
+    )
     valid_through = min(
         plan.valid_through_block,
         policy.valid_through_block,
         package.settlement_certificate.publication.round.valid_through_block,
-        settlement.registration_snapshot.block + policy.maximum_snapshot_age_blocks,
+        reuse_limit,
         block + plan.maximum_lifetime_blocks,
     )
     if valid_through - block < max(
@@ -571,6 +592,8 @@ class SuccessorRoundPublicationBuilder:
         with self._locked():
             if digest(_canonical(SuccessorRoundPublicationPlan, self.plan)) != self._plan_digest:
                 raise ValueError("publication plan changed")
+            if self.plan.maximum_settlement_reuse_blocks is not None and current_gate is None:
+                raise ValueError("settlement reuse requires a current recipient gate")
             directive_wallets = tuple(directive_wallets)
             self._check_signers(authorization_wallet, directive_wallets)
             self.journal.observe(finalized_block)
@@ -595,7 +618,7 @@ class SuccessorRoundPublicationBuilder:
 
             current()
             if type(renew) is not bool or (renew and self.plan.renewal_interval_blocks is None):
-                raise ValueError("renewal requires an explicit version 2 publication plan")
+                raise ValueError("renewal requires an explicit version 2 or 3 publication plan")
             previous_round = None
             for item in reversed(history):
                 if item.intent.round_sequence == package.manifest.round_sequence:

@@ -495,6 +495,16 @@ Publish both the rational allocation and resulting raw row. Validators
 must recheck policy validity, registration and chain requirements before
 signing. Finalized consensus and incentive determine actual payouts.
 
+A completed round may support repeated weight updates during its published
+reward interval. A version 3 publication plan sets an explicit maximum age for
+reusing that settlement, measured from its original observation. Each renewal
+has fresh single-use transaction authority and remains bounded by the original
+round, policy and plan expiry. The publisher and weight worker check recipient
+UID/hotkey mappings and the burn destination against fresh finalized state.
+Unrelated registration changes do not invalidate an unchanged recipient set.
+Reusing scores never admits a miner into a closed roster or extends its signed
+evaluation deadlines; new submissions enter a subsequent announced round.
+
 A projected row is not a submitted or economically effective row.
 Observer status reports those states separately. The mechanism does not
 guarantee a particular amount of income.
