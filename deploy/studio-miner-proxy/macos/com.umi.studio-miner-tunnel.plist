@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.umi.studio-miner-tunnel</string>
+  <key>UserName</key><string>sam</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/cloudflared</string>
+    <string>tunnel</string><string>--no-autoupdate</string>
+    <string>--metrics</string><string>127.0.0.1:20247</string>
+    <string>--loglevel</string><string>warn</string>
+    <string>run</string><string>--max-active-flows</string><string>16</string>
+    <string>--token-file</string><string>/Users/sam/umi-miner-setup/cloudflare/tunnel-token</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sam/umi-miner-setup/cloudflare</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>Nice</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/sam/umi-miner-setup/cloudflare/boot-tunnel.stdout.log</string>
+  <key>StandardErrorPath</key><string>/Users/sam/umi-miner-setup/cloudflare/boot-tunnel.stderr.log</string>
+</dict></plist>

@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "studio-miner",
+  "account_id": "91287420c3cb985d6d726f4ddd730b18",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-09-17",
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [{
+    "pattern": "api.umi.vision/v1/competition/assignments/query*",
+    "zone_name": "umi.vision"
+  }],
+  "vpc_services": [
+    {
+      "binding": "MINER_ORIGIN",
+      "service_id": "01a0a172-c22f-7230-82f2-3bdb5f8c9e93"
+    },
+    {
+      "binding": "ASSIGNMENT_ORIGIN",
+      "service_id": "01a0ae0a-9ebc-7462-8ad7-14d7cfa55810"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false }
+  }
+}
