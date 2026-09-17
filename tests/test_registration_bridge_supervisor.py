@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-import umi.registration_bridge as registration_bridge
+import umi.bridge.policy as bridge_policy
 import umi.validator_supervisor_cli as supervisor_cli
 from tests.test_validator_supervisor import (
     _config as directive_config,
@@ -71,7 +71,7 @@ def _accept_only_the_fixture_policy_signature(
     tmp_path: Path,
 ):
     monkeypatch.setattr(
-        registration_bridge,
+        bridge_policy,
         "verify_response_signature",
         lambda _digest, **values: values.get("signature") == POLICY_SIGNATURE,
     )

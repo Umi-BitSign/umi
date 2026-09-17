@@ -73,7 +73,9 @@ def funding_report(obs, funders):
 @pytest.fixture
 def setup(monkeypatch):
     signer = dev_wallet("//RegistrationBridgeAuthority")
-    monkeypatch.setattr(bridge, "REGISTRATION_BRIDGE_COORDINATOR", signer.hotkey.ss58_address)
+    monkeypatch.setattr(
+        "umi.bridge.policy.REGISTRATION_BRIDGE_COORDINATOR", signer.hotkey.ss58_address
+    )
     obs = roster(
         [
             (6, 1006, "https://1.1.1.1:443"),

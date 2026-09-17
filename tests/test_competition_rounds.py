@@ -339,6 +339,7 @@ async def test_http_authentication_nonce_and_body_bounds(setup):
 
 def test_round_journal_capacity_and_private_state(tmp_path):
     journal = rounds.RoundJournal(tmp_path / "journal", {"policy": "test"}, maximum_rounds=1)
+    assert journal.lock_path.stat().st_mode & 0o777 == 0o600
     journal.put("intent", "1", {"a": 1})
     with pytest.raises(ValueError, match="record capacity"):
         journal.put("intent", "2", {"a": 2})
@@ -347,6 +348,22 @@ def test_round_journal_capacity_and_private_state(tmp_path):
     journal.path.chmod(0o644)
     with pytest.raises(ValueError, match="private and owned"):
         journal.get("intent", "1")
+
+
+def test_round_journal_compound_lock_is_separate_from_sqlite(tmp_path):
+    journal = rounds.RoundJournal(tmp_path / "journal", {"policy": "test"})
+    assert journal.lock_path != journal.path
+    with journal.locked():
+        journal.put("intent", "1", {"a": 1})
+        assert journal.get("intent", "1") == {"a": 1}
+
+
+def test_round_journal_rejects_replaced_lock_file(tmp_path):
+    journal = rounds.RoundJournal(tmp_path / "journal", {"policy": "test"})
+    journal.lock_path.unlink()
+    journal.lock_path.symlink_to(journal.path)
+    with pytest.raises(ValueError, match="symlink"), journal.locked():
+        pass
 
 
 @pytest.mark.asyncio

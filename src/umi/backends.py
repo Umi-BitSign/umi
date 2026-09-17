@@ -24,6 +24,7 @@ from .model_sidecar import (
     MODEL_RESPONSE_MAGIC,
     MODEL_RESPONSE_PREFIX_BYTES,
     validate_model_sidecar_capacity,
+    validate_private_socket_parent,
 )
 from .protocol import TranslationRequest, canonical_json_bytes, request_digest
 
@@ -320,7 +321,7 @@ def _validate_private_unix_socket(value: str) -> None:
     path = Path(value)
     if not path.is_absolute():
         raise ValueError("model socket path must be absolute")
-    _validate_private_socket_parent(path)
+    validate_private_socket_parent(path)
     try:
         metadata = path.lstat()
     except OSError as error:
@@ -329,14 +330,3 @@ def _validate_private_unix_socket(value: str) -> None:
         raise RuntimeError("model socket path must name a Unix socket directly")
     if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
         raise RuntimeError("model socket must be owned by this user with mode 0600")
-
-
-def _validate_private_socket_parent(path: Path) -> None:
-    try:
-        metadata = path.parent.lstat()
-    except OSError as error:
-        raise RuntimeError("model socket parent directory is unavailable") from error
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise RuntimeError("model socket parent must name a directory directly")
-    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
-        raise RuntimeError("model socket parent must be owned by this user with mode 0700")
