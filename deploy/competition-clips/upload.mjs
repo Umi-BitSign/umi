@@ -36,7 +36,7 @@ async function main() {
   assert.equal(manifest.schema, "umi-selected-clip-upload/1");
   const { not_before_unix: start, expires_unix: end } = manifest;
   assert(Number.isSafeInteger(start) && Number.isSafeInteger(end));
-  assert(start >= 1e9 && end < 1e10 && end > start && end - start <= 86400);
+  assert(start >= 1e9 && end < 1e10 && end > start && end - start <= 7 * 24 * 60 * 60);
   assert(end > Math.floor(Date.now() / 1000));
   assert(Array.isArray(manifest.videos) && manifest.videos.length >= 1 && manifest.videos.length <= 64);
   const seen = new Set();

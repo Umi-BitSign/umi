@@ -47,7 +47,13 @@ describe("private clip delivery", () => {
     expect((await worker.fetch(request(path.replace(String(now + 3600), String(now + 7200))), env)).status).toBe(404);
   });
 
-  it.each([[now - 100, now - 1], [now + 60, now + 3600], [now - 60, now + 86400], [now + 60, now - 60]])("rejects expired, premature or invalid windows %s %s", async (start, end) => {
+  it("serves a capability covering a multi-day evaluation window", async () => {
+    const pathname = `/v1/clips/${now - 60}/${now + 4 * 24 * 60 * 60}/${token}/${digest}.mp4`;
+    await upload(pathname);
+    expect((await worker.fetch(request(pathname), env)).status).toBe(200);
+  });
+
+  it.each([[now - 100, now - 1], [now + 60, now + 3600], [now - 60, now + 7 * 24 * 60 * 60], [now + 60, now - 60]])("rejects expired, premature or invalid windows %s %s", async (start, end) => {
     const pathname = `/v1/clips/${start}/${end}/${token}/${digest}.mp4`;
     await upload(pathname);
     expect((await worker.fetch(request(pathname), env)).status).toBe(404);
