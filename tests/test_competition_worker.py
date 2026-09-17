@@ -61,11 +61,13 @@ def _run(worker, case, policy, release_identity):
 
 def _record_cutoff_conflict(worker, case, policy, replay_limits):
     scenario = case.scenario
-    schedule = scenario.schedule.model_copy(update={"evidence_cutoff_block": 170})
+    alternate_snapshot = scenario.cutoff_publication.registration_snapshot.model_copy(
+        update={"block_hash": "0x" + "ff" * 32}
+    )
     publication = build_cutoff_publication(
         round_=scenario.round,
-        cutoff_schedule=schedule,
-        registration_snapshot=scenario.cutoff_publication.registration_snapshot,
+        cutoff_schedule=scenario.schedule,
+        registration_snapshot=alternate_snapshot,
         submissions=scenario.submissions,
         policy=policy,
         limits=replay_limits,

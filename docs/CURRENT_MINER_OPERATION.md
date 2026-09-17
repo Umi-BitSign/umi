@@ -67,10 +67,15 @@ See the [signed-policy specification and rollout evidence](operators/bridge.md).
 
 The [version 0.2 successor design](../whitepaper/README.md) adds self-service
 endpoint participation and an optional reproducible-model contribution track.
-Public intake for its first round is now live. It does not replace the bridge or
-activate competition weights by itself. The first roster closes between blocks
-`9,135,843` and `9,135,903`, and admitted submissions must remain valid through
-the evaluation close at block `9,156,243`.
+Public endpoint intake for its first round has been live since block `9,085,463`.
+It does not replace the bridge or activate competition weights by itself. A
+submission or replacement must be accepted on or after the opening block and by
+block `9,135,843` to guarantee first-round consideration. The coordinator may
+close the roster at any later
+poll through block `9,135,903`, so later acceptance is not guaranteed for round
+one. Admitted submissions must remain valid through the evaluation close at
+block `9,156,243`. The submitted hotkey must still be registered on SN78 in the
+finalized roster-close snapshot.
 
 Translation requests need the
 [protocol miner connected to a working model](miners/model.md#miner-model-integration).
@@ -79,12 +84,21 @@ A health-only keepalive cannot answer them. Use the exact live policy and
 saved `accepted_no_weight` receipt; it establishes admission only, not quality or
 earnings.
 
+Assignment delivery is not public yet. Do not run the placeholder feed examples
+as production configuration. UMI will publish the exact signed feed settings and
+a tested launch command before evaluation, with operating lead time. A
+coordinator, feed or evaluator infrastructure delay cannot count as miner
+failure.
+
 The open-competition endpoint path supports
 [hotkey-signed HTTPS hostnames as well as literal IPs](miners/model.md#miner-endpoint-hostnames).
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
-Before spending compute on a model contribution, read the
+Model-artifact intake and evaluation are not open for this first round because
+the exact canonical runtime and its immutable environment have not been
+published. The 30% model allocation remains burned and does not accrue for a
+later retroactive award. Before preparing a future model contribution, read the
 [provenance and rights checklist](contributors/models.md#model-contribution-review) and the approved
 [version 1 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS.md).
 The live policy binds their exact version and hash.

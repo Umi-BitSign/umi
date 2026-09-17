@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from ..competition_evidence import IndependentEvaluationEvidence
+from ..competition_launch import PublicLaunchIdentity
 from ..competition_settlement import EvidenceCutoffSchedule
 from ..competition_store import AttestedPromotionReview, CompetitionStore
 from ..open_competition import (
@@ -36,7 +37,20 @@ def open_store(args: argparse.Namespace, policy: CompetitionPolicy) -> Competiti
             limits=load_json(args.evaluator_review_limits, PublicationReplayLimits),
         )
     else:
-        store = CompetitionStore(Path(args.state).absolute(), policy)
+        public_launch = (
+            load_json(args.public_launch, PublicLaunchIdentity)
+            if getattr(args, "public_launch", None)
+            else None
+        )
+        checkpoint = getattr(args, "submission_head_checkpoint_directory", None)
+        store = CompetitionStore(
+            Path(args.state).absolute(),
+            policy,
+            public_launch=public_launch,
+            submission_head_checkpoint_directory=(
+                Path(checkpoint).absolute() if checkpoint is not None else None
+            ),
+        )
     return store
 
 

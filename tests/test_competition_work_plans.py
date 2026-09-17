@@ -50,7 +50,12 @@ def setup(policy, runtime, tmp_path, request):
             key=lambda s: digest(s.submission),
         )
     )
-    round_ = item.round.model_copy(update={"roster": tuple(digest(s.submission) for s in roster)})
+    round_ = item.round.model_copy(
+        update={
+            "eligible_tracks": tuple(sorted({s.submission.track for s in roster})),
+            "roster": tuple(digest(s.submission) for s in roster),
+        }
+    )
     snapshot = RegistrationSnapshot(
         network="finney",
         netuid=78,
@@ -70,7 +75,7 @@ def setup(policy, runtime, tmp_path, request):
             schema="umi-competition-evidence-cutoff/1",
             policy_sha256=digest(policy),
             round_sha256=digest(round_),
-            evidence_cutoff_block=round_.reveal_block + 5,
+            evidence_cutoff_block=round_.public_schedule.evidence_cutoff_block,
         ),
         limits=PublicationReplayLimits(
             maximum_roster_bytes=plans.MAX_BYTES,

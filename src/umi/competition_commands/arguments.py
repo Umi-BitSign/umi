@@ -167,6 +167,14 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         cmd = commands.add_parser(name)
         cmd.add_argument("--state", required=True)
+        cmd.add_argument(
+            "--public-launch",
+            help="canonical public launch identity JSON for a launch-bound intake store",
+        )
+        cmd.add_argument(
+            "--submission-head-checkpoint-directory",
+            help="external submission checkpoint directory required by a migrated intake store",
+        )
         if name in {
             "status",
             "initialize-baseline",

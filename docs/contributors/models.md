@@ -8,23 +8,33 @@
 
 ## Model contributions: prepare before spending compute
 
-Open-competition intake and rewards are not active yet. This checklist explains
-what to prepare for rights and reconstruction review. It is not a license grant,
-contribution agreement or approval of a particular model. The approved
+Public first-round endpoint intake is live; model-artifact intake, model
+evaluation and competition rewards are not. The exact canonical model runtime
+and its immutable, reconstructible environment have not been published. This
+checklist explains what to prepare for a future rights and reconstruction
+review. It is not a license grant or approval of a particular model. The approved
 [version 1 contribution terms](../MODEL_CONTRIBUTION_TERMS.md) publish the 70/30
 allocation and the accepted identifiers for review: `MIT`, `Apache-2.0`,
 `CC-BY-4.0` and `CC-BY-SA-4.0`. An identifier match still requires source-stack
 review and a qualifying promotion.
 
+The current endpoint-only intake is a no-weight intake. Version 1 says both
+tracks launch together. Before UMI can cut over to endpoint-only rewards while
+burning the 30% model share, it must adopt prospective terms that explicitly
+allow staged activation, bind those terms in a new signed policy, and obtain
+acceptance from every affected miner. Otherwise, UMI must open both tracks before
+activating rewards under version 1.
+
 <a id="model-contribution-review--what-must-be-published-before-intake-opens"></a>
 
-### What must be published before intake opens
+### Published launch inputs
 
-The signed launch policy must name the accepted model-license identifiers and
-bind the exact contribution terms by SHA-256. The terms, license list and Sam's
-review route are published. Supported evaluation resource limits and their
-signed policy bindings must also be published before intake opens. No date is
-committed until those inputs and the deployment checks are ready.
+The signed launch policy names the accepted model-license identifiers and binds
+the exact contribution terms by SHA-256. The current policy, endpoint cutoffs and
+public status are linked from the
+[launch configuration](../competition/launch.md). The model-artifact track will
+not open until UMI publishes its exact runtime, immutable environment, cutoffs
+and submission route. Sam's preliminary review route is published below.
 
 The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its
 weights and portable bundle. The separate
@@ -136,5 +146,18 @@ remove privacy, consent, access-agreement or commercial-use restrictions.
 
 Contributors seeking the 30% model track additionally need a preserved,
 reconstructible, rights-reviewed artifact that qualifies for promotion. Endpoint
-scores compete for the 70% service track. Both tracks launch together only after
-the [activation gates](../competition/launch.md) pass.
+scores compete for the 70% service track. The current live origin accepts
+endpoint submissions only. The
+[manifest preparation notes](../reference/commands.md#live-first-round-model-contribution)
+do not open model intake. A future model submission will register a signed
+manifest and provide its bytes from an immutable source through the restricted
+review route, where every declared file is rehashed before execution.
+
+Until that future opening and a qualifying promotion, the 30% share remains
+burned. It does not accrue for retroactive payment. If two new candidates are
+exactly tied for the highest qualifying result, neither is promoted in that
+round.
+
+Both tracks use the same signed policy. Rewards begin only after the
+[activation gates](../competition/launch.md) pass and the competition row is
+confirmed on chain.

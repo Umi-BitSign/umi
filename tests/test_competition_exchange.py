@@ -160,6 +160,17 @@ async def test_same_clients_advance_to_another_round_without_restart(relay):
         update={
             "sequence": 2,
             "suite_sha256": digest(suite),
+            "public_schedule": relay.job.round.public_schedule.model_copy(
+                update={
+                    "roster_close_earliest_block": 160,
+                    "roster_close_latest_block": 160,
+                    "work_signing_close_block": 170,
+                    "evaluation_close_block": 180,
+                    "protected_reference_reveal_block": 190,
+                    "evidence_cutoff_block": 195,
+                    "round_valid_through_block": 200,
+                }
+            ),
             "submission_close_block": 160,
             "evaluation_close_block": 180,
             "reveal_block": 190,
@@ -366,6 +377,17 @@ def test_suite_reuse_across_rounds_is_rejected(relay):
     round_ = relay.job.round.model_copy(
         update={
             "sequence": 2,
+            "public_schedule": relay.job.round.public_schedule.model_copy(
+                update={
+                    "roster_close_earliest_block": 160,
+                    "roster_close_latest_block": 160,
+                    "work_signing_close_block": 170,
+                    "evaluation_close_block": 180,
+                    "protected_reference_reveal_block": 190,
+                    "evidence_cutoff_block": 195,
+                    "round_valid_through_block": 200,
+                }
+            ),
             "submission_close_block": 160,
             "evaluation_close_block": 180,
             "reveal_block": 190,

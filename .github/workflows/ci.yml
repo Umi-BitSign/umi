@@ -95,6 +95,7 @@ jobs:
       - name: Check console entry points
         run: |
           .venv/bin/umi-competition --help
+          .venv/bin/umi-competition-store-migrate --help
           .venv/bin/umi-competition-worker --help
           .venv/bin/umi-competition-supervisor --help
           .venv/bin/umi-competition-supervisor-cleanup --help

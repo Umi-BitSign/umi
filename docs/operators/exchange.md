@@ -34,15 +34,49 @@ Use a private configuration with schema `umi-evaluator-exchange-config/1`:
   `<suite-digest>.json`. Keep these private even before publication.
 - `legacy_policy_sha256`: required when delivering endpoint orders; pass that
   same transport policy on the command line.
-- Optional `intake_directory`: the existing competition store. Admissions,
-  baseline initialization, cutoff scheduling, and round closure must already
-  exist there. The relay will not create them to make a result eligible.
+- Optional `intake_directory`, `public_launch`, and
+  `submission_head_checkpoint_directory`: supply all three to collect into the
+  existing competition store, or omit all three for relay-only operation. The
+  launch identity and external checkpoint must match the store exactly. Admissions, baseline
+  initialization, cutoff scheduling, and round closure must already exist
+  there. The relay will not create them to make a result eligible. For the
+  first public round, the three fields are:
+
+  ```json
+  {
+    "schema": "umi-evaluator-exchange-config/1",
+    "intake_directory": "/ABSOLUTE/PRIVATE/INTAKE",
+    "submission_head_checkpoint_directory": "/ABSOLUTE/PRIVATE/SUBMISSION-HEAD-CHECKPOINT",
+    "public_launch": {
+      "schema": "umi-competition-public-launch/1",
+      "round_schedule": {
+        "schema": "umi-public-round-schedule/1",
+        "intake_opened_block": 9085463,
+        "roster_close_earliest_block": 9135843,
+        "roster_close_latest_block": 9135903,
+        "work_signing_close_block": 9135963,
+        "evaluation_close_block": 9156243,
+        "protected_reference_reveal_block": 9156263,
+        "evidence_cutoff_block": 9156383,
+        "round_valid_through_block": 9156983
+      },
+      "eligible_tracks": ["endpoint"]
+    }
+  }
+  ```
+
+  Complete the
+  [writer-generation cutover](../reference/commands.md#owned-finality-intake-v2-cutover)
+  before enabling collection against a legacy store.
 - Optional `host` and `port`: loopback address and port, default `127.0.0.1:8100`.
 
 All configured directories must be separate, absolute, owned by the service
-user, and inaccessible to other users. Symlinks and hardlinked input files are
-rejected. Do not put wallets in this service's filesystem view. Transfer local
-input files atomically with mode `0600` and their directories with mode `0700`.
+user, and inaccessible to other users. The checkpoint path must be the same
+external directory used by intake and every other process opening that intake
+database, while remaining outside their state trees. Symlinks and hardlinked
+input files are rejected. Do not put wallets in this service's filesystem view.
+Transfer local input files atomically with mode `0600` and their directories
+with mode `0700`.
 
 ```sh
 umi-competition --policy /ABSOLUTE/POLICY.json serve-evaluator-exchange \

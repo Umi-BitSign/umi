@@ -17,6 +17,7 @@ from pydantic import Field, model_validator
 
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_evaluator import Directory, _read
+from .competition_launch import PublicLaunchIdentity
 from .competition_package import PreparedCompetitionPackage
 from .competition_store import CompetitionStore
 from .competition_successor_feed import SuccessorFeedConfig, SuccessorPublicationFeed
@@ -43,10 +44,12 @@ class AuthorityWallet(StrictProtocolModel):
 
 
 class SuccessorPublisherConfig(StrictProtocolModel):
-    schema_: Literal["umi-successor-publisher-config/1"] = Field(alias="schema")
+    schema_: Literal["umi-successor-publisher-config/2"] = Field(alias="schema")
     plan: SuccessorRoundPublicationPlan
+    public_launch: PublicLaunchIdentity
     chain: CompetitionChainConfig
     intake_directory: Directory
+    submission_head_checkpoint_directory: Directory
     publication_directory: Directory
     replay_directory: Directory
     replay_capacity: CompetitionWorkerCapacity
@@ -63,6 +66,7 @@ class SuccessorPublisherConfig(StrictProtocolModel):
             Path(value)
             for value in (
                 self.intake_directory,
+                self.submission_head_checkpoint_directory,
                 self.publication_directory,
                 self.replay_directory,
                 self.chain.state_directory,
@@ -89,6 +93,7 @@ async def _managed_publisher(config, policy, *, feed_config=None):
         destination = Path(feed_config.directory)
         for source in (
             config.intake_directory,
+            config.submission_head_checkpoint_directory,
             config.publication_directory,
             config.replay_directory,
             config.chain.state_directory,
@@ -108,7 +113,12 @@ async def _managed_publisher(config, policy, *, feed_config=None):
     intake = Path(config.intake_directory)
     if not (intake / "competition.sqlite3").is_file():
         raise ValueError("publisher requires the retained intake store")
-    store = CompetitionStore(intake, policy)
+    store = CompetitionStore(
+        intake,
+        policy,
+        public_launch=config.public_launch,
+        submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
+    )
     builder = SuccessorRoundPublicationBuilder(
         Path(config.publication_directory),
         config.plan,
@@ -158,6 +168,7 @@ async def follow_rounds(config, policy, follow_config, *, feed_config, once=Fals
         source = Path(source)
         for other in (
             config.intake_directory,
+            config.submission_head_checkpoint_directory,
             config.publication_directory,
             config.replay_directory,
             config.chain.state_directory,

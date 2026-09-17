@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_successor_publication as publication_module
+from umi.competition_launch import PublicRoundSchedule
 from umi.competition_package import prepare_competition_package
 from umi.competition_publication import build_cutoff_publication, build_settlement_publication
 from umi.competition_settlement import CompetitionSettlement, EvidenceCutoffSchedule
@@ -131,6 +132,17 @@ def next_package(package_case, policy, replay_limits, package_limits, release_id
     round_ = round_for(policy, suite, (endpoint,), previous.promotion["model_sha256"]).model_copy(
         update={
             "sequence": 2,
+            "public_schedule": PublicRoundSchedule(
+                schema="umi-public-round-schedule/1",
+                intake_opened_block=175,
+                roster_close_earliest_block=200,
+                roster_close_latest_block=200,
+                work_signing_close_block=210,
+                evaluation_close_block=220,
+                protected_reference_reveal_block=230,
+                evidence_cutoff_block=240,
+                round_valid_through_block=260,
+            ),
             "submission_close_block": 200,
             "evaluation_close_block": 220,
             "reveal_block": 230,

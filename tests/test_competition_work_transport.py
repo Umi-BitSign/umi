@@ -9,18 +9,23 @@ import pytest
 
 from umi import competition_rounds as rounds
 from umi import competition_work_transport as transport
+from umi.competition_artifacts import preserve_bundle
 from umi.competition_evaluator import SignedEvaluationOrder, _publish, _read
+from umi.competition_store import CompetitionStore
 from umi.competition_work_plans import RoundWorkAssets, RoundWorkConfig
 from umi.open_competition import digest, identity, sign_object
 from umi.policy import scoring_policy_hash
 from umi.protocol import canonical_json_bytes
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_chain import chain_config as chain_config
+from .test_competition_rounds import deployment_for
 from .test_competition_work_queue import policy as policy
 from .test_competition_work_queue import runtime as runtime
 from .test_competition_work_queue import setup as queue_fixture
 from .test_competition_work_queue import signing as signing
 from .test_competition_work_queue import work as work
+from .test_open_competition import snapshot
 
 queue_setup = queue_fixture
 
@@ -30,9 +35,27 @@ def setup(queue_setup, chain_config, tmp_path):
     item = queue_setup
     p = item.work.policy
     chain = chain_config.model_copy(update={"policy_sha256": digest(p)})
+    proposal = rounds.RoundProposal.model_validate_json(
+        canonical_json_bytes(
+            item.signers[0].cutoffs.get("intent", str(item.model.body.round.sequence))
+        )
+    )
+    r = proposal.cutoff.round
+    public_launch = deployment_for(r.public_schedule, r.eligible_tracks).launch_identity()
+    intake = tmp_path / "intake"
+    archive = tmp_path / "intake-archive"
+    preserve_bundle(item.work.plan.incumbent, tmp_path / "incumbent", archive, p)
+    store = CompetitionStore(intake, p)
+    store.initialize_baseline(item.work.plan.incumbent, archive)
+    admission_block = r.public_schedule.intake_opened_block
+    for signed in proposal.submissions:
+        store.admit(signed, snapshot(admission_block), admission_block)
+    checkpoint = tmp_path / "intake-checkpoint"
+    bind_submission_checkpoint(store, public_launch, checkpoint)
     config = rounds.RoundCoordinatorConfig(
-        schema="umi-round-coordinator-config/1",
+        schema="umi-round-coordinator-config/2",
         policy_sha256=digest(p),
+        public_launch=public_launch,
         chain=chain.model_copy(
             update={
                 "state_directory": str(tmp_path / "round-chain"),
@@ -40,7 +63,8 @@ def setup(queue_setup, chain_config, tmp_path):
             }
         ),
         state_directory=str(tmp_path / "round-state"),
-        intake_directory=str(tmp_path / "intake"),
+        intake_directory=str(intake),
+        submission_head_checkpoint_directory=str(checkpoint),
         plan_directory=str(tmp_path / "plans"),
         certificate_directory=str(tmp_path / "cutoffs"),
         replay_limits=rounds.PublicationReplayLimits(
@@ -70,22 +94,19 @@ def setup(queue_setup, chain_config, tmp_path):
         legacy=item.work.item.legacy_policy,
         transport_provider=item.signers[0].transport_provider,
     )
-    proposal = rounds.RoundProposal.model_validate_json(
-        canonical_json_bytes(
-            item.signers[0].cutoffs.get("intent", str(item.model.body.round.sequence))
-        )
-    )
-    r = proposal.cutoff.round
     private = rounds.RoundPlan(
-        schema="umi-round-plan/1",
+        schema="umi-round-plan/2",
         suite=item.work.item.suite,
-        not_before_block=r.submission_close_block,
-        admission_close_by_block=r.submission_close_block,
-        signing_close_block=proposal.signing_close_block,
-        evaluation_close_block=r.evaluation_close_block,
-        reveal_block=r.reveal_block,
-        evidence_cutoff_block=proposal.cutoff.cutoff_schedule.evidence_cutoff_block,
-        valid_through_block=r.valid_through_block,
+        public_schedule=r.public_schedule,
+        eligible_tracks=r.eligible_tracks,
+        intake_opened_block=r.public_schedule.intake_opened_block,
+        not_before_block=r.public_schedule.roster_close_earliest_block,
+        admission_close_by_block=r.public_schedule.roster_close_latest_block,
+        signing_close_block=r.public_schedule.work_signing_close_block,
+        evaluation_close_block=r.public_schedule.evaluation_close_block,
+        reveal_block=r.public_schedule.protected_reference_reveal_block,
+        evidence_cutoff_block=r.public_schedule.evidence_cutoff_block,
+        valid_through_block=r.public_schedule.round_valid_through_block,
     )
     suite_id = r.suite_sha256
     coordinator.journal.put("plan", suite_id, private)
@@ -241,11 +262,11 @@ def test_round_work_directories_and_transport_must_match(setup):
     raw = setup.config.model_dump(mode="json", by_alias=True)
     raw["work"]["asset_directory"] = raw["intake_directory"]
     with pytest.raises(ValueError, match="overlap"):
-        rounds.RoundCoordinatorConfig.model_validate(raw)
+        rounds.RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(raw))
     raw = setup.config.model_dump(mode="json", by_alias=True)
     raw["work"]["transport_chain"]["policy_sha256"] = "ff" * 32
     with pytest.raises(ValueError, match="matching transport"):
-        rounds.RoundCoordinatorConfig.model_validate(raw)
+        rounds.RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(raw))
 
 
 @pytest.mark.asyncio

@@ -220,6 +220,8 @@ async def test_old_v1_receipts_remain_unchanged_and_unverified(policy, tmp_path)
     del receipt["registration_snapshot"]
     original = canonical_json_bytes(receipt)
     with sqlite3.connect(store.path) as connection:
+        connection.create_function("umi_writer_generation", 0, lambda: 2)
+        connection.create_function("umi_submission_checkpoint_binding", 0, lambda: None)
         connection.execute("UPDATE submissions SET receipt=?", (original,))
     reopened = CompetitionStore(store.directory, policy)
     assert (

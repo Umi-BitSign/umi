@@ -44,6 +44,7 @@ from umi.policy import scoring_policy_hash
 from umi.protocol import canonical_json_bytes
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_authorization import build_authorization_fixture
 from .test_competition_dispatch import dispatch as dispatch
 from .test_competition_dispatch import dispatch_legacy_policy
@@ -51,7 +52,7 @@ from .test_competition_endpoint_execution import paired_setup as paired_setup
 from .test_competition_evaluator import completed, put
 from .test_competition_package import package_limits as package_limits
 from .test_competition_package import release_identity as release_identity
-from .test_competition_rounds import OwnedProvider
+from .test_competition_rounds import OwnedProvider, deployment_for
 from .test_competition_runner import runtime as runtime
 from .test_drand import ROUND, pulse_record
 from .test_open_competition import bundle_at, review_for, snapshot, wallet
@@ -204,11 +205,15 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
         )
 
     config = rounds.RoundCoordinatorConfig(
-        schema="umi-round-coordinator-config/1",
+        schema="umi-round-coordinator-config/2",
         policy_sha256=digest(item.policy),
+        public_launch=deployment_for(
+            item.round.public_schedule, item.round.eligible_tracks
+        ).launch_identity(),
         chain=chain("round-chain"),
         state_directory=str(tmp_path / "round-state"),
         intake_directory=str(tmp_path / "intake"),
+        submission_head_checkpoint_directory=str(tmp_path / "intake-checkpoint"),
         plan_directory=str(tmp_path / "plans"),
         certificate_directory=str(tmp_path / "cutoffs"),
         replay_limits=limits,
@@ -235,17 +240,25 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
         ),
     )
     store = seed_store(Path(config.intake_directory), item, setup.archive)
+    store = bind_submission_checkpoint(
+        store,
+        config.public_launch,
+        Path(config.submission_head_checkpoint_directory),
+    )
     r = item.round
     plan = rounds.RoundPlan(
-        schema="umi-round-plan/1",
+        schema="umi-round-plan/2",
         suite=item.suite,
-        not_before_block=r.submission_close_block,
-        admission_close_by_block=r.submission_close_block,
-        signing_close_block=r.submission_close_block + 1,
-        evaluation_close_block=r.evaluation_close_block,
-        reveal_block=r.reveal_block,
-        evidence_cutoff_block=r.reveal_block + 3,
-        valid_through_block=r.valid_through_block,
+        public_schedule=r.public_schedule,
+        eligible_tracks=r.eligible_tracks,
+        intake_opened_block=r.public_schedule.intake_opened_block,
+        not_before_block=r.public_schedule.roster_close_earliest_block,
+        admission_close_by_block=r.public_schedule.roster_close_latest_block,
+        signing_close_block=r.public_schedule.work_signing_close_block,
+        evaluation_close_block=r.public_schedule.evaluation_close_block,
+        reveal_block=r.public_schedule.protected_reference_reveal_block,
+        evidence_cutoff_block=r.public_schedule.evidence_cutoff_block,
+        valid_through_block=r.public_schedule.round_valid_through_block,
     )
     put(Path(config.plan_directory) / (digest(item.suite) + ".json"), plan)
     assets = ArchivedRoundWorkAssets(
@@ -273,11 +286,13 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
     exchange_config = ExchangeConfig(
         schema="umi-evaluator-exchange-config/1",
         policy_sha256=digest(item.policy),
+        public_launch=config.public_launch,
         chain=chain("exchange-chain"),
         state_directory=str(tmp_path / "exchange-state"),
         order_directory=config.work.order_directory,
         reveal_directory=str(tmp_path / "exchange-reveals"),
         intake_directory=config.intake_directory,
+        submission_head_checkpoint_directory=config.submission_head_checkpoint_directory,
         legacy_policy_sha256=scoring_policy_hash(item.legacy_policy),
     )
     put(Path(exchange_config.reveal_directory) / (digest(item.suite) + ".json"), item.suite)
@@ -629,6 +644,8 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
         expected_round=1001440,
     )
 
+    successor_intake_opened = item.round.public_schedule.round_valid_through_block + 1
+
     def next_fixture():
         return build_authorization_fixture(
             item.policy,
@@ -637,6 +654,9 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
             model_bundle=item.candidate,
             window_index=1,
             sequence=2,
+            intake_opened_block=successor_intake_opened,
+            submission_sequence=2,
+            submission_start_block=successor_intake_opened,
             single_evaluator=len(item.evaluator_wallets) == 1,
         )
 
@@ -649,28 +669,50 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
     issuance = next_item.finalized_blocks.blocks[next_item.request.issued_block]
     dispatch.feed.clock.ns = max(dispatch.feed.clock.ns, issuance.timestamp_ms * 1_000_000 + 1)
     assert next_item.policy == item.policy
-    # sr25519 re-signing may change signature bytes; the retained admission and
-    # its exact original signature remain in the store across both rounds.
-    assert tuple(s.submission for s in next_item.submissions) == tuple(
-        s.submission for s in item.submissions
-    )
+    assert {(s.submission.hotkey, s.submission.track) for s in next_item.submissions} == {
+        (s.submission.hotkey, s.submission.track) for s in item.submissions
+    }
+    assert {s.submission.sequence for s in next_item.submissions} == {2}
     assert next_item.round.submission_close_block > item.round.valid_through_block
+    assert (
+        next_item.round.public_schedule.intake_opened_block
+        > item.round.public_schedule.round_valid_through_block
+    )
     # Preserve the owned-source test object's old block history for replay.
     item.finalized_blocks.blocks.update(next_item.finalized_blocks.blocks)
     item.finalized_blocks.head = next_item.finalized_blocks.head
-    for field in ("request", "suite", "round", "cases", "schedule", "publication"):
+    for field in (
+        "request",
+        "suite",
+        "round",
+        "cases",
+        "schedule",
+        "publication",
+        "submissions",
+    ):
         setattr(item, field, getattr(next_item, field))
+    s.config = s.config.model_copy(
+        update={
+            "public_launch": deployment_for(
+                item.round.public_schedule,
+                item.round.eligible_tracks,
+            ).launch_identity()
+        }
+    )
 
     plan = s.plan.model_copy(
         update={
             "suite": item.suite,
-            "not_before_block": item.round.submission_close_block,
-            "admission_close_by_block": item.round.submission_close_block,
-            "signing_close_block": item.round.submission_close_block + 1,
-            "evaluation_close_block": item.round.evaluation_close_block,
-            "reveal_block": item.round.reveal_block,
-            "evidence_cutoff_block": item.round.reveal_block + 3,
-            "valid_through_block": item.round.valid_through_block,
+            "public_schedule": item.round.public_schedule,
+            "eligible_tracks": item.round.eligible_tracks,
+            "intake_opened_block": item.round.public_schedule.intake_opened_block,
+            "not_before_block": item.round.public_schedule.roster_close_earliest_block,
+            "admission_close_by_block": item.round.public_schedule.roster_close_latest_block,
+            "signing_close_block": item.round.public_schedule.work_signing_close_block,
+            "evaluation_close_block": item.round.public_schedule.evaluation_close_block,
+            "reveal_block": item.round.public_schedule.protected_reference_reveal_block,
+            "evidence_cutoff_block": item.round.public_schedule.evidence_cutoff_block,
+            "valid_through_block": item.round.public_schedule.round_valid_through_block,
         }
     )
     assets = ArchivedRoundWorkAssets(
@@ -694,6 +736,12 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
         legacy=item.legacy_policy,
         transport_provider=dispatch.provider,
     )
+    for signed in item.submissions:
+        s.coordinator.store.admit(
+            signed,
+            snapshot(successor_intake_opened),
+            successor_intake_opened,
+        )
     app = rounds.create_round_app(
         s.config,
         item.policy,
@@ -735,7 +783,8 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
     ]
     try:
         await s.coordinator.cycle()
-        proposal = next(p for p in s.coordinator.proposals() if p.cutoff.round.sequence == 2)
+        proposals = s.coordinator.proposals()
+        proposal = next(p for p in proposals if p.cutoff.round.sequence == 2)
         assert proposal.cutoff.round == item.round
         assert proposal.cutoff.round.incumbent_model_sha256 == digest(item.candidate)
         s.provider.block = item.request.issued_block

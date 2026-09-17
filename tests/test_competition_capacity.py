@@ -1,27 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
 
 from umi.competition_api import CompetitionApiLimits, create_app
+from umi.competition_artifacts import preserve_bundle
 from umi.competition_chain import RegistrationCapture
-from umi.competition_service import CompetitionServiceConfig, create_intake_app
+from umi.competition_service import (
+    CompetitionServiceConfig,
+    RetainedIntakeState,
+    create_intake_app,
+)
 from umi.competition_store import (
     AdmissionCapacity,
     AdmissionCapacityError,
     CompetitionStore,
 )
+from umi.competition_store_migration_cli import migrate
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_chain import chain_config as chain_config
+from .test_competition_service import public_deployment as public_deployment
+from .test_open_competition import bundle_at, snapshot, submission
 from .test_open_competition import policy as policy
-from .test_open_competition import snapshot, submission
 
 
 def capacity(records: int, payload_bytes: int = 10_000_000) -> AdmissionCapacity:
@@ -124,6 +133,7 @@ def test_restart_reconciles_utf8_payload_bytes_from_existing_rows(policy, tmp_pa
     store = CompetitionStore(tmp_path / "state", policy, admission_capacity=capacity(2))
     store.admit(submission(policy), snapshot(), 110)
     with sqlite3.connect(store.path) as connection:
+        connection.create_function("umi_writer_generation", 0, lambda: 2)
         expected = connection.execute(
             "SELECT COUNT(*), SUM(length(CAST(body AS BLOB)) + "
             "length(CAST(receipt AS BLOB))) FROM submissions"
@@ -191,7 +201,6 @@ async def test_http_capacity_failure_is_generic_and_does_not_block_exact_retry(p
         maximum_page_offset=10,
         maximum_page_size=10,
         capacity_wait_seconds=0.05,
-        maximum_http_connections=3,
         socket_backlog=4,
     )
     app = create_app(store, current, limits=limits)
@@ -252,7 +261,6 @@ async def test_read_saturation_is_bounded_without_starving_submission(
         maximum_page_offset=10,
         maximum_page_size=10,
         capacity_wait_seconds=0.05,
-        maximum_http_connections=3,
         socket_backlog=4,
     )
     async with httpx.AsyncClient(
@@ -271,6 +279,7 @@ async def test_read_saturation_is_bounded_without_starving_submission(
         assert (await first_read).status_code == 200
     assert saturated.status_code == 503
     assert saturated.json() == {"detail": "service busy; retry the same request later"}
+    assert saturated.headers["cache-control"] == "no-store"
     assert admitted.status_code == 200
 
 
@@ -302,7 +311,6 @@ async def test_cancelled_read_releases_its_capacity(policy, tmp_path, monkeypatc
         maximum_page_offset=10,
         maximum_page_size=10,
         capacity_wait_seconds=0.05,
-        maximum_http_connections=3,
         socket_backlog=4,
     )
     async with httpx.AsyncClient(
@@ -336,7 +344,7 @@ class BlockingProvider:
                 "block": snap.block,
                 "block_hash": snap.block_hash,
                 "state_root": "0x" + "22" * 32,
-                "timestamp_ms": 1_800_000_000_000,
+                "timestamp_ms": time.time_ns() // 1_000_000,
                 "snapshot_sha256": digest(snap),
                 "evidence_sha256": "33" * 32,
                 "metadata_sha256": "44" * 32,
@@ -362,8 +370,8 @@ class BlockingProvider:
         self.release.set()
 
 
-async def test_registration_collection_saturation_preserves_historical_retry(
-    policy, chain_config, tmp_path
+async def test_sustained_public_reads_cannot_starve_fresh_submission(
+    policy, chain_config, tmp_path, public_deployment
 ):
     limits = CompetitionApiLimits(
         maximum_concurrent_submissions=2,
@@ -373,25 +381,38 @@ async def test_registration_collection_saturation_preserves_historical_retry(
         maximum_page_offset=10,
         maximum_page_size=10,
         capacity_wait_seconds=0.05,
-        maximum_http_connections=5,
         socket_backlog=4,
     )
-    config = CompetitionServiceConfig(
-        schema="umi-competition-service-config/1",
-        mode="intake_no_weight",
-        policy_sha256=digest(policy),
-        state_directory=str(tmp_path / "intake"),
-        chain=chain_config,
-        admission_capacity=capacity(2),
-        api_limits=limits,
-    )
+    archive = tmp_path / "archive"
+    baseline = bundle_at(tmp_path / "baseline")
+    preserve_bundle(baseline, tmp_path / "baseline", archive, policy)
+    store = CompetitionStore(tmp_path / "intake", policy, admission_capacity=capacity(2))
+    store.initialize_baseline(baseline, archive)
     historical = submission(policy)
-    saved = CompetitionStore(tmp_path / "intake", policy, admission_capacity=capacity(2)).admit(
+    saved = store.admit(
         historical,
         snapshot(),
         110,
         registration_source="verifier_attested_finality",
     )
+    config = CompetitionServiceConfig(
+        schema="umi-competition-service-config/2",
+        mode="intake_no_weight",
+        policy_sha256=digest(policy),
+        public_deployment=public_deployment,
+        retained_state=RetainedIntakeState(
+            schema="umi-competition-retained-intake-state/1",
+            baseline_promotion_sha256=store.baseline_summary()["promotion_sha256"],
+            required_submission_sha256s=(digest(historical.submission),),
+        ),
+        state_directory=str(tmp_path / "intake"),
+        submission_head_checkpoint_directory=str(tmp_path / "intake-checkpoint"),
+        chain=chain_config,
+        admission_capacity=capacity(2),
+        api_limits=limits,
+    )
+    (tmp_path / "intake-checkpoint").mkdir(mode=0o700)
+    migrate(tmp_path / "intake", policy, confirmed=True, service_config=config)
     provider = BlockingProvider(config.chain, policy)
     app = create_intake_app(config, policy, provider_factory=lambda *_: provider)
 
@@ -402,45 +423,118 @@ async def test_registration_collection_saturation_preserves_historical_retry(
             base_url="https://intake.example",
         ) as client,
     ):
-        first = asyncio.create_task(client.get("/v1/competition/readiness"))
+        # The background collector owns the only provider call. A public read
+        # may await that initial refresh but does not initiate another one.
+        await asyncio.wait_for(provider.entered.wait(), timeout=1)
+        assert provider.calls == 1
+        provider.release.set()
+        assert (await client.get("/v1/competition/readiness")).status_code == 200
+        for _ in range(20):
+            if app.state.registration_snapshot_cache._inflight is None:
+                break
+            await asyncio.sleep(0)
+        assert app.state.registration_snapshot_cache._inflight is None
+
+        # A new admission starts the next fresh collection. While it is held,
+        # sustained status and readiness traffic is served from the verified
+        # bounded-age cache and cannot take collection capacity from the POST.
+        provider.entered.clear()
+        provider.release.clear()
+        fresh_submission = asyncio.create_task(
+            client.post(
+                "/v1/competition/submissions",
+                content=canonical_json_bytes(submission(policy, name="Bob")),
+                headers={"content-type": "application/json"},
+            )
+        )
         await asyncio.wait_for(provider.entered.wait(), timeout=1)
         retry = await client.post(
             "/v1/competition/submissions",
             content=canonical_json_bytes(historical),
             headers={"content-type": "application/json"},
         )
-        blocked_submission = await client.post(
-            "/v1/competition/submissions",
-            content=canonical_json_bytes(submission(policy, name="Bob")),
-            headers={"content-type": "application/json"},
-        )
-        blocked_readiness = await client.get("/v1/competition/readiness")
-        assert provider.calls == 1
+        for index in range(40):
+            route = "status" if index % 2 else "readiness"
+            assert (await client.get(f"/v1/competition/{route}")).status_code == 200
+        assert provider.calls == 2
+        assert not fresh_submission.done()
         provider.release.set()
-        assert (await first).status_code == 200
+        accepted = await asyncio.wait_for(fresh_submission, timeout=1)
     assert retry.status_code == 200
     assert retry.json() == saved
-    assert blocked_submission.status_code == 503
-    assert blocked_readiness.status_code == 503
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "accepted_no_weight"
     assert provider.closed
+
+
+async def test_idle_loopback_connections_cannot_consume_submission_capacity(policy, tmp_path):
+    """The loopback listener leaves request isolation to the route semaphores.
+
+    A single global Uvicorn connection ceiling would let idle proxy connections
+    reject a POST before the ASGI submission reservation can run.
+    """
+
+    import uvicorn
+
+    store = CompetitionStore(tmp_path / "state", policy)
+
+    async def current():
+        return snapshot()
+
+    app = create_app(store, current)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    listener.setblocking(False)
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            log_level="critical",
+            lifespan="on",
+            timeout_graceful_shutdown=2,
+        )
+    )
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    idle = []
+    try:
+        for _ in range(100):
+            if server.started:
+                break
+            await asyncio.sleep(0.01)
+        assert server.started
+        idle = [await asyncio.open_connection("127.0.0.1", port) for _ in range(80)]
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+            response = await client.post(
+                "/v1/competition/submissions",
+                content=canonical_json_bytes(submission(policy)),
+                headers={"content-type": "application/json"},
+            )
+        assert response.status_code == 200
+        assert response.json()["status"] == "accepted_no_weight"
+    finally:
+        for _reader, writer in idle:
+            writer.close()
+        await asyncio.gather(
+            *(writer.wait_closed() for _reader, writer in idle), return_exceptions=True
+        )
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=5)
+        listener.close()
 
 
 @pytest.mark.parametrize(
     "change",
     [
         {"maximum_concurrent_reads": 0},
+        {"maximum_concurrent_registration_collections": 2},
         {"maximum_page_offset": 1_000_001},
         {"maximum_page_size": 101},
         {"maximum_http_connections": 2},
-        {
-            "maximum_concurrent_submissions": 2,
-            "maximum_concurrent_reads": 2,
-            "maximum_concurrent_readiness": 2,
-            "maximum_http_connections": 5,
-        },
     ],
 )
-def test_api_limits_reject_invalid_or_underprovisioned_values(change):
+def test_api_limits_reject_invalid_values(change):
     with pytest.raises(ValueError):
         CompetitionApiLimits(**change)
 
@@ -459,7 +553,6 @@ async def test_public_pagination_is_bounded(policy, tmp_path):
         maximum_page_offset=3,
         maximum_page_size=2,
         capacity_wait_seconds=0.05,
-        maximum_http_connections=3,
         socket_backlog=4,
     )
     async with httpx.AsyncClient(

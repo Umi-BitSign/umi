@@ -18,6 +18,7 @@ from umi.competition_evidence import (
     sign_evaluator_run,
     verify_evaluator_run,
 )
+from umi.competition_launch import PublicRoundSchedule
 from umi.open_competition import (
     AttestedResult,
     CaseOutput,
@@ -123,12 +124,24 @@ def evaluation_round(
     signed: SignedSubmission,
 ) -> EvaluationRound:
     return EvaluationRound(
-        schema="umi-competition-round/1",
+        schema="umi-competition-round/2",
         policy_sha256=digest(policy),
         sequence=9,
         suite_sha256=digest(suite),
         incumbent_model_sha256="b2" * 32,
         runtime_sha256=policy.evaluation_runtime_sha256,
+        public_schedule=PublicRoundSchedule(
+            schema="umi-public-round-schedule/1",
+            intake_opened_block=policy.valid_from_block,
+            roster_close_earliest_block=120,
+            roster_close_latest_block=125,
+            work_signing_close_block=130,
+            evaluation_close_block=140,
+            protected_reference_reveal_block=150,
+            evidence_cutoff_block=160,
+            round_valid_through_block=200,
+        ),
+        eligible_tracks=("endpoint",),
         roster=(digest(signed.submission),),
         submission_close_block=120,
         evaluation_close_block=140,

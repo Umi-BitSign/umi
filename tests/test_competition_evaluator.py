@@ -216,6 +216,17 @@ async def test_two_workers_execute_agree_sign_and_continue_into_later_round(setu
     next_round = setup.job.round.model_copy(
         update={
             "sequence": 2,
+            "public_schedule": setup.job.round.public_schedule.model_copy(
+                update={
+                    "roster_close_earliest_block": 160,
+                    "roster_close_latest_block": 165,
+                    "work_signing_close_block": 170,
+                    "evaluation_close_block": 180,
+                    "protected_reference_reveal_block": 190,
+                    "evidence_cutoff_block": 195,
+                    "round_valid_through_block": 200,
+                }
+            ),
             "submission_close_block": 160,
             "evaluation_close_block": 180,
             "reveal_block": 190,

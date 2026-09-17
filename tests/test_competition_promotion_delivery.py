@@ -109,7 +109,7 @@ async def test_elapsed_owned_window_cannot_promote(setup):
     class Advancing(OwnedProvider):
         async def collect(self):
             result = await super().collect()
-            self.block += 5
+            self.block += 10
             return result
 
     s = setup
@@ -121,7 +121,7 @@ async def test_elapsed_owned_window_cannot_promote(setup):
 @pytest.mark.asyncio
 async def test_first_delivery_after_cutoff_cannot_backdate(setup):
     with pytest.raises(ValueError, match="outside its evidence window"):
-        await apply(setup, OwnedProvider(156))
+        await apply(setup, OwnedProvider(161))
 
 
 @pytest.mark.asyncio

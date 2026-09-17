@@ -101,14 +101,13 @@ class CutoffPublication(StrictProtocolModel):
             or self.cutoff_schedule.round_sha256 != self.round_sha256
         ):
             raise ValueError("cutoff publication schedule binding mismatch")
-        if not (
-            self.round.reveal_block
-            <= self.cutoff_schedule.evidence_cutoff_block
-            <= self.round.valid_through_block
+        if (
+            self.cutoff_schedule.evidence_cutoff_block
+            != self.round.public_schedule.evidence_cutoff_block
         ):
             raise ValueError("cutoff publication schedule interval is invalid")
-        if self.registration_snapshot.block > self.round.submission_close_block:
-            raise ValueError("cutoff registration snapshot is from the future")
+        if self.registration_snapshot.block != self.round.submission_close_block:
+            raise ValueError("cutoff registration snapshot differs from the round close")
         return self
 
 
@@ -454,7 +453,8 @@ def _validate_cutoff_material(
         raise ValueError("cutoff publication policy, round or runtime mismatch")
     if not (
         policy.valid_from_block
-        <= round_.submission_close_block
+        <= round_.public_schedule.intake_opened_block
+        < round_.submission_close_block
         < round_.evaluation_close_block
         < round_.reveal_block
         <= cutoff_schedule.evidence_cutoff_block
@@ -463,9 +463,10 @@ def _validate_cutoff_material(
     ):
         raise ValueError("cutoff publication interval is outside policy")
     if not (
-        policy.valid_from_block <= registration_snapshot.block <= round_.submission_close_block
+        registration_snapshot.block == round_.submission_close_block
+        and cutoff_schedule.evidence_cutoff_block == round_.public_schedule.evidence_cutoff_block
     ):
-        raise ValueError("cutoff registration snapshot interval is invalid")
+        raise ValueError("cutoff snapshot or evidence schedule differs from the round")
     normalized, _ = _canonical_submissions(
         submissions,
         maximum_bytes=limits.maximum_roster_bytes,
@@ -476,6 +477,8 @@ def _validate_cutoff_material(
     slots: set[tuple[str, str]] = set()
     for signed in normalized:
         submission = signed.submission
+        if submission.track not in round_.eligible_tracks:
+            raise ValueError("cutoff publication includes an ineligible submission track")
         slot = (identity(submission.hotkey), submission.track)
         if slot in slots:
             raise ValueError("cutoff publication has duplicate hotkey and track")

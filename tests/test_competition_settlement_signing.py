@@ -80,7 +80,7 @@ def setup(policy, replay_limits, tmp_path, monkeypatch):
         schema="umi-round-proposal/1",
         cutoff=cutoff,
         submissions=s.submissions,
-        signing_close_block=125,
+        signing_close_block=s.round.public_schedule.work_signing_close_block,
     )
     s.signers = []
     s.local_checks = []
@@ -197,6 +197,7 @@ async def test_rechecks_after_owned_historical_proof(setup, damage):
             if damage == "unowned":
                 return replace(capture, provenance={})
             with sqlite3.connect(s.store.path) as db:
+                db.create_function("umi_writer_generation", 0, lambda: 2)
                 db.execute("INSERT INTO round_conflicts VALUES (?,?)", (digest(s.round), 160))
             return capture
 
@@ -353,6 +354,7 @@ def test_submitter_group_alias_is_also_excluded(setup):
 def test_local_review_head_corruption_is_rejected(setup, damage):
     s = setup
     with sqlite3.connect(s.store.path) as db:
+        db.create_function("umi_writer_generation", 0, lambda: 2)
         if damage == "size":
             db.execute("UPDATE promotions SET body=zeroblob(1100000) WHERE sequence=1")
         elif damage == "digest":

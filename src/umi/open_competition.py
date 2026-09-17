@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from pydantic import AfterValidator, Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_launch import PublicRoundSchedule
 from .competition_scoring import score_single_reference
 from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
@@ -440,12 +441,14 @@ def validate_suite_profile(suite: EvaluationSuite, policy: CompetitionPolicy) ->
 
 
 class EvaluationRound(StrictProtocolModel):
-    schema_: Literal["umi-competition-round/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-round/2"] = Field(alias="schema")
     policy_sha256: Hex32
     sequence: Annotated[int, Field(ge=1, le=2**32 - 1)]
     suite_sha256: Hex32
     incumbent_model_sha256: Hex32
     runtime_sha256: Hex32
+    public_schedule: PublicRoundSchedule
+    eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)]
     roster: Annotated[tuple[Hex32, ...], Field(min_length=1, max_length=512)]
     submission_close_block: Block
     evaluation_close_block: Block
@@ -454,13 +457,18 @@ class EvaluationRound(StrictProtocolModel):
 
     @model_validator(mode="after")
     def validate_round(self) -> Self:
+        schedule = self.public_schedule
         if not (
-            self.submission_close_block
-            < self.evaluation_close_block
-            < self.reveal_block
-            <= self.valid_through_block
+            schedule.roster_close_earliest_block
+            <= self.submission_close_block
+            <= schedule.roster_close_latest_block
+            and self.evaluation_close_block == schedule.evaluation_close_block
+            and self.reveal_block == schedule.protected_reference_reveal_block
+            and self.valid_through_block == schedule.round_valid_through_block
         ):
-            raise ValueError("round deadlines are not ordered")
+            raise ValueError("round deadlines differ from the committed public schedule")
+        if tuple(sorted(set(self.eligible_tracks))) != self.eligible_tracks:
+            raise ValueError("eligible tracks must be sorted and unique")
         if list(self.roster) != sorted(set(self.roster)):
             raise ValueError("round roster must be sorted and unique")
         return self
