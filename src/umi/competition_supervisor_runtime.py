@@ -50,6 +50,7 @@ from .competition_worker import (
     _verify_sqlite_family,
 )
 from .encoding import account_id32
+from .file_identity import delivery_file_identity as _startup_identity
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator_supervisor import ValidatorSupervisorConfig
 
@@ -89,20 +90,6 @@ class SuccessorStartupLease:
         # must still work if another startup check has just detected corruption.
         _validate_startup_lease_token(self)
         self._state.preserve = True
-
-
-def _startup_identity(info):
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_uid,
-        info.st_gid,
-        info.st_mode,
-        info.st_nlink,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
 
 
 def _startup_binding(lease):

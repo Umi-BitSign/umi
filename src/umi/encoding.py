@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable
+from datetime import datetime, timezone
 
 _HEX_32_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -107,3 +108,11 @@ __all__ = [
     "u32be",
     "u64be",
 ]
+
+
+def datetime_to_unix_ms(value: datetime) -> int:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise TypeError("now must be a timezone-aware datetime")
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = value.astimezone(timezone.utc) - epoch
+    return delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000

@@ -58,6 +58,7 @@ from .chain_evidence import (
 )
 from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
+from .encoding import datetime_to_unix_ms as _datetime_ms
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .observer_pilot_feed import (
     MAX_PILOT_FEED_BYTES,
@@ -3309,14 +3310,6 @@ def _partial_submission_receipt(
         terminal_verification_complete=False,
         created_at=datetime.now(timezone.utc),
     )
-
-
-def _datetime_ms(value: datetime) -> int:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise TypeError("now must be a timezone-aware datetime")
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    delta = value.astimezone(timezone.utc) - epoch
-    return delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000
 
 
 def _verify_historical_signed_manifest(signed: SignedBootstrapEligibilityManifest) -> None:

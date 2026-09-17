@@ -55,6 +55,7 @@ from .competition_weights import (
 )
 from .competition_worker import CompetitionWorkerCapacity
 from .encoding import account_id32
+from .file_identity import file_fingerprint as _fingerprint
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator_supervisor import (
     MAX_JSON_SAFE_INTEGER,
@@ -1812,20 +1813,6 @@ def _canonical_absolute_path(path: Path, label: str) -> Path:
     if not path.is_absolute() or path != Path(os.path.normpath(path)) or "\x00" in str(path):
         raise HostActivationError(f"{label} path must be canonical and absolute")
     return path
-
-
-def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_uid,
-        info.st_gid,
-        info.st_nlink,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
 
 
 def _tree_snapshot_sha256(snapshot: tuple[tuple[str, tuple[int, ...]], ...]) -> str:

@@ -44,7 +44,9 @@ def policy_body(*, coordinator_hotkey, revision=REVISION, valid_from_block=BLOCK
 @pytest.fixture
 def signed_policy(monkeypatch):
     wallet = dev_wallet("//RegistrationBridgeAuthority")
-    monkeypatch.setattr(bridge, "REGISTRATION_BRIDGE_COORDINATOR", wallet.hotkey.ss58_address)
+    monkeypatch.setattr(
+        "umi.bridge.policy.REGISTRATION_BRIDGE_COORDINATOR", wallet.hotkey.ss58_address
+    )
     return bridge.sign_registration_bridge_policy(
         policy_body(coordinator_hotkey=wallet.hotkey.ss58_address), wallet=wallet
     )

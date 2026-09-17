@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
-import csv
 import hashlib
 import io
 import json
@@ -34,20 +32,16 @@ import sys
 import tempfile
 import time
 import zipfile
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
-from pydantic import Field, ValidationError, model_validator
-from typing_extensions import Self
+from pydantic import ValidationError
 
 try:
     import tomllib
@@ -98,19 +92,13 @@ from .policy import (
     FinalityVerifierPin,
     LiveChainObservationPin,
     MediaRuntimePin,
-    PolicyClock,
     PolicyImplementationPins,
-    PolicyLimits,
-    PolicyThresholds,
-    PublisherControlGroup,
-    PublisherRegistryEntry,
     ScoringPolicy,
     StorageProofVerifierPin,
-    ValidatorRegistryEntry,
     activation_equivalence_digest,
     scoring_policy_hash,
 )
-from .protocol import PROTOCOL_VERSION, BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
+from .protocol import PROTOCOL_VERSION, canonical_json_bytes
 from .release_chain_evidence import (
     RELEASE_OBSERVATION_EVIDENCE_PROFILE,
     RUNTIME_METADATA_AUTHENTICATION,
@@ -118,6 +106,377 @@ from .release_chain_evidence import (
     ReleaseChainEvidenceError,
     collect_release_observation_evidence,
     replay_release_observation_evidence,
+)
+from .releases.layout import (
+    _CONFORMANCE_REPORT_PATH as _CONFORMANCE_REPORT_PATH,
+)
+from .releases.layout import (
+    _DARWIN_ARM64_CPU_TYPE as _DARWIN_ARM64_CPU_TYPE,
+)
+from .releases.layout import (
+    _DARWIN_ARM64_MACHO_MAGIC as _DARWIN_ARM64_MACHO_MAGIC,
+)
+from .releases.layout import (
+    _EXECUTABLE_ARTIFACT_LABELS as _EXECUTABLE_ARTIFACT_LABELS,
+)
+from .releases.layout import (
+    _FINAL_MANIFEST_DOMAIN as _FINAL_MANIFEST_DOMAIN,
+)
+from .releases.layout import (
+    _FINALITY_SOURCE_DOMAIN as _FINALITY_SOURCE_DOMAIN,
+)
+from .releases.layout import (
+    _FORBIDDEN_OUTPUT_KEYS as _FORBIDDEN_OUTPUT_KEYS,
+)
+from .releases.layout import (
+    _GIT_REVISION_RE as _GIT_REVISION_RE,
+)
+from .releases.layout import (
+    _MACHO_EXECUTE_FILE_TYPE as _MACHO_EXECUTE_FILE_TYPE,
+)
+from .releases.layout import (
+    _MINER_FINALITY_BINARY_LABEL_PREFIX as _MINER_FINALITY_BINARY_LABEL_PREFIX,
+)
+from .releases.layout import (
+    _MINER_FINALITY_LICENSE_LABEL_PREFIX as _MINER_FINALITY_LICENSE_LABEL_PREFIX,
+)
+from .releases.layout import (
+    _MINER_FINALITY_REPORT_LABEL_PREFIX as _MINER_FINALITY_REPORT_LABEL_PREFIX,
+)
+from .releases.layout import (
+    _PACKAGED_ARTIFACT_FILENAMES as _PACKAGED_ARTIFACT_FILENAMES,
+)
+from .releases.layout import (
+    _PINNED_FFMPEG_SOURCE_SHA256 as _PINNED_FFMPEG_SOURCE_SHA256,
+)
+from .releases.layout import (
+    _PINNED_UV_ARCHIVE_SHA256_BY_TARGET as _PINNED_UV_ARCHIVE_SHA256_BY_TARGET,
+)
+from .releases.layout import (
+    _PINNED_UV_BINARY_SHA256_BY_TARGET as _PINNED_UV_BINARY_SHA256_BY_TARGET,
+)
+from .releases.layout import (
+    _PINNED_UV_LICENSE_SHA256 as _PINNED_UV_LICENSE_SHA256,
+)
+from .releases.layout import (
+    _PINNED_UV_SOURCE_ARCHIVE_SHA256 as _PINNED_UV_SOURCE_ARCHIVE_SHA256,
+)
+from .releases.layout import (
+    _PROOF_SOURCE_DOMAIN as _PROOF_SOURCE_DOMAIN,
+)
+from .releases.layout import (
+    _PYPI_REGISTRY as _PYPI_REGISTRY,
+)
+from .releases.layout import (
+    _REHEARSAL_PLACEHOLDER_LABELS as _REHEARSAL_PLACEHOLDER_LABELS,
+)
+from .releases.layout import (
+    _REHEARSAL_PLACEHOLDERS as _REHEARSAL_PLACEHOLDERS,
+)
+from .releases.layout import (
+    _RELEASE_INTENT_DOMAIN as _RELEASE_INTENT_DOMAIN,
+)
+from .releases.layout import (
+    _SIGNATURE_RE as _SIGNATURE_RE,
+)
+from .releases.layout import (
+    _STATIC_MEDIA_TARGET_MACHINE as _STATIC_MEDIA_TARGET_MACHINE,
+)
+from .releases.layout import (
+    _TARGET_RE as _TARGET_RE,
+)
+from .releases.layout import (
+    _WALLET_NAME_RE as _WALLET_NAME_RE,
+)
+
+# Compatibility exports keep existing callers and CLI entry points working.
+from .releases.layout import (
+    CAPACITY_SIGNING_REQUEST_SCHEMA as CAPACITY_SIGNING_REQUEST_SCHEMA,
+)
+from .releases.layout import (
+    DARWIN_MINER_TARGET as DARWIN_MINER_TARGET,
+)
+from .releases.layout import (
+    FINAL_MANIFEST_AUTHORITY_REQUEST_SCHEMA as FINAL_MANIFEST_AUTHORITY_REQUEST_SCHEMA,
+)
+from .releases.layout import (
+    FINAL_MANIFEST_AUTHORITY_SCHEMA as FINAL_MANIFEST_AUTHORITY_SCHEMA,
+)
+from .releases.layout import (
+    MAX_RELEASE_FILE_BYTES as MAX_RELEASE_FILE_BYTES,
+)
+from .releases.layout import (
+    MAX_RELEASE_INPUT_BYTES as MAX_RELEASE_INPUT_BYTES,
+)
+from .releases.layout import (
+    MAX_WHEEL_UNCOMPRESSED_BYTES as MAX_WHEEL_UNCOMPRESSED_BYTES,
+)
+from .releases.layout import (
+    MAXIMUM_FINALIZED_HEAD_AGE_MS as MAXIMUM_FINALIZED_HEAD_AGE_MS,
+)
+from .releases.layout import (
+    MAXIMUM_RELEASE_LEAD_BLOCKS as MAXIMUM_RELEASE_LEAD_BLOCKS,
+)
+from .releases.layout import (
+    MEDIA_RUNTIME_CLOSURE_SCHEMA as MEDIA_RUNTIME_CLOSURE_SCHEMA,
+)
+from .releases.layout import (
+    MINER_FINALITY_BUILD_REPORT_SCHEMA as MINER_FINALITY_BUILD_REPORT_SCHEMA,
+)
+from .releases.layout import (
+    MINIMUM_RELEASE_LEAD_BLOCKS as MINIMUM_RELEASE_LEAD_BLOCKS,
+)
+from .releases.layout import (
+    PINNED_FFMPEG_VERSION as PINNED_FFMPEG_VERSION,
+)
+from .releases.layout import (
+    PINNED_UV_VERSION as PINNED_UV_VERSION,
+)
+from .releases.layout import (
+    RELEASE_AUTHORITY_REQUEST_SCHEMA as RELEASE_AUTHORITY_REQUEST_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_AUTHORITY_SCHEMA as RELEASE_AUTHORITY_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_BASELINE_PATCH_SCHEMA as RELEASE_BASELINE_PATCH_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_INPUT_SCHEMA as RELEASE_INPUT_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_INTENT_SCHEMA as RELEASE_INTENT_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_MANIFEST_SCHEMA as RELEASE_MANIFEST_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_PROOF_TIMEOUT_SECONDS as RELEASE_PROOF_TIMEOUT_SECONDS,
+)
+from .releases.layout import (
+    RELEASE_RELATIVE_MINER_CONFIG_SCHEMA as RELEASE_RELATIVE_MINER_CONFIG_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_RELATIVE_OPERATOR_CONFIG_SCHEMA as RELEASE_RELATIVE_OPERATOR_CONFIG_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_RELATIVE_VALIDATOR_CONFIG_SCHEMA as RELEASE_RELATIVE_VALIDATOR_CONFIG_SCHEMA,
+)
+from .releases.layout import (
+    RELEASE_UNSIGNED_MANIFEST_SCHEMA as RELEASE_UNSIGNED_MANIFEST_SCHEMA,
+)
+from .releases.layout import (
+    RESOLVED_MINER_RELEASE_SCHEMA as RESOLVED_MINER_RELEASE_SCHEMA,
+)
+from .releases.layout import (
+    SIGNED_PUBLISHER_CAPACITY_SCHEMA as SIGNED_PUBLISHER_CAPACITY_SCHEMA,
+)
+from .releases.layout import (
+    UV_TOOL_PROVENANCE_SCHEMA as UV_TOOL_PROVENANCE_SCHEMA,
+)
+from .releases.layout import (
+    VALIDATOR_COST_SCHEDULE_SCHEMA as VALIDATOR_COST_SCHEDULE_SCHEMA,
+)
+from .releases.layout import (
+    ShadowReleaseError as ShadowReleaseError,
+)
+from .releases.layout import (
+    _absolute_normal_path as _absolute_normal_path,
+)
+from .releases.layout import (
+    _artifact_filename as _artifact_filename,
+)
+from .releases.layout import (
+    _artifact_is_executable as _artifact_is_executable,
+)
+from .releases.layout import (
+    _miner_finality_label as _miner_finality_label,
+)
+from .releases.layout import (
+    _packaged_artifact_relative_path as _packaged_artifact_relative_path,
+)
+from .releases.layout import (
+    _reject_digest as _reject_digest,
+)
+from .releases.layout import (
+    _release_relative_path as _release_relative_path,
+)
+from .releases.models import (
+    ArtifactPaths as ArtifactPaths,
+)
+from .releases.models import (
+    BuiltMinerFinalityArtifact as BuiltMinerFinalityArtifact,
+)
+from .releases.models import (
+    BuiltShadowRelease as BuiltShadowRelease,
+)
+from .releases.models import (
+    CapacitySigningRequest as CapacitySigningRequest,
+)
+from .releases.models import (
+    FinalityReleaseInput as FinalityReleaseInput,
+)
+from .releases.models import (
+    FinalityReplayBinding as FinalityReplayBinding,
+)
+from .releases.models import (
+    FinalizedReleaseObservation as FinalizedReleaseObservation,
+)
+from .releases.models import (
+    FinalManifestAuthorityAttestation as FinalManifestAuthorityAttestation,
+)
+from .releases.models import (
+    FinalManifestAuthorityRequest as FinalManifestAuthorityRequest,
+)
+from .releases.models import (
+    GeneratedReleaseArtifact as GeneratedReleaseArtifact,
+)
+from .releases.models import (
+    LiveReleaseObservationCapture as LiveReleaseObservationCapture,
+)
+from .releases.models import (
+    LiveShadowReleaseInput as LiveShadowReleaseInput,
+)
+from .releases.models import (
+    LiveShadowReleaseIntent as LiveShadowReleaseIntent,
+)
+from .releases.models import (
+    LiveShadowReleaseManifest as LiveShadowReleaseManifest,
+)
+from .releases.models import (
+    MediaRuntimeClosure as MediaRuntimeClosure,
+)
+from .releases.models import (
+    MinerFinalityBuildReport as MinerFinalityBuildReport,
+)
+from .releases.models import (
+    MinerFinalityTargetReleaseInput as MinerFinalityTargetReleaseInput,
+)
+from .releases.models import (
+    OperatorMaterializationBindings as OperatorMaterializationBindings,
+)
+from .releases.models import (
+    OperatorReleaseInput as OperatorReleaseInput,
+)
+from .releases.models import (
+    PreparedShadowRelease as PreparedShadowRelease,
+)
+from .releases.models import (
+    PublishedCostObservation as PublishedCostObservation,
+)
+from .releases.models import (
+    PublisherCapacityReleaseInput as PublisherCapacityReleaseInput,
+)
+from .releases.models import (
+    ReleaseArtifactDigest as ReleaseArtifactDigest,
+)
+from .releases.models import (
+    ReleaseAuthorityAttestation as ReleaseAuthorityAttestation,
+)
+from .releases.models import (
+    ReleaseAuthorityInput as ReleaseAuthorityInput,
+)
+from .releases.models import (
+    ReleaseAuthorityRequest as ReleaseAuthorityRequest,
+)
+from .releases.models import (
+    ReleaseRelativeMinerConfig as ReleaseRelativeMinerConfig,
+)
+from .releases.models import (
+    ReleaseRelativeOperatorConfig as ReleaseRelativeOperatorConfig,
+)
+from .releases.models import (
+    ReleaseRelativeValidatorConfig as ReleaseRelativeValidatorConfig,
+)
+from .releases.models import (
+    ResolvedMinerRelease as ResolvedMinerRelease,
+)
+from .releases.models import (
+    SignedPublisherCapacity as SignedPublisherCapacity,
+)
+from .releases.models import (
+    StorageProofReleaseInput as StorageProofReleaseInput,
+)
+from .releases.models import (
+    UnsignedLiveShadowReleaseManifest as UnsignedLiveShadowReleaseManifest,
+)
+from .releases.models import (
+    UvToolProvenance as UvToolProvenance,
+)
+from .releases.models import (
+    ValidatorCostClass as ValidatorCostClass,
+)
+from .releases.models import (
+    ValidatorCostSchedule as ValidatorCostSchedule,
+)
+from .releases.models import (
+    _CapturedFinalityPort as _CapturedFinalityPort,
+)
+from .releases.sources import (
+    _canonical_source_bundle as _canonical_source_bundle,
+)
+from .releases.sources import (
+    _finality_source_tree_sha256 as _finality_source_tree_sha256,
+)
+from .releases.sources import (
+    _fixed_source_tree_sha256 as _fixed_source_tree_sha256,
+)
+from .releases.sources import (
+    _read_executable as _read_executable,
+)
+from .releases.sources import (
+    _read_file as _read_file,
+)
+from .releases.sources import (
+    _read_owned_file as _read_owned_file,
+)
+from .releases.sources import (
+    _read_private_file as _read_private_file,
+)
+from .releases.sources import (
+    _rust_source_tree_sha256 as _rust_source_tree_sha256,
+)
+from .releases.wheel import (
+    _expected_console_scripts as _expected_console_scripts,
+)
+from .releases.wheel import (
+    _expected_project_requirements as _expected_project_requirements,
+)
+from .releases.wheel import (
+    _expected_record as _expected_record,
+)
+from .releases.wheel import (
+    _parsed_requirement as _parsed_requirement,
+)
+from .releases.wheel import (
+    _project_string as _project_string,
+)
+from .releases.wheel import (
+    _project_string_list as _project_string_list,
+)
+from .releases.wheel import (
+    _single_metadata_header as _single_metadata_header,
+)
+from .releases.wheel import (
+    _strict_metadata_headers as _strict_metadata_headers,
+)
+from .releases.wheel import (
+    _umi_source_tree_sha256_from_members as _umi_source_tree_sha256_from_members,
+)
+from .releases.wheel import (
+    _umi_source_tree_sha256_from_wheel as _umi_source_tree_sha256_from_wheel,
+)
+from .releases.wheel import (
+    _verify_core_metadata as _verify_core_metadata,
+)
+from .releases.wheel import (
+    _verify_wheel_matches_source as _verify_wheel_matches_source,
+)
+from .releases.wheel import (
+    _verify_wheel_metadata as _verify_wheel_metadata,
+)
+from .releases.wheel import (
+    _wheel_project_metadata as _wheel_project_metadata,
 )
 from .rust_license import (
     RustLicenseClosureError,
@@ -140,1104 +499,7 @@ from .validator_transcript_ports import (
     validator_capacity_set_root,
 )
 
-RELEASE_INPUT_SCHEMA = "umi-live-shadow-release-input/1"
-RELEASE_MANIFEST_SCHEMA = "umi-live-shadow-release-manifest/1"
-RELEASE_UNSIGNED_MANIFEST_SCHEMA = "umi-live-shadow-release-unsigned-manifest/1"
-RELEASE_INTENT_SCHEMA = "umi-live-shadow-release-intent/1"
-RELEASE_AUTHORITY_SCHEMA = "umi-live-shadow-release-authority/1"
-RELEASE_AUTHORITY_REQUEST_SCHEMA = "umi-live-shadow-release-authority-request/1"
-FINAL_MANIFEST_AUTHORITY_SCHEMA = "umi-live-shadow-final-manifest-authority/1"
-FINAL_MANIFEST_AUTHORITY_REQUEST_SCHEMA = "umi-live-shadow-final-manifest-authority-request/1"
-RELEASE_RELATIVE_VALIDATOR_CONFIG_SCHEMA = "umi-validator-live-config-template/1"
-RELEASE_RELATIVE_OPERATOR_CONFIG_SCHEMA = "umi-validator-live-operator-config-template/1"
-SIGNED_PUBLISHER_CAPACITY_SCHEMA = "umi-signed-publisher-capacity/1"
-CAPACITY_SIGNING_REQUEST_SCHEMA = "umi-publisher-capacity-signing-request/1"
-RELEASE_BASELINE_PATCH_SCHEMA = "umi-live-shadow-release-baseline-patch/1"
-VALIDATOR_COST_SCHEDULE_SCHEMA = "umi-validator-cost-schedule/1"
-UV_TOOL_PROVENANCE_SCHEMA = "umi-uv-tool-provenance/1"
-MEDIA_RUNTIME_CLOSURE_SCHEMA = "umi-media-runtime-closure/1"
-MINER_FINALITY_BUILD_REPORT_SCHEMA = "umi-miner-finality-build-report/1"
-RELEASE_RELATIVE_MINER_CONFIG_SCHEMA = "umi-miner-live-config-template/1"
-RESOLVED_MINER_RELEASE_SCHEMA = "umi-resolved-miner-release/1"
-
-DARWIN_MINER_TARGET = "aarch64-apple-darwin"
-_DARWIN_ARM64_MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
-_DARWIN_ARM64_CPU_TYPE = 0x0100000C
-_MACHO_EXECUTE_FILE_TYPE = 2
-
-PINNED_UV_VERSION = "0.12.9"
-PINNED_FFMPEG_VERSION = "8.0.1"
-_PINNED_FFMPEG_SOURCE_SHA256 = "05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41"
-_PYPI_REGISTRY = "https://pypi.org/simple"
-_PINNED_UV_SOURCE_ARCHIVE_SHA256 = (
-    "2523396a64a6a1ea358aff5b3d23acd5e371ee6b38013750d9de5648491fbd4a"
-)
-_PINNED_UV_LICENSE_SHA256 = "01b9a628dce02323aaa1e263192edc7368c19572471b7c035c673ec6205f724f"
-_PINNED_UV_ARCHIVE_SHA256_BY_TARGET = {
-    "aarch64-unknown-linux-musl": (
-        "7eb9bf48516448c9db6a9e436d8e747ac9c8a9cac74717160a29918249b080a6"
-    ),
-    "x86_64-unknown-linux-musl": (
-        "aa4b1f8770910f7c7c543c7acc980e4270e52e70750c996acef813ea1c7c2912"
-    ),
-}
-_PINNED_UV_BINARY_SHA256_BY_TARGET = {
-    "aarch64-unknown-linux-musl": (
-        "8353b259b2486ab011aae51f8815f88b41648e2ee8fe68494a8379b9f59377c8"
-    ),
-    "x86_64-unknown-linux-musl": (
-        "308d3841102bffca4acfe799e726db08846ee35f7408762a02349c42d1ba0a09"
-    ),
-}
-_STATIC_MEDIA_TARGET_MACHINE = {
-    "aarch64-unknown-linux-musl": 183,
-    "x86_64-unknown-linux-musl": 62,
-}
-
-MAX_RELEASE_INPUT_BYTES = 2 * 1024 * 1024
-MAX_RELEASE_FILE_BYTES = 256 * 1024 * 1024
-MAX_WHEEL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
-MINIMUM_RELEASE_LEAD_BLOCKS = 360
-MAXIMUM_RELEASE_LEAD_BLOCKS = (1 << 32) - 1
-MAXIMUM_FINALIZED_HEAD_AGE_MS = 120_000
-RELEASE_PROOF_TIMEOUT_SECONDS = 30.0
-
-_TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
-_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
-_SIGNATURE_RE = re.compile(r"^0x[0-9a-f]{128}$")
-_WALLET_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
-_FINALITY_SOURCE_DOMAIN = b"umi-grandpa-finality-observer-source-v1\0"
-_PROOF_SOURCE_DOMAIN = b"umi-substrate-proof-verifier-source-v1\0"
-_RELEASE_INTENT_DOMAIN = b"umi-live-shadow-release-intent-v1\0"
-_FINAL_MANIFEST_DOMAIN = b"umi-live-shadow-final-manifest-v1\0"
 _LIVE_CAPTURE_AUTHORITY = object()
-_CONFORMANCE_REPORT_PATH = "conformance-execution-report.json"
-
-_REHEARSAL_PLACEHOLDER_LABELS = (
-    "normalization",
-    "frame-digest",
-    "portable-timelock",
-    "chain-schedule-and-calls",
-    "authenticated-content-mirror",
-)
-_REHEARSAL_PLACEHOLDERS = frozenset(
-    hashlib.sha256(("umi-rehearsal-placeholder-v1\0" + label).encode()).hexdigest()
-    for label in _REHEARSAL_PLACEHOLDER_LABELS
-)
-_FORBIDDEN_OUTPUT_KEYS = frozenset(
-    {
-        "api_key",
-        "authorization",
-        "mnemonic",
-        "password",
-        "private_key",
-        "secret",
-        "token",
-    }
-)
-_EXECUTABLE_ARTIFACT_LABELS = frozenset(
-    {
-        "ffmpeg_binary",
-        "ffprobe_binary",
-        "finality_verifier_binary",
-        "storage_proof_verifier_binary",
-        "uv_binary",
-    }
-)
-_MINER_FINALITY_BINARY_LABEL_PREFIX = "miner_finality_verifier."
-_MINER_FINALITY_REPORT_LABEL_PREFIX = "miner_finality_build_report."
-_MINER_FINALITY_LICENSE_LABEL_PREFIX = "miner_finality_license_closure."
-_PACKAGED_ARTIFACT_FILENAMES = {
-    "python_wheel": "umi_subnet-0.1.0-py3-none-any.whl",
-    "python_lockfile": "uv.lock",
-    "uv_binary": "uv",
-    "uv_license": "uv-LICENSE",
-    "uv_provenance": "uv-provenance.json",
-    "ffmpeg_binary": "ffmpeg",
-    "ffprobe_binary": "ffprobe",
-    "media_runtime_manifest": "media-runtime-closure.json",
-    "media_runtime_license_bundle": "media-runtime-licenses.zip",
-    "media_runtime_source_bundle": "media-runtime-source.zip",
-    "runtime_metadata": "runtime-metadata.scale",
-    "validator_capacity_set": "validator-capacity-set.json",
-    "validator_cost_schedule": "validator-cost-schedule.json",
-    "mirror_discovery_rule": "mirror-discovery-rule.json",
-    "normalization_fixture_set": "normalization-fixtures.json",
-    "frame_digest_fixture_set": "frame-digest-fixtures.json",
-    "portable_envelope_fixture_set": "portable-envelope-fixtures.json",
-    "chain_fixture_set": "chain-fixtures.json",
-    "live_chain_fixture_set": "live-chain-fixtures.json",
-    "storage_proof_fixture_set": "storage-proof-fixtures.json",
-    "finality_fixture_set": "finality-fixtures.json",
-    "storage_proof_verifier_binary": "umi-substrate-proof-verifier",
-    "finality_verifier_binary": "umi-grandpa-finality-observer",
-    "finality_chain_spec": "finney-chain-spec.json",
-    "replay_finality_attestation": "capacity-baseline-finality-attestation.json",
-    "replay_release_observation_chain_evidence": "capacity-baseline-chain-evidence.json",
-    "storage_proof_cargo_lock": "storage-proof-Cargo.lock",
-    "finality_cargo_lock": "finality-Cargo.lock",
-    "storage_proof_source_bundle": "storage-proof-source.zip",
-    "finality_source_bundle": "finality-source-and-vendor.zip",
-    "storage_proof_license_closure": "storage-proof-third-party-licenses.zip",
-    "finality_license_closure": "finality-third-party-licenses.zip",
-    "storage_proof_source_tree": "storage-proof-source-tree.sha256",
-    "finality_source_tree": "finality-source-tree.sha256",
-    "umi_source_tree": "umi-source-tree.sha256",
-    "repository_license": "LICENSE",
-    "third_party_notices": "THIRD_PARTY_NOTICES.md",
-    "pyproject": "pyproject.toml",
-}
-
-
-class ShadowReleaseError(RuntimeError):
-    """A stable release-input, verification, or emission failure."""
-
-    def __init__(self, reason_code: str) -> None:
-        if not isinstance(reason_code, str) or not reason_code:
-            raise ValueError("release reason code must be nonempty")
-        self.reason_code = reason_code
-        super().__init__(reason_code)
-
-
-class ArtifactPaths(StrictProtocolModel):
-    """Absolute immutable inputs whose bytes are pinned in the release.
-
-    The supplied finality attestation and release-observation evidence preserve
-    the capacity-signing baseline for replay. They are never release authority.
-    """
-
-    python_wheel: str
-    python_lockfile: str
-    uv_binary: str
-    uv_license: str
-    uv_provenance: str
-    ffmpeg_binary: str
-    ffprobe_binary: str
-    media_runtime_manifest: str
-    media_runtime_license_bundle: str
-    media_runtime_source_bundle: str
-    runtime_metadata: str
-    validator_capacity_set: str
-    validator_cost_schedule: str
-    mirror_discovery_rule: str
-    normalization_fixture_set: str
-    frame_digest_fixture_set: str
-    portable_envelope_fixture_set: str
-    chain_fixture_set: str
-    live_chain_fixture_set: str
-    storage_proof_fixture_set: str
-    finality_fixture_set: str
-    storage_proof_verifier_binary: str
-    finality_verifier_binary: str
-    finality_chain_spec: str
-    finality_attestation: str
-    release_observation_chain_evidence: str
-
-    @model_validator(mode="after")
-    def validate_paths(self) -> Self:
-        values = [Path(value) for value in self.model_dump().values()]
-        if any(not path.is_absolute() or path != Path(os.path.normpath(path)) for path in values):
-            raise ValueError("release artifact paths must be absolute and lexically normalized")
-        if len(set(values)) != len(values):
-            raise ValueError("release artifact paths must be distinct")
-        return self
-
-
-class UvToolProvenance(StrictProtocolModel):
-    """Reviewed origin and target binding for the packaged ``uv`` executable."""
-
-    schema_: Literal[UV_TOOL_PROVENANCE_SCHEMA] = Field(alias="schema")
-    tool: Literal["uv"]
-    version: Literal[PINNED_UV_VERSION]
-    target_triple: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,127}$")]
-    binary_sha256: Hex32
-    binary_archive_url: Annotated[str, Field(min_length=1, max_length=2_048)]
-    binary_archive_sha256: Hex32
-    license_sha256: Hex32
-    source_archive_url: Annotated[str, Field(min_length=1, max_length=2_048)]
-    source_archive_sha256: Hex32
-    license_expression: Literal["Apache-2.0 OR MIT"]
-
-    @model_validator(mode="after")
-    def validate_origin(self) -> Self:
-        prefix = f"/astral-sh/uv/releases/download/{PINNED_UV_VERSION}/"
-        expected_paths = {
-            self.binary_archive_url: prefix + f"uv-{self.target_triple}.tar.gz",
-            self.source_archive_url: prefix + "source.tar.gz",
-        }
-        for value, expected_path in expected_paths.items():
-            parsed = urlsplit(value)
-            if (
-                parsed.scheme != "https"
-                or parsed.hostname != "github.com"
-                or parsed.username is not None
-                or parsed.password is not None
-                or parsed.port is not None
-                or parsed.query
-                or parsed.fragment
-                or parsed.path != expected_path
-            ):
-                raise ValueError("uv archive URL is outside the pinned upstream release")
-        if (
-            self.binary_archive_sha256
-            != _PINNED_UV_ARCHIVE_SHA256_BY_TARGET.get(self.target_triple)
-            or self.binary_sha256 != _PINNED_UV_BINARY_SHA256_BY_TARGET.get(self.target_triple)
-            or self.source_archive_sha256 != _PINNED_UV_SOURCE_ARCHIVE_SHA256
-            or self.license_sha256 != _PINNED_UV_LICENSE_SHA256
-        ):
-            raise ValueError("uv provenance does not match the reviewed upstream release")
-        _reject_digest(self.binary_sha256, "uv_binary")
-        _reject_digest(self.binary_archive_sha256, "uv_binary_archive")
-        _reject_digest(self.license_sha256, "uv_license")
-        _reject_digest(self.source_archive_sha256, "uv_source_archive")
-        return self
-
-
-class MediaRuntimeClosure(StrictProtocolModel):
-    """Target-bound, redistributable static FFmpeg/FFprobe runtime contract."""
-
-    schema_: Literal[MEDIA_RUNTIME_CLOSURE_SCHEMA] = Field(alias="schema")
-    profile: Literal["target-bound-static-elf-media-runtime/1"]
-    target_triple: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,127}$")]
-    ffmpeg_binary_sha256: Hex32
-    ffprobe_binary_sha256: Hex32
-    ffmpeg_version: Literal[PINNED_FFMPEG_VERSION]
-    ffmpeg_configuration: Annotated[str, Field(min_length=1, max_length=8_192)]
-    linkage: Literal["static-elf-without-pt-interp-or-pt-dynamic"]
-    runtime_dependencies: Annotated[list[str], Field(max_length=0)]
-    license_expression: Annotated[str, Field(min_length=1, max_length=512)]
-    license_bundle_sha256: Hex32
-    corresponding_source_bundle_sha256: Hex32
-    redistribution_reviewed: Literal[True]
-
-    @model_validator(mode="after")
-    def validate_closure(self) -> Self:
-        if self.target_triple not in _STATIC_MEDIA_TARGET_MACHINE:
-            raise ValueError("media runtime target is not a supported static Linux target")
-        if any(
-            "\n" in value or "\r" in value
-            for value in (self.ffmpeg_version, self.license_expression)
-        ):
-            raise ValueError("media runtime text fields must be single-line")
-        if any(
-            marker in self.license_expression.casefold()
-            for marker in ("placeholder", "replace", "reviewed spdx", "todo", "unknown")
-        ):
-            raise ValueError("media runtime license expression is unresolved")
-        configuration_tokens = set(self.ffmpeg_configuration.split())
-        if not {"--disable-shared", "--enable-static"}.issubset(configuration_tokens):
-            raise ValueError("media runtime configuration is not a static build")
-        _reject_digest(self.ffmpeg_binary_sha256, "ffmpeg_binary")
-        _reject_digest(self.ffprobe_binary_sha256, "ffprobe_binary")
-        _reject_digest(self.license_bundle_sha256, "media_runtime_license_bundle")
-        _reject_digest(self.corresponding_source_bundle_sha256, "media_runtime_source_bundle")
-        return self
-
-
-class FinalityReplayBinding(StrictProtocolModel):
-    """Exact one-record sidecar invocation used for the release observation."""
-
-    maximum_records: Literal[1]
-    startup_timeout_seconds: Annotated[int, Field(gt=0, le=3_600)]
-    bootstrap_kind: Literal["grandpa_warp_sync_checkpoint"]
-    bootstrap_block_number: Annotated[int, Field(ge=0)]
-    bootstrap_block_hash: Hex32
-
-
-class FinalizedReleaseObservation(StrictProtocolModel):
-    """One coherent finalized-block runtime and topology observation."""
-
-    network: Literal["finney"]
-    block_number: Annotated[int, Field(gt=0)]
-    block_hash: BlockHash
-    parent_hash: BlockHash
-    state_root: BlockHash
-    runtime_query_block_hash: BlockHash
-    topology_query_block_hash: BlockHash
-    runtime_metadata_sha256: Hex32
-    finality_attestation_sha256: Hex32
-    timestamp_ms: Annotated[int, Field(gt=0)]
-    observed_at_ms: Annotated[int, Field(gt=0)]
-    genesis_block_hash: BlockHash
-    runtime_spec_version: Annotated[int, Field(gt=0)]
-    transaction_version: Annotated[int, Field(gt=0)]
-    state_version: Literal[1]
-    subtensor_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    netuid: Literal[78]
-    mechanism_id: Literal[0]
-    mechanism_count: Literal[1]
-    commit_reveal_enabled: Literal[True]
-    commit_reveal_version: Literal[4]
-    subnet_active: Literal[True]
-    translation_weights_active: Literal[False]
-    target_block_interval_seconds: Literal[12]
-
-    @model_validator(mode="after")
-    def validate_times_and_hashes(self) -> Self:
-        if self.timestamp_ms > self.observed_at_ms:
-            raise ValueError("finalized block timestamp is after its observation")
-        if self.block_hash == self.parent_hash:
-            raise ValueError("finalized block cannot name itself as parent")
-        if (
-            self.runtime_query_block_hash != self.block_hash
-            or self.topology_query_block_hash != self.block_hash
-        ):
-            raise ValueError("runtime and topology observations must use the finalized block")
-        _reject_digest(self.runtime_metadata_sha256, "runtime_metadata")
-        _reject_digest(self.finality_attestation_sha256, "finality_attestation")
-        return self
-
-
-class StorageProofReleaseInput(StrictProtocolModel):
-    polkadot_sdk_revision: Literal["cacb4310f20c7cac83eb3ccd8ed5a5ad4212608a"]
-    source_root: str
-
-    @model_validator(mode="after")
-    def validate_root(self) -> Self:
-        _absolute_normal_path(self.source_root, "storage-proof source root")
-        return self
-
-
-class FinalityReleaseInput(StrictProtocolModel):
-    source_root: str
-    chain_spec_source_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    replay: FinalityReplayBinding
-
-    @model_validator(mode="after")
-    def validate_root(self) -> Self:
-        _absolute_normal_path(self.source_root, "finality source root")
-        return self
-
-
-class MinerFinalityTargetReleaseInput(StrictProtocolModel):
-    """One native finality artifact admitted for miner request validation only."""
-
-    target_triple: Literal[DARWIN_MINER_TARGET]
-    binary_path: str
-    build_report_path: str
-    license_closure_path: str
-    expected_binary_sha256: Hex32
-    expected_build_report_sha256: Hex32
-    expected_license_closure_sha256: Hex32
-
-    @model_validator(mode="after")
-    def validate_paths(self) -> Self:
-        paths = (
-            _absolute_normal_path(self.binary_path, "miner finality binary"),
-            _absolute_normal_path(self.build_report_path, "miner finality build report"),
-            _absolute_normal_path(self.license_closure_path, "miner finality license closure"),
-        )
-        if len(set(paths)) != len(paths):
-            raise ValueError("miner finality artifact paths must be distinct")
-        for label, digest in (
-            ("miner finality binary", self.expected_binary_sha256),
-            ("miner finality build report", self.expected_build_report_sha256),
-            ("miner finality license closure", self.expected_license_closure_sha256),
-        ):
-            _reject_digest(digest, label)
-        return self
-
-
-class MinerFinalityBuildReport(StrictProtocolModel):
-    """Native build and self-test record for an additive miner-only binary."""
-
-    schema_: Literal[MINER_FINALITY_BUILD_REPORT_SCHEMA] = Field(alias="schema")
-    role: Literal["miner-finality-only"]
-    target_triple: Literal[DARWIN_MINER_TARGET]
-    host_operating_system: Literal["darwin"]
-    host_architecture: Literal["arm64"]
-    binary_format: Literal["mach-o-64-arm64-executable"]
-    binary_sha256: Hex32
-    binary_size_bytes: Annotated[int, Field(gt=0, le=MAX_RELEASE_FILE_BYTES)]
-    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    finality_source_revision: Annotated[str, Field(min_length=1, max_length=2_048)]
-    finality_source_tree_sha256: Hex32
-    finality_cargo_lock_sha256: Hex32
-    finality_fixture_set_sha256: Hex32
-    license_closure_sha256: Hex32
-    self_test_output_sha256: Hex32
-    self_test: FinalitySelfTestReport
-    validator_runtime_supported: Literal[False]
-    media_runtime_included: Literal[False]
-
-
-class PublisherCapacityReleaseInput(StrictProtocolModel):
-    """Capacity facts plus the administrator signature populated in pass two."""
-
-    control_group_id: Hex32
-    issued_block: Annotated[int, Field(gt=0)]
-    issued_block_hash: BlockHash
-    valid_from_block: Annotated[int, Field(gt=0)]
-    valid_through_block: Annotated[int, Field(gt=0)]
-    control_disclosure_path: str
-    signature_scheme: Literal["sr25519", "ed25519"]
-    signature: str | None
-
-    @model_validator(mode="after")
-    def validate_values(self) -> Self:
-        _absolute_normal_path(self.control_disclosure_path, "control disclosure")
-        if self.signature is not None and _SIGNATURE_RE.fullmatch(self.signature) is None:
-            raise ValueError("publisher capacity signature must be canonical 64-byte hex")
-        return self
-
-
-class OperatorReleaseInput(StrictProtocolModel):
-    """Secret-free validator settings fixed in the signed public template."""
-
-    validator_hotkey: str
-    signature_scheme: Literal["sr25519", "ed25519"]
-    maximum_transport_concurrency: Annotated[int, Field(ge=1, le=1_024)] = 32
-    transport_timeout_seconds: Annotated[float, Field(gt=0, le=300)] = 90.0
-    stage_port_timeout_seconds: Annotated[float, Field(gt=0, le=300)] = 30.0
-    maximum_anchor_advances: Annotated[int, Field(ge=1, le=16)] = 4
-    poll_seconds: Annotated[float, Field(ge=0.05, le=60)] = 1.0
-
-    @model_validator(mode="after")
-    def validate_operator(self) -> Self:
-        account_id32(self.validator_hotkey)
-        return self
-
-
-class ReleaseAuthorityInput(StrictProtocolModel):
-    """Dedicated public release signer; private key use stays outside this command."""
-
-    authority_hotkey: str
-    signature_scheme: Literal["sr25519", "ed25519"]
-    signature: str | None
-
-    @model_validator(mode="after")
-    def validate_authority(self) -> Self:
-        account_id32(self.authority_hotkey)
-        if self.signature is not None and _SIGNATURE_RE.fullmatch(self.signature) is None:
-            raise ValueError("release authority signature must be canonical 64-byte hex")
-        return self
-
-
-class ReleaseRelativeValidatorConfig(StrictProtocolModel):
-    """Secret-free signed validator template with release-relative inputs."""
-
-    schema_: Literal[RELEASE_RELATIVE_VALIDATOR_CONFIG_SCHEMA] = Field(alias="schema")
-    protocol: Literal[PROTOCOL_VERSION]
-    mode: Literal[LIVE_SHADOW_MODE]
-    translation_weights_active: Literal[False]
-    policy_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-    scoring_policy_sha256: Hex32
-    validator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
-    target_triple: Annotated[str, Field(min_length=1, max_length=128)]
-    storage_proof_verifier_binary: Annotated[str, Field(min_length=1, max_length=4_096)]
-    finality_verifier_binary: Annotated[str, Field(min_length=1, max_length=4_096)]
-    finality_chain_spec_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-    initial_minimum_finalized_block: Annotated[int, Field(ge=0)]
-    signature_scheme: Literal["sr25519", "ed25519"]
-    umi_revision: Annotated[str, Field(min_length=1, max_length=256)]
-    maximum_transport_concurrency: Annotated[int, Field(ge=1, le=1_024)]
-    transport_timeout_seconds: Annotated[float, Field(gt=0, le=300)]
-    stage_port_timeout_seconds: Annotated[float, Field(gt=0, le=300)]
-    maximum_anchor_advances: Annotated[int, Field(ge=1, le=16)]
-    poll_seconds: Annotated[float, Field(ge=0.05, le=60)]
-
-    @model_validator(mode="after")
-    def validate_template(self) -> Self:
-        account_id32(self.validator_hotkey)
-        if _TARGET_RE.fullmatch(self.target_triple) is None:
-            raise ValueError("target triple is not canonical")
-        relative_paths = (
-            self.policy_path,
-            self.storage_proof_verifier_binary,
-            self.finality_verifier_binary,
-            self.finality_chain_spec_path,
-        )
-        if len(set(relative_paths)) != len(relative_paths):
-            raise ValueError("release-relative validator paths must be distinct")
-        for value in relative_paths:
-            _release_relative_path(value, "validator template")
-        return self
-
-
-class ReleaseRelativeMinerConfig(StrictProtocolModel):
-    """Signed paths needed by a miner on an additional release target."""
-
-    schema_: Literal[RELEASE_RELATIVE_MINER_CONFIG_SCHEMA] = Field(alias="schema")
-    protocol: Literal[PROTOCOL_VERSION]
-    role: Literal["miner"]
-    translation_weights_active: Literal[False]
-    target_triple: Literal[DARWIN_MINER_TARGET]
-    policy_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-    scoring_policy_sha256: Hex32
-    python_wheel: Annotated[str, Field(min_length=1, max_length=4_096)]
-    python_lockfile: Annotated[str, Field(min_length=1, max_length=4_096)]
-    pyproject: Annotated[str, Field(min_length=1, max_length=4_096)]
-    mirror_discovery_rule_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-    finality_verifier_binary: Annotated[str, Field(min_length=1, max_length=4_096)]
-    finality_chain_spec_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-    finality_build_report: Annotated[str, Field(min_length=1, max_length=4_096)]
-    finality_license_closure: Annotated[str, Field(min_length=1, max_length=4_096)]
-    initial_minimum_finalized_block: Annotated[int, Field(ge=0)]
-    minimum_validator_transport_timeout_seconds: Annotated[float, Field(gt=0, le=300)]
-    minimum_validator_transport_concurrency: Annotated[int, Field(ge=1, le=1_024)]
-    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    umi_source_tree_sha256: Hex32
-    umi_revision: Annotated[str, Field(min_length=1, max_length=256)]
-    validator_runtime_supported: Literal[False]
-
-    @model_validator(mode="after")
-    def validate_template(self) -> Self:
-        paths = (
-            self.policy_path,
-            self.python_wheel,
-            self.python_lockfile,
-            self.pyproject,
-            self.mirror_discovery_rule_path,
-            self.finality_verifier_binary,
-            self.finality_chain_spec_path,
-            self.finality_build_report,
-            self.finality_license_closure,
-        )
-        if len(set(paths)) != len(paths):
-            raise ValueError("release-relative miner paths must be distinct")
-        for value in paths:
-            _release_relative_path(value, "miner template")
-        if self.umi_revision != (
-            "git:" + self.umi_git_revision + ";source-tree-sha256:" + self.umi_source_tree_sha256
-        ):
-            raise ValueError("miner template UMI revision fields disagree")
-        return self
-
-
-class ResolvedMinerRelease(StrictProtocolModel):
-    """Absolute, authenticated runtime paths for one supported miner target."""
-
-    schema_: Literal[RESOLVED_MINER_RELEASE_SCHEMA] = Field(alias="schema")
-    protocol: Literal[PROTOCOL_VERSION]
-    role: Literal["miner"]
-    translation_weights_active: Literal[False]
-    target_triple: Literal[DARWIN_MINER_TARGET]
-    scoring_policy_sha256: Hex32
-    policy_path: str
-    python_wheel: str
-    python_lockfile: str
-    pyproject: str
-    mirror_discovery_rule_path: str
-    finality_verifier_binary: str
-    finality_chain_spec_path: str
-    finality_build_report: str
-    finality_license_closure: str
-    initial_minimum_finalized_block: Annotated[int, Field(ge=0)]
-    minimum_validator_transport_timeout_seconds: Annotated[float, Field(gt=0, le=300)]
-    minimum_validator_transport_concurrency: Annotated[int, Field(ge=1, le=1_024)]
-    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    umi_source_tree_sha256: Hex32
-    umi_revision: Annotated[str, Field(min_length=1, max_length=256)]
-    validator_runtime_supported: Literal[False]
-
-    @model_validator(mode="after")
-    def validate_paths(self) -> Self:
-        paths = (
-            self.policy_path,
-            self.python_wheel,
-            self.python_lockfile,
-            self.pyproject,
-            self.mirror_discovery_rule_path,
-            self.finality_verifier_binary,
-            self.finality_chain_spec_path,
-            self.finality_build_report,
-            self.finality_license_closure,
-        )
-        normalized = [_absolute_normal_path(value, "resolved miner artifact") for value in paths]
-        if len(set(normalized)) != len(normalized):
-            raise ValueError("resolved miner artifact paths must be distinct")
-        if self.umi_revision != (
-            "git:" + self.umi_git_revision + ";source-tree-sha256:" + self.umi_source_tree_sha256
-        ):
-            raise ValueError("resolved miner UMI revision fields disagree")
-        return self
-
-
-class ReleaseRelativeOperatorConfig(StrictProtocolModel):
-    """Secret-free signed operator template materialized on the validator host."""
-
-    schema_: Literal[RELEASE_RELATIVE_OPERATOR_CONFIG_SCHEMA] = Field(alias="schema")
-    protocol: Literal[PROTOCOL_VERSION]
-    mode: Literal[LIVE_SHADOW_MODE]
-    network: Literal["finney"]
-    validator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
-    validator_capacity_set_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-    mirror_discovery_rule_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-
-    @model_validator(mode="after")
-    def validate_template(self) -> Self:
-        account_id32(self.validator_hotkey)
-        for value in (self.validator_capacity_set_path, self.mirror_discovery_rule_path):
-            _release_relative_path(value, "operator template")
-        if self.validator_capacity_set_path == self.mirror_discovery_rule_path:
-            raise ValueError("release-relative operator paths must be distinct")
-        return self
-
-
-class OperatorMaterializationBindings(StrictProtocolModel):
-    """Paths and wallet names supplied on the validator's own machine."""
-
-    schema_: Literal["umi-validator-operator-local-bindings/1"] = Field(alias="schema")
-    validator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
-    state_root: Annotated[str, Field(min_length=1, max_length=4_096)]
-    wallet_name: Annotated[str, Field(min_length=1, max_length=128)]
-    wallet_hotkey_name: Annotated[str, Field(min_length=1, max_length=128)]
-    wallet_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-    mirror_request_headers_path: Annotated[str, Field(min_length=1, max_length=4_096)]
-
-    @model_validator(mode="after")
-    def validate_bindings(self) -> Self:
-        account_id32(self.validator_hotkey)
-        if _WALLET_NAME_RE.fullmatch(self.wallet_name) is None:
-            raise ValueError("wallet name is not canonical")
-        if _WALLET_NAME_RE.fullmatch(self.wallet_hotkey_name) is None:
-            raise ValueError("wallet hotkey name is not canonical")
-        paths = (
-            self.state_root,
-            self.wallet_path,
-            self.mirror_request_headers_path,
-        )
-        for value in paths:
-            _absolute_normal_path(value, "operator local binding")
-        if len(set(paths)) != len(paths):
-            raise ValueError("operator local binding paths must be distinct")
-        return self
-
-
-class LiveShadowReleaseInput(StrictProtocolModel):
-    """Complete canonical input for one public, weight-disabled release.
-
-    ``observation`` is the replay-only baseline used to prepare publisher
-    capacity signatures. A final release additionally requires a fresh direct
-    P2P observation captured by :func:`collect_live_release_observation`.
-    """
-
-    schema_: Literal[RELEASE_INPUT_SCHEMA] = Field(alias="schema")
-    protocol: Literal[PROTOCOL_VERSION]
-    mode: Literal[LIVE_SHADOW_MODE]
-    network: Literal["finney"]
-    translation_weights_active: Literal[False]
-    repository_root: str
-    release_install_root: str
-    target_triple: str
-    activation_block: Annotated[int, Field(gt=0)]
-    minimum_release_lead_blocks: Annotated[
-        int,
-        Field(ge=MINIMUM_RELEASE_LEAD_BLOCKS, le=MAXIMUM_RELEASE_LEAD_BLOCKS),
-    ]
-    maximum_finalized_head_age_ms: Literal[MAXIMUM_FINALIZED_HEAD_AGE_MS]
-    minimum_publisher_collateral_alpha_rao: Annotated[int, Field(gt=0)]
-    soak_start_window_index: Annotated[int, Field(ge=0)]
-    clock: PolicyClock
-    limits: PolicyLimits
-    thresholds: PolicyThresholds
-    observation: FinalizedReleaseObservation
-    artifacts: ArtifactPaths
-    storage_proof: StorageProofReleaseInput
-    finality: FinalityReleaseInput
-    miner_finality_targets: Annotated[
-        list[MinerFinalityTargetReleaseInput], Field(max_length=4)
-    ] = Field(default_factory=list, exclude_if=lambda value: not value)
-    validator_registry: Annotated[list[ValidatorRegistryEntry], Field(min_length=4)]
-    control_group_registry: Annotated[list[PublisherControlGroup], Field(min_length=3)]
-    publisher_registry: Annotated[list[PublisherRegistryEntry], Field(min_length=3)]
-    publisher_capacities: Annotated[list[PublisherCapacityReleaseInput], Field(min_length=3)]
-    release_authority: ReleaseAuthorityInput
-    operators: Annotated[list[OperatorReleaseInput], Field(min_length=4)]
-
-    @model_validator(mode="after")
-    def validate_release_bindings(self) -> Self:
-        repository = _absolute_normal_path(self.repository_root, "repository root")
-        install = _absolute_normal_path(self.release_install_root, "release install root")
-        if repository == install or repository in install.parents or install in repository.parents:
-            raise ValueError("release install root and source repository must be disjoint")
-        if _TARGET_RE.fullmatch(self.target_triple) is None:
-            raise ValueError("target triple is not canonical")
-        if self.target_triple not in _STATIC_MEDIA_TARGET_MACHINE:
-            raise ValueError("validator release target must be a supported static Linux target")
-        miner_targets = [item.target_triple for item in self.miner_finality_targets]
-        if miner_targets != sorted(miner_targets) or len(set(miner_targets)) != len(miner_targets):
-            raise ValueError("miner finality targets must be unique and sorted")
-        if self.target_triple in miner_targets:
-            raise ValueError("primary validator target cannot be repeated as a miner target")
-        if (
-            self.clock != PolicyClock.launch()
-            or self.limits != PolicyLimits.launch()
-            or self.thresholds != PolicyThresholds.launch()
-        ):
-            raise ValueError("release parameters must match the version 0.1 launch profile")
-        observation = self.observation
-        if observation.block_number >= self.activation_block:
-            raise ValueError("release observation must precede policy activation")
-        if self.minimum_release_lead_blocks < self.clock.window_stride_blocks:
-            raise ValueError("minimum release lead must cover at least one full window stride")
-        required_lead = max(self.clock.anchor_blocks, self.minimum_release_lead_blocks)
-        if self.activation_block - observation.block_number < required_lead:
-            raise ValueError("policy activation does not provide the declared release lead")
-        capacity_groups = [
-            bytes.fromhex(item.control_group_id) for item in self.publisher_capacities
-        ]
-        known_groups = [
-            bytes.fromhex(item.control_group_id) for item in self.control_group_registry
-        ]
-        if capacity_groups != sorted(capacity_groups) or len(set(capacity_groups)) != len(
-            capacity_groups
-        ):
-            raise ValueError("publisher capacity entries must be unique and sorted by group ID")
-        if set(capacity_groups) != set(known_groups):
-            raise ValueError("publisher capacity entries must cover every control group exactly")
-        operator_accounts = [account_id32(item.validator_hotkey) for item in self.operators]
-        registry_accounts = [
-            account_id32(item.validator_hotkey) for item in self.validator_registry
-        ]
-        if operator_accounts != sorted(operator_accounts) or len(set(operator_accounts)) != len(
-            operator_accounts
-        ):
-            raise ValueError("operator entries must be unique and sorted by validator account")
-        if operator_accounts != sorted(registry_accounts):
-            raise ValueError("operator entries must cover every validator exactly")
-        return self
-
-
-class SignedPublisherCapacity(StrictProtocolModel):
-    schema_: Literal[SIGNED_PUBLISHER_CAPACITY_SCHEMA] = Field(alias="schema")
-    statement: PublisherCapacityStatement
-    signature_scheme: Literal["sr25519", "ed25519"]
-    signature: Annotated[str, Field(pattern=r"^0x[0-9a-f]{128}$")]
-
-
-class PublishedCostObservation(StrictProtocolModel):
-    """One content-pinned public list-price observation."""
-
-    source_id: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_.-]{0,127}$")]
-    url: Annotated[str, Field(min_length=1, max_length=2_048)]
-    captured_at_ms: Annotated[int, Field(gt=0)]
-    content_sha256: Hex32
-    price_minor_units_per_window: Annotated[int, Field(gt=0)]
-
-    @model_validator(mode="after")
-    def validate_public_source(self) -> Self:
-        parsed = urlsplit(self.url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None:
-            raise ValueError("cost observation URL must be a public HTTPS URL without userinfo")
-        _reject_digest(self.content_sha256, "cost_observation_content")
-        return self
-
-
-class ValidatorCostClass(StrictProtocolModel):
-    """One hardware/region class and its conservative full-window price."""
-
-    hardware_class: Annotated[str, Field(min_length=1, max_length=256)]
-    region_class: Annotated[str, Field(min_length=1, max_length=256)]
-    cpu_core_count: Annotated[int, Field(gt=0)]
-    accelerator_count: Annotated[int, Field(ge=0)]
-    host_memory_bytes: Annotated[int, Field(gt=0)]
-    accelerator_memory_bytes: Annotated[int, Field(ge=0)]
-    provisioned_storage_bytes: Annotated[int, Field(gt=0)]
-    unit_definition: Annotated[str, Field(min_length=1, max_length=1_024)]
-    list_prices: Annotated[list[PublishedCostObservation], Field(min_length=3)]
-    selected_price_minor_units_per_window: Annotated[int, Field(gt=0)]
-
-    @model_validator(mode="after")
-    def validate_conservative_price(self) -> Self:
-        if (self.accelerator_count == 0) != (self.accelerator_memory_bytes == 0):
-            raise ValueError("accelerator count and memory must both be zero or positive")
-        source_ids = [item.source_id for item in self.list_prices]
-        if source_ids != sorted(source_ids) or len(set(source_ids)) != len(source_ids):
-            raise ValueError("cost sources must be unique and sorted by source ID")
-        hosts = [urlsplit(item.url).hostname for item in self.list_prices]
-        if len(set(hosts)) != len(hosts):
-            raise ValueError("cost sources must use distinct publication hosts")
-        digests = [item.content_sha256 for item in self.list_prices]
-        if len(set(digests)) != len(digests):
-            raise ValueError("cost sources must carry distinct captured content")
-        greatest = max(item.price_minor_units_per_window for item in self.list_prices)
-        if self.selected_price_minor_units_per_window != greatest:
-            raise ValueError("selected class price must be the greatest published list price")
-        return self
-
-
-class ValidatorCostSchedule(StrictProtocolModel):
-    """Minimum reproducible cost schedule needed by the live shadow release."""
-
-    schema_: Literal[VALIDATOR_COST_SCHEDULE_SCHEMA] = Field(alias="schema")
-    reporting_currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
-    currency_minor_units_per_major: Annotated[int, Field(gt=0)]
-    class_price_rule: Literal["greatest-of-three-independent-list-prices/1"]
-    tao_price_observation_rule: Annotated[str, Field(min_length=1, max_length=1_024)]
-    executable_alpha_quote_function: Annotated[str, Field(min_length=1, max_length=1_024)]
-    classes: Annotated[list[ValidatorCostClass], Field(min_length=1)]
-
-    @model_validator(mode="after")
-    def validate_classes(self) -> Self:
-        keys = [(item.hardware_class, item.region_class) for item in self.classes]
-        if keys != sorted(keys) or len(set(keys)) != len(keys):
-            raise ValueError("validator cost classes must be unique and sorted")
-        return self
-
-
-class CapacitySigningRequest(StrictProtocolModel):
-    schema_: Literal[CAPACITY_SIGNING_REQUEST_SCHEMA] = Field(alias="schema")
-    control_group_id: Hex32
-    administrator: str
-    statement: PublisherCapacityStatement
-    digest: Hex32
-
-
-class ReleaseArtifactDigest(StrictProtocolModel):
-    label: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_.-]{0,127}$")]
-    relative_path: Annotated[str, Field(min_length=1, max_length=512)]
-    sha256: Hex32
-    size_bytes: Annotated[int, Field(gt=0)]
-    install_mode: Literal["0444", "0555"]
-
-    @model_validator(mode="after")
-    def validate_relative_path(self) -> Self:
-        path = PurePosixPath(self.relative_path)
-        if path.is_absolute() or ".." in path.parts or "." in path.parts:
-            raise ValueError("packaged artifact path must be normalized and relative")
-        expected = _packaged_artifact_relative_path(self.label, self.sha256)
-        if self.relative_path != expected:
-            raise ValueError("packaged artifact path does not match its label and SHA-256")
-        expected_mode = "0555" if _artifact_is_executable(self.label) else "0444"
-        if self.install_mode != expected_mode:
-            raise ValueError("packaged artifact mode does not match its label")
-        return self
-
-
-class GeneratedReleaseArtifact(StrictProtocolModel):
-    relative_path: Annotated[str, Field(min_length=1, max_length=512)]
-    sha256: Hex32
-    size_bytes: Annotated[int, Field(gt=0)]
-
-    @model_validator(mode="after")
-    def validate_relative_path(self) -> Self:
-        path = PurePosixPath(self.relative_path)
-        if path.is_absolute() or ".." in path.parts or "." in path.parts:
-            raise ValueError("generated artifact path must be normalized and relative")
-        return self
-
-
-class LiveShadowReleaseIntent(StrictProtocolModel):
-    """Static release content signed before the final live observation."""
-
-    schema_: Literal[RELEASE_INTENT_SCHEMA] = Field(alias="schema")
-    protocol: Literal[PROTOCOL_VERSION]
-    mode: Literal[LIVE_SHADOW_MODE]
-    network: Literal["finney"]
-    netuid: Literal[78]
-    mechanism_id: Literal[0]
-    translation_weights_active: Literal[False]
-    target_triple: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,127}$")]
-    activation_block: Annotated[int, Field(gt=0)]
-    minimum_release_lead_blocks: Annotated[int, Field(ge=MINIMUM_RELEASE_LEAD_BLOCKS)]
-    maximum_finalized_head_age_ms: Literal[MAXIMUM_FINALIZED_HEAD_AGE_MS]
-    scoring_policy_sha256: Hex32
-    activation_equivalence_digest: Hex32
-    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    observation_authentication_profile: Literal[
-        "pinned-smoldot-finality-and-state-proof-verified-after-intent-signing/1"
-    ]
-    signed_artifacts: Annotated[list[GeneratedReleaseArtifact], Field(min_length=1)]
-
-    @model_validator(mode="after")
-    def validate_artifacts(self) -> Self:
-        paths = [item.relative_path for item in self.signed_artifacts]
-        if paths != sorted(paths) or len(set(paths)) != len(paths):
-            raise ValueError("signed intent artifacts must be unique and sorted")
-        if any(path.startswith("release-observation/") for path in paths):
-            raise ValueError("live observation artifacts cannot be pre-signed")
-        return self
-
-
-class ReleaseAuthorityRequest(StrictProtocolModel):
-    schema_: Literal[RELEASE_AUTHORITY_REQUEST_SCHEMA] = Field(alias="schema")
-    authority_hotkey: str
-    signature_scheme: Literal["sr25519", "ed25519"]
-    intent: LiveShadowReleaseIntent
-    digest: Hex32
-
-
-class ReleaseAuthorityAttestation(StrictProtocolModel):
-    schema_: Literal[RELEASE_AUTHORITY_SCHEMA] = Field(alias="schema")
-    authority_hotkey: str
-    signature_scheme: Literal["sr25519", "ed25519"]
-    intent: LiveShadowReleaseIntent
-    digest: Hex32
-    signature: Annotated[str, Field(pattern=r"^0x[0-9a-f]{128}$")]
-
-
-class UnsignedLiveShadowReleaseManifest(StrictProtocolModel):
-    """Complete staged manifest before its fresh observation is authorized."""
-
-    schema_: Literal[RELEASE_UNSIGNED_MANIFEST_SCHEMA] = Field(alias="schema")
-    protocol: Literal[PROTOCOL_VERSION]
-    mode: Literal[LIVE_SHADOW_MODE]
-    network: Literal["finney"]
-    netuid: Literal[78]
-    mechanism_id: Literal[0]
-    translation_weights_active: Literal[False]
-    activation_block: Annotated[int, Field(gt=0)]
-    minimum_release_lead_blocks: Annotated[
-        int,
-        Field(ge=MINIMUM_RELEASE_LEAD_BLOCKS, le=MAXIMUM_RELEASE_LEAD_BLOCKS),
-    ]
-    maximum_finalized_head_age_ms: Literal[MAXIMUM_FINALIZED_HEAD_AGE_MS]
-    release_observation_block: Annotated[int, Field(gt=0)]
-    release_observation_block_hash: BlockHash
-    release_observation_timestamp_ms: Annotated[int, Field(gt=0)]
-    release_observation_observed_at_ms: Annotated[int, Field(gt=0)]
-    scoring_policy_sha256: Hex32
-    activation_equivalence_digest: Hex32
-    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    umi_source_tree_sha256: Hex32
-    python_wheel_sha256: Hex32
-    python_lockfile_sha256: Hex32
-    pyproject_sha256: Hex32
-    conformance_execution_report_sha256: Hex32
-    observation_verification_profile: Literal[
-        "direct-hash-pinned-smoldot-p2p-plus-layout-v1-release-observation-state/1"
-    ]
-    supplied_observation_role: Literal["capacity-signing-baseline-replay-only/1"]
-    finality_evidence_class: Literal["verifier-attested-not-portable-offline-proof/1"]
-    release_observation_state_evidence_profile: Literal[RELEASE_OBSERVATION_EVIDENCE_PROFILE]
-    runtime_metadata_authentication: Literal[RUNTIME_METADATA_AUTHENTICATION]
-    runtime_version_authentication: Literal[RUNTIME_VERSION_AUTHENTICATION]
-    subtensor_revision_authentication: Literal[
-        "operator-declared-source-map-not-chain-authenticated/1"
-    ]
-    target_block_interval_authentication: Literal[
-        "policy-pinned-calibration-assumption-not-state-proven/1"
-    ]
-    operator_configuration_profile: Literal["release-relative-public-template/1"]
-    artifact_packaging_profile: Literal["target-bound-static-runtime-closure/1"]
-    release_authenticity_profile: Literal[
-        "same-expected-hotkey-signed-static-intent-and-final-manifest/1"
-    ]
-    release_authority: ReleaseAuthorityAttestation
-    public_artifacts_include_operator_configuration: Literal[True]
-    external_artifacts: Annotated[list[ReleaseArtifactDigest], Field(min_length=1)]
-    generated_artifacts: Annotated[list[GeneratedReleaseArtifact], Field(min_length=1)]
-    publisher_capacity_statement_sha256s: Annotated[dict[str, Hex32], Field(min_length=3)]
-    validator_hotkeys: Annotated[list[str], Field(min_length=4)]
-    contains_private_material: Literal[False]
-
-    @model_validator(mode="after")
-    def validate_ordering(self) -> Self:
-        labels = [item.label for item in self.external_artifacts]
-        if labels != sorted(labels) or len(set(labels)) != len(labels):
-            raise ValueError("external artifacts must be unique and sorted by label")
-        packaged = [item.relative_path for item in self.external_artifacts]
-        if len(set(packaged)) != len(packaged):
-            raise ValueError("packaged artifact paths must be unique")
-        generated = [item.relative_path for item in self.generated_artifacts]
-        if generated != sorted(generated) or len(set(generated)) != len(generated):
-            raise ValueError("generated artifacts must be unique and sorted by path")
-        accounts = [account_id32(item) for item in self.validator_hotkeys]
-        if accounts != sorted(accounts) or len(set(accounts)) != len(accounts):
-            raise ValueError("release validator hotkeys must be unique and sorted")
-        if list(self.publisher_capacity_statement_sha256s) != sorted(
-            self.publisher_capacity_statement_sha256s
-        ):
-            raise ValueError("publisher capacity digest map must be sorted")
-        return self
-
-
-class FinalManifestAuthorityRequest(StrictProtocolModel):
-    """Exact full-manifest digest handed to the external release authority."""
-
-    schema_: Literal[FINAL_MANIFEST_AUTHORITY_REQUEST_SCHEMA] = Field(alias="schema")
-    authority_hotkey: str
-    signature_scheme: Literal["sr25519", "ed25519"]
-    unsigned_manifest: UnsignedLiveShadowReleaseManifest
-    unsigned_manifest_sha256: Hex32
-    digest: Hex32
-
-    @model_validator(mode="after")
-    def validate_authority(self) -> Self:
-        account_id32(self.authority_hotkey)
-        return self
-
-
-class FinalManifestAuthorityAttestation(StrictProtocolModel):
-    """Authority response embedded in the finalized public manifest."""
-
-    schema_: Literal[FINAL_MANIFEST_AUTHORITY_SCHEMA] = Field(alias="schema")
-    authority_hotkey: str
-    signature_scheme: Literal["sr25519", "ed25519"]
-    unsigned_manifest_sha256: Hex32
-    digest: Hex32
-    signature: Annotated[str, Field(pattern=r"^0x[0-9a-f]{128}$")]
-
-    @model_validator(mode="after")
-    def validate_authority(self) -> Self:
-        account_id32(self.authority_hotkey)
-        return self
-
-
-class LiveShadowReleaseManifest(UnsignedLiveShadowReleaseManifest):
-    """Final public manifest authenticated after its live observation."""
-
-    schema_: Literal[RELEASE_MANIFEST_SCHEMA] = Field(alias="schema")
-    final_manifest_authority: FinalManifestAuthorityAttestation
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedShadowRelease:
-    descriptor: LiveShadowReleaseInput
-    descriptor_bytes: bytes
-    umi_git_revision: str
-    policy: ScoringPolicy
-    external_artifacts: tuple[ReleaseArtifactDigest, ...]
-    external_artifact_payloads: Mapping[str, bytes]
-    conformance_report_bytes: bytes
-    signing_requests: tuple[CapacitySigningRequest, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class LiveReleaseObservationCapture:
-    """Exact bytes captured from a direct pinned-smoldot and proof-collector run."""
-
-    observation: FinalizedReleaseObservation
-    finality_attestation: bytes
-    chain_evidence: bytes
-    _authority: object | None = field(default=None, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.observation, FinalizedReleaseObservation):
-            raise TypeError("observation must be a FinalizedReleaseObservation")
-        if not isinstance(self.finality_attestation, bytes) or not self.finality_attestation:
-            raise TypeError("finality_attestation must be nonempty exact bytes")
-        if not isinstance(self.chain_evidence, bytes) or not self.chain_evidence:
-            raise TypeError("chain_evidence must be nonempty exact bytes")
-
-
-@dataclass(frozen=True, slots=True)
-class _CapturedFinalityPort:
-    snapshot: FinalizedSnapshotRef
-
-    async def verified_finalized_snapshot(self) -> FinalizedSnapshotRef:
-        return self.snapshot
-
-
-@dataclass(frozen=True, slots=True)
-class BuiltShadowRelease:
-    policy: ScoringPolicy
-    manifest: UnsignedLiveShadowReleaseManifest
-    release_install_root: str
-    files: Mapping[str, bytes]
-    file_modes: Mapping[str, int]
-    _authority: object | None = field(default=None, repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
-class BuiltMinerFinalityArtifact:
-    """Exact native miner-finality artifact bytes produced on the target host."""
-
-    report: MinerFinalityBuildReport
-    binary: bytes
-    report_bytes: bytes
-    license_closure: bytes
 
 
 def load_release_input(path: str | Path) -> tuple[LiveShadowReleaseInput, bytes]:
@@ -1503,36 +765,6 @@ def _static_elf_machine(payload: bytes, *, label: str) -> int:
         if program_type in {2, 3}:
             raise ShadowReleaseError(f"{label}_dynamic_linkage_forbidden")
     return machine
-
-
-def _miner_finality_label(kind: Literal["binary", "report", "license"], target: str) -> str:
-    prefixes = {
-        "binary": _MINER_FINALITY_BINARY_LABEL_PREFIX,
-        "report": _MINER_FINALITY_REPORT_LABEL_PREFIX,
-        "license": _MINER_FINALITY_LICENSE_LABEL_PREFIX,
-    }
-    if target != DARWIN_MINER_TARGET:
-        raise ShadowReleaseError("miner_finality_target_unsupported")
-    return prefixes[kind] + target
-
-
-def _artifact_is_executable(label: str) -> bool:
-    return label in _EXECUTABLE_ARTIFACT_LABELS or label.startswith(
-        _MINER_FINALITY_BINARY_LABEL_PREFIX
-    )
-
-
-def _artifact_filename(label: str) -> str:
-    if label.startswith(_MINER_FINALITY_BINARY_LABEL_PREFIX):
-        return "umi-grandpa-finality-observer"
-    if label.startswith(_MINER_FINALITY_REPORT_LABEL_PREFIX):
-        return "miner-finality-build-report.json"
-    if label.startswith(_MINER_FINALITY_LICENSE_LABEL_PREFIX):
-        return "finality-third-party-licenses.zip"
-    try:
-        return _PACKAGED_ARTIFACT_FILENAMES[label]
-    except KeyError as error:
-        raise ShadowReleaseError(f"packaged_artifact_label_unknown:{label}") from error
 
 
 def _validate_darwin_arm64_executable(payload: bytes) -> None:
@@ -5012,700 +4244,10 @@ def _validate_capacity_cost_classes(
             raise ShadowReleaseError("validator_storage_differs_from_cost_class")
 
 
-def _fixed_source_tree_sha256(
-    root: Path,
-    *,
-    domain: bytes,
-    relative_paths: Sequence[str],
-) -> str:
-    digest = hashlib.sha256(domain)
-    for relative in relative_paths:
-        payload = _read_file(root / relative, label=f"source:{relative}")
-        name = relative.encode()
-        digest.update(len(name).to_bytes(4, "big"))
-        digest.update(name)
-        digest.update(hashlib.sha256(payload).digest())
-    return digest.hexdigest()
-
-
-def _canonical_source_bundle(
-    root: Path,
-    *,
-    archive_root: str,
-    required_files: Sequence[str],
-    recursive_directories: Sequence[str],
-) -> bytes:
-    """Build a deterministic, unpackable archive of binary-corresponding source."""
-
-    if (
-        not root.is_absolute()
-        or _TARGET_RE.fullmatch(archive_root) is None
-        or not root.is_dir()
-        or root.is_symlink()
-    ):
-        raise ShadowReleaseError("source_bundle_root_invalid")
-    relative_paths = set(required_files)
-    for directory_name in recursive_directories:
-        directory = root / directory_name
-        if not directory.exists():
-            continue
-        if not directory.is_dir() or directory.is_symlink():
-            raise ShadowReleaseError("source_bundle_tree_unsafe")
-        for path in directory.rglob("*"):
-            if path.is_symlink():
-                raise ShadowReleaseError("source_bundle_tree_unsafe")
-            if path.is_file():
-                relative_paths.add(path.relative_to(root).as_posix())
-            elif not path.is_dir():
-                raise ShadowReleaseError("source_bundle_tree_unsafe")
-
-    payloads: dict[str, bytes] = {}
-    for relative in sorted(relative_paths):
-        normalized = PurePosixPath(relative)
-        if normalized.is_absolute() or ".." in normalized.parts or "." in normalized.parts:
-            raise ShadowReleaseError("source_bundle_path_invalid")
-        payloads[relative] = _read_file(root / relative, label=f"source_bundle:{relative}")
-    if not payloads:
-        raise ShadowReleaseError("source_bundle_empty")
-
-    manifest = "".join(
-        f"{hashlib.sha256(payload).hexdigest()}  {relative}\n"
-        for relative, payload in payloads.items()
-    ).encode()
-    archive_payloads = {
-        f"{archive_root}/SOURCE-MANIFEST.sha256": manifest,
-        **{f"{archive_root}/{relative}": payload for relative, payload in payloads.items()},
-    }
-    output = io.BytesIO()
-    with zipfile.ZipFile(
-        output, "w", compression=zipfile.ZIP_STORED, strict_timestamps=True
-    ) as archive:
-        for name, payload in archive_payloads.items():
-            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.create_system = 3
-            info.compress_type = zipfile.ZIP_STORED
-            info.external_attr = (stat.S_IFREG | 0o444) << 16
-            archive.writestr(info, payload)
-    bundle = output.getvalue()
-    if not bundle or len(bundle) > MAX_RELEASE_FILE_BYTES:
-        raise ShadowReleaseError("source_bundle_size_invalid")
-    return bundle
-
-
-def _rust_source_tree_sha256(
-    root: Path,
-    *,
-    domain: bytes,
-    required_files: Sequence[str],
-) -> str:
-    relative_paths = set(required_files)
-    source_root = root / "src"
-    if not source_root.is_dir() or source_root.is_symlink():
-        raise ShadowReleaseError("rust_source_root_invalid")
-    for path in source_root.rglob("*.rs"):
-        if path.is_symlink() or not path.is_file():
-            raise ShadowReleaseError("rust_source_tree_unsafe")
-        relative_paths.add(path.relative_to(root).as_posix())
-    if not any(value.startswith("src/") for value in relative_paths):
-        raise ShadowReleaseError("rust_source_tree_empty")
-    return _fixed_source_tree_sha256(
-        root,
-        domain=domain,
-        relative_paths=tuple(sorted(relative_paths)),
-    )
-
-
-def _finality_source_tree_sha256(root: Path) -> str:
-    """Bind every local input that can affect the patched finality binary."""
-
-    relative_paths = {"Cargo.toml", "build.rs", "rust-toolchain.toml"}
-    for subtree_name in ("src", "vendor"):
-        subtree = root / subtree_name
-        if not subtree.is_dir() or subtree.is_symlink():
-            raise ShadowReleaseError(f"finality_{subtree_name}_root_invalid")
-        for path in subtree.rglob("*"):
-            if path.is_symlink():
-                raise ShadowReleaseError("finality_source_tree_unsafe")
-            if path.is_file():
-                relative_paths.add(path.relative_to(root).as_posix())
-            elif not path.is_dir():
-                raise ShadowReleaseError("finality_source_tree_unsafe")
-    cargo_config = root / ".cargo"
-    if cargo_config.exists():
-        if not cargo_config.is_dir() or cargo_config.is_symlink():
-            raise ShadowReleaseError("finality_cargo_config_unsafe")
-        for path in cargo_config.rglob("*"):
-            if path.is_symlink():
-                raise ShadowReleaseError("finality_source_tree_unsafe")
-            if path.is_file():
-                relative_paths.add(path.relative_to(root).as_posix())
-            elif not path.is_dir():
-                raise ShadowReleaseError("finality_source_tree_unsafe")
-    return _fixed_source_tree_sha256(
-        root,
-        domain=_FINALITY_SOURCE_DOMAIN,
-        relative_paths=tuple(sorted(relative_paths)),
-    )
-
-
-def _strict_metadata_headers(
-    payload: bytes,
-    *,
-    label: str,
-    body_required: bool,
-) -> tuple[dict[str, list[str]], bytes]:
-    if not payload or b"\r" in payload or b"\x00" in payload:
-        raise ShadowReleaseError(f"{label}_invalid")
-    if body_required:
-        header_bytes, separator, body = payload.partition(b"\n\n")
-        if not separator:
-            raise ShadowReleaseError(f"{label}_invalid")
-    else:
-        header_bytes = payload[:-1] if payload.endswith(b"\n") else payload
-        body = b""
-        if b"\n\n" in header_bytes:
-            raise ShadowReleaseError(f"{label}_invalid")
-
-    headers: dict[str, list[str]] = {}
-    for line in header_bytes.split(b"\n"):
-        if not line or line[:1] in {b" ", b"\t"} or b": " not in line:
-            raise ShadowReleaseError(f"{label}_invalid")
-        raw_name, raw_value = line.split(b": ", 1)
-        try:
-            name = raw_name.decode("ascii")
-            value = raw_value.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ShadowReleaseError(f"{label}_invalid") from error
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", name):
-            raise ShadowReleaseError(f"{label}_invalid")
-        headers.setdefault(name, []).append(value)
-    return headers, body
-
-
-def _single_metadata_header(headers: Mapping[str, list[str]], name: str, *, label: str) -> str:
-    values = headers.get(name, [])
-    if len(values) != 1:
-        raise ShadowReleaseError(f"{label}_invalid")
-    return values[0]
-
-
-def _wheel_project_metadata(pyproject_bytes: bytes) -> Mapping[str, Any]:
-    try:
-        parsed = tomllib.loads(pyproject_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise ShadowReleaseError("python_project_metadata_invalid") from error
-    build_system = parsed.get("build-system")
-    project = parsed.get("project")
-    tool = parsed.get("tool")
-    hatch = tool.get("hatch") if isinstance(tool, dict) else None
-    build = hatch.get("build") if isinstance(hatch, dict) else None
-    targets = build.get("targets") if isinstance(build, dict) else None
-    wheel_config = targets.get("wheel") if isinstance(targets, dict) else None
-    if (
-        not isinstance(build_system, dict)
-        or build_system.get("build-backend") != "hatchling.build"
-        or build_system.get("requires") != ["hatchling==1.32.0"]
-        or not isinstance(project, dict)
-        or not isinstance(wheel_config, dict)
-        or wheel_config.get("packages") != ["src/umi"]
-    ):
-        raise ShadowReleaseError("python_project_build_config_invalid")
-    return project
-
-
-def _project_string(project: Mapping[str, Any], name: str) -> str:
-    value = project.get(name)
-    if not isinstance(value, str) or not value:
-        raise ShadowReleaseError("python_project_metadata_invalid")
-    return value
-
-
-def _project_string_list(project: Mapping[str, Any], name: str) -> list[str]:
-    value = project.get(name)
-    if (
-        not isinstance(value, list)
-        or not value
-        or any(not isinstance(item, str) or not item for item in value)
-    ):
-        raise ShadowReleaseError("python_project_metadata_invalid")
-    return value
-
-
-def _parsed_requirement(value: str) -> Requirement:
-    try:
-        return Requirement(value)
-    except InvalidRequirement as error:
-        raise ShadowReleaseError("python_project_requirement_invalid") from error
-
-
-def _expected_project_requirements(project: Mapping[str, Any]) -> Counter[Requirement]:
-    expected: Counter[Requirement] = Counter()
-    for raw_requirement in _project_string_list(project, "dependencies"):
-        requirement = _parsed_requirement(raw_requirement)
-        if requirement.url is not None:
-            raise ShadowReleaseError("python_project_requirement_unsupported")
-        expected[requirement] += 1
-
-    optional = project.get("optional-dependencies")
-    if not isinstance(optional, dict) or not optional:
-        raise ShadowReleaseError("python_project_metadata_invalid")
-    for extra, requirements in optional.items():
-        if (
-            not isinstance(extra, str)
-            or canonicalize_name(extra) != extra
-            or not isinstance(requirements, list)
-            or not requirements
-        ):
-            raise ShadowReleaseError("python_project_metadata_invalid")
-        for raw_requirement in requirements:
-            if not isinstance(raw_requirement, str) or not raw_requirement:
-                raise ShadowReleaseError("python_project_metadata_invalid")
-            requirement = _parsed_requirement(raw_requirement)
-            if requirement.marker is not None or requirement.url is not None:
-                raise ShadowReleaseError("python_project_requirement_unsupported")
-            expected[_parsed_requirement(f'{raw_requirement}; extra == "{extra}"')] += 1
-    return expected
-
-
-def _verify_core_metadata(
-    payload: bytes,
-    *,
-    project: Mapping[str, Any],
-    readme_bytes: bytes,
-) -> None:
-    headers, body = _strict_metadata_headers(
-        payload,
-        label="python_wheel_metadata",
-        body_required=True,
-    )
-    allowed_headers = {
-        "Description-Content-Type",
-        "License-Expression",
-        "License-File",
-        "Metadata-Version",
-        "Name",
-        "Provides-Extra",
-        "Requires-Dist",
-        "Requires-Python",
-        "Summary",
-        "Version",
-    }
-    if set(headers) != allowed_headers:
-        raise ShadowReleaseError("python_wheel_metadata_fields_mismatch")
-    expected_singles = {
-        "Description-Content-Type": "text/markdown",
-        "License-Expression": _project_string(project, "license"),
-        "Metadata-Version": "2.5",
-        "Name": _project_string(project, "name"),
-        "Summary": _project_string(project, "description"),
-        "Version": _project_string(project, "version"),
-    }
-    for name, expected in expected_singles.items():
-        if _single_metadata_header(headers, name, label="python_wheel_metadata") != expected:
-            raise ShadowReleaseError("python_wheel_metadata_mismatch")
-
-    if project.get("readme") != "README.md" or project.get("license-files") != ["LICENSE"]:
-        raise ShadowReleaseError("python_project_metadata_invalid")
-    if headers["License-File"] != ["LICENSE"] or body != readme_bytes:
-        raise ShadowReleaseError("python_wheel_metadata_mismatch")
-    try:
-        actual_python = SpecifierSet(
-            _single_metadata_header(headers, "Requires-Python", label="python_wheel_metadata")
-        )
-        expected_python = SpecifierSet(_project_string(project, "requires-python"))
-    except InvalidSpecifier as error:
-        raise ShadowReleaseError("python_wheel_metadata_invalid") from error
-    if actual_python != expected_python:
-        raise ShadowReleaseError("python_wheel_metadata_mismatch")
-
-    actual_requirements: Counter[Requirement] = Counter()
-    for value in headers["Requires-Dist"]:
-        actual_requirements[_parsed_requirement(value)] += 1
-    if actual_requirements != _expected_project_requirements(project):
-        raise ShadowReleaseError("python_wheel_requirements_mismatch")
-
-    optional = project["optional-dependencies"]
-    expected_extras = Counter(canonicalize_name(value) for value in optional)
-    actual_extras = Counter(canonicalize_name(value) for value in headers["Provides-Extra"])
-    if actual_extras != expected_extras:
-        raise ShadowReleaseError("python_wheel_extras_mismatch")
-
-
-def _verify_wheel_metadata(payload: bytes) -> None:
-    headers, body = _strict_metadata_headers(
-        payload,
-        label="python_wheel_wheel_metadata",
-        body_required=False,
-    )
-    if body or set(headers) != {"Generator", "Root-Is-Purelib", "Tag", "Wheel-Version"}:
-        raise ShadowReleaseError("python_wheel_wheel_metadata_mismatch")
-    expected = {
-        "Generator": "hatchling 1.32.0",
-        "Root-Is-Purelib": "true",
-        "Tag": "py3-none-any",
-        "Wheel-Version": "1.0",
-    }
-    for name, value in expected.items():
-        if (
-            _single_metadata_header(
-                headers,
-                name,
-                label="python_wheel_wheel_metadata",
-            )
-            != value
-        ):
-            raise ShadowReleaseError("python_wheel_wheel_metadata_mismatch")
-
-
-def _expected_console_scripts(project: Mapping[str, Any]) -> bytes:
-    scripts = project.get("scripts")
-    if not isinstance(scripts, dict) or not scripts:
-        raise ShadowReleaseError("python_project_scripts_invalid")
-    lines = ["[console_scripts]"]
-    for name, target in sorted(scripts.items()):
-        if (
-            not isinstance(name, str)
-            or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name)
-            or not isinstance(target, str)
-            or not re.fullmatch(
-                r"umi(?:\.[A-Za-z_][A-Za-z0-9_]*)+:[A-Za-z_][A-Za-z0-9_]*",
-                target,
-            )
-        ):
-            raise ShadowReleaseError("python_project_scripts_invalid")
-        lines.append(f"{name} = {target}")
-    return ("\n".join(lines) + "\n").encode()
-
-
-def _expected_record(
-    ordered_names: Sequence[str],
-    members: Mapping[str, bytes],
-    *,
-    record_name: str,
-) -> bytes:
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\n")
-    for name in ordered_names:
-        if name == record_name:
-            writer.writerow((name, "", ""))
-            continue
-        payload = members[name]
-        digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=").decode()
-        writer.writerow((name, f"sha256={digest}", str(len(payload))))
-    return output.getvalue().encode("utf-8")
-
-
-def _verify_wheel_matches_source(
-    wheel_path: Path,
-    wheel_bytes: bytes,
-    source_root: Path,
-    *,
-    pyproject_bytes: bytes,
-    readme_bytes: bytes,
-    license_bytes: bytes,
-) -> str:
-    project = _wheel_project_metadata(pyproject_bytes)
-    project_name = _project_string(project, "name")
-    version = _project_string(project, "version")
-    wheel_distribution = canonicalize_name(project_name).replace("-", "_")
-    if not re.fullmatch(r"[a-z0-9_]+", wheel_distribution) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9._+!-]*", version
-    ):
-        raise ShadowReleaseError("python_project_metadata_invalid")
-    expected_filename = f"{wheel_distribution}-{version}-py3-none-any.whl"
-    if wheel_path.name != expected_filename:
-        raise ShadowReleaseError("python_wheel_filename_mismatch")
-
-    if not source_root.is_dir() or source_root.is_symlink():
-        raise ShadowReleaseError("python_source_tree_unsafe")
-    source_paths = sorted(
-        source_root.rglob("*.py"),
-        key=lambda path: path.relative_to(source_root).as_posix(),
-    )
-    if any(path.is_symlink() or not path.is_file() for path in source_paths):
-        raise ShadowReleaseError("python_source_tree_unsafe")
-    if not source_paths:
-        raise ShadowReleaseError("python_source_tree_empty")
-    package_members = {
-        "umi/" + path.relative_to(source_root).as_posix(): path.read_bytes()
-        for path in source_paths
-    }
-
-    dist_info = f"{wheel_distribution}-{version}.dist-info"
-    metadata_name = f"{dist_info}/METADATA"
-    wheel_metadata_name = f"{dist_info}/WHEEL"
-    entry_points_name = f"{dist_info}/entry_points.txt"
-    license_name = f"{dist_info}/licenses/LICENSE"
-    record_name = f"{dist_info}/RECORD"
-    expected_order = [
-        *sorted(package_members),
-        metadata_name,
-        wheel_metadata_name,
-        entry_points_name,
-        license_name,
-        record_name,
-    ]
-
-    if (
-        len(wheel_bytes) < 22
-        or not wheel_bytes.startswith(b"PK\x03\x04")
-        or wheel_bytes[-22:-18] != b"PK\x05\x06"
-    ):
-        raise ShadowReleaseError("python_wheel_container_invalid")
-    try:
-        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
-            if archive.comment:
-                raise ShadowReleaseError("python_wheel_archive_comment")
-            infos = archive.infolist()
-            if not infos or sum(item.file_size for item in infos) > MAX_WHEEL_UNCOMPRESSED_BYTES:
-                raise ShadowReleaseError("python_wheel_size_limit")
-            if [info.filename for info in infos] != expected_order:
-                raise ShadowReleaseError("python_wheel_archive_layout_mismatch")
-            archive_names: set[str] = set()
-            members: dict[str, bytes] = {}
-            for info in infos:
-                name = PurePosixPath(info.filename)
-                if (
-                    info.is_dir()
-                    or name.is_absolute()
-                    or ".." in name.parts
-                    or "\\" in info.filename
-                    or info.filename in archive_names
-                    or info.flag_bits & 0x1
-                    or info.comment
-                    or info.extra
-                    or info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
-                ):
-                    raise ShadowReleaseError("python_wheel_archive_member_invalid")
-                archive_names.add(info.filename)
-                mode = info.external_attr >> 16
-                if mode and stat.S_ISLNK(mode):
-                    raise ShadowReleaseError("python_wheel_symlink")
-                members[info.filename] = archive.read(info)
-    except ShadowReleaseError:
-        raise
-    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
-        raise ShadowReleaseError("python_wheel_invalid") from error
-
-    if any(members[name] != payload for name, payload in package_members.items()):
-        raise ShadowReleaseError("python_wheel_source_mismatch")
-    if members[license_name] != license_bytes:
-        raise ShadowReleaseError("python_wheel_license_mismatch")
-    _verify_core_metadata(members[metadata_name], project=project, readme_bytes=readme_bytes)
-    _verify_wheel_metadata(members[wheel_metadata_name])
-    if members[entry_points_name] != _expected_console_scripts(project):
-        raise ShadowReleaseError("python_wheel_entry_points_mismatch")
-    if members[record_name] != _expected_record(
-        expected_order,
-        members,
-        record_name=record_name,
-    ):
-        raise ShadowReleaseError("python_wheel_record_mismatch")
-    return _umi_source_tree_sha256_from_members({name: members[name] for name in package_members})
-
-
-def _umi_source_tree_sha256_from_members(package_members: Mapping[str, bytes]) -> str:
-    """Hash exact wheel-resident UMI modules with the runtime source-tree domain."""
-
-    names = sorted(package_members)
-    if not names:
-        raise ShadowReleaseError("python_wheel_source_tree_empty")
-    digest = hashlib.sha256(b"umi-source-tree-v1\0")
-    for name in names:
-        path = PurePosixPath(name)
-        if (
-            path.is_absolute()
-            or len(path.parts) < 2
-            or path.parts[0] != "umi"
-            or path.suffix != ".py"
-            or ".." in path.parts
-            or "." in path.parts
-            or path.as_posix() != name
-        ):
-            raise ShadowReleaseError("python_wheel_source_member_invalid")
-        relative = PurePosixPath(*path.parts[1:]).as_posix().encode()
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
-        digest.update(hashlib.sha256(package_members[name]).digest())
-    return digest.hexdigest()
-
-
-def _umi_source_tree_sha256_from_wheel(wheel_bytes: bytes) -> str:
-    """Recompute the UMI source pin directly from an installed wheel artifact."""
-
-    if len(wheel_bytes) < 22 or not wheel_bytes.startswith(b"PK\x03\x04"):
-        raise ShadowReleaseError("python_wheel_container_invalid")
-    try:
-        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
-            if archive.comment:
-                raise ShadowReleaseError("python_wheel_archive_comment")
-            infos = archive.infolist()
-            if not infos or sum(item.file_size for item in infos) > MAX_WHEEL_UNCOMPRESSED_BYTES:
-                raise ShadowReleaseError("python_wheel_size_limit")
-            seen: set[str] = set()
-            package_members: dict[str, bytes] = {}
-            for info in infos:
-                path = PurePosixPath(info.filename)
-                if (
-                    info.is_dir()
-                    or path.is_absolute()
-                    or ".." in path.parts
-                    or "\\" in info.filename
-                    or info.filename in seen
-                    or info.flag_bits & 0x1
-                    or info.comment
-                    or info.extra
-                    or info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
-                ):
-                    raise ShadowReleaseError("python_wheel_archive_member_invalid")
-                seen.add(info.filename)
-                mode = info.external_attr >> 16
-                if mode and stat.S_ISLNK(mode):
-                    raise ShadowReleaseError("python_wheel_symlink")
-                if len(path.parts) >= 2 and path.parts[0] == "umi" and path.suffix == ".py":
-                    package_members[info.filename] = archive.read(info)
-    except ShadowReleaseError:
-        raise
-    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
-        raise ShadowReleaseError("python_wheel_invalid") from error
-    return _umi_source_tree_sha256_from_members(package_members)
-
-
-def _absolute_normal_path(value: str | Path, label: str) -> Path:
-    path = Path(value)
-    if not path.is_absolute() or path != Path(os.path.normpath(path)):
-        raise ValueError(f"{label} path must be absolute and lexically normalized")
-    return path
-
-
-def _release_relative_path(value: str | PurePosixPath, label: str) -> PurePosixPath:
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or not path.parts
-        or ".." in path.parts
-        or "." in path.parts
-        or path.as_posix() != str(value)
-    ):
-        raise ValueError(f"{label} path must be normalized and release-relative")
-    return path
-
-
-def _read_file(path: Path, *, label: str, maximum_bytes: int = MAX_RELEASE_FILE_BYTES) -> bytes:
-    return _read_owned_file(
-        path,
-        label=label,
-        maximum_bytes=maximum_bytes,
-        executable=False,
-        private=False,
-    )
-
-
-def _read_owned_file(
-    path: Path,
-    *,
-    label: str,
-    maximum_bytes: int,
-    executable: bool,
-    private: bool,
-) -> bytes:
-    if not path.is_absolute():
-        raise ShadowReleaseError(f"{label}_path_not_absolute")
-    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
-    try:
-        descriptor = os.open(os.fspath(path), flags)
-    except OSError as error:
-        raise ShadowReleaseError(f"{label}_unavailable") from error
-    try:
-        before = os.fstat(descriptor)
-        mode = stat.S_IMODE(before.st_mode)
-        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or mode & 0o022:
-            raise ShadowReleaseError(f"{label}_unsafe")
-        if executable and not mode & stat.S_IXUSR:
-            raise ShadowReleaseError(f"{label}_not_executable")
-        if private and mode not in {0o400, 0o600}:
-            raise ShadowReleaseError(f"{label}_permissions_too_broad")
-        if before.st_size <= 0 or before.st_size > maximum_bytes:
-            raise ShadowReleaseError(f"{label}_size_invalid")
-
-        payload_parts: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(1024 * 1024, maximum_bytes + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > maximum_bytes:
-                raise ShadowReleaseError(f"{label}_size_invalid")
-            payload_parts.append(chunk)
-        after = os.fstat(descriptor)
-        stable = (
-            "st_dev",
-            "st_ino",
-            "st_mode",
-            "st_uid",
-            "st_gid",
-            "st_nlink",
-            "st_size",
-            "st_mtime_ns",
-            "st_ctime_ns",
-        )
-        if total != before.st_size or any(
-            getattr(before, field) != getattr(after, field) for field in stable
-        ):
-            raise ShadowReleaseError(f"{label}_changed")
-        return b"".join(payload_parts)
-    except OSError as error:
-        raise ShadowReleaseError(f"{label}_unavailable") from error
-    finally:
-        with suppress(OSError):
-            os.close(descriptor)
-
-
-def _read_executable(path: Path, *, label: str) -> bytes:
-    return _read_owned_file(
-        path,
-        label=label,
-        maximum_bytes=MAX_RELEASE_FILE_BYTES,
-        executable=True,
-        private=False,
-    )
-
-
-def _read_private_file(path: Path, *, label: str, maximum_bytes: int) -> bytes:
-    return _read_owned_file(
-        path,
-        label=label,
-        maximum_bytes=maximum_bytes,
-        executable=False,
-        private=True,
-    )
-
-
 def _nonplaceholder_sha256(payload: bytes, *, label: str) -> str:
     digest = hashlib.sha256(payload).hexdigest()
     _reject_digest(digest, label)
     return digest
-
-
-def _packaged_artifact_relative_path(label: str, digest: str) -> str:
-    """Return the stable in-release path for one content-pinned input."""
-
-    _reject_digest(digest, label)
-    if label.startswith("control_disclosure."):
-        filename = f"{label}.json"
-    else:
-        filename = _artifact_filename(label)
-    return PurePosixPath("artifacts", "sha256", digest, filename).as_posix()
-
-
-def _reject_digest(digest: str, label: str) -> None:
-    try:
-        raw = bytes.fromhex(digest)
-    except ValueError as error:  # pragma: no cover - all callers derive SHA-256
-        raise ShadowReleaseError(f"{label}_digest_invalid") from error
-    if len(raw) != 32 or len(set(raw)) == 1 or digest in _REHEARSAL_PLACEHOLDERS:
-        raise ShadowReleaseError(f"{label}_placeholder_digest")
 
 
 def _require_distinct_digests(artifacts: Mapping[str, tuple[str, bytes]]) -> None:

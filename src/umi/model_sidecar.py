@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
 
+from .file_identity import private_file_identity as _stat_identity
+
 MODEL_SIDECAR_PROTOCOL = "umi-model-sidecar/1"
 MODEL_SIDECAR_CAPACITY_SCHEMA = "umi-model-sidecar-capacity/1"
 MODEL_REQUEST_MAGIC = b"umi-model-request-v1\0"
@@ -138,7 +140,7 @@ async def start_model_sidecar(
         raise ValueError("model socket path must be absolute")
     if os.path.lexists(path):
         raise FileExistsError("model socket path already exists")
-    _validate_private_socket_parent(path)
+    validate_private_socket_parent(path)
 
     semaphore = asyncio.Semaphore(maximum_concurrency)
 
@@ -238,7 +240,7 @@ def validate_model_sidecar_capacity(
     _revision_bytes(expected_model_revision)
     maximum_inference_milliseconds = _inference_milliseconds(maximum_inference_seconds)
     socket = Path(socket_path)
-    _validate_private_socket_parent(socket)
+    validate_private_socket_parent(socket)
     socket_metadata = socket.lstat()
     if (
         not stat.S_ISSOCK(socket_metadata.st_mode)
@@ -395,19 +397,6 @@ def _canonical_json(document: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_uid,
-        value.st_nlink,
-        value.st_mode,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
-
-
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -546,7 +535,7 @@ def _revision_bytes(value: str | None) -> bytes:
     return bytes.fromhex(value)
 
 
-def _validate_private_socket_parent(path: Path) -> None:
+def validate_private_socket_parent(path: Path) -> None:
     try:
         metadata = path.parent.lstat()
     except OSError as error:
@@ -569,4 +558,5 @@ __all__ = [
     "ModelSidecarServer",
     "start_model_sidecar",
     "validate_model_sidecar_capacity",
+    "validate_private_socket_parent",
 ]

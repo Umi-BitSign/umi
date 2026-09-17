@@ -31,7 +31,9 @@ from umi.protocol import canonical_json_bytes
 @pytest.fixture
 def policies(monkeypatch):
     signer = dev_wallet("//RegistrationBridgeAuthority")
-    monkeypatch.setattr(bridge, "REGISTRATION_BRIDGE_COORDINATOR", signer.hotkey.ss58_address)
+    monkeypatch.setattr(
+        "umi.bridge.policy.REGISTRATION_BRIDGE_COORDINATOR", signer.hotkey.ss58_address
+    )
     old = policy_body(coordinator_hotkey=signer.hotkey.ss58_address)
     new = bridge.RegistrationBridgePolicyBody.model_validate(
         {

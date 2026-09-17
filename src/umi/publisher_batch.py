@@ -28,6 +28,8 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 from typing_extensions import Self
 
+from .file_identity import private_file_identity as _stat_identity
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - production targets are Unix hosts
@@ -1462,19 +1464,6 @@ def _read_regular_file(
 
 def _is_absolute_normal_path(path: Path) -> bool:
     return path.is_absolute() and path == Path(os.path.normpath(path))
-
-
-def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_uid,
-        value.st_nlink,
-        value.st_mode,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
 
 
 def _require_private_directory(path: Path, label: str) -> None:

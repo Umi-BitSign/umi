@@ -21,6 +21,7 @@ from packaging.requirements import Requirement
 from pydantic import ValidationError
 
 import umi.conformance as conformance
+import umi.releases.models as release_models_module
 import umi.rust_license as rust_license_module
 import umi.shadow_release as shadow_release_module
 import umi.validator_live as validator_live_module
@@ -923,7 +924,7 @@ def release_environment(
         uv_archive_digest,
     )
     monkeypatch.setattr(
-        shadow_release_module,
+        release_models_module,
         "_PINNED_UV_SOURCE_ARCHIVE_SHA256",
         uv_source_digest,
     )
@@ -932,7 +933,7 @@ def release_environment(
         b"Test fixture for upstream Apache-2.0 OR MIT uv license texts.\n",
     )
     monkeypatch.setattr(
-        shadow_release_module,
+        release_models_module,
         "_PINNED_UV_LICENSE_SHA256",
         hashlib.sha256(uv_license.read_bytes()).hexdigest(),
     )
@@ -1985,7 +1986,12 @@ def test_uv_provenance_rejects_binary_outside_reviewed_upstream_release() -> Non
         )
 
 
-def test_repository_revision_requires_committed_source_and_docs(tmp_path: Path) -> None:
+def test_repository_revision_requires_committed_source_and_docs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fixture commits must not invoke the operator's signing agent or Git hooks.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     repository = (tmp_path / "release-repository").resolve()
     repository.mkdir()
     for relative in (
@@ -2010,6 +2016,7 @@ def test_repository_revision_requires_committed_source_and_docs(tmp_path: Path) 
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
+            timeout=30,
         )
 
     revision = shadow_release_module._verified_clean_repository_revision(repository)

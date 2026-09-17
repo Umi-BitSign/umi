@@ -45,6 +45,7 @@ from .competition_bridge_recovery import (
     audit_bridge_history,
 )
 from .encoding import account_id32
+from .file_identity import file_fingerprint as _fingerprint
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 from .simple_bootstrap_validator import (
     SignedSimpleBootstrapLease,
@@ -172,20 +173,6 @@ def _parts(value: str) -> tuple[str, ...]:
     if not parts or any(not _SAFE_PART.fullmatch(item) or item in {".", ".."} for item in parts):
         raise CompetitionRecoveryError("unsafe legacy relative path")
     return parts
-
-
-def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_uid,
-        info.st_gid,
-        info.st_nlink,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
 
 
 def _open_path(path: Path, *, writable: bool = False) -> int:

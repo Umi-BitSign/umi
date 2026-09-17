@@ -47,6 +47,7 @@ from .competition_supervisor import (
 from .competition_supervisor_adapters import SuccessorArtifactFiles
 from .competition_supervisor_runtime import SuccessorWorkerSelection
 from .competition_worker import _open_directory_without_links
+from .file_identity import delivery_file_identity as _identity
 from .protocol import canonical_json_bytes
 from .validator_supervisor import (
     MAX_JSON_SAFE_INTEGER,
@@ -189,20 +190,6 @@ class HTTPSSuccessorDirectiveFetcher:
         except asyncio.TimeoutError as error:
             # asyncio's timeout type became a built-in alias in Python 3.11.
             raise TimeoutError("initial history collection timed out") from error
-
-
-def _identity(info):
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_uid,
-        info.st_gid,
-        info.st_mode,
-        info.st_nlink,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
 
 
 def _directory(path: Path, modes=(0o700,)):

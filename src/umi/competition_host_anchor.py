@@ -36,6 +36,7 @@ from .competition_supervisor import (
     parse_canonical_successor_supervisor_directive_history,
     successor_source_config_sha256,
 )
+from .file_identity import file_fingerprint as _fingerprint
 from .protocol import canonical_json_bytes
 from .validator_supervisor import (
     MAX_SUPERVISOR_DOCUMENT_BYTES,
@@ -861,20 +862,6 @@ def _directory_names(descriptor: int, *, maximum: int) -> set[str]:
 
 def _stable_directory_identity(info: os.stat_result) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_uid, info.st_gid)
-
-
-def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_uid,
-        info.st_gid,
-        info.st_nlink,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
 
 
 def _json_identity(value: tuple[int, ...]) -> list[str]:
