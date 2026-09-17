@@ -68,8 +68,7 @@ def test_retired_hold_guide_is_archived_and_routes_to_current_installation() -> 
     assert "Do not\nfollow their installation or enrollment steps" in guide
     assert "../PERMANENT_VALIDATOR_SUPERVISOR.md" in guide
     assert (
-        "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/LEGACY_VALIDATOR_TRANSITION.md"
-        in guide
+        "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/LEGACY_VALIDATOR_TRANSITION.md" in guide
     )
 
 

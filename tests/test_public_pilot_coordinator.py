@@ -61,8 +61,7 @@ def test_public_pilot_runbook_preserves_the_historical_handoff_procedure() -> No
     assert "Do not open pilot enrollment issues" in text
     assert "CURRENT_MINER_OPERATION.md" in text
     assert (
-        "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/PUBLIC_ENDPOINT_MINER_PILOT.md"
-        in text
+        "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/PUBLIC_ENDPOINT_MINER_PILOT.md" in text
     )
 
 
