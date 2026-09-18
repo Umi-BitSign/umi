@@ -57,5 +57,6 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "submit": submissions.submit,
     "verify-bundle": models.verify_bundle,
     "verify-cutoff-publication": evidence.verify_cutoff_publication,
+    "verify-miner-feed-profile": submissions.verify_miner_feed_profile,
     "verify-settlement-publication": evidence.verify_cutoff_publication,
 }

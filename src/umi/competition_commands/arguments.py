@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--publication")
     discover.add_argument("--after")
     discover.add_argument("--limit", type=int, default=20)
+    profile = commands.add_parser("verify-miner-feed-profile")
+    for name in ("profile", "expected-profile-sha256", "legacy-policy", "deployment"):
+        profile.add_argument("--" + name, required=True)
+    profile.add_argument("--current-block", required=True, type=int)
     inspection = commands.add_parser("inspect-host-upgrade")
     for name in ("config", "accepted-directive", "expected-hotkey"):
         inspection.add_argument("--" + name, required=True)
