@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import hashlib
 import os
@@ -1047,6 +1048,14 @@ async def run_registration_bridge_iteration(
         # the event loop so the owned finality observer can continue ingesting
         # heads while recovery audits old receipts.
         journal = await asyncio.to_thread(state.initialize, before, now=chain.clock())
+        if journal.phase in {"submitting", "outcome_unknown"}:
+            # Recover only a finalized, exact, successful call from this attempt.
+            # The helper never signs or broadcasts. If proof is absent, retain the
+            # original durable hold below.
+            from .registration_bridge_recover import recover_with_client
+
+            with contextlib.suppress(RegistrationBridgeError):
+                journal, _ = await recover_with_client(state, journal, before, client, chain)
         if journal.phase == "receipt_returned":
             # A full retained-history audit can outlive the snapshot's freshness
             # limit. Reobserve after it; never relax the age or receipt checks.
