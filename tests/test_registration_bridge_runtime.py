@@ -81,12 +81,21 @@ def applied_observation(wallet, policy, *, block=BLOCK + 1):
 class Client:
     def __init__(self, state, *, error=None):
         self.state, self.error, self.calls = state, error, []
+        self.recovery_block_info = None
+        self.recovery_events = []
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *_):
         return None
+
+    async def block_info(self, *, block):
+        return self.recovery_block_info
+
+    async def query(self, item, *, block):
+        assert item == ("System", "Events")
+        return self.recovery_events
 
     async def submit_call(self, call, wallet, **kwargs):
         durable = self.state.load()
@@ -221,6 +230,58 @@ def test_unknown_never_retries_even_if_another_writer_lands_equal_row(
         ):
             run(signed_policy, wallet, chain, state)
         assert not chain.client.calls
+
+
+def test_unknown_exact_successful_chain_call_recovers_without_rebroadcast(
+    tmp_path, signed_policy, wallet
+):
+    before = writer_observation(wallet)
+    root = tmp_path.resolve() / "state"
+    with bridge.RegistrationBridgeState(root) as state:
+        chain = Chain(state, [before, before], error=TimeoutError())
+        with pytest.raises(TimeoutError):
+            run(signed_policy, wallet, chain, state)
+        attempt = state.load().attempt
+    included = BLOCK + 3
+    after = applied_observation(wallet, signed_policy, block=included).model_copy(
+        update={"block_number": BLOCK + 10, "block_hash": "0x" + "33" * 32}
+    )
+    call = {
+        "call_module": "SubtensorModule",
+        "call_function": "set_mechanism_weights",
+        "call_args": [
+            {"name": "netuid", "value": 78},
+            {"name": "mecid", "value": 0},
+            {"name": "dests", "value": list(range(256))},
+            {"name": "weights", "value": [pair[1] for pair in attempt.expected_row]},
+            {"name": "version_key", "value": 4_294_967_296},
+        ],
+    }
+    with bridge.RegistrationBridgeState(root) as state:
+        chain = Chain(state, [after, after])
+        chain.client.recovery_block_info = SimpleNamespace(
+            number=included,
+            hash="0x" + "44" * 32,
+            extrinsics=[{"address": wallet.hotkey.ss58_address, "call": call}],
+        )
+        chain.client.recovery_events = [
+            {
+                "extrinsic_idx": 0,
+                "module_id": "SubtensorModule",
+                "event_id": "WeightsSet",
+                "attributes": [78, 54],
+            },
+            {
+                "extrinsic_idx": 0,
+                "module_id": "System",
+                "event_id": "ExtrinsicSuccess",
+                "attributes": {},
+            },
+        ]
+        run(signed_policy, wallet, chain, state)
+        assert not chain.client.calls
+        assert state.load().phase == "applied"
+        assert state.load().weight_call.extrinsic_id == f"{included}-0000"
 
 
 def test_returned_receipt_survives_post_submit_rpc_failure_and_recovers_without_send(

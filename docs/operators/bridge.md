@@ -104,12 +104,16 @@ can be normal waits; compare their block with the activity cutoff. The retired
 ## Unknown submissions
 
 `prior_submission_outcome_unknown` means a retained attempt has no confirmed
-successful receipt. The current bridge worker holds indefinitely rather than
-sending another transaction. It does not retain signed bytes, nonce and exact
-era before submission, so elapsed blocks or matching weights alone do not supply
-its missing recovery evidence. Restarting, deleting journals or reinstalling is
-not a recovery procedure. Preserve state and obtain the bounded attempt details
-from the [validator troubleshooting guide](../PERMANENT_VALIDATOR_SUPERVISOR.md#troubleshooting).
+successful receipt. The bridge never sends another transaction while that
+attempt is unresolved. It instead checks the finalized `LastUpdate` block for
+one exact call signed by the validator hotkey, the successful dispatch and
+`WeightsSet` events, and the intended row. If all proof agrees, it archives a
+recovered receipt and resumes without rebroadcasting. An absent, failed or
+ambiguous proof leaves the hold unchanged. Elapsed blocks or matching weights
+alone are not recovery evidence. Restarting, deleting journals or reinstalling
+is not a recovery procedure. Preserve state and obtain the bounded attempt
+details from the
+[validator troubleshooting guide](../PERMANENT_VALIDATOR_SUPERVISOR.md#troubleshooting).
 
 `receipt_returned` is different: a retained finalized receipt can be verified
 against the chain and reconciled without another send. Neither state permits a

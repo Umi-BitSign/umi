@@ -75,7 +75,9 @@ umi-competition-worker = "umi.competition_worker_cli:main"
 umi-competition-supervisor = "umi.competition_supervisor_cli:main"
 umi-competition-supervisor-cleanup = "umi.competition_supervisor_cleanup:main"
 umi-competition-host-upgrade = "umi.competition_switch_recovery:main"
+umi-competition-not-ready = "umi.competition_not_ready:main"
 umi-registration-bridge = "umi.registration_bridge:main"
+umi-registration-bridge-recover = "umi.registration_bridge_recover:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/umi"]
