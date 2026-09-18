@@ -27,6 +27,15 @@ The policy digest is
 `81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`;
 the accepted contribution-terms digest is
 `61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62`.
+Those are the version 1 live-intake bindings until the public status changes.
+The prospective sequence 5 policy is published as
+[`FIRST_ROUND_STAGED_POLICY.json`](FIRST_ROUND_STAGED_POLICY.json), with protocol
+digest `eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56`.
+It binds [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md), SHA-256
+`c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b`,
+and names the version 1 digest as its predecessor. The immutable version 1
+policy is retained as
+[`FIRST_ROUND_INTAKE_POLICY_V1.json`](FIRST_ROUND_INTAKE_POLICY_V1.json).
 The live intake and bounded status API use `https://api.umi.vision`. The endpoint
 has been publicly reachable since block `9,085,463`, and its accepted-submission
 log is public. A first-round submission or replacement must be accepted at block
@@ -109,23 +118,122 @@ rights checks. An endpoint result alone cannot promote a model. The imported
 baseline has no founding-model exception.
 
 Version 1 of the accepted contribution terms says that both reward tracks launch
-together. The endpoint-only intake described here is therefore a no-weight
-admission phase, not activation of either reward track. Before an endpoint-only
-successor row can activate with the model share burned, UMI must publish
-prospective terms that expressly allow that staged activation, bind them in a
-new signed policy, and require affected miners to accept that exact version.
-Alternatively, both tracks must open together under version 1. No row may pay a
+together. The endpoint-only version 1 intake remains a no-weight admission
+phase. Version 2 permits staged endpoint activation with the model share burned,
+and the published sequence 5 policy binds it. Before that successor governs the
+round, each affected miner must sign and receive acceptance for a new submission
+under the exact successor policy and terms. Version 1 signatures and receipts
+stay immutable and cannot be counted as version 2 acceptance. No row may pay a
 model contributor until a model round passes the published reconstruction,
-preservation, improvement, quality and rights gates.
+preservation, improvement, quality, and rights gates.
 
 If no model qualifies, continue burning the unallocated share. There is no
 retroactive award. After promotion, fresh evaluation and recipient eligibility
 remain required. An awarded contributor becoming ineligible, or a round without
 qualifying endpoint evidence, retains the existing hold; no silent fallback or
-redistribution is authorized. Preserve the [accepted terms](../MODEL_CONTRIBUTION_TERMS.md)
-byte-for-byte, including their version and SHA-256 in submissions and policy.
+redistribution is authorized. Preserve both the
+[version 1 terms](../MODEL_CONTRIBUTION_TERMS.md) and
+[version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) byte-for-byte. Every
+submission and policy must bind the version it actually accepted.
 An exact tie between the highest qualifying new model candidates promotes
 neither candidate; the share remains burned for that round.
+
+### Version 1 to version 2 intake transition
+
+Do not replace the version 1 intake database or reopen it with the sequence 5
+policy. The store, baseline, retained submissions, checkpoint, and finality
+cache are policy-bound. Opening those files under another digest either fails
+closed or risks losing the distinction between the two acceptances.
+
+Before advertising sequence 5, the operator must:
+
+1. Quiesce writes long enough to take a consistent snapshot of the version 1
+   ledger, write-ahead log, checkpoint, baseline, public deployment record, and
+   finality cache. Retain the snapshot and its hashes off host.
+2. Keep every version 1 signed submission and receipt retrievable at a stable,
+   read-only archive route. Do not rewrite their policy or terms fields.
+3. Initialize a separate version 2 intake state with the same launch identity
+   and a separately recorded baseline under the sequence 5 policy. Its retained
+   submission list is empty until the first version 2 acceptance; the external
+   checkpoint must commit that exact empty head before the service starts.
+4. Change public status and the writable intake route together so they expose
+   `eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56`
+   and the version 2 terms digest before accepting successor submissions.
+5. Give affected miners time to use the documented transition command, sign
+   with the same hotkey, and receive a new receipt by block `9,135,843`. Build
+   the reward roster only from accepted version 2 submissions. The version 1
+   archive remains evidence, not implied consent or a reward roster.
+
+With every version 1 writer stopped and its backup verified, export the
+content-addressed public archive before starting the sequence 5 service:
+
+```sh
+umi-competition --policy /ABSOLUTE/PRIVATE/version-1-policy.json \
+  export-intake-archive \
+  --state /ABSOLUTE/PRIVATE/version-1-intake \
+  --submission-head-checkpoint-directory /ABSOLUTE/PRIVATE/version-1-checkpoint \
+  --deployment /ABSOLUTE/PRIVATE/version-1-deployment.json \
+  --destination /ABSOLUTE/PRIVATE/version-1-public-archive \
+  --confirm-quiesced-backup
+```
+
+Put the printed `manifest_sha256` and archive directory in the sequence 5
+service configuration's `historical_archives` list. The service refuses an
+archive that is not the policy's immediate predecessor, lacks the durable
+external checkpoint commitment, belongs to another launch, or differs from the
+pinned manifest. The sequence 5 service also refuses to start without exactly
+one such archive. On first startup it writes the predecessor policy and manifest
+digests into the successor ledger; later startups reject configuration drift.
+Confirm the archived list, canonical manifest, and exact-record routes before
+changing the writable intake route. Hash the response bytes from the manifest
+and exact-record routes against their respective manifest commitments.
+
+Create the successor ledger while both public routes still point at version 1.
+Use the already preserved baseline archive; do not copy the old intake
+database:
+
+```sh
+v2_policy=/ABSOLUTE/PRIVATE/version-2-policy.json
+v2_state=/ABSOLUTE/PRIVATE/version-2-intake
+v2_checkpoint=/ABSOLUTE/PRIVATE/version-2-checkpoint
+v2_config=/ABSOLUTE/PRIVATE/version-2-service.json
+
+test ! -e "$v2_state"
+test ! -e "$v2_checkpoint"
+install -d -m 0700 "$v2_checkpoint"
+umi-competition --policy "$v2_policy" initialize-baseline \
+  --state "$v2_state" \
+  --manifest /ABSOLUTE/PRIVATE/baseline-manifest.json \
+  --archive /ABSOLUTE/PRIVATE/preserved-baseline
+umi-competition --policy "$v2_policy" status --state "$v2_state" \
+  > /ABSOLUTE/PRIVATE/version-2-initial-status.json
+```
+
+Build `v2_config` with the printed baseline promotion digest,
+`required_submission_sha256s: []`, the new checkpoint directory, and the pinned
+version 1 archive. Back up the new database, verify that configuration, then
+initialize its external empty-head commitment through the existing stopped-store
+migration command:
+
+```sh
+umi-competition-store-migrate \
+  --policy "$v2_policy" --state "$v2_state" \
+  --service-config "$v2_config" --confirm-quiesced-backup \
+  > /ABSOLUTE/PRIVATE/version-2-checkpoint-initialization.json
+jq -e '
+  .restart_services_without_migration == true and
+  .retained_submission_head.record_count == 0 and
+  .retained_submission_head.external_checkpoint_durable == true
+' /ABSOLUTE/PRIVATE/version-2-checkpoint-initialization.json >/dev/null
+```
+
+Before the first version 2 acceptance, rollback may restore the version 1
+service and its exact snapshot. Once version 2 has accepted anything, never
+discard that ledger or reopen version 1 for writes; preserve both histories and
+repair the successor deployment forward. Version 2 submissions cannot be copied
+into version 1. If the public archive, atomic route switch, or retained-state
+snapshot is not ready, keep version 1 intake live and do not advertise the
+successor policy.
 
 ## Burn proof
 

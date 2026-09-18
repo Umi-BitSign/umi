@@ -118,6 +118,14 @@ class AdmissionCapacityError(ValueError):
     """A new admission would exceed its configured durable capacity."""
 
 
+class HistoricalIntakeArchiveBinding(StrictProtocolModel):
+    """Content-addressed predecessor archive bound into this ledger."""
+
+    schema_: Literal["umi-historical-intake-archive-binding/1"] = Field(alias="schema")
+    policy_sha256: Hex32
+    manifest_sha256: Hex32
+
+
 class SettlementNotReadyError(ValueError):
     """A frozen roster entry has no complete independent evidence by cutoff."""
 
@@ -189,6 +197,9 @@ class CompetitionStore(VoidEvidenceRetention):
         initial_checkpoint_submission_sha256s: tuple[str, ...] | None = None,
         initial_checkpoint_baseline_promotion_sha256: str | None = None,
         initialize_submission_checkpoint: bool = False,
+        historical_intake_archive_bindings: (
+            tuple[HistoricalIntakeArchiveBinding, ...] | None
+        ) = None,
     ):
         if not directory.is_absolute() or directory.is_symlink():
             raise ValueError("competition state directory must be absolute and not a symlink")
@@ -203,6 +214,21 @@ class CompetitionStore(VoidEvidenceRetention):
         launch_id = None if public_launch is None else digest(public_launch)
         self.public_launch = public_launch
         self.public_launch_id = launch_id
+        if historical_intake_archive_bindings is None:
+            self.historical_intake_archive_bindings = None
+        else:
+            archive_bindings = tuple(
+                HistoricalIntakeArchiveBinding.model_validate_json(canonical_json_bytes(item))
+                for item in historical_intake_archive_bindings
+            )
+            if (
+                archive_bindings
+                != tuple(sorted(archive_bindings, key=lambda item: item.policy_sha256))
+                or len({item.policy_sha256 for item in archive_bindings}) != len(archive_bindings)
+                or len({item.manifest_sha256 for item in archive_bindings}) != len(archive_bindings)
+            ):
+                raise ValueError("historical intake archive bindings must be unique and sorted")
+            self.historical_intake_archive_bindings = archive_bindings
         if role not in {"intake", "evaluator_review"}:
             raise ValueError("unknown competition store role")
         self.role = role
@@ -472,6 +498,7 @@ class CompetitionStore(VoidEvidenceRetention):
                     raise ValueError("evaluator receipt state cannot bind a public launch")
                 if role == "intake":
                     self._bind_public_launch(connection, public_launch)
+                self._bind_historical_intake_archives(connection)
                 self._bind_required_submission_checkpoint(connection)
                 actual_usage = connection.execute(
                     "SELECT COUNT(*), COALESCE(SUM("
@@ -669,6 +696,26 @@ class CompetitionStore(VoidEvidenceRetention):
             )
         elif required != (self._submission_checkpoint_binding,):
             raise ValueError("competition state requires another submission checkpoint")
+
+    def _bind_historical_intake_archives(self, connection: sqlite3.Connection) -> None:
+        """Persist exact predecessor archives before this ledger can serve intake."""
+
+        configured = self.historical_intake_archive_bindings
+        if configured is None:
+            return
+        body = canonical_json_bytes(
+            [item.model_dump(mode="json", by_alias=True) for item in configured]
+        ).decode("utf-8")
+        bound = connection.execute(
+            "SELECT value FROM metadata WHERE key='historical_intake_archives'"
+        ).fetchone()
+        if bound is None:
+            connection.execute(
+                "INSERT INTO metadata VALUES ('historical_intake_archives', ?)",
+                (body,),
+            )
+        elif bound != (body,):
+            raise ValueError("competition state requires its bound historical intake archives")
 
     @contextmanager
     def _transaction(self):
@@ -1366,10 +1413,7 @@ class CompetitionStore(VoidEvidenceRetention):
         required_submission_sha256s: tuple[str, ...],
     ) -> None:
         _require_hex32(baseline_promotion_sha256, "baseline promotion digest")
-        if (
-            not required_submission_sha256s
-            or tuple(sorted(set(required_submission_sha256s))) != required_submission_sha256s
-        ):
+        if tuple(sorted(set(required_submission_sha256s))) != required_submission_sha256s:
             raise ValueError("required submission digests must be sorted and unique")
         for submission_id in required_submission_sha256s:
             _require_hex32(submission_id, "submission digest")

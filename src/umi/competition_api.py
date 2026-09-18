@@ -13,11 +13,16 @@ from typing import Annotated, Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import Field, ValidationError
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.types import Lifespan
 
+from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
-from .competition_store import AdmissionCapacityError, CompetitionStore
+from .competition_store import (
+    AdmissionCapacityError,
+    CompetitionStore,
+    HistoricalIntakeArchiveBinding,
+)
 from .competition_submission_checkpoint import SubmissionCheckpointError
 from .open_competition import RegistrationSnapshot, SignedSubmission, StrictProtocolModel, digest
 from .protocol import canonical_json_bytes
@@ -51,6 +56,7 @@ def create_app(
     ] = "rehearsal_snapshot",
     limits: CompetitionApiLimits | None = None,
     public_deployment: PublicIntakeDeployment | None = None,
+    historical_archives: tuple[LoadedIntakeArchive, ...] = (),
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
@@ -62,6 +68,25 @@ def create_app(
             canonical_json_bytes(public_deployment)
         )
     status_snapshot_provider = status_snapshot_provider or snapshot_provider
+    archives_by_policy = {
+        digest(archive.manifest.policy): archive for archive in historical_archives
+    }
+    if len(archives_by_policy) != len(historical_archives) or digest(store.policy) in (
+        archives_by_policy
+    ):
+        raise ValueError("historical intake archives must name unique superseded policies")
+    archive_bindings = tuple(
+        HistoricalIntakeArchiveBinding(
+            schema="umi-historical-intake-archive-binding/1",
+            policy_sha256=digest(archive.manifest.policy),
+            manifest_sha256=archive.manifest_sha256,
+        )
+        for archive in sorted(historical_archives, key=lambda item: digest(item.manifest.policy))
+    )
+    if (
+        historical_archives or store.historical_intake_archive_bindings is not None
+    ) and store.historical_intake_archive_bindings != archive_bindings:
+        raise ValueError("public archive routes differ from the ledger-bound archive manifests")
     title = (
         "UMI open competition intake"
         if registration_source == "verifier_attested_finality"
@@ -146,6 +171,7 @@ def create_app(
             "admission_phase": admission_phase,
             "admission_checked_block": admission_checked_block,
             "chain_submission_authorized": False,
+            "historical_intake_archives": [archive.summary() for archive in historical_archives],
         }
         if public_deployment is not None:
             result.update(
@@ -188,6 +214,55 @@ def create_app(
         if item is None:
             raise HTTPException(404, "submission not found")
         return item
+
+    @app.get("/v1/competition/archives")
+    async def intake_archives():
+        return {"items": [archive.summary() for archive in historical_archives]}
+
+    @app.get("/v1/competition/archives/{policy_sha256}/manifest")
+    async def archived_manifest(policy_sha256: str):
+        archive = archives_by_policy.get(policy_sha256)
+        if archive is None:
+            raise HTTPException(404, "intake archive not found")
+        return Response(
+            content=archive.canonical_manifest_bytes(),
+            media_type="application/json",
+        )
+
+    @app.get("/v1/competition/archives/{policy_sha256}/submissions")
+    async def archived_submissions(
+        policy_sha256: str,
+        offset: int = Query(default=0, ge=0, le=limits.maximum_page_offset),
+        limit: int = Query(
+            default=min(20, limits.maximum_page_size),
+            ge=1,
+            le=limits.maximum_page_size,
+        ),
+    ):
+        archive = archives_by_policy.get(policy_sha256)
+        if archive is None:
+            raise HTTPException(404, "intake archive not found")
+        return {
+            "policy_sha256": policy_sha256,
+            "items": await run_in_threadpool(
+                archive.admission_summaries, offset=offset, limit=limit
+            ),
+            "offset": offset,
+            "limit": limit,
+        }
+
+    @app.get("/v1/competition/archives/{policy_sha256}/submissions/{submission_sha256}")
+    async def archived_submission_by_digest(policy_sha256: str, submission_sha256: str):
+        archive = archives_by_policy.get(policy_sha256)
+        if archive is None:
+            raise HTTPException(404, "intake archive not found")
+        try:
+            item = await run_in_threadpool(archive.canonical_submission_bytes, submission_sha256)
+        except ValueError as error:
+            raise HTTPException(404, "archived submission not found") from error
+        if item is None:
+            raise HTTPException(404, "archived submission not found")
+        return Response(content=item, media_type="application/json")
 
     @app.get("/v1/competition/rounds/{round_sha256}")
     async def round_status(

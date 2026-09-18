@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from ..competition_evidence import IndependentEvaluationEvidence
-from ..competition_launch import PublicLaunchIdentity
+from ..competition_launch import PublicIntakeDeployment, PublicLaunchIdentity
 from ..competition_settlement import EvidenceCutoffSchedule
 from ..competition_store import AttestedPromotionReview, CompetitionStore
 from ..open_competition import (
@@ -62,6 +62,25 @@ def status(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
         "mode": "rehearsal_no_weight",
         "chain_submission_authorized": False,
     }
+
+
+def export_intake_archive(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    from ..competition_intake_archive import export_intake_archive as export
+
+    deployment = load_json(args.deployment, PublicIntakeDeployment)
+    store = CompetitionStore(
+        Path(args.state).absolute(),
+        policy,
+        public_launch=deployment.launch_identity(),
+        submission_head_checkpoint_directory=Path(
+            args.submission_head_checkpoint_directory
+        ).absolute(),
+    )
+    return export(
+        store,
+        Path(args.destination),
+        confirmed_quiesced=args.confirm_quiesced_backup,
+    )
 
 
 def admit(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:

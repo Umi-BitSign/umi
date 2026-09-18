@@ -1,5 +1,5 @@
 {
-  "competition_cli_sha256": "1f3e13ac84b8a0be4d05a1cff5cc03753f11ff2ce07b7dae1e7bbb4008f51b1b",
+  "competition_cli_sha256": "5af32a2d2529a932cac7f847e405bd23fe0d062310e7cf0069d53e230c65624f",
   "schema_sha256": {
     "competition_cli.ExecutionInputs": "918a72249a15d407e05da4a59c1bd5dbcadcbfad267eacfd125dedab02f05869",
     "competition_cli.ExecutionRevealPulses": "bca1b8985845ee2e399c72ccac1c6b90728702ccab986872a9a6436f67dee721",

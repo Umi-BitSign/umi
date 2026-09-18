@@ -150,6 +150,19 @@ def build_parser() -> argparse.ArgumentParser:
     sign.add_argument("--wallet-name", required=True)
     sign.add_argument("--hotkey-name", required=True)
     sign.add_argument("--wallet-path", required=True)
+    transition = commands.add_parser("prepare-endpoint-policy-transition")
+    for name in ("prior-policy", "prior-submission", "prior-receipt", "deployment"):
+        transition.add_argument("--" + name, required=True)
+    transition.add_argument("--current-block", required=True, type=int)
+    archive = commands.add_parser("export-intake-archive")
+    for name in (
+        "state",
+        "submission-head-checkpoint-directory",
+        "deployment",
+        "destination",
+    ):
+        archive.add_argument("--" + name, required=True)
+    archive.add_argument("--confirm-quiesced-backup", action="store_true")
     for name in (
         "status",
         "admit",

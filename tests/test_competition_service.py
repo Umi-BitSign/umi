@@ -767,6 +767,45 @@ def test_retained_submission_anchor_is_canonical(config):
         RetainedIntakeState.model_validate_json(canonical_json_bytes(raw))
 
 
+def test_successor_intake_can_start_with_an_empty_policy_bound_submission_head(
+    chain_config, tmp_path, policy, public_deployment
+):
+    state = tmp_path / "successor-intake"
+    checkpoint = tmp_path / "successor-checkpoint"
+    checkpoint.mkdir(mode=0o700)
+    archive = tmp_path / "successor-baseline"
+    baseline = bundle_at(tmp_path / "successor-model")
+    preserve_bundle(baseline, tmp_path / "successor-model", archive, policy)
+    store = CompetitionStore(
+        state,
+        policy,
+        public_launch=public_deployment.launch_identity(),
+    )
+    store.initialize_baseline(baseline, archive)
+    retained = RetainedIntakeState(
+        schema="umi-competition-retained-intake-state/1",
+        baseline_promotion_sha256=store.baseline_summary()["promotion_sha256"],
+        required_submission_sha256s=(),
+    )
+    service = CompetitionServiceConfig(
+        schema="umi-competition-service-config/2",
+        mode="intake_no_weight",
+        policy_sha256=digest(policy),
+        public_deployment=public_deployment,
+        retained_state=retained,
+        state_directory=str(state),
+        submission_head_checkpoint_directory=str(checkpoint),
+        chain=chain_config,
+    )
+
+    migration = migrate(state, policy, confirmed=True, service_config=service)
+    app = create_intake_app(service, policy, provider_factory=Provider)
+
+    assert migration["retained_submission_head"]["record_count"] == 0
+    assert migration["retained_submission_head"]["external_checkpoint_durable"] is True
+    assert app.state.competition_store.submissions() == []
+
+
 @pytest.mark.parametrize(
     "eligible_tracks,model_intake_ready",
     [

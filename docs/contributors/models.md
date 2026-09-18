@@ -12,18 +12,19 @@ Public first-round endpoint intake is live; model-artifact intake, model
 evaluation and competition rewards are not. The exact canonical model runtime
 and its immutable, reconstructible environment have not been published. This
 checklist explains what to prepare for a future rights and reconstruction
-review. It is not a license grant or approval of a particular model. The approved
-[version 1 contribution terms](../MODEL_CONTRIBUTION_TERMS.md) publish the 70/30
-allocation and the accepted identifiers for review: `MIT`, `Apache-2.0`,
-`CC-BY-4.0` and `CC-BY-SA-4.0`. An identifier match still requires source-stack
-review and a qualifying promotion.
+review. It is not a license grant or approval of a particular model. The
+[historical version 1 terms](../MODEL_CONTRIBUTION_TERMS.md) and prospective
+[version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) publish the 70/30 allocation
+and the accepted identifiers for review: `MIT`, `Apache-2.0`, `CC-BY-4.0`, and
+`CC-BY-SA-4.0`. An identifier match still requires source-stack review and a
+qualifying promotion.
 
 The current endpoint-only intake is a no-weight intake. Version 1 says both
-tracks launch together. Before UMI can cut over to endpoint-only rewards while
-burning the 30% model share, it must adopt prospective terms that explicitly
-allow staged activation, bind those terms in a new signed policy, and obtain
-acceptance from every affected miner. Otherwise, UMI must open both tracks before
-activating rewards under version 1.
+tracks launch together. Version 2 permits the endpoint track to activate at 70%
+while the unallocated 30% is burned. The sequence 5 successor policy binds that
+version, but each affected miner must sign a fresh successor submission before
+it can govern a reward roster. Version 1 acceptance cannot be carried forward by
+an operator.
 
 <a id="model-contribution-review--what-must-be-published-before-intake-opens"></a>
 

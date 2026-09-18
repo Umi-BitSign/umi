@@ -18,10 +18,17 @@ from typing_extensions import Self
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_finality_cache import VerifiedRegistrationCache
-from .competition_store import AdmissionCapacity, CompetitionStore
+from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
+from .competition_store import (
+    AdmissionCapacity,
+    CompetitionStore,
+    HistoricalIntakeArchiveBinding,
+)
 from .open_competition import CompetitionPolicy, Hex32, RegistrationSnapshot, digest
 from .policy import umi_source_tree_sha256
 from .protocol import StrictProtocolModel, canonical_json_bytes
+
+_FIRST_STAGED_POLICY_SHA256 = "eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56"
 
 
 class RetainedIntakeState(StrictProtocolModel):
@@ -29,9 +36,7 @@ class RetainedIntakeState(StrictProtocolModel):
 
     schema_: Literal["umi-competition-retained-intake-state/1"] = Field(alias="schema")
     baseline_promotion_sha256: Hex32
-    required_submission_sha256s: Annotated[
-        tuple[Hex32, ...], Field(min_length=1, max_length=65_536)
-    ]
+    required_submission_sha256s: Annotated[tuple[Hex32, ...], Field(max_length=65_536)]
 
     @model_validator(mode="after")
     def canonical_submission_digests(self) -> Self:
@@ -55,6 +60,7 @@ class CompetitionServiceConfig(StrictProtocolModel):
     port: Annotated[int, Field(ge=1024, le=65535)] = 8098
     admission_capacity: AdmissionCapacity = Field(default_factory=AdmissionCapacity)
     api_limits: CompetitionApiLimits = Field(default_factory=CompetitionApiLimits)
+    historical_archives: Annotated[tuple[IntakeArchiveConfig, ...], Field(max_length=8)] = ()
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
@@ -80,6 +86,21 @@ class CompetitionServiceConfig(StrictProtocolModel):
             for right in roots[index + 1 :]
         ):
             raise ValueError("intake, checkpoint, and finality state directories must not overlap")
+        archive_roots = tuple(Path(item.directory).resolve() for item in self.historical_archives)
+        if (
+            len(set(archive_roots)) != len(archive_roots)
+            or any(
+                archive == root or archive in root.parents or root in archive.parents
+                for archive in archive_roots
+                for root in roots
+            )
+            or any(
+                left in right.parents or right in left.parents
+                for index, left in enumerate(archive_roots)
+                for right in archive_roots[index + 1 :]
+            )
+        ):
+            raise ValueError("historical archives need distinct read-only directory trees")
         return self
 
 
@@ -98,6 +119,8 @@ def create_intake_app(
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if digest(policy) != config.policy_sha256:
         raise ValueError("service configuration does not bind the supplied policy")
+    if digest(policy) == _FIRST_STAGED_POLICY_SHA256 and len(config.historical_archives) != 1:
+        raise ValueError("the first staged policy requires its pinned predecessor archive")
     if config.public_deployment.umi_source_tree_sha256 != umi_source_tree_sha256():
         raise ValueError("public deployment does not match the running UMI source tree")
     schedule = config.public_deployment.round_schedule
@@ -118,6 +141,26 @@ def create_intake_app(
         > policy.maximum_snapshot_age_blocks
     ):
         raise ValueError("public round signing can outlive its registration snapshot")
+    historical_archives = tuple(load_intake_archive(item) for item in config.historical_archives)
+    if historical_archives:
+        if len(historical_archives) != 1:
+            raise ValueError("the first staged transition requires one predecessor archive")
+        predecessor = historical_archives[0]
+        predecessor_summary = predecessor.summary()
+        if policy.predecessor_sha256 != predecessor_summary["policy_sha256"] or predecessor_summary[
+            "public_launch_sha256"
+        ] != digest(config.public_deployment.launch_identity()):
+            raise ValueError(
+                "historical archive is not the durable immediate predecessor for this launch"
+            )
+    archive_bindings = tuple(
+        HistoricalIntakeArchiveBinding(
+            schema="umi-historical-intake-archive-binding/1",
+            policy_sha256=digest(archive.manifest.policy),
+            manifest_sha256=archive.manifest_sha256,
+        )
+        for archive in historical_archives
+    )
     database = Path(config.state_directory) / "competition.sqlite3"
     if not database.is_file() or database.is_symlink():
         raise ValueError("intake deployment requires its pre-existing durable ledger")
@@ -127,6 +170,7 @@ def create_intake_app(
         admission_capacity=config.admission_capacity,
         public_launch=config.public_deployment.launch_identity(),
         submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
+        historical_intake_archive_bindings=archive_bindings,
     )
     store.verify_retained_intake_state(
         baseline_promotion_sha256=config.retained_state.baseline_promotion_sha256,
@@ -166,9 +210,11 @@ def create_intake_app(
         registration_source="verifier_attested_finality",
         limits=config.api_limits,
         public_deployment=config.public_deployment,
+        historical_archives=historical_archives,
     )
     app.state.finality_providers = (provider,)
     app.state.registration_snapshot_cache = finality_cache
+    app.state.historical_intake_archives = historical_archives
 
     @app.get("/v1/competition/readiness")
     async def readiness():

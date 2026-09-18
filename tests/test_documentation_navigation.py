@@ -70,10 +70,14 @@ class DocumentationNavigationTests(unittest.TestCase):
                     errors.append(f"{source.relative_to(ROOT)}: missing anchor: {target}")
         self.assertEqual(errors, [], "\n".join(errors))
 
-    def test_terms_remain_the_accepted_exact_version(self):
+    def test_terms_versions_remain_exact(self):
         self.assertEqual(
             hashlib.sha256((ROOT / "docs/MODEL_CONTRIBUTION_TERMS.md").read_bytes()).hexdigest(),
             "61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62",
+        )
+        self.assertEqual(
+            hashlib.sha256((ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V2.md").read_bytes()).hexdigest(),
+            "c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b",
         )
 
     def test_public_phase_and_release_boundary_are_current(self):

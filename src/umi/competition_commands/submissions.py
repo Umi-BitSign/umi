@@ -99,3 +99,19 @@ def sign_submission(args: argparse.Namespace, policy: CompetitionPolicy) -> dict
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey_name, path=args.wallet_path)
     signed = SignedSubmission(submission=sub, signature=sign_object(sub, wallet))
     return signed.model_dump(mode="json", by_alias=True)
+
+
+def prepare_endpoint_policy_transition(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    from ..competition_client import AdmissionReceipt
+    from ..competition_launch import PublicIntakeDeployment
+    from ..competition_policy_transition import prepare_endpoint_policy_transition as prepare
+
+    submission = prepare(
+        prior_policy=load_json(args.prior_policy, CompetitionPolicy),
+        successor_policy=policy,
+        prior_submission=load_json(args.prior_submission, SignedSubmission),
+        prior_receipt=load_json(args.prior_receipt, AdmissionReceipt),
+        deployment=load_json(args.deployment, PublicIntakeDeployment),
+        current_block=args.current_block,
+    )
+    return submission.model_dump(mode="json", by_alias=True)
