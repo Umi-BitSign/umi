@@ -1110,6 +1110,11 @@ def create_app(
                         )
                 except MinerAdmissionError as error:
                     status = 503 if error.retryable else 422
+                    LOGGER.warning(
+                        "miner_admission_rejected reason_code=%s retryable=%s",
+                        error.reason_code,
+                        error.retryable,
+                    )
                     raise HTTPException(status_code=status, detail=error.reason_code) from error
                 if (
                     not isinstance(admission, MinerWindowAdmission)

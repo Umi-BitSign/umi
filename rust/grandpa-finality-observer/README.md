@@ -28,13 +28,19 @@ any configured limit. A stopped subscription cannot deliver another header;
 the observer exits so its supervisor can recover without waiting for a record
 timeout. Recovery still requires a new verified observer run.
 
-Each embedded RPC request has a 60-second deadline. Timestamp reads retry a
-completed light-client RPC error at most twice, after 2 and 4 seconds, against
-the same pinned block. A deadline failure terminates the process without starting
-an overlapping request; malformed timestamp values also fail immediately. No
-header is emitted until its timestamp has been verified and decoded. Longer peer
-outages still require supervisor recovery and may leave explicitly recorded
-history gaps. These bounds do not guarantee peer availability.
+Timestamps use `chainHead_v1_storage` on the same follow subscription and pinned
+block as the header. The observer accepts only the exact `Timestamp.Now` key and
+operation ID, and waits for `operationStorageDone` before emitting a header.
+Chain notifications received during that operation are retained in order, within
+256-event and 1 MiB limits. The legacy `state_getStorage` path is not used.
+
+Each embedded RPC request and complete timestamp operation has a 60-second
+deadline. Explicit terminal storage failures permit at most two retries, after
+2 and 4 seconds, against the same pinned block. A deadline, malformed result,
+subscription stop, or buffer overflow terminates the process without starting
+an overlapping operation. Peer outages still require supervisor recovery and
+may leave explicitly recorded history gaps. These bounds do not guarantee peer
+availability. See the [storage operation specification](https://paritytech.github.io/json-rpc-interface-spec/api/chainHead_v1_storage.html).
 
 ## Security model and bootstrap
 
@@ -103,7 +109,7 @@ Current artifact pins are:
 - `fixtures/finney-grandpa-checkpoint-v1.json` SHA-256:
   `b3f2191587a21b57fbe9f56e3a8245e852c06cdebb0a4dd0b878a5242d9a8311`;
 - source-tree SHA-256:
-  `1d0ff962feb40163a9f54ac9fc177b15150182c881e2a6d6998ac65c3bf938ec`.
+  `4ebff3884dca50726e3a94abd1b5332063daf5e8600933142612755aa03de3fc`.
 
 Release binary hashes are target- and release-specific. The primary Linux
 validator hash is fixed by its signed release. An Apple Silicon miner hash is

@@ -2318,7 +2318,12 @@ def test_final_build_rejects_tampered_live_capture(
         build_shadow_release(descriptor, live_capture=late_capture, now_ms=now_ms)
 
 
-def test_finality_source_pin_covers_vendored_rust_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "relative", ["src/timestamp_storage.rs", "vendor/smoldot-light-1.3.2/src/lib.rs"]
+)
+def test_finality_source_pin_covers_local_and_vendored_rust_source(
+    tmp_path: Path, relative: str
+) -> None:
     repository_root = Path(__file__).resolve().parents[1]
     source = repository_root / "rust" / "grandpa-finality-observer"
     copied = tmp_path / "finality-source"
@@ -2329,8 +2334,8 @@ def test_finality_source_pin_covers_vendored_rust_source(tmp_path: Path) -> None
     shutil.copytree(source / "vendor", copied / "vendor")
 
     assert _finality_source_tree_sha256(copied) == SOURCE_TREE_SHA256
-    vendored_rust = copied / "vendor" / "smoldot-light-1.3.2" / "src" / "lib.rs"
-    vendored_rust.write_bytes(vendored_rust.read_bytes() + b"\n// source-pin mutation\n")
+    rust_source = copied / relative
+    rust_source.write_bytes(rust_source.read_bytes() + b"\n// source-pin mutation\n")
     assert _finality_source_tree_sha256(copied) != SOURCE_TREE_SHA256
 
 
