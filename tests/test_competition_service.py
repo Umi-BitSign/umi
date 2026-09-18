@@ -157,6 +157,57 @@ def checkpoint_store(config, policy):
     )
 
 
+def test_retention_protects_exact_snapshot_blocks_including_replaced_receipts(config, policy):
+    store = checkpoint_store(config, policy)
+    first = submission(policy)
+    receipt = store.admit(first, snapshot(block=108), 110)
+    second = submission(policy, sequence=2)
+    store.admit(second, snapshot(block=117), 120)
+    assert store.retained_registration_blocks() == frozenset({105, 108, 117})
+    assert store.submission_by_digest(digest(first.submission))["receipt"] == receipt
+
+
+def test_default_intake_provider_enables_receipt_aware_retention(config, policy, monkeypatch):
+    captured = {}
+
+    def factory(chain, selected_policy, **kwargs):
+        captured.update(kwargs)
+        return Provider(chain, selected_policy)
+
+    monkeypatch.setattr("umi.competition_service.FinalizedRegistrationProvider", factory)
+    create_intake_app(config, policy)
+    assert captured["retained_capture_blocks"]() == frozenset({105})
+
+
+async def test_refresh_failures_log_class_once_and_recovery_without_private_details(
+    config, policy, monkeypatch, caplog
+):
+    from umi.competition_chain import RegistrationCacheFull
+
+    app, _ = app_for(config, policy)
+    cache = app.state.registration_snapshot_cache
+    attempts = 0
+
+    async def collect():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RegistrationCacheFull("PRIVATE path or RPC credentials")
+        cache._stop.set()
+
+    monkeypatch.setattr(cache, "collect_fresh", collect)
+    cache._refresh_interval = 0.001
+    with caplog.at_level("INFO", logger="umi.competition_finality_cache"):
+        await cache._run()
+    assert attempts == 3
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "registration_refresh_failed error_type=RegistrationCacheFull",
+        "registration_refresh_recovered",
+    ]
+    assert "PRIVATE" not in caplog.text
+
+
 def successor_launch(launch, offset):
     schedule = launch.round_schedule
     schedule = schedule.model_copy(

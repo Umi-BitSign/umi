@@ -108,7 +108,7 @@ def create_intake_app(
     config: CompetitionServiceConfig,
     policy: CompetitionPolicy,
     *,
-    provider_factory=FinalizedRegistrationProvider,
+    provider_factory=None,
 ) -> FastAPI:
     """Create intake without starting it or contacting the chain at import time.
 
@@ -176,7 +176,13 @@ def create_intake_app(
         baseline_promotion_sha256=config.retained_state.baseline_promotion_sha256,
         required_submission_sha256s=config.retained_state.required_submission_sha256s,
     )
-    provider = provider_factory(config.chain, policy)
+    provider = (
+        FinalizedRegistrationProvider(
+            config.chain, policy, retained_capture_blocks=store.retained_registration_blocks
+        )
+        if provider_factory is None
+        else provider_factory(config.chain, policy)
+    )
     finality_cache = VerifiedRegistrationCache(
         provider,
         policy,

@@ -8,6 +8,7 @@ status poll cannot occupy or queue the proof collector ahead of an admission.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -17,6 +18,8 @@ from typing import Any
 from .competition_chain import RegistrationCapture
 from .open_competition import CompetitionPolicy, RegistrationSnapshot, digest
 from .protocol import canonical_json_bytes
+
+_LOGGER = logging.getLogger(__name__)
 
 PROVENANCE_FIELDS = frozenset(
     {
@@ -198,14 +201,22 @@ class VerifiedRegistrationCache:
         return RegistrationCapture(snapshot=snapshot, provenance=provenance)
 
     async def _run(self) -> None:
+        last_error_type = None
         while not self._stop.is_set():
             try:
                 await self.collect_fresh()
+                if last_error_type is not None:
+                    _LOGGER.info("registration_refresh_recovered")
+                    last_error_type = None
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 # A prior verified value remains usable only until its bounded
                 # age expires. Repeated failures therefore fail public state shut.
-                pass
+                # Log transitions privately, without RPC URLs, paths, or bodies.
+                error_type = type(error).__name__
+                if error_type != last_error_type:
+                    _LOGGER.warning("registration_refresh_failed error_type=%s", error_type)
+                    last_error_type = error_type
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self._refresh_interval)

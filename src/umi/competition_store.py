@@ -1274,6 +1274,23 @@ class CompetitionStore(VoidEvidenceRetention):
         with self._connection() as connection:
             return self._admission_capacity_status(connection)
 
+    def retained_registration_blocks(self) -> frozenset[int]:
+        """Protect evidence for every receipt, including superseded submissions."""
+        checkpoint_lock = (
+            self._submission_checkpoint.locked()
+            if self._submission_checkpoint is not None
+            else nullcontext()
+        )
+        with checkpoint_lock:
+            if self._submission_checkpoint is not None:
+                self._synchronize_submission_checkpoint_locked()
+            with self._connection() as connection:
+                rows = connection.execute(
+                    "SELECT DISTINCT json_extract(receipt, '$.registration_snapshot.block') "
+                    "FROM submissions"
+                ).fetchall()
+        return frozenset(row[0] for row in rows)
+
     def _admission_capacity_status(self, connection: sqlite3.Connection) -> dict:
         usage = connection.execute(
             "SELECT records, payload_bytes FROM admission_usage WHERE singleton=1"
