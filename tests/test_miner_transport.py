@@ -337,6 +337,7 @@ async def test_inference_capacity_wait_is_bounded() -> None:
 async def test_window_authority_rejects_before_resource_or_model_work(
     retryable: bool,
     status: int,
+    caplog,
 ) -> None:
     validator_wallet = dev_wallet("//Alice")
     fetcher = CountingFetcher()
@@ -365,6 +366,11 @@ async def test_window_authority_rejects_before_resource_or_model_work(
 
     assert response.status_code == status
     assert response.json()["detail"] == "request_window_binding_mismatch"
+    assert (
+        "miner_admission_rejected reason_code=request_window_binding_mismatch "
+        f"retryable={retryable}" in caplog.messages
+    )
+    assert request.challenge_id not in caplog.text
     assert authority.calls == 1
     assert fetcher.calls == translator.calls == 0
     with pytest.raises(MinerResourceError, match="assignment_not_recorded"):
@@ -870,7 +876,7 @@ async def test_validator_rejects_empty_nonpublic_or_mixed_dns_answers(
 
 
 @pytest.mark.asyncio
-async def test_validator_pins_one_public_ip_and_preserves_host_and_tls_name() -> None:
+async def test_validator_pins_one_public_ip_and_preserves_host_and_tls_name(caplog) -> None:
     validator_wallet = dev_wallet("//Alice")
     miner_runtime = runtime(allowed_wallet=validator_wallet)
     prepared = prepare_request_attempt(
@@ -901,6 +907,7 @@ async def test_validator_pins_one_public_ip_and_preserves_host_and_tls_name() ->
     )
 
     assert outcome.failure_code == "http_error"
+    assert "miner_http_error status=503" in caplog.messages
     assert resolver_calls == [("miner.example", 8443)]
     assert observed == {
         "url": "https://1.1.1.1:8443/v1/translate",

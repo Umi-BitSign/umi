@@ -575,6 +575,7 @@ async def send_prepared_request(
                         received_bytes_sha256=hashlib.sha256(body_prefix).hexdigest(),
                     )
                 if response.status_code != 200:
+                    LOGGER.warning("miner_http_error status=%d", response.status_code)
                     raise ComponentResponseError(
                         "http_error", f"miner returned HTTP {response.status_code}"
                     )

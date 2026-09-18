@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use subxt_lightclient::{LightClient, LightClientRpc};
 use thiserror::Error;
 
+mod timestamp_storage;
+use timestamp_storage::{PendingEvents, timestamp_at};
+
 const REQUEST_SCHEMA: &str = "umi-grandpa-finality-observer/1";
 const RECORD_SCHEMA: &str = "umi-grandpa-finality-attestation/1";
 const EVIDENCE_CLASS: &str = "verifier_attested_finality";
@@ -108,6 +111,8 @@ enum ObserverError {
     LightClient(String),
     #[error("light client RPC timed out: {0}")]
     RpcTimeout(&'static str),
+    #[error("pinned timestamp storage unavailable")]
+    TimestampStorageUnavailable,
     #[error("JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("startup timed out")]
@@ -938,47 +943,6 @@ async fn header_at(
     Ok(header)
 }
 
-async fn timestamp_at(rpc: &LightClientRpc, hash: &str) -> Result<u64, ObserverError> {
-    timestamp_with_retry(
-        || {
-            rpc_value(
-                rpc,
-                "state_getStorage",
-                serde_json::json!([TIMESTAMP_NOW_KEY, hash]),
-            )
-        },
-        TIMESTAMP_RETRY_DELAY,
-    )
-    .await
-}
-
-async fn timestamp_with_retry<F, Fut>(
-    mut fetch: F,
-    retry_delay: std::time::Duration,
-) -> Result<u64, ObserverError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Value, ObserverError>>,
-{
-    for attempt in 0..TIMESTAMP_RPC_ATTEMPTS {
-        match fetch().await {
-            Ok(value) => return decode_timestamp(value),
-            Err(ObserverError::LightClient(_)) if attempt + 1 < TIMESTAMP_RPC_ATTEMPTS => {
-                // Retry the same pinned block, never a newer head or an
-                // unverified value. The final failed attempt is returned.
-                log::warn!(
-                    target: "umi-storage",
-                    "timestamp RPC attempt {} failed; retrying the same pinned block",
-                    attempt + 1
-                );
-                tokio::time::sleep(retry_delay * (1 << attempt)).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    unreachable!("the final timestamp attempt always returns")
-}
-
 fn decode_timestamp(value: Value) -> Result<u64, ObserverError> {
     let encoded = value
         .as_str()
@@ -1107,6 +1071,7 @@ async fn observe(config: &Config, chain_spec: ChainSpecMaterial) -> Result<(), O
         .await
         .map_err(|error| ObserverError::LightClient(error.to_string()))?;
     let subscription_id = subscription.id().to_owned();
+    let mut pending = PendingEvents::default();
     let mut parents: HashMap<String, String> = HashMap::new();
     let mut transcript = Transcript::new(config);
     let mut emitted = 0u32;
@@ -1115,7 +1080,9 @@ async fn observe(config: &Config, chain_spec: ChainSpecMaterial) -> Result<(), O
         + std::time::Duration::from_secs(config.startup_timeout_seconds);
 
     loop {
-        let notification = if emitted == 0 {
+        let notification = if let Some(raw) = pending.pop() {
+            Some(Ok(raw))
+        } else if emitted == 0 {
             tokio::time::timeout_at(startup_deadline, subscription.next())
                 .await
                 .map_err(|_| ObserverError::StartupTimeout)?
@@ -1209,7 +1176,8 @@ async fn observe(config: &Config, chain_spec: ChainSpecMaterial) -> Result<(), O
                     true,
                 ),
             };
-            let timestamp = timestamp_at(&rpc, &header.hash).await?;
+            let timestamp =
+                timestamp_at(&rpc, &mut subscription, &mut pending, &header.hash).await?;
             let record = transcript.record(header, timestamp, ancestry, complete)?;
             emit(&record, config.maximum_record_bytes)?;
             let mut obsolete = Vec::new();
@@ -1494,7 +1462,6 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
     use std::io::Write;
 
     #[tokio::test]
@@ -1517,98 +1484,6 @@ mod tests {
             result,
             Err(ObserverError::RpcTimeout("state_getStorage"))
         ));
-    }
-
-    #[tokio::test]
-    async fn timestamp_transport_failure_can_recover_within_the_bound() {
-        let calls = Cell::new(0);
-        let result = timestamp_with_retry(
-            || {
-                calls.set(calls.get() + 1);
-                std::future::ready(match calls.get() {
-                    1 => Err(ObserverError::LightClient("NoConnection".to_owned())),
-                    2 => Err(ObserverError::LightClient("NoConnection".to_owned())),
-                    _ => Ok(serde_json::json!("0x0100000000000000")),
-                })
-            },
-            std::time::Duration::ZERO,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, 1);
-        assert_eq!(calls.get(), TIMESTAMP_RPC_ATTEMPTS);
-    }
-
-    #[tokio::test]
-    async fn timestamp_transport_retry_is_bounded() {
-        let calls = Cell::new(0);
-        let result = timestamp_with_retry(
-            || {
-                calls.set(calls.get() + 1);
-                std::future::ready(Err(ObserverError::LightClient("NoConnection".to_owned())))
-            },
-            std::time::Duration::ZERO,
-        )
-        .await;
-        assert!(matches!(result, Err(ObserverError::LightClient(_))));
-        assert_eq!(calls.get(), TIMESTAMP_RPC_ATTEMPTS);
-    }
-
-    #[tokio::test]
-    async fn timestamp_deadline_is_terminal_without_overlapping_requests() {
-        let calls = Cell::new(0);
-        let result = timestamp_with_retry(
-            || {
-                calls.set(calls.get() + 1);
-                std::future::ready(Err(ObserverError::RpcTimeout("state_getStorage")))
-            },
-            std::time::Duration::ZERO,
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(ObserverError::RpcTimeout("state_getStorage"))
-        ));
-        assert_eq!(calls.get(), 1);
-    }
-
-    #[tokio::test]
-    async fn timestamp_decode_failure_is_not_retried() {
-        for value in [
-            Value::Null,
-            serde_json::json!("0x01"),
-            serde_json::json!("0xzz"),
-        ] {
-            let calls = Cell::new(0);
-            let result = timestamp_with_retry(
-                || {
-                    calls.set(calls.get() + 1);
-                    std::future::ready(Ok(value.clone()))
-                },
-                std::time::Duration::ZERO,
-            )
-            .await;
-            assert!(matches!(result, Err(ObserverError::Protocol(_))));
-            assert_eq!(calls.get(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn timestamp_protocol_error_is_not_retried() {
-        let calls = Cell::new(0);
-        let result = timestamp_with_retry(
-            || {
-                calls.set(calls.get() + 1);
-                std::future::ready(Err(ObserverError::Protocol("invalid_rpc_result")))
-            },
-            std::time::Duration::ZERO,
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(ObserverError::Protocol("invalid_rpc_result"))
-        ));
-        assert_eq!(calls.get(), 1);
     }
 
     #[test]
