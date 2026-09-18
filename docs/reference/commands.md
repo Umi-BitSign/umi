@@ -271,6 +271,28 @@ placeholder feed values below. UMI will publish an exact signed feed
 configuration and tested miner command before evaluation, with operating lead
 time. A coordinator, feed or evaluator delay is not a miner failure.
 
+Before using a published miner feed profile, verify it against its separately
+announced digest, the reviewed competition and transport policies, and the
+current intake deployment. This read-only command does not open a wallet or
+contact the feed:
+
+```sh
+umi-competition --policy competition-policy.json verify-miner-feed-profile \
+  --profile signed-miner-feed-profile.json \
+  --expected-profile-sha256 PUBLISHED_SIGNED_PROFILE_SHA256 \
+  --legacy-policy transport-policy.json \
+  --deployment intake-deployment.json --current-block VERIFIED_FINALIZED_BLOCK
+```
+
+The profile binds the feed origin, allowed video origins and the public round
+schedule. Its signatures must meet the competition policy's evaluator-group
+quorum. A changed deadline, wrong policy, duplicate control group or changed
+profile is rejected. The caller must obtain the current finalized block; this
+command does not prove finality. Successful verification establishes connection
+settings only. It does not prove availability, authorize assignments or activate
+rewards. Each assignment still needs its own verified authorization and chain
+observations. No production profile is supplied by this example.
+
 An endpoint proof check uses the owned finality sidecar and storage verifier:
 
 ```sh

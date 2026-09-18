@@ -76,6 +76,31 @@ def check_endpoint_origin(args: argparse.Namespace, policy: CompetitionPolicy) -
     return asyncio.run(check())
 
 
+def verify_miner_feed_profile(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    from ..competition_launch import PublicIntakeDeployment
+    from ..competition_miner_profile import SignedMinerFeedProfile
+    from ..competition_miner_profile import verify_miner_feed_profile as verify
+    from ..policy import ScoringPolicy
+
+    profile = verify(
+        load_json(args.profile, SignedMinerFeedProfile),
+        expected_profile_sha256=args.expected_profile_sha256,
+        policy=policy,
+        transport=load_json(args.legacy_policy, ScoringPolicy),
+        public_launch=load_json(args.deployment, PublicIntakeDeployment).launch_identity(),
+        current_block=args.current_block,
+    )
+    return {
+        "status": "miner_feed_profile_verified",
+        "profile": profile.model_dump(mode="json", by_alias=True),
+        "current_block": args.current_block,
+        "finality_verified": False,
+        "assignment_authorized": False,
+        "availability_verified": False,
+        "chain_submission_authorized": False,
+    }
+
+
 def submit(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
     from ..competition_client import submit_signed_submission
 
