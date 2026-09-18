@@ -66,9 +66,19 @@ def policies() -> tuple[CompetitionPolicy, CompetitionPolicy]:
     )
     successor = prior.model_copy(
         update={
+            "schema_": "umi-open-competition-policy/4",
             "sequence": 5,
             "predecessor_sha256": digest(prior),
             "contribution_terms_sha256": "b2" * 32,
+            "minimum_continuous_observed_margin_bps": 31,
+            "continuous_dependence_lower_bound_floor_bps": 0,
+            "minimum_continuous_dependence_pairs": 12,
+            "continuous_dependence_duration_bins": 6,
+            "maximum_counterfactual_duration_delta_ms": 500,
+            "continuous_dependence_bootstrap_replicates": 4096,
+            "continuous_dependence_confidence_bps": 9500,
+            "positive_control_model_sha256": "f2" * 32,
+            "minimum_positive_control_dependence_bps": 5000,
         }
     )
     return prior, CompetitionPolicy.model_validate_json(canonical_json_bytes(successor))

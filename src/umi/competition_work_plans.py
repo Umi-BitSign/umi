@@ -6,6 +6,7 @@ Signing and delivery must retain these exact bytes and original deadlines.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -31,6 +32,7 @@ from .competition_publication import (
 from .competition_runner import OfflineRuntime
 from .competition_scheduling import _clock
 from .open_competition import (
+    DEPENDENCE_POLICY_SCHEMA,
     CompetitionPolicy,
     EvaluationSuite,
     Hotkey,
@@ -137,12 +139,14 @@ def validate_work_plan(plan, policy):
     validate_bundle_policy(plan.incumbent, policy)
     if plan.evaluators != evaluator_selection(policy, plan.submissions, plan.cutoff):
         raise ValueError("work plan evaluator selection differs from the canonical groups")
+    video_counts = Counter(case.video_sha256 for case in plan.cases)
     if (
         len({c.case_id for c in plan.cases}) != len(plan.cases)
-        or len({c.video_sha256 for c in plan.cases}) != len(plan.cases)
+        or (policy.schema_ != DEPENDENCE_POLICY_SCHEMA and len(video_counts) != len(plan.cases))
+        or any(count > 2 for count in video_counts.values())
         or not has_case_coverage(plan.cases, policy)
     ):
-        raise ValueError("work plan cases lack unique complete stratum coverage")
+        raise ValueError("work plan cases have invalid identity or stratum coverage")
     return plan
 
 
@@ -209,6 +213,8 @@ def endpoint_proposals(
     """
     plan = validate_work_plan(plan, policy)
     legacy = ScoringPolicy.model_validate_json(canonical_json_bytes(legacy))
+    if policy.schema_ == DEPENDENCE_POLICY_SCHEMA and legacy.clock.issue_allowance_seconds != 5400:
+        raise ValueError("dependence work requires the signed 5400-second issue allowance")
     for block in (announcement, issuance):
         _verified_transport_block(block, legacy)
     if (

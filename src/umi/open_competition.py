@@ -20,6 +20,13 @@ from urllib.parse import urlsplit
 from pydantic import AfterValidator, Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_dependence import (
+    DependenceCaseProfile,
+    DependenceReport,
+    MatchedSwapPair,
+    matched_swap_report,
+    validate_matched_swap_pairs,
+)
 from .competition_launch import PublicRoundSchedule
 from .competition_scoring import score_single_reference
 from .crypto import sign_response_digest, verify_response_signature
@@ -39,7 +46,9 @@ Stratum = Literal["fingerspelling", "short_utterance", "continuous"]
 Track = Literal["endpoint", "model"]
 TWO_TASK_POLICY_SCHEMA = "umi-open-competition-policy/2"
 BURN_POLICY_SCHEMA = "umi-open-competition-policy/3"
+DEPENDENCE_POLICY_SCHEMA = "umi-open-competition-policy/4"
 TWO_TASK_SUITE_SCHEMA = "umi-competition-suite/2"
+DEPENDENCE_SUITE_SCHEMA = "umi-competition-suite/3"
 TWO_TASK_WEIGHTS = MappingProxyType(
     {"fingerspelling": Fraction(3, 13), "continuous": Fraction(10, 13)}
 )
@@ -80,6 +89,7 @@ class CompetitionPolicy(StrictProtocolModel):
         "umi-open-competition-policy/1",
         "umi-open-competition-policy/2",
         "umi-open-competition-policy/3",
+        "umi-open-competition-policy/4",
     ] = Field(alias="schema")
     network: Literal["finney"]
     netuid: Literal[78]
@@ -106,12 +116,43 @@ class CompetitionPolicy(StrictProtocolModel):
     accepted_model_licenses: Annotated[tuple[str, ...], Field(min_length=1, max_length=32)]
     evaluation_runtime_sha256: Hex32
     unallocated_model_burn: BurnDestination | None = None
+    minimum_continuous_observed_margin_bps: Annotated[int, Field(ge=1, le=10_000)] | None = None
+    continuous_dependence_lower_bound_floor_bps: Bps | None = None
+    minimum_continuous_dependence_pairs: Annotated[int, Field(ge=3, le=1024)] | None = None
+    continuous_dependence_duration_bins: Annotated[int, Field(ge=1, le=512)] | None = None
+    maximum_counterfactual_duration_delta_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = (
+        None
+    )
+    continuous_dependence_bootstrap_replicates: Annotated[int, Field(ge=100, le=65_536)] | None = (
+        None
+    )
+    continuous_dependence_confidence_bps: Annotated[int, Field(ge=5_000, le=9_999)] | None = None
+    positive_control_model_sha256: Hex32 | None = None
+    minimum_positive_control_dependence_bps: Annotated[int, Field(ge=1, le=10_000)] | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
         value = handler(self)
         if self.unallocated_model_burn is None:
             value.pop("unallocated_model_burn", None)
+        if self.minimum_continuous_observed_margin_bps is None:
+            value.pop("minimum_continuous_observed_margin_bps", None)
+        if self.continuous_dependence_lower_bound_floor_bps is None:
+            value.pop("continuous_dependence_lower_bound_floor_bps", None)
+        if self.minimum_continuous_dependence_pairs is None:
+            value.pop("minimum_continuous_dependence_pairs", None)
+        if self.continuous_dependence_duration_bins is None:
+            value.pop("continuous_dependence_duration_bins", None)
+        if self.maximum_counterfactual_duration_delta_ms is None:
+            value.pop("maximum_counterfactual_duration_delta_ms", None)
+        if self.continuous_dependence_bootstrap_replicates is None:
+            value.pop("continuous_dependence_bootstrap_replicates", None)
+        if self.continuous_dependence_confidence_bps is None:
+            value.pop("continuous_dependence_confidence_bps", None)
+        if self.positive_control_model_sha256 is None:
+            value.pop("positive_control_model_sha256", None)
+        if self.minimum_positive_control_dependence_bps is None:
+            value.pop("minimum_positive_control_dependence_bps", None)
         return value
 
     @property
@@ -122,8 +163,29 @@ class CompetitionPolicy(StrictProtocolModel):
 
     @model_validator(mode="after")
     def validate_policy(self) -> Self:
-        if (self.schema_ == BURN_POLICY_SCHEMA) != (self.unallocated_model_burn is not None):
-            raise ValueError("unallocated model burn requires explicit policy version 3")
+        burn_schemas = {BURN_POLICY_SCHEMA, DEPENDENCE_POLICY_SCHEMA}
+        if (self.schema_ in burn_schemas) != (self.unallocated_model_burn is not None):
+            raise ValueError("unallocated model burn requires explicit policy version 3 or 4")
+        dependence_values = (
+            self.minimum_continuous_observed_margin_bps,
+            self.continuous_dependence_lower_bound_floor_bps,
+            self.minimum_continuous_dependence_pairs,
+            self.continuous_dependence_duration_bins,
+            self.maximum_counterfactual_duration_delta_ms,
+            self.continuous_dependence_bootstrap_replicates,
+            self.continuous_dependence_confidence_bps,
+            self.positive_control_model_sha256,
+            self.minimum_positive_control_dependence_bps,
+        )
+        if (self.schema_ == DEPENDENCE_POLICY_SCHEMA) != all(
+            value is not None for value in dependence_values
+        ):
+            raise ValueError("continuous dependence controls require policy version 4")
+        if (
+            self.schema_ == DEPENDENCE_POLICY_SCHEMA
+            and self.continuous_dependence_lower_bound_floor_bps != 0
+        ):
+            raise ValueError("dependence policy version 4 requires a strictly positive lower bound")
         if self.unallocated_model_burn is not None and (
             not self.model_reward_bps or self.unallocated_model_burn.uid >= self.maximum_uids
         ):
@@ -396,48 +458,101 @@ class SingleReferenceEvaluationCase(EvaluationCase):
     references: Annotated[tuple[ReferenceText, ...], Field(min_length=1, max_length=1)]
 
 
+class DependenceEvaluationCase(SingleReferenceEvaluationCase):
+    duration_ms: Annotated[int, Field(ge=1, le=3_600_000)]
+    role: Literal["scored", "matched_swap"]
+
+
 class EvaluationSuite(StrictProtocolModel):
     """Revealed replay input; never mount this object into a model sandbox."""
 
-    schema_: Literal["umi-competition-suite/1", "umi-competition-suite/2"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-competition-suite/1",
+        "umi-competition-suite/2",
+        "umi-competition-suite/3",
+    ] = Field(alias="schema")
     policy_sha256: Hex32
     cases: Annotated[
-        tuple[EvaluationCase | SingleReferenceEvaluationCase, ...],
+        tuple[EvaluationCase | SingleReferenceEvaluationCase | DependenceEvaluationCase, ...],
         Field(min_length=3, max_length=2048),
     ]
+    matched_swap_pairs: (
+        Annotated[tuple[MatchedSwapPair, ...], Field(min_length=3, max_length=1024)] | None
+    ) = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.matched_swap_pairs is None:
+            value.pop("matched_swap_pairs", None)
+        return value
 
     @model_validator(mode="after")
     def unique_cases(self) -> Self:
-        if self.schema_ == TWO_TASK_SUITE_SCHEMA:
+        if self.schema_ in {TWO_TASK_SUITE_SCHEMA, DEPENDENCE_SUITE_SCHEMA}:
             if any(len(c.references) != 1 or c.stratum not in TWO_TASK_WEIGHTS for c in self.cases):
-                raise ValueError("v2 suite requires one reference and only its two task strata")
+                raise ValueError("two-task suite requires one reference and only its two strata")
         elif any(not 3 <= len(c.references) <= 5 for c in self.cases):
             raise ValueError("v1 suite requires three to five references per case")
+        if self.schema_ == DEPENDENCE_SUITE_SCHEMA:
+            if self.matched_swap_pairs is None or any(
+                not isinstance(case, DependenceEvaluationCase) for case in self.cases
+            ):
+                raise ValueError("v3 suite requires duration metadata and matched-swap pairs")
+        elif self.matched_swap_pairs is not None:
+            raise ValueError("matched-swap pairs require suite version 3")
         if len({c.case_id for c in self.cases}) != len(self.cases):
             raise ValueError("evaluation case IDs must be unique")
-        if len({c.video_sha256 for c in self.cases}) != len(self.cases):
+        if self.schema_ != DEPENDENCE_SUITE_SCHEMA and len(
+            {c.video_sha256 for c in self.cases}
+        ) != len(self.cases):
             raise ValueError("duplicate evaluation video")
         return self
 
 
 def has_case_coverage(cases: Sequence[Any], policy: CompetitionPolicy) -> bool:
     """Check reference-free coverage without accepting extra, unscored strata."""
-    return {c.stratum for c in cases} == set(policy.stratum_weights) and all(
-        sum(c.stratum == stratum for c in cases) >= policy.minimum_cases_per_stratum
+    scored = [case for case in cases if getattr(case, "role", "scored") == "scored"]
+    return {c.stratum for c in scored} == set(policy.stratum_weights) and all(
+        sum(c.stratum == stratum for c in scored) >= policy.minimum_cases_per_stratum
         for stratum in policy.stratum_weights
     )
 
 
 def validate_suite_profile(suite: EvaluationSuite, policy: CompetitionPolicy) -> None:
-    expected = (
-        TWO_TASK_SUITE_SCHEMA
-        if policy.schema_ in {TWO_TASK_POLICY_SCHEMA, BURN_POLICY_SCHEMA}
-        else "umi-competition-suite/1"
-    )
+    if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+        expected = DEPENDENCE_SUITE_SCHEMA
+    elif policy.schema_ in {TWO_TASK_POLICY_SCHEMA, BURN_POLICY_SCHEMA}:
+        expected = TWO_TASK_SUITE_SCHEMA
+    else:
+        expected = "umi-competition-suite/1"
     if suite.schema_ != expected or suite.policy_sha256 != digest(policy):
         raise ValueError("evaluation suite scoring profile or policy binding mismatch")
     if not has_case_coverage(suite.cases, policy):
         raise ValueError("insufficient evaluation coverage in a required stratum")
+    if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+        if any(case.role != "scored" for case in suite.cases if case.stratum == "fingerspelling"):
+            raise ValueError("fingerspelling cases cannot be matched-swap controls")
+        scored_videos = [case.video_sha256 for case in suite.cases if case.role == "scored"]
+        if len(set(scored_videos)) != len(scored_videos):
+            raise ValueError("scored evaluation videos must be unique")
+        continuous = {
+            case.case_id: DependenceCaseProfile(
+                role=case.role,
+                video_sha256=case.video_sha256,
+                duration_ms=case.duration_ms,
+                reference=case.references[0],
+            )
+            for case in suite.cases
+            if case.stratum == "continuous"
+        }
+        validate_matched_swap_pairs(
+            profiles=continuous,
+            pairs=suite.matched_swap_pairs or (),
+            minimum_pairs=policy.minimum_continuous_dependence_pairs,
+            duration_bin_count=policy.continuous_dependence_duration_bins,
+            maximum_duration_delta_ms=policy.maximum_counterfactual_duration_delta_ms,
+        )
 
 
 class EvaluationRound(StrictProtocolModel):
@@ -487,6 +602,30 @@ class CaseOutput(StrictProtocolModel):
         return self
 
 
+class DependenceCalibration(StrictProtocolModel):
+    """Known-dependent execution through the exact protected suite and runtime."""
+
+    schema_: Literal["umi-continuous-dependence-calibration/1"] = Field(alias="schema")
+    policy_sha256: Hex32
+    suite_sha256: Hex32
+    runtime_sha256: Hex32
+    model_sha256: Hex32
+    execution_evidence_sha256: Hex32
+    evaluated_block: Block
+    outputs: Annotated[tuple[CaseOutput, ...], Field(min_length=3, max_length=2048)]
+
+    @model_validator(mode="after")
+    def require_retained_execution_evidence(self) -> Self:
+        if self.execution_evidence_sha256 == "0" * 64:
+            raise ValueError("positive control requires retained execution evidence")
+        return self
+
+
+class AttestedDependenceCalibration(StrictProtocolModel):
+    calibration: DependenceCalibration
+    signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
+
+
 class EvaluationResult(StrictProtocolModel):
     schema_: Literal["umi-competition-result/1"] = Field(alias="schema")
     round_sha256: Hex32
@@ -531,6 +670,7 @@ def _quality(
     if [o.case_id for o in outputs] != expected_ids:
         raise ValueError("outputs must cover the complete suite in canonical order")
     strata: dict[str, list[Fraction]] = defaultdict(list)
+    valid_hypotheses: dict[str, str | None] = {}
     for case, output in zip(suite.cases, outputs, strict=True):
         if output.status == "infrastructure_failure":
             raise ValueError("infrastructure failure voids evaluation")
@@ -541,10 +681,18 @@ def _quality(
         )
         if incumbent and not valid:
             raise ValueError("incumbent execution failed; evaluation is void")
+        if case.stratum == "continuous" and policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+            valid_hypotheses[case.case_id] = output.hypothesis if valid else None
+        if getattr(case, "role", "scored") == "matched_swap":
+            continue
         scorer = score_cer if case.stratum == "fingerspelling" else score_wer
         if not valid:
             score = Fraction(0)
-        elif policy.schema_ in {TWO_TASK_POLICY_SCHEMA, BURN_POLICY_SCHEMA}:
+        elif policy.schema_ in {
+            TWO_TASK_POLICY_SCHEMA,
+            BURN_POLICY_SCHEMA,
+            DEPENDENCE_POLICY_SCHEMA,
+        }:
             score = score_single_reference(
                 "cer" if case.stratum == "fingerspelling" else "wer",
                 output.hypothesis,
@@ -553,7 +701,141 @@ def _quality(
         else:
             score = scorer(output.hypothesis, case.references)
         strata[case.stratum].append(score)
-    return {s: sum(strata[s], Fraction(0)) / len(strata[s]) for s in policy.stratum_weights}
+    quality = {s: sum(strata[s], Fraction(0)) / len(strata[s]) for s in policy.stratum_weights}
+    if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+        profiles = {
+            case.case_id: DependenceCaseProfile(
+                role=case.role,
+                video_sha256=case.video_sha256,
+                duration_ms=case.duration_ms,
+                reference=case.references[0],
+            )
+            for case in suite.cases
+            if case.stratum == "continuous"
+        }
+        report = matched_swap_report(
+            hypotheses=valid_hypotheses,
+            profiles=profiles,
+            pairs=suite.matched_swap_pairs or (),
+            seed_sha256=digest(suite),
+            bootstrap_replicates=policy.continuous_dependence_bootstrap_replicates,
+            confidence_bps=policy.continuous_dependence_confidence_bps,
+        )
+        observed_minimum = Fraction(policy.minimum_continuous_observed_margin_bps, 10_000)
+        lower_bound_floor = Fraction(policy.continuous_dependence_lower_bound_floor_bps, 10_000)
+        if not incumbent and (
+            not report.complete
+            or report.observed_margin < observed_minimum
+            or report.bootstrap_lower_bound <= lower_bound_floor
+        ):
+            return {stratum: Fraction(0) for stratum in policy.stratum_weights}
+    return quality
+
+
+def continuous_dependence_report(
+    outputs: tuple[CaseOutput, ...], suite: EvaluationSuite, policy: CompetitionPolicy
+) -> DependenceReport:
+    """Replay the public matched-swap diagnostics without assigning rewards."""
+
+    validate_suite_profile(suite, policy)
+    if policy.schema_ != DEPENDENCE_POLICY_SCHEMA:
+        raise ValueError("matched-swap reporting requires dependence policy version 4")
+    if [output.case_id for output in outputs] != [case.case_id for case in suite.cases]:
+        raise ValueError("outputs must cover the complete suite in canonical order")
+    hypotheses: dict[str, str | None] = {}
+    profiles: dict[str, DependenceCaseProfile] = {}
+    for case, output in zip(suite.cases, outputs, strict=True):
+        if case.stratum != "continuous":
+            continue
+        if output.status == "infrastructure_failure":
+            raise ValueError("infrastructure failure voids evaluation")
+        valid = (
+            output.status == "ok"
+            and output.elapsed_ms <= policy.maximum_inference_ms
+            and len(output.hypothesis.encode("utf-8")) <= policy.maximum_output_bytes
+        )
+        hypotheses[case.case_id] = output.hypothesis if valid else None
+        profiles[case.case_id] = DependenceCaseProfile(
+            role=case.role,
+            video_sha256=case.video_sha256,
+            duration_ms=case.duration_ms,
+            reference=case.references[0],
+        )
+    return matched_swap_report(
+        hypotheses=hypotheses,
+        profiles=profiles,
+        pairs=suite.matched_swap_pairs or (),
+        seed_sha256=digest(suite),
+        bootstrap_replicates=policy.continuous_dependence_bootstrap_replicates,
+        confidence_bps=policy.continuous_dependence_confidence_bps,
+    )
+
+
+def validate_dependence_calibration(
+    attested: AttestedDependenceCalibration,
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+    *,
+    latest_block: int,
+) -> DependenceReport:
+    """Require a quorum-signed known-dependent run before settlement is possible."""
+
+    attested = AttestedDependenceCalibration.model_validate_json(canonical_json_bytes(attested))
+    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    report = validate_dependence_calibration_body(
+        attested.calibration,
+        suite,
+        policy,
+        latest_block=latest_block,
+    )
+    if policy.schema_ != DEPENDENCE_POLICY_SCHEMA:
+        raise ValueError("positive dependence calibration requires policy version 4")
+    groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
+    seen_keys: set[str] = set()
+    seen_groups: set[str] = set()
+    for signature in attested.signatures:
+        key = identity(signature.hotkey)
+        if key not in groups or key in seen_keys or groups[key] in seen_groups:
+            raise ValueError("duplicate or unauthorized calibration control group")
+        verify_signature(attested.calibration, signature)
+        seen_keys.add(key)
+        seen_groups.add(groups[key])
+    if len(seen_groups) < policy.required_evaluator_groups:
+        raise ValueError("insufficient independent calibration agreement")
+    return report
+
+
+def validate_dependence_calibration_body(
+    calibration: DependenceCalibration,
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+    *,
+    latest_block: int,
+) -> DependenceReport:
+    """Replay one unsigned body before a nominated evaluator signs it."""
+
+    calibration = DependenceCalibration.model_validate_json(canonical_json_bytes(calibration))
+    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    if policy.schema_ != DEPENDENCE_POLICY_SCHEMA:
+        raise ValueError("positive dependence calibration requires policy version 4")
+    if (
+        calibration.policy_sha256 != digest(policy)
+        or calibration.suite_sha256 != digest(suite)
+        or calibration.runtime_sha256 != policy.evaluation_runtime_sha256
+        or calibration.model_sha256 != policy.positive_control_model_sha256
+    ):
+        raise ValueError("positive dependence calibration binding mismatch")
+    if type(latest_block) is not int or not (
+        policy.valid_from_block <= calibration.evaluated_block <= latest_block
+    ):
+        raise ValueError("positive dependence calibration block is outside its usable window")
+    report = continuous_dependence_report(calibration.outputs, suite, policy)
+    minimum = Fraction(policy.minimum_positive_control_dependence_bps, 10_000)
+    if not report.complete or report.bootstrap_lower_bound < minimum:
+        raise ValueError("positive control did not prove the dependence harness")
+    return report
 
 
 def aggregate_quality(

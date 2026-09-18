@@ -55,14 +55,21 @@ and is recorded as infrastructure expiry, not a miner failure.
 Budget for every assigned case, not just one request. Six tasks at a 120-second
 inference limit already require at least 720 seconds for one single-worker miner,
 before proof collection and delivery. A 300-second issue window is insufficient.
+The prospective dependence suite assigns three fingerspelling cases, 12 scored
+continuous cases and 12 matched-swap controls. Its 27 serialized requests can
+consume 3,240 seconds at the inference cap before proof, delivery and scheduling
+overhead. Use the 5,400-second competition default unless complete measured
+qualification supports a shorter signed value.
 For a larger cohort, qualify the shared proof queue, HTTP concurrency, publication
 discovery, and total per-miner serial workload before signing the window. Preserve
 the per-request inference limit; do not edit deadlines after publication.
 
 For the single-evaluator competition transport, prepare a new policy with an
-explicit `issue_allowance_seconds` between 300 and 5400. The builder
-`ScoringPolicy.competition_transport(...)` defaults to the original 300 seconds
-for compatibility. The extended allowance changes the transport-policy hash;
+explicit `issue_allowance_seconds` between 300 and 5400. The builder retains
+the historical 300-second default so existing policy construction and digests
+do not change silently. A dependence-gated release must explicitly pass 5400;
+work preparation rejects a shorter signed transport for that profile. The
+extended allowance changes the transport-policy hash;
 coordinator, evaluator, feed and miner must all use that new policy before any
 assignments are signed. Existing assignments retain their original deadlines.
 Legacy scoring-policy clocks remain fixed.

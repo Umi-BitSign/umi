@@ -19,6 +19,12 @@ and the accepted identifiers for review: `MIT`, `Apache-2.0`, `CC-BY-4.0`, and
 `CC-BY-SA-4.0`. An identifier match still requires source-stack review and a
 qualifying promotion.
 
+The prospective
+[version 3 terms draft](../competition/TERMS_V3_DRAFT.md) adds the
+continuous-video dependence gate. It is not adopted and cannot be accepted by a
+submission until UMI publishes its final immutable file and successor-policy
+digest.
+
 The current endpoint-only intake is a no-weight intake. Version 1 says both
 tracks launch together. Version 2 permits the endpoint track to activate at 70%
 while the unallocated 30% is burned. The sequence 5 successor policy binds that

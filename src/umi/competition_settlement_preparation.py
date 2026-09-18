@@ -28,7 +28,13 @@ from .competition_publication import (
 )
 from .competition_settlement import CompetitionSettlement
 from .competition_void import VoidEvaluationEvidence
-from .open_competition import StrictProtocolModel, digest
+from .open_competition import (
+    DEPENDENCE_POLICY_SCHEMA,
+    AttestedDependenceCalibration,
+    StrictProtocolModel,
+    digest,
+    validate_dependence_calibration,
+)
 from .protocol import canonical_json_bytes
 
 MAX_BYTES = 16 * 1024**2
@@ -58,6 +64,18 @@ def validate_preparation(prepared, policy, limits):
     if len(raw) > MAX_BYTES:
         raise ValueError("settlement preparation exceeds the transport byte bound")
     prepared = SettlementPreparation.model_validate_json(raw)
+    calibration = prepared.publication.settlement.dependence_calibration
+    if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+        if calibration is None:
+            raise ValueError("dependence settlement lacks its positive control")
+        validate_dependence_calibration(
+            calibration,
+            prepared.publication.settlement.suite,
+            policy,
+            latest_block=prepared.publication.round.evaluation_close_block,
+        )
+    elif calibration is not None:
+        raise ValueError("legacy settlement cannot carry a dependence calibration")
     publication = build_settlement_publication(
         cutoff_certificate=prepared.cutoff,
         retained_settlement=prepared.publication.settlement,
@@ -71,7 +89,16 @@ def validate_preparation(prepared, policy, limits):
     return prepared
 
 
-async def prepare_retained_settlement(*, store, provider, cutoff, suite, limits, output_directory):
+async def prepare_retained_settlement(
+    *,
+    store,
+    provider,
+    cutoff,
+    suite,
+    limits,
+    output_directory,
+    dependence_calibration: AttestedDependenceCalibration | None = None,
+):
     """Publish an unsigned review package, preserving exact retries across restart."""
     policy = store.policy
     round_ = cutoff.publication.round
@@ -110,6 +137,7 @@ async def prepare_retained_settlement(*, store, provider, cutoff, suite, limits,
                 evidence=material["evidence"],
                 snapshot=snapshot,
                 current_block=current,
+                dependence_calibration=dependence_calibration,
             )
         )
     )

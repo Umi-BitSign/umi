@@ -20,7 +20,7 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
@@ -50,6 +50,8 @@ from .competition_work_plans import RoundWorkConfig
 from .crypto import verify_response_signature
 from .nonce import SQLiteNonceStore
 from .open_competition import (
+    DEPENDENCE_POLICY_SCHEMA,
+    AttestedDependenceCalibration,
     CompetitionPolicy,
     EvaluationSuite,
     Hotkey,
@@ -59,6 +61,7 @@ from .open_competition import (
     digest,
     identity,
     sign_object,
+    validate_dependence_calibration,
     verify_signature,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -73,6 +76,7 @@ class RoundPlan(StrictProtocolModel):
 
     schema_: Literal["umi-round-plan/2"] = Field(alias="schema")
     suite: EvaluationSuite
+    dependence_calibration: AttestedDependenceCalibration | None = None
     public_schedule: PublicRoundSchedule
     eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)]
     intake_opened_block: Block
@@ -83,6 +87,13 @@ class RoundPlan(StrictProtocolModel):
     reveal_block: Block
     evidence_cutoff_block: Block
     valid_through_block: Block
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.dependence_calibration is None:
+            value.pop("dependence_calibration", None)
+        return value
 
     @model_validator(mode="after")
     def windows(self):
@@ -862,6 +873,17 @@ class RoundCoordinator:
                         plan.valid_through_block > self.policy.valid_through_block
                     ):
                         raise ValueError("round plan lies outside the policy")
+                    if self.policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+                        if plan.dependence_calibration is None:
+                            raise ValueError("dependence round lacks its positive control")
+                        validate_dependence_calibration(
+                            plan.dependence_calibration,
+                            plan.suite,
+                            self.policy,
+                            latest_block=block,
+                        )
+                    elif plan.dependence_calibration is not None:
+                        raise ValueError("legacy round cannot carry a dependence calibration")
                     # Keep the protected plan private and never retime a used suite.
                     self.journal.put("plan", suite_id, plan)
                     if (
@@ -1035,6 +1057,7 @@ class RoundCoordinator:
                     provider=self.provider,
                     cutoff=certificate,
                     suite=plan.suite,
+                    dependence_calibration=plan.dependence_calibration,
                     limits=self.config.replay_limits,
                     output_directory=self.config.settlement_directory,
                 )

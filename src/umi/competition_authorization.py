@@ -32,6 +32,7 @@ from .miner_admission import (
     ProofBackedMinerWindowAuthority,
 )
 from .open_competition import (
+    DEPENDENCE_POLICY_SCHEMA,
     CompetitionPolicy,
     EvaluationRound,
     EvaluationSuite,
@@ -278,12 +279,14 @@ def validate_publication_body(
             raise ValueError("publication contains an ineligible endpoint submission")
         _origin(sub.endpoint_url)
     cases = {digest(c): c for c in body.cases}
+    video_counts = Counter(c.video_sha256 for c in body.cases)
     if (
         len({c.case_id for c in body.cases}) != len(body.cases)
-        or len({c.video_sha256 for c in body.cases}) != len(body.cases)
+        or (policy.schema_ != DEPENDENCE_POLICY_SCHEMA and len(video_counts) != len(body.cases))
+        or any(count > 2 for count in video_counts.values())
         or not has_case_coverage(body.cases, policy)
     ):
-        raise ValueError("authorization has duplicate cases/videos or insufficient coverage")
+        raise ValueError("authorization has invalid cases, videos or coverage")
     legacy_keys = {identity(v.validator_hotkey) for v in legacy_policy.validator_registry}
     assignments, covered, assigned_groups = set(), defaultdict(set), defaultdict(set)
     wire_ids = set()

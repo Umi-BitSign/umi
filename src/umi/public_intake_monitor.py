@@ -203,6 +203,17 @@ class RetainedSubmissionHead(StrictProtocolModel):
     external_checkpoint_durable: bool
 
 
+class HistoricalIntakeArchiveSummary(StrictProtocolModel):
+    schema_: Literal["umi-competition-intake-archive-summary/1"] = Field(alias="schema")
+    policy_sha256: Hex32
+    public_launch_sha256: Hex32
+    manifest_sha256: Hex32
+    record_count: Annotated[int, Field(ge=1, le=65_536)]
+    submission_set_sha256: Hex32
+    source_head_sha256: Hex32
+    source_checkpoint_sha256: Hex32
+
+
 class RegistrationProvenance(StrictProtocolModel):
     schema_: Literal["umi-competition-registration-provenance/1"] = Field(alias="schema")
     evidence_class: Literal["verifier_attested_finality"]
@@ -230,6 +241,9 @@ class CompetitionStatus(StrictProtocolModel):
     baseline: BaselineSummary
     accepted_submission_count: Annotated[int, Field(ge=0, le=65_536)]
     retained_submission_head: RetainedSubmissionHead
+    historical_intake_archives: Annotated[
+        tuple[HistoricalIntakeArchiveSummary, ...], Field(max_length=8)
+    ]
     admission_accepting_new: bool
     admission_capacity_available: bool
     admission_phase: Literal["not_open", "open", "closed", "capacity_exhausted", "unverified"]

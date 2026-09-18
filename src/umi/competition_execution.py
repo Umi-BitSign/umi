@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import stat
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,6 +34,7 @@ from .competition_runner import (
     verify_runtime,
 )
 from .open_competition import (
+    DEPENDENCE_POLICY_SCHEMA,
     Block,
     CaseOutput,
     CompetitionPolicy,
@@ -111,8 +113,6 @@ class ModelEvaluationJob(StrictProtocolModel):
     def unique_cases(self) -> Self:
         if len({c.case_id for c in self.cases}) != len(self.cases):
             raise ValueError("execution case IDs must be unique")
-        if len({c.video_sha256 for c in self.cases}) != len(self.cases):
-            raise ValueError("execution videos must be unique")
         return self
 
 
@@ -245,6 +245,11 @@ def _validate_job(job, policy, model, track):
         raise ValueError("unauthorized or self-evaluating model execution job")
     if not has_case_coverage(job.cases, policy):
         raise ValueError("model execution job has insufficient stratum coverage")
+    video_counts = Counter(case.video_sha256 for case in job.cases)
+    if (policy.schema_ != DEPENDENCE_POLICY_SCHEMA and len(video_counts) != len(job.cases)) or any(
+        count > 2 for count in video_counts.values()
+    ):
+        raise ValueError("model execution job has invalid repeated videos")
     if track == "model":
         validate_bundle_policy(sub.model_bundle, policy)
     validate_bundle_policy(job.incumbent, policy)
@@ -636,7 +641,7 @@ class ExecutionJournal:
             )
 
 
-def _read_video(directory: Path, sha256: str, maximum: int) -> bytes:
+def read_case_video(directory: Path, sha256: str, maximum: int) -> bytes:
     # Content-addressed filenames only. The directory is operator-owned and
     # never mounted into a model; the runner mounts a separate one-video copy.
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -748,7 +753,7 @@ async def _run_evaluation(
             else (("candidate", candidate), ("incumbent", job.incumbent))
         )
         for case in job.cases:
-            video = _read_video(videos, case.video_sha256, job.runtime.maximum_video_bytes)
+            video = read_case_video(videos, case.video_sha256, job.runtime.maximum_video_bytes)
             for role, model in runs:
                 started = await boundary()
                 record = await execute_offline_case(

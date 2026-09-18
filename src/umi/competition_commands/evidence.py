@@ -11,6 +11,7 @@ from ..competition_endpoint_execution import EndpointPairedEvidence
 from ..competition_evidence import IndependentEvaluationEvidence, replay_independent_evaluation
 from ..competition_execution import ModelExecutionEvidence
 from ..open_competition import (
+    AttestedDependenceCalibration,
     AttestedResult,
     CompetitionPolicy,
     EvaluationRound,
@@ -18,9 +19,13 @@ from ..open_competition import (
     SignedSubmission,
     aggregate_quality,
     digest,
+    identity,
     qualifies_for_promotion,
     replay_evaluation,
+    sign_object,
+    validate_dependence_calibration,
 )
+from ..protocol import canonical_json_bytes
 from .common import (
     ExecutionInputs,
     ExecutionRevealPulses,
@@ -186,6 +191,64 @@ def inspect_policy(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
         "model_reward_bps": policy.model_reward_bps,
         "chain_submission_authorized": False,
     }
+
+
+def sign_dependence_calibration(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    """Validate and sign one exact positive-control execution body."""
+
+    import bittensor as bt
+
+    from ..competition_dependence_execution import (
+        DependenceCalibrationPreparation,
+        validate_dependence_preparation,
+    )
+
+    suite = load_json(args.suite, EvaluationSuite)
+    preparation = validate_dependence_preparation(
+        load_json(args.preparation, DependenceCalibrationPreparation),
+        suite,
+        policy,
+        latest_block=args.latest_block,
+    )
+    calibration = preparation.calibration
+    wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey_name, path=args.wallet_path)
+    signer = bt.resolve_signer(wallet, role="hotkey")
+    evaluator_keys = {identity(evaluator.hotkey) for evaluator in policy.evaluators}
+    if identity(signer.ss58_address) not in evaluator_keys:
+        raise ValueError("calibration signer is not a nominated evaluator")
+    attested = AttestedDependenceCalibration(
+        calibration=calibration,
+        signatures=(sign_object(calibration, wallet),),
+    )
+    return attested.model_dump(mode="json", by_alias=True)
+
+
+def assemble_dependence_calibration(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    """Combine matching evaluator attestations and prove policy quorum."""
+
+    if len(args.attestation) > 64:
+        raise ValueError("too many calibration attestation files")
+    inputs = tuple(load_json(path, AttestedDependenceCalibration) for path in args.attestation)
+    canonical_body = canonical_json_bytes(inputs[0].calibration)
+    if any(canonical_json_bytes(item.calibration) != canonical_body for item in inputs[1:]):
+        raise ValueError("calibration attestations do not cover the same body")
+    signatures = tuple(
+        sorted(
+            (signature for item in inputs for signature in item.signatures),
+            key=lambda signature: identity(signature.hotkey),
+        )
+    )
+    attested = AttestedDependenceCalibration(
+        calibration=inputs[0].calibration,
+        signatures=signatures,
+    )
+    validate_dependence_calibration(
+        attested,
+        load_json(args.suite, EvaluationSuite),
+        policy,
+        latest_block=args.latest_block,
+    )
+    return attested.model_dump(mode="json", by_alias=True)
 
 
 def replay_evaluations(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:

@@ -5,6 +5,8 @@ from __future__ import annotations
 from .competition_client import AdmissionReceipt
 from .competition_launch import PublicIntakeDeployment
 from .open_competition import (
+    BURN_POLICY_SCHEMA,
+    DEPENDENCE_POLICY_SCHEMA,
     CompetitionPolicy,
     SignedSubmission,
     Submission,
@@ -14,16 +16,26 @@ from .open_competition import (
 from .protocol import canonical_json_bytes
 
 _TRANSITION_FIELDS = {
+    "schema",
     "sequence",
     "predecessor_sha256",
     "contribution_terms_sha256",
+    "minimum_continuous_observed_margin_bps",
+    "continuous_dependence_lower_bound_floor_bps",
+    "minimum_continuous_dependence_pairs",
+    "continuous_dependence_duration_bins",
+    "maximum_counterfactual_duration_delta_ms",
+    "continuous_dependence_bootstrap_replicates",
+    "continuous_dependence_confidence_bps",
+    "positive_control_model_sha256",
+    "minimum_positive_control_dependence_bps",
 }
 
 
 def _unchanged_policy_body(policy: CompetitionPolicy) -> dict:
     body = policy.model_dump(mode="json", by_alias=True)
     for field in _TRANSITION_FIELDS:
-        body.pop(field)
+        body.pop(field, None)
     return body
 
 
@@ -54,7 +66,18 @@ def prepare_endpoint_policy_transition(
     prior_policy_sha256 = digest(prior_policy)
     successor_policy_sha256 = digest(successor_policy)
     if (
-        successor_policy.sequence != prior_policy.sequence + 1
+        prior_policy.schema_ != BURN_POLICY_SCHEMA
+        or successor_policy.schema_ != DEPENDENCE_POLICY_SCHEMA
+        or successor_policy.minimum_continuous_observed_margin_bps is None
+        or successor_policy.continuous_dependence_lower_bound_floor_bps is None
+        or successor_policy.minimum_continuous_dependence_pairs is None
+        or successor_policy.continuous_dependence_duration_bins is None
+        or successor_policy.maximum_counterfactual_duration_delta_ms is None
+        or successor_policy.continuous_dependence_bootstrap_replicates is None
+        or successor_policy.continuous_dependence_confidence_bps is None
+        or successor_policy.positive_control_model_sha256 is None
+        or successor_policy.minimum_positive_control_dependence_bps is None
+        or successor_policy.sequence != prior_policy.sequence + 1
         or successor_policy.predecessor_sha256 != prior_policy_sha256
         or successor_policy.contribution_terms_sha256 == prior_policy.contribution_terms_sha256
         or _unchanged_policy_body(successor_policy) != _unchanged_policy_body(prior_policy)
