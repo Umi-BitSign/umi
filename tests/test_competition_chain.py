@@ -529,9 +529,17 @@ async def test_two_heads_reuse_one_retained_runtime_artifact(chain):
         assert connection.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 2
 
 
+@pytest.mark.parametrize("startup_seconds,head_age_ms", [(600, 120_000), (30, 10_000)])
 async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanly(
-    chain, monkeypatch
+    chain, monkeypatch, startup_seconds, head_age_ms
 ):
+    chain.config = chain.config.model_copy(
+        update={
+            "startup_timeout_seconds": startup_seconds,
+            "maximum_head_age_ms": head_age_ms,
+            "state_directory": chain.config.state_directory + "-owned",
+        }
+    )
     started, stopped = asyncio.Event(), asyncio.Event()
 
     async def run(stop):
@@ -551,9 +559,7 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
         assert kwargs["binary_path"] == chain.config.finality_binary
         assert kwargs["chain_spec_path"] == chain.config.chain_spec
         assert kwargs["first_record_timeout_seconds"] == chain.config.startup_timeout_seconds
-        assert kwargs["record_timeout_seconds"] == min(
-            chain.config.startup_timeout_seconds, chain.config.maximum_head_age_ms / 1000
-        )
+        assert kwargs["record_timeout_seconds"] == 900.0
         return "pinned-test-observer"
 
     def durable_port(**kwargs):
@@ -580,7 +586,9 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
     monkeypatch.setattr(
         "umi.competition_chain._RegistrationRpc", lambda config, **kwargs: chain.rpc
     )
-    owned = FinalizedRegistrationProvider(chain.config, chain.policy, now_ms=lambda: _NOW)
+    owned = FinalizedRegistrationProvider(
+        chain.config, chain.policy, now_ms=lambda: chain.clock.now
+    )
     assert owned._proofs._limits.maximum_proof_node_bytes == 2 * 1024**2
     assert owned._proofs._limits.maximum_proof_bytes == 8 * 1024**2
     with pytest.raises(ValueError, match="not running"):
@@ -591,6 +599,17 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
         await owned.collect()
     chain.finality.ref = replace(chain.finality.ref, block_number=_HEIGHT + 1, block_hash=_hash(98))
     assert (await owned.collect()).snapshot.block == _HEIGHT + 1
+    task = owned._task
+    chain.clock.now += head_age_ms + 1
+    with pytest.raises(ValueError, match="stale"):
+        await owned.collect()
+    owned.ensure_observer_running()
+    assert not stopped.is_set()
+    chain.finality.ref = replace(chain.finality.ref, block_number=_HEIGHT + 2, block_hash=_hash(99))
+    chain.finality.timestamp = chain.clock.now - 1000
+    chain.rpc.values[("Timestamp", "Now", ())] = chain.finality.timestamp
+    assert (await owned.collect()).snapshot.block == _HEIGHT + 2
+    assert owned._task is task  # Recovery must not replace the observer or its journal.
     await owned.aclose()
     assert stopped.is_set()
     assert owned._task.done()

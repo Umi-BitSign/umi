@@ -58,6 +58,10 @@ from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
+# A stale head pauses authorization while the observer catches up. Its process
+# lifetime must not share that freshness cutoff. Match the observer's bounded
+# default, leaving all capture freshness checks unchanged.
+_OBSERVER_RECORD_TIMEOUT_SECONDS = 900.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -471,9 +475,7 @@ class FinalizedRegistrationProvider:
                 target_triple=config.target_triple,
                 binary_path=config.finality_binary,
                 chain_spec_path=config.chain_spec,
-                record_timeout_seconds=min(
-                    config.startup_timeout_seconds, config.maximum_head_age_ms / 1000
-                ),
+                record_timeout_seconds=_OBSERVER_RECORD_TIMEOUT_SECONDS,
                 first_record_timeout_seconds=config.startup_timeout_seconds,
             )
             finality = DurableGrandpaFinalityPort(
