@@ -74,13 +74,15 @@ rehearsal. Returned data remains untrusted until the local verifier checks it
 against an owned finalized state root. Keep the collection timeout and proof
 checks enabled; changing the RPC endpoint does not grant finality authority.
 
-The owned observer retains the configured startup allowance for its first
-verified record. Subsequent records must arrive within the smaller of that
-allowance and `maximum_head_age_ms` (at most 120 seconds). An idle stream exits
-with `record_timeout`, terminates its child process and lets the service manager
-restart from retained finality history. It does not accept a stale head, erase
-evidence or extend a signed round. This bounds idle-stream detection, not the
-time required to reconnect and obtain fresh proofs.
+The owned observer uses `startup_timeout_seconds` for its first verified record
+(600 seconds by default, configurable up to 900). Subsequent records have a
+separate 900-second timeout. During a gap, `maximum_head_age_ms` still limits
+usable evidence to at most 120 seconds: signing and execution wait for a fresh
+verified head. The longer observer timeout allows recovery without discarding
+the running observer as soon as its last head becomes stale. If no new record
+arrives within 900 seconds, the observer exits with `record_timeout`, terminates
+its child process and lets the service manager restart from retained finality
+history. Recovery never erases evidence or extends a signed round.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives
