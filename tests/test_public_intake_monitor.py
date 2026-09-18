@@ -1132,6 +1132,7 @@ def test_poll_context_rejects_a_missing_predecessor_snapshot(intake_scenario, tm
 def test_archive_rejects_tampering_and_unsafe_root(intake_scenario, tmp_path) -> None:
     unsafe = tmp_path / "unsafe"
     unsafe.mkdir(mode=0o755)
+    unsafe.chmod(0o755)
     with pytest.raises(PublicIntakeArchiveError, match="archive_directory_not_private"):
         PublicIntakeArchive(unsafe)
 
