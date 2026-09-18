@@ -101,6 +101,45 @@ def run_model_evaluation(args: argparse.Namespace, policy: CompetitionPolicy) ->
     return asyncio.run(run()).model_dump(mode="json", by_alias=True)
 
 
+def run_dependence_calibration(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    from ..competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+    from ..competition_dependence_execution import run_dependence_calibration as run_calibration
+    from ..competition_execution import execution_boundary
+    from ..competition_runner import OFFLINE_RUNTIME
+    from ..open_competition import EvaluationSuite
+
+    suite = load_json(args.suite, EvaluationSuite)
+    bundle = load_json(args.bundle, ModelBundle)
+    runtime = load_json(args.runtime, OFFLINE_RUNTIME)
+    chain = load_json(args.chain_config, CompetitionChainConfig)
+    if chain.policy_sha256 != digest(policy) or chain.collection_timeout_seconds > 15:
+        raise ValueError("calibration requires a matching bounded finalized provider")
+
+    async def run():
+        provider = FinalizedRegistrationProvider(chain, policy)
+        try:
+            await provider.start()
+            await provider.wait_ready()
+
+            async def boundary():
+                return execution_boundary(await provider.collect())
+
+            return await run_calibration(
+                suite=suite,
+                policy=policy,
+                bundle=bundle,
+                runtime=runtime,
+                evaluator_hotkey=args.evaluator_hotkey,
+                archive=Path(args.archive).absolute(),
+                videos=Path(args.videos).absolute(),
+                boundary_provider=boundary,
+            )
+        finally:
+            await provider.aclose()
+
+    return asyncio.run(run()).model_dump(mode="json", by_alias=True)
+
+
 def run_offline_case(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
     from ..competition_runner import OFFLINE_RUNTIME, evaluate_offline_case
 

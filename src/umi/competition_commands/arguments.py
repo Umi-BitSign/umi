@@ -99,6 +99,17 @@ def build_parser() -> argparse.ArgumentParser:
             model_run.add_argument("--" + name, required=True)
         model_run.add_argument("--maximum-jobs", type=int, default=1024)
         model_run.add_argument("--maximum-evidence-bytes", type=int, default=1024**3)
+    calibration_run = commands.add_parser("run-dependence-calibration")
+    for name in (
+        "suite",
+        "chain-config",
+        "bundle",
+        "runtime",
+        "archive",
+        "videos",
+        "evaluator-hotkey",
+    ):
+        calibration_run.add_argument("--" + name, required=True)
     endpoint_job = commands.add_parser("prepare-endpoint-incumbent")
     for name in (
         "publication",
@@ -238,4 +249,23 @@ def build_parser() -> argparse.ArgumentParser:
         for argument in ("submission", "evaluation", "round", "suite"):
             replay.add_argument("--" + argument, required=True)
         replay.add_argument("--current-block", type=int, required=True)
+    calibration_sign = commands.add_parser("sign-dependence-calibration")
+    for name in (
+        "preparation",
+        "suite",
+        "wallet-name",
+        "hotkey-name",
+        "wallet-path",
+    ):
+        calibration_sign.add_argument("--" + name, required=True)
+    calibration_sign.add_argument("--latest-block", type=int, required=True)
+    calibration_assemble = commands.add_parser("assemble-dependence-calibration")
+    calibration_assemble.add_argument(
+        "--attestation",
+        action="append",
+        required=True,
+        help="one evaluator attestation JSON; repeat for each evaluator",
+    )
+    calibration_assemble.add_argument("--suite", required=True)
+    calibration_assemble.add_argument("--latest-block", type=int, required=True)
     return parser

@@ -74,16 +74,123 @@ contributor supplies it, disclose that access and any influence on selection.
 
 ### Approved launch input contract
 
-`EvaluationSuite` binds the policy hash and distinct case/video identities.
-The approved launch uses `umi-open-competition-policy/3` and
-`umi-competition-suite/2`. Version 3 retains version 2's scoring profile and adds
-the [unallocated model-share burn rule](../competition/launch.md).
+The approved endpoint-intake launch uses `umi-open-competition-policy/3` and
+`umi-competition-suite/2`. It uses one reference, the fingerspelling and
+continuous strata, the 3/13 and 10/13 weights, and the unallocated model-share
+burn rule. Its exact bytes and semantics remain unchanged.
+
+### Prospective dependence-gated input contract
+
+`EvaluationSuite` binds the policy hash and case identities. The prospective
+dependence-gated launch uses `umi-open-competition-policy/4` and
+`umi-competition-suite/3`. Version 4 retains version 3's scoring and
+[unallocated model-share burn rule](../competition/launch.md), then adds
+duration-matched continuous-video controls. It also requires fresh acceptance
+of the final form of the
+[version 3 terms draft](../competition/TERMS_V3_DRAFT.md).
 The scoring profile uses one authentic English reference per case, with
 fingerspelling and continuous signing as its two required tasks. Their exact
-score weights are 3/13 and 10/13, respectively. Each task must meet the policy's minimum case count,
-and the suite must contain at least three cases overall. Short utterances are
-not scored under this profile. It preserves the 70/30 reward split and the
-120-second launch inference deadline.
+score weights are 3/13 and 10/13, respectively. Each task must meet the policy's
+minimum case count, and the suite must contain at least three cases overall.
+Short utterances are not scored under this profile. It preserves the 70/30
+reward split and the 120-second launch inference deadline.
+
+Suite version 3 pairs every scored continuous case with one control. The
+control retains the anchor's reference and uses another scored clip's video.
+The source mapping must be a complete derangement within deterministic duration
+bins, and each source video therefore appears once as a scored input and once
+as a control input. The policy fixes the pair count, bin count, maximum duration
+difference, bootstrap repetitions, confidence level and effect thresholds.
+Fingerspelling videos and all scored video identities remain unique.
+Matched-swap controls are additional requests and do not count toward any
+minimum scored-case coverage.
+
+The matched-swap comparison uses score differences. Output-string changes are
+not eligibility evidence because an input-blind model can vary fluent guesses.
+For a fixed submitted artifact, resample paired clip differences rather than
+requiring several training seeds. Policy version 4 requires the one-sided 95%
+bootstrap lower bound to be strictly above zero. Its separate observed-margin
+minimum is a point-estimate noise control whose release value and operating
+characteristics must be published before signing. Keep output identity,
+reversal, static-frame and blank-input measurements as diagnostics unless a
+later signed policy gives them a different role.
+
+Retain one exact-suite, exact-runtime run of the policy-pinned known-dependent
+positive control. Its model identity, execution-evidence digest, outputs,
+evaluation block and evaluator signatures enter the protected round plan and
+settlement. A missing or failed calibration holds the round. It cannot be
+replaced after candidate outputs are known.
+
+#### Run and attest the positive control
+
+The execution operator runs the policy-pinned positive-control bundle through
+the exact private suite and runtime. The command records finalized boundaries,
+each sandbox receipt and the derived calibration body in one canonical private
+preparation:
+
+```sh
+umi-competition --policy /PRIVATE/policy.json \
+  run-dependence-calibration \
+  --suite /PRIVATE/suite.json \
+  --chain-config /PRIVATE/chain-config.json \
+  --bundle /PRIVATE/positive-control-bundle.json \
+  --runtime /PRIVATE/runtime.json \
+  --archive /PRIVATE/preserved-models \
+  --videos /PRIVATE/content-addressed-videos \
+  --evaluator-hotkey EVALUATOR_HOTKEY \
+  > /PRIVATE/dependence-calibration-preparation.json
+```
+
+The video directory contains one regular file named `SHA256.mp4` for every
+suite case. The preparation binds the exact policy, suite, runtime,
+positive-control model, retained execution evidence and finalized evaluation
+block. Keep the preparation, outputs and source videos private. The deliberately
+memorizing positive control is an evaluator fixture only. It is never an
+incumbent, baseline or reward candidate.
+
+Each nominated evaluator validates and signs the same body with its explicitly
+named hotkey:
+
+```sh
+umi-competition --policy /PRIVATE/policy.json \
+  sign-dependence-calibration \
+  --preparation /PRIVATE/dependence-calibration-preparation.json \
+  --suite /PRIVATE/suite.json \
+  --latest-block FINALIZED_BLOCK \
+  --wallet-name VALIDATOR_WALLET \
+  --hotkey-name VALIDATOR_HOTKEY \
+  --wallet-path /ABSOLUTE/PATH/TO/WALLETS \
+  > /PRIVATE/evaluator-attestation.json
+```
+
+`FINALIZED_BLOCK` is the current finalized block observed after the run. Do not
+substitute a planned deadline or future block. The command reproduces the
+calibration body from the retained execution before signing. It rejects a
+tampered preparation, a failed positive control and a hotkey outside the
+policy's evaluator set. It reads only the named hotkey.
+
+After collecting the required independent evaluator groups, assemble and verify
+the exact quorum. Repeat `--attestation` for each evaluator file:
+
+```sh
+umi-competition --policy /PRIVATE/policy.json \
+  assemble-dependence-calibration \
+  --attestation /PRIVATE/evaluator-one.json \
+  --attestation /PRIVATE/evaluator-two.json \
+  --suite /PRIVATE/suite.json \
+  --latest-block FINALIZED_BLOCK \
+  > /PRIVATE/dependence-calibration.json
+```
+
+The assembler rejects mismatched bodies, duplicate evaluators, duplicate control
+groups, invalid signatures and insufficient quorum. Put the resulting object in
+the private `RoundPlan.dependence_calibration` field before the coordinator sees
+the plan. The coordinator checks the calibration block against its actual
+finalized head. It does not accept a future-dated calibration.
+
+Policy and suite versions 3 and 2 remain the prospective predecessor profile.
+Their original bytes and semantics are unchanged; they do not acquire matched
+controls retroactively.
 
 Historical version 1 retains three to five references, all three required tasks,
 and the 15%/35%/50% weights. A version 1 suite cannot be replayed as version 2,
@@ -97,7 +204,7 @@ there is no requirement to recruit a new panel to regrade every clip. Automatic
 format checks cannot establish that a label translates the ASL correctly.
 Document annotation limitations and exclude known mismatches before commitment.
 
-Use the supplied reference unchanged under suite version 2. Do not repeat one label or
+Use the supplied reference unchanged under suite version 3. Do not repeat one label or
 generate unverified paraphrases to satisfy version 1. A single reference can
 penalize otherwise valid paraphrases, so disclose this limitation. The revised
 profile still requires scoring rehearsal before activation; preparation alone

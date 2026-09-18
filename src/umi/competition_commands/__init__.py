@@ -10,6 +10,7 @@ CommandHandler = Callable[[Namespace, CompetitionPolicy], dict]
 
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "admit": store.admit,
+    "assemble-dependence-calibration": evidence.assemble_dependence_calibration,
     "assemble-endpoint-execution": evidence.assemble_endpoint_execution,
     "check-endpoint-origin": submissions.check_endpoint_origin,
     "close-round": store.close_round,
@@ -38,6 +39,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "round-status": store.round_status,
     "run-endpoint-dispatch": services.run_endpoint_dispatch,
     "run-endpoint-incumbent": models.run_model_evaluation,
+    "run-dependence-calibration": models.run_dependence_calibration,
     "run-evaluator": services.run_evaluator,
     "run-model-evaluation": models.run_model_evaluation,
     "run-offline-case": models.run_offline_case,
@@ -49,6 +51,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "settle-round": store.settle_round,
     "settlement-status": store.settlement_status,
     "sign-assignment-query": submissions.sign_assignment_query,
+    "sign-dependence-calibration": evidence.sign_dependence_calibration,
     "sign-submission": submissions.sign_submission,
     "status": store.status,
     "submit": submissions.submit,

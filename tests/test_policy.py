@@ -15,6 +15,7 @@ from umi.policy import (
     SCORING_POLICY_SCHEMA,
     SINGLE_EVALUATOR_TRANSPORT_SCHEMA,
     ExactRatio,
+    PolicyClock,
     PolicyImplementationPins,
     PublisherControlGroup,
     PublisherRegistryEntry,
@@ -312,7 +313,7 @@ def test_competition_transport_builder_needs_no_legacy_calibration_evidence() ->
     assert transport.publisher_registry == transport.control_group_registry == []
     assert transport.validator_registry == legacy.validator_registry[:1]
     assert transport.translation_weights_active is False
-    assert transport.clock == legacy.clock
+    assert transport.clock == PolicyClock.competition_transport(300)
     assert transport.limits == legacy.limits
     assert transport.thresholds == legacy.thresholds
     assert transport.implementation_pins == legacy.implementation_pins

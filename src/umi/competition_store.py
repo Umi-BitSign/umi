@@ -52,6 +52,8 @@ from .competition_submission_checkpoint import (
 from .competition_void import VoidEvaluationEvidence
 from .competition_void_retention import VoidEvidenceRetention, hold_outcome_conflict
 from .open_competition import (
+    DEPENDENCE_POLICY_SCHEMA,
+    AttestedDependenceCalibration,
     AttestedResult,
     CompetitionPolicy,
     EvaluationResult,
@@ -73,6 +75,7 @@ from .open_competition import (
     qualifies_for_promotion,
     replay_evaluation,
     validate_admission,
+    validate_dependence_calibration,
     validate_evaluation_suite,
     validate_suite_profile,
     verify_signature,
@@ -2841,10 +2844,13 @@ class CompetitionStore(VoidEvidenceRetention):
         evidence: tuple[tuple[SignedSubmission, OutcomeEvidence], ...],
         snapshot: RegistrationSnapshot,
         current_block: int,
+        dependence_calibration: AttestedDependenceCalibration | None = None,
     ) -> dict:
         """Persist one immutable no-weight settlement after its fixed evidence cutoff."""
 
         self._require_intake()
+        if type(current_block) is not int:
+            raise ValueError("settlement observation block must be an integer")
 
         invalid: ValueError | None = None
         for signed, independent in evidence:
@@ -2874,6 +2880,20 @@ class CompetitionStore(VoidEvidenceRetention):
 
         round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
         suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+        if self.policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+            if dependence_calibration is None:
+                raise ValueError("dependence settlement lacks its positive control")
+            dependence_calibration = AttestedDependenceCalibration.model_validate_json(
+                canonical_json_bytes(dependence_calibration)
+            )
+            validate_dependence_calibration(
+                dependence_calibration,
+                suite,
+                self.policy,
+                latest_block=current_block,
+            )
+        elif dependence_calibration is not None:
+            raise ValueError("legacy settlement cannot carry a dependence calibration")
         normalized = tuple(
             (
                 SignedSubmission.model_validate_json(canonical_json_bytes(signed)),
@@ -2885,8 +2905,6 @@ class CompetitionStore(VoidEvidenceRetention):
         with self._connection() as connection:
             cutoff = self._fixed_cutoff(connection, round_id)
 
-        if type(current_block) is not int:
-            raise ValueError("settlement observation block must be an integer")
         if current_block <= cutoff.evidence_cutoff_block:
             invalid = None
             for signed, independent in normalized:
@@ -2942,6 +2960,7 @@ class CompetitionStore(VoidEvidenceRetention):
                     suite=suite,
                     snapshot=snapshot,
                     supplied=supplied,
+                    dependence_calibration=dependence_calibration,
                 ):
                     raise ValueError("round already has a settlement with different inputs")
                 return settlement.model_dump(mode="json", by_alias=True)
@@ -3030,9 +3049,13 @@ class CompetitionStore(VoidEvidenceRetention):
             )
             settlement = CompetitionSettlement(
                 schema=(
-                    "umi-competition-settlement/2"
-                    if any(isinstance(e, VoidEvaluationEvidence) for _, e in replay_entries)
-                    else "umi-competition-settlement/1"
+                    "umi-competition-settlement/3"
+                    if self.policy.schema_ == DEPENDENCE_POLICY_SCHEMA
+                    else (
+                        "umi-competition-settlement/2"
+                        if any(isinstance(e, VoidEvaluationEvidence) for _, e in replay_entries)
+                        else "umi-competition-settlement/1"
+                    )
                 ),
                 policy_sha256=digest(self.policy),
                 round_sha256=round_id,
@@ -3048,6 +3071,7 @@ class CompetitionStore(VoidEvidenceRetention):
                     contributor_hotkey=contributor,
                 ),
                 projection=projection,
+                dependence_calibration=dependence_calibration,
                 observed_block=current_block,
             )
             settlement_id = competition_settlement_digest(settlement)
@@ -3298,8 +3322,13 @@ def _same_settlement_request(
     suite: EvaluationSuite,
     snapshot: RegistrationSnapshot,
     supplied: dict[str, tuple[SignedSubmission, OutcomeEvidence, str]],
+    dependence_calibration: AttestedDependenceCalibration | None,
 ) -> bool:
-    if settlement.suite != suite or settlement.registration_snapshot != snapshot:
+    if (
+        settlement.suite != suite
+        or settlement.registration_snapshot != snapshot
+        or settlement.dependence_calibration != dependence_calibration
+    ):
         return False
     expected = {item.submission_sha256: binding_ids(item) for item in settlement.results}
     actual = {
