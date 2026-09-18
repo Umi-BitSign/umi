@@ -65,18 +65,22 @@ def prepare_endpoint_policy_transition(
 
     prior_policy_sha256 = digest(prior_policy)
     successor_policy_sha256 = digest(successor_policy)
+    terms_only = prior_policy.schema_ == successor_policy.schema_ == BURN_POLICY_SCHEMA
+    adds_dependence = (
+        prior_policy.schema_ == BURN_POLICY_SCHEMA
+        and successor_policy.schema_ == DEPENDENCE_POLICY_SCHEMA
+        and successor_policy.minimum_continuous_observed_margin_bps is not None
+        and successor_policy.continuous_dependence_lower_bound_floor_bps is not None
+        and successor_policy.minimum_continuous_dependence_pairs is not None
+        and successor_policy.continuous_dependence_duration_bins is not None
+        and successor_policy.maximum_counterfactual_duration_delta_ms is not None
+        and successor_policy.continuous_dependence_bootstrap_replicates is not None
+        and successor_policy.continuous_dependence_confidence_bps is not None
+        and successor_policy.positive_control_model_sha256 is not None
+        and successor_policy.minimum_positive_control_dependence_bps is not None
+    )
     if (
-        prior_policy.schema_ != BURN_POLICY_SCHEMA
-        or successor_policy.schema_ != DEPENDENCE_POLICY_SCHEMA
-        or successor_policy.minimum_continuous_observed_margin_bps is None
-        or successor_policy.continuous_dependence_lower_bound_floor_bps is None
-        or successor_policy.minimum_continuous_dependence_pairs is None
-        or successor_policy.continuous_dependence_duration_bins is None
-        or successor_policy.maximum_counterfactual_duration_delta_ms is None
-        or successor_policy.continuous_dependence_bootstrap_replicates is None
-        or successor_policy.continuous_dependence_confidence_bps is None
-        or successor_policy.positive_control_model_sha256 is None
-        or successor_policy.minimum_positive_control_dependence_bps is None
+        not (terms_only or adds_dependence)
         or successor_policy.sequence != prior_policy.sequence + 1
         or successor_policy.predecessor_sha256 != prior_policy_sha256
         or successor_policy.contribution_terms_sha256 == prior_policy.contribution_terms_sha256

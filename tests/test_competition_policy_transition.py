@@ -33,7 +33,7 @@ def wallet(name: str):
     return SimpleNamespace(hotkey=key, coldkey=key, coldkeypub=key)
 
 
-def policies() -> tuple[CompetitionPolicy, CompetitionPolicy]:
+def policies(*, terms_only: bool = False) -> tuple[CompetitionPolicy, CompetitionPolicy]:
     evaluator = wallet("Charlie").hotkey.ss58_address
     burn = wallet("Bob").hotkey.ss58_address
     prior = CompetitionPolicy(
@@ -64,23 +64,27 @@ def policies() -> tuple[CompetitionPolicy, CompetitionPolicy]:
         evaluation_runtime_sha256="a2" * 32,
         unallocated_model_burn=BurnDestination(uid=0, hotkey=burn),
     )
-    successor = prior.model_copy(
-        update={
-            "schema_": "umi-open-competition-policy/4",
-            "sequence": 5,
-            "predecessor_sha256": digest(prior),
-            "contribution_terms_sha256": "b2" * 32,
-            "minimum_continuous_observed_margin_bps": 31,
-            "continuous_dependence_lower_bound_floor_bps": 0,
-            "minimum_continuous_dependence_pairs": 12,
-            "continuous_dependence_duration_bins": 6,
-            "maximum_counterfactual_duration_delta_ms": 500,
-            "continuous_dependence_bootstrap_replicates": 4096,
-            "continuous_dependence_confidence_bps": 9500,
-            "positive_control_model_sha256": "f2" * 32,
-            "minimum_positive_control_dependence_bps": 5000,
-        }
-    )
+    changes = {
+        "sequence": 5,
+        "predecessor_sha256": digest(prior),
+        "contribution_terms_sha256": "b2" * 32,
+    }
+    if not terms_only:
+        changes.update(
+            {
+                "schema_": "umi-open-competition-policy/4",
+                "minimum_continuous_observed_margin_bps": 31,
+                "continuous_dependence_lower_bound_floor_bps": 0,
+                "minimum_continuous_dependence_pairs": 12,
+                "continuous_dependence_duration_bins": 6,
+                "maximum_counterfactual_duration_delta_ms": 500,
+                "continuous_dependence_bootstrap_replicates": 4096,
+                "continuous_dependence_confidence_bps": 9500,
+                "positive_control_model_sha256": "f2" * 32,
+                "minimum_positive_control_dependence_bps": 5000,
+            }
+        )
+    successor = prior.model_copy(update=changes)
     return prior, CompetitionPolicy.model_validate_json(canonical_json_bytes(successor))
 
 
@@ -151,8 +155,9 @@ def accepted_predecessor(prior: CompetitionPolicy) -> tuple[SignedSubmission, Ad
     return signed, receipt
 
 
-def test_transition_requires_new_signature_and_preserves_predecessor_bytes():
-    prior, successor = policies()
+@pytest.mark.parametrize("terms_only", (True, False))
+def test_transition_requires_new_signature_and_preserves_predecessor_bytes(terms_only):
+    prior, successor = policies(terms_only=terms_only)
     signed, receipt = accepted_predecessor(prior)
     prior_bytes = canonical_json_bytes(signed)
 
@@ -197,8 +202,9 @@ def test_transition_requires_new_signature_and_preserves_predecessor_bytes():
         {"contribution_terms_sha256": "a1" * 32},
     ),
 )
-def test_transition_rejects_policy_drift(change):
-    prior, successor = policies()
+@pytest.mark.parametrize("terms_only", (True, False))
+def test_transition_rejects_policy_drift(change, terms_only):
+    prior, successor = policies(terms_only=terms_only)
     signed, receipt = accepted_predecessor(prior)
     successor = CompetitionPolicy.model_validate_json(
         canonical_json_bytes(successor.model_copy(update=change))
@@ -214,8 +220,9 @@ def test_transition_rejects_policy_drift(change):
         )
 
 
-def test_transition_rejects_tampered_receipt_and_late_resign():
-    prior, successor = policies()
+@pytest.mark.parametrize("terms_only", (True, False))
+def test_transition_rejects_tampered_receipt_and_late_resign(terms_only):
+    prior, successor = policies(terms_only=terms_only)
     signed, receipt = accepted_predecessor(prior)
     changed = receipt.model_copy(update={"submission_sha256": "ff" * 32})
     with pytest.raises(ValueError, match="does not bind"):
@@ -239,8 +246,9 @@ def test_transition_rejects_tampered_receipt_and_late_resign():
 
 
 @pytest.mark.parametrize("accepted_block", (201, 311))
-def test_transition_rejects_receipt_after_observation_or_roster_close(accepted_block):
-    prior, successor = policies()
+@pytest.mark.parametrize("terms_only", (True, False))
+def test_transition_rejects_receipt_after_observation_or_roster_close(accepted_block, terms_only):
+    prior, successor = policies(terms_only=terms_only)
     signed, receipt = accepted_predecessor(prior)
     snapshot = receipt.registration_snapshot.model_copy(
         update={"block": accepted_block, "block_hash": "0x" + f"{accepted_block:064x}"}
@@ -288,8 +296,70 @@ def test_published_terms_and_successor_policy_have_fixed_digests():
     assert policy.unallocated_model_burn is not None
 
 
-def test_transition_command_reads_retained_files_and_emits_unsigned_successor(tmp_path: Path):
-    prior, successor = policies()
+def test_exact_published_staged_policies_prepare_a_new_terms_acceptance():
+    prior = CompetitionPolicy.model_validate_json(
+        (ROOT / "docs/competition/FIRST_ROUND_INTAKE_POLICY_V1.json").read_bytes()
+    )
+    successor = CompetitionPolicy.model_validate_json(
+        (ROOT / "docs/competition/FIRST_ROUND_STAGED_POLICY.json").read_bytes()
+    )
+    published_schedule = PublicRoundSchedule(
+        schema="umi-public-round-schedule/1",
+        intake_opened_block=9085463,
+        roster_close_earliest_block=9135843,
+        roster_close_latest_block=9135903,
+        work_signing_close_block=9135963,
+        evaluation_close_block=9156243,
+        protected_reference_reveal_block=9156263,
+        evidence_cutoff_block=9156383,
+        round_valid_through_block=9156983,
+    )
+    miner = wallet("Alice")
+    original, _ = accepted_predecessor(prior)
+    submission = original.submission.model_copy(
+        update={"valid_from_block": 9091285, "valid_through_block": 9156243}
+    )
+    signed = SignedSubmission(submission=submission, signature=sign_object(submission, miner))
+    snapshot = RegistrationSnapshot(
+        network="finney",
+        netuid=78,
+        block=9091285,
+        block_hash="0x" + "03" * 32,
+        registrations=(Registration(uid=93, hotkey=miner.hotkey.ss58_address),),
+    )
+    receipt = AdmissionReceipt(
+        schema="umi-competition-admission/2",
+        policy_sha256=digest(prior),
+        submission_sha256=digest(submission),
+        accepted_block=9091285,
+        registration_snapshot_sha256=digest(snapshot),
+        registration_snapshot=snapshot,
+        registration_source="verifier_attested_finality",
+        observed_uid=93,
+        status="accepted_no_weight",
+        chain_submission_authorized=False,
+    )
+    prepared = prepare_endpoint_policy_transition(
+        prior_policy=prior,
+        successor_policy=successor,
+        prior_submission=signed,
+        prior_receipt=receipt,
+        deployment=deployment().model_copy(update={"round_schedule": published_schedule}),
+        current_block=9095915,
+    )
+    assert prepared.policy_sha256 == digest(successor)
+    assert prepared.accepted_terms_sha256 == successor.contribution_terms_sha256
+    assert prepared.sequence == 3
+    assert prepared.valid_through_block == published_schedule.evaluation_close_block
+    assert prepared.endpoint_url == submission.endpoint_url
+    assert prepared.model_revision == submission.model_revision
+
+
+@pytest.mark.parametrize("terms_only", (True, False))
+def test_transition_command_reads_retained_files_and_emits_unsigned_successor(
+    tmp_path: Path, terms_only
+):
+    prior, successor = policies(terms_only=terms_only)
     signed, receipt = accepted_predecessor(prior)
     values = {
         "policy": successor,
