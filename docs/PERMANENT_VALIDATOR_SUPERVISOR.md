@@ -284,7 +284,7 @@ Supervisor `durable_hold:false` applies only to the supervisor's own journal.
 
 | Observation | Meaning and next step |
 | --- | --- |
-| `prior_submission_outcome_unknown` | An earlier attempt has no confirmed successful receipt. The current bridge worker does not clear this automatically. Preserve its journal; do not reinstall, erase state or start another writer. |
+| `prior_submission_outcome_unknown` | An earlier attempt has no returned successful receipt. The bridge retries recovery, not submission: it clears the hold only when finalized history proves one exact successful call signed by this hotkey and the current row shows that effect. Otherwise it keeps holding. Preserve the journal; do not reinstall, erase state or start another writer. |
 | `validator_not_registered` | The configured hotkey is not currently registered. Verify its public identity and registration; a service restart does not register it. |
 | `validator_permit_missing` | Registration alone is insufficient to write weights. Verify the current permit. |
 | `operator_input_bundle_invalid` | Signed input validation failed; this is separate from a missing permit. Do not edit the bundle or bypass checks. |
@@ -299,11 +299,14 @@ sudo jq '{validator_hotkey, phase, last_observed_block, updated_at_unix_ms, atte
 ```
 
 The missing outcome may reflect a timeout, disconnect, interrupted process or
-submission failure. The reason code alone cannot identify which happened.
-The current bridge records an attempt before submission but not signed bytes,
-nonce and exact era. A matching row or elapsed time alone therefore cannot
-clear its hold. A returned finalized receipt follows a separate verification
-and recovery path. See [bridge diagnostics](operators/bridge.md#unknown-submissions).
+submission failure. The reason code alone cannot identify which happened. A
+matching row or elapsed time alone cannot clear the hold. The worker reconstructs
+the immutable intended call from its retained attempt and searches the finalized
+`LastUpdate` block. It recovers only when the signer, complete call, successful
+dispatch event, `WeightsSet` event, finalized receipt and current row all agree,
+and it archives the recovered receipt before marking the attempt applied. An
+absent or ambiguous proof leaves the hold unchanged. See
+[bridge diagnostics](operators/bridge.md#unknown-submissions).
 
 For routine signed container updates, leave the supervisor running. A Git pull,
 restart or rerun of the installer is not a host-upgrade procedure. Use the
