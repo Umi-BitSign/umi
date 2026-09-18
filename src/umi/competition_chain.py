@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
+import shutil
 import sqlite3
 import stat
 import time
@@ -56,6 +58,7 @@ from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
+_LOGGER = logging.getLogger(__name__)
 
 
 def model_burn_storage_reads(policy):
@@ -92,6 +95,10 @@ class OwnedFinalityStale(ValueError):
     """The owned observer is running, but its verified head is too old."""
 
 
+class RegistrationCacheFull(ValueError):
+    """The working registration cache exhausts its configured byte budget."""
+
+
 class CompetitionChainConfig(StrictProtocolModel):
     schema_: Literal["umi-competition-chain-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -111,7 +118,7 @@ class CompetitionChainConfig(StrictProtocolModel):
     maximum_future_skew_ms: Annotated[int, Field(ge=0, le=30_000)] = 30_000
     collection_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 15
     startup_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 600
-    maximum_cache_bytes: Annotated[int, Field(ge=1024, le=1024**3)] = 256 * 1024**2
+    maximum_cache_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
     storage_codec_metadata_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary_sha256: Hex32 | None = None
@@ -421,6 +428,7 @@ class FinalizedRegistrationProvider:
         finality: Any = None,
         proofs: Any = None,
         now_ms: Callable[[], int] | None = None,
+        retained_capture_blocks: Callable[[], frozenset[int]] | None = None,
     ):
         self.config = CompetitionChainConfig.model_validate_json(canonical_json_bytes(config))
         if self.config.runtime_metadata_binary is not None and not self._supports_executed_runtime:
@@ -431,6 +439,8 @@ class FinalizedRegistrationProvider:
         if (finality is None) != (proofs is None):
             raise ValueError("test ports must be supplied together")
         self._now_ms = now_ms or (lambda: time.time_ns() // 1_000_000)
+        self._retained_capture_blocks = retained_capture_blocks
+        self._capacity_warning_state: tuple[bool, bool] | None = None
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -998,6 +1008,7 @@ class FinalizedRegistrationProvider:
     ) -> None:
         snapshot = capture.snapshot
         connection = self._connect()
+        capacity = None
         try:
             connection.execute("BEGIN IMMEDIATE")
             metadata_id = hashlib.sha256(metadata).hexdigest()
@@ -1021,15 +1032,46 @@ class FinalizedRegistrationProvider:
                 if prior[0] != digest(snapshot):
                     raise ValueError("registration mapping changed at the same finalized block")
             else:
-                total = connection.execute(
-                    "SELECT COALESCE(SUM(length(evidence)), 0) FROM captures"
-                ).fetchone()[0]
+                # Intake may discard old background polls, but never an
+                # admission's proof or any still-usable historical snapshot.
+                # Other provider consumers retain their existing semantics.
+                # Pruning and insertion commit together; a failed save rolls
+                # back every deletion. observed_head remains the rollback guard.
+                retained = frozenset()
+                if self._retained_capture_blocks is not None:
+                    retained = self._retained_capture_blocks()
+                    if not isinstance(retained, frozenset) or any(
+                        type(block) is not int or not 0 <= block <= 2**53 - 1 for block in retained
+                    ):
+                        raise ValueError("invalid retained registration blocks")
+                    obsolete = connection.execute(
+                        "SELECT block FROM captures WHERE block<?",
+                        (height - self.policy.maximum_snapshot_age_blocks,),
+                    ).fetchall()
+                    connection.executemany(
+                        "DELETE FROM captures WHERE block=?",
+                        ((block,) for (block,) in obsolete if block not in retained),
+                    )
+                sizes = connection.execute(
+                    "SELECT block, length(evidence) FROM captures"
+                ).fetchall()
+                archived = sum(size for block, size in sizes if block in retained)
+                total = sum(size for block, size in sizes if block not in retained)
                 total += connection.execute(
                     "SELECT COALESCE(SUM(length(body)), 0) FROM artifacts"
                 ).fetchone()[0]
                 added_metadata = 0 if artifact else len(metadata)
-                if total + len(evidence) + added_metadata > self.config.maximum_cache_bytes:
-                    raise ValueError("registration evidence cache is full")
+                # Receipt-bound evidence is a durable archive, not disposable
+                # cache. Its growth is governed by the admission ledger's
+                # record/byte limits and disk capacity, not the polling budget.
+                added_evidence = 0 if snapshot.block in retained else len(evidence)
+                capacity = (
+                    total + added_evidence + added_metadata,
+                    archived + (len(evidence) if snapshot.block in retained else 0),
+                )
+                if capacity[0] > self.config.maximum_cache_bytes:
+                    self._report_capacity(*capacity)
+                    raise RegistrationCacheFull("registration evidence cache is full")
                 connection.execute(
                     "INSERT OR IGNORE INTO artifacts VALUES (?, ?)", (metadata_id, metadata)
                 )
@@ -1052,6 +1094,33 @@ class FinalizedRegistrationProvider:
             connection.commit()
         finally:
             connection.close()
+        if capacity is not None:
+            self._report_capacity(*capacity)
+
+    def _report_capacity(self, working_bytes: int, archived_bytes: int) -> None:
+        """Warn on pressure transitions without exposing paths or proof contents."""
+        try:
+            disk = shutil.disk_usage(self._path.parent)
+        except OSError:
+            _LOGGER.warning("registration_storage_capacity_unavailable")
+            return  # A failed capacity probe must not invalidate a saved proof.
+        state = (
+            working_bytes * 5 >= self.config.maximum_cache_bytes * 4,
+            disk.free < max(1024**3, disk.total // 5),
+        )
+        if state != self._capacity_warning_state and any(state):
+            _LOGGER.warning(
+                "registration_storage_pressure working_bytes=%d working_limit_bytes=%d "
+                "archived_bytes=%d disk_free_bytes=%d cache_pressure=%s disk_pressure=%s",
+                working_bytes,
+                self.config.maximum_cache_bytes,
+                archived_bytes,
+                disk.free,
+                *state,
+            )
+        elif self._capacity_warning_state and any(self._capacity_warning_state) and not any(state):
+            _LOGGER.info("registration_storage_pressure_recovered")
+        self._capacity_warning_state = state
 
 
 def _uint(value: Any, maximum: int) -> int:

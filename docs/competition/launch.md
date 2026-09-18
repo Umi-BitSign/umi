@@ -235,6 +235,42 @@ into version 1. If the public archive, atomic route switch, or retained-state
 snapshot is not ready, keep version 1 intake live and do not advertise the
 successor policy.
 
+## Intake proof-cache retention
+
+The intake collector keeps the complete registration proof for each accepted
+submission, including replaced submissions. It also keeps all snapshots within
+the policy's `maximum_snapshot_age_blocks` window. Older background-poll
+snapshots with no admission receipt are pruned in the same transaction that
+retains a new proof. The finalized high-water mark, runtime artifacts, accepted
+submissions, receipts and their external checkpoint remain intact. SQLite
+reuses freed pages; the file need not shrink.
+
+This retention is specific to the intake service. Evaluator, endpoint and
+validator evidence stores keep their existing retention rules. In intake,
+`maximum_cache_bytes` covers runtime artifacts and unreferenced polling proofs;
+receipt-bound proofs are a durable archive outside that working-cache budget.
+The archive is limited by the admission ledger's record/byte bounds, individual
+proof-size bounds, and available disk. Provision disk for the expected accepted
+proof volume as well as the ledger and backups. A typical 220 KiB proof for
+each of 65,536 distinct admission snapshots needs about 14 GiB before overhead.
+The operational cache budget supports up to 20 GiB (`21474836480` bytes).
+Existing serialized defaults stay unchanged. Set the budget explicitly; changing
+it requires a stopped-service, backed-up cache-binding migration that verifies
+the old configuration and preserves proofs and the finalized high-water mark.
+
+Private logs report `registration_storage_pressure` when working-cache usage
+reaches 80%, or free disk falls below 20% or 1 GiB. Warnings repeat on pressure
+state changes, not every poll; recovery is logged separately. Monitor these
+warnings and public readiness. If the working window itself exhausts its
+budget, logs report `registration_refresh_failed error_type=RegistrationCacheFull`;
+`registration_refresh_recovered` reports recovery. A real storage failure still
+fails closed: readiness remains HTTP 503 once no fresh verified snapshot is
+available. No unchecked registration is admitted to conceal a storage failure.
+
+Back up the intake ledger, checkpoint and chain state before an upgrade. Do not
+delete the ledger, weaken finality checks or edit signed submissions to clear a
+cache error.
+
 ## Burn proof
 
 The policy's `unallocated_model_burn` binds the destination UID, hotkey and
