@@ -77,6 +77,11 @@ one. Admitted submissions must remain valid through the evaluation close at
 block `9,156,243`. The submitted hotkey must still be registered on SN78 in the
 finalized roster-close snapshot.
 
+Current intake uses version 2 contribution terms. If you submitted under version
+1, follow the [policy-transition instructions](reference/commands.md#required-version-1-to-version-2-acceptance)
+and receive a new acceptance by the same deadline. Your archived version 1
+receipt does not accept the new terms.
+
 Translation requests need the
 [protocol miner connected to a working model](miners/model.md#miner-model-integration).
 A health-only keepalive cannot answer them. Use the exact live policy and
@@ -100,7 +105,7 @@ the exact canonical runtime and its immutable environment have not been
 published. The 30% model allocation remains burned and does not accrue for a
 later retroactive award. Before preparing a future model contribution, read the
 [provenance and rights checklist](contributors/models.md#model-contribution-review) and the approved
-[version 1 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS.md).
+[version 2 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS_V2.md).
 The live policy binds their exact version and hash.
 Published terms do not approve an individual model's rights or award it the
 contribution share. Endpoint service does not require contributing private weights.

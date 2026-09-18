@@ -23,18 +23,19 @@ The authoritative cutoffs are blocks, not wall-clock estimates:
 | Evidence cutoff | `9,156,383` |
 | Round validity end | `9,156,983` |
 
-The policy digest is
-`81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`;
-the accepted contribution-terms digest is
-`61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62`.
-Those are the version 1 live-intake bindings until the public status changes.
-The prospective sequence 5 policy is published as
+Version 2 intake is live under the sequence 5 policy published as
 [`FIRST_ROUND_STAGED_POLICY.json`](FIRST_ROUND_STAGED_POLICY.json), with protocol
 digest `eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56`.
 It binds [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md), SHA-256
 `c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b`,
-and names the version 1 digest as its predecessor. The immutable version 1
-policy is retained as
+and names version 1 policy
+`81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`
+as its predecessor. Version 1 accepted terms
+`61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62`.
+Its submissions and receipts remain available through the read-only archive
+listed in public status. They do not count as version 2 acceptance. Existing
+participants must [sign and submit a version 2 replacement](../reference/commands.md#required-version-1-to-version-2-acceptance)
+by the same guaranteed deadline. The immutable version 1 policy is retained as
 [`FIRST_ROUND_INTAKE_POLICY_V1.json`](FIRST_ROUND_INTAKE_POLICY_V1.json).
 The live intake and bounded status API use `https://api.umi.vision`. The endpoint
 has been publicly reachable since block `9,085,463`, and its accepted-submission
@@ -118,11 +119,11 @@ rights checks. An endpoint result alone cannot promote a model. The imported
 baseline has no founding-model exception.
 
 Version 1 of the accepted contribution terms says that both reward tracks launch
-together. The endpoint-only version 1 intake remains a no-weight admission
-phase. Version 2 permits staged endpoint activation with the model share burned,
-and the published sequence 5 policy binds it. Before that successor governs the
-round, each affected miner must sign and receive acceptance for a new submission
-under the exact successor policy and terms. Version 1 signatures and receipts
+together. That intake is now read-only. Version 2 permits staged endpoint
+activation with the model share burned, and the live sequence 5 intake policy
+binds it. Each affected miner must sign and receive acceptance for a new
+submission under that exact policy and terms before the round's admission
+deadline. Version 1 signatures and receipts
 stay immutable and cannot be counted as version 2 acceptance. No row may pay a
 model contributor until a model round passes the published reconstruction,
 preservation, improvement, quality, and rights gates.
