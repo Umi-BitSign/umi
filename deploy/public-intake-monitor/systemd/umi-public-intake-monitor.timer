@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll UMI public intake every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+Persistent=true
+Unit=umi-public-intake-monitor.service
+
+[Install]
+WantedBy=timers.target

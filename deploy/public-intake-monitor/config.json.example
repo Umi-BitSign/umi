@@ -1,0 +1,46 @@
+{
+  "schema": "umi-public-intake-monitor-config/1",
+  "competition_origin": "https://api.umi.vision",
+  "observer_origin": "https://api.umi.vision",
+  "expected_identities": [
+    {
+      "schema": "umi-public-intake-monitor-identity/1",
+      "name": "first-round-staged-v1",
+      "policy_sha256": "81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0",
+      "deployment_document_sha256": "0a7fe770dbd0de45584d13d42f385479504fcd9bcb509aad0e45d864d2c4961d",
+      "not_before_checked_block": 9092272,
+      "acceptance_not_before_block": 9085463,
+      "minimum_accepted_submission_count": 133,
+      "required_submission_count": 55,
+      "required_submission_set_sha256": "eb329da4be3f150c5de5c5f6a1fc0ffe40fde5439bbac5eb64fd24dfe5179740",
+      "admission_writer_generation": 2
+    }
+  ],
+  "reviewed_bootstrap": {
+    "schema": "umi-public-intake-monitor-bootstrap/1",
+    "identity_name": "first-round-staged-v1",
+    "accepted_submission_count": 133,
+    "retained_head_sha256": "2cae6d45df8ceda88a59b1866a93693afdd6cd315ff04b2304e24f6d298ac0a1"
+  },
+  "watched_validator_uids": [0, 54],
+  "validator_age_thresholds": {
+    "schema": "umi-validator-age-thresholds/1",
+    "warning_blocks": 200,
+    "investigate_blocks": 240,
+    "critical_blocks": 300,
+    "stale_blocks": 360
+  },
+  "maximum_checked_block_stall_seconds": 180,
+  "maximum_observer_age_seconds": 120,
+  "maximum_observer_block_lag": 20,
+  "submission_page_size": 100,
+  "participant_page_size": 512,
+  "record_request_workers": 8,
+  "request_timeout_seconds": 20,
+  "maximum_poll_seconds": 240,
+  "request_attempts": 3,
+  "snapshot_attempts": 3,
+  "maximum_response_bytes": 4194304,
+  "maximum_capture_bytes": 536870912,
+  "maximum_accepted_submission_count": 4096
+}

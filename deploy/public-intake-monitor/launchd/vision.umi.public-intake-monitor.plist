@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>vision.umi.public-intake-monitor</string>
+  <key>UserName</key>
+  <string>_umi_intake</string>
+  <key>GroupName</key>
+  <string>staff</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/umi-public-intake-monitor/venv/bin/umi-public-intake-monitor</string>
+    <string>poll</string>
+    <string>--config</string>
+    <string>/usr/local/etc/umi-public-intake-monitor/config.json</string>
+    <string>--archive-root</string>
+    <string>/var/db/umi-public-intake-monitor</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONDONTWRITEBYTECODE</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/umi-public-intake-monitor/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/umi-public-intake-monitor/stderr.log</string>
+</dict>
+</plist>
