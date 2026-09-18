@@ -17,6 +17,7 @@ from umi.competition_evidence import (
     independent_evidence_digest,
     sign_evaluator_run,
 )
+from umi.competition_launch import PublicLaunchIdentity, PublicRoundSchedule
 from umi.competition_settlement import EvidenceCutoffSchedule
 from umi.competition_store import CompetitionStore
 from umi.open_competition import CompetitionPolicy, digest
@@ -132,6 +133,113 @@ def _settle(s, *, current_block=160, evidence=None, snapshot_block=None):
         snapshot=snapshot(current_block if snapshot_block is None else snapshot_block),
         current_block=current_block,
     )
+
+
+def _launch(round_):
+    return PublicLaunchIdentity(
+        schema="umi-competition-public-launch/1",
+        round_schedule=round_.public_schedule,
+        eligible_tracks=round_.eligible_tracks,
+    )
+
+
+def _successor(launch, *, shift=101, eligible_tracks=None):
+    schedule = launch.round_schedule
+    fields = (
+        "intake_opened_block",
+        "roster_close_earliest_block",
+        "roster_close_latest_block",
+        "work_signing_close_block",
+        "evaluation_close_block",
+        "protected_reference_reveal_block",
+        "evidence_cutoff_block",
+        "round_valid_through_block",
+    )
+    return PublicLaunchIdentity(
+        schema="umi-competition-public-launch/1",
+        round_schedule=schedule.model_copy(
+            update={name: getattr(schedule, name) + shift for name in fields}
+        ),
+        eligible_tracks=(launch.eligible_tracks if eligible_tracks is None else eligible_tracks),
+    )
+
+
+def test_public_launch_successor_requires_settlement_and_is_append_only(policy, tmp_path):
+    s = _scenario(policy, tmp_path)
+    current = _launch(s.round)
+    s.store = CompetitionStore(s.store.directory, s.policy, public_launch=current)
+    successor = _successor(current)
+
+    with pytest.raises(ValueError, match="finalized before succession"):
+        CompetitionStore(s.store.directory, s.policy, public_launch=successor)
+
+    _record_all(s)
+    _settle(s)
+    advanced = CompetitionStore(s.store.directory, s.policy, public_launch=successor)
+    CompetitionStore(s.store.directory, s.policy, public_launch=successor)
+    with sqlite3.connect(s.store.path) as connection:
+        history = connection.execute(
+            "SELECT sequence, digest, schedule, body FROM public_launch_history ORDER BY sequence"
+        ).fetchall()
+    assert [row[0] for row in history] == [1, 2]
+    assert [row[1] for row in history] == [digest(current), digest(successor)]
+    assert [row[2] for row in history] == [
+        digest(current.round_schedule),
+        digest(successor.round_schedule),
+    ]
+
+    with pytest.raises(ValueError, match="rollback"):
+        CompetitionStore(s.store.directory, s.policy, public_launch=current)
+    with pytest.raises(ValueError, match="schedule reuse"):
+        CompetitionStore(
+            s.store.directory,
+            s.policy,
+            public_launch=successor.model_copy(update={"eligible_tracks": ("endpoint",)}),
+        )
+    with pytest.raises(ValueError, match="stale public launch"):
+        s.store.admit(submission(s.policy, sequence=2), snapshot(201), 201)
+    assert advanced.public_launch == successor
+
+
+def test_public_launch_successor_rejects_overlap_and_unconsumed_launch(policy, tmp_path):
+    s = _scenario(policy, tmp_path)
+    current = _launch(s.round)
+    s.store = CompetitionStore(s.store.directory, s.policy, public_launch=current)
+    _record_all(s)
+    _settle(s)
+    overlap = _successor(current, shift=100)
+    with pytest.raises(ValueError, match="overlaps or rolls back"):
+        CompetitionStore(s.store.directory, s.policy, public_launch=overlap)
+
+    successor = _successor(current)
+    CompetitionStore(s.store.directory, s.policy, public_launch=successor)
+    next_successor = _successor(successor)
+    with pytest.raises(ValueError, match="consumed by exactly one round"):
+        CompetitionStore(s.store.directory, s.policy, public_launch=next_successor)
+
+
+@pytest.mark.parametrize("table", ["round_conflicts", "settlement_disputes"])
+def test_public_launch_successor_rejects_any_retained_conflict(policy, tmp_path, table):
+    s = _scenario(policy, tmp_path)
+    current = _launch(s.round)
+    s.store = CompetitionStore(s.store.directory, s.policy, public_launch=current)
+    _record_all(s)
+    _settle(s)
+    with s.store._connection() as connection:
+        connection.execute(
+            f"INSERT INTO {table} VALUES (?, ?)", (digest(s.round), s.round.valid_through_block)
+        )
+    with pytest.raises(ValueError, match="unresolved conflicts"):
+        CompetitionStore(s.store.directory, s.policy, public_launch=_successor(current))
+
+
+def test_legacy_launch_adoption_requires_latest_round_identity(policy, tmp_path):
+    s = _scenario(policy, tmp_path)
+    current = _launch(s.round)
+    with pytest.raises(ValueError, match="latest round public launch"):
+        CompetitionStore(s.store.directory, s.policy, public_launch=_successor(current))
+    adopted = CompetitionStore(s.store.directory, s.policy, public_launch=current)
+    assert adopted.public_launch == current
 
 
 def test_cutoff_is_explicit_policy_bound_and_fixed_before_round_close(policy, tmp_path):
@@ -351,6 +459,17 @@ def test_source_conflict_disputes_only_downstream_settlement_heads(policy, tmp_p
     ).model_copy(
         update={
             "sequence": 2,
+            "public_schedule": PublicRoundSchedule(
+                schema="umi-public-round-schedule/1",
+                intake_opened_block=100,
+                roster_close_earliest_block=130,
+                roster_close_latest_block=130,
+                work_signing_close_block=140,
+                evaluation_close_block=145,
+                protected_reference_reveal_block=150,
+                evidence_cutoff_block=160,
+                round_valid_through_block=200,
+            ),
             "submission_close_block": 130,
             "evaluation_close_block": 145,
             "reveal_block": 150,
@@ -382,6 +501,17 @@ def test_source_conflict_disputes_only_downstream_settlement_heads(policy, tmp_p
     ).model_copy(
         update={
             "sequence": 3,
+            "public_schedule": PublicRoundSchedule(
+                schema="umi-public-round-schedule/1",
+                intake_opened_block=100,
+                roster_close_earliest_block=170,
+                roster_close_latest_block=170,
+                work_signing_close_block=180,
+                evaluation_close_block=190,
+                protected_reference_reveal_block=200,
+                evidence_cutoff_block=220,
+                round_valid_through_block=250,
+            ),
             "submission_close_block": 170,
             "evaluation_close_block": 190,
             "reveal_block": 200,

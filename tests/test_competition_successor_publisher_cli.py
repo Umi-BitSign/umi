@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 
 from umi import competition_successor_publisher_cli as cli
+from umi.competition_launch import PublicLaunchIdentity
 from umi.protocol import canonical_json_bytes
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_successor_publisher import (
     chain_config as chain_config,
 )
@@ -54,11 +56,20 @@ def config(guarded, tmp_path):
     wallet = cli.AuthorityWallet(
         wallet_name="authority", hotkey_name="release", wallet_path=str(tmp_path / "wallets")
     )
+    public_launch = PublicLaunchIdentity(
+        schema="umi-competition-public-launch/1",
+        round_schedule=guarded.package.scenario.round.public_schedule,
+        eligible_tracks=guarded.package.scenario.round.eligible_tracks,
+    )
+    checkpoint = tmp_path / "intake-checkpoint"
+    guarded.store = bind_submission_checkpoint(guarded.store, public_launch, checkpoint)
     return cli.SuccessorPublisherConfig(
-        schema="umi-successor-publisher-config/1",
+        schema="umi-successor-publisher-config/2",
         plan=guarded.builder.plan,
+        public_launch=public_launch,
         chain=guarded.provider.config,
         intake_directory=str(guarded.store.directory),
+        submission_head_checkpoint_directory=str(checkpoint),
         publication_directory=str(guarded.builder.journal.root),
         replay_directory=str(guarded.replay.state_root),
         replay_capacity=guarded.replay.capacity,

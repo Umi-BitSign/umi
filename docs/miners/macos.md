@@ -200,11 +200,13 @@ the evaluator's DNS answers, update the Axon and wait for finalization. Test
 from the evaluator's network because geographically varying answers can hold
 dispatch.
 
-Hostname support does not activate open competition or alter the bridge's
-literal-IP discovery and grouping rules. Do not announce model-serving readiness
-until an external host can validate the chosen profile's TLS certificate and
-complete an authenticated request within the signed limits. The proxy must
-preserve the exact request target, authentication headers and body bytes.
+Hostname support does not activate competition rewards or alter the bridge's
+literal-IP discovery and grouping rules. Public endpoint intake can accept the
+signed hostname while assignment delivery remains unavailable. Do not announce
+model-serving readiness until an external host can validate the chosen profile's
+TLS certificate and complete an authenticated request within the signed limits.
+The proxy must preserve the exact request target, authentication headers and body
+bytes.
 
 <a id="macos-miner-operator--6-create-state-and-start-the-miner"></a>
 

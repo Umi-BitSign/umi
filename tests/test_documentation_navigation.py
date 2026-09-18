@@ -1,10 +1,13 @@
 """Keep the reader-facing docs navigable without loading model dependencies."""
 
 import hashlib
+import json
 import re
 import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+from umi.competition_launch import PublicLaunchIdentity
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_MAIN = "https://github.com/Umi-BitSign/umi/blob/main/"
@@ -24,6 +27,14 @@ def anchors(text):
         counts[key] = number + 1
         found.add(key + (f"-{number}" if number else ""))
     return found
+
+
+def fenced_json_after(path, marker):
+    tail = path.read_text().split(marker, 1)[1]
+    match = re.search(r"```json\n(.*?)\n\s*```", tail, flags=re.DOTALL)
+    if match is None:
+        raise AssertionError(f"missing JSON example after {marker!r} in {path}")
+    return json.loads(match.group(1))
 
 
 class DocumentationNavigationTests(unittest.TestCase):
@@ -64,6 +75,41 @@ class DocumentationNavigationTests(unittest.TestCase):
             hashlib.sha256((ROOT / "docs/MODEL_CONTRIBUTION_TERMS.md").read_bytes()).hexdigest(),
             "61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62",
         )
+
+    def test_public_phase_and_release_boundary_are_current(self):
+        readme = (ROOT / "README.md").read_text()
+        docs_index = (ROOT / "docs/README.md").read_text()
+        contributor_guide = (ROOT / "docs/contributors/models.md").read_text()
+        self.assertIn("Public first-round competition intake is live", readme)
+        self.assertIn("main` branch is reviewed source, not an activation signal", readme)
+        self.assertIn("Public first-round competition intake is", docs_index)
+        self.assertNotIn(
+            "Open-competition intake and rewards are not active yet", contributor_guide
+        )
+
+    def test_operator_store_consumers_show_the_exact_public_launch(self):
+        publisher = fenced_json_after(
+            ROOT / "docs/operators/settlement.md", "these config fields are:"
+        )
+        exchange = fenced_json_after(ROOT / "docs/operators/exchange.md", "three fields are:")
+        self.assertEqual(publisher["schema"], "umi-successor-publisher-config/2")
+        self.assertEqual(exchange["schema"], "umi-evaluator-exchange-config/1")
+        self.assertEqual(exchange["intake_directory"], "/ABSOLUTE/PRIVATE/INTAKE")
+        self.assertEqual(
+            publisher["submission_head_checkpoint_directory"],
+            "/ABSOLUTE/PRIVATE/SUBMISSION-HEAD-CHECKPOINT",
+        )
+        self.assertEqual(
+            exchange["submission_head_checkpoint_directory"],
+            publisher["submission_head_checkpoint_directory"],
+        )
+        publisher_launch = PublicLaunchIdentity.model_validate_json(
+            json.dumps(publisher["public_launch"])
+        )
+        exchange_launch = PublicLaunchIdentity.model_validate_json(
+            json.dumps(exchange["public_launch"])
+        )
+        self.assertEqual(publisher_launch, exchange_launch)
 
     def test_small_front_door_without_dated_runbooks(self):
         self.assertLessEqual(len(list((ROOT / "docs").glob("*.md"))), 8)

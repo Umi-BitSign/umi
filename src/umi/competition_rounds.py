@@ -33,6 +33,7 @@ from .competition_execution import (
     execution_boundary,
     registration_boundary,
 )
+from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
 from .competition_package import CompetitionPackageLimits, CompetitionReleaseIdentity
 from .competition_promotion_delivery import ReviewedPromotion
 from .competition_publication import (
@@ -54,6 +55,7 @@ from .open_competition import (
     Hotkey,
     Signature,
     SignedSubmission,
+    Track,
     digest,
     identity,
     sign_object,
@@ -69,8 +71,11 @@ Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 class RoundPlan(StrictProtocolModel):
     """Private operator input with explicit windows, never a remote request."""
 
-    schema_: Literal["umi-round-plan/1"] = Field(alias="schema")
+    schema_: Literal["umi-round-plan/2"] = Field(alias="schema")
     suite: EvaluationSuite
+    public_schedule: PublicRoundSchedule
+    eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)]
+    intake_opened_block: Block
     not_before_block: Block
     admission_close_by_block: Block
     signing_close_block: Block
@@ -81,8 +86,10 @@ class RoundPlan(StrictProtocolModel):
 
     @model_validator(mode="after")
     def windows(self):
+        schedule = self.public_schedule
         if not (
-            self.not_before_block
+            self.intake_opened_block
+            <= self.not_before_block
             <= self.admission_close_by_block
             < self.signing_close_block
             < self.evaluation_close_block
@@ -91,6 +98,28 @@ class RoundPlan(StrictProtocolModel):
             <= self.valid_through_block
         ):
             raise ValueError("round plan windows are not ordered")
+        if (
+            self.intake_opened_block,
+            self.not_before_block,
+            self.admission_close_by_block,
+            self.signing_close_block,
+            self.evaluation_close_block,
+            self.reveal_block,
+            self.evidence_cutoff_block,
+            self.valid_through_block,
+        ) != (
+            schedule.intake_opened_block,
+            schedule.roster_close_earliest_block,
+            schedule.roster_close_latest_block,
+            schedule.work_signing_close_block,
+            schedule.evaluation_close_block,
+            schedule.protected_reference_reveal_block,
+            schedule.evidence_cutoff_block,
+            schedule.round_valid_through_block,
+        ):
+            raise ValueError("round plan differs from its public schedule")
+        if tuple(sorted(set(self.eligible_tracks))) != self.eligible_tracks:
+            raise ValueError("eligible tracks must be sorted and unique")
         return self
 
 
@@ -175,11 +204,13 @@ class PromotionDeliveryConfig(StrictProtocolModel):
 
 
 class RoundCoordinatorConfig(StrictProtocolModel):
-    schema_: Literal["umi-round-coordinator-config/1"] = Field(alias="schema")
+    schema_: Literal["umi-round-coordinator-config/2"] = Field(alias="schema")
     policy_sha256: Hex32
+    public_launch: PublicLaunchIdentity
     chain: CompetitionChainConfig
     state_directory: Directory
     intake_directory: Directory
+    submission_head_checkpoint_directory: Directory
     plan_directory: Directory
     certificate_directory: Directory
     replay_limits: PublicationReplayLimits
@@ -201,6 +232,7 @@ class RoundCoordinatorConfig(StrictProtocolModel):
             for p in (
                 self.state_directory,
                 self.intake_directory,
+                self.submission_head_checkpoint_directory,
                 self.plan_directory,
                 self.certificate_directory,
                 self.chain.state_directory,
@@ -282,6 +314,7 @@ def validate_proposal(proposal, policy, limits):
         cutoff.registration_snapshot.block
         == cutoff.round.submission_close_block
         < proposal.signing_close_block
+        == cutoff.round.public_schedule.work_signing_close_block
         < cutoff.round.evaluation_close_block
     ):
         raise ValueError("round proposal bindings or signing window differ")
@@ -641,14 +674,30 @@ class RoundCoordinator:
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         if digest(self.policy) != config.policy_sha256:
             raise ValueError("coordinator policy mismatch")
+        schedule = self.config.public_launch.round_schedule
+        if not (
+            self.policy.valid_from_block
+            <= schedule.intake_opened_block
+            < schedule.round_valid_through_block
+            <= self.policy.valid_through_block
+        ):
+            raise ValueError("coordinator public deployment is outside the policy interval")
         self.provider = provider
-        self.store = CompetitionStore(Path(config.intake_directory), self.policy)
+        self.store = CompetitionStore(
+            Path(config.intake_directory),
+            self.policy,
+            public_launch=self.config.public_launch,
+            submission_head_checkpoint_directory=Path(
+                self.config.submission_head_checkpoint_directory
+            ),
+        )
         self.journal = RoundJournal(
             Path(config.state_directory),
             config.model_dump(
                 mode="json",
                 by_alias=True,
                 exclude={
+                    "public_launch",
                     "maximum_rounds",
                     "maximum_journal_bytes",
                     "poll_seconds",
@@ -809,12 +858,17 @@ class RoundCoordinator:
                         self.policy
                     ):
                         raise ValueError("round plan filename or policy mismatch")
-                    if not self.policy.valid_from_block <= plan.not_before_block or (
+                    if not self.policy.valid_from_block <= plan.intake_opened_block or (
                         plan.valid_through_block > self.policy.valid_through_block
                     ):
                         raise ValueError("round plan lies outside the policy")
                     # Keep the protected plan private and never retime a used suite.
                     self.journal.put("plan", suite_id, plan)
+                    if (
+                        plan.public_schedule != self.config.public_launch.round_schedule
+                        or plan.eligible_tracks != self.config.public_launch.eligible_tracks
+                    ):
+                        raise ValueError("round plan differs from the public deployment")
                     existing = self.journal.get("prepared", suite_id)
                     if existing is not None:
                         proposal = RoundProposal.model_validate_json(canonical_json_bytes(existing))
@@ -832,6 +886,9 @@ class RoundCoordinator:
                     prepared = prepared or self.store.prepare_round(
                         snapshot=capture.snapshot,
                         suite=plan.suite,
+                        public_schedule=plan.public_schedule,
+                        eligible_tracks=plan.eligible_tracks,
+                        intake_opened_block=plan.intake_opened_block,
                         evaluation_close_block=plan.evaluation_close_block,
                         reveal_block=plan.reveal_block,
                         evidence_cutoff_block=plan.evidence_cutoff_block,
@@ -855,7 +912,8 @@ class RoundCoordinator:
                     )
                     prepared_round = proposal.cutoff.round
                     if (
-                        not (
+                        prepared["intake_opened_block"] != plan.intake_opened_block
+                        or not (
                             plan.not_before_block
                             <= prepared_round.submission_close_block
                             <= plan.admission_close_by_block

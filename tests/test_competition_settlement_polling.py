@@ -13,10 +13,11 @@ from umi.competition_settlement_preparation import SettlementPreparation
 from umi.open_competition import digest, identity
 from umi.protocol import canonical_json_bytes
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_publication import _certificate, _scenario
 from .test_competition_publication import replay_limits as replay_limits
-from .test_competition_rounds import OwnedProvider
+from .test_competition_rounds import OwnedProvider, deployment_for
 from .test_open_competition import policy as policy
 from .test_open_competition import snapshot
 
@@ -35,9 +36,15 @@ def setup(policy, replay_limits, chain_config, tmp_path):
             limits=limits,
         )
     )
+    public_launch = deployment_for(
+        s.round.public_schedule, s.round.eligible_tracks
+    ).launch_identity()
+    checkpoint = tmp_path / "intake-checkpoint"
+    s.store = bind_submission_checkpoint(s.store, public_launch, checkpoint)
     config = rounds.RoundCoordinatorConfig(
-        schema="umi-round-coordinator-config/1",
+        schema="umi-round-coordinator-config/2",
         policy_sha256=digest(policy),
+        public_launch=public_launch,
         chain=chain_config.model_copy(
             update={
                 "policy_sha256": digest(policy),
@@ -47,6 +54,7 @@ def setup(policy, replay_limits, chain_config, tmp_path):
         ),
         state_directory=str(tmp_path / "rounds"),
         intake_directory=str(s.store.directory),
+        submission_head_checkpoint_directory=str(checkpoint),
         plan_directory=str(tmp_path / "plans"),
         certificate_directory=str(tmp_path / "cutoffs"),
         settlement_directory=str(tmp_path / "settlements"),
@@ -61,15 +69,18 @@ def setup(policy, replay_limits, chain_config, tmp_path):
         signing_close_block=130,
     )
     plan = rounds.RoundPlan(
-        schema="umi-round-plan/1",
+        schema="umi-round-plan/2",
         suite=s.suite,
-        not_before_block=120,
-        admission_close_by_block=125,
-        signing_close_block=130,
-        evaluation_close_block=140,
-        reveal_block=150,
-        evidence_cutoff_block=160,
-        valid_through_block=200,
+        public_schedule=s.round.public_schedule,
+        eligible_tracks=s.round.eligible_tracks,
+        intake_opened_block=s.round.public_schedule.intake_opened_block,
+        not_before_block=s.round.public_schedule.roster_close_earliest_block,
+        admission_close_by_block=s.round.public_schedule.roster_close_latest_block,
+        signing_close_block=s.round.public_schedule.work_signing_close_block,
+        evaluation_close_block=s.round.public_schedule.evaluation_close_block,
+        reveal_block=s.round.public_schedule.protected_reference_reveal_block,
+        evidence_cutoff_block=s.round.public_schedule.evidence_cutoff_block,
+        valid_through_block=s.round.public_schedule.round_valid_through_block,
     )
     _publish(Path(config.plan_directory) / (digest(s.suite) + ".json"), plan)
     coordinator.journal.put("plan", digest(s.suite), plan)
@@ -112,6 +123,7 @@ async def test_coordinator_poll_reaches_retained_settlement_without_manual_assem
 async def test_missing_evidence_does_not_stop_coordinator_or_shrink_roster(setup):
     s = setup
     with sqlite3.connect(s.scenario.store.path) as db:
+        db.create_function("umi_writer_generation", 0, lambda: 2)
         db.execute(
             "DELETE FROM independent_evaluation_evidence WHERE submission=?",
             (s.scenario.round.roster[0],),
@@ -162,10 +174,23 @@ def test_expired_history_does_not_starve_current_settlement_pages(setup):
     s = setup
     for sequence in range(2, 25):
         expired = sequence < 20
+        public_schedule = s.proposal.cutoff.round.public_schedule
+        if expired:
+            public_schedule = public_schedule.model_copy(
+                update={
+                    "evaluation_close_block": 135,
+                    "protected_reference_reveal_block": 140,
+                    "evidence_cutoff_block": 150,
+                    "round_valid_through_block": 159,
+                }
+            )
         round_ = s.proposal.cutoff.round.model_copy(
             update={
                 "sequence": sequence,
                 "suite_sha256": f"{sequence:064x}",
+                "public_schedule": public_schedule,
+                "evaluation_close_block": 135 if expired else 140,
+                "reveal_block": 140 if expired else 150,
                 "valid_through_block": 159 if expired else 200,
             }
         )
@@ -203,6 +228,7 @@ def test_disabled_settlement_preserves_the_previous_configuration_binding(setup,
         mode="json",
         by_alias=True,
         exclude={
+            "public_launch",
             "maximum_rounds",
             "maximum_journal_bytes",
             "poll_seconds",

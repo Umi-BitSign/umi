@@ -7,10 +7,16 @@ The successor mechanism has two tracks. Qualifying translation endpoints share
 model's contributor receives 30%. Until the first promotion, that 30% is burned.
 The imported baseline has no contributor award or founding-model exception.
 
-Public intake is live at `https://api.umi.vision`. The first roster is scheduled
-to close between blocks `9,135,843` and `9,135,903`; its evaluation closes at
-block `9,156,243`. A submission intended for this round must remain valid through
-at least `9,156,243`. The exact policy digest is
+Public endpoint intake is live at `https://api.umi.vision` and has been publicly
+reachable since block `9,085,463`. Block `9,135,843` is the guaranteed
+first-round deadline for submissions and replacements accepted on or after the
+opening block. The coordinator polls
+after that block and may close the roster at any time through its operator close
+bound, block `9,135,903`, so an acceptance after `9,135,843` is not guaranteed
+first-round inclusion. Evaluation closes at block `9,156,243`. A submission
+intended for this round must remain valid through at least that block, and its
+hotkey must still be registered on SN78 in the finalized roster-close snapshot.
+The exact policy digest is
 `81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`.
 
 Competition rewards have not yet replaced the registration bridge. Until the
@@ -31,12 +37,41 @@ is submitted. The live origin and complete procedure are in the
 receipt has status `accepted_no_weight`; keep it and keep the submitted model and
 endpoint unchanged and online through evaluation.
 
+The accepted-submission log is public. It contains the complete signed
+submission and receipt, including the hotkey, endpoint URL, model revision,
+signature and finalized registration snapshot. Use a credential-free HTTPS
+origin with no secret in its host, path, query or fragment. Do not put
+credentials, private dataset details, confidential provenance or private review
+material in a submission. Endpoint intake records metadata; it does not upload
+model weights or training data.
+
+Assignment delivery is not public yet. Do not start a miner from placeholder
+feed examples. UMI will publish the exact signed feed configuration and a tested
+command before first-round evaluation, with operating lead time. A coordinator,
+feed or evaluator infrastructure delay is not a miner failure and cannot be
+scored against a miner.
+
 ## Model contributors
 
-Contribution is optional. Submit a complete, reproducible artifact with weights
-or base-plus-adapter files, configuration, tokenizer, inference code, dependency
-inventory, hashes and notices. UMI preserves qualifying promoted models so
-future miners and products can use them independently of an endpoint.
+Contribution is optional. Model-artifact intake and evaluation are **not open
+for the first round** because the exact canonical runtime and its immutable,
+reconstructible environment have not been published. The public endpoint intake
+does not accept or evaluate model bytes. The 30% model allocation remains burned
+until a later announced model round supplies that runtime and a model passes all
+promotion checks. No reward accrues while the share is unallocated, and a later
+promotion has no retroactive award.
+
+The current endpoint-only intake is a no-weight intake. Version 1 says both
+tracks launch together. Before UMI can cut over to endpoint-only rewards while
+burning the 30% model share, it must adopt prospective terms that explicitly
+allow staged activation, bind those terms in a new signed policy, and obtain
+acceptance from every affected miner. Otherwise, UMI must open both tracks before
+activating rewards under version 1.
+
+A future contribution must provide a complete, reproducible artifact with
+weights or base-plus-adapter files, configuration, tokenizer, inference code,
+dependency inventory, hashes and notices. UMI preserves qualifying promoted
+models so future miners and products can use them independently of an endpoint.
 
 Read the [preparation and rights checklist](contributors/models.md) and
 [accepted version 1 terms](MODEL_CONTRIBUTION_TERMS.md) before spending compute.
@@ -45,9 +80,11 @@ Uploading an archive or winning an endpoint benchmark does not grant the model
 share. Promotion requires reconstruction, paired improvement, preservation and
 rights review.
 
-The first contribution round targets seven days, with exact signed cutoffs
-published before intake. Endpoint scoring may run during collection. If nothing
-qualifies, the 30% remains burned; rewards do not accrue retroactively.
+The [model-manifest preparation notes](reference/commands.md#live-first-round-model-contribution)
+are for advance preparation only. A future opening will publish its own runtime,
+cutoffs, submission route and review process. If two new candidates are exactly
+tied for the highest qualifying promotion result, neither is promoted in that
+round and the 30% remains burned.
 
 ## Evaluation and trust
 
@@ -55,12 +92,56 @@ The initial policy uses UID 0 as one evaluator group. UID 54 shares its
 administration and is not an independent vote. This is a disclosed
 single-operator launch, not independent evaluator consensus.
 
-Automatic scoring compares one authentic reference per clip: fingerspelling
-CER weighted 3/13 and continuous-signing WER weighted 10/13. The inference limit
-is 120 seconds. Candidates and the preserved incumbent use the same committed
-suite and runtime profile. Labels stay out of execution until reveal; exposed
-cases are retired. Text error rates do not establish human interpreter
-equivalence, clinical safety or unseen-training performance.
+Automatic scoring compares one authentic reference per clip. Fingerspelling
+uses CER over graphemes with whitespace removed; continuous signing uses WER
+over word tokens. Each case similarity is
+`max(0, 1 - edit_distance / max(1, reference_units))`. Case similarities are
+averaged within each stratum, then combined as 3/13 fingerspelling and 10/13
+continuous signing. The 120-second inference limit is the evaluator-observed
+full request-response round trip, not a miner-reported duration. Candidates and
+the preserved incumbent use the same committed suite and runtime profile.
+Labels stay out of execution until reveal; exposed cases are retired. Text error
+rates do not establish human interpreter equivalence, clinical safety or
+unseen-training performance.
+
+A candidate output that is late, oversized, invalid or returns an authenticated
+miner error scores zero for that case. A verified evaluator or dispatch
+infrastructure failure voids the affected evaluation instead of charging it to
+the miner. Every frozen roster entry needs scored evidence or a complete signed
+void; missing evidence holds the round.
+
+The minimum aggregate quality score is 10%. Qualifying endpoint miners split
+the 70% endpoint allocation in proportion to their exact scores. Integer
+rounding uses largest remainders, with UID order breaking an exact tie. A model
+can be promoted only if it meets the minimum score, beats the incumbent by at
+least one percentage point, does not regress either scoring stratum, and passes
+preservation, reconstruction and rights review. Review conflicts or missing
+quorum hold settlement; operators cannot edit frozen labels or issue an ad hoc
+rescore after seeing answers.
+
+## Incidents and score challenges
+
+Report a possible protocol, evidence, evaluator or protected-data defect to Sam
+(`sam0x17`) in a public UMI community channel. Send confidential supporting
+material only through the restricted route he provides. A report that could
+affect first-round settlement must arrive by the evidence cutoff, block
+`9,156,383`.
+
+Useful evidence includes the signed submission and receipt digest, signed
+requests or responses, bounded endpoint logs with timestamps, public chain
+references, and signed evaluator or dispatch evidence. Never publish seed
+phrases, credentials, private labels, restricted videos or confidential
+provenance material.
+
+There is no discretionary appeal of a correctly computed automatic score.
+Reports are limited to objective protocol, evidence, execution or data defects.
+No operator may manually override one miner's score. A material evaluator,
+dispatch or holdout defect found before settlement holds or voids the complete
+affected round; a replacement round uses a fresh protected suite. Finalized
+rows are not rewritten. A verified late conflict or defect stops renewal and
+holds the next cutover while it is handled prospectively. UMI publishes a
+bounded incident record and the relevant evidence digests, with private or
+restricted material redacted.
 
 ## Operations and release checks
 
@@ -68,6 +149,12 @@ The [launch configuration](competition/launch.md) is the single acceptance
 checklist and policy reference. It covers the burn proof, exact intake windows,
 real workload qualification, signed artifacts, state-preserving handoff and
 finalized competition-row verification.
+
+The repository's `main` branch is not the release channel. It may include
+reviewed changes that are not active in the coordinator, evaluator, intake or
+validator fleet. The public status identifies the live policy; signed release
+artifacts identify validator code; finalized chain state identifies the row that
+can affect incentives. A merged commit changes none of those by itself.
 
 Service operators should follow the [round](operators/rounds.md),
 [dispatch](operators/dispatch.md), [evaluation](operators/evaluation.md),

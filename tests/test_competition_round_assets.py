@@ -8,6 +8,7 @@ import pytest
 
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_evaluator import _publish, _read
+from umi.competition_launch import PublicRoundSchedule
 from umi.competition_publication import PublicationReplayLimits
 from umi.competition_round_assets import (
     ArchivedRoundWorkAssets,
@@ -159,15 +160,18 @@ async def test_coordinator_resolves_assets_before_deriving_work(setup, tmp_path,
 
     coordinator.work_queue = SimpleNamespace(prepare=prepared)
     plan = RoundPlan(
-        schema="umi-round-plan/1",
+        schema="umi-round-plan/2",
         suite=s.work.item.suite,
-        not_before_block=s.round.submission_close_block,
-        admission_close_by_block=s.round.submission_close_block,
-        signing_close_block=s.round.submission_close_block + 1,
-        evaluation_close_block=s.round.evaluation_close_block,
-        reveal_block=s.round.reveal_block,
-        evidence_cutoff_block=s.work.plan.cutoff.publication.cutoff_schedule.evidence_cutoff_block,
-        valid_through_block=s.round.valid_through_block,
+        public_schedule=s.round.public_schedule,
+        eligible_tracks=s.round.eligible_tracks,
+        intake_opened_block=s.round.public_schedule.intake_opened_block,
+        not_before_block=s.round.public_schedule.roster_close_earliest_block,
+        admission_close_by_block=s.round.public_schedule.roster_close_latest_block,
+        signing_close_block=s.round.public_schedule.work_signing_close_block,
+        evaluation_close_block=s.round.public_schedule.evaluation_close_block,
+        reveal_block=s.round.public_schedule.protected_reference_reveal_block,
+        evidence_cutoff_block=s.round.public_schedule.evidence_cutoff_block,
+        valid_through_block=s.round.public_schedule.round_valid_through_block,
     )
     coordinator.journal.put("plan", s.round.suite_sha256, plan)
     value = s.assets
@@ -216,6 +220,19 @@ def test_new_round_uses_promoted_incumbent_and_old_round_stays_frozen(scenario, 
     prepared = s.store.prepare_round(
         snapshot=snapshot(151),
         suite=suite,
+        public_schedule=PublicRoundSchedule(
+            schema="umi-public-round-schedule/1",
+            intake_opened_block=s.policy.valid_from_block,
+            roster_close_earliest_block=151,
+            roster_close_latest_block=151,
+            work_signing_close_block=160,
+            evaluation_close_block=170,
+            protected_reference_reveal_block=180,
+            evidence_cutoff_block=185,
+            round_valid_through_block=190,
+        ),
+        eligible_tracks=("endpoint", "model"),
+        intake_opened_block=s.policy.valid_from_block,
         evaluation_close_block=170,
         reveal_block=180,
         evidence_cutoff_block=185,

@@ -3,24 +3,45 @@
 # Competition CLI reference
 
 These are operator and local-rehearsal recipes except for the explicitly marked
-live first-round intake section. Start with the
+live first-round endpoint intake section. Start with the
 [launch checklist](../competition/launch.md).
 
 <a id="live-first-round-intake"></a>
 
-## Live first-round intake
+## Live first-round endpoint intake
 
-The reviewed origin is `https://api.umi.vision`. Read the bounded status and
-finalized registration head, then extract the exact canonical policy:
+The reviewed endpoint-intake origin is `https://api.umi.vision`. It has been
+publicly reachable since block `9,085,463`. A submission or replacement must be
+accepted on or after that opening block and by block `9,135,843` to guarantee
+consideration for round one. The
+coordinator may close the roster at any later poll through block `9,135,903`, so
+an acceptance in that interval is not guaranteed first-round inclusion. The
+same hotkey must still be registered on SN78 in the finalized roster-close
+snapshot, and the submission must remain valid through evaluation.
+
+Read the bounded status and finalized registration head, then extract the exact
+canonical policy:
 
 ```sh
 origin=https://api.umi.vision
 curl --fail --silent --show-error --max-time 20 \
   "$origin/v1/competition/status" > competition-status.json
+jq -e '
+  .admission_phase == "open" and
+  .admission_accepting_new == true and
+  (.deployment.umi_git_revision | test("^[0-9a-f]{40}$")) and
+  (.deployment.umi_source_tree_sha256 | test("^[0-9a-f]{64}$"))
+' competition-status.json >/dev/null
 jq -c '.policy' competition-status.json > competition-policy.json
 head_block="$(curl --fail --silent --show-error --max-time 20 \
   "$origin/v1/competition/readiness" | jq -r '.registration_source.block')"
 ```
+
+If the status is `not_open`, `closed` or `unverified`, do not create a new
+submission. An identical retry of an already accepted signed object remains
+safe. The service enforces the source-tree digest at startup. The displayed Git
+revision is an operator declaration that the deployment procedure must verify
+against that exact tree; a repository branch name does not identify a release.
 
 Set the three operator values below. `model_revision` is the SHA-256 revision of
 the exact model served at the credential-free HTTPS origin. Then prepare the
@@ -64,18 +85,95 @@ Success is `accepted_no_weight`. Keep the exact signed submission and receipt,
 and keep the endpoint, model revision and registered hotkey available through
 evaluation. A receipt does not promise inclusion, score or payment. To replace a
 submission, increment its sequence and wait at least 360 blocks after the prior
-acceptance. Never upload a seed phrase, coldkey or wallet file.
+acceptance. The roster uses the latest accepted submission for each hotkey and
+track. A bad or expired replacement does not revive an older submission. There
+is no rollback or cancellation operation. The replacement must be accepted by
+the guaranteed deadline and remain valid through evaluation to guarantee
+first-round consideration. Its hotkey must also remain registered on SN78 in the
+finalized roster-close snapshot; an admission receipt does not preserve a slot
+after deregistration.
 
-The model-contribution track uses the same live origin and cutoffs. It requires
-`track: "model"`, a complete `model_bundle`, `endpoint_url: null`, and a
-`model_revision` equal to the canonical bundle digest. Read the
-[model preparation and rights checklist](../contributors/models.md) before
-uploading or signing a model submission.
+The public log retains complete signed submissions and receipts. It exposes the
+hotkey, endpoint URL, model revision, signature and finalized registration
+snapshot. Use a credential-free HTTPS root with no secret in its host, path,
+query or fragment. Do not put credentials, private provenance, private dataset
+details or confidential review evidence in these fields. Endpoint intake stores
+metadata and does not upload model bytes. Never upload a seed phrase, coldkey or
+wallet file.
+
+<a id="live-first-round-model-contribution"></a>
+
+### Model-manifest preparation; artifact intake is not open
+
+Model-artifact intake and evaluation are not operational for the first round.
+The exact canonical runtime and its immutable, reconstructible environment have
+not been published. Do not sign or submit a model-track object to the live
+endpoint-intake origin. The 30% model share remains burned, does not accrue, and
+cannot be awarded retroactively. A future opening will publish its own runtime,
+cutoffs and submission route.
+
+The manifest below is an advance-preparation aid only. Read the
+[model preparation and rights checklist](../contributors/models.md). Do not
+include training data, credentials or confidential review evidence in it.
+
+Create `model-bundle.json` with this exact shape:
+
+```json
+{
+  "schema": "umi-model-bundle/1",
+  "profile": "offline_bundle/1",
+  "parent_baseline_sha256": "CURRENT_BASELINE_MODEL_SHA256",
+  "license_id": "ONE_POLICY_ACCEPTED_IDENTIFIER",
+  "files": [
+    {
+      "path": "config.json",
+      "role": "config",
+      "sha256": "EXACT_FILE_SHA256",
+      "size_bytes": 123
+    }
+  ]
+}
+```
+
+`files` must be the complete sorted inventory of the runnable artifact. Paths
+are relative POSIX paths. The manifest needs at least one file in each of these
+roles: `weights`, `config`, `processor`, `inference`, `environment`, `license`
+and `provenance`. Additional files use the closest role or `dependency`. Use the
+current value of `.baseline.model_sha256` from `competition-status.json` as the
+parent. The policy's `.accepted_model_licenses` lists the identifiers eligible
+for review. An eligible identifier is not a rights approval.
+
+Validate the manifest and compute its domain-separated revision from a checkout
+of this repository with its environment installed:
+
+```sh
+model_revision="$(python - <<'PY'
+from pathlib import Path
+
+from umi.open_competition import ModelBundle, digest
+
+bundle = ModelBundle.model_validate_json(Path("model-bundle.json").read_bytes())
+print(digest(bundle))
+PY
+)"
+printf '%s\n' "$model_revision"
+```
+
+Compare every listed size and SHA-256 digest to the immutable source files
+before retaining it for a future opening. Do not publish private datasets,
+credentials or confidential provenance in the manifest. The future review route
+will retrieve and rehash declared files under bounded limits. An exact tie
+between the highest qualifying new candidates promotes neither candidate, and
+the model share remains burned for that round.
 
 ## Assignment and publication rehearsal
 
 These commands operate on reviewed local artifacts. No live feed URL or
 successor policy is supplied by these examples, and no command submits weights.
+Assignment delivery is not yet public. Do not start a production miner with the
+placeholder feed values below. UMI will publish an exact signed feed
+configuration and tested miner command before evaluation, with operating lead
+time. A coordinator, feed or evaluator delay is not a miner failure.
 
 An endpoint proof check uses the owned finality sidecar and storage verifier:
 
@@ -296,7 +394,8 @@ The fixture CLI cannot select the verified-source marker or enable public bindin
 
 ### Owned-finality intake service
 
-The separate service entrypoint accepts a strict local configuration:
+The separate service entrypoint accepts a strict
+`umi-competition-service-config/2` local configuration:
 
 ```sh
 umi-competition --policy policy.json serve-intake --config intake.json
@@ -307,7 +406,306 @@ and [competition_chain.py](../../src/umi/competition_chain.py). Configuration mu
 bind the exact policy digest, Finney genesis, runtime metadata, finality
 checkpoint and both verifier binaries. Give intake and chain evidence separate,
 private state directories. There are no wallet fields or fixture-provider
-overrides in the configuration.
+overrides in the configuration. `public_deployment` carries the published code
+identity, round schedule, eligible tracks and readiness flags. The intake store
+durably binds only its immutable public launch identity: schedule and eligible
+tracks. A later code deployment may update its declared revision and source-tree
+digest without changing those launch semantics. `retained_state` binds the
+expected baseline promotion and the complete set of submission digests present
+at deployment. The database must already exist; the service refuses a new path,
+another baseline or a ledger missing any anchored submission. The required
+`submission_head_checkpoint_directory` is a pre-existing, private external
+journal disjoint from intake and finality state.
+
+<a id="owned-finality-intake-v2-cutover"></a>
+
+#### Version 1 store to writer-generation 2 cutover
+
+This is a quiesced database migration. First disable the public submission
+route and drain its in-flight request. Stop every old process that can open the
+intake store, including intake, round coordinator, evaluator exchange with
+`intake_directory`, successor publisher, and scheduled or manual store commands.
+Stopping only the HTTP intake process is insufficient. Run the following blocks
+in order in one dedicated shell. Record the stopped units and require `lsof` to
+find no open handle:
+
+```sh
+set -eu
+umask 077
+state=/ABSOLUTE/PRIVATE/INTAKE
+database="$state/competition.sqlite3"
+if sudo lsof +D "$state"; then
+  printf '%s\n' 'intake state is still open; stop every writer' >&2
+  exit 1
+fi
+```
+
+Do not continue while an old process has the database, WAL, or shared-memory
+file open. Keep all old units stopped for the whole cutover. They must never be
+started against a writer-generation 2 store.
+
+Set fresh paths outside the intake and finality state trees. The cutover
+directory is the retained audit and rollback copy. The checkpoint directory is
+the external submission-head journal named by the version 2 service config:
+
+```sh
+policy=/ABSOLUTE/PRIVATE/POLICY.json
+config=/ABSOLUTE/PRIVATE/INTAKE-V2.json
+cutover=/ABSOLUTE/PRIVATE/INTAKE-CUTOVER
+checkpoint=/ABSOLUTE/PRIVATE/SUBMISSION-HEAD-CHECKPOINT
+backup="$cutover/competition-v1.sqlite3"
+restore_state="$cutover/restore-test"
+restore_database="$restore_state/competition.sqlite3"
+restore_checkpoint="$cutover/restore-checkpoint"
+restore_config="$cutover/restore-config.json"
+
+test -f "$database"
+test ! -L "$database"
+test ! -e "$cutover"
+test ! -e "$checkpoint"
+install -d -m 0700 \
+  "$cutover" "$restore_state" "$restore_checkpoint" "$checkpoint"
+jq -e --arg state "$state" --arg checkpoint "$checkpoint" '
+  .schema == "umi-competition-service-config/2" and
+  .state_directory == $state and
+  .submission_head_checkpoint_directory == $checkpoint
+' "$config" >/dev/null
+```
+
+Use SQLite's backup API through `.backup`; copying only
+`competition.sqlite3` is unsafe in WAL mode. Restore that backup into a fresh
+database before trusting it:
+
+```sh
+sqlite3 -batch -noheader "$database" 'PRAGMA wal_checkpoint(FULL);' \
+  > "$cutover/wal-checkpoint.txt"
+test "$(awk -F'|' 'NR == 1 { print $1 }' "$cutover/wal-checkpoint.txt")" = 0
+test "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = ok
+sqlite3 "$database" ".backup '$backup'"
+chmod 0600 "$backup"
+
+sqlite3 "$restore_database" ".restore '$backup'"
+test "$(sqlite3 "$restore_database" 'PRAGMA integrity_check;')" = ok
+```
+
+Capture the current promotion head and the complete sorted submission set from
+both databases. The restored values must match the stopped source exactly:
+
+```sh
+sqlite3 -noheader "$database" \
+  'SELECT digest FROM promotions ORDER BY sequence DESC LIMIT 1;' \
+  > "$cutover/source-baseline.txt"
+sqlite3 -noheader "$restore_database" \
+  'SELECT digest FROM promotions ORDER BY sequence DESC LIMIT 1;' \
+  > "$cutover/restored-baseline.txt"
+sqlite3 -noheader "$database" \
+  'SELECT digest FROM submissions ORDER BY digest;' \
+  > "$cutover/source-submissions.txt"
+sqlite3 -noheader "$restore_database" \
+  'SELECT digest FROM submissions ORDER BY digest;' \
+  > "$cutover/restored-submissions.txt"
+
+cmp "$cutover/source-baseline.txt" "$cutover/restored-baseline.txt"
+cmp "$cutover/source-submissions.txt" "$cutover/restored-submissions.txt"
+test "$(wc -l < "$cutover/source-baseline.txt" | tr -d ' ')" = 1
+test -s "$cutover/source-submissions.txt"
+```
+
+Build the exact retained-state value from that inventory and compare it with
+the reviewed version 2 config. This check must pass before migration:
+
+```sh
+IFS= read -r baseline < "$cutover/source-baseline.txt"
+jq -Rn --arg baseline "$baseline" '
+  [inputs | select(length > 0)] as $submissions |
+  {
+    schema: "umi-competition-retained-intake-state/1",
+    baseline_promotion_sha256: $baseline,
+    required_submission_sha256s: $submissions
+  }
+' < "$cutover/source-submissions.txt" > "$cutover/retained-state.json"
+
+jq -e --slurpfile expected "$cutover/retained-state.json" \
+  '.retained_state == $expected[0]' "$config" >/dev/null
+```
+
+Derive a rehearsal config that changes only the database and checkpoint
+directories. The rehearsal must not initialize the live checkpoint:
+
+```sh
+jq -cS --arg state "$restore_state" --arg checkpoint "$restore_checkpoint" '
+  .state_directory = $state |
+  .submission_head_checkpoint_directory = $checkpoint
+' "$config" > "$restore_config"
+chmod 0600 "$restore_config"
+jq -e --arg state "$restore_state" --arg checkpoint "$restore_checkpoint" \
+  --slurpfile expected "$cutover/retained-state.json" \
+  --slurpfile live "$config" '
+    .schema == "umi-competition-service-config/2" and
+    .state_directory == $state and
+    .submission_head_checkpoint_directory == $checkpoint and
+    .retained_state == $expected[0] and
+    ((. | del(.state_directory, .submission_head_checkpoint_directory)) ==
+      ($live[0] | del(.state_directory, .submission_head_checkpoint_directory)))
+  ' "$restore_config" >/dev/null
+
+umi-competition-store-migrate \
+  --policy "$policy" --state "$restore_state" \
+  --service-config "$restore_config" \
+  --confirm-quiesced-backup > "$cutover/restore-migration.json"
+jq -e '
+  .status == "writer_generation_and_submission_checkpoint_migrated" and
+  .restart_services_without_migration == true and
+  .retained_submission_head.external_checkpoint_durable == true
+' "$cutover/restore-migration.json" >/dev/null
+jq -S '.retained_submission_head' "$cutover/restore-migration.json" \
+  > "$cutover/restored-submission-head.json"
+```
+
+Run the same one-shot command on the still-quiesced source with the reviewed
+live config. `--service-config` binds the public launch, exact retained state,
+and checkpoint path. An ordinary service start never initializes a missing
+checkpoint:
+
+```sh
+umi-competition-store-migrate \
+  --policy "$policy" --state "$state" --service-config "$config" \
+  --confirm-quiesced-backup > "$cutover/source-migration.json"
+
+jq -S '.retained_submission_head' "$cutover/source-migration.json" \
+  > "$cutover/retained-submission-head.json"
+jq -e '
+  .status == "writer_generation_and_submission_checkpoint_migrated" and
+  .restart_services_without_migration == true and
+  .retained_submission_head.external_checkpoint_durable == true
+' "$cutover/source-migration.json" >/dev/null
+cmp "$cutover/restored-submission-head.json" \
+  "$cutover/retained-submission-head.json"
+cmp "$restore_checkpoint/submission-head.json" \
+  "$checkpoint/submission-head.json"
+chmod 0600 "$cutover"/*.json "$cutover"/*.txt
+```
+
+Retain the backup, inventory, config, and migration output on storage separate
+from the live intake tree. Configure
+`submission_head_checkpoint_directory` as the separate `0700` directory created
+above. The migration writes canonical `submission-head.json` there only if the
+database still has exactly the configured retained submissions. The checkpoint
+commits both their sorted identities and the exact immutable admission records
+and receipts. Version 2 startup requires that file and fails on a missing,
+corrupt, or ahead checkpoint. Never delete that journal to make a rollback pass.
+The restore config and restore checkpoint are bounded rehearsal evidence. Never
+run a service against them.
+
+Validate the external checkpoint before starting any service:
+
+```sh
+jq -e \
+  --slurpfile retained "$cutover/retained-state.json" \
+  --slurpfile head "$cutover/retained-submission-head.json" '
+    .schema == "umi-competition-submission-head-checkpoint/1" and
+    .policy_sha256 == $head[0].policy_sha256 and
+    .submission_sha256s == $retained[0].required_submission_sha256s and
+    (.admission_record_sha256s | length) == $head[0].record_count and
+    all(.admission_record_sha256s[]; test("^[0-9a-f]{64}$")) and
+    .record_count == $head[0].record_count and
+    .submission_set_sha256 == $head[0].submission_set_sha256 and
+    .head_sha256 == $head[0].head_sha256 and
+    (.public_launch_sha256 | test("^[0-9a-f]{64}$"))
+  ' "$checkpoint/submission-head.json" >/dev/null
+```
+
+Start only the version 2 intake unit. Keep public submissions disabled and leave
+the coordinator, exchange, and publisher stopped until both public responses
+match the retained cutover state:
+
+```sh
+origin=https://REVIEWED_INTAKE_HOST
+curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/readiness" > "$cutover/readiness-v2.json"
+curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/status" > "$cutover/status-v2.json"
+
+IFS= read -r baseline < "$cutover/source-baseline.txt"
+submission_count="$(wc -l < "$cutover/source-submissions.txt" | tr -d ' ')"
+jq -e \
+  --slurpfile retained "$cutover/retained-state.json" \
+  --slurpfile head "$cutover/retained-submission-head.json" '
+    .schema == "umi-competition-readiness/2" and
+    .retained_state == $retained[0] and
+    .retained_submission_head == $head[0] and
+    .chain_submission_authorized == false
+  ' "$cutover/readiness-v2.json" >/dev/null
+jq -e --arg baseline "$baseline" --argjson count "$submission_count" \
+  --slurpfile head "$cutover/retained-submission-head.json" '
+    .schema == "umi-competition-status/2" and
+    .baseline.promotion_sha256 == $baseline and
+    .accepted_submission_count == $count and
+    .retained_submission_head == $head[0] and
+    .chain_submission_authorized == false
+  ' "$cutover/status-v2.json" >/dev/null
+```
+
+After those checks, configure the version 2 coordinator, every intake-enabled
+exchange, and the publisher with the exact same
+`submission_head_checkpoint_directory` as the intake service. Then start those
+units and re-enable submissions. Relay-only exchanges omit the complete intake
+binding triplet. Keep `submission-head.json`, its lock file, and the cutover
+evidence. Do not treat a successful process start as a cutover check.
+
+Any manual `umi-competition` store command against this migrated live database
+must also carry `--public-launch /ABSOLUTE/PUBLIC-LAUNCH.json` and
+`--submission-head-checkpoint-directory "$checkpoint"`. The public-launch file
+must be the canonical `umi-competition-public-launch/1` identity derived from
+the reviewed service deployment; omitting either argument is a startup error,
+not a way around the fence.
+
+Rollback to the backup is allowed only while submissions remain disabled and no
+version 2 writer has accepted new work. Once the head advances, restoring this
+backup would discard durable records and the external checkpoint will reject
+it. For a pre-admission rollback, stop every version 2 store user, confirm no
+open handle with `lsof +D "$state"`, and preserve the failed database files:
+
+```sh
+if sudo lsof +D "$state"; then
+  printf '%s\n' 'intake state is still open; stop every writer' >&2
+  exit 1
+fi
+failed="$cutover/failed-v2"
+test ! -e "$failed"
+install -d -m 0700 "$failed"
+cmp "$restore_checkpoint/submission-head.json" \
+  "$checkpoint/submission-head.json"
+mv "$database" "$failed/competition.sqlite3"
+if test -e "${database}-wal"; then
+  mv "${database}-wal" "$failed/competition.sqlite3-wal"
+fi
+if test -e "${database}-shm"; then
+  mv "${database}-shm" "$failed/competition.sqlite3-shm"
+fi
+
+sqlite3 "$database" ".restore '$backup'"
+chmod 0600 "$database"
+test "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = ok
+umi-competition-store-migrate \
+  --policy "$policy" --state "$state" --service-config "$config" \
+  --confirm-quiesced-backup > "$cutover/rollback-migration.json"
+jq -e '
+  .status == "writer_generation_and_submission_checkpoint_migrated" and
+  .restart_services_without_migration == true and
+  .retained_submission_head.external_checkpoint_durable == true
+' "$cutover/rollback-migration.json" >/dev/null
+jq -S '.retained_submission_head' "$cutover/rollback-migration.json" \
+  > "$cutover/rollback-submission-head.json"
+cmp "$cutover/retained-submission-head.json" \
+  "$cutover/rollback-submission-head.json"
+cmp "$restore_checkpoint/submission-head.json" \
+  "$checkpoint/submission-head.json"
+```
+
+Restart the same version 2 intake and repeat both `/2` response checks. Reuse
+the preserved external checkpoint; do not start a version 1 writer or skip the
+migration after restoring the version 1 backup.
 
 The service runs one loopback worker behind an operator-managed HTTPS proxy.
 It does not trust forwarded headers. New admissions require a current verified
@@ -315,13 +713,24 @@ head; restarting cannot make old persisted finality fresh. Each capture checks
 the subnet size and every forward and inverse UID/hotkey mapping against the
 same state root. Runtime metadata and proof evidence are retained locally by
 digest. The bounded cache fails closed when full; it never silently evicts
-evidence. Backup/export and retention operations still need deployment design.
+evidence. Ongoing backup/export and retention beyond this cutover still need a
+deployment design.
 
-`GET /v1/competition/readiness` reports bounded provenance without private paths
-or RPC addresses. Its evidence class is `verifier_attested_finality`, not a
-portable offline finality proof. It reports `evaluation_ready: false` and
-`rewards_active: false`. This route does not publish the full retained proof
-archive. A working route is not a production launch gate by itself.
+`GET /v1/competition/readiness` returns
+`schema: "umi-competition-readiness/2"` and reports bounded provenance without
+private paths or RPC addresses. Its evidence class is
+`verifier_attested_finality`, not a portable offline finality proof. It reports
+`evaluation_ready: false` and `rewards_active: false`. This route does not
+publish the full retained proof archive. A working route is not a production
+launch gate by itself.
+
+`GET /v1/competition/status` returns
+`schema: "umi-competition-status/2"`. It includes the deployment, public
+schedule, eligible-track gates, accepted-submission count and an admission phase
+of `not_open`, `open`, `closed`, `capacity_exhausted` or `unverified`. Public GET
+routes read a bounded verified cache and never initiate finality collection. A
+new POST starts or joins one fresh collection, so status polling cannot take its
+proof capacity.
 
 HTTP routes:
 
@@ -670,15 +1079,18 @@ and rehearse the release's case/quorum/output bounds accordingly.
 | Concurrent submissions / reads / readiness checks | 8 / 16 / 2 |
 | Concurrent finalized registration collections | 1 |
 | Maximum page offset / page size | 65,536 / 100 |
-| HTTP concurrency / socket backlog | 64 / 128 |
+| Loopback socket backlog | 128 |
 
 Admission accounting and insertion share one SQLite transaction. Quota failures
 do not advance the sequence or observed-block state. Historical authenticated
 retries return their original receipts even if quotas are lowered below current
 usage. Capacity exhaustion returns a bounded 503 response. Operators must
 provision capacity and a retention plan; restarting does not erase the ledger.
-Connection limits are process-local. The reviewed HTTPS proxy must also bound
-headers, slow connections and per-source traffic, including read routes.
+The loopback listener has no undifferentiated connection ceiling that public GET
+traffic could consume ahead of a POST. Route-specific application semaphores
+bound submissions, reads and readiness work independently. The listener must
+remain reachable only through the reviewed HTTPS tunnel or proxy, which bounds
+headers, slow connections and per-source traffic; do not expose it directly.
 
 ## Release checks
 
@@ -689,5 +1101,6 @@ make -C whitepaper
 ```
 
 Before production activation, complete Section 10 of the successor whitepaper
-and publish the exact evidence. Continue the existing bootstrap only through
-its signed hard sunset. No local CLI result changes that schedule.
+and publish the exact evidence. Continue the current bridge until an explicit
+signed replacement or revocation. Historical finite policies keep their own
+cutoffs. No local CLI result changes either schedule.

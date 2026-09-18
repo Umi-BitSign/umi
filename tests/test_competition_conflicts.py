@@ -379,6 +379,17 @@ def test_conflict_holds_descendant_baseline_without_rewriting_history(conflict_s
     round_ = round_for(s.policy, suite, (signed, s.endpoint), first["model_sha256"]).model_copy(
         update={
             "sequence": 2,
+            "public_schedule": s.round.public_schedule.model_copy(
+                update={
+                    "roster_close_earliest_block": 160,
+                    "roster_close_latest_block": 165,
+                    "work_signing_close_block": 170,
+                    "evaluation_close_block": 180,
+                    "protected_reference_reveal_block": 190,
+                    "evidence_cutoff_block": 200,
+                    "round_valid_through_block": 250,
+                }
+            ),
             "submission_close_block": 160,
             "evaluation_close_block": 180,
             "reveal_block": 190,

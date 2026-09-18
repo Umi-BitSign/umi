@@ -16,6 +16,7 @@ from umi.competition_delivery import (
     SuccessorDeliveryLimits,
 )
 from umi.competition_host_activation import SuccessorWorkerExecutionLimits
+from umi.competition_launch import PublicLaunchIdentity
 from umi.competition_successor_feed import (
     SuccessorFeedConfig,
     SuccessorPublicationFeed,
@@ -36,6 +37,7 @@ from umi.competition_worker_cli import (
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor_adapters import PinnedHTTPSClient
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_delivery import _BUNDLE
 from .test_competition_delivery import release_identity as release_identity
@@ -263,11 +265,22 @@ async def test_signing_command_delivers_after_build_and_closes_provider(
     wallet = publisher_cli.AuthorityWallet(
         wallet_name="authority", hotkey_name="release", wallet_path=str(tmp_path / "wallets")
     )
+    public_launch = PublicLaunchIdentity(
+        schema="umi-competition-public-launch/1",
+        round_schedule=package_case.scenario.round.public_schedule,
+        eligible_tracks=package_case.scenario.round.eligible_tracks,
+    )
+    checkpoint = tmp_path / "intake-checkpoint"
+    package_case.scenario.store = bind_submission_checkpoint(
+        package_case.scenario.store, public_launch, checkpoint
+    )
     config = publisher_cli.SuccessorPublisherConfig(
-        schema="umi-successor-publisher-config/1",
+        schema="umi-successor-publisher-config/2",
         plan=c.config.plan,
+        public_launch=public_launch,
         chain=c.config.execution.weights.chain,
         intake_directory=str(package_case.scenario.store.directory),
+        submission_head_checkpoint_directory=str(checkpoint),
         publication_directory=str(c.signer.builder.journal.root),
         replay_directory=str(tmp_path / "command-replay"),
         replay_capacity=c.config.execution.replay_capacity,

@@ -52,6 +52,8 @@ def published(s):
 
 def mutate(s, sql, args=()):
     with sqlite3.connect(s.store.path) as db:
+        db.create_function("umi_writer_generation", 0, lambda: 2)
+        db.create_function("umi_submission_checkpoint_binding", 0, lambda: None)
         db.execute(sql, args)
 
 

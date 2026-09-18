@@ -15,9 +15,12 @@ import pytest
 from umi import competition_rounds as rounds
 from umi.competition_evaluator import _publish, _read
 from umi.competition_execution import execution_boundary
+from umi.competition_launch import PublicIntakeDeployment
 from umi.open_competition import digest, sign_object
+from umi.policy import umi_source_tree_sha256
 from umi.protocol import canonical_json_bytes
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_evaluator import Provider
 from .test_competition_round_preparation import setup as preparation_fixture
@@ -25,6 +28,20 @@ from .test_open_competition import policy as policy
 from .test_open_competition import snapshot, wallet
 
 preparation = preparation_fixture
+
+
+def deployment_for(schedule, eligible_tracks):
+    return PublicIntakeDeployment(
+        schema="umi-competition-intake-deployment/2",
+        repository="https://github.com/Umi-BitSign/umi",
+        umi_git_revision="12" * 20,
+        umi_source_tree_sha256=umi_source_tree_sha256(),
+        deployed_at_utc="2026-09-17T12:00:00Z",
+        round_schedule=schedule,
+        eligible_tracks=eligible_tracks,
+        assignment_delivery_ready=False,
+        model_intake_ready="model" in eligible_tracks,
+    )
 
 
 class OwnedProvider(Provider):
@@ -53,9 +70,15 @@ class OwnedProvider(Provider):
 @pytest.fixture
 def setup(preparation, chain_config, tmp_path):
     policy = preparation.policy
+    public_launch = deployment_for(
+        preparation.options["public_schedule"], preparation.options["eligible_tracks"]
+    ).launch_identity()
+    checkpoint = tmp_path / "intake-checkpoint"
+    preparation.store = bind_submission_checkpoint(preparation.store, public_launch, checkpoint)
     config = rounds.RoundCoordinatorConfig(
-        schema="umi-round-coordinator-config/1",
+        schema="umi-round-coordinator-config/2",
         policy_sha256=digest(policy),
+        public_launch=public_launch,
         chain=chain_config.model_copy(
             update={
                 "policy_sha256": digest(policy),
@@ -65,13 +88,17 @@ def setup(preparation, chain_config, tmp_path):
         ),
         state_directory=str(tmp_path / "round-state"),
         intake_directory=str(preparation.store.directory),
+        submission_head_checkpoint_directory=str(checkpoint),
         plan_directory=str(tmp_path / "round-plans"),
         certificate_directory=str(tmp_path / "round-certificates"),
         replay_limits=preparation.options["limits"],
     )
     plan = rounds.RoundPlan(
-        schema="umi-round-plan/1",
+        schema="umi-round-plan/2",
         suite=preparation.options["suite"],
+        public_schedule=preparation.options["public_schedule"],
+        eligible_tracks=preparation.options["eligible_tracks"],
+        intake_opened_block=preparation.options["intake_opened_block"],
         not_before_block=120,
         admission_close_by_block=125,
         signing_close_block=130,
@@ -275,7 +302,14 @@ async def test_preparation_crash_recovers_original_cutoff_after_admission_close(
 @pytest.mark.asyncio
 async def test_changed_plan_is_held_across_restart(setup):
     await prepare(setup)
-    changed = setup.plan.model_copy(update={"signing_close_block": 129})
+    changed = setup.plan.model_copy(
+        update={
+            "signing_close_block": 129,
+            "public_schedule": setup.plan.public_schedule.model_copy(
+                update={"work_signing_close_block": 129}
+            ),
+        }
+    )
     setup.plan_path.write_bytes(canonical_json_bytes(changed))
     assert (await setup.coordinator.cycle())["held"] == 1
     setup.plan_path.write_bytes(canonical_json_bytes(setup.plan))
@@ -286,17 +320,16 @@ async def test_changed_plan_is_held_across_restart(setup):
 
 
 @pytest.mark.asyncio
-async def test_independent_signer_refuses_different_proposal_for_reserved_sequence(setup):
+async def test_signer_rejects_schedule_mismatch_without_poisoning_reserved_sequence(setup):
     proposal = await prepare(setup)
-    await setup.clients[0].endorse(proposal)
+    original = await setup.clients[0].endorse(proposal)
     changed = proposal.model_copy(update={"signing_close_block": 129})
-    with pytest.raises(ValueError, match="conflict retained"):
+    with pytest.raises(ValueError, match="bindings or signing window"):
         await setup.clients[0].endorse(changed)
     recovered = rounds.RoundSigningClient(
         setup.workers[0], "https://rounds.example", transport=setup.transport
     )
-    with pytest.raises(ValueError, match="conflict held"):
-        await recovered.endorse(proposal)
+    assert await recovered.endorse(proposal) == original
 
 
 @pytest.mark.asyncio
@@ -421,6 +454,17 @@ def plan_at(setup, marker, block):
                     )
                 }
             ),
+            "public_schedule": setup.plan.public_schedule.model_copy(
+                update={
+                    "roster_close_earliest_block": block,
+                    "roster_close_latest_block": block + 5,
+                    "work_signing_close_block": block + 10,
+                    "evaluation_close_block": block + 20,
+                    "protected_reference_reveal_block": block + 30,
+                    "evidence_cutoff_block": block + 40,
+                    "round_valid_through_block": block + 70,
+                }
+            ),
             "not_before_block": block,
             "admission_close_by_block": block + 5,
             "signing_close_block": block + 10,
@@ -433,62 +477,58 @@ def plan_at(setup, marker, block):
 
 
 @pytest.mark.asyncio
-async def test_new_round_is_discovered_without_paging_expired_archive(setup):
+async def test_unpublished_round_schedule_is_held(setup):
     await prepare(setup)
-    # More than four pages of retained history, with a restarted evaluator.
-    for n in range(1, 18):
-        block = 120 + n * 2
-        plan = plan_at(setup, n, block)
-        _publish(Path(setup.config.plan_directory) / (digest(plan.suite) + ".json"), plan)
-        setup.provider.block = block
-        assert (await setup.coordinator.cycle())["held"] == 0
-    setup.provider.block = 170
-    plan = plan_at(setup, 30, 170)
+    plan = plan_at(setup, 1, 122)
     _publish(Path(setup.config.plan_directory) / (digest(plan.suite) + ".json"), plan)
-    assert (await setup.coordinator.cycle())["held"] == 0
-    reply = await setup.clients[0].query()
-    assert [p.cutoff.round.sequence for p in reply.proposals] == [19]
-    for worker, client in zip(setup.workers, setup.clients, strict=True):
-        worker.provider.block = 170
-        await client.sync_once()
-        assert worker.provider.history == [170]
-    assert len(list(Path(setup.config.certificate_directory).glob("*.json"))) == 1
-    assert len(setup.coordinator.journal.keys("prepared")) == 19
+    setup.provider.block = 122
+    assert (await setup.coordinator.cycle())["held"] == 1
+    assert len(setup.coordinator.journal.keys("prepared")) == 1
 
 
 @pytest.mark.asyncio
-async def test_known_future_plan_is_prioritized_when_its_window_opens(setup):
+async def test_future_plan_cannot_replace_public_launch_when_its_window_opens(setup):
     await prepare(setup)
-    for n in range(1, 12):
-        expired = plan_at(setup, n, 100)
-        key = digest(expired.suite)
-        _publish(Path(setup.config.plan_directory) / (key + ".json"), expired)
-        setup.coordinator.journal.put("plan", key, expired)
     future = plan_at(setup, 90, 180)
     key = digest(future.suite)
     _publish(Path(setup.config.plan_directory) / (key + ".json"), future)
-    assert (await setup.coordinator.cycle())["waiting"] == 1
+    assert (await setup.coordinator.cycle())["held"] == 1
     setup.provider.block = 180
     recovered = rounds.RoundCoordinator(setup.config, setup.policy, setup.provider)
-    assert (await recovered.cycle())["held"] == 0
-    assert recovered.proposals(block=180)[0].cutoff.round.suite_sha256 == key
+    assert (await recovered.cycle())["held"] == 1
+    assert all(p.cutoff.round.suite_sha256 != key for p in recovered.proposals(block=180))
 
 
 @pytest.mark.asyncio
-async def test_expired_snapshot_is_not_advertised_even_if_signing_window_remains(setup):
-    plan = setup.plan.model_copy(update={"signing_close_block": 135})
+async def test_signing_window_cannot_be_extended_beyond_public_launch(setup):
+    plan = setup.plan.model_copy(
+        update={
+            "signing_close_block": 135,
+            "public_schedule": setup.plan.public_schedule.model_copy(
+                update={"work_signing_close_block": 135}
+            ),
+        }
+    )
     setup.plan_path.write_bytes(canonical_json_bytes(plan))
-    await prepare(setup)
-    setup.provider.block = 131  # Policy maximum snapshot age is ten blocks.
-    assert not (await setup.clients[0].query()).proposals
-    assert setup.coordinator.proposals()  # Historical records remain inspectable.
+    result = await setup.coordinator.cycle()
+    assert result["prepared"] == 0 and result["held"] == 1
+    assert not setup.coordinator.proposals()
 
 
 @pytest.mark.asyncio
 async def test_held_plan_is_not_advertised_to_evaluators(setup):
     await prepare(setup)
     setup.plan_path.write_bytes(
-        canonical_json_bytes(setup.plan.model_copy(update={"signing_close_block": 129}))
+        canonical_json_bytes(
+            setup.plan.model_copy(
+                update={
+                    "signing_close_block": 129,
+                    "public_schedule": setup.plan.public_schedule.model_copy(
+                        update={"work_signing_close_block": 129}
+                    ),
+                }
+            )
+        )
     )
     assert (await setup.coordinator.cycle())["held"] == 1
     assert not (await setup.clients[0].query()).proposals
@@ -748,8 +788,31 @@ def test_cli_routes_private_coordinator_config_without_constructing_wallet(
 
 @pytest.mark.asyncio
 async def test_recovery_cannot_retime_a_store_preparation_under_a_new_plan(setup, preparation):
-    preparation.store.prepare_round(**preparation.options)
-    changed = setup.plan.model_copy(update={"evaluation_close_block": 141})
+    setup.coordinator.store.prepare_round(**preparation.options)
+    changed = setup.plan.model_copy(
+        update={
+            "evaluation_close_block": 141,
+            "public_schedule": setup.plan.public_schedule.model_copy(
+                update={"evaluation_close_block": 141}
+            ),
+        }
+    )
+    setup.plan_path.write_bytes(canonical_json_bytes(changed))
+    assert (await setup.coordinator.cycle())["held"] == 1
+    assert not setup.coordinator.proposals()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cannot_change_a_store_preparation_intake_opening(setup, preparation):
+    setup.coordinator.store.prepare_round(**preparation.options)
+    changed = setup.plan.model_copy(
+        update={
+            "intake_opened_block": 101,
+            "public_schedule": setup.plan.public_schedule.model_copy(
+                update={"intake_opened_block": 101}
+            ),
+        }
+    )
     setup.plan_path.write_bytes(canonical_json_bytes(changed))
     assert (await setup.coordinator.cycle())["held"] == 1
     assert not setup.coordinator.proposals()

@@ -426,7 +426,14 @@ def test_round_sequence_cannot_reset_lifetime_with_changed_round(schedule):
     _publish(schedule)
     body = schedule.authorization.publication.publication
     round_ = body.round.model_copy(
-        update={"valid_through_block": body.round.valid_through_block + 1}
+        update={
+            "public_schedule": body.round.public_schedule.model_copy(
+                update={
+                    "round_valid_through_block": body.round.valid_through_block + 1,
+                }
+            ),
+            "valid_through_block": body.round.valid_through_block + 1,
+        }
     )
     assignments = []
     for assignment in body.assignments:

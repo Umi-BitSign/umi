@@ -11,6 +11,7 @@ import pytest
 from umi import competition_successor_publication as publication_module
 from umi import competition_successor_publisher_cli as cli
 from umi.competition_evaluator import _publish
+from umi.competition_launch import PublicLaunchIdentity
 from umi.competition_successor_follow import (
     AutomaticSuccessorPublisher,
     CompletedRoundSource,
@@ -19,6 +20,7 @@ from umi.competition_successor_follow import (
 from umi.competition_successor_publisher import CurrentSuccessorRoundPublisher
 from umi.protocol import canonical_json_bytes
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_successor_feed import chain_config as chain_config
 from .test_competition_successor_feed import feed_case as feed_case
 from .test_competition_successor_feed import next_package as next_package
@@ -272,7 +274,9 @@ def test_source_scan_is_bounded(automatic, package_case):
 
 
 @pytest.mark.asyncio
-async def test_cli_follow_cancellation_closes_owned_provider(automatic, policy, monkeypatch):
+async def test_cli_follow_cancellation_closes_owned_provider(
+    automatic, policy, tmp_path, monkeypatch
+):
     c = automatic
     events, reported = [], asyncio.Event()
     wallet = cli.AuthorityWallet(
@@ -280,11 +284,20 @@ async def test_cli_follow_cancellation_closes_owned_provider(automatic, policy, 
         hotkey_name="authority",
         wallet_path=str(Path(c.config.certificate_directory).parent / "wallets"),
     )
+    public_launch = PublicLaunchIdentity(
+        schema="umi-competition-public-launch/1",
+        round_schedule=c.guarded.package.scenario.round.public_schedule,
+        eligible_tracks=c.guarded.package.scenario.round.eligible_tracks,
+    )
+    checkpoint = tmp_path / "intake-checkpoint"
+    c.guarded.store = bind_submission_checkpoint(c.guarded.store, public_launch, checkpoint)
     config = cli.SuccessorPublisherConfig(
-        schema="umi-successor-publisher-config/1",
+        schema="umi-successor-publisher-config/2",
         plan=c.publisher.builder.plan,
+        public_launch=public_launch,
         chain=c.provider.config,
         intake_directory=str(c.guarded.store.directory),
+        submission_head_checkpoint_directory=str(checkpoint),
         publication_directory=str(c.publisher.builder.journal.root),
         replay_directory=str(c.guarded.replay.state_root),
         replay_capacity=c.guarded.replay.capacity,

@@ -3,6 +3,7 @@
 import pytest
 
 from umi.competition_artifacts import preserve_bundle
+from umi.competition_launch import PublicRoundSchedule
 from umi.competition_publication import PublicationReplayLimits, build_cutoff_publication
 from umi.competition_store import CompetitionStore
 from umi.open_competition import CompetitionPolicy, digest
@@ -43,6 +44,19 @@ def test_weekly_roster_requires_validity_through_evaluation(policy, tmp_path, tr
     options = dict(
         snapshot=snapshot(CLOSE),
         suite=suite_for(policy),
+        public_schedule=PublicRoundSchedule(
+            schema="umi-public-round-schedule/1",
+            intake_opened_block=OPEN,
+            roster_close_earliest_block=CLOSE,
+            roster_close_latest_block=CLOSE,
+            work_signing_close_block=CLOSE + 50,
+            evaluation_close_block=EVALUATION_CLOSE,
+            protected_reference_reveal_block=EVALUATION_CLOSE + 10,
+            evidence_cutoff_block=EVALUATION_CLOSE + 20,
+            round_valid_through_block=EVALUATION_CLOSE + 50,
+        ),
+        eligible_tracks=(track,),
+        intake_opened_block=OPEN,
         evaluation_close_block=EVALUATION_CLOSE,
         reveal_block=EVALUATION_CLOSE + 10,
         evidence_cutoff_block=EVALUATION_CLOSE + 20,

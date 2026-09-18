@@ -25,7 +25,7 @@ The current bridge services are unaffected.
 ### Configuration
 
 Add `settlement_directory` to the private
-[`umi-round-coordinator-config/1` configuration](rounds.md#open-competition-round-coordinator).
+[`umi-round-coordinator-config/2` configuration](rounds.md#open-competition-round-coordinator).
 Use an absolute path owned by the service user, separate from every other
 coordinator directory. Configure this when establishing the coordinator's state;
 an existing journal is bound to its original configuration. Do not delete a
@@ -236,7 +236,7 @@ This path does not approve model rights, import a promotion head, activate the
 
 Enable `settlement_directory` as described in the
 [preparation guide](settlement.md#open-competition-settlement-preparation), then add a
-`settlement_delivery` object to `umi-round-coordinator-config/1`:
+`settlement_delivery` object to `umi-round-coordinator-config/2`:
 
 - `state_directory`: private durable proposal, vote and certificate journal.
 - `certificate_directory`: private certificate and package-reference output.
@@ -341,18 +341,46 @@ announcement or a replacement for the signed initial supervisor upgrade.
 
 ### Inputs
 
-Use a canonical, private `umi-successor-publisher-config/1` JSON file containing:
+Use a canonical, private `umi-successor-publisher-config/2` JSON file containing:
 
 - `plan`: the fixed policy digest, supervisor trust configuration, operator
   consent, release identity, verifier pins, weight requirements and validity
   limits from `umi-successor-round-publication-plan/1`, the renewal-enabled `/2`,
   or the bounded settlement-reuse `/3` described below.
+- `public_launch`: the exact `umi-competition-public-launch/1` identity bound to
+  the retained intake store. For the first public round, these config fields are:
+
+  ```json
+  {
+    "schema": "umi-successor-publisher-config/2",
+    "submission_head_checkpoint_directory": "/ABSOLUTE/PRIVATE/SUBMISSION-HEAD-CHECKPOINT",
+    "public_launch": {
+      "schema": "umi-competition-public-launch/1",
+      "round_schedule": {
+        "schema": "umi-public-round-schedule/1",
+        "intake_opened_block": 9085463,
+        "roster_close_earliest_block": 9135843,
+        "roster_close_latest_block": 9135903,
+        "work_signing_close_block": 9135963,
+        "evaluation_close_block": 9156243,
+        "protected_reference_reveal_block": 9156263,
+        "evidence_cutoff_block": 9156383,
+        "round_valid_through_block": 9156983
+      },
+      "eligible_tracks": ["endpoint"]
+    }
+  }
+  ```
+
 - `chain`: the process-owned finality/proof configuration. Its policy, chain
   family and selected verifier hashes must match the plan.
 - `intake_directory`: the existing retained competition store. Missing intake
   history is an error; the command cannot create a replacement empty source.
+- `submission_head_checkpoint_directory`: the exact external checkpoint used by
+  intake, the coordinator, and any intake-enabled exchange. It must remain
+  separate from every component state tree.
 - `publication_directory` and `replay_directory`: separate private state roots.
-  They must not overlap each other, intake or finality state.
+  They must not overlap each other, intake, checkpoint, or finality state.
 - `replay_capacity`, `maximum_rounds` and `maximum_journal_bytes`: explicit local
   storage limits. Existing records are retained when these limits are reached.
 - `authorization_wallet` and `directive_wallets`: explicit release-authority
@@ -362,6 +390,9 @@ Use a canonical, private `umi-successor-publisher-config/1` JSON file containing
 Supply the reviewed policy and the coordinator's canonical
 `umi-prepared-competition-replay-package/1` descriptor separately. All three
 input files must be owned private regular files in private directories.
+Complete the [writer-generation cutover](../reference/commands.md#owned-finality-intake-v2-cutover)
+before this publisher or any other version 2 process opens a legacy intake
+database.
 
 ```sh
 python -m umi.competition_successor_publisher_cli \

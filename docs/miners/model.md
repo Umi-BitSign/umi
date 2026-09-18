@@ -19,12 +19,20 @@ translation requests under the corresponding release and policy.
 
 ### Successor assignment discovery rehearsal
 
-The weight-disabled miner can discover new quorum-signed assignments while
-running. Supply `--competition-policy`, `--competition-feed https://REVIEWED_HOST`
+First-round endpoint intake is live, but assignment delivery is not public yet.
+Do not use the placeholder values in this section for production. UMI will
+publish the exact signed feed configuration and a tested launch command before
+evaluation begins, with operating lead time. A coordinator, feed or evaluator
+infrastructure delay cannot be scored as miner failure.
+
+In a reviewed rehearsal, the weight-disabled miner can discover new
+quorum-signed assignments while running. Supply `--competition-policy`,
+`--competition-feed https://REVIEWED_HOST`
 and `--serving-origin` alongside the normal transport policy, finality, model,
 wallet and state options. `--competition-feed` replaces
 `--competition-authorization`; do not use both. The feed URL and policy are
-reviewed operator inputs. There is no production enrollment URL in these examples.
+reviewed operator inputs. There is no production assignment URL in these
+examples.
 
 The process starts with no authorized assignments. It polls using its own hotkey,
 checks exact signed publications against the configured model and origin, then
@@ -38,7 +46,7 @@ close. Existing durable nonce, response and resource ledgers still apply across
 rounds and restarts. A feed outage leaves already verified unexpired assignments
 usable; after restart, assignments must be rediscovered before accepting work.
 
-This is still a no-weight rehearsal profile. Local discovery does not prove
+This is a no-weight rehearsal profile. Local discovery does not prove
 independently witnessed publication timing or the chain-announced endpoint origin.
 The production scheduler must allow time for discovery before dispatch and must
 not attribute coordinator publication delays to miner failure. Protected-data
@@ -355,9 +363,10 @@ The open-competition endpoint path accepts either of these HTTPS origins:
 - A DNS hostname, such as `https://miner.example.org`.
 
 These are format examples, not UMI endpoints. Use your own origin and a valid
-certificate for its IP or hostname. This support does not activate open
-competition or change the live registration bridge's literal-IP discovery and
-signed grouping rules.
+certificate for its IP or hostname. This support does not activate competition
+rewards or change the live registration bridge's literal-IP discovery and signed
+grouping rules. Public endpoint intake can accept a signed hostname before
+assignment delivery or competition rewards are active.
 
 <a id="miner-endpoint-hostnames--registration-and-verification"></a>
 

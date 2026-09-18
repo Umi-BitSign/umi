@@ -34,12 +34,18 @@ the bridge sunset.
 
 Prepare the existing intake store with the reviewed competition policy,
 preserved incumbent and accepted submissions. Use a private configuration with
-schema `umi-round-coordinator-config/1`:
+schema `umi-round-coordinator-config/2`:
 
 - `policy_sha256` and `chain`: the same reviewed policy digest and owned-finality
   configuration. Proof collection must finish within 15 seconds.
+- `public_launch`: the exact `umi-competition-public-launch/1` schedule and sorted
+  eligible tracks advertised by intake. The intake store binds this identity on
+  first use and rejects later omission or replacement.
 - `state_directory`: durable coordinator journal, nonce database and process lock.
 - `intake_directory`: the existing competition store.
+- `submission_head_checkpoint_directory`: the exact external checkpoint directory
+  used by the intake service and the writer-generation cutover. The coordinator
+  will not open the retained intake database without that matching fence.
 - `plan_directory`: private, canonical `RoundPlan` JSON files, named
   `<suite-digest>.json`.
 - `certificate_directory`: private output files named `<round-digest>.cutoff.json`.
@@ -57,18 +63,22 @@ schema `umi-round-coordinator-config/1`:
   [work-signing guide](rounds.md#open-competition-work-signing) and pass its transport
   policy through `--legacy-policy` when enabled.
 
-All directories, including the finality provider's state, must be separate,
-absolute and owned by the service user. Directories use mode `0700`; input files
-use `0600`. Publish complete files by atomic rename. Symlinks, hardlinks and
-group/world-readable inputs are rejected. Do not mount a wallet into this service.
+All directories, including the finality provider's state and the external
+checkpoint, must be separate, absolute and owned by the service user. The
+checkpoint must be shared with every process that opens this intake database,
+but must not overlap any component state tree. Directories use mode `0700`;
+input files use `0600`. Publish complete files by atomic rename. Symlinks,
+hardlinks and group/world-readable inputs are rejected. Do not mount a wallet
+into this service.
 
-Each plan has schema `umi-round-plan/1`, the committed private `suite` including
-its references, and explicit block windows:
+Each plan has schema `umi-round-plan/2`, the committed private `suite` including
+its references, the complete `public_schedule`, the sorted `eligible_tracks`,
+and duplicated scalar windows that must equal that schedule exactly:
 
 ```text
-not_before_block <= admission_close_by_block
-                 < signing_close_block < evaluation_close_block
-                 < reveal_block <= evidence_cutoff_block <= valid_through_block
+intake_opened_block < not_before_block <= admission_close_by_block
+                    < signing_close_block < evaluation_close_block
+                    < reveal_block < evidence_cutoff_block < valid_through_block
 ```
 
 Supply reviewed windows long enough for proof collection, independent signatures,
@@ -76,13 +86,15 @@ publication and execution. The policy's snapshot-age limit also bounds cutoff
 signing. No default block schedule is a production authorization. A delayed plan
 expires; the service never rewrites its deadlines or turns delay into miner fault.
 Retained preparation is recovered with its original roster and windows after a
-crash. Replacing a used plan creates a durable conflict hold.
+crash. One public schedule can create only one round. Replacing or reusing it
+creates a durable conflict hold.
 
 <a id="open-competition-round-coordinator--seven-day-contribution-intake"></a>
 
-#### Seven-day contribution intake
+#### First-round endpoint intake
 
-The first contribution round targets seven days of intake. Its intake opening
+The first endpoint round targets seven days of intake. Model-artifact intake is
+not open for this round. Its intake opening
 and its roster-closing window are different times. `not_before_block` is the
 earliest block at which the coordinator may **close the roster**, not the time
 at which miners may start submitting. Once that block arrives, the coordinator
@@ -103,6 +115,15 @@ evidence cutoff and settlement. A larger lifetime cap does not extend existing
 signed submissions. A miner with a shorter submission needs to sign and admit
 a higher-sequence replacement before the roster closes. Publish these
 requirements before intake; do not silently extend a signature's validity.
+
+For the live first round, endpoint intake was observed at block `9,085,463`.
+Block `9,135,843` is the guaranteed participant submission and replacement
+deadline for admissions on or after that opening block. The coordinator may
+close the roster at any subsequent poll through
+the final operator bound, block `9,135,903`. An acceptance after the guaranteed
+deadline is not guaranteed first-round inclusion. Evaluation closes at block
+`9,156,243`. A submission also requires its hotkey to remain registered on SN78
+in the finalized roster-close snapshot.
 
 At a planning assumption of 12 seconds per block, seven days is 50,400 blocks.
 The staged 7,200-block rehearsal lifetime cannot cover that intake plus its
@@ -292,7 +313,7 @@ contributor attribution.
 
 ### Coordinator configuration
 
-Add `work` to the private `umi-round-coordinator-config/1` configuration:
+Add `work` to the private `umi-round-coordinator-config/2` configuration:
 
 | Field | Purpose |
 | --- | --- |

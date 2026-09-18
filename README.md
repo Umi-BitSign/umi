@@ -20,10 +20,31 @@ coldkey/IP/funding groups. It does not score translations. The public-endpoint
 pilot is closed. The ongoing bridge policy has no scheduled calendar sunset;
 historical finite policies retain their original expiry.
 
-Open-competition rewards have not been activated. Code, tests, a running miner
-and staged release artifacts are not a finalized competition row. The
-[launch checklist](docs/competition/launch.md) defines the remaining activation
-evidence. Check current chain state before making payout claims.
+Public first-round competition intake is live for endpoint submissions only. It
+has been publicly reachable since block `9,085,463`. To guarantee consideration
+for round one, a submission or replacement must be accepted on or after that
+opening block and by block
+`9,135,843`; the coordinator may close the roster at any poll through its final
+close bound, block `9,135,903`. The submitted hotkey must still be registered on
+SN78 in the finalized roster-close snapshot, and the submission must remain
+valid through evaluation.
+Open-competition rewards have not replaced the bridge. An
+`accepted_no_weight` receipt records an admitted submission; it does not prove
+evaluation, settlement or payment. Assignment delivery and model-artifact
+intake are not yet open. See the
+[live competition status](https://api.umi.vision/v1/competition/status) and the
+[launch configuration](docs/competition/launch.md) for the exact policy and
+cutoffs. The status also publishes an operator-declared repository revision and
+the UMI source-tree digest. Intake startup recomputes and enforces the source-tree
+digest. Release verification must separately confirm that the declared revision
+is the commit from which that exact tree was deployed.
+
+The `main` branch is reviewed source, not an activation signal. Launch-facing
+documentation on `main` must describe deployed behavior; incomplete features
+must be gated and labeled. Live behavior is defined by the exact signed policy,
+release and finalized chain row reported through the public status and release
+channels. Code, tests, a running process and staged artifacts do not activate
+rewards.
 
 ## Development
 

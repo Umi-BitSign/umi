@@ -4,7 +4,7 @@ Canonical public whitepaper and successor mechanism specification
 
 Protocol version: 0.2
 
-Status: Successor specification and implementation work; open competition rewards inactive; temporary registration-bridge weights governed by a separate signed policy and fixed sunset
+Status: Public first-round endpoint intake; open competition rewards inactive; temporary registration-bridge weights governed by a separate signed policy
 
 This edition replaces the proposed endpoint-only launch design in
 [version 0.1](LEGACY_V0_1.md). It does not activate a new reward mechanism,
@@ -95,10 +95,11 @@ A validator's supervisor is the host service that checks signed release
 directives and manages its worker. The worker image is the versioned container
 containing the validator task code.
 
-Anyone with a registered SN78 hotkey can submit through the same public
-interface. A prior pilot, invitation, GitHub issue or private upload key is
-not an admission requirement. Registration proves control of an identity;
-it does not establish translation quality or a right to rewards.
+Anyone with a registered SN78 hotkey can use the published endpoint-submission
+interface. A prior pilot, invitation, GitHub issue or private upload key is not
+an admission requirement. Registration proves control of an identity; it does
+not establish translation quality or a right to rewards. Model-artifact intake
+opens separately after its exact runtime and immutable environment are public.
 
 A submission binds:
 
@@ -112,9 +113,16 @@ The hotkey signs a domain-separated digest of canonical JSON. Signatures from
 another network, policy, identity or track cannot be reused. The registry
 returns the same receipt for an identical retry. A conflicting sequence is
 rejected. The policy sets the minimum interval between accepted replacements
-and admits at most one current submission per hotkey per track.
+and admits at most one current submission per hotkey per track. A roster uses
+the latest accepted submission. A bad or expired replacement does not revive an
+older submission, and there is no rollback or cancellation operation.
 
 The registry publishes accepted submissions and explicit rejection reasons.
+Its public records include complete signed submission and receipt metadata, such
+as hotkey, endpoint URL, model revision, signature and registration snapshot.
+Submissions must not contain credentials, private labels, confidential
+provenance or private dataset details. Endpoint intake does not upload model
+bytes.
 Pending work survives process restarts. A UID is resolved from the current
 finalized hotkey mapping at the scoring boundary and rechecked before a
 weight submission; UID reuse must not transfer another miner's score.
@@ -370,9 +378,11 @@ the previous baseline, new model manifest, policy, evaluation result, agreeing
 evaluator signatures, archive verification and rights review. The initial
 baseline is imported explicitly with its own manifest and provenance.
 The imported initial baseline has no registered contributor and earns no
-model-contribution share. Until the first qualifying promotion, a policy must
-allocate zero basis points to that track or no successor reward row can be
-produced.
+model-contribution share. Until the first qualifying promotion, no contributor
+may receive that share. Policies version 1 and 2 require zero model-track basis
+points or hold the successor row when no recipient exists. Version 3 may instead
+include the signed model allocation only at its proved burn destination. It
+cannot redistribute or accrue that unallocated share.
 
 Promotion follows this order:
 
@@ -451,12 +461,19 @@ basis points. There is no default allocation and this whitepaper does not
 activate a split. Endpoint and model-contribution shares sum to 10,000.
 
 The approved initial launch allocation is 7,000 basis points (70%) for endpoint
-service and 3,000 (30%) for the current promoted model's contributor. Both
-tracks open together. Under the September 16 approved version 3 policy rule,
-the unallocated model share is burned until a model qualifies. The imported
-baseline receives no special award. The first contribution review targets a
-seven-day round whose exact cutoffs must be published before intake opens.
-Approval of the allocation does not activate rewards or change the bootstrap.
+service and 3,000 (30%) for the current promoted model's contributor. Endpoint
+intake opens first. Under the September 16 approved version 3 policy rule, the
+unallocated model share is burned until a later model round publishes its exact
+runtime and a model qualifies. It does not accrue for retroactive payment. The
+imported baseline receives no special award. Approval of the allocation does not
+activate rewards or change the bridge.
+
+The accepted version 1 contribution terms say that both tracks launch together.
+The current endpoint-only intake is no-weight and does not activate either track.
+Before an endpoint-only reward cutover can use the burn rule, prospective terms
+must expressly permit staged activation, a new signed policy must bind those
+terms, and affected miners must accept that exact version. The alternative is to
+open both tracks together under version 1.
 
 For each closed round, qualifying endpoint submissions receive their share
 in proportion to their exact quality scores. Scores below the policy floor
@@ -487,6 +504,8 @@ round with no qualifying endpoint evidence, or an already awarded contributor
 that loses eligibility. The unawarded share never accrues for retroactive payout
 and never moves to endpoints. Model promotion retains its rights and quality
 checks; an endpoint score alone cannot qualify an artifact for preservation.
+An exact tie between the highest qualifying new model candidates promotes
+neither candidate; the share remains burned for that round.
 
 Resolve recipients against a common finalized SN78 snapshot. Merge both
 track contributions by current UID, normalize the complete vector using
@@ -562,9 +581,12 @@ not make those trust assumptions disappear.
 ## 10. Release and activation
 
 The implementation must first run without any weight-submit capability.
-A complete rehearsal exercises a new miner submission, replacement,
-paired evaluation, failure handling, archive restoration, promotion,
-baseline download by another miner, and exact row replay after restart.
+A complete endpoint activation rehearsal exercises a new miner submission,
+replacement, paired evaluation, failure handling, exact row replay after restart
+and, for a version 3 launch with no promoted contributor, the burn proof and its
+failure paths. Before a policy can pay a model contributor, a separate complete
+model rehearsal must also exercise reconstruction, archive restoration,
+promotion and baseline download by another miner.
 
 Before activating successor rewards, publish:
 
@@ -574,13 +596,30 @@ Before activating successor rewards, publish:
 - the exact evaluator cohort, control-group disclosures and resource profile;
 - evaluation-data rights and annotation provenance, dataset validation, split
   isolation and protected-suite procedure, without a mandatory human grading panel;
-- successful endpoint and contributed-model end-to-end evidence, including
-  signed run records from the selected evaluator cohort bound to the common result, and adversarial,
-  timeout, restart, replay and failed-promotion cases;
+- successful endpoint end-to-end evidence, including signed run records from the
+  selected evaluator cohort bound to the common result, plus adversarial,
+  timeout, restart and replay cases;
+- before any model-contributor payment, successful contributed-model evidence,
+  including reconstruction, preservation, promotion and failed-promotion cases;
+- for a version 3 burn-only model allocation, the finalized owner, UID mapping
+  and burn-mode proof plus changed-proof hold behavior;
 - the deterministic row calculation and its finalized-chain preflight;
 - the compatible signed validator release and tested upgrade path;
 - the evidence cutoff, settlement record and late-conflict recovery rules; and
 - monitoring, expiry, incident handling and rollback procedures.
+
+Assignment delivery is a separate activation gate. Until the exact signed feed
+configuration and tested miner command are public, placeholder examples are not
+production inputs. Give miners operating lead time after publication. A
+coordinator, feed or evaluator infrastructure delay cannot be scored as miner
+failure.
+
+The public incident policy accepts objective protocol, evidence, execution and
+data-defect reports through the published evidence cutoff. It permits no manual
+per-miner score override and no discretionary appeal of a correctly computed
+automatic score. A material pre-settlement defect holds or voids the complete
+affected round and requires a fresh suite. Finalized rows are not rewritten;
+verified late defects stop renewal and are handled prospectively.
 
 The policy fixes the rehearsal duration and minimum evaluator evidence
 before it begins. Rehearsal output cannot be relabeled as production evidence.
@@ -594,17 +633,23 @@ upgrade only if required, with explicit operator consent and rollback.
 Never run competing weight writers for the same hotkey.
 
 Keep the UID 0 and UID 54 registration-bridge processes operating within their
-signed policy until the approved transition or their submission deadline.
+signed policy until the approved transition, explicit replacement or revocation.
 A signed transition coordinates the stop of each old worker and activation of
 its successor, preserving authorization history, keys and transaction journals.
-The bridge's inherited hard sunset remains effective even if the successor is
-delayed.
+The current ongoing bridge has no scheduled sunset. Historical finite policies
+retain their original cutoffs.
 
 ## 11. Implementation status
 
-This specification defines the successor target. It does not claim that
-open enrollment, arbitrary model evaluation, promotion or successor rewards
-are deployed. The repository's
+This specification defines the successor target. Public first-round endpoint
+intake has been reachable since block `9,085,463`. Block `9,135,843` is the
+guaranteed participant submission and replacement deadline for admissions on or
+after that opening block; the coordinator may
+close at any later poll through block `9,135,903`. Assignment delivery,
+model-artifact intake and evaluation, promotion, settlement and successor
+rewards are not yet deployed. First-round consideration also requires the
+submitted hotkey to remain registered in the finalized roster-close snapshot
+and the submission to remain valid through evaluation. The repository's
 [implementation checklist](../docs/OPEN_COMPETITION.md) distinguishes tested
 code, local rehearsal tooling and remaining production integration.
 

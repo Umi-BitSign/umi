@@ -129,7 +129,9 @@ documented operational claims, not properties a hash or signature proves.
    holds new rounds until another valid suite is available.
 
 Do not correct labels after seeing a candidate's answers or rescore a frozen
-round with changed references. Use the published incident rules and a new suite.
+round with changed references. Use the
+[published incident and score-challenge rules](../OPEN_COMPETITION.md#incidents-and-score-challenges)
+and a new suite.
 
 <a id="open-competition-private-holdout--what-the-score-means"></a>
 

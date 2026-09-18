@@ -76,7 +76,7 @@ the exact response body.
 | `GET /api/v1/pilots` | Explicitly nonconforming, no-weight component pilots, separate from protocol windows |
 | `GET /api/v1/pilots/{pilot_id}` | One replayed local or public-endpoint component pilot and its evidence boundary |
 | `GET /api/v1/pilots/{pilot_id}/solutions` | Replayed hypotheses, references, scores, failures, and evidence for one pilot |
-| `GET /api/v1/bootstrap-service` | Current fail-closed bootstrap service-weight status, exact eligible miners, and immutable evidence locators |
+| `GET /api/v1/bootstrap-service` | Historical frozen-pilot lease status and immutable evidence locators; not current registration-bridge health |
 | `GET /api/v1/validator-directives/{validator_account_id32}/after/{sequence}/{cursor}.json` | Exact cache-disabled supervisor directive page for one configured validator channel |
 | `GET /api/v1/activation-gates` | Gate inventory with every unevidenced gate marked `pending` |
 | `GET /api/v1/benchmarks` | Empty public benchmark feed with `not_started` |
@@ -254,9 +254,17 @@ The pilot list, detail, and solutions response schemas are
 
 <a id="dashboard-api--bootstrap-service-weight-feed"></a>
 
-### Bootstrap service-weight feed
+### Historical bootstrap service-weight feed
 
-The optional `--bootstrap-service-feed-config` accepts the current
+This route describes the retired frozen-pilot lease. That lease has expired, so
+`current: null` or `bootstrap_service_lease_inactive` does not mean the current
+registration-bridge validators are down. Do not use this route to determine
+registration-bridge eligibility, row freshness, consensus or incentive. Until a
+dedicated bridge-status adapter is published, use `/api/v1/network` and
+`/api/v1/participants` for bounded public chain observations and independently
+inspect finalized validator rows for operational decisions.
+
+The optional `--bootstrap-service-feed-config` accepts the legacy
 `umi-observer-simple-bootstrap-feed-config/1` shape. It loads the frozen signed
 eligibility manifest and coordinator-signed common lease from immutable local
 paths. It requires the component pilot feed because every eligible miner is

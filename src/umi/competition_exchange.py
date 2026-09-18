@@ -44,6 +44,7 @@ from .competition_evidence import (
     verify_evaluator_run,
 )
 from .competition_execution import execution_boundary, execution_key
+from .competition_launch import PublicLaunchIdentity
 from .competition_observations import execution_observations
 from .competition_void import (
     AttestedEvaluationVoid,
@@ -84,11 +85,13 @@ ROUTE = "/v1/competition/evaluators/exchange"
 class ExchangeConfig(StrictProtocolModel):
     schema_: Literal["umi-evaluator-exchange-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
+    public_launch: PublicLaunchIdentity | None = None
     chain: CompetitionChainConfig
     state_directory: Directory
     order_directory: Directory
     reveal_directory: Directory
     intake_directory: Directory | None = None
+    submission_head_checkpoint_directory: Directory | None = None
     legacy_policy_sha256: Hex32 | None = None
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_events: Annotated[int, Field(ge=1, le=262144)] = 65536
@@ -99,6 +102,17 @@ class ExchangeConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def bindings(self):
+        intake_bindings = (
+            self.intake_directory,
+            self.public_launch,
+            self.submission_head_checkpoint_directory,
+        )
+        if any(value is None for value in intake_bindings) and not all(
+            value is None for value in intake_bindings
+        ):
+            raise ValueError(
+                "exchange intake collection requires its exact public launch and checkpoint"
+            )
         paths = [
             Path(p).resolve()
             for p in (
@@ -106,6 +120,7 @@ class ExchangeConfig(StrictProtocolModel):
                 self.order_directory,
                 self.reveal_directory,
                 self.intake_directory,
+                self.submission_head_checkpoint_directory,
                 self.chain.state_directory,
             )
             if p is not None
@@ -592,7 +607,12 @@ def create_exchange_app(
     if config.intake_directory is not None:
         from .competition_store import CompetitionStore
 
-        store = CompetitionStore(Path(config.intake_directory), policy)
+        store = CompetitionStore(
+            Path(config.intake_directory),
+            policy,
+            public_launch=config.public_launch,
+            submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
+        )
 
     @asynccontextmanager
     async def lifespan(_app):

@@ -43,7 +43,7 @@ async def test_automatically_signed_work_reaches_independent_execution_evidence(
             schema="umi-competition-evidence-cutoff/1",
             policy_sha256=digest(relay.policy),
             round_sha256=digest(order.round),
-            evidence_cutoff_block=order.round.reveal_block + 1,
+            evidence_cutoff_block=order.round.public_schedule.evidence_cutoff_block,
         ),
         registration_snapshot=snapshot(order.round.submission_close_block),
         submissions=(order.submission,),

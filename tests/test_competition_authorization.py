@@ -19,6 +19,7 @@ from umi.competition_authorization import (
     validate_publication_suite,
     validate_transport_cohort,
 )
+from umi.competition_launch import PublicRoundSchedule
 from umi.config import Limits
 from umi.miner_admission import MinerAdmissionError
 from umi.open_competition import (
@@ -51,6 +52,10 @@ def build_authorization_fixture(
     extra_model_bundle=None,
     window_index=0,
     sequence=1,
+    intake_opened_block=None,
+    submission_sequence=1,
+    submission_start_block=1000,
+    submission_valid_through_block=1900,
     serving_origin="https://8.8.8.8:443",
     single_evaluator=False,
     legacy_calibration_inputs=False,
@@ -126,19 +131,36 @@ def build_authorization_fixture(
     finality = FinalizedPort(
         head=issued, blocks={announcement.height: announcement, issuance.height: issuance}
     )
-    sub = submission(policy, start=1000, end=1900).submission.model_copy(
-        update={"endpoint_url": serving_origin}
-    )
+    sub = submission(
+        policy,
+        sequence=submission_sequence,
+        start=submission_start_block,
+        end=submission_valid_through_block,
+    ).submission.model_copy(update={"endpoint_url": serving_origin})
     signed_sub = SignedSubmission(submission=sub, signature=sign_object(sub, wallet("Alice")))
     model_sub = (
         None
         if model_bundle is None
-        else submission(policy, bundle=model_bundle, name="Bob", start=1000, end=1900)
+        else submission(
+            policy,
+            bundle=model_bundle,
+            name="Bob",
+            sequence=submission_sequence,
+            start=submission_start_block,
+            end=submission_valid_through_block,
+        )
     )
     extra_model_sub = (
         None
         if extra_model_bundle is None
-        else submission(policy, bundle=extra_model_bundle, name="Eve", start=1000, end=1900)
+        else submission(
+            policy,
+            bundle=extra_model_bundle,
+            name="Eve",
+            sequence=submission_sequence,
+            start=submission_start_block,
+            end=submission_valid_through_block,
+        )
     )
     submissions = tuple(
         sorted(
@@ -167,21 +189,40 @@ def build_authorization_fixture(
             for i in range(case_count)
         ),
     )
+    submission_close = issued - 1
+    evaluation_close = issued + schedule.response_deadline_blocks + 1
+    reveal = evaluation_close + 1
+    evidence_cutoff = reveal + 3
+    valid_through = max(
+        1200 + window_index * legacy.clock.window_stride_blocks,
+        evidence_cutoff + 1,
+    )
     round_ = EvaluationRound(
-        schema="umi-competition-round/1",
+        schema="umi-competition-round/2",
         policy_sha256=digest(policy),
         sequence=sequence,
         suite_sha256=digest(suite),
         incumbent_model_sha256=incumbent_sha256 or "b2" * 32,
         runtime_sha256=policy.evaluation_runtime_sha256,
-        roster=tuple(digest(s.submission) for s in submissions),
-        submission_close_block=issued - 1,
-        evaluation_close_block=issued + schedule.response_deadline_blocks + 1,
-        reveal_block=issued + schedule.response_deadline_blocks + 2,
-        valid_through_block=max(
-            1200 + window_index * legacy.clock.window_stride_blocks,
-            issued + schedule.response_deadline_blocks + 3,
+        public_schedule=PublicRoundSchedule(
+            schema="umi-public-round-schedule/1",
+            intake_opened_block=(
+                policy.valid_from_block if intake_opened_block is None else intake_opened_block
+            ),
+            roster_close_earliest_block=submission_close,
+            roster_close_latest_block=submission_close,
+            work_signing_close_block=issued,
+            evaluation_close_block=evaluation_close,
+            protected_reference_reveal_block=reveal,
+            evidence_cutoff_block=evidence_cutoff,
+            round_valid_through_block=valid_through,
         ),
+        eligible_tracks=tuple(sorted({s.submission.track for s in submissions})),
+        roster=tuple(digest(s.submission) for s in submissions),
+        submission_close_block=submission_close,
+        evaluation_close_block=evaluation_close,
+        reveal_block=reveal,
+        valid_through_block=valid_through,
     )
     cases = tuple(
         EndpointAuthorizationCase(case_id=c.case_id, video_sha256=c.video_sha256, stratum=c.stratum)
@@ -672,6 +713,16 @@ async def test_reload_excludes_elapsed_slots_but_keeps_future_windows(authorizat
     )
     round_ = authorization.round.model_copy(
         update={
+            "public_schedule": authorization.round.public_schedule.model_copy(
+                update={
+                    "evaluation_close_block": issued + next_schedule.response_deadline_blocks + 1,
+                    "protected_reference_reveal_block": issued
+                    + next_schedule.response_deadline_blocks
+                    + 2,
+                    "evidence_cutoff_block": issued + next_schedule.response_deadline_blocks + 3,
+                    "round_valid_through_block": 1600,
+                }
+            ),
             "evaluation_close_block": issued + next_schedule.response_deadline_blocks + 1,
             "reveal_block": issued + next_schedule.response_deadline_blocks + 2,
             "valid_through_block": 1600,

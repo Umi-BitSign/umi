@@ -19,6 +19,7 @@ from umi.competition_artifacts import (
     verify_preserved_bundle,
 )
 from umi.competition_cli import main
+from umi.competition_launch import PublicRoundSchedule
 from umi.competition_store import AttestedPromotionReview, CompetitionStore, PromotionReview
 from umi.open_competition import (
     AttestedResult,
@@ -168,12 +169,24 @@ def suite_for(policy):
 
 def round_for(policy, suite, signed_submissions, incumbent="b2" * 32):
     return EvaluationRound(
-        schema="umi-competition-round/1",
+        schema="umi-competition-round/2",
         policy_sha256=digest(policy),
         sequence=1,
         suite_sha256=digest(suite),
         incumbent_model_sha256=incumbent,
         runtime_sha256=policy.evaluation_runtime_sha256,
+        public_schedule=PublicRoundSchedule(
+            schema="umi-public-round-schedule/1",
+            intake_opened_block=policy.valid_from_block,
+            roster_close_earliest_block=120,
+            roster_close_latest_block=125,
+            work_signing_close_block=130,
+            evaluation_close_block=140,
+            protected_reference_reveal_block=150,
+            evidence_cutoff_block=160,
+            round_valid_through_block=200,
+        ),
+        eligible_tracks=("endpoint", "model"),
         roster=tuple(sorted(digest(s.submission) for s in signed_submissions)),
         submission_close_block=120,
         evaluation_close_block=140,
@@ -605,7 +618,14 @@ def test_round_cannot_omit_enrollments_or_publish_late(scenario):
     with pytest.raises(ValueError, match="omits"):
         s.store.close_round(
             s.round.model_copy(
-                update={"sequence": 2, "roster": s.round.roster[:1], "suite_sha256": "e1" * 32}
+                update={
+                    "sequence": 2,
+                    "roster": s.round.roster[:1],
+                    "suite_sha256": "e1" * 32,
+                    "public_schedule": s.round.public_schedule.model_copy(
+                        update={"roster_close_latest_block": 124}
+                    ),
+                }
             ),
             current_block=120,
         )
@@ -835,7 +855,15 @@ def test_copied_baseline_and_stale_incumbent_cannot_be_promoted(scenario, tmp_pa
     )
     suite = s.suite.model_copy(update={"cases": cases})
     round_ = round_for(s.policy, suite, (s.model, s.endpoint, challenger), digest(s.baseline))
-    round_ = round_.model_copy(update={"sequence": 2, "submission_close_block": 125})
+    round_ = round_.model_copy(
+        update={
+            "sequence": 2,
+            "submission_close_block": 125,
+            "public_schedule": round_.public_schedule.model_copy(
+                update={"roster_close_earliest_block": 121}
+            ),
+        }
+    )
     s.store.close_round(round_, current_block=125)
     evaluation = result_for(challenger, round_, suite)
     review = review_for(s.policy, challenger, round_, evaluation)

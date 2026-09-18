@@ -11,7 +11,9 @@
 Status: implemented upgrade command with synthetic native Linux migration
 coverage. This document does not approve production artifacts or a transition.
 Keep UID 0 and UID 54 on their existing bridge policy until an authorized
-transition, subject to its hard sunset.
+transition, explicit replacement or revocation. The current ongoing bridge has
+no scheduled sunset; historical finite bridge policies keep their original
+cutoffs.
 
 <a id="successor-supervisor-upgrade--available-read-only-inspection"></a>
 
@@ -475,8 +477,9 @@ The older explicit-hotkey worker uses `SupervisorWorkerJournal` under
 `bootstrap-transactions/<directive>/` and global claims under
 `bootstrap-authorizations/`. Migration must account for both layouts.
 
-Both live recovery paths check authorization at the current block. The common
-service also exits at hard sunset before reconciling its journal. Add a
+Both historical recovery paths check authorization at the current block. A
+finite common-service policy also exits at its hard sunset before reconciling
+its journal. Add a
 historical recovery wrapper that validates the original bindings without
 granting permission for new work under an expired authorization.
 
@@ -567,4 +570,6 @@ Rehearse with synthetic keys in isolated Linux installations before live use:
 These checks do not authorize activation. The complete
 [successor release gates](../../whitepaper/README.md#10-release-and-activation)
 also require real evaluation evidence, finalized-chain preflight and an approved
-signed transition. Bootstrap expiry still applies if successor work is delayed.
+signed transition. Historical finite bootstrap or policy expiry still applies
+if successor work is delayed; this is separate from the current no-sunset
+registration bridge.

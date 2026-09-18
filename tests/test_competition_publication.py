@@ -178,7 +178,7 @@ def _scenario(
     cutoff_publication = build_cutoff_publication(
         round_=round_,
         cutoff_schedule=schedule,
-        registration_snapshot=snapshot_factory(),
+        registration_snapshot=snapshot_factory(round_.submission_close_block),
         submissions=submissions,
         policy=policy,
         limits=limits,
@@ -239,13 +239,15 @@ def _alternate_cutoff_certificate(scenario, policy, limits, *, cutoff_block, rou
     schedule = scenario.schedule.model_copy(
         update={
             "round_sha256": digest(round_),
-            "evidence_cutoff_block": cutoff_block,
         }
+    )
+    alternate_snapshot = snapshot(round_.submission_close_block).model_copy(
+        update={"block_hash": "0x" + f"{cutoff_block:064x}"}
     )
     publication = build_cutoff_publication(
         round_=round_,
         cutoff_schedule=schedule,
-        registration_snapshot=snapshot(),
+        registration_snapshot=alternate_snapshot,
         submissions=scenario.submissions,
         policy=policy,
         limits=limits,
@@ -286,7 +288,7 @@ def test_real_store_promotion_and_70_30_settlement_replay(policy, replay_limits,
 
 def test_modified_body_cannot_reuse_valid_signatures(policy, replay_limits, tmp_path):
     scenario = _scenario(policy, tmp_path, replay_limits)
-    alternate_snapshot = snapshot(111)
+    alternate_snapshot = snapshot(120).model_copy(update={"block_hash": "0x" + "11" * 32})
     alternate_publication = build_cutoff_publication(
         round_=scenario.round,
         cutoff_schedule=scenario.schedule,
@@ -377,7 +379,7 @@ def test_same_control_group_and_roster_signer_cannot_form_publication_quorum(pol
     publication = build_cutoff_publication(
         round_=round_,
         cutoff_schedule=schedule,
-        registration_snapshot=snapshot(),
+        registration_snapshot=snapshot(round_.submission_close_block),
         submissions=submissions,
         policy=grouped_policy,
         limits=replay_limits,
@@ -427,7 +429,7 @@ def test_same_control_group_and_roster_signer_cannot_form_publication_quorum(pol
     self_publication = build_cutoff_publication(
         round_=self_round,
         cutoff_schedule=self_schedule,
-        registration_snapshot=snapshot(),
+        registration_snapshot=snapshot(self_round.submission_close_block),
         submissions=self_submissions,
         policy=self_policy,
         limits=replay_limits,
@@ -533,6 +535,22 @@ def test_settlement_quorum_excludes_absent_incumbent_beneficiary_group(
     ).model_copy(
         update={
             "sequence": 2,
+            "public_schedule": round_for(
+                beneficiary_policy,
+                suite,
+                (endpoint,),
+                promotion["model_sha256"],
+            ).public_schedule.model_copy(
+                update={
+                    "roster_close_earliest_block": 170,
+                    "roster_close_latest_block": 170,
+                    "work_signing_close_block": 180,
+                    "evaluation_close_block": 190,
+                    "protected_reference_reveal_block": 200,
+                    "evidence_cutoff_block": 220,
+                    "round_valid_through_block": 250,
+                }
+            ),
             "submission_close_block": 170,
             "evaluation_close_block": 190,
             "reveal_block": 200,
@@ -659,7 +677,9 @@ def test_exact_roster_registration_and_evidence_are_required(policy, replay_limi
             limits=replay_limits,
         )
 
-    unknown_snapshot = snapshot().model_copy(update={"registrations": ()})
+    unknown_snapshot = snapshot(scenario.round.submission_close_block).model_copy(
+        update={"registrations": ()}
+    )
     with pytest.raises(ValueError, match="not registered"):
         build_cutoff_publication(
             round_=scenario.round,
@@ -791,11 +811,13 @@ def test_journal_is_idempotent_and_conflict_hold_survives_restart(policy, replay
     assert equivalent_status["held"] is False
     assert equivalent_status["conflicts"] == []
 
-    alternate_schedule = scenario.schedule.model_copy(update={"evidence_cutoff_block": 170})
+    alternate_snapshot = snapshot(scenario.round.submission_close_block).model_copy(
+        update={"block_hash": "0x" + "ab" * 32}
+    )
     alternate_publication = build_cutoff_publication(
         round_=scenario.round,
-        cutoff_schedule=alternate_schedule,
-        registration_snapshot=snapshot(),
+        cutoff_schedule=scenario.schedule,
+        registration_snapshot=alternate_snapshot,
         submissions=scenario.submissions,
         policy=policy,
         limits=replay_limits,
@@ -893,7 +915,7 @@ def test_journal_holds_both_rounds_on_same_sequence_equivocation(policy, replay_
     alternate_publication = build_cutoff_publication(
         round_=alternate_round,
         cutoff_schedule=alternate_schedule,
-        registration_snapshot=snapshot(),
+        registration_snapshot=snapshot(alternate_round.submission_close_block),
         submissions=scenario.submissions,
         policy=policy,
         limits=replay_limits,

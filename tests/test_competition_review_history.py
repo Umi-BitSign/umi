@@ -40,7 +40,7 @@ def setup(scenario, tmp_path):
             schema="umi-competition-evidence-cutoff/1",
             policy_sha256=digest(s.policy),
             round_sha256=digest(s.round),
-            evidence_cutoff_block=s.round.reveal_block + 5,
+            evidence_cutoff_block=s.round.public_schedule.evidence_cutoff_block,
         ),
         limits=s.limits,
     )
@@ -164,13 +164,17 @@ def test_changed_cutoff_and_capacity_failure_preserve_first_state(setup, tmp_pat
     observe(s)
     changed = s.cutoff.publication.model_copy(
         update={
-            "cutoff_schedule": s.cutoff.publication.cutoff_schedule.model_copy(
-                update={"evidence_cutoff_block": s.round.reveal_block + 6}
+            "registration_snapshot": s.cutoff.publication.registration_snapshot.model_copy(
+                update={"block_hash": "0x" + "ff" * 32}
             )
         }
     )
     with pytest.raises(ValueError, match="original decision"):
-        observe(s, certificate=attest(changed))
+        observe(
+            s,
+            certificate=attest(changed),
+            snapshot_=changed.registration_snapshot,
+        )
     s.reviews = EvaluatorReviewStore(
         tmp_path / "small-reviews",
         s.policy,

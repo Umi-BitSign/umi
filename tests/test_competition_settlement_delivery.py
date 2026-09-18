@@ -17,9 +17,11 @@ from umi.competition_publication import PublicationReplayLimits, settlement_publ
 from umi.open_competition import digest, identity, sign_object
 from umi.protocol import canonical_json_bytes
 
+from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_package import package_limits as package_limits
 from .test_competition_package import release_identity as release_identity
+from .test_competition_rounds import deployment_for
 from .test_competition_settlement_signing import policy as policy
 from .test_competition_settlement_signing import setup as signing_fixture
 from .test_open_competition import wallet
@@ -41,9 +43,15 @@ def setup(signing_setup, chain_config, package_limits, release_identity, tmp_pat
     # Delivery/state tests reuse the signer's synthetic both-track fixture.
     # Local execution is isolated there; these tests do not attest real model quality.
     s = signing_setup
+    public_launch = deployment_for(
+        s.round.public_schedule, s.round.eligible_tracks
+    ).launch_identity()
+    checkpoint = tmp_path / "intake-checkpoint"
+    s.store = bind_submission_checkpoint(s.store, public_launch, checkpoint)
     config = rounds.RoundCoordinatorConfig(
-        schema="umi-round-coordinator-config/1",
+        schema="umi-round-coordinator-config/2",
         policy_sha256=digest(s.policy),
+        public_launch=public_launch,
         chain=chain_config.model_copy(
             update={
                 "policy_sha256": digest(s.policy),
@@ -53,6 +61,7 @@ def setup(signing_setup, chain_config, package_limits, release_identity, tmp_pat
         ),
         state_directory=str(tmp_path / "coordinator"),
         intake_directory=str(s.store.directory),
+        submission_head_checkpoint_directory=str(checkpoint),
         plan_directory=str(tmp_path / "plans"),
         certificate_directory=str(tmp_path / "cutoffs"),
         replay_limits=s.limits,
@@ -72,15 +81,18 @@ def setup(signing_setup, chain_config, package_limits, release_identity, tmp_pat
     )
     r = proposal.cutoff.round
     plan = rounds.RoundPlan(
-        schema="umi-round-plan/1",
+        schema="umi-round-plan/2",
         suite=s.suite,
-        not_before_block=r.submission_close_block,
-        admission_close_by_block=r.submission_close_block,
-        signing_close_block=proposal.signing_close_block,
-        evaluation_close_block=r.evaluation_close_block,
-        reveal_block=r.reveal_block,
-        evidence_cutoff_block=proposal.cutoff.cutoff_schedule.evidence_cutoff_block,
-        valid_through_block=r.valid_through_block,
+        public_schedule=r.public_schedule,
+        eligible_tracks=r.eligible_tracks,
+        intake_opened_block=r.public_schedule.intake_opened_block,
+        not_before_block=r.public_schedule.roster_close_earliest_block,
+        admission_close_by_block=r.public_schedule.roster_close_latest_block,
+        signing_close_block=r.public_schedule.work_signing_close_block,
+        evaluation_close_block=r.public_schedule.evaluation_close_block,
+        reveal_block=r.public_schedule.protected_reference_reveal_block,
+        evidence_cutoff_block=r.public_schedule.evidence_cutoff_block,
+        valid_through_block=r.public_schedule.round_valid_through_block,
     )
     s.coordinator.journal.put("plan", r.suite_sha256, plan)
     s.coordinator.journal.put("prepared", r.suite_sha256, proposal)
@@ -164,6 +176,7 @@ async def test_conflict_after_preparation_prevents_discovery_and_vote_acceptance
     vote = await s.signers[0].endorse(s.prepared)
     await s.queue.prepare(s.prepared)
     with sqlite3.connect(s.store.path) as db:
+        db.create_function("umi_writer_generation", 0, lambda: 2)
         db.execute("INSERT INTO round_conflicts VALUES (?,?)", (digest(s.round), 160))
     assert (await s.queue.pending(vote.signature.hotkey))[1] == ()
     with pytest.raises(ValueError):
@@ -443,6 +456,7 @@ async def test_conflict_during_finality_collection_is_rechecked_before_output(se
         calls += 1
         if calls == {"prepare": 1, "discover": 2, "publish": 3}[stage]:
             with sqlite3.connect(s.store.path) as db:
+                db.create_function("umi_writer_generation", 0, lambda: 2)
                 db.execute("INSERT INTO round_conflicts VALUES (?,?)", (digest(s.round), 160))
         return capture
 
