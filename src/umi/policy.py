@@ -674,9 +674,10 @@ class PolicyImplementationPins(StrictProtocolModel):
     live_chain: LiveChainObservationPin | None = None
     storage_proof_verifier: StorageProofVerifierPin | None = None
     finality_verifier: FinalityVerifierPin | None = None
-    scoring_by_target: Annotated[
-        dict[ScoringRuntimeTarget, ScoringRuntimePin], Field(min_length=1, max_length=4)
-    ] | None = None
+    scoring_by_target: (
+        Annotated[dict[ScoringRuntimeTarget, ScoringRuntimePin], Field(min_length=1, max_length=4)]
+        | None
+    ) = None
 
     @model_serializer(mode="wrap")
     def serialize_legacy_pins(self, handler):

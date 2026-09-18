@@ -58,9 +58,7 @@ def test_verification_uses_only_the_host_target_and_keeps_artifact_checks(docume
     monkeypatch.setattr("umi.policy.scoring_runtime_target", lambda: MAC)
     with pytest.raises(RuntimeError, match="regex_distribution_content_sha256"):
         validate_scoring_runtime(policy)
-    monkeypatch.setattr(
-        "umi.policy.scoring_runtime_target", lambda: "aarch64-unknown-linux-gnu"
-    )
+    monkeypatch.setattr("umi.policy.scoring_runtime_target", lambda: "aarch64-unknown-linux-gnu")
     with pytest.raises(RuntimeError, match="target is not pinned"):
         validate_scoring_runtime(policy)
 
@@ -78,9 +76,13 @@ def test_each_target_specific_artifact_must_match(document, monkeypatch, field):
 @pytest.mark.parametrize(
     "field",
     (
-        "python_version", "unicode_data_version", "regex_distribution_version",
-        "rfc8785_distribution_version", "pydantic_distribution_version",
-        "pydantic_core_distribution_version", "scoring_source_sha256",
+        "python_version",
+        "unicode_data_version",
+        "regex_distribution_version",
+        "rfc8785_distribution_version",
+        "pydantic_distribution_version",
+        "pydantic_core_distribution_version",
+        "scoring_source_sha256",
         "normalization_fixture_set_sha256",
     ),
 )
@@ -121,8 +123,10 @@ def test_target_verification_still_checks_import_origins(document, monkeypatch):
     with pytest.raises(RuntimeError, match="outside the pinned distribution"):
         validate_scoring_runtime(policy)
     assert checked == [
-        ("regex", "regex"), ("rfc8785", "rfc8785"),
-        ("pydantic", "pydantic"), ("pydantic_core", "pydantic-core"),
+        ("regex", "regex"),
+        ("rfc8785", "rfc8785"),
+        ("pydantic", "pydantic"),
+        ("pydantic_core", "pydantic-core"),
     ]
 
 
