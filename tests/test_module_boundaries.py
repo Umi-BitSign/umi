@@ -86,7 +86,15 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
     for reference, expected in contracts["schema_sha256"].items():
         module_name, class_name = reference.rsplit(".", 1)
         model = getattr(importlib.import_module("umi." + module_name), class_name)
-        assert json_sha256(model.model_json_schema()) == expected, reference
+        schema = model.model_json_schema()
+        pins = schema.get("$defs", {}).get("PolicyImplementationPins")
+        if pins is not None:
+            # The optional platform pins extend the schema; all historical
+            # fields retain their exact pre-refactor contract and signed bytes.
+            extension = pins["properties"].pop("scoring_by_target")
+            assert extension["default"] is None
+            assert "scoring_by_target" not in pins["required"]
+        assert json_sha256(schema) == expected, reference
 
 
 @pytest.mark.parametrize(

@@ -293,6 +293,16 @@ settings only. It does not prove availability, authorize assignments or activate
 rewards. Each assignment still needs its own verified authorization and chain
 observations. No production profile is supplied by this example.
 
+Transport policies may include `implementation_pins.scoring_by_target` for
+reviewed macOS and glibc Linux builds on arm64 or x86_64. Each target carries
+exact package-content hashes. All targets must use the same Python, Unicode
+and package versions, scoring source and normalization fixtures. The miner
+selects its target from the running host and refuses an unlisted target or a
+mismatched artifact. Policies without this field retain their original single
+runtime pin and canonical bytes. Adding platform pins changes the transport
+digest and requires a newly signed feed profile before use; it does not change
+an existing profile or make that deployment ready automatically.
+
 An endpoint proof check uses the owned finality sidecar and storage verifier:
 
 ```sh

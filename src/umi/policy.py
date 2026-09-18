@@ -21,7 +21,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .encoding import account_id32
@@ -32,6 +32,7 @@ from .protocol import (
     StrictProtocolModel,
     canonical_json_bytes,
 )
+from .runtime_targets import ScoringRuntimeTarget, scoring_runtime_target
 
 SCORING_POLICY_SCHEMA = "umi-scoring-policy/1"
 SINGLE_EVALUATOR_TRANSPORT_SCHEMA = "umi-competition-single-evaluator-transport/1"
@@ -673,6 +674,37 @@ class PolicyImplementationPins(StrictProtocolModel):
     live_chain: LiveChainObservationPin | None = None
     storage_proof_verifier: StorageProofVerifierPin | None = None
     finality_verifier: FinalityVerifierPin | None = None
+    scoring_by_target: (
+        Annotated[dict[ScoringRuntimeTarget, ScoringRuntimePin], Field(min_length=1, max_length=4)]
+        | None
+    ) = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_pins(self, handler):
+        value = handler(self)
+        if self.scoring_by_target is None:
+            value.pop("scoring_by_target", None)
+        return value
+
+    @model_validator(mode="after")
+    def validate_scoring_targets(self) -> Self:
+        if self.scoring_by_target is None:
+            return self
+        artifact_fields = {
+            "regex_distribution_content_sha256",
+            "rfc8785_distribution_content_sha256",
+            "pydantic_distribution_content_sha256",
+            "pydantic_core_distribution_content_sha256",
+        }
+        semantics = self.scoring.model_dump(exclude=artifact_fields)
+        if self.scoring not in self.scoring_by_target.values():
+            raise ValueError("scoring targets must include the primary runtime pin")
+        if any(
+            pin.model_dump(exclude=artifact_fields) != semantics
+            for pin in self.scoring_by_target.values()
+        ):
+            raise ValueError("scoring targets must share versions, scoring source and fixtures")
+        return self
 
     @model_validator(mode="after")
     def validate_deadline_stages(self) -> Self:
@@ -1086,6 +1118,12 @@ def validate_scoring_runtime(policy: ScoringPolicy) -> None:
     from .scoring import scoring_environment
 
     expected = policy.implementation_pins.scoring
+    variants = policy.implementation_pins.scoring_by_target
+    if variants is not None:
+        target = scoring_runtime_target()
+        if target not in variants:
+            raise RuntimeError("scoring runtime target is not pinned in this policy")
+        expected = variants[target]
     actual = scoring_environment()
     comparisons = {
         "python_implementation": platform.python_implementation(),
