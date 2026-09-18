@@ -19,6 +19,16 @@ hotkey must still be registered on SN78 in the finalized roster-close snapshot.
 The exact policy digest is
 `81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`.
 
+The prospective staged-activation successor policy has digest
+`eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56`
+and binds [version 2 contribution terms](MODEL_CONTRIBUTION_TERMS_V2.md), SHA-256
+`c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b`.
+It becomes the intake policy only when the public status advertises that exact
+digest. Existing version 1 submissions and receipts retain their original bytes
+and no-weight meaning. Each affected miner must sign and receive acceptance for
+a fresh successor submission by block `9,135,843`; no operator can reinterpret
+a version 1 signature as acceptance of version 2.
+
 Competition rewards have not yet replaced the registration bridge. Until the
 signed transition is verified on chain, miners should keep following the
 [current bridge instructions](CURRENT_MINER_OPERATION.md) as well. A healthy
@@ -62,19 +72,21 @@ promotion checks. No reward accrues while the share is unallocated, and a later
 promotion has no retroactive award.
 
 The current endpoint-only intake is a no-weight intake. Version 1 says both
-tracks launch together. Before UMI can cut over to endpoint-only rewards while
-burning the 30% model share, it must adopt prospective terms that explicitly
-allow staged activation, bind those terms in a new signed policy, and obtain
-acceptance from every affected miner. Otherwise, UMI must open both tracks before
-activating rewards under version 1.
+tracks launch together. The published version 2 terms permit endpoint-only
+activation with the 30% model share burned, and the sequence 5 successor policy
+binds those terms. Rewards remain inactive until affected miners submit new
+hotkey signatures under that exact successor, the round completes, and the
+signed validator cutover is finalized on chain.
 
 A future contribution must provide a complete, reproducible artifact with
 weights or base-plus-adapter files, configuration, tokenizer, inference code,
 dependency inventory, hashes and notices. UMI preserves qualifying promoted
 models so future miners and products can use them independently of an endpoint.
 
-Read the [preparation and rights checklist](contributors/models.md) and
-[accepted version 1 terms](MODEL_CONTRIBUTION_TERMS.md) before spending compute.
+Read the [preparation and rights checklist](contributors/models.md), the
+[historical version 1 terms](MODEL_CONTRIBUTION_TERMS.md), and the
+[staged-activation version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md) before
+spending compute.
 Ownership stays with contributors; licenses and upstream obligations still apply.
 Uploading an archive or winning an endpoint benchmark does not grant the model
 share. Promotion requires reconstruction, paired improvement, preservation and

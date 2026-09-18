@@ -33,6 +33,8 @@ jq -e '
   (.deployment.umi_source_tree_sha256 | test("^[0-9a-f]{64}$"))
 ' competition-status.json >/dev/null
 jq -c '.policy' competition-status.json > competition-policy.json
+policy_sha256="$(jq -r '.policy_sha256' competition-status.json)"
+terms_sha256="$(jq -r '.policy.contribution_terms_sha256' competition-status.json)"
 head_block="$(curl --fail --silent --show-error --max-time 20 \
   "$origin/v1/competition/readiness" | jq -r '.registration_source.block')"
 ```
@@ -54,13 +56,14 @@ model_revision=YOUR_64_HEX_MODEL_REVISION
 
 jq -n -c \
   --arg hotkey "$hotkey" --arg endpoint "$endpoint" \
-  --arg model_revision "$model_revision" --argjson from "$head_block" \
+  --arg model_revision "$model_revision" --arg policy "$policy_sha256" \
+  --arg terms "$terms_sha256" --argjson from "$head_block" \
   '{schema:"umi-competition-submission/1",network:"finney",netuid:78,
-    policy_sha256:"81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0",
+    policy_sha256:$policy,
     hotkey:$hotkey,track:"endpoint",sequence:1,valid_from_block:$from,
     valid_through_block:9156243,model_revision:$model_revision,
     endpoint_url:$endpoint,model_bundle:null,
-    accepted_terms_sha256:"61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62"}' \
+    accepted_terms_sha256:$terms}' \
   > submission.json
 ```
 
@@ -100,6 +103,99 @@ query or fragment. Do not put credentials, private provenance, private dataset
 details or confidential review evidence in these fields. Endpoint intake stores
 metadata and does not upload model bytes. Never upload a seed phrase, coldkey or
 wallet file.
+
+### Required version 1 to version 2 acceptance
+
+The staged-activation successor has policy digest
+`eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56`
+and contribution-terms digest
+`c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b`.
+Do not use this procedure until the public status advertises both exact values.
+An old receipt remains valid historical evidence, but it cannot accept the new
+terms or authorize successor rewards.
+
+Locate the latest accepted version 1 submission for your hotkey in the public
+log. Fetch current status first, verify the content-addressed archive manifest,
+then verify and save the full record by digest. Extract the unchanged signed
+object and receipt only after those hash checks:
+
+```sh
+origin=https://api.umi.vision
+prior_policy_sha256=81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0
+prior_submission_sha256=YOUR_LATEST_ACCEPTED_SUBMISSION_SHA256
+sha256_file() { openssl dgst -sha256 "$1" | awk '{print $NF}'; }
+
+curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/status" > competition-status.json
+jq -e '
+  .policy_sha256 == "eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56" and
+  .policy.contribution_terms_sha256 == "c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b" and
+  .admission_accepting_new == true
+' competition-status.json >/dev/null
+jq -c '.policy' competition-status.json > competition-policy.json
+jq -c '.deployment' competition-status.json > intake-deployment.json
+
+archive_manifest_sha256="$(jq -er --arg policy "$prior_policy_sha256" '
+  .historical_intake_archives[] |
+  select(.policy_sha256 == $policy) |
+  .manifest_sha256
+' competition-status.json)"
+curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/archives/$prior_policy_sha256/manifest" \
+  > prior-archive-manifest.json
+test "$(sha256_file prior-archive-manifest.json)" = \
+  "$archive_manifest_sha256"
+prior_record_sha256="$(jq -er --arg submission "$prior_submission_sha256" '
+  .records[] |
+  select(.submission_sha256 == $submission) |
+  .record_sha256
+' prior-archive-manifest.json)"
+curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/archives/$prior_policy_sha256/submissions/$prior_submission_sha256" \
+  > prior-admission-record.json
+test "$(sha256_file prior-admission-record.json)" = \
+  "$prior_record_sha256"
+jq -c '.signed_submission' prior-admission-record.json > prior-signed-submission.json
+jq -c '.receipt' prior-admission-record.json > prior-admission-receipt.json
+
+head_block="$(curl --fail --silent --show-error --max-time 20 \
+  "$origin/v1/competition/readiness" | jq -r '.registration_source.block')"
+```
+
+Use the immutable predecessor policy published in the repository. The
+transition command verifies the old hotkey signature and receipt, confirms the
+exact predecessor chain, carries forward only the endpoint and model revision,
+increments the sequence, and binds the new policy and terms. It refuses to
+prepare a first-round transition after guaranteed roster block `9,135,843`.
+
+```sh
+curl --fail --silent --show-error --max-time 20 \
+  https://raw.githubusercontent.com/Umi-BitSign/umi/main/docs/competition/FIRST_ROUND_INTAKE_POLICY_V1.json \
+  > competition-policy-v1.json
+
+umi-competition --policy competition-policy.json \
+  prepare-endpoint-policy-transition \
+  --prior-policy competition-policy-v1.json \
+  --prior-submission prior-signed-submission.json \
+  --prior-receipt prior-admission-receipt.json \
+  --deployment intake-deployment.json \
+  --current-block "$head_block" > successor-submission.json
+
+umi-competition --policy competition-policy.json sign-submission \
+  --submission successor-submission.json \
+  --wallet-name YOUR_WALLET --hotkey-name YOUR_HOTKEY \
+  --wallet-path /ABSOLUTE/PATH/TO/WALLETS > successor-signed-submission.json
+
+umi-competition --policy competition-policy.json submit \
+  --submission successor-signed-submission.json --origin "$origin" \
+  | tee successor-admission-receipt.json
+```
+
+Success is a new `accepted_no_weight` receipt under the successor policy. Keep
+both generations of signed submissions and receipts. Do not overwrite the
+version 1 files. If the final submit has an uncertain transport result, retry
+the exact same `successor-signed-submission.json`; never prepare or sign another
+sequence until its receipt is known.
 
 <a id="live-first-round-model-contribution"></a>
 
@@ -412,10 +508,26 @@ durably binds only its immutable public launch identity: schedule and eligible
 tracks. A later code deployment may update its declared revision and source-tree
 digest without changing those launch semantics. `retained_state` binds the
 expected baseline promotion and the complete set of submission digests present
-at deployment. The database must already exist; the service refuses a new path,
-another baseline or a ledger missing any anchored submission. The required
+at deployment. A new successor store may bind an empty submission list; its
+independent checkpoint then commits that empty head before the first admission.
+The database must already exist; the service refuses a new path, another
+baseline or a ledger missing any anchored submission. The required
 `submission_head_checkpoint_directory` is a pre-existing, private external
 journal disjoint from intake and finality state.
+
+For a successor-policy deployment, `historical_archives` names the pinned,
+read-only predecessor archive. Its directory must be separate from intake,
+checkpoint, and finality state. The archive remains available only under the
+policy-qualified route
+`/v1/competition/archives/{policy_sha256}`. Its `/manifest` response is the
+canonical byte string named by `manifest_sha256`; the manifest commits every
+canonical exact-record response and the source checkpoint. Archived submissions
+are below `/submissions`; successor submissions remain under the unqualified
+`/v1/competition/submissions` route. This prevents an old digest from being
+mistaken for a submission accepted by the current policy. The published sequence
+5 policy refuses startup unless exactly one archive proves its immediate
+predecessor. The successor ledger binds that archive's policy and manifest
+digests on first startup and rejects a different archive on restart.
 
 <a id="owned-finality-intake-v2-cutover"></a>
 
@@ -740,6 +852,9 @@ HTTP routes:
 | `POST /v1/competition/submissions` | Signed submission, no personal API key |
 | `GET /v1/competition/submissions?offset=0&limit=20` | Paginated public admission log |
 | `GET /v1/competition/submissions/{digest}` | One complete signed submission and its receipt |
+| `GET /v1/competition/archives` | Content-addressed summaries of superseded intake ledgers |
+| `GET /v1/competition/archives/{policy_digest}/manifest` | Canonical archive manifest bytes |
+| `GET /v1/competition/archives/{policy_digest}/submissions/{submission_digest}` | Canonical archived submission and receipt bytes |
 | `GET /v1/competition/rounds/{digest}?offset=0&limit=20` | Bounded result identities, conflict status and recorded group equivocations |
 | `GET /v1/competition/settlements/{round_digest}` | Immutable settlement and separate current dispute status, or 404 |
 

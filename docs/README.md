@@ -16,7 +16,7 @@ open.
 | Install or troubleshoot a validator | [Validator supervisor](PERMANENT_VALIDATOR_SUPERVISOR.md) |
 | Upgrade an existing validator host | [State-preserving upgrade](validators/successor-upgrade.md) |
 | Understand the competition and rewards | [Competition overview](OPEN_COMPETITION.md) |
-| Prepare a reproducible model for a future contribution round | [Contributor checklist](contributors/models.md) and [terms](MODEL_CONTRIBUTION_TERMS.md) |
+| Prepare a reproducible model for a future contribution round | [Contributor checklist](contributors/models.md), [staged terms](MODEL_CONTRIBUTION_TERMS_V2.md), and [historical version 1 terms](MODEL_CONTRIBUTION_TERMS.md) |
 
 ## Service operators
 
