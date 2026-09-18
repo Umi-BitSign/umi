@@ -92,6 +92,7 @@ class ExpectedIntakeIdentity(StrictProtocolModel):
     name: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")]
     policy_sha256: Hex32
     deployment_document_sha256: Hex32
+    expected_baseline_promotion_sha256: Hex32
     not_before_checked_block: Annotated[int, Field(ge=0, le=2**53 - 1)]
     acceptance_not_before_block: Annotated[int, Field(ge=0, le=2**53 - 1)]
     minimum_accepted_submission_count: Annotated[int, Field(ge=0, le=65_536)]
@@ -479,6 +480,11 @@ def capture_fence(capture: PublicRouteCapture) -> tuple[str, str, str, int]:
             after_readiness.retained_submission_head.head_sha256,
             after_readiness.retained_submission_head.record_count,
         )
+        or before_status.baseline != after_status.baseline
+        or before_status.baseline.promotion_sha256
+        != before_readiness.retained_state.baseline_promotion_sha256
+        or after_status.baseline.promotion_sha256
+        != after_readiness.retained_state.baseline_promotion_sha256
     ):
         _fail("capture_admission_fence_changed")
     return status_values
@@ -584,6 +590,14 @@ def _validate_status_readiness(
         _fail("deployment_readiness_flag_mismatch")
     expected_phase, expected_ready_for, expected_accepting = _phase(status)
     issues: list[MonitorIssue] = []
+    if status.baseline.held_for_conflict:
+        issues.append(
+            MonitorIssue(
+                schema="umi-public-intake-monitor-issue/1",
+                severity="critical",
+                code="baseline_held_for_conflict",
+            )
+        )
     if status.admission_phase == "capacity_exhausted" or readiness.admission_phase == (
         "capacity_exhausted"
     ):
@@ -1046,6 +1060,8 @@ def validate_public_capture(
         checked_block=status.admission_checked_block,
         policy=policy,
     )
+    if status.baseline.promotion_sha256 != expected.expected_baseline_promotion_sha256:
+        _fail("retained_baseline_differs_from_expected_identity")
     if status.accepted_submission_count < expected.minimum_accepted_submission_count:
         _fail("accepted_submission_count_below_configured_floor")
     if status.accepted_submission_count > config.maximum_accepted_submission_count:

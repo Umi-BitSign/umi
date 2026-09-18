@@ -592,8 +592,8 @@ class PublicIntakeArchive:
                     ArchiveFile(path=relative, sha256=_hash(payload), size_bytes=len(payload))
                 )
             for relative in ("submission-pages", "participant-pages", "submission-records"):
-                _fsync_directory(stage / relative)
                 (stage / relative).chmod(0o500)
+                _fsync_directory(stage / relative)
             timestamp = datetime.fromtimestamp(
                 validated.next_state.last_success_at_unix_ms / 1000, tz=timezone.utc
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -637,6 +637,7 @@ class PublicIntakeArchive:
                 self._cleanup_staging(stage)
             else:
                 os.replace(stage, destination)
+                _fsync_directory(self.staging)
                 destination.chmod(0o500)
                 _fsync_directory(destination)
                 _fsync_directory(self.snapshots)
@@ -691,8 +692,8 @@ class PublicIntakeArchive:
                     ArchiveFile(path=relative, sha256=_hash(payload), size_bytes=len(payload))
                 )
             for relative in ("submission-pages", "participant-pages", "submission-records"):
-                _fsync_directory(stage / relative)
                 (stage / relative).chmod(0o500)
+                _fsync_directory(stage / relative)
             timestamp = datetime.fromtimestamp(
                 captured_at_unix_ms / 1000, tz=timezone.utc
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -723,6 +724,7 @@ class PublicIntakeArchive:
                 self._cleanup_staging(stage)
             else:
                 os.replace(stage, destination)
+                _fsync_directory(self.staging)
                 destination.chmod(0o500)
                 _fsync_directory(destination)
                 _fsync_directory(self.rejected)

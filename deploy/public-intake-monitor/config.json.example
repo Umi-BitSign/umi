@@ -8,6 +8,7 @@
       "name": "first-round-staged-v1",
       "policy_sha256": "81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0",
       "deployment_document_sha256": "0a7fe770dbd0de45584d13d42f385479504fcd9bcb509aad0e45d864d2c4961d",
+      "expected_baseline_promotion_sha256": "911a2342bcd7bf74d02d896d0a398b1ad800aa0fc26bfda6097baf1ff4388279",
       "not_before_checked_block": 9092272,
       "acceptance_not_before_block": 9085463,
       "minimum_accepted_submission_count": 133,

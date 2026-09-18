@@ -357,11 +357,19 @@ class PublicIntakeHttpSource:
             after.retained_submission_head.head_sha256,
             after.accepted_submission_count,
         )
-        if before_fence != after_fence or before_fence != (
-            ready.policy_sha256,
-            document_sha256(readiness["deployment"]),
-            ready.retained_submission_head.head_sha256,
-            ready.retained_submission_head.record_count,
+        if (
+            before_fence != after_fence
+            or before_fence
+            != (
+                ready.policy_sha256,
+                document_sha256(readiness["deployment"]),
+                ready.retained_submission_head.head_sha256,
+                ready.retained_submission_head.record_count,
+            )
+            or (
+                before.baseline != after.baseline
+                or after.baseline.promotion_sha256 != ready.retained_state.baseline_promotion_sha256
+            )
         ):
             raise PublicIntakeHttpError("public_identity_changed_during_observation")
         policy = status["policy"]
@@ -378,6 +386,7 @@ class PublicIntakeHttpSource:
             "policy_sequence": policy.get("sequence"),
             "policy_predecessor_sha256": policy.get("predecessor_sha256"),
             "policy": policy,
+            "baseline": status["baseline"],
             "deployment_document_sha256": after_fence[1],
             "deployment": status["deployment"],
             "admission_checked_block": after.admission_checked_block,
@@ -396,6 +405,7 @@ class PublicIntakeHttpSource:
                 "name": "REVIEW_REQUIRED",
                 "policy_sha256": after.policy_sha256,
                 "deployment_document_sha256": after_fence[1],
+                "expected_baseline_promotion_sha256": after.baseline.promotion_sha256,
                 "not_before_checked_block": after.admission_checked_block,
                 "acceptance_not_before_block": "REVIEW_REQUIRED",
                 "minimum_accepted_submission_count": after.accepted_submission_count,

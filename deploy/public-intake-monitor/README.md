@@ -91,10 +91,11 @@ sudo -u umi-intake-audit \
   observe-identity --config /etc/umi-public-intake-monitor/config.json
 ```
 
-Review the policy document, raw deployment document, count, head, required-set
-IDs, count and digest, and checked block in the fenced output. Update both the
-matching `expected_identities` entry and `reviewed_bootstrap` in one root-owned
-config edit. `observe-identity` validates and includes the complete policy and
+Review the policy document, raw deployment document, retained baseline
+promotion digest, accepted count and head, required-set IDs and digest, and
+checked block in the fenced output. Update both the matching
+`expected_identities` entry and `reviewed_bootstrap` in one root-owned config
+edit. `observe-identity` validates and includes the complete policy and
 deployment bodies; it deliberately emits a non-copyable
 `acceptance_not_before_block` placeholder. For the first identity, replace it
 with the actual block at which that deployment began admitting records. The
@@ -125,8 +126,9 @@ Identity history is append-only. For a v2 policy or any deployment change:
 
 1. Keep every existing identity entry byte-for-byte unchanged.
 2. Before rollout, obtain and independently review the prospective signed
-   policy, raw deployment document, writer generation, retained set, and exact
-   activation block through the published change procedure.
+   policy, raw deployment document, retained baseline promotion digest, writer
+   generation, retained set, and exact activation block through the published
+   change procedure.
 3. Append exactly one identity. Set `not_before_checked_block` to the reviewed
    rollout checkpoint. Set `acceptance_not_before_block` to the exact block at
    which the successor deployment becomes eligible to admit records, even if

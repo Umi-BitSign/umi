@@ -180,6 +180,7 @@ def intake_scenario(request, policy) -> IntakeScenario:
                 name="initial",
                 policy_sha256=digest(policy),
                 deployment_document_sha256=document_sha256(status["deployment"]),
+                expected_baseline_promotion_sha256=status["baseline"]["promotion_sha256"],
                 not_before_checked_block=status["admission_checked_block"],
                 acceptance_not_before_block=status["round_schedule"]["intake_opened_block"],
                 minimum_accepted_submission_count=status["accepted_submission_count"],
@@ -246,6 +247,7 @@ def _successor_capture(
         name="successor",
         policy_sha256=policy_sha,
         deployment_document_sha256=document_sha256(raw.status["deployment"]),
+        expected_baseline_promotion_sha256=raw.status["baseline"]["promotion_sha256"],
         not_before_checked_block=successor_block,
         acceptance_not_before_block=successor_block,
         minimum_accepted_submission_count=raw.status["accepted_submission_count"],
@@ -386,6 +388,7 @@ def test_bootstrap_replays_non_anchor_records_before_observation_floor(request, 
         name="historical-bootstrap",
         policy_sha256=digest(policy),
         deployment_document_sha256=document_sha256(capture.status["deployment"]),
+        expected_baseline_promotion_sha256=capture.status["baseline"]["promotion_sha256"],
         not_before_checked_block=observed_block,
         acceptance_not_before_block=capture.status["round_schedule"]["intake_opened_block"],
         minimum_accepted_submission_count=capture.status["accepted_submission_count"],
@@ -463,6 +466,37 @@ def test_capacity_exhaustion_requires_consistent_closed_flags(intake_scenario) -
         )
 
 
+def test_baseline_is_pinned_and_conflict_hold_is_critical(intake_scenario) -> None:
+    changed = copy.deepcopy(intake_scenario.capture)
+    replacement = "ab" * 32
+    for status in (changed.status_before, changed.status):
+        status["baseline"]["promotion_sha256"] = replacement
+    for readiness in (changed.readiness_before, changed.readiness):
+        readiness["retained_state"]["baseline_promotion_sha256"] = replacement
+    with pytest.raises(
+        PublicIntakeMonitorError,
+        match="retained_baseline_differs_from_expected_identity",
+    ):
+        validate_public_capture(
+            changed,
+            intake_scenario.config,
+            previous_state=None,
+            now_unix_ms=NOW_MS,
+        )
+
+    held = copy.deepcopy(intake_scenario.capture)
+    for status in (held.status_before, held.status):
+        status["baseline"]["held_for_conflict"] = True
+    validated = validate_public_capture(
+        held,
+        intake_scenario.config,
+        previous_state=None,
+        now_unix_ms=NOW_MS,
+    )
+    assert validated.severity == "critical"
+    assert [item.code for item in validated.issues] == ["baseline_held_for_conflict"]
+
+
 def test_policy_rollover_is_append_only_and_retains_old_admission_policy(intake_scenario) -> None:
     initial = validate_public_capture(
         intake_scenario.capture,
@@ -535,6 +569,7 @@ def test_same_policy_deployment_rollover_uses_activation_and_writer_generation(
             name="model-only",
             policy_sha256=digest(policy),
             deployment_document_sha256=document_sha256(initial_status["deployment"]),
+            expected_baseline_promotion_sha256=initial_status["baseline"]["promotion_sha256"],
             not_before_checked_block=initial_status["admission_checked_block"] - 1,
             acceptance_not_before_block=initial_status["round_schedule"]["intake_opened_block"],
             minimum_accepted_submission_count=initial_status["accepted_submission_count"],
@@ -584,6 +619,7 @@ def test_same_policy_deployment_rollover_uses_activation_and_writer_generation(
         name="endpoint-enabled",
         policy_sha256=digest(policy),
         deployment_document_sha256=document_sha256(successor_capture.status["deployment"]),
+        expected_baseline_promotion_sha256=successor_capture.status["baseline"]["promotion_sha256"],
         not_before_checked_block=activation_block,
         acceptance_not_before_block=activation_block,
         minimum_accepted_submission_count=successor_capture.status["accepted_submission_count"],
@@ -651,6 +687,7 @@ def test_rollover_closes_prior_identity_acceptance_interval(
             name="endpoint-v1",
             policy_sha256=digest(policy),
             deployment_document_sha256=document_sha256(initial_status["deployment"]),
+            expected_baseline_promotion_sha256=initial_status["baseline"]["promotion_sha256"],
             not_before_checked_block=initial_status["admission_checked_block"] - 1,
             acceptance_not_before_block=initial_status["round_schedule"]["intake_opened_block"],
             minimum_accepted_submission_count=initial_status["accepted_submission_count"],
@@ -722,6 +759,7 @@ def test_rollover_closes_prior_identity_acceptance_interval(
         name=f"successor-{rollover_kind.replace('_', '-')}",
         policy_sha256=digest(successor_policy),
         deployment_document_sha256=document_sha256(rollover_capture.status["deployment"]),
+        expected_baseline_promotion_sha256=rollover_capture.status["baseline"]["promotion_sha256"],
         not_before_checked_block=activation_block,
         acceptance_not_before_block=activation_block,
         minimum_accepted_submission_count=rollover_capture.status["accepted_submission_count"],
@@ -761,6 +799,7 @@ def test_preconfigured_successor_closes_predecessor_acceptance_interval(request,
             name="endpoint-v1",
             policy_sha256=digest(policy),
             deployment_document_sha256=document_sha256(initial_status["deployment"]),
+            expected_baseline_promotion_sha256=initial_status["baseline"]["promotion_sha256"],
             not_before_checked_block=initial_status["admission_checked_block"] - 1,
             acceptance_not_before_block=initial_status["round_schedule"]["intake_opened_block"],
             minimum_accepted_submission_count=initial_status["accepted_submission_count"],
@@ -812,6 +851,9 @@ def test_preconfigured_successor_closes_predecessor_acceptance_interval(request,
         name="model-v2",
         policy_sha256=digest(policy),
         deployment_document_sha256=document_sha256(successor_deployment),
+        expected_baseline_promotion_sha256=predecessor_capture.status["baseline"][
+            "promotion_sha256"
+        ],
         not_before_checked_block=accepted_block + 1,
         acceptance_not_before_block=accepted_block,
         minimum_accepted_submission_count=predecessor_capture.status["accepted_submission_count"],
@@ -1273,6 +1315,13 @@ def test_http_capture_uses_only_bounded_get_routes_and_fetches_every_record(
     assert observed.submission_records == capture.submission_records
     identity_candidate = source.observed_identity()
     assert identity_candidate["policy"] == capture.status["policy"]
+    assert identity_candidate["baseline"] == capture.status["baseline"]
+    assert (
+        identity_candidate["identity_template_requires_review"][
+            "expected_baseline_promotion_sha256"
+        ]
+        == capture.status["baseline"]["promotion_sha256"]
+    )
     assert identity_candidate["required_submission_sha256s"] == sorted(
         capture.readiness["retained_state"]["required_submission_sha256s"]
     )
@@ -1284,6 +1333,26 @@ def test_http_capture_uses_only_bounded_get_routes_and_fetches_every_record(
         "/v1/competition/submissions/" + next(iter(capture.submission_records)),
         "/api/v1/participants",
     }
+
+
+def test_observed_identity_fences_retained_baseline(intake_scenario) -> None:
+    readiness = copy.deepcopy(intake_scenario.capture.readiness)
+    readiness["retained_state"]["baseline_promotion_sha256"] = "cd" * 32
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        value = (
+            readiness
+            if request.url.path == "/v1/competition/readiness"
+            else intake_scenario.capture.status
+        )
+        return httpx.Response(
+            200,
+            content=canonical_json_bytes(value),
+            headers={"content-type": "application/json"},
+        )
+
+    with pytest.raises(PublicIntakeHttpError, match="public_identity_changed_during_observation"):
+        _mock_source(intake_scenario, handler).observed_identity()
 
 
 def test_http_source_rejects_redirect_and_oversized_response(intake_scenario) -> None:
@@ -1490,6 +1559,9 @@ def test_deployment_examples_parse_and_match_cli_contract() -> None:
     assert (
         config.expected_identities[0].acceptance_not_before_block
         < config.expected_identities[0].not_before_checked_block
+    )
+    assert config.expected_identities[0].expected_baseline_promotion_sha256 == (
+        "911a2342bcd7bf74d02d896d0a398b1ad800aa0fc26bfda6097baf1ff4388279"
     )
 
     with (root / "launchd/vision.umi.public-intake-monitor.plist").open("rb") as stream:
