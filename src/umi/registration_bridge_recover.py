@@ -76,7 +76,8 @@ def prove_applied_attempt(journal, observation, block_info, events):
         "recovery_expected_row_not_visible",
     )
     _require(
-        attempt.preflight_block < writer.last_update
+        attempt.preflight_block
+        < writer.last_update
         <= attempt.preflight_block + attempt.signed_policy.body.submission_era_period,
         "recovery_last_update_outside_attempt_era",
     )
@@ -157,9 +158,7 @@ def persist_recovered_attempt(state, journal, observation, receipt, *, now_ms: i
         ).model_dump(mode="python", by_alias=True)
     )
     state.store(returned, archive=True)
-    applied = returned.model_copy(
-        update={"phase": "applied", "updated_at_unix_ms": now_ms}
-    )
+    applied = returned.model_copy(update={"phase": "applied", "updated_at_unix_ms": now_ms})
     state.store(applied, archive=True)
     return applied
 

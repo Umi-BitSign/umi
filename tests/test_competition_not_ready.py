@@ -28,17 +28,20 @@ def test_future_routes_return_structured_not_ready(component, paths):
             assert response.status_code == 503
             assert response.headers["cache-control"] == "no-store"
             assert response.headers["retry-after"] == "300"
-            assert response.content == json.dumps(
-                {
-                    "component": component,
-                    "reason_code": "service_not_active_during_intake",
-                    "retryable": True,
-                    "schema": "umi-competition-service-not-ready/1",
-                    "status": "not_ready",
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
+            assert (
+                response.content
+                == json.dumps(
+                    {
+                        "component": component,
+                        "reason_code": "service_not_active_during_intake",
+                        "retryable": True,
+                        "schema": "umi-competition-service-not-ready/1",
+                        "status": "not_ready",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
 
 
 def test_placeholder_has_bounded_health_and_route_surface():
