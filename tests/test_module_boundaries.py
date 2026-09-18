@@ -56,7 +56,14 @@ def argument_contract(parser: argparse.ArgumentParser) -> dict:
 
 def test_public_command_arguments_match_pre_refactor_contract() -> None:
     contracts = json.loads(CONTRACTS.read_text())
-    assert json_sha256(argument_contract(_parser())) == contracts["competition_cli_sha256"]
+    current = argument_contract(_parser())
+    commands = next(
+        action["choices"] for action in current["actions"] if action["dest"] == "command"
+    )
+    # This additive command has its own parser/handler tests. Preserve the
+    # original digest so changes to any pre-existing command still fail here.
+    commands.pop("verify-miner-feed-profile")
+    assert json_sha256(current) == contracts["competition_cli_sha256"]
 
 
 def test_every_command_has_exactly_one_named_handler() -> None:
