@@ -156,7 +156,7 @@ def create_app(
                     ),
                     "assignment_delivery_ready": public_deployment.assignment_delivery_ready,
                     "model_intake_ready": public_deployment.model_intake_ready,
-                    "evaluation_ready": False,
+                    "evaluation_ready": public_deployment.evaluation_ready,
                     "rewards_active": False,
                 }
             )

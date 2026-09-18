@@ -70,12 +70,20 @@ class PublicIntakeDeployment(StrictProtocolModel):
     ]
     assignment_delivery_ready: bool
     model_intake_ready: bool
+    evaluation_ready: bool = False
 
     @model_validator(mode="after")
     def eligibility(self) -> Self:
         self.launch_identity()
         if self.model_intake_ready != ("model" in self.eligible_tracks):
             raise ValueError("model intake readiness differs from eligible tracks")
+        if self.assignment_delivery_ready and "endpoint" not in self.eligible_tracks:
+            raise ValueError("assignment delivery requires an eligible endpoint track")
+        if self.evaluation_ready and (
+            ("endpoint" in self.eligible_tracks and not self.assignment_delivery_ready)
+            or ("model" in self.eligible_tracks and not self.model_intake_ready)
+        ):
+            raise ValueError("evaluation readiness requires every eligible track to be ready")
         return self
 
     def launch_identity(self) -> PublicLaunchIdentity:

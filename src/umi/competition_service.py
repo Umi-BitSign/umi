@@ -217,7 +217,7 @@ def create_intake_app(
             "admission_checked_block": snapshot.block,
             "registration_count": len(snapshot.registrations),
             "registration_source": provenance,
-            "evaluation_ready": False,
+            "evaluation_ready": config.public_deployment.evaluation_ready,
             "rewards_active": False,
             "chain_submission_authorized": False,
         }
