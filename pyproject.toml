@@ -78,6 +78,7 @@ umi-competition-host-upgrade = "umi.competition_switch_recovery:main"
 umi-competition-not-ready = "umi.competition_not_ready:main"
 umi-registration-bridge = "umi.registration_bridge:main"
 umi-registration-bridge-recover = "umi.registration_bridge_recover:main"
+umi-public-intake-monitor = "umi.public_intake_monitor_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/umi"]
