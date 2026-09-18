@@ -172,11 +172,14 @@ page on it. The timer continues to invoke later polls.
 ## macOS launchd
 
 The plist uses fixed paths and the dedicated `_umi_intake` account. Create that
-non-admin local account using the site's managed-account procedure, then:
+non-admin local account using the site's managed-account procedure. The package
+requires Python 3.10 through 3.14; the audited Mac Studio has Homebrew Python
+3.12 at the path used below. Verify that executable before creating the venv,
+then:
 
 ```sh
 sudo install -d -o root -g wheel -m 0755 /opt/umi-public-intake-monitor
-sudo python3 -m venv /opt/umi-public-intake-monitor/venv
+sudo /opt/homebrew/bin/python3.12 -m venv /opt/umi-public-intake-monitor/venv
 sudo /opt/umi-public-intake-monitor/venv/bin/pip install /path/to/reviewed/umi
 sudo install -d -o root -g wheel -m 0755 /usr/local/etc/umi-public-intake-monitor
 sudo install -d -o _umi_intake -g staff -m 0700 /var/db/umi-public-intake-monitor
