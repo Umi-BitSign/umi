@@ -257,6 +257,45 @@ def test_lifecycle_readiness_and_real_admission(config, policy):
     assert provider.closed
 
 
+def test_readiness_flags_are_deployment_bound(config, policy):
+    deployment = PublicIntakeDeployment.model_validate(
+        {
+            **config.public_deployment.model_dump(mode="python", by_alias=True),
+            "assignment_delivery_ready": True,
+            "evaluation_ready": True,
+        }
+    )
+    configured = config.model_copy(update={"public_deployment": deployment})
+    app, provider = app_for(configured, policy)
+    with TestClient(app) as client:
+        readiness = client.get("/v1/competition/readiness").json()
+        status = client.get("/v1/competition/status").json()
+        for document in (readiness, status):
+            assert document["assignment_delivery_ready"] is True
+            assert document["evaluation_ready"] is True
+            assert document["rewards_active"] is False
+    assert provider.closed
+
+
+def test_evaluation_readiness_requires_ready_eligible_tracks(public_deployment):
+    with pytest.raises(ValueError, match="every eligible track"):
+        PublicIntakeDeployment.model_validate(
+            {
+                **public_deployment.model_dump(mode="python", by_alias=True),
+                "evaluation_ready": True,
+            }
+        )
+    with pytest.raises(ValueError, match="eligible endpoint track"):
+        PublicIntakeDeployment.model_validate(
+            {
+                **public_deployment.model_dump(mode="python", by_alias=True),
+                "eligible_tracks": ("model",),
+                "assignment_delivery_ready": True,
+                "model_intake_ready": True,
+            }
+        )
+
+
 def test_same_launch_checkpoint_restart_is_exact(config, policy):
     first = checkpoint_store(config, policy).retained_submission_head()
     second = checkpoint_store(config, policy).retained_submission_head()
