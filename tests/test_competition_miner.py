@@ -76,6 +76,7 @@ def test_successor_mode_cannot_omit_authority_or_accept_a_duck_typed_authority()
 def test_startup_document_reader_is_bounded_and_canonical(tmp_path):
     path = tmp_path / "authorization.json"
     path.write_bytes(b'{"no_weight":true}')
+    path.chmod(0o600)
     assert _read_startup_file(path, label="competition authorization") == path.read_bytes()
     with pytest.raises(RuntimeError, match="file size"):
         _read_startup_file(path, maximum_bytes=2)

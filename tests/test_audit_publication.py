@@ -447,6 +447,7 @@ def test_publication_config_is_canonical_https_and_has_no_capability_escape(tmp_
     config = AuditPublicationConfig.model_validate(values)
     path = tmp_path / "publisher.json"
     path.write_bytes(canonical_json_bytes(config))
+    path.chmod(0o644)
 
     loaded, encoded = load_audit_publication_config(path)
 
