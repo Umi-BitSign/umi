@@ -5,9 +5,11 @@ from __future__ import annotations
 import errno
 import fcntl
 import hashlib
+import math
 import os
 import secrets
 import stat
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -131,7 +133,27 @@ def _exact_head_body(
 class SubmissionHeadCheckpointFile:
     """Atomic checkpoint file and independent compound-operation lock."""
 
-    def __init__(self, directory: Path, *, policy_sha256: str, public_launch_sha256: str):
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        policy_sha256: str,
+        public_launch_sha256: str,
+        lock_timeout_seconds: float = 5.0,
+    ):
+        if isinstance(lock_timeout_seconds, bool) or not isinstance(
+            lock_timeout_seconds, (int, float)
+        ):
+            raise ValueError("submission checkpoint lock timeout must be finite and positive")
+        try:
+            timeout = float(lock_timeout_seconds)
+        except OverflowError as error:
+            raise ValueError(
+                "submission checkpoint lock timeout must be finite and positive"
+            ) from error
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("submission checkpoint lock timeout must be finite and positive")
+        self.lock_timeout_seconds = timeout
         if not directory.is_absolute() or directory == Path(directory.anchor):
             raise ValueError("submission checkpoint needs a dedicated absolute directory")
         if directory.is_symlink():
@@ -168,7 +190,20 @@ class SubmissionHeadCheckpointFile:
             if created:
                 os.fsync(descriptor)
                 os.fsync(directory)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            deadline = time.monotonic() + self.lock_timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as error:
+                    if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SubmissionCheckpointError(
+                            "submission checkpoint lock timed out"
+                        ) from None
+                    time.sleep(min(0.05, remaining))
             self._check_directory_fd(directory)
             _check_named_identity(directory, _LOCK_NAME, descriptor)
             yield
@@ -325,7 +360,11 @@ def _open_lock(directory: int) -> tuple[int, bool]:
             dir_fd=directory,
         )
         created = False
-    _check_private_regular(os.fstat(descriptor), "submission checkpoint lock")
+    try:
+        _check_private_regular(os.fstat(descriptor), "submission checkpoint lock")
+    except BaseException:
+        os.close(descriptor)
+        raise
     return descriptor, created
 
 
