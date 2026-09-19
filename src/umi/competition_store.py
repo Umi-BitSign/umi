@@ -1123,24 +1123,27 @@ class CompetitionStore(VoidEvidenceRetention):
         rows = connection.execute(
             "SELECT digest, hotkey, track, sequence, accepted_block, expires_block, "
             "body, receipt, writer_generation FROM submissions ORDER BY digest"
-        ).fetchall()
+        )
         submission_ids: list[str] = []
         record_ids: list[str] = []
-        for row in rows:
-            submission_ids.append(row[0])
-            record = {
-                "schema": "umi-competition-admission-record-commitment/1",
-                "submission_sha256": row[0],
-                "hotkey": row[1],
-                "track": row[2],
-                "sequence": row[3],
-                "accepted_block": row[4],
-                "expires_block": row[5],
-                "body_sha256": hashlib.sha256(row[6]).hexdigest(),
-                "receipt_sha256": hashlib.sha256(row[7]).hexdigest(),
-                "writer_generation": row[8],
-            }
-            record_ids.append(hashlib.sha256(canonical_json_bytes(record)).hexdigest())
+        try:
+            for row in rows:
+                submission_ids.append(row[0])
+                record = {
+                    "schema": "umi-competition-admission-record-commitment/1",
+                    "submission_sha256": row[0],
+                    "hotkey": row[1],
+                    "track": row[2],
+                    "sequence": row[3],
+                    "accepted_block": row[4],
+                    "expires_block": row[5],
+                    "body_sha256": hashlib.sha256(row[6]).hexdigest(),
+                    "receipt_sha256": hashlib.sha256(row[7]).hexdigest(),
+                    "writer_generation": row[8],
+                }
+                record_ids.append(hashlib.sha256(canonical_json_bytes(record)).hexdigest())
+        finally:
+            rows.close()
         return tuple(submission_ids), tuple(record_ids)
 
     def _synchronize_submission_checkpoint_locked(
@@ -1974,52 +1977,140 @@ class CompetitionStore(VoidEvidenceRetention):
 
     def _hydrate_promotion_evidence(self, connection: sqlite3.Connection) -> None:
         """Recover certificates retained by earlier, no-ledger rehearsal stores."""
-        for sequence, record_id, model, body in connection.execute(
-            "SELECT sequence, digest, model, body FROM promotions ORDER BY sequence"
+        for sequence, record_id, model, contributor, body in connection.execute(
+            "SELECT sequence, digest, model, contributor, body FROM promotions ORDER BY sequence"
         ).fetchall():
             record = json.loads(body)
-            if _record_digest(record) != record_id or record["model_sha256"] != model:
-                raise ValueError("preserved promotion history is corrupt")
-            if sequence == 0:
-                continue
-            if record["schema"] == "umi-model-baseline/2":
-                if record["sequence"] != sequence:
-                    raise ValueError("agreed promotion sequence is corrupt")
-                attested, observed = self._read_agreed_promotion_receipt(connection, record)
-                evaluation = attested.model_dump(mode="json", by_alias=True)
-            else:
-                evaluation = dict(record["evaluation"])
-                observed = record["promoted_at_block"]
-            result_body = dict(evaluation["result"])
-            # Earlier prototype records used Pydantic field names in this
-            # embedded object. Verify the original record hash above and only
-            # normalize a copy for certificate authentication. Never rewrite it.
-            if "schema_" in result_body and "schema" not in result_body:
-                result_body["schema"] = result_body.pop("schema_")
-            evaluation["result"] = result_body
-            attested = AttestedResult.model_validate_json(canonical_json_bytes(evaluation))
-            result = attested.result
-            round_row = connection.execute(
-                "SELECT body FROM rounds WHERE digest=?", (result.round_sha256,)
-            ).fetchone()
-            sub_row = connection.execute(
-                "SELECT body FROM submissions WHERE digest=?", (result.submission_sha256,)
-            ).fetchone()
-            if round_row is None or sub_row is None or model != result.model_revision:
-                raise ValueError("preserved promotion lacks its closed round or submission")
-            round_ = EvaluationRound.model_validate_json(round_row[0])
-            signed = SignedSubmission.model_validate_json(sub_row[0])
-            authenticate_evaluation(attested, signed, round_, self.policy)
             if (
-                type(observed) is not int
-                or not round_.reveal_block <= observed <= round_.valid_through_block
+                not isinstance(record, dict)
+                or _record_digest(record) != record_id
+                or record.get("sequence") != sequence
+                or record.get("model_sha256") != model
+                or contributor
+                != (
+                    None
+                    if record.get("contributor_hotkey") is None
+                    else identity(record["contributor_hotkey"])
+                )
             ):
-                raise ValueError("preserved promotion has an invalid observation block")
+                raise ValueError("preserved promotion history is corrupt")
+            receipt = self._read_promotion_receipt(connection, record)
+            if receipt is None:
+                continue
+            attested, observed = receipt
             self._store_certificate(connection, attested, observed)
             connection.execute(
                 "INSERT OR IGNORE INTO promotion_sources VALUES (?, ?)",
-                (sequence, result.round_sha256),
+                (sequence, attested.result.round_sha256),
             )
+
+    def _read_promotion_receipt(
+        self,
+        connection: sqlite3.Connection,
+        record: dict,
+        *,
+        maximum_bytes: int | None = None,
+    ) -> tuple[AttestedResult, int] | None:
+        """Authenticate each stored version without changing its historical bytes."""
+        sequence = record.get("sequence")
+        if type(sequence) is not int or not 0 <= sequence <= 2**53 - 1:
+            raise ValueError("preserved promotion sequence is corrupt")
+        if record.get("policy_sha256") != digest(self.policy):
+            raise ValueError("preserved promotion belongs to another policy")
+        if record.get("schema") == "umi-model-baseline/2":
+            return self._read_agreed_promotion_receipt(
+                connection, record, maximum_bytes=maximum_bytes
+            )
+        if record.get("schema") != "umi-model-baseline/1":
+            raise ValueError("unsupported preserved promotion version")
+        if sequence == 0:
+            _require_hex32(record.get("model_sha256"), "initial reference model")
+            if record != {
+                "schema": "umi-model-baseline/1",
+                "sequence": 0,
+                "policy_sha256": digest(self.policy),
+                "model_sha256": record["model_sha256"],
+                "contributor_hotkey": None,
+                "previous_promotion_sha256": None,
+                "kind": "initial_reference_no_reward",
+            }:
+                raise ValueError("initial reference must remain unallocated")
+            return None
+
+        # Prototype records used field names for these two embedded bodies.
+        # Normalize copies only; the original record hash and bytes stay intact.
+        normalized = dict(record)
+        for outer, inner in (("evaluation", "result"), ("review", "review")):
+            certificate = normalized.get(outer)
+            if not isinstance(certificate, dict) or not isinstance(certificate.get(inner), dict):
+                raise ValueError("preserved promotion lacks its evaluation or review")
+            certificate = dict(certificate)
+            body = dict(certificate[inner])
+            if "schema_" in body and "schema" not in body:
+                body["schema"] = body.pop("schema_")
+            certificate[inner] = body
+            normalized[outer] = certificate
+        attested = AttestedResult.model_validate_json(
+            canonical_json_bytes(normalized["evaluation"])
+        )
+        review = AttestedPromotionReview.model_validate_json(
+            canonical_json_bytes(normalized["review"])
+        )
+        verify_review(review, self.policy)
+        if isinstance(review.review, AgreedPromotionReview):
+            raise ValueError("legacy promotion requires a version 1 review")
+        result = attested.result
+        round_row = connection.execute(
+            "SELECT body FROM rounds WHERE digest=?", (result.round_sha256,)
+        ).fetchone()
+        sub_row = connection.execute(
+            "SELECT body FROM submissions WHERE digest=?", (result.submission_sha256,)
+        ).fetchone()
+        previous = connection.execute(
+            "SELECT digest, model FROM promotions WHERE sequence=?", (sequence - 1,)
+        ).fetchone()
+        if round_row is None or sub_row is None or previous is None:
+            raise ValueError("preserved promotion lacks its closed round, submission or parent")
+        round_ = EvaluationRound.model_validate_json(round_row[0])
+        signed = SignedSubmission.model_validate_json(sub_row[0])
+        authenticate_evaluation(attested, signed, round_, self.policy)
+        sub = signed.submission
+        if (
+            sub.track != "model"
+            or sub.model_bundle is None
+            or previous[1] != round_.incumbent_model_sha256
+            or review.review.model_sha256 != sub.model_revision
+            or review.review.incumbent_model_sha256 != round_.incumbent_model_sha256
+            or review.review.evaluation_result_sha256 != digest(result)
+            or sub.model_bundle.parent_baseline_sha256 not in {None, round_.incumbent_model_sha256}
+        ):
+            raise ValueError("preserved promotion review does not bind its model evaluation")
+        observed = record.get("promoted_at_block")
+        high_water = connection.execute(
+            "SELECT value FROM metadata WHERE key='observed_block'"
+        ).fetchone()
+        if (
+            type(observed) is not int
+            or not round_.reveal_block <= observed <= round_.valid_through_block
+            or high_water is None
+            or observed > int(high_water[0])
+        ):
+            raise ValueError("promotion receipt exceeds the local observation history")
+        if normalized != {
+            "schema": "umi-model-baseline/1",
+            "sequence": sequence,
+            "policy_sha256": digest(self.policy),
+            "model_sha256": sub.model_revision,
+            "contributor_hotkey": sub.hotkey,
+            "previous_promotion_sha256": previous[0],
+            "submission_sha256": digest(sub),
+            "evaluation": attested.model_dump(mode="json", by_alias=True),
+            "review": review.model_dump(mode="json", by_alias=True),
+            "promoted_at_block": observed,
+            "kind": "verified_model_promotion_no_weight",
+        }:
+            raise ValueError("preserved promotion differs from its local certificates")
+        return attested, observed
 
     def _read_agreed_promotion_receipt(self, connection, record, *, maximum_bytes=None):
         sequence = record["sequence"]
@@ -2665,8 +2756,7 @@ class CompetitionStore(VoidEvidenceRetention):
                 or head[3] != (None if contributor is None else identity(contributor))
             ):
                 raise ValueError("independently reviewed promotion head is corrupt")
-            if record["schema"] == "umi-model-baseline/2":
-                self._read_agreed_promotion_receipt(connection, record, maximum_bytes=maximum_bytes)
+            self._read_promotion_receipt(connection, record, maximum_bytes=maximum_bytes)
             return PromotionHeadBinding(
                 sequence=head[0],
                 promotion_sha256=head[1],
