@@ -35,6 +35,7 @@ from .bootstrap_weights import (
     bootstrap_policy_hash,
     verify_signed_bootstrap_eligibility_manifest,
 )
+from .bridge.transactions import RegistrationBridgeTransactionJournal
 from .competition_bridge_recovery import (
     HISTORY as BRIDGE_HISTORY,
 )
@@ -449,9 +450,13 @@ def _classify(
                         journal.last_observed_block,
                         receipt.block_number if receipt else journal.attempt.preflight_block,
                     ),
-                    reason="registration_bridge_finalized_reference_retained"
-                    if receipt
-                    else "registration_bridge_attempt_mortality_unknown",
+                    reason=(
+                        "registration_bridge_transaction_proof_required"
+                        if type(journal) is RegistrationBridgeTransactionJournal
+                        else "registration_bridge_finalized_reference_retained"
+                        if receipt
+                        else "registration_bridge_attempt_mortality_unknown"
+                    ),
                 )
             )
     if "journal.json" in files:

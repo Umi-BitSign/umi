@@ -10,12 +10,15 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from .bridge.journal_history import MAX_HISTORY_FILES, audit_attempt_phases, audit_current_history
+from .bridge.policy import RegistrationBridgeError
+from .bridge.transactions import (
+    BridgeJournal,
+    RegistrationBridgeTransactionJournal,
+    parse_bridge_journal,
+)
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
-from .registration_bridge import (
-    MAX_HISTORY_FILES,
-    RegistrationBridgeJournal,
-)
 from .simple_bootstrap_validator import SimpleBootstrapJournal
 
 JOURNAL = "registration-bridge-journal.json"
@@ -25,8 +28,8 @@ HISTORY = "registration-bridge-history"
 
 @dataclass(frozen=True)
 class BridgeHistoryAudit:
-    current: RegistrationBridgeJournal
-    attempts: tuple[tuple[str, RegistrationBridgeJournal], ...]
+    current: BridgeJournal
+    attempts: tuple[tuple[str, BridgeJournal], ...]
     recognized: frozenset[str]
     holds: tuple[str, ...]
 
@@ -39,7 +42,16 @@ def _model(raw: bytes, model):
 
 
 def audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHistoryAudit:
-    current = _model(files[JOURNAL], RegistrationBridgeJournal)
+    """Validate both journal versions without changing any retained byte."""
+    try:
+        return _audit_bridge_history(files, hotkey=hotkey)
+    except RegistrationBridgeError as exc:
+        # Preserve the stopped-recovery API's validation exception family.
+        raise ValueError(f"bridge recovery {exc.reason_code}") from exc
+
+
+def _audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHistoryAudit:
+    current = parse_bridge_journal(files[JOURNAL])
     if account_id32(current.validator_hotkey) != account_id32(hotkey):
         raise ValueError("bridge recovery journal belongs to another validator")
     recognized = {JOURNAL}
@@ -61,7 +73,7 @@ def audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHisto
         prior_receipt = old.weight_call.block_number
         prior_observation = max(old.observation_block or 0, prior_receipt)
         recognized.add(ARCHIVE)
-    groups: dict[str, dict[str, RegistrationBridgeJournal]] = {}
+    groups: dict[str, dict[str, BridgeJournal]] = {}
     history_count = 0
     for path, raw in files.items():
         if not path.startswith(HISTORY + "/"):
@@ -69,7 +81,7 @@ def audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHisto
         history_count += 1
         if history_count > MAX_HISTORY_FILES:
             raise ValueError("bridge recovery history exceeds its bound")
-        item = _model(raw, RegistrationBridgeJournal)
+        item = parse_bridge_journal(raw)
         if (
             item.attempt is None
             or path != f"{HISTORY}/{item.attempt.attempt_id}-{item.phase}.json"
@@ -90,25 +102,20 @@ def audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHisto
         return BridgeHistoryAudit(current, (), frozenset(recognized), ())
     if current.attempt.attempt_id not in groups:
         raise ValueError("bridge recovery current attempt history is missing")
-    records = []
+    records: list[tuple[str, BridgeJournal]] = []
     holds = set()
-    order = {"submitting": 0, "outcome_unknown": 1, "receipt_returned": 2, "applied": 3}
-    for identity, phases in groups.items():
-        if "submitting" not in phases:
-            raise ValueError("bridge recovery history intent is missing")
-        attempt = phases["submitting"].attempt
-        if any(record.attempt != attempt for record in phases.values()):
-            raise ValueError("bridge recovery immutable attempt changed")
-        terminal = max(phases.values(), key=lambda item: order[item.phase])
-        receipts = [item.weight_call for item in phases.values() if item.weight_call is not None]
-        if any(receipt != receipts[0] for receipt in receipts):
-            raise ValueError("bridge recovery retained receipt changed")
-        if "applied" in phases and "receipt_returned" not in phases:
-            raise ValueError("bridge recovery applied history lacks the returned receipt")
-        if terminal.phase == "applied" and (
-            terminal.last_observed_block < terminal.weight_call.block_number
-        ):
-            raise ValueError("bridge recovery applied observation predates the receipt")
+    # Keep the legacy stopped-reader's unresolved-history diagnostics. New
+    # transaction records also require the live writer's complete history audit.
+    if any(
+        type(item) is RegistrationBridgeTransactionJournal
+        for phases in groups.values()
+        for item in phases.values()
+    ):
+        terminals = audit_current_history(current, groups)
+    else:
+        terminals = {identity: audit_attempt_phases(phases) for identity, phases in groups.items()}
+    for identity, terminal in terminals.items():
+        attempt = terminal.attempt
         if identity == current.attempt.attempt_id:
             if (
                 current.phase != terminal.phase
@@ -119,10 +126,15 @@ def audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHisto
             terminal = current
             path = JOURNAL
         else:
-            if terminal.phase != "applied":
+            if terminal.phase not in {"applied", "expired_nonce_available", "failed"}:
                 holds.add("registration_bridge_retained_attempt_unresolved")
             path = f"{HISTORY}/{identity}-{terminal.phase}.json"
-        if "outcome_unknown" in phases or terminal.phase == "submitting":
+        if type(terminal) is RegistrationBridgeTransactionJournal:
+            # A retained nonce, failure, expiry or receipt is still only a local
+            # claim. The stopped handoff must authenticate its chain evidence;
+            # SDK row equality cannot clear this hold.
+            holds.add("registration_bridge_transaction_proof_required")
+        elif "outcome_unknown" in groups[identity] or terminal.phase == "submitting":
             holds.add("registration_bridge_attempt_mortality_unknown")
         records.append((path, terminal))
     records.sort(key=lambda pair: pair[1].attempt.preflight_block)
@@ -140,6 +152,13 @@ def audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHisto
         ):
             raise ValueError("bridge recovery attempts have an unexplained LastUpdate gap")
         prior_preflight = attempt.preflight_block
-        prior_receipt = record.weight_call.block_number if record.weight_call else None
+        if record.weight_call is not None:
+            prior_receipt = record.weight_call.block_number
+        elif type(record) is RegistrationBridgeTransactionJournal:
+            # A failed or expired call does not account for a new LastUpdate.
+            # Preserve this continuity check across non-writing attempts.
+            prior_receipt = attempt.prior_last_update
+        else:
+            prior_receipt = None
         prior_observation = record.last_observed_block
     return BridgeHistoryAudit(current, tuple(records), frozenset(recognized), tuple(sorted(holds)))

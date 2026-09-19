@@ -57,6 +57,7 @@ from .bridge.journal import (
 from .bridge.journal import (
     reconcile_registration_bridge_journal as reconcile_registration_bridge_journal,
 )
+from .bridge.journal_history import MAX_HISTORY_FILES as MAX_HISTORY_FILES
 from .bridge.journal_history import reconcile_archived_transition, validate_next_journal
 from .bridge.native import receipt_reader, signing_reader
 
@@ -204,7 +205,6 @@ from .simple_bootstrap_validator import (
 
 # Retain every transition and its recovery protections. These are resource
 # ceilings, not a retention policy; archival needs a separate verified design.
-MAX_HISTORY_FILES = 4096
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
 _FINALITY_HASHES = {
     "x86_64": "cd696ea86acd691112413a7909b6bf469f90042747c87b9350f01dacfe4ae8c3",

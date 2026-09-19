@@ -8,6 +8,8 @@ from .journal import RegistrationBridgeJournal
 from .policy import _require
 from .transactions import BridgeJournal, RegistrationBridgeTransactionJournal
 
+MAX_HISTORY_FILES = 4096
+
 _LEGACY_ORDER = {"submitting": 0, "outcome_unknown": 1, "receipt_returned": 2, "applied": 3}
 _TRANSACTION_ORDER = {
     "preparing": 0,
@@ -125,6 +127,10 @@ def validate_next_journal(
 def audit_attempt_phases(phases: dict[str, BridgeJournal]) -> BridgeJournal:
     """Return the latest archived transition after checking one attempt."""
     _require(bool(phases), "history_intent_missing")
+    _require(
+        all(item.phase == phase and item.attempt is not None for phase, item in phases.items()),
+        "history_phase_identity_changed",
+    )
     transaction = any(
         type(item) is RegistrationBridgeTransactionJournal for item in phases.values()
     )
@@ -133,7 +139,10 @@ def audit_attempt_phases(phases: dict[str, BridgeJournal]) -> BridgeJournal:
     original = phases[first]
     _require(
         all(
-            type(item) is type(original) and item.attempt == original.attempt
+            type(item) is type(original)
+            and item.attempt == original.attempt
+            and item.validator_hotkey == original.validator_hotkey
+            and item.legacy_journal_sha256 == original.legacy_journal_sha256
             for item in phases.values()
         ),
         "history_attempt_changed",
@@ -145,6 +154,17 @@ def audit_attempt_phases(phases: dict[str, BridgeJournal]) -> BridgeJournal:
         not receipts or all(receipt == receipts[0] for receipt in receipts),
         "history_receipt_changed",
     )
+    _require(
+        "applied" not in phases or "receipt_returned" in phases,
+        "history_applied_receipt_missing",
+    )
+    if "applied" in phases:
+        applied = phases["applied"]
+        _require(
+            applied.weight_call is not None
+            and applied.last_observed_block >= applied.weight_call.block_number,
+            "history_applied_observation_predates_receipt",
+        )
     if transaction:
         _require(
             not (
@@ -170,27 +190,22 @@ def audit_attempt_phases(phases: dict[str, BridgeJournal]) -> BridgeJournal:
                 "history_submission_missing",
             )
         for older, newer in pairwise(ordered):
-            _transaction_identity(older, newer)
-            _require(
-                older.last_observed_block <= newer.last_observed_block
-                and (
-                    older.last_observed_block != newer.last_observed_block
-                    or older.last_observed_block_hash == newer.last_observed_block_hash
-                ),
-                "history_finality_rollback",
-            )
+            validate_next_journal(older, newer, archive=True)
     return ordered[-1]
 
 
 def audit_current_history(
     current: BridgeJournal, groups: dict[str, dict[str, BridgeJournal]]
-) -> None:
+) -> dict[str, BridgeJournal]:
+    """Validate the current record and return each audited terminal attempt."""
     if current.attempt is None:
         _require(not groups, "current_journal_rolled_back")
-        return
+        return {}
     _require(current.attempt.attempt_id in groups, "current_attempt_history_missing")
+    terminals = {}
     for identity, phases in groups.items():
         terminal = audit_attempt_phases(phases)
+        terminals[identity] = terminal
         attempt = terminal.attempt
         _require(
             attempt.preflight_block <= current.attempt.preflight_block,
@@ -221,6 +236,7 @@ def audit_current_history(
                     current.signed_extrinsic == terminal.signed_extrinsic,
                     "history_signed_extrinsic_changed",
                 )
+    return terminals
 
 
 def reconcile_archived_transition(
