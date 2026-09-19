@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 
 from umi.competition_promotion_delivery import (
     ReviewedPromotion,
+    apply_evaluator_promotion,
     apply_reviewed_promotion,
     retain_delivery,
     validate_delivery,
@@ -23,6 +25,11 @@ from umi.competition_rounds import (
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_evaluator import agree, completed, execute
+from .test_competition_evaluator import chain_config as chain_config
+from .test_competition_evaluator import model_setup as model_setup
+from .test_competition_evaluator import runtime as runtime
+from .test_competition_evaluator import setup as execution_fixture
 from .test_competition_publication import _independent
 from .test_competition_review_history import observe
 from .test_competition_review_history import policy as policy
@@ -33,6 +40,7 @@ from .test_open_competition import wallet
 from .test_promotion_agreement import agreed_review, attest
 
 history_setup = review_fixture
+execution_setup = execution_fixture
 
 
 @pytest.fixture
@@ -188,9 +196,171 @@ def test_fresh_valid_submission_signature_cannot_create_a_decision_conflict(setu
 
 
 @pytest.mark.asyncio
-async def test_completed_peer_evidence_cannot_replace_missing_local_execution(setup):
-    from umi.competition_promotion_delivery import apply_evaluator_promotion
+async def test_resigned_first_delivery_applies_original_retained_evidence(setup, tmp_path):
+    s = setup
+    resigned = s.model.model_copy(
+        update={"signature": sign_object(s.model.submission, wallet("Alice"))}
+    )
+    assert resigned.signature != s.model.signature
+    assert resigned.submission == s.model.submission
+    delivery = validate_delivery(s.delivery.model_copy(update={"submission": resigned}), s.policy)
+    journal = RoundJournal(tmp_path / "resigned-first", {})
+    retain_delivery(journal, delivery, s.policy)
+    first = journal.get("promotion-certificate", "promotion:1")
+    assert first == delivery.model_dump(mode="json", by_alias=True)
+    with s.reviews._connection() as c:
+        original_submission = c.execute(
+            "SELECT body FROM submissions WHERE digest=?", (digest(s.model.submission),)
+        ).fetchone()
+        original_evidence = c.execute(
+            "SELECT digest,body,first_observed_block "
+            "FROM independent_evaluation_evidence ORDER BY digest"
+        ).fetchall()
 
+    result = await apply(s, delivery=first)
+
+    assert result["sequence"] == 1
+    assert result["contributor_hotkey"] == s.model.submission.hotkey
+    with s.reviews._connection() as c:
+        assert (
+            c.execute(
+                "SELECT body FROM submissions WHERE digest=?", (digest(s.model.submission),)
+            ).fetchone()
+            == original_submission
+        )
+        assert (
+            c.execute(
+                "SELECT digest,body,first_observed_block "
+                "FROM independent_evaluation_evidence ORDER BY digest"
+            ).fetchall()
+            == original_evidence
+        )
+        assert c.execute("SELECT observed_block FROM promotion_receipts").fetchall() == [(152,)]
+    retain_delivery(journal, s.delivery, s.policy)
+    assert journal.get("promotion-certificate", "promotion:1") == first
+    s.reviews = EvaluatorReviewStore(s.reviews.directory, s.policy, limits=s.limits)
+    assert await apply(s, OwnedProvider(500), first) == result
+
+
+@pytest.mark.asyncio
+async def test_evaluator_applies_resigned_delivery_from_original_execution(
+    execution_setup, tmp_path
+):
+    from umi.competition_execution import execution_slot
+    from umi.competition_publication import PublicationReplayLimits, build_cutoff_publication
+    from umi.competition_settlement import EvidenceCutoffSchedule
+    from umi.competition_store import AgreedPromotionReview
+
+    from .test_competition_review_history import attest as attest_cutoff
+    from .test_open_competition import review_for, snapshot
+
+    s = execution_setup
+    driver = s.drivers[0]
+    try:
+        await execute(s.drivers)
+        await agree(s)
+        evidence = completed(driver)[0]
+        limits = PublicationReplayLimits(
+            maximum_roster_bytes=1_000_000,
+            maximum_certificate_bytes=4_000_000,
+            maximum_evidence_bytes=5_000_000,
+        )
+        store = EvaluatorReviewStore(tmp_path / "execution-reviews", s.policy, limits=limits)
+        store.initialize_baseline(s.job.incumbent, Path(driver.config.archive_directory))
+        capture = snapshot(s.job.round.submission_close_block)
+        cutoff = attest_cutoff(
+            build_cutoff_publication(
+                policy=s.policy,
+                round_=s.job.round,
+                submissions=(s.job.submission,),
+                registration_snapshot=capture,
+                cutoff_schedule=EvidenceCutoffSchedule(
+                    schema="umi-competition-evidence-cutoff/1",
+                    policy_sha256=digest(s.policy),
+                    round_sha256=digest(s.job.round),
+                    evidence_cutoff_block=s.job.round.public_schedule.evidence_cutoff_block,
+                ),
+                limits=limits,
+            )
+        )
+        store.observe_cutoff(
+            cutoff, (s.job.submission,), snapshot=capture, observed_block=capture.block + 1
+        )
+        store.record_independent_evaluation(
+            signed=s.job.submission,
+            evidence=evidence,
+            round_=s.job.round,
+            suite=s.suite,
+            observed_block=s.job.round.reveal_block,
+        )
+        body = review_for(s.policy, s.job.submission, s.job.round, evidence.attested_result).review
+        reviewed = attest(
+            AgreedPromotionReview.model_validate(
+                {
+                    **body.model_dump(mode="json", by_alias=True),
+                    "schema": "umi-model-promotion-review/2",
+                    "round_sha256": digest(s.job.round),
+                    "submission_sha256": digest(s.job.submission.submission),
+                    "previous_promotion_sha256": store.baseline_summary()["promotion_sha256"],
+                    "sequence": 1,
+                }
+            )
+        )
+        resigned = s.job.submission.model_copy(
+            update={"signature": sign_object(s.job.submission.submission, wallet("Alice"))}
+        )
+        assert resigned.signature != s.job.submission.signature
+        value = ReviewedPromotion(
+            schema="umi-reviewed-promotion-delivery/1",
+            review=reviewed,
+            round=s.job.round,
+            submission=resigned,
+        )
+        driver.review_store = store
+        driver.provider.block = s.job.round.reveal_block + 2
+        slot = execution_slot(s.job.round, s.job.submission, driver.config.evaluator_hotkey)
+        original = driver.journal.settlement_evidence(slot)
+
+        result = await apply_evaluator_promotion(driver, value)
+
+        assert result["sequence"] == 1
+        assert result["contributor_hotkey"] == s.job.submission.submission.hotkey
+        assert driver.journal.settlement_evidence(slot) == original
+        with store._connection() as c:
+            assert c.execute(
+                "SELECT body FROM submissions WHERE digest=?",
+                (digest(s.job.submission.submission),),
+            ).fetchone() == (canonical_json_bytes(s.job.submission),)
+    finally:
+        for driver in s.drivers:
+            await driver.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evaluator", [False, True])
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_invalid_submission_signature_never_reuses_retained_evidence(
+    setup, evaluator, accepted
+):
+    s = setup
+    if accepted:
+        await apply(s)
+    bad = s.model.model_copy(
+        update={"signature": s.model.signature.model_copy(update={"signature": "0x" + "00" * 64})}
+    )
+    value = s.delivery.model_copy(update={"submission": bad})
+    with pytest.raises(ValueError, match="signature"):
+        if evaluator:
+            await apply_evaluator_promotion(
+                SimpleNamespace(policy=s.policy, review_store=s.reviews), value
+            )
+        else:
+            await apply(s, delivery=value)
+    assert s.reviews.baseline()["sequence"] == int(accepted)
+
+
+@pytest.mark.asyncio
+async def test_completed_peer_evidence_cannot_replace_missing_local_execution(setup):
     class MissingJournal:
         def settlement_evidence(self, _slot):
             raise ValueError("local execution missing")
