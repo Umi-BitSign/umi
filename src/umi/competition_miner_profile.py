@@ -84,7 +84,13 @@ def verify_miner_feed_profile(
         policy.valid_from_block <= schedule.intake_opened_block
         and schedule.round_valid_through_block <= policy.valid_through_block
         and type(current_block) is int
-        and schedule.intake_opened_block <= current_block <= schedule.evaluation_close_block
+        and schedule.intake_opened_block
+        <= current_block
+        <= (
+            policy.valid_through_block
+            if public_launch.round_stride_blocks is not None
+            else schedule.evaluation_close_block
+        )
     ):
         raise ValueError("miner feed profile is outside its round or policy interval")
     groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}

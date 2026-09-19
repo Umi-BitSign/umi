@@ -16,6 +16,9 @@ import stat
 import weakref
 from pathlib import Path
 
+from .bridge.transactions import RegistrationBridgeTransactionJournal
+from .competition_bridge_reconciliation import summarize_bridge_outcome
+from .competition_bridge_recovery import BridgeHistoryAudit
 from .competition_chain_state import (
     FinalizedCompetitionWeightProvider,
     OwnedCompetitionChainObservation,
@@ -35,6 +38,15 @@ from .competition_host_artifacts import (
 )
 from .competition_host_switch import _root_directory
 from .competition_host_upgrade import HostUpgradeError, StoppedSupervisor, _require_root_linux
+from .competition_recovery_models import BridgeRecoveryOutcome
+from .competition_recovery_observation import (
+    _BRIDGE_OBSERVATIONS,
+    _bridge_binding,
+)
+from .competition_recovery_observation import StoppedBridgeObservation as StoppedBridgeObservation
+from .competition_recovery_observation import (
+    validate_stopped_bridge_observation as validate_stopped_bridge_observation,
+)
 from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
     parse_canonical_successor_operator_consent,
@@ -277,13 +289,42 @@ class StoppedUpgradeObserver:
         _issued(self)
 
     async def observe(self) -> OwnedCompetitionChainObservation:
+        return (await self._observe()).observation
+
+    async def observe_bridge(
+        self,
+        audit: BridgeHistoryAudit,
+        snapshot_sha256: str,
+    ) -> StoppedBridgeObservation:
+        if type(audit) is not BridgeHistoryAudit or len(snapshot_sha256) != 64:
+            raise HostUpgradeError("bridge recovery requires an audited snapshot")
+        return await self._observe(audit, snapshot_sha256)
+
+    async def _observe(
+        self, audit: BridgeHistoryAudit | None = None, snapshot_sha256: str = ""
+    ) -> StoppedBridgeObservation:
         _issued(self)
         async with self._lock:
             self._recheck()
             selected = parse_successor_host_observer_config(self._observer.payload)
             provider = FinalizedCompetitionWeightProvider(selected.chain, selected.policy)
+            outcomes: list[BridgeRecoveryOutcome] = []
             try:
                 await provider.start()
+                if audit is not None:
+                    if audit.current.validator_hotkey != self._stopped.validator_hotkey:
+                        raise HostUpgradeError("bridge recovery belongs to another validator")
+                    # Warm up the owner before historical readers use it. The
+                    # final fresh observation is collected after all old proofs.
+                    await provider.wait_weights_ready(self._stopped.validator_hotkey, ())
+                    for path, journal in reversed(audit.attempts):
+                        if type(journal) is RegistrationBridgeTransactionJournal:
+                            self._recheck()
+                            outcomes.append(
+                                summarize_bridge_outcome(
+                                    path, journal, await provider.read_bridge_outcome(journal)
+                                )
+                            )
                 observation = await provider.wait_weights_ready(self._stopped.validator_hotkey, ())
             finally:
                 await provider.aclose()
@@ -298,7 +339,15 @@ class StoppedUpgradeObserver:
                 or observation.block < self._stopped.accepted_at_finalized_block
             ):
                 raise HostUpgradeError("upgrade proof differs from its stopped installation")
-            return observation
+            result = StoppedBridgeObservation(
+                observation,
+                snapshot_sha256,
+                tuple(sorted(outcomes, key=lambda item: item.path)),
+                self._stopped,
+            )
+            if outcomes:
+                _BRIDGE_OBSERVATIONS[result] = _bridge_binding(result)
+            return result
 
     async def aclose(self) -> None:
         _issued(self, allow_closed=True)

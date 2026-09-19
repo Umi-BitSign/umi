@@ -15,11 +15,14 @@ import json
 import os
 import re
 import stat
+import threading
 from dataclasses import dataclass, replace
+from functools import partial
 from urllib.parse import urlsplit
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import FinalizedRegistrationProvider, _AwaitingFinality, _hotkey, _uint
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .grandpa_finality_supervisor import GrandpaFinalitySupervisorError
 from .open_competition import SignedSubmission, digest
@@ -355,6 +358,8 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
 
     async def _collect_origin_locked(self, signed, origin) -> EndpointOriginCapture:
         async with self._lock:
+            if self._closed:
+                raise ValueError("endpoint provider is closed")
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
             ref = await self._proofs.finalized_snapshot()
@@ -370,7 +375,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             block = await self._finality.verified_block_at(ref.block_number)
             self._check_finality(ref, block)
             self._fresh(block.timestamp_ms)
-            self._check_origin_prior(ref)
+            await run_owned_thread(self._check_origin_prior, ref)
             runtime = await self._runtime_context(ref)
             if (
                 not isinstance(runtime, PinnedRuntimeContext)
@@ -462,7 +467,16 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                 evidence,
                 None if dns is None else announced,
             )
-            return self._save_origin(capture, runtime.metadata_bytes)
+            cancelled = threading.Event()
+            return await run_owned_thread(
+                partial(
+                    self._save_origin,
+                    capture,
+                    runtime.metadata_bytes,
+                    cancelled=cancelled,
+                ),
+                on_cancel=cancelled.set,
+            )
 
     def _check_origin_prior(self, ref):
         connection = self._connect()
@@ -479,7 +493,9 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         if prior and (block < prior[0] or (block == prior[0] and block_hash != prior[1])):
             raise ValueError("endpoint finalized head rolled back or changed")
 
-    def _save_origin(self, capture, metadata):
+    def _save_origin(self, capture, metadata, *, cancelled: threading.Event | None = None):
+        if cancelled is not None and cancelled.is_set():
+            raise ValueError("endpoint persistence cancelled")
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -565,6 +581,8 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                     ),
                 )
             self._fresh(capture.timestamp_ms)
+            if cancelled is not None and cancelled.is_set():
+                raise ValueError("endpoint persistence cancelled")
             connection.commit()
             return capture
         finally:

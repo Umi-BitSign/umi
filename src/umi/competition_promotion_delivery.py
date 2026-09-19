@@ -7,9 +7,17 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from .competition_chain import RegistrationCapture
+from .competition_evidence import IndependentEvaluationEvidence
 from .competition_execution import execution_boundary, execution_slot
-from .competition_store import AgreedPromotionReview, AttestedPromotionReview, verify_review
-from .open_competition import EvaluationRound, SignedSubmission, digest
+from .competition_store import (
+    AgreedPromotionReview,
+    AttestedPromotionReview,
+    CompetitionStore,
+    verify_review,
+)
+from .concurrency import run_owned_thread
+from .open_competition import EvaluationRound, EvaluationSuite, SignedSubmission, digest
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 
@@ -66,16 +74,13 @@ def retain_delivery(journal, value, policy):
 async def apply_reviewed_promotion(store, provider, value, *, suite, archive):
     """Apply only locally retained independent evidence at the actual owned head."""
     value = validate_delivery(value, store.policy)
-    existing = store.accepted_review(value)
+    existing = await run_owned_thread(store.accepted_review, value)
     if existing is not None:
         return existing
     capture = await provider.collect()
     current = execution_boundary(capture).block
-    evidence = store.promotion_evidence(
-        round_=value.round,
-        signed=value.submission,
-        suite=suite,
-        current_block=current,
+    retained, evidence = await run_owned_thread(
+        _retained_promotion_evidence, store, value, suite, current
     )
     if digest(evidence.attested_result.result) != value.review.review.evaluation_result_sha256:
         raise ValueError("review differs from locally retained independent evaluation")
@@ -84,12 +89,49 @@ async def apply_reviewed_promotion(store, provider, value, *, suite, archive):
     head = execution_boundary(capture).block
     if head < current:
         raise ValueError("promotion finalized head regressed")
+    return await run_owned_thread(
+        _commit_reviewed_promotion, store, value, retained, evidence, suite, archive, capture
+    )
+
+
+def _retained_promotion_evidence(
+    store: CompetitionStore, value: ReviewedPromotion, suite: EvaluationSuite, current: int
+) -> tuple[SignedSubmission, IndependentEvaluationEvidence]:
+    """Read and replay local evidence on one owned worker thread."""
+    with store._connection() as connection:
+        retained, _ = store._recorded_evaluation(
+            connection, digest(value.round), digest(value.submission.submission)
+        )
+    if retained.submission != value.submission.submission:
+        raise ValueError("promotion differs from retained submission")
+    # A fresh valid signature authenticates the same body. Replay the original
+    # locally retained envelope without replacing admission or execution evidence.
+    evidence = store.promotion_evidence(
+        round_=value.round,
+        signed=retained,
+        suite=suite,
+        current_block=current,
+    )
+    return retained, evidence
+
+
+def _commit_reviewed_promotion(
+    store: CompetitionStore,
+    value: ReviewedPromotion,
+    retained: SignedSubmission,
+    evidence: IndependentEvaluationEvidence,
+    suite: EvaluationSuite,
+    archive: Path,
+    capture: RegistrationCapture,
+) -> dict:
+    """Keep the final window check and durable promotion inside owned work."""
+    head = execution_boundary(capture).block
     with store._connection() as connection:
         cutoff = store._fixed_cutoff(connection, digest(value.round))
     if head > cutoff.evidence_cutoff_block:
         raise ValueError("promotion evidence window elapsed during review replay")
     return store.promote(
-        signed=value.submission,
+        signed=retained,
         attested=evidence.attested_result,
         round_=value.round,
         suite=suite,
@@ -101,28 +143,36 @@ async def apply_reviewed_promotion(store, provider, value, *, suite, archive):
 
 
 async def apply_evaluator_promotion(worker, value):
-    from .competition_evaluator import _read, validate_evidence_observation, validate_order
+    from .competition_evaluator import validate_evidence_observation, validate_order
     from .competition_settlement_signing import validate_local_execution
-    from .open_competition import EvaluationSuite
+    from .private_files import read_private_model as _read
 
     value = validate_delivery(value, worker.policy)
     if worker.review_store is None:
         raise ValueError("review delivery requires evaluator-owned history")
-    existing = worker.review_store.accepted_review(value)
+    existing = await run_owned_thread(worker.review_store.accepted_review, value)
     if existing is not None:
         return existing
     slot = execution_slot(value.round, value.submission, worker.config.evaluator_hotkey)
-    signed, evidence, receipt, own = worker.journal.settlement_evidence(slot)
+    signed, evidence, receipt, own = await run_owned_thread(
+        worker.journal.settlement_evidence, slot
+    )
     validate_order(signed, worker.policy, worker.legacy)
-    if signed.order.round != value.round or signed.order.submission != value.submission:
+    if (
+        signed.order.round != value.round
+        or signed.order.submission.submission != value.submission.submission
+    ):
         raise ValueError("review differs from the local execution order")
     validate_evidence_observation(receipt, signed.order, evidence, worker.config.evaluator_hotkey)
-    suite = _read(
+    suite = await run_owned_thread(
+        _read,
         Path(worker.config.reveal_directory) / (value.round.suite_sha256 + ".json"),
         EvaluationSuite,
     )
     current = (await worker.boundary()).block
-    validate_local_execution(worker, signed.order, evidence, own, suite, current)
+    await run_owned_thread(
+        validate_local_execution, worker, signed.order, evidence, own, suite, current
+    )
     return await apply_reviewed_promotion(
         worker.review_store,
         worker.provider,

@@ -33,6 +33,7 @@ class WeightProofRpc:
                 "state_getMetadata",
                 "state_getRuntimeVersion",
                 "chain_getHeader",
+                "chain_getBlock",
                 "chain_getBlockHash",
             )
         }

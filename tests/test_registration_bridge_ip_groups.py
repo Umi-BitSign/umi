@@ -237,7 +237,7 @@ def test_live_policy_upgrade_preserves_old_history_and_submits_rebalanced_row(
     )
     with bridge.RegistrationBridgeState(root) as state:
         chain = Chain(state, [before_new, before_new, after_new])
-        submit = chain.client.submit_call
+        submit = chain.client.submit_signed
 
         async def new_receipt(*args, **kwargs):
             await submit(*args, **kwargs)
@@ -245,7 +245,29 @@ def test_live_policy_upgrade_preserves_old_history_and_submits_rebalanced_row(
                 success=True, extrinsic_id=f"{BLOCK + 121}-0002", block_hash="0x" + "44" * 32
             )
 
-        chain.client.submit_call = new_receipt
+        chain.client.submit_signed = new_receipt
+        # Inclusion proof is an independent fixture, not the SDK return value.
+        from umi.bridge.receipts import VerifiedBridgeReceipt
+        from umi.chain_evidence import FinalizedSnapshotRef
+        from umi.signed_extrinsic import exact_signed_extrinsic
+
+        async def proven(client, journal):
+            receipt = bridge.BootstrapExtrinsicReference(
+                extrinsic_id=f"{BLOCK + 121}-0002",
+                block_number=BLOCK + 121,
+                extrinsic_index=2,
+                block_hash=after_new.block_hash,
+            )
+            return VerifiedBridgeReceipt(
+                receipt,
+                True,
+                exact_signed_extrinsic(bytes.fromhex(journal.signed_extrinsic)).extrinsic_hash,
+                FinalizedSnapshotRef(
+                    BLOCK + 121, after_new.block_hash, before_new.block_hash, "0x" + "55" * 32
+                ),
+            )
+
+        chain.exact_receipt_with_client = proven
         assert run(new, wallet, chain, state)["status"] == "submitted"
         assert len(chain.client.calls) == 1
         current = state.load()

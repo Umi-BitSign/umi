@@ -596,7 +596,12 @@ class DurableOwnedFinalityReader:
         with self._connect() as connection:
             if connection.execute("PRAGMA application_id").fetchone()[0] != _APPLICATION_ID:
                 raise BootstrapChainCaptureError("finality_store_schema_mismatch")
-            if connection.execute("PRAGMA user_version").fetchone()[0] != STORE_SCHEMA_VERSION:
+            # Version 3 adds private accounting only; version 2 retains the same
+            # config, evidence, and receipt bytes. This reader never migrates it.
+            if connection.execute("PRAGMA user_version").fetchone()[0] not in (
+                2,
+                STORE_SCHEMA_VERSION,
+            ):
                 raise BootstrapChainCaptureError("finality_store_schema_mismatch")
             if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise BootstrapChainCaptureError("finality_store_integrity_failed")

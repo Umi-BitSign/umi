@@ -9,9 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.test_bridge_transactions import case as case
+from tests.test_bridge_transactions import signed_policy as signed_policy
+from tests.test_bridge_transactions import tx as tx
 from umi import competition_host_anchor as anchor
 from umi import competition_host_artifacts as artifacts
 from umi import competition_host_observer as observer_module
+from umi.bridge.receipts import VerifiedBridgeExpiry
+from umi.bridge.transactions import evolve_journal
+from umi.competition_bridge_recovery import JOURNAL, BridgeHistoryAudit
 from umi.competition_chain import CompetitionChainConfig
 from umi.competition_chain_state import (
     FinalizedCompetitionWeightProvider,
@@ -30,7 +36,7 @@ from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor import ValidatorSupervisorError
 
-from .test_competition_chain import _hash
+from .test_competition_chain import _hash, _Runtime
 from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_host_artifacts import sign as sign_host_artifact
@@ -77,7 +83,8 @@ def _verified_host_tree(tmp_path, monkeypatch, config):
     revision = "73" * 20
     parent = tmp_path / "signed-hosts"
     root = parent / revision
-    root.mkdir(parents=True)
+    parent.mkdir(mode=0o700)
+    root.mkdir()
     files = []
     for name in sorted(artifacts._REQUIRED_FILES | set(_HELPERS)):
         path = root / name
@@ -362,6 +369,99 @@ async def test_capture_uses_exact_mocked_mounts_and_genuine_owned_proof(observer
         path.name: path.read_bytes() for path in (case.consent_path, case.observer_path)
     }
     assert not hasattr(observation, "chain_submission_authorized")
+
+
+def _preparing_for_observer(tx, hotkey):
+    """Rebind a synthetic journal to the real stopped-host fixture's test key."""
+    journal = tx.preparing
+    payload = journal.attempt.model_dump(mode="json", by_alias=True, exclude={"attempt_id"})
+    assert payload["health_observation"] is None
+    old = payload["validator_hotkey"]
+    payload["validator_hotkey"] = hotkey
+    payload["signing"]["validator_hotkey"] = hotkey
+    for participant in payload["roster"]:
+        if participant["hotkey"] == old:
+            participant["hotkey"] = hotkey
+    payload["roster_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "participants": [
+                    {k: v for k, v in p.items() if k != "last_update"} for p in payload["roster"]
+                ],
+                "owner_associated_hotkeys": payload["owner_associated_hotkeys"],
+            }
+        )
+    ).hexdigest()
+    payload["attempt_id"] = hashlib.sha256(
+        journal.attempt._identity_domain + canonical_json_bytes(payload)
+    ).hexdigest()
+    attempt = type(journal.attempt).model_validate(payload)
+    return evolve_journal(journal, validator_hotkey=hotkey, attempt=attempt)
+
+
+@pytest.mark.parametrize("failure", [False, True])
+async def test_bridge_collector_issues_only_after_owned_observation_and_closes_provider(
+    observer_case, tx, monkeypatch, failure
+):
+    item = observer_case
+    journal = _preparing_for_observer(tx, item.stopped.validator_hotkey)
+    # Journal preparation uses the signing fixture's narrow codec. Restore the
+    # chain fixture's codec before its genuine owned-observation collection.
+    monkeypatch.setattr("umi.validator_chain.bittensor_core.Runtime", _Runtime)
+    block = journal.attempt.era_death + 20
+    item.chain.finality.ref = replace(
+        item.chain.finality.ref,
+        block_number=block,
+        block_hash="0x" + hashlib.sha256(str(block).encode()).hexdigest(),
+    )
+    audit = BridgeHistoryAudit(
+        journal,
+        ((JOURNAL, journal),),
+        frozenset({JOURNAL}),
+        ("registration_bridge_transaction_proof_required",),
+    )
+    calls = []
+
+    async def read_outcome(provider, retained):
+        calls.append(retained)
+        assert not provider.closed and retained == journal
+        if failure:
+            raise ValueError("injected bridge proof failure")
+        # Reader ports are synthetic; the final observation and stopped lease
+        # are issued by the same production collectors used in the tests above.
+        return VerifiedBridgeExpiry(
+            item.chain.finality.ref, retained.attempt.signing.nonce, item.chain.finality.ref
+        )
+
+    monkeypatch.setattr(
+        observer_module.FinalizedCompetitionWeightProvider,
+        "read_bridge_outcome",
+        read_outcome,
+        raising=False,
+    )
+    observer = item.build()
+    try:
+        if failure:
+            with pytest.raises(ValueError, match="bridge proof failure"):
+                await observer.observe_bridge(audit, "ab" * 32)
+        else:
+            value = await observer.observe_bridge(audit, "ab" * 32)
+            kwargs = dict(
+                stopped=item.stopped, observation=value.observation, snapshot_sha256="ab" * 32
+            )
+            outcomes = observer_module.validate_stopped_bridge_observation(value, **kwargs)
+            assert len(outcomes) == 1 and outcomes[0].disposition == "expired_nonce_available"
+            validate_owned_weight_observation(value.observation)
+            with pytest.raises(ValueError, match="absent, altered or misbound"):
+                observer_module.validate_stopped_bridge_observation(replace(value), **kwargs)
+            with pytest.raises(ValueError, match="absent, altered or misbound"):
+                observer_module.validate_stopped_bridge_observation(
+                    value, **{**kwargs, "snapshot_sha256": "cd" * 32}
+                )
+        assert calls == [journal]
+        assert item.providers[-1].closed
+    finally:
+        await observer.aclose()
 
 
 @pytest.mark.parametrize("control", ["consent", "observer"])

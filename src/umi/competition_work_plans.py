@@ -22,7 +22,7 @@ from .competition_authorization import (
     validate_publication_body,
 )
 from .competition_chain import CompetitionChainConfig
-from .competition_evaluator import Directory, EvaluationOrder, validate_order_body
+from .competition_evaluator import EvaluationOrder, validate_order_body
 from .competition_execution import ExecutionCase
 from .competition_publication import (
     PublicationReplayLimits,
@@ -45,6 +45,7 @@ from .open_competition import (
     validate_suite_profile,
 )
 from .policy import ScoringPolicy, require_live_chain_observation, scoring_policy_hash
+from .private_files import Directory
 from .protocol import (
     PROTOCOL_VERSION,
     Hex32,

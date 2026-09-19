@@ -15,6 +15,30 @@ from tests.test_validator_supervisor import dev_wallet
 from umi import competition_container as containers
 
 
+@pytest.mark.parametrize("source_hash", [None, "00" * 32])
+async def test_linux_rehearsal_rejects_an_image_from_another_source_tree(
+    tmp_path, monkeypatch, source_hash
+):
+    from tests import test_competition_container_linux as rehearsal
+
+    archive = tmp_path / "synthetic.oci.tar"
+    archive.write_bytes(b"synthetic archive, never loaded")
+    monkeypatch.setenv("UMI_REHEARSAL_OCI_ARCHIVE", str(archive))
+    labels = {} if source_hash is None else {"vision.umi.source-tree-sha256": source_hash}
+    calls = []
+
+    def inspect(arguments, **kwargs):
+        calls.append(arguments)
+        assert arguments[:3] == ["/usr/bin/podman", "image", "inspect"]
+        return SimpleNamespace(stdout=json.dumps([{"Config": {"Labels": labels}}]).encode())
+
+    monkeypatch.setattr(rehearsal.subprocess, "run", inspect)
+    with pytest.raises(AssertionError, match="rebuild the rehearsal image from this checkout"):
+        await rehearsal.test_real_signed_oci_load_and_inert_sandbox(tmp_path)
+    assert len(calls) == 1
+    assert not (tmp_path / "release-cache").exists()
+
+
 def _limits(**updates):
     values = dict(
         maximum_cache_entries=4,

@@ -9,6 +9,7 @@ import pytest
 from bittensor import Wallet
 
 import umi.registration_bridge as bridge
+from tests.bridge_execution_fixtures import signing_state
 from tests.factories import dev_wallet
 from tests.test_registration_bridge import (
     BLOCK,
@@ -22,6 +23,9 @@ from tests.test_registration_bridge import (
     policy_body,
     replace_participant,
 )
+from umi.bridge.receipts import VerifiedBridgeReceipt
+from umi.bridge.transactions import RegistrationBridgeSigningAttempt, parse_bridge_journal
+from umi.chain_evidence import FinalizedSnapshotRef
 from umi.protocol import canonical_json_bytes
 
 
@@ -46,6 +50,9 @@ def wallet():
 
         def __init__(self):
             pass  # No filesystem wallet is created by this in-memory double.
+
+        def get_hotkey(self, password=None):
+            return self.hotkey
 
         @property
         def coldkey(self):
@@ -83,6 +90,7 @@ class Client:
         self.state, self.error, self.calls = state, error, []
         self.recovery_block_info = None
         self.recovery_events = []
+        self._substrate = self
 
     async def __aenter__(self):
         return self
@@ -97,24 +105,31 @@ class Client:
         assert item == ("System", "Events")
         return self.recovery_events
 
-    async def submit_call(self, call, wallet, **kwargs):
+    async def submit_call(self, *args, **kwargs):
+        pytest.fail("legacy SDK signing must not be used")
+
+    async def submit_signed(self, envelope, signer, **kwargs):
         durable = self.state.load()
         assert durable.phase == "submitting"
-        assert durable.attempt.expected_row == [
-            [uid, weight] for uid, weight in enumerate(call.params["weights"])
-        ]
+        assert envelope.data.hex() == durable.signed_extrinsic
+        assert envelope.extrinsic_hash == durable.signed_extrinsic_hash
+        assert signer.ss58_address == durable.validator_hotkey
         assert (
             self.state.root
             / "registration-bridge-history"
             / f"{durable.attempt.attempt_id}-submitting.json"
         ).is_file()
         assert kwargs == {
-            "signer": "hotkey",
-            "period": 8,
             "wait_for_inclusion": True,
             "wait_for_finalization": True,
         }
-        self.calls.append(call)
+        for phase in ("preparing", "signed"):
+            assert (
+                self.state.root
+                / "registration-bridge-history"
+                / f"{durable.attempt.attempt_id}-{phase}.json"
+            ).is_file()
+        self.calls.append(envelope)
         if self.error:
             raise self.error
         return SimpleNamespace(
@@ -128,6 +143,10 @@ class Chain:
         self.observations = iter(observations)
         self.hook, self.reads, self.receipts = hook, 0, []
         self.now = NOW
+        self.last_observation = None
+        self.signing_reads = 0
+        self.nonce = 7
+        self.proven_receipt = None
 
     def clock(self):
         return self.now
@@ -144,7 +163,44 @@ class Chain:
         if isinstance(result, BaseException):
             raise result
         assert result.validator_hotkey == validator_hotkey
+        self.last_observation = result
         return result
+
+    async def signing_observation_with_client(self, client, *, validator_hotkey):
+        self.signing_reads += 1
+        # The synthetic proof pins the most recent fixture observation. Tests
+        # that exercise a later signing head override this method explicitly.
+        obs = self.last_observation
+        assert obs.validator_hotkey == validator_hotkey
+        return obs, signing_state(obs, client.state, nonce=self.nonce)
+
+    async def exact_receipt_with_client(self, client, journal):
+        if self.proven_receipt is not None:
+            proven = self.proven_receipt
+            if isinstance(proven, BaseException):
+                raise proven
+            self.receipts.append(proven.receipt)
+            return proven
+        if not client.calls and journal.weight_call is None:
+            return None  # SDK hints or an equal observed row cannot supply a proof.
+        receipt = journal.weight_call or bridge.BootstrapExtrinsicReference(
+            extrinsic_id=f"{journal.attempt.preflight_block + 1}-0002",
+            block_number=journal.attempt.preflight_block + 1,
+            extrinsic_index=2,
+            block_hash="0x" + "22" * 32,
+        )
+        self.receipts.append(receipt)
+        return VerifiedBridgeReceipt(
+            receipt,
+            True,
+            journal.signed_extrinsic_hash,
+            FinalizedSnapshotRef(
+                receipt.block_number,
+                receipt.block_hash,
+                journal.attempt.preflight_block_hash,
+                "0x" + "55" * 32,
+            ),
+        )
 
     async def verify_finalized_receipt_with_client(self, client, receipt, *, observation):
         self.receipts.append(receipt)
@@ -191,7 +247,13 @@ def test_exact_real_sdk_call_intent_before_submit_and_retained_final_receipt(
             path.name.rsplit("-", 1)[1]
             for path in (state.root / "registration-bridge-history").iterdir()
         }
-        assert phases == {"submitting.json", "receipt_returned.json", "applied.json"}
+        assert phases == {
+            "preparing.json",
+            "signed.json",
+            "submitting.json",
+            "receipt_returned.json",
+            "applied.json",
+        }
         assert not (state.root / "journal.json").exists()
 
 
@@ -232,16 +294,29 @@ def test_unknown_never_retries_even_if_another_writer_lands_equal_row(
         assert not chain.client.calls
 
 
-def test_unknown_exact_successful_chain_call_recovers_without_rebroadcast(
-    tmp_path, signed_policy, wallet
+@pytest.mark.parametrize(
+    ("history_mutation", "reason"),
+    [
+        (None, None),
+        ("missing_applied", "retained_unresolved_attempt"),
+        ("conflicting_receipt", "history_receipt_changed"),
+    ],
+)
+def test_unknown_exact_successful_chain_call_recovers_and_allows_next_submission_after_restart(
+    tmp_path, signed_policy, wallet, history_mutation, reason
 ):
     before = writer_observation(wallet)
     root = tmp_path.resolve() / "state"
     with bridge.RegistrationBridgeState(root) as state:
-        chain = Chain(state, [before, before], error=TimeoutError())
-        with pytest.raises(TimeoutError):
-            run(signed_policy, wallet, chain, state)
-        attempt = state.load().attempt
+        # A historical version-1 writer never retained signed bytes. Keep that
+        # fixture explicit: all new submissions below must use version 2.
+        old = state.initialize(before, now=NOW)
+        attempt = bridge._new_attempt(
+            signed_policy, before, decision(signed_policy, before), health(before)
+        )
+        old = old.model_copy(update={"phase": "submitting", "attempt": attempt})
+        state.store(old, archive=True)
+        state.store(old.model_copy(update={"phase": "outcome_unknown"}), archive=True)
     included = BLOCK + 3
     after = applied_observation(wallet, signed_policy, block=included).model_copy(
         update={"block_number": BLOCK + 10, "block_hash": "0x" + "33" * 32}
@@ -282,6 +357,57 @@ def test_unknown_exact_successful_chain_call_recovers_without_rebroadcast(
         assert not chain.client.calls
         assert state.load().phase == "applied"
         assert state.load().weight_call.extrinsic_id == f"{included}-0000"
+
+    history = root / "registration-bridge-history"
+    recovered_history = {path.name: path.read_bytes() for path in history.iterdir()}
+    assert set(recovered_history) == {
+        f"{attempt.attempt_id}-{phase}.json"
+        for phase in ("submitting", "outcome_unknown", "receipt_returned", "applied")
+    }
+    next_block = included + signed_policy.body.required_activity_cutoff_blocks
+    next_before = after.model_copy(
+        update={"block_number": next_block, "block_hash": "0x" + "55" * 32}
+    )
+    next_after = applied_observation(wallet, signed_policy, block=next_block + 1)
+
+    with bridge.RegistrationBridgeState(root) as state:
+        chain = Chain(state, [next_before, next_before, next_after])
+        result = run(signed_policy, wallet, chain, state)
+        assert result["status"] == "submitted"
+        assert len(chain.client.calls) == 1 and len(chain.receipts) == 1
+        current = state.load()
+        assert current.phase == "applied"
+        assert current.attempt.attempt_id != attempt.attempt_id
+        assert current.weight_call.extrinsic_id == f"{next_block + 1}-0002"
+
+    if history_mutation == "missing_applied":
+        (history / f"{attempt.attempt_id}-applied.json").unlink()
+    elif history_mutation == "conflicting_receipt":
+        path = history / f"{attempt.attempt_id}-receipt_returned.json"
+        retained = bridge.RegistrationBridgeJournal.model_validate_json(path.read_bytes())
+        changed = retained.model_copy(
+            update={
+                "weight_call": retained.weight_call.model_copy(
+                    update={"block_hash": "0x" + "66" * 32}
+                )
+            }
+        )
+        path.write_bytes(canonical_json_bytes(changed))
+
+    # Recovery must remain auditable without turning the archived uncertainty
+    # into a permanent hold once a later attempt becomes the current journal.
+    with bridge.RegistrationBridgeState(root) as state:
+        chain = Chain(state, [next_after, next_after])
+        if reason is None:
+            assert run(signed_policy, wallet, chain, state)["status"] == "wait"
+        else:
+            with pytest.raises(bridge.RegistrationBridgeError, match=reason):
+                run(signed_policy, wallet, chain, state)
+        assert not chain.client.calls
+        assert state.load().attempt == current.attempt
+        assert state.load().weight_call == current.weight_call
+    if history_mutation is None:
+        assert all((history / name).read_bytes() == raw for name, raw in recovered_history.items())
 
 
 def test_returned_receipt_survives_post_submit_rpc_failure_and_recovers_without_send(
@@ -413,13 +539,11 @@ def test_changed_miner_after_probe_excludes_only_that_registration(
         assert len(chain.client.calls) == 1 and journal.phase == "applied"
         assert journal.attempt.expected_row == expected
         assert expected[6][1] == 0 and expected[10][1] > 0
-        assert isinstance(journal.attempt, bridge.RegistrationBridgeChurnAttempt)
+        assert isinstance(journal.attempt, RegistrationBridgeSigningAttempt)
         assert journal.attempt.health_observation == before
         assert journal.attempt.roster == after.participants
         raw = canonical_json_bytes(journal)
-        assert (
-            canonical_json_bytes(bridge.RegistrationBridgeJournal.model_validate_json(raw)) == raw
-        )
+        assert canonical_json_bytes(parse_bridge_journal(raw)) == raw
 
 
 @pytest.mark.parametrize("mutation", ["delete", "replace", "rootmode", "lockmode", "archive"])
@@ -490,9 +614,16 @@ def test_restart_rejects_current_rollback_against_retained_history(
             next(item for item in history if item.name.endswith(f"-{phase}.json")).read_bytes()
         )
     with bridge.RegistrationBridgeState(root) as state:
-        chain = Chain(state, [applied_observation(wallet, signed_policy)])
-        with pytest.raises(bridge.RegistrationBridgeError):
-            run(signed_policy, wallet, chain, state)
+        after = applied_observation(wallet, signed_policy)
+        chain = Chain(state, [after, after])
+        if rollback == "receipt":
+            # Only the directly adjacent, fully archived V2 transition may be
+            # completed after archive publication interrupted current replace.
+            assert run(signed_policy, wallet, chain, state)["status"] == "wait"
+            assert state.load().phase == "applied"
+        else:
+            with pytest.raises(bridge.RegistrationBridgeError):
+                run(signed_policy, wallet, chain, state)
         assert not chain.client.calls
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from .competition_evaluator import _private, _publish
 from .competition_execution import execution_boundary
 from .competition_package import prepare_competition_package
 from .competition_publication import (
@@ -15,10 +14,12 @@ from .competition_publication import (
     verify_settlement_endorsement,
     verify_settlement_publication,
 )
-from .competition_rounds import RoundJournal
+from .competition_round_journal import RoundJournal
 from .competition_settlement_preparation import MAX_BYTES, validate_preparation
 from .competition_settlement_signing import SettlementEndorsement
 from .open_competition import digest, identity
+from .private_files import ensure_private_directory as _private
+from .private_files import publish_private_model as _publish
 from .protocol import canonical_json_bytes
 
 

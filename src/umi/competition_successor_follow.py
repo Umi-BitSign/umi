@@ -16,7 +16,6 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from .competition_evaluator import Directory, _private, _read
 from .competition_package import (
     CompetitionPackageManifest,
     PreparedCompetitionPackage,
@@ -25,13 +24,16 @@ from .competition_package import (
     _read_sealed_file,
     competition_package_digest,
 )
-from .competition_successor_feed import _drained_thread
 from .competition_successor_publication import (
     PublicationWindowUnavailable,
     SuccessorRoundPublicationIntent,
     publication_valid_through,
 )
+from .concurrency import run_owned_thread
 from .open_competition import digest
+from .private_files import Directory
+from .private_files import ensure_private_directory as _private
+from .private_files import read_private_model as _read
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 _DESCRIPTOR = re.compile(r"([0-9a-f]{64})\.package\.json")
@@ -195,7 +197,7 @@ class AutomaticSuccessorPublisher:
     async def tick(self):
         async with self._serial:
             self.source.check_binding()
-            signed, delivered = await _drained_thread(self._histories)
+            signed, delivered = await run_owned_thread(self._histories)
             if len(delivered) < len(signed):
                 # A crash after signing never causes another signature or a
                 # newer export to jump over the missing predecessor. Recover
@@ -206,10 +208,10 @@ class AutomaticSuccessorPublisher:
                 )
                 return self._status("recovered_signed_history", missing.intent.round_sequence)
             head = await self.publisher._head()
-            prepared = await _drained_thread(self._select, signed, head.block)
+            prepared = await run_owned_thread(self._select, signed, head.block)
             if prepared is None:
                 return self._status("waiting_for_completed_round")
-            package = await _drained_thread(self.publisher.builder._load, prepared)
+            package = await run_owned_thread(self.publisher.builder._load, prepared)
             try:
                 publication_valid_through(self.publisher.builder.plan, package, head.block)
             except PublicationWindowUnavailable:

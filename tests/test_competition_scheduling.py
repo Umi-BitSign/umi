@@ -563,6 +563,8 @@ def test_database_symlink_and_public_directory_are_rejected(tmp_path, policy):
     a = build_authorization_fixture(policy)
     public = tmp_path / "public"
     public.mkdir(mode=0o755)
+    # CLI tests may leave a private umask. This fixture needs actual public bits.
+    public.chmod(0o755)
     with pytest.raises(ValueError, match="0700"):
         AssignmentPublicationJournal(public, a.policy, a.legacy_policy)
     private = tmp_path / "private"
@@ -699,8 +701,8 @@ def test_publication_crossing_deadline_during_checks_returns_expired(schedule, m
     original = schedule.journal._quotas
     first_observed = schedule.now[0]
 
-    def slow_checks(*args):
-        original(*args)
+    def slow_checks(*args, **kwargs):
+        original(*args, **kwargs)
         schedule.now[0] = (
             QUICKNET_GENESIS_MS
             + (schedule.authorization.schedule.issue_close_round - 1) * QUICKNET_PERIOD_MS

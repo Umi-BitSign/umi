@@ -24,6 +24,7 @@ from typing_extensions import Self
 
 from .competition_artifacts import verify_preserved_bundle
 from .competition_native import OfflineMpsRuntime
+from .concurrency import kill_and_reap
 from .open_competition import CaseOutput, CompetitionPolicy, ModelBundle, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -235,9 +236,7 @@ async def _small_command(arguments: tuple[str, ...], *, timeout: float = 10) -> 
         return await asyncio.wait_for(collect(), timeout)
     finally:
         if process.returncode is None:
-            process.kill()
-            with contextlib.suppress(ProcessLookupError):
-                await process.wait()
+            await kill_and_reap(process)
 
 
 async def verify_runtime(runtime: OfflineRuntime, policy: CompetitionPolicy) -> None:

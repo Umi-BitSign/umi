@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import bittensor as bt
-from bittensor._transport.contract import SignedExtrinsic
 from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
@@ -55,6 +54,7 @@ from .open_competition import Hex32, Hotkey, Registration, Signature, StrictProt
 from .policy import LiveChainObservationPin
 from .protocol import canonical_json_bytes
 from .runtime_metadata import ExecutedRuntimeContext
+from .signed_extrinsic import encode_mortal_call, exact_signed_extrinsic
 
 Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 _AUTH_DOMAIN = b"umi-competition-weight-authorization-v1\0"
@@ -502,52 +502,18 @@ class BittensorCompetitionWeightTransport:
             }
         ):
             raise ValueError("successor signing only accepts the exact authorized raw row")
-        if account_id32(signer.ss58_address) != account_id32(observation.validator_hotkey):
-            raise ValueError("hotkey signer differs from finalized validator")
-        crypto_type = signer.crypto_type
-        if crypto_type not in (0, 1) or type(crypto_type) is bool:
-            raise ValueError("successor only accepts ed25519 or sr25519 hotkeys")
-        runtime = observation.runtime._runtime
-        call_bytes = bytes(runtime.compose_call(call.module, call.function, call.params))
-        era = {"period": body.mortality_period, "current": observation.block}
-        payload = bytes(
-            runtime.signature_payload(
-                call_bytes,
-                era=era,
-                nonce=observation.validator_nonce,
-                tip=0,
-                tip_asset_id=None,
-                genesis_hash=bytes.fromhex(observation.genesis_hash[2:]),
-                era_block_hash=bytes.fromhex(observation.block_hash[2:]),
-                metadata_hash=None,
-            )
-        )
-        signature = signer.sign(payload)
-        if not isinstance(signature, bytes) or len(signature) != 64:
-            raise ValueError("hotkey returned an invalid signature")
-        encoded, returned_hash = runtime.encode_signed_extrinsic(
-            call_bytes,
-            public_key=account_id32(signer.ss58_address),
-            signature=signature,
-            signature_version=crypto_type,
-            era=era,
+        return encode_mortal_call(
+            call,
+            runtime=observation.runtime,
+            signer=signer,
+            validator_hotkey=observation.validator_hotkey,
             nonce=observation.validator_nonce,
-            tip=0,
-            tip_asset_id=None,
-            metadata_hash_enabled=False,
+            mortality_period=body.mortality_period,
+            genesis_hash=observation.genesis_hash,
         )
-        encoded = bytes(encoded)
-        if bytes(returned_hash) != hashlib.blake2b(encoded, digest_size=32).digest():
-            raise ValueError("runtime returned an inconsistent signed extrinsic hash")
-        if not 0 < len(encoded) <= 64 * 1024:
-            raise ValueError("signed successor extrinsic exceeds its fixed bound")
-        return encoded
 
     async def submit(self, encoded: bytes, signer):
-        extrinsic = SignedExtrinsic(
-            data=encoded,
-            extrinsic_hash="0x" + hashlib.blake2b(encoded, digest_size=32).hexdigest(),
-        )
+        extrinsic = exact_signed_extrinsic(encoded)
         async with self.client_factory(self.endpoint, retry_forever=False) as client:
             # No submit_call re-composition, nonce lookup, era selection or retry.
             return await client._substrate.submit_signed(
@@ -1095,7 +1061,8 @@ class CompetitionWeightWorker:
         if attempt["phase"] in {"applied", "recovered_effect", "expired_unconsumed_nonce"}:
             return self._outcome(body, hotkey, attempt["phase"], observation, row, attempt, False)
         if (
-            observation.validator_row == row
+            attempt["signed_extrinsic"] is not None
+            and observation.validator_row == row
             and attempt["preflight_block"]
             < observation.validator_last_update
             < attempt["era_death"]

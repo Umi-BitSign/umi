@@ -139,6 +139,40 @@ jobs:
             "${IMAGE_TAG}" -c 'import subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; chain = BittensorRegistrationBridgeChain()
           with chain.finality.observer._staged_inputs() as staged:
               subprocess.run([str(staged["binary"]), "--conformance-self-test"], check=True)'
+          docker run --rm --interactive --platform "${PLATFORM}" \
+            --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 64 --memory 1g --cpus 1 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777 \
+            --tmpfs /run/umi-finality:rw,exec,nosuid,nodev,size=268435456,mode=1777 \
+            --entrypoint /opt/umi/.venv/bin/python \
+            "${IMAGE_TAG}" -c 'import hashlib, json, subprocess, sys; from umi.bridge.native import _tools, read_image_artifacts; from umi.registration_bridge import BittensorRegistrationBridgeChain
+          BittensorRegistrationBridgeChain()
+          artifacts = read_image_artifacts()
+          tools = _tools()
+          assert tools["verifier"].verify_extrinsics_root(expected_root=hashlib.blake2b(b"\0", digest_size=32).digest(), extrinsics=(), state_version=1)
+          fixture = json.load(sys.stdin)
+          decode = lambda value: bytes.fromhex(value.removeprefix("0x"))
+          proof = dict(state_root=decode(fixture["state_root"]), items=tuple((decode(item["key"]), decode(item["value"])) for item in fixture["items"]), proof=tuple(decode(node) for node in fixture["proof"]))
+          assert tools["verifier"].verify_many(**proof)
+          from umi.substrate_proof import SubstrateProofVerifierError
+          try:
+              tools["verifier"].verify_many(**dict(proof, state_root=bytes(32)))
+          except SubstrateProofVerifierError as error:
+              assert error.reason_code == "invalid_proof"
+          else:
+              raise RuntimeError("proof verifier accepted the wrong state root")
+          with tools["verifier"]._staged_binary() as staged:
+              subprocess.run([str(staged["binary"])], input=b"", check=True)
+          from umi.runtime_metadata import RuntimeMetadataError
+          try:
+              tools["runtime_executor"]._invoke(b"invalid wasm")
+          except RuntimeMetadataError as error:
+              assert error.reason_code == "runtime_execution_failed"
+          else:
+              raise RuntimeError("runtime accepted invalid Wasm")
+          process = subprocess.run(["/opt/umi/bin/umi-runtime-metadata"], input=b"invalid wasm", capture_output=True, timeout=10)
+          assert process.returncode == 1 and process.stderr == b"runtime_initialization_failed\n" and process.stdout == b""
+          print(artifacts.model_dump_json(by_alias=True))' < rust/substrate-proof-verifier/fixtures/finney-state-v1.json
 
       - name: Extract the host finality verifier and pinned Finney chain spec
         shell: bash

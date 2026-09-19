@@ -57,6 +57,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _MAX_EVIDENCE_BYTES = 208 * 1024**2
 _MAX_STEP_BYTES = 48 * 1024
+_MAX_RESERVATION_RECEIPT_BYTES = 16 * 1024**2
 _FRESH_BOUNDARY_WAIT_SECONDS = 300
 _FRESH_BOUNDARY_POLL_SECONDS = 1
 
@@ -366,6 +367,83 @@ def _private_directory(path: Path) -> None:
         raise ValueError("execution journal must be owned by this user and mode 0700")
 
 
+def _job_allowance(job, raw: bytes) -> int:
+    # Preserve the existing receipt budget, including pending observations and
+    # JSON escaping of hypotheses, for every consumer of a shared incumbent.
+    return len(raw) + _runs_per_case(job) * len(job.cases) * _MAX_STEP_BYTES + 4096
+
+
+class _ExecutionObligation(StrictProtocolModel):
+    execution_key: Hex32
+    job_sha256: Hex32
+    reserved_bytes: Annotated[int, Field(ge=1, le=16 * 1024**3)]
+
+
+class _ExecutionReservation(StrictProtocolModel):
+    schema_: Literal["umi-execution-capacity-receipt/1"] = Field(alias="schema")
+    batch_id: Hex32
+    policy_sha256: Hex32
+    journal_identity: Hex32
+    journal_path: Annotated[str, Field(min_length=1, max_length=4096)]
+    generation: Literal[2] = 2
+    jobs: Annotated[tuple[_ExecutionObligation, ...], Field(max_length=65536)]
+    chain_submission_authorized: Literal[False] = False
+
+
+_EXECUTION_RESERVATION_SCHEMA = "umi-execution-capacity/1"
+_EXECUTION_RESERVATION_TABLES = {
+    "reservation_batches": (
+        "CREATE TABLE reservation_batches (id TEXT PRIMARY KEY NOT NULL "
+        "CHECK(length(id)=64), document BLOB NOT NULL CHECK(typeof(document)='blob'))"
+    ),
+    "reservation_jobs": (
+        "CREATE TABLE reservation_jobs (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=64), "
+        "job BLOB NOT NULL CHECK(typeof(job)='blob'), reserved INTEGER NOT NULL "
+        "CHECK(typeof(reserved)='integer' AND reserved>0))"
+    ),
+}
+_EXECUTION_TABLES = (
+    "metadata",
+    "jobs",
+    "steps",
+    "pending_steps",
+    "endpoint_incumbents",
+    *_EXECUTION_RESERVATION_TABLES,
+)
+_EXECUTION_FENCES = {
+    f"generation_{table}_{operation.lower()}": (
+        f"CREATE TRIGGER generation_{table}_{operation.lower()} BEFORE {operation} ON {table} "
+        "BEGIN SELECT CASE WHEN umi_execution_writer_generation() IS NOT 2 "
+        "THEN RAISE(ABORT,'execution writer generation mismatch') END; END"
+    )
+    for table in _EXECUTION_TABLES
+    for operation in ("INSERT", "UPDATE", "DELETE")
+}
+_EXECUTION_FENCES.update(
+    {
+        f"immutable_{table}_{operation.lower()}": (
+            f"CREATE TRIGGER immutable_{table}_{operation.lower()} BEFORE {operation} ON {table} "
+            "BEGIN SELECT RAISE(ABORT,'immutable execution reservation'); END"
+        )
+        for table, operations in (
+            ("reservation_batches", ("UPDATE", "DELETE")),
+            ("reservation_jobs", ("UPDATE",)),
+        )
+        for operation in operations
+    }
+)
+
+
+def _execution_batch_id(value: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(c not in "0123456789abcdef" for c in value)
+    ):
+        raise ValueError("execution reservation batch ID must be a SHA-256 digest")
+    return value
+
+
 class ExecutionJournal:
     """Reserve before execution. An interrupted/failed attempt never auto-runs again.
 
@@ -428,13 +506,17 @@ class ExecutionJournal:
                 "CREATE TABLE IF NOT EXISTS endpoint_incumbents "
                 "(scope TEXT PRIMARY KEY, source_job TEXT NOT NULL)"
             )
+            if self._reservation_enabled(db):
+                self._capacity(db)
 
     @contextmanager
     def _transaction(self):
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        db.create_function("umi_execution_writer_generation", 0, lambda: 2)
         try:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
+            self._check_generation(db)
             yield db
             db.commit()
         except BaseException:
@@ -442,6 +524,237 @@ class ExecutionJournal:
             raise
         finally:
             db.close()
+
+    @staticmethod
+    def _reservation_enabled(db):
+        return db.execute("PRAGMA user_version").fetchone()[0] == 2
+
+    def _check_generation(self, db):
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version == 0:
+            objects = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name GLOB 'reservation_*' "
+                "OR name GLOB 'generation_*' OR name GLOB 'immutable_reservation_*' LIMIT 1"
+            ).fetchone()
+            has_metadata = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+            ).fetchone()
+            marker = (
+                has_metadata
+                and db.execute(
+                    "SELECT 1 FROM metadata WHERE key IN "
+                    "('capacity_schema','journal_identity','journal_path') LIMIT 1"
+                ).fetchone()
+            )
+            if objects or marker:
+                raise ValueError("execution reservation generation marker was downgraded")
+            return
+        if version != 2:
+            raise ValueError("unsupported execution journal generation")
+        metadata = dict(db.execute("SELECT key,value FROM metadata"))
+        if (
+            metadata.get("capacity_schema") != _EXECUTION_RESERVATION_SCHEMA
+            or metadata.get("policy") != digest(self.policy)
+            or metadata.get("journal_path") != str(self.path.resolve())
+        ):
+            raise ValueError("execution reservation journal binding mismatch")
+        _execution_batch_id(metadata.get("journal_identity"))
+        expected = {**_EXECUTION_RESERVATION_TABLES, **_EXECUTION_FENCES}
+        placeholders = ",".join("?" for _ in expected)
+        objects = dict(
+            db.execute(
+                f"SELECT name,sql FROM sqlite_master WHERE name IN ({placeholders})",
+                tuple(expected),
+            )
+        )
+        if objects != expected:
+            raise ValueError("execution reservation capability schema differs")
+
+    def _enable_reservations(self, db):
+        if self._reservation_enabled(db):
+            return
+        if db.execute("SELECT 1 FROM jobs WHERE status='running' LIMIT 1").fetchone():
+            raise ValueError("drain running jobs before execution reservation migration")
+        # Historical allowances were computed by the same formula. Do not use
+        # malformed or undersized retained data as free capacity during migration.
+        for key, raw, reserved, status in db.execute("SELECT id,job,reserved,status FROM jobs"):
+            model = (
+                EndpointIncumbentJob
+                if json.loads(raw).get("schema") == "umi-endpoint-incumbent-job/1"
+                else ModelEvaluationJob
+            )
+            job = _journal_job(model.model_validate_json(raw), self.policy)
+            if (
+                execution_key(job) != key
+                or canonical_json_bytes(job) != bytes(raw)
+                or type(reserved) is not int
+                or reserved != _job_allowance(job, bytes(raw))
+                or status not in {"complete", "failed"}
+            ):
+                raise ValueError("retained execution job cannot be safely migrated")
+        for statement in _EXECUTION_RESERVATION_TABLES.values():
+            db.execute(statement)
+        db.executemany(
+            "INSERT INTO metadata VALUES (?,?)",
+            (
+                ("capacity_schema", _EXECUTION_RESERVATION_SCHEMA),
+                ("journal_identity", os.urandom(32).hex()),
+                ("journal_path", str(self.path.resolve())),
+            ),
+        )
+        for statement in _EXECUTION_FENCES.values():
+            db.execute(statement)
+        db.execute("PRAGMA user_version=2")
+
+    def _usage(self, db):
+        count, used = db.execute("SELECT COUNT(*),COALESCE(SUM(reserved),0) FROM jobs").fetchone()
+        if self._reservation_enabled(db):
+            pending, pending_bytes = db.execute(
+                "SELECT COUNT(*),COALESCE(SUM(reserved),0) FROM reservation_jobs"
+            ).fetchone()
+            metadata = db.execute(
+                "SELECT COALESCE(SUM(length(CAST(key AS BLOB))"
+                "+length(CAST(value AS BLOB))),0) FROM metadata"
+            ).fetchone()[0]
+            batches = db.execute(
+                "SELECT COALESCE(SUM(length(CAST(id AS BLOB))+length(document)),0) "
+                "FROM reservation_batches"
+            ).fetchone()[0]
+            count, used = count + pending, used + pending_bytes + metadata + batches
+        return count, used
+
+    def _capacity(self, db, *, jobs=0, reserved=0):
+        count, used = self._usage(db)
+        if count + jobs > self.maximum_jobs or used + reserved > self.maximum_bytes:
+            raise ValueError(
+                "execution journal capacity exhausted; retain history and provision capacity"
+            )
+        return count, used
+
+    @staticmethod
+    def _receipt_value(receipt, raw):
+        return {
+            **receipt.model_dump(mode="json", by_alias=True),
+            "receipt_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+
+    def _reservation(self, db, batch_id):
+        if not self._reservation_enabled(db):
+            return None
+        row = db.execute(
+            "SELECT document FROM reservation_batches WHERE id=?", (batch_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        raw = bytes(row[0])
+        if len(raw) > _MAX_RESERVATION_RECEIPT_BYTES:
+            raise ValueError("execution reservation receipt exceeds its byte bound")
+        receipt = _ExecutionReservation.model_validate_json(raw)
+        metadata = dict(db.execute("SELECT key,value FROM metadata"))
+        keys = tuple(item.execution_key for item in receipt.jobs)
+        if (
+            canonical_json_bytes(receipt) != raw
+            or receipt.batch_id != batch_id
+            or receipt.policy_sha256 != digest(self.policy)
+            or receipt.journal_identity != metadata["journal_identity"]
+            or receipt.journal_path != str(self.path.resolve())
+            or keys != tuple(sorted(set(keys)))
+        ):
+            raise ValueError("execution reservation receipt binding mismatch")
+        for item in receipt.jobs:
+            existing = db.execute(
+                "SELECT job,reserved FROM jobs WHERE id=?", (item.execution_key,)
+            ).fetchone()
+            pending = db.execute(
+                "SELECT job,reserved FROM reservation_jobs WHERE id=?", (item.execution_key,)
+            ).fetchone()
+            if (existing is None) == (pending is None):
+                raise ValueError("execution reservation obligation is missing or duplicated")
+            job_raw, reserved = existing if existing is not None else pending
+            if (
+                hashlib.sha256(bytes(job_raw)).hexdigest() != item.job_sha256
+                or reserved != item.reserved_bytes
+            ):
+                raise ValueError("execution reservation obligation differs from receipt")
+        return self._receipt_value(receipt, raw)
+
+    def reservation(self, batch_id: str) -> dict | None:
+        """Read and revalidate immutable capacity evidence without claiming work."""
+        batch_id = _execution_batch_id(batch_id)
+        with self._transaction() as db:
+            if self._reservation_enabled(db):
+                self._capacity(db)
+            return self._reservation(db, batch_id)
+
+    def reserve_jobs(self, batch_id: str, jobs) -> dict:
+        """Reserve a whole exact job cohort without changing execution status.
+
+        This enables the private reservation generation atomically on success.
+        It does not authorize execution or make failed/incomplete jobs retryable.
+        Overlapping batches share pending job credit, but retain their own receipts.
+        An empty cohort is supported and charges its immutable metadata only.
+        """
+        batch_id = _execution_batch_id(batch_id)
+        with self._transaction() as db:
+            prior = self._reservation(db, batch_id)
+            self._enable_reservations(db)
+            count, used = self._capacity(db)
+            specs, seen = [], set()
+            for index, supplied in enumerate(jobs):
+                if index >= 65536:
+                    raise ValueError("execution reservation batch exceeds its job bound")
+                job = _journal_job(supplied, self.policy)
+                raw, key = canonical_json_bytes(job), execution_key(job)
+                reserved = _job_allowance(job, raw)
+                if key in seen:
+                    raise ValueError("execution reservation repeats a job identity")
+                seen.add(key)
+                spec = _ExecutionObligation(
+                    execution_key=key,
+                    job_sha256=hashlib.sha256(raw).hexdigest(),
+                    reserved_bytes=reserved,
+                )
+                specs.append(spec)
+                existing = db.execute("SELECT job,reserved FROM jobs WHERE id=?", (key,)).fetchone()
+                pending = db.execute(
+                    "SELECT job,reserved FROM reservation_jobs WHERE id=?", (key,)
+                ).fetchone()
+                if existing is not None and pending is not None:
+                    raise ValueError("execution reservation obligation is duplicated")
+                retained = existing if existing is not None else pending
+                if retained is not None:
+                    if bytes(retained[0]) != raw or retained[1] != reserved:
+                        raise ValueError("execution identity already has a different assignment")
+                elif prior is not None:
+                    raise ValueError("execution reservation retry has an unknown job")
+                else:
+                    if count + 1 > self.maximum_jobs or used + reserved > self.maximum_bytes:
+                        raise ValueError(
+                            "execution journal capacity exhausted; "
+                            "retain history and provision capacity"
+                        )
+                    db.execute("INSERT INTO reservation_jobs VALUES (?,?,?)", (key, raw, reserved))
+                    count, used = count + 1, used + reserved
+            metadata = dict(db.execute("SELECT key,value FROM metadata"))
+            receipt = _ExecutionReservation(
+                schema="umi-execution-capacity-receipt/1",
+                batch_id=batch_id,
+                policy_sha256=digest(self.policy),
+                journal_identity=metadata["journal_identity"],
+                journal_path=str(self.path.resolve()),
+                jobs=tuple(sorted(specs, key=lambda item: item.execution_key)),
+            )
+            raw = canonical_json_bytes(receipt)
+            if len(raw) > _MAX_RESERVATION_RECEIPT_BYTES:
+                raise ValueError("execution reservation receipt exceeds its byte bound")
+            value = self._receipt_value(receipt, raw)
+            if prior is not None:
+                if value != prior:
+                    raise ValueError("execution reservation batch already has different jobs")
+                return prior
+            db.execute("INSERT INTO reservation_batches VALUES (?,?)", (batch_id, raw))
+            self._capacity(db)
+            return value
 
     def status(self, key: str) -> dict | None:
         with self._transaction() as db:
@@ -464,9 +777,7 @@ class ExecutionJournal:
     def reserve(self, job: ModelEvaluationJob) -> ModelExecutionEvidence | None:
         job = _journal_job(job, self.policy)
         raw, key = canonical_json_bytes(job), execution_key(job)
-        # JSON escaping can expand a 4096-byte hypothesis sixfold. Reserve
-        # space for that, its raw hex prefix, and both boundary records.
-        reserved = len(raw) + _runs_per_case(job) * len(job.cases) * _MAX_STEP_BYTES + 4096
+        reserved = _job_allowance(job, raw)
         with self._transaction() as db:
             existing = db.execute("SELECT job, status FROM jobs WHERE id=?", (key,)).fetchone()
             if existing:
@@ -477,13 +788,18 @@ class ExecutionJournal:
                         "prior execution is incomplete or failed; automatic rerun refused"
                     )
                 return self._evidence(db, job)
-            count, used = db.execute(
-                "SELECT COUNT(*), COALESCE(SUM(reserved),0) FROM jobs"
-            ).fetchone()
-            if count >= self.maximum_jobs or used + reserved > self.maximum_bytes:
-                raise ValueError(
-                    "execution journal capacity exhausted; retain history and provision capacity"
-                )
+            pending = None
+            if self._reservation_enabled(db):
+                pending = db.execute(
+                    "SELECT job,reserved FROM reservation_jobs WHERE id=?", (key,)
+                ).fetchone()
+            if pending is not None:
+                if bytes(pending[0]) != raw or pending[1] != reserved:
+                    raise ValueError("execution identity already has a different assignment")
+                self._capacity(db)
+                db.execute("DELETE FROM reservation_jobs WHERE id=?", (key,))
+            else:
+                self._capacity(db, jobs=1, reserved=reserved)
             db.execute("INSERT INTO jobs VALUES (?,?,?,'running',NULL)", (key, raw, reserved))
         return None
 

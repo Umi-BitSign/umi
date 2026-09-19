@@ -244,6 +244,7 @@ async def test_initial_history_refuses_public_parent(initial_history_case, tmp_p
     body = await case.fetcher.fetch_initial_history(**case.arguments)
     parent = tmp_path / "public"
     parent.mkdir(mode=0o755)
+    parent.chmod(0o755)  # Exercise public permissions even under a private umask.
     with pytest.raises(delivery.SuccessorDeliveryError, match="ownership or mode"):
         delivery.write_initial_history(parent / "history.json", body)
     assert not list(parent.iterdir())

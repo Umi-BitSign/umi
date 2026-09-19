@@ -22,7 +22,7 @@ from .competition_package import (
     PreparedCompetitionPackage,
     load_competition_package,
 )
-from .competition_rounds import RoundJournal
+from .competition_round_journal import RoundJournal
 from .competition_supervisor import (
     SignedSuccessorSupervisorDirective,
     SuccessorChainAuthorizationTarget,

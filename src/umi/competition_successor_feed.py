@@ -20,7 +20,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import Field
 from starlette.responses import Response
 
-from .competition_evaluator import Directory, _read
 from .competition_host_activation import (
     SuccessorWorkerExecutionLimits,
     _parse_worker_execution_config,
@@ -34,7 +33,7 @@ from .competition_package import (
     _opened_sealed_directory,
     _read_sealed_file,
 )
-from .competition_rounds import RoundJournal
+from .competition_round_journal import RoundJournal
 from .competition_successor_publication import (
     SignedSuccessorRoundPublication,
     SuccessorRoundPublicationPlan,
@@ -47,7 +46,10 @@ from .competition_supervisor import (
     load_bound_successor_replay_package,
 )
 from .competition_worker_cli import SuccessorWorkerExecutionConfig
+from .concurrency import run_owned_thread
 from .open_competition import digest
+from .private_files import Directory
+from .private_files import read_private_model as _read
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 _HEX = r"[0-9a-f]{64}"
@@ -84,24 +86,6 @@ def _page(items, cursor, *, more=False):
         more=more,
         head=signed[-1],
     )
-
-
-async def _drained_thread(function, *args):
-    """Keep the operation owned until its disk worker has actually stopped."""
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not task.cancelled():
-            task.exception()
-        raise
 
 
 class SuccessorPublicationFeed:
@@ -216,7 +200,7 @@ class SuccessorPublicationFeed:
             self.journal.put("delivery", str(publication.intent.sequence), record)
 
     async def retain_async(self, publication, prepared):
-        await _drained_thread(self.retain, publication, prepared)
+        await run_owned_thread(self.retain, publication, prepared)
 
     def history(self):
         """Read verified signed history for local delivery-outbox recovery."""
@@ -315,7 +299,7 @@ def create_successor_feed_app(feed):
             raise HTTPException(503, "successor delivery busy", headers={"Retry-After": "1"})
         async with serial:
             try:
-                body, immutable = await _drained_thread(feed.read, route)
+                body, immutable = await run_owned_thread(feed.read, route)
             except KeyError:
                 raise HTTPException(404, "successor object unavailable") from None
             except (OSError, ValueError, RuntimeError):

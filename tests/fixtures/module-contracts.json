@@ -1,5 +1,6 @@
 {
   "competition_cli_sha256": "8064cb6af3e9d1da9062aa65f97e4b47152e87f63bb2e442c187b8c7f20d6d44",
+  "round_schema_source_revision": "a80b8a579ee6ab156d6270cf1c0aabb3816b75cf",
   "schema_sha256": {
     "competition_cli.ExecutionInputs": "918a72249a15d407e05da4a59c1bd5dbcadcbfad267eacfd125dedab02f05869",
     "competition_cli.ExecutionRevealPulses": "bca1b8985845ee2e399c72ccac1c6b90728702ccab986872a9a6436f67dee721",
@@ -9,6 +10,8 @@
     "competition_cli.PublicationRoster": "ef5b8e54a38810bcb8c86cebe0c38500a49e04fc11d3cfea7d74c38d68728a52",
     "competition_cli.ReplayEntry": "35d65553eb004a84edd585ce54ce43adab83e8c42eb223bfcd1b9b842e77692e",
     "competition_cli.SettlementInput": "52fa4a6115d136eb215e0dbffa57e83993d422ede2d8268b82d5e7071584abce",
+    "competition_rounds.RoundPlan": "edafe54ddc146af40d139c9d0c9e525678b6eb3389e34ea59d07cd78fa4f19da",
+    "competition_rounds.RoundProposal": "8b5351536905076ccb8c7b2352884051b32505d4313513f3ecaa63852f3ca60a",
     "registration_bridge.RegistrationBridgeAttempt": "5c0bcbe39f8647b55321d216268bd1f65f93137c12ee2a8ef8ab1f78cbe0ed81",
     "registration_bridge.RegistrationBridgeChurnAttempt": "bd4d6c5030bfce90793ad303cd88fe38c3b4e7be66c4c9736c053f11ed8ea8a2",
     "registration_bridge.RegistrationBridgeDecision": "30ace272a7dfa2f236bb5e0362cbce8d29be0fe98ce30c545efede5937c59baa",

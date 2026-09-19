@@ -4,6 +4,7 @@
 
 - [Round coordinator and cutoff signing](#open-competition-round-coordinator)
 - [Round preparation](#open-competition-round-preparation)
+- [Continuous cohorts and schedule amendments](#continuous-cohorts-and-schedule-amendments)
 - [Automatic work proposals and independent signing](#open-competition-work-signing)
 
 <a id="open-competition-round-coordinator"></a>
@@ -38,9 +39,10 @@ schema `umi-round-coordinator-config/2`:
 
 - `policy_sha256` and `chain`: the same reviewed policy digest and owned-finality
   configuration. Proof collection must finish within 15 seconds.
-- `public_launch`: the exact `umi-competition-public-launch/1` schedule and sorted
-  eligible tracks advertised by intake. The intake store binds this identity on
-  first use and rejects later omission or replacement.
+- `public_launch`: the exact public launch identity and sorted eligible tracks
+  advertised by intake. Version 1 describes one round; version 2 adds continuous
+  intake with an explicit `round_stride_blocks`. The store rejects omission or
+  unauthorized replacement of its bound identity.
 - `state_directory`: durable coordinator journal, nonce database and process lock.
 - `intake_directory`: the existing competition store.
 - `submission_head_checkpoint_directory`: the exact external checkpoint directory
@@ -80,6 +82,56 @@ intake_opened_block < not_before_block <= admission_close_by_block
                     < signing_close_block < evaluation_close_block
                     < reveal_block < evidence_cutoff_block < valid_through_block
 ```
+
+### Continuous cohorts and schedule amendments
+
+A version 2 public launch keeps intake open after the first roster closes.
+Its matching intake deployment uses schema `umi-competition-intake-deployment/3`.
+For cycle `n`, add `n * round_stride_blocks` to every first-round schedule block
+except `intake_opened_block`. That opening remains fixed. Each plan must match
+one of these complete derived schedules; changing only a deadline is rejected.
+The stride must exceed the first evidence window. Reward validity may overlap
+the next cycle so a completed round can remain effective during later scoring.
+
+Each cycle freezes the latest accepted, still-valid submission per hotkey and
+track at its finalized registration snapshot. Subsequent admissions and
+replacements cannot change an already frozen roster. They are available to the
+next cycle; miners must keep any previously selected endpoint/model available
+through its evaluation deadline. An unchanged submission can remain eligible
+across cycles until it expires, is replaced, or its hotkey loses registration.
+The policy interval, admission limits and replacement rate limit still apply.
+
+Public status retains the first schedule and reports `continuous_intake` plus
+`next_intake_schedule`. The latter uses the guaranteed cutoff, not the later
+coordinator polling margin. Admission receipts remain `accepted_no_weight`:
+they do not prove scoring or finalized competition rewards. Continuous intake
+also does not create private test cases. Operators must supply each cycle's
+fresh reviewed suite, delivery assets and capacity-qualified plan before its
+window. A missing or failed coordinator cycle is not a miner failure.
+
+To accelerate an unused version 1 first cohort, publish a
+`umi-competition-launch-amendment/1` signed by the current policy's evaluator
+quorum. It binds the previous launch digest, the complete continuous replacement,
+an effective block and reason `accelerate_first_cohort_continuous_intake`.
+It cannot change the policy, tracks, intake opening or accepted submission bytes.
+It cannot retime a prepared round or a used suite. Publish the signed miner feed
+profile and tested command with operating lead time before the new cutoff.
+
+Stop the intake database writers briefly and back up both the database and its
+external checkpoint. With the replacement service configuration, use the
+existing migration command's `--launch-amendment` and
+`--amendment-observed-block` options alongside `--confirm-quiesced-backup`.
+The observed block must come from the owned finalized-registration verifier and
+fall between the amendment's effective block and new guaranteed cutoff.
+The migration appends the authorization and launch identity, preserves all
+receipts, and advances the independent checkpoint. Restart writers with the
+replacement identity and without migration options. Verify unchanged receipt
+commitments and the public `/v1/competition/launch-amendments` response before
+announcing the revised schedule as applied.
+
+An ordinary restart cannot amend the schedule. Do not edit the SQLite binding,
+delete a checkpoint, replace a used plan, or change the live policy's reward
+rules as part of a schedule amendment.
 
 Supply reviewed windows long enough for proof collection, independent signatures,
 publication and execution. The policy's snapshot-age limit also bounds cutoff
@@ -195,10 +247,15 @@ task before closing the finality provider and releasing the instance lock.
 Run coordinator, intake, exchange, dispatcher and evaluator commands under a
 service manager with failure restart and rate limits. A terminated owned
 observer now exits the parent service even when no work is queued. HTTP shutdown
-drains requests before closing providers; journals are retained. A live observer
-waiting for a head is not restarted by this check. Freshness and proof checks
-continue to reject unusable observations. An active process alone does not prove
-that the service has a fresh finalized head.
+drains requests before closing providers; journals are retained. The durable
+observer also recovers a silent follow-stream timeout: it reaps the old process
+and restarts from the last retained head, with interruptible backoff from one to
+30 seconds. Competition providers use a 120-second follow-stream timeout; initial
+bootstrap has its own allowance. Invalid evidence and store faults remain
+terminal. Recovery never invents missing ancestry or makes stale heads usable.
+An active process alone does not prove that the service has a fresh finalized
+head. This describes the source implementation; installed services need the
+corresponding qualified release to acquire new recovery behavior.
 
 Tests cover owned snapshot disagreement, signing-window expiry, independent
 hotkey signatures, quorum certificates, lost acknowledgments, crash recovery,
@@ -408,6 +465,29 @@ the round. The plan selects exactly the policy's required number of groups.
 Every selected group must sign. Another hotkey from our own administration
 cannot replace an unavailable independent evaluator.
 
+The work queue prepares all new endpoint statements for a frozen plan together.
+Their immutable intents and discovery indexes commit in one transaction after
+validation and a final issue-window check. A capacity or indexing failure exposes
+none of those new statements. Model orders remain independently preparable.
+Exact retries keep original signed bodies and can repair missing indexes without
+choosing a new issuance. A partial endpoint batch retained by an older writer
+requires explicit recovery; preserve its evidence and do not clear the journal.
+
+Run one upgraded work-queue writer per state directory. The preparation lock
+coordinates upgraded instances but does not fence an already-running older
+writer. Quiesce the old writer during rollout. Before a new endpoint endorsement,
+the signer separately requires the dispatcher's bound timing profile and an
+atomic storage reservation for the complete cohort. See
+[dispatch capacity and timing](dispatch.md#shared-scheduling-capacity) for the
+private journal migration and qualification inputs. The work signer also reserves
+the complete cohort in its signing, execution and evaluator journals, plus its
+settlement-review store when configured. The private admission manifest binds
+the original assignments, byte allowances and native journal identities. Partial
+commits remain pending; no new work signature is produced until all receipts
+verify and admission completion is retained. Exact retries keep the same manifest.
+Capacity increases may be needed for retained history and both scored and void
+outcomes. Filesystem space and full-roster runtime still require qualification.
+
 Before its first signature, a worker requires its own retained cutoff intent,
 cutoff vote and original suite reservation. It checks the complete roster,
 incumbent, runtime and reference-free cases. An endpoint proposal additionally
@@ -423,7 +503,11 @@ The protected suite's commitment is checked during coordinator preparation;
 its reference-free projection is replayed against the suite after reveal.
 An opaque commitment alone cannot prove the hidden references before reveal.
 
-Model orders can enter signing immediately after cutoff certification. Each
+For a model-only round, orders can enter signing after cutoff certification and
+whole-cohort admission. In a mixed round, model endorsements wait until the signer
+has independently derived and reserved the endpoint assignments and retained its
+first endpoint-authorization endorsement. The client
+continues reading other work and retries waiting entries on its next pass. Each
 endpoint first needs an authorization quorum, then an order quorum. All requests
 must fit the frozen evaluation interval. A retained endpoint intent keeps its
 original issuance after restart; the service never chooses a later time to make
@@ -436,6 +520,15 @@ but the coordinator accepts a late acknowledgment retry only when that same
 signature was already retained. A late first arrival cannot establish quorum.
 Certificates are retained before file delivery. Recovery republishes the exact
 certificate only while its original window is usable.
+
+The signer holds a process-level lease through verification and vote persistence.
+Statement checks, retained-vote reads, assignment derivation and native capacity
+commits run outside the event loop. Cancellation waits for the owned operation
+to finish before releasing that lease. Finality providers stay on the event loop,
+and time used by preparation does not extend the signing window.
+A previous retained signature remains replayable under its
+original checks; replay does not authorize additional work. Drain older writer
+processes before a release which enables these private schema generations.
 
 Historical issuance recovery keeps a process-local LRU cache of hash-checked
 headers, bounded to 2,048 entries and 1 MiB of encoded header bytes (stored as

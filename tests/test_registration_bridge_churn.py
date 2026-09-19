@@ -23,6 +23,7 @@ from tests.test_registration_bridge_freeze import frozen
 from tests.test_registration_bridge_funding import setup as funding_setup  # noqa: F401
 from tests.test_registration_bridge_runtime import Chain, run, writer_observation
 from tests.test_registration_bridge_runtime import wallet as wallet
+from umi.bridge.transactions import RegistrationBridgeSigningAttempt
 from umi.protocol import canonical_json_bytes
 
 
@@ -262,7 +263,7 @@ def test_churn_attempt_restart_keeps_exact_receipt_and_no_duplicate_send(
             run(signed_policy, wallet, chain, state)
         journal = state.load()
         assert journal.phase == ("receipt_returned" if receipt_returned else "outcome_unknown")
-        assert isinstance(journal.attempt, bridge.RegistrationBridgeChurnAttempt)
+        assert isinstance(journal.attempt, RegistrationBridgeSigningAttempt)
         assert journal.attempt.health_observation == before
     with bridge.RegistrationBridgeState(root) as state:
         # UID6 remains unavailable, so the next complete probe has the same row.

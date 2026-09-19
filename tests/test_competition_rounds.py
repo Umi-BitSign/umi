@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from umi import competition_round_journal as round_journal
 from umi import competition_rounds as rounds
 from umi.competition_evaluator import _publish, _read
 from umi.competition_execution import execution_boundary
@@ -20,6 +21,7 @@ from umi.open_competition import digest, sign_object
 from umi.policy import umi_source_tree_sha256
 from umi.protocol import canonical_json_bytes
 
+from .async_ownership import PausedCall
 from .competition_checkpoint import bind_submission_checkpoint
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_evaluator import Provider
@@ -156,6 +158,142 @@ async def prepare(setup):
     result = await setup.coordinator.cycle()
     assert result["prepared"] == 1 and result["held"] == 0
     return setup.coordinator.proposals()[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["observe", "proposals", "promotion_deliveries", "vote"])
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+async def test_round_query_drains_storage_before_releasing_serial_owner(
+    setup, monkeypatch, operation, cancel, fail
+):
+    coordinator = setup.coordinator
+    proposal = await prepare(setup)
+    worker = setup.workers[0]
+    vote = (
+        rounds.CutoffEndorsement(
+            proposal_sha256=digest(proposal),
+            signature=rounds.sign_cutoff_publication(proposal.cutoff, worker.wallet),
+        )
+        if operation == "vote"
+        else None
+    )
+    query = rounds.RoundQuery(
+        schema="umi-round-query/1",
+        policy_sha256=digest(setup.policy),
+        hotkey=worker.config.evaluator_hotkey,
+        nonce_unix_ns=str(time.time_ns()),
+        vote=vote,
+    )
+    owner, name = {
+        "observe": (coordinator.journal, "observe"),
+        "proposals": (coordinator, "proposals"),
+        "promotion_deliveries": (coordinator, "promotion_deliveries"),
+        "vote": (coordinator.journal, "put"),
+    }[operation]
+    original = getattr(owner, name)
+
+    def perform(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if fail:
+            raise OSError("synthetic storage failure")
+        return result
+
+    paused = PausedCall(perform)
+    monkeypatch.setattr(owner, name, paused)
+    operation = paused.drive(coordinator.query(query), coordinator.serial, cancel=cancel)
+    if cancel or fail:
+        with pytest.raises(asyncio.CancelledError if cancel else OSError):
+            await operation
+    else:
+        reply = await operation
+        assert reply.query_sha256 == digest(query)
+        assert reply.accepted_proposal_sha256 == (digest(proposal) if vote else None)
+    if vote is not None:
+        key = digest(proposal) + ":" + rounds.identity(query.hotkey)
+        assert coordinator.journal.get("vote", key) == json.loads(canonical_json_bytes(vote))
+        # Losing the response after a durable write does not create a new vote
+        # or require moving the original signing window.
+        monkeypatch.setattr(owner, name, original)
+        setup.provider.block = proposal.signing_close_block + 1
+        reply = await coordinator.query(query)
+        assert reply.accepted_proposal_sha256 == digest(proposal)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["plan_read", "plan_index", "prepare", "prepared_write"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_round_cycle_drains_plan_preparation_before_releasing_serial(
+    setup, monkeypatch, operation, cancel
+):
+    coordinator = setup.coordinator
+    owner, name = {
+        "plan_read": (rounds, "_read"),
+        "plan_index": (coordinator.journal, "keys"),
+        "prepare": (coordinator.store, "prepare_round"),
+        "prepared_write": (coordinator.journal, "put"),
+    }[operation]
+    original = getattr(owner, name)
+    paused = PausedCall(original)
+
+    def write(kind, *args, **kwargs):
+        return (paused if kind == "prepared" else original)(kind, *args, **kwargs)
+
+    monkeypatch.setattr(owner, name, write if operation == "prepared_write" else paused)
+    running = paused.drive(coordinator.cycle(), coordinator.serial, cancel=cancel)
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    else:
+        result = await running
+        assert result["prepared"] == 1 and result["held"] == 0
+    monkeypatch.setattr(owner, name, original)
+    if operation != "plan_index":
+        # Storage finishes before cancellation escapes, even if the caller never
+        # received the result. Recovery must use the original cutoff snapshot.
+        setup.provider.block = 126
+    result = await coordinator.cycle()
+    assert result["prepared"] == 1 and result["held"] == 0
+    assert coordinator.proposals()[0].cutoff.registration_snapshot.block == 120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_round_http_nonce_persistence_drains_on_cancellation(setup, monkeypatch, cancel):
+    original = rounds.SQLiteNonceStore.check_and_store
+    paused = PausedCall(original)
+
+    def store(self, *args):
+        return paused(self, *args)
+
+    monkeypatch.setattr(rounds.SQLiteNonceStore, "check_and_store", store)
+    worker = setup.workers[0]
+    query = rounds.RoundQuery(
+        schema="umi-round-query/1",
+        policy_sha256=digest(setup.policy),
+        hotkey=worker.config.evaluator_hotkey,
+        nonce_unix_ns=str(time.time_ns()),
+    )
+    signed = rounds.SignedRoundQuery(query=query, signature=sign_object(query, worker.wallet))
+    serial = asyncio.Lock()
+    async with httpx.AsyncClient(transport=setup.transport, base_url="https://rounds.example") as c:
+
+        async def post():
+            async with serial:
+                return await c.post(
+                    rounds.ROUTE,
+                    content=canonical_json_bytes(signed),
+                    headers={"Content-Type": "application/json"},
+                )
+
+        running = paused.drive(post(), serial, cancel=cancel)
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        else:
+            assert (await running).status_code == 200
+        monkeypatch.setattr(rounds.SQLiteNonceStore, "check_and_store", original)
+        assert (await post()).status_code == 401
 
 
 @pytest.mark.asyncio
@@ -685,7 +823,7 @@ def test_journal_rejects_oversized_retained_objects_before_decode(tmp_path, monk
         assert len(raw) <= rounds.MAX_BYTES
         return real_loads(raw, *args, **kwargs)
 
-    monkeypatch.setattr(rounds.json, "loads", guarded)
+    monkeypatch.setattr(round_journal.json, "loads", guarded)
     with pytest.raises(ValueError, match="byte bound"):
         journal.get("intent", "1")
     with pytest.raises(ValueError, match="byte bound"):

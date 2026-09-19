@@ -16,10 +16,13 @@ import re
 import stat
 import time
 import weakref
-from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
+from .bridge.receipts import BridgeReceiptReader, VerifiedBridgeExpiry, VerifiedBridgeReceipt
+from .bridge.signing import FinalizedIdentity
+from .bridge.transactions import RegistrationBridgeTransactionJournal, parse_bridge_journal
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import (
     FinalizedRegistrationProvider,
@@ -44,7 +47,12 @@ from .grandpa_finality_supervisor import (
 )
 from .open_competition import BurnDestination, Registration, digest
 from .protocol import canonical_json_bytes
-from .runtime_metadata import MAX_CODE_BYTES, ExecutedRuntimeContext, RuntimeMetadataExecutor
+from .runtime_metadata import (
+    MAX_CODE_BYTES,
+    ExecutedRuntimeContext,
+    RuntimeMetadataExecutor,
+    collect_executed_runtime,
+)
 from .simple_bootstrap_validator import _manifest_anchor_state
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
@@ -284,6 +292,19 @@ def validate_owned_weight_observation(observation: OwnedCompetitionChainObservat
         raise ValueError("weight observation was not issued by the owned proof adapter")
 
 
+class _ReceiptFinality:
+    """Adapt the owned proof collector without consulting RPC finality labels."""
+
+    def __init__(self, proofs: FinalizedProofCollector, minimum_block: int):
+        self._proofs, self._minimum_block = proofs, minimum_block
+
+    async def read_finalized_identity(self) -> FinalizedIdentity:
+        ref = await self._proofs.finalized_snapshot()
+        if type(ref) is not FinalizedSnapshotRef or ref.block_number < self._minimum_block:
+            raise ValueError("bridge receipt requires an owned snapshot at the configured floor")
+        return SimpleNamespace(number=ref.block_number, block_hash=ref.block_hash)
+
+
 class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
     """Use the existing pinned GRANDPA owner with bounded weight-state proofs.
 
@@ -297,6 +318,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         self._cache_lease = None
         self._weight_rpc = None
         self._runtime_rpc = None
+        self._bridge_receipts = None
         try:
             super().__init__(*args, **kwargs)
             self._configure_weight_collector()
@@ -358,16 +380,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
     async def _runtime_context(self, ref):
         if self._runtime_executor is None:
             return await super()._runtime_context(ref)
-        evidence = await self._runtime_proofs.storage_evidence(ref, b":code")
-        task = asyncio.create_task(asyncio.to_thread(self._runtime_executor.execute, ref, evidence))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # Retain the collection lock until the bounded subprocess exits.
-            # A cancelled collection must not leave concurrent executors behind.
-            with suppress(Exception):
-                await task
-            raise
+        # Retain the collection lock until the bounded subprocess exits,
+        # including repeated cancellation during shutdown.
+        return await collect_executed_runtime(self._runtime_proofs, self._runtime_executor, ref)
 
     def _validate_runtime_context(self, runtime, ref):
         if not isinstance(runtime, PinnedRuntimeContext) or runtime.snapshot != ref:
@@ -473,16 +488,97 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             maximum_database_bytes=maximum,
         )
 
-    async def aclose(self):
+    async def _close_resources(self):
+        # The base close method holds the collection lock until all receipt
+        # reads and their native proof work have drained.
+        self._bridge_receipts = None
         try:
-            await super().aclose()
+            await super()._close_resources()
         finally:
             try:
-                for rpc in (self._weight_rpc, self._runtime_rpc):
-                    if rpc is not None:
-                        await rpc.aclose()
+                try:
+                    if self._weight_rpc is not None:
+                        await self._weight_rpc.aclose()
+                finally:
+                    if self._runtime_rpc is not None:
+                        await self._runtime_rpc.aclose()
             finally:
                 self._release_cache_lease()
+
+    async def read_bridge_receipt(
+        self, journal: RegistrationBridgeTransactionJournal
+    ) -> VerifiedBridgeReceipt | None:
+        """Read exact historical bytes using this provider's owned finality.
+
+        This method neither updates the bridge journal nor grants a stopped-host
+        capability. Missing evidence remains unknown. Repeated calls preserve
+        the reader's bounded ancestry progress until the provider closes.
+        """
+        journal = parse_bridge_journal(canonical_json_bytes(journal))
+        if type(journal) is not RegistrationBridgeTransactionJournal:
+            raise ValueError("bridge receipt collection requires a version-2 transaction")
+        async with self._lock:
+            return await self._bridge_reader().find(journal)
+
+    async def read_bridge_expiry(
+        self, journal: RegistrationBridgeTransactionJournal
+    ) -> VerifiedBridgeExpiry:
+        async with self._lock:
+            return await self._bridge_reader().expiry(journal)
+
+    async def read_bridge_outcome(
+        self, journal: RegistrationBridgeTransactionJournal
+    ) -> VerifiedBridgeReceipt | VerifiedBridgeExpiry:
+        """Resolve one retained attempt; retry timeouts only after verified progress."""
+        journal = parse_bridge_journal(canonical_json_bytes(journal))
+        if type(journal) is not RegistrationBridgeTransactionJournal:
+            raise ValueError("bridge outcome requires a version-2 transaction")
+        async with self._lock:
+
+            async def read(operation):
+                while True:
+                    reader = self._bridge_reader()
+                    before = reader.progress
+                    try:
+                        return await operation(reader, journal)
+                    except asyncio.TimeoutError:
+                        if reader.progress == before:
+                            raise
+
+            if journal.phase in {
+                "submitting",
+                "outcome_unknown",
+                "receipt_returned",
+                "applied",
+                "failed",
+            }:
+                receipt = await read(BridgeReceiptReader.find)
+                if receipt is not None:
+                    return receipt
+                if journal.phase in {"receipt_returned", "applied", "failed"}:
+                    raise ValueError("recorded bridge receipt was not verified")
+            return await read(BridgeReceiptReader.expiry)
+
+    def _bridge_reader(self) -> BridgeReceiptReader:
+        # Caller holds the same collection lock used by shutdown.
+        if self._closed:
+            raise ValueError("weight provider is closed")
+        if not self._owned or self._task is None or self._task.done():
+            raise ValueError("owned finality observer is not running")
+        if self._runtime_executor is None or self._weight_rpc is None:
+            raise ValueError("bridge receipt collection requires owned runtime proof tools")
+        if self._bridge_receipts is None:
+            self._bridge_receipts = BridgeReceiptReader(
+                finality=_ReceiptFinality(self._proofs, self.config.minimum_finalized_block),
+                rpc=self._weight_rpc,
+                verifier=SubprocessStorageProofVerifier(
+                    binary_path=self.config.proof_binary,
+                    expected_sha256=self.config.proof_binary_sha256,
+                ),
+                runtime_executor=self._runtime_executor,
+                timeout_seconds=min(120, self.config.collection_timeout_seconds),
+            )
+        return self._bridge_receipts
 
     async def collect(self):
         raise ValueError("weight collection needs an explicit validator and recipients")
@@ -544,6 +640,8 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
 
     async def _collect_weights_locked(self, hotkey, recipients, anchor):
         async with self._lock:
+            if self._closed:
+                raise ValueError("weight provider is closed")
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
             ref = await self._proofs.finalized_snapshot()

@@ -45,6 +45,8 @@ Use one hotkey per worker and a dedicated configuration with schema
 - For endpoints, `dispatch_directory` and `legacy_policy_sha256`: the local
   [dispatcher](dispatch.md#open-competition-dispatch) journal and exact transport policy.
   Supply both, or omit both for a model-only evaluator worker.
+- `scheduling_capacity`: optional [shared scheduling limits](dispatch.md#shared-scheduling-capacity),
+  matching the dispatcher, assignment feed and evidence assembler for that journal.
 - `exchange_origin` enables the [authenticated exchange](exchange.md#open-competition-exchange).
   For automatic endpoint publication delivery, set `assignment_directory` to
   the dispatcher's separate `publication_directory`. No extra upload key is used.
@@ -75,14 +77,21 @@ against an owned finalized state root. Keep the collection timeout and proof
 checks enabled; changing the RPC endpoint does not grant finality authority.
 
 The owned observer uses `startup_timeout_seconds` for its first verified record
-(600 seconds by default, configurable up to 900). Subsequent records have a
-separate 900-second timeout. During a gap, `maximum_head_age_ms` still limits
-usable evidence to at most 120 seconds: signing and execution wait for a fresh
-verified head. The longer observer timeout allows recovery without discarding
-the running observer as soon as its last head becomes stale. If no new record
-arrives within 900 seconds, the observer exits with `record_timeout`, terminates
-its child process and lets the service manager restart from retained finality
-history. Recovery never erases evidence or extends a signed round.
+(600 seconds by default, configurable up to 900). The source implementation now
+uses a separate 120-second follow-stream timeout and recovers from the last
+retained head after reaping the old process. Signing and execution still require
+a fresh verified head. See [observer recovery and release qualification](rounds.md#open-competition-round-coordinator--capacity-operations-and-verification);
+an installed service needs the corresponding qualified release to use this behavior.
+
+The source finality store uses private SQLite schema 3 for transactionally
+maintained evidence counters. Opening a schema-2 store audits its history and
+installs the counters in one write transaction. Config bindings, attestation
+bytes and acceptance receipts remain unchanged. Read-only capture supports both
+versions. Startup still verifies all retained evidence and rejects inconsistent
+counters. Existing open writers execute the database triggers, but older binaries
+cannot reopen schema 3. Upgrade shared writers together; do not lower the schema
+version or delete history to force a downgrade. Include this migration in release
+qualification before deploying the new source.
 
 None of these directories may overlap each other, the wallet, or the chain
 verifier's state. Paths cannot traverse symlinks. The model container receives

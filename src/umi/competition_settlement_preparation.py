@@ -12,7 +12,6 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from .competition_evaluator import _publish
 from .competition_execution import execution_boundary
 from .competition_package import (
     CompetitionPackageEvidence,
@@ -35,6 +34,7 @@ from .open_competition import (
     digest,
     validate_dependence_calibration,
 )
+from .private_files import publish_private_model as _publish
 from .protocol import canonical_json_bytes
 
 MAX_BYTES = 16 * 1024**2

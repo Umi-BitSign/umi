@@ -42,10 +42,10 @@ from umi.grandpa_finality import (
     SOURCE_TREE_SHA256,
     GrandpaFinalityObserver,
 )
+from umi.grandpa_finality_accounting import install_accounting
 from umi.grandpa_finality_supervisor import (
     _SCHEMA_STATEMENTS,
     STORE_SCHEMA,
-    STORE_SCHEMA_VERSION,
     DurableGrandpaFinalityPort,
     GrandpaFinalitySupervisorLimits,
     parse_finality_acceptance_receipt,
@@ -493,8 +493,10 @@ def stat_mode(path: Path) -> int:
     return os.stat(path).st_mode & 0o777
 
 
-def test_durable_reader_rejects_empty_or_replaced_store_without_mutating_it(
+@pytest.mark.parametrize("schema_version", [0, 1, 2, 3, 4])
+def test_durable_reader_accepts_only_known_store_versions_without_mutating_it(
     tmp_path: Path,
+    schema_version: int,
 ) -> None:
     binary = tmp_path / "observer"
     binary.write_bytes(b"#!/bin/sh\nexit 1\n")
@@ -542,7 +544,7 @@ def test_durable_reader_rejects_empty_or_replaced_store_without_mutating_it(
         for statement in _SCHEMA_STATEMENTS:
             connection.execute(statement)
         connection.execute("PRAGMA application_id = 1431128390")
-        connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
+        connection.execute(f"PRAGMA user_version = {schema_version}")
         connection.executemany(
             "INSERT INTO store_meta(key, value) VALUES (?, ?)",
             (
@@ -551,8 +553,19 @@ def test_durable_reader_rejects_empty_or_replaced_store_without_mutating_it(
                 ("head_acceptance_digest", bytes(32)),
             ),
         )
+        if schema_version == 3:
+            install_accounting(connection, (0, 0))
     state.chmod(0o600)
     before = state.read_bytes()
+    if schema_version not in (2, 3):
+        with pytest.raises(BootstrapChainCaptureError, match="finality_store_schema_mismatch"):
+            DurableOwnedFinalityReader(
+                state_path=state.absolute(),
+                finality_verifier=binary,
+                chain_spec=chain_spec,
+            )
+        assert state.read_bytes() == before
+        return
     reader = DurableOwnedFinalityReader(
         state_path=state.absolute(),
         finality_verifier=binary,
@@ -564,7 +577,11 @@ def test_durable_reader_rejects_empty_or_replaced_store_without_mutating_it(
 
 
 @pytest.mark.asyncio
-async def test_durable_reader_replays_one_owned_finney_attestation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("schema_version", [2, 3])
+async def test_durable_reader_replays_one_owned_finney_attestation(
+    tmp_path: Path,
+    schema_version: int,
+) -> None:
     binary = tmp_path / "observer"
     binary.write_bytes(b"#!/bin/sh\nexit 1\n")
     binary.chmod(0o500)
@@ -615,6 +632,22 @@ async def test_durable_reader_replays_one_owned_finney_attestation(tmp_path: Pat
         previous=None,
     )
     port.accept_attestation(binding, accepted)
+    if schema_version == 2:
+        # Reconstruct the historical on-disk shape rather than following the
+        # current schema constant and silently dropping legacy coverage.
+        with sqlite3.connect(state) as connection:
+            for trigger in (
+                "finality_evidence_insert",
+                "finality_evidence_delete",
+                "finality_evidence_update",
+            ):
+                connection.execute(f"DROP TRIGGER {trigger}")
+            connection.execute("DROP TABLE finality_evidence_accounting")
+            connection.execute("DELETE FROM store_meta WHERE key='evidence_accounting_v1'")
+            connection.execute("PRAGMA user_version=2")
+    with sqlite3.connect(state) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == schema_version
+    before = state.read_bytes()
 
     reader = DurableOwnedFinalityReader(
         state_path=state.absolute(),
@@ -630,3 +663,4 @@ async def test_durable_reader_replays_one_owned_finney_attestation(tmp_path: Pat
     assert hashlib.sha256(evidence.attestation).hexdigest() == (
         parse_finality_acceptance_receipt(evidence.acceptance_receipt).evidence_sha256
     )
+    assert state.read_bytes() == before

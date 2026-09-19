@@ -372,7 +372,10 @@ def _make_case(tmp_path: Path) -> RenewalCase:
             / str(sequence)
             / (f"{history[sequence - 1].directive_sha256}.json")
         )
-        path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        # parents=True applies mode only to the last component. Explicit modes
+        # keep every fixture ancestor non-writable under a shared-group umask.
+        for directory in (route_root / account, route_root / account / "after", path.parent):
+            directory.mkdir(mode=0o755, exist_ok=True)
         feed._write_new_public(
             path,
             canonical_json_bytes(feed.page_for_cursor(history, sequence)),

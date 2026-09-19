@@ -9,17 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from .competition_chain import RegistrationCapture
+from .competition_chain import OwnedFinalityStale, RegistrationCacheFull, RegistrationCapture
+from .competition_submission_checkpoint import SubmissionCheckpointError
+from .concurrency import await_owned_task
 from .open_competition import CompetitionPolicy, RegistrationSnapshot, digest
 from .protocol import canonical_json_bytes
+from .validator_chain import ValidatorChainError
 
 _LOGGER = logging.getLogger(__name__)
+_RATE_LIMIT_COOLDOWN_SECONDS = 30.0
 
 PROVENANCE_FIELDS = frozenset(
     {
@@ -46,6 +51,83 @@ class VerifiedCaptureUnavailable(ValueError):
     """No sufficiently recent verified capture is available for public reads."""
 
 
+_CHAIN_REFRESH_REASONS = frozenset(
+    {
+        "owned_finality_unavailable",
+        "owned_finalized_snapshot_invalid",
+        "finalized_snapshot_rpc_failed",
+        "finalized_header_invalid",
+        "finalized_header_number_invalid",
+        "finalized_header_number_mismatch",
+        "finalized_block_hash_invalid",
+        "finalized_block_hash_mismatch",
+        "finalized_parent_hash_invalid",
+        "finalized_parent_hash_mismatch",
+        "finalized_state_root_invalid",
+        "finalized_state_root_mismatch",
+        "proof_rpc_endpoint_unavailable",
+        "proof_rpc_endpoint_invalid",
+        "proof_rpc_failed",
+        "proof_rpc_rate_limited",
+        "proof_rpc_error",
+        "proof_rpc_response_invalid",
+        "proof_rpc_response_limit",
+        "proof_rpc_request_invalid",
+        "proof_rpc_request_limit",
+        "proof_rpc_method_forbidden",
+        "runtime_version_invalid",
+        "runtime_version_pin_mismatch",
+        "runtime_metadata_rpc_failed",
+        "runtime_metadata_invalid",
+        "runtime_metadata_limit",
+        "runtime_metadata_pin_mismatch",
+        "runtime_codec_initialization_failed",
+        "storage_codec_initialization_failed",
+        "storage_codec_metadata_pin_mismatch",
+        "storage_value_decode_failed",
+        "storage_value_invalid",
+        "storage_value_limit",
+        "storage_values_size_limit",
+        "storage_proof_rpc_failed",
+        "storage_proof_verification_failed",
+        "storage_multi_proof_verifier_unavailable",
+        "storage_proof_invalid",
+        "storage_proof_block_mismatch",
+        "storage_proof_node_invalid",
+        "storage_proof_node_limit",
+        "storage_proof_node_size_limit",
+        "storage_proof_size_limit",
+        "storage_proof_duplicate_node",
+    }
+)
+_REFRESH_FAILURE_CLASSES = {
+    OwnedFinalityStale: ("OwnedFinalityStale", "owned_finality_stale"),
+    RegistrationCacheFull: ("RegistrationCacheFull", "registration_cache_capacity"),
+    SubmissionCheckpointError: ("SubmissionCheckpointError", "submission_checkpoint_failure"),
+    VerifiedCaptureUnavailable: ("VerifiedCaptureUnavailable", "verified_capture_unavailable"),
+    OSError: ("OSError", "refresh_io_failure"),
+    sqlite3.OperationalError: ("OperationalError", "refresh_storage_failure"),
+    ValueError: ("ValueError", "refresh_validation_failed"),
+    TypeError: ("TypeError", "refresh_type_invalid"),
+    RuntimeError: ("RuntimeError", "refresh_runtime_failure"),
+}
+
+
+def _refresh_failure(error: Exception) -> tuple[str, str]:
+    """Classify without formatting exceptions or following their cause chains."""
+    # asyncio.TimeoutError is a distinct class on supported Python 3.10.
+    if type(error) in (TimeoutError, asyncio.TimeoutError):
+        return "TimeoutError", "refresh_timeout"
+    if type(error) is ValidatorChainError:
+        reason = getattr(error, "reason_code", None)
+        if type(reason) is str and len(reason) <= 64 and reason in _CHAIN_REFRESH_REASONS:
+            return "ValidatorChainError", reason
+        return "ValidatorChainError", "validator_chain_unclassified"
+    # Exact classes prevent untrusted subclasses from supplying a property or
+    # dynamic class name as a purported diagnostic. All output is fixed text.
+    return _REFRESH_FAILURE_CLASSES.get(type(error), ("Exception", "unclassified_refresh_failure"))
+
+
 @dataclass(frozen=True, slots=True)
 class _CachedCapture:
     capture: RegistrationCapture
@@ -58,6 +140,9 @@ class VerifiedRegistrationCache:
     The provider remains the authority for head freshness and proof validity.
     ``maximum_cache_age_seconds`` bounds the additional time for which that
     successful verification may be reused by unauthenticated public reads.
+    An explicit RPC rate limit pauses new collections for 30 seconds across
+    background refreshes and admissions. Admissions still require fresh proof;
+    the cooldown never extends a cached capture's validity.
     """
 
     def __init__(
@@ -91,9 +176,11 @@ class VerifiedRegistrationCache:
         self._inflight: asyncio.Task | None = None
         self._cached: _CachedCapture | None = None
         self._runner: asyncio.Task | None = None
+        self._closing: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._closed = False
         self._refresh_interval = max(0.05, min(30.0, self._maximum_age / 4))
+        self._rate_limit_until: float | None = None
 
     async def start(self) -> None:
         if self._closed or self._runner is not None:
@@ -104,9 +191,15 @@ class VerifiedRegistrationCache:
         await asyncio.sleep(0)
 
     async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        """Drain one shared cleanup task before any close caller can finish."""
+        if self._closing is None:
+            self._closed = True
+            self._closing = asyncio.create_task(
+                self._close(), name="competition-finality-cache-close"
+            )
+        await await_owned_task(self._closing)
+
+    async def _close(self) -> None:
         self._stop.set()
         runner = self._runner
         if runner is not None:
@@ -122,34 +215,51 @@ class VerifiedRegistrationCache:
 
     async def collect_fresh(self) -> RegistrationCapture:
         """Return one newly collected capture, sharing an existing collection."""
-        if self._closed:
-            raise VerifiedCaptureUnavailable("verified registration cache is closed")
+        self._require_open()
         async with self._guard:
+            self._require_open()
             task = self._inflight
             if task is None:
+                if (
+                    self._rate_limit_until is not None
+                    and self._monotonic() < self._rate_limit_until
+                ):
+                    raise ValidatorChainError("proof_rpc_rate_limited")
+                self._rate_limit_until = None
                 task = asyncio.create_task(
                     self._provider.collect(), name="competition-finality-collection"
                 )
                 self._inflight = task
                 task.add_done_callback(self._collection_finished)
         raw = await asyncio.shield(task)
-        capture = self._validate(raw)
-        self._cached = _CachedCapture(capture, self._monotonic())
-        return self._current()
+        return self._remember(raw)
 
     def _collection_finished(self, task: asyncio.Task) -> None:
         # The event loop invokes callbacks serially. Clear even when every
         # request awaiting the shielded provider call was cancelled.
         if self._inflight is task:
             self._inflight = None
+        # Observe failures even when no waiter remains, without logging private
+        # provider details. Active awaiters still receive the original exception.
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None and _refresh_failure(failure) == (
+                "ValidatorChainError",
+                "proof_rpc_rate_limited",
+            ):
+                # Store only a monotonic deadline, including when every waiter
+                # canceled before the provider reported its rate limit.
+                self._rate_limit_until = self._monotonic() + _RATE_LIMIT_COOLDOWN_SECONDS
 
     async def cached(self) -> RegistrationCapture:
         """Return a recent cached capture without initiating proof collection."""
+        self._require_open()
         try:
             return self._current()
         except VerifiedCaptureUnavailable:
             pass
         async with self._guard:
+            self._require_open()
             task = self._inflight
         if task is not None:
             try:
@@ -159,11 +269,23 @@ class VerifiedRegistrationCache:
                 raise VerifiedCaptureUnavailable(
                     "verified registration capture is unavailable"
                 ) from error
-            capture = self._validate(raw)
-            self._cached = _CachedCapture(capture, self._monotonic())
+            return self._remember(raw)
         return self._current()
 
+    def _remember(self, raw: Any) -> RegistrationCapture:
+        # A provider may finish while shutdown is draining it. Late waiters
+        # must neither return that capture nor repopulate a closed cache.
+        self._require_open()
+        capture = self._validate(raw)
+        self._cached = _CachedCapture(capture, self._monotonic())
+        return self._current()
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise VerifiedCaptureUnavailable("verified registration cache is closed")
+
     def _current(self) -> RegistrationCapture:
+        self._require_open()
         cached = self._cached
         if cached is None:
             raise VerifiedCaptureUnavailable("verified registration capture is unavailable")
@@ -201,22 +323,24 @@ class VerifiedRegistrationCache:
         return RegistrationCapture(snapshot=snapshot, provenance=provenance)
 
     async def _run(self) -> None:
-        last_error_type = None
+        last_failure = None
         while not self._stop.is_set():
             try:
                 await self.collect_fresh()
-                if last_error_type is not None:
+                if last_failure is not None:
                     _LOGGER.info("registration_refresh_recovered")
-                    last_error_type = None
+                    last_failure = None
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 # A prior verified value remains usable only until its bounded
                 # age expires. Repeated failures therefore fail public state shut.
                 # Log transitions privately, without RPC URLs, paths, or bodies.
-                error_type = type(error).__name__
-                if error_type != last_error_type:
-                    _LOGGER.warning("registration_refresh_failed error_type=%s", error_type)
-                    last_error_type = error_type
+                failure = _refresh_failure(error)
+                if failure != last_failure:
+                    _LOGGER.warning(
+                        "registration_refresh_failed error_type=%s reason_code=%s", *failure
+                    )
+                    last_failure = failure
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self._refresh_interval)
