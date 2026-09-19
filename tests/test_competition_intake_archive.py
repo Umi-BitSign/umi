@@ -18,11 +18,14 @@ from umi.competition_intake_archive import (
 )
 from umi.competition_service import CompetitionServiceConfig, RetainedIntakeState, create_intake_app
 from umi.competition_store import CompetitionStore, HistoricalIntakeArchiveBinding
-from umi.open_competition import CompetitionPolicy, digest
+from umi.competition_store_migration_cli import migrate
+from umi.open_competition import CompetitionPolicy, digest, sign_object
+from umi.policy import umi_source_tree_sha256
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_chain import chain_config as chain_config
-from .test_competition_policy_transition import accepted_predecessor, deployment, policies
+from .test_competition_policy_transition import accepted_predecessor, deployment, policies, wallet
+from .test_competition_service import Provider
 from .test_open_competition import bundle_at
 
 
@@ -247,3 +250,113 @@ def test_published_staged_policy_cannot_start_without_its_v1_archive(chain_confi
 
     with pytest.raises(ValueError, match="requires its pinned predecessor archive"):
         create_intake_app(config, policy)
+
+
+@pytest.mark.parametrize("amend", (False, True))
+def test_archived_intake_starts_after_authorized_schedule_amendment(chain_config, tmp_path, amend):
+    from umi.competition_launch_amendment import LaunchAmendment, SignedLaunchAmendment
+
+    prior, successor, original, old_signed, old_receipt, archive_config = archived_v1(tmp_path)
+    archive = load_intake_archive(archive_config)
+    before = {
+        path.relative_to(archive_config.directory): path.read_bytes()
+        for path in Path(archive_config.directory).rglob("*.json")
+    }
+    original = original.model_copy(update={"umi_source_tree_sha256": umi_source_tree_sha256()})
+    state, checkpoint = tmp_path / "current", tmp_path / "current-checkpoint"
+    checkpoint.mkdir(mode=0o700)
+    store = CompetitionStore(
+        state,
+        successor,
+        public_launch=original.launch_identity(),
+        historical_intake_archive_bindings=(
+            HistoricalIntakeArchiveBinding(
+                schema="umi-historical-intake-archive-binding/1",
+                policy_sha256=digest(prior),
+                manifest_sha256=archive.manifest_sha256,
+            ),
+        ),
+    )
+    source, preserved = tmp_path / "baseline-source", tmp_path / "baseline-archive"
+    baseline = bundle_at(source).model_copy(update={"license_id": "MIT"})
+    preserve_bundle(baseline, source, preserved, successor)
+    store.initialize_baseline(baseline, preserved)
+    current_signed, current_receipt = accepted_predecessor(successor)
+    receipt = store.admit(current_signed, current_receipt.registration_snapshot, 150)
+    config = CompetitionServiceConfig(
+        schema="umi-competition-service-config/2",
+        mode="intake_no_weight",
+        policy_sha256=digest(successor),
+        public_deployment=original,
+        retained_state=RetainedIntakeState(
+            schema="umi-competition-retained-intake-state/1",
+            baseline_promotion_sha256=store.baseline_summary()["promotion_sha256"],
+            required_submission_sha256s=(digest(current_signed.submission),),
+        ),
+        state_directory=str(state),
+        submission_head_checkpoint_directory=str(checkpoint),
+        chain=chain_config.model_copy(update={"policy_sha256": digest(successor)}),
+        historical_archives=(archive_config,),
+    )
+    migrate(state, successor, confirmed=True, service_config=config)
+    schedule = original.round_schedule.model_copy(
+        update={
+            "roster_close_earliest_block": 250,
+            "roster_close_latest_block": 251,
+            "work_signing_close_block": 255,
+            "evaluation_close_block": 270,
+            "protected_reference_reveal_block": 280,
+            "evidence_cutoff_block": 290,
+        }
+    )
+    replacement = original.model_copy(
+        update={
+            "schema_": "umi-competition-intake-deployment/3",
+            "round_schedule": schedule,
+            "round_stride_blocks": 1000,
+        }
+    )
+    config = config.model_copy(update={"public_deployment": replacement})
+    amendment = LaunchAmendment(
+        schema="umi-competition-launch-amendment/1",
+        policy_sha256=digest(successor),
+        previous_launch_sha256=digest(original.launch_identity()),
+        replacement=replacement.launch_identity(),
+        effective_block=200,
+        reason="accelerate_first_cohort_continuous_intake",
+    )
+    if not amend:
+        with pytest.raises(ValueError, match=r"overlaps|historical archive"):
+            create_intake_app(config, successor, provider_factory=Provider)
+        return
+    signed = SignedLaunchAmendment(
+        amendment=amendment, signatures=(sign_object(amendment, wallet("Charlie")),)
+    )
+    migrate(
+        state,
+        successor,
+        confirmed=True,
+        service_config=config,
+        launch_amendment=signed,
+        amendment_observed_block=201,
+    )
+    # Exercise the real service constructor, including archive, checkpoint,
+    # retained submission and authenticated launch-history checks, twice.
+    for _ in range(2):
+        app = create_intake_app(config, successor, provider_factory=Provider)
+        with TestClient(app) as client:
+            response = client.get(
+                f"/v1/competition/archives/{digest(prior)}/submissions/{digest(old_signed.submission)}"
+            )
+            assert response.status_code == 200
+            assert response.json()["receipt"] == old_receipt.model_dump(mode="json", by_alias=True)
+            current = client.get(f"/v1/competition/submissions/{digest(current_signed.submission)}")
+            assert current.status_code == 200
+            assert current.json()["receipt"] == receipt
+            assert client.get("/v1/competition/launch-amendments").json() == {
+                "amendments": [json.loads(canonical_json_bytes(signed))]
+            }
+    assert before == {
+        path.relative_to(archive_config.directory): path.read_bytes()
+        for path in Path(archive_config.directory).rglob("*.json")
+    }
