@@ -19,7 +19,7 @@ from ..signed_extrinsic import MAX_SIGNED_EXTRINSIC_BYTES
 from ..simple_bootstrap_validator import SIMPLE_BOOTSTRAP_MANIFEST_SHA256, SimpleBootstrapJournal
 from .journal import REGISTRATION_BRIDGE_JOURNAL_SCHEMA, RegistrationBridgeJournal
 from .journal_history import MAX_HISTORY_FILES as MAX_HISTORY_FILES
-from .journal_history import reconcile_archived_transition, validate_next_journal
+from .journal_history import HistoryContinuity, reconcile_archived_transition, validate_next_journal
 from .policy import MAX_DOCUMENT_BYTES, _canonical_object, _require
 from .selection import RegistrationBridgeObservation
 from .transactions import BridgeJournal, RegistrationBridgeTransactionJournal, parse_bridge_journal
@@ -208,6 +208,20 @@ class RegistrationBridgeState:
             self.root / "registration-bridge-legacy-journal.json", private=True, optional=True
         )
         _require(archive == legacy_raw, "legacy_archive_changed")
+        after = HistoryContinuity()
+        if legacy_raw is not None:
+            legacy = SimpleBootstrapJournal.model_validate_json(legacy_raw)
+            _require(
+                canonical_json_bytes(legacy) == legacy_raw
+                and legacy.validator_hotkey == current.validator_hotkey
+                and legacy.phase == "applied"
+                and legacy.weight_call is not None,
+                "legacy_attempt_not_proven_terminal",
+            )
+            after = HistoryContinuity(
+                last_update=legacy.weight_call.block_number,
+                observed_block=max(legacy.observation_block or 0, legacy.weight_call.block_number),
+            )
         history = self.root / "registration-bridge-history"
         groups = {}
         if history.exists():
@@ -228,7 +242,7 @@ class RegistrationBridgeState:
                         "history_filename_changed",
                     )
                     groups.setdefault(retained.attempt.attempt_id, {})[retained.phase] = retained
-        return reconcile_archived_transition(current, groups)
+        return reconcile_archived_transition(current, groups, after=after)
 
     def load(self) -> BridgeJournal | None:
         self.require_unchanged()
@@ -253,12 +267,26 @@ class RegistrationBridgeState:
             journal,
             archive=archive,
         )
+        history = self.root / "registration-bridge-history"
+        path = None
+        existing = None
+        if archive and journal.attempt is not None:
+            path = history / f"{journal.attempt.attempt_id}-{journal.phase}.json"
+            existing = _read_bytes(path, private=True, optional=True)
+            _require(existing is None or existing == raw, "history_record_changed")
         if type(journal) is RegistrationBridgeTransactionJournal and (
             previous.attempt is None or previous.attempt.attempt_id != journal.attempt.attempt_id
         ):
-            self._require_transaction_headroom(raw)
-        if archive and journal.attempt is not None:
-            history = self.root / "registration-bridge-history"
+            self._require_transaction_headroom(raw, retained_preparing=existing is not None)
+        count, used = self._history_usage()
+        new_archive = path is not None and existing is None
+        _require(count + int(new_archive) <= MAX_HISTORY_FILES, "history_capacity_reached")
+        _require(
+            used - len(previous_raw or b"") + len(raw) * (1 + int(new_archive))
+            <= MAX_HISTORY_BYTES,
+            "history_byte_capacity_reached",
+        )
+        if path is not None:
             history.mkdir(mode=0o700, exist_ok=True)
             meta = history.lstat()
             _require(
@@ -267,25 +295,8 @@ class RegistrationBridgeState:
                 and stat.S_IMODE(meta.st_mode) == 0o700,
                 "history_root_unsafe",
             )
-            total = 0
-            with os.scandir(history) as entries:
-                for count, entry in enumerate(entries, start=1):
-                    _require(count < MAX_HISTORY_FILES, "history_capacity_reached")
-                    item = entry.stat(follow_symlinks=False)
-                    _require(
-                        stat.S_ISREG(item.st_mode)
-                        and item.st_uid == os.geteuid()
-                        and item.st_nlink == 1,
-                        "history_file_unsafe",
-                    )
-                    total += item.st_size
-                    _require(total + len(raw) <= MAX_HISTORY_BYTES, "history_byte_capacity_reached")
-            path = history / f"{journal.attempt.attempt_id}-{journal.phase}.json"
-            existing = _read_bytes(path, private=True, optional=True)
             if existing is None:
                 _write_new(path, raw)
-            else:
-                _require(existing == raw, "history_record_changed")
             # A retry may observe a file whose preceding directory sync failed.
             # Matching bytes alone do not establish durable publication.
             _fsync(history)
@@ -296,7 +307,18 @@ class RegistrationBridgeState:
         _fsync(self.root)
         self._expected = self._snapshot()
 
-    def _require_transaction_headroom(self, preparing: bytes) -> None:
+    def _history_usage(self) -> tuple[int, int]:
+        """Use the snapshot just authenticated by require_unchanged under service.lock."""
+        return (
+            sum(name.startswith("registration-bridge-history/") for name in self._expected),
+            sum(
+                item[6]
+                for name, item in self._expected.items()
+                if item is not None and name != "registration-bridge-history"
+            ),
+        )
+
+    def _require_transaction_headroom(self, preparing: bytes, *, retained_preparing: bool) -> None:
         """Reserve configured capacity before any new-format signing intent.
 
         The service lock and unchanged-state check serialize all writers. Seven
@@ -307,19 +329,14 @@ class RegistrationBridgeState:
         """
         maximum_record = len(preparing) + 2 * MAX_SIGNED_EXTRINSIC_BYTES + 4096
         _require(maximum_record <= MAX_DOCUMENT_BYTES, "transaction_document_headroom_insufficient")
-        history_count = sum(
-            name.startswith("registration-bridge-history/") for name in self._expected
+        history_count, used = self._history_usage()
+        _require(
+            history_count + 7 - int(retained_preparing) <= MAX_HISTORY_FILES,
+            "transaction_history_file_headroom_insufficient",
         )
         _require(
-            history_count + 7 <= MAX_HISTORY_FILES, "transaction_history_file_headroom_insufficient"
-        )
-        used = sum(
-            item[6]
-            for name, item in self._expected.items()
-            if item is not None and name != "registration-bridge-history"
-        )
-        _require(
-            used + 8 * maximum_record <= MAX_HISTORY_BYTES,
+            used + 8 * maximum_record - len(preparing) * int(retained_preparing)
+            <= MAX_HISTORY_BYTES,
             "transaction_history_byte_headroom_insufficient",
         )
         available = os.statvfs(self.root)

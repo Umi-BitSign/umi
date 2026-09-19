@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from itertools import pairwise
 
 from .journal import RegistrationBridgeJournal
@@ -31,6 +33,59 @@ _TRANSACTION_EDGES = {
     "expired_nonce_available": set(),
     "failed": set(),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryContinuity:
+    """In-memory traversal state, never a chain proof or persisted checkpoint."""
+
+    preflight_block: int = -1
+    last_update: int | None = None
+    observed_block: int = 0
+
+    @classmethod
+    def following(cls, record: BridgeJournal) -> HistoryContinuity:
+        last_update = None
+        if record.weight_call is not None:
+            last_update = record.weight_call.block_number
+        elif type(record) is RegistrationBridgeTransactionJournal:
+            last_update = record.attempt.prior_last_update
+        return cls(
+            preflight_block=-1 if record.attempt is None else record.attempt.preflight_block,
+            last_update=last_update,
+            observed_block=record.last_observed_block,
+        )
+
+
+def audit_history_sequence(
+    records: Iterable[BridgeJournal], *, after: HistoryContinuity | None = None
+) -> HistoryContinuity:
+    """Check ordered, phase-audited attempts with constant traversal memory.
+
+    Callers retain responsibility for phase/identity checks and owned chain
+    evidence. Passing the returned boundary to the next page preserves the same
+    continuity checks as traversing the complete sequence at once.
+    """
+    if after is None:
+        after = HistoryContinuity()
+    for record in records:
+        attempt = record.attempt
+        _require(attempt is not None, "history_intent_missing")
+        _require(attempt.preflight_block > after.preflight_block, "history_attempt_order_changed")
+        _require(
+            attempt.preflight_block >= after.observed_block,
+            "history_preflight_predates_observation",
+        )
+        _require(
+            after.last_update is None
+            or (
+                attempt.prior_last_update == after.last_update
+                and attempt.preflight_block >= after.last_update
+            ),
+            "history_lastupdate_gap",
+        )
+        after = HistoryContinuity.following(record)
+    return after
 
 
 def _transaction_identity(
@@ -93,6 +148,7 @@ def validate_next_journal(
             ),
             "current_journal_rolled_back",
         )
+        audit_history_sequence((current,), after=HistoryContinuity.following(previous))
         return
     _require(
         type(previous) is RegistrationBridgeTransactionJournal
@@ -240,7 +296,10 @@ def audit_current_history(
 
 
 def reconcile_archived_transition(
-    current: BridgeJournal, groups: dict[str, dict[str, BridgeJournal]]
+    current: BridgeJournal,
+    groups: dict[str, dict[str, BridgeJournal]],
+    *,
+    after: HistoryContinuity | None = None,
 ) -> BridgeJournal:
     """Complete at most one archived v2 transition after a torn publication.
 
@@ -281,5 +340,8 @@ def reconcile_archived_transition(
                     or retained.last_observed_block_hash == result.last_observed_block_hash,
                     "history_finality_equivocation",
                 )
-    audit_current_history(result, groups)
+    terminals = audit_current_history(result, groups)
+    audit_history_sequence(
+        sorted(terminals.values(), key=lambda record: record.attempt.preflight_block), after=after
+    )
     return result

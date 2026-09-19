@@ -51,10 +51,11 @@ def test_archive_write_keeps_byte_ceiling_and_existing_receipt(
         retained = {p.name: p.read_bytes() for p in history.iterdir()}
         total = sum(len(value) for value in retained.values()) + len(original)
         monkeypatch.setattr(persistence, "MAX_HISTORY_BYTES", total)
-        # Snapshot permits the exact ceiling. An additional archived payload
-        # must still fail, even with an already existing destination record.
+        # Matching evidence can be retried at the ceiling. Different bytes for
+        # that immutable archive must still fail without replacing the journal.
+        state.store(journal, archive=True)
         oversized = journal.model_copy(update={"last_observed_block": 10**12})
-        with pytest.raises(bridge.RegistrationBridgeError, match="history_byte_capacity_reached"):
+        with pytest.raises(bridge.RegistrationBridgeError, match="history_record_changed"):
             state.store(oversized, archive=True)
         assert state.path.read_bytes() == original
         assert {p.name: p.read_bytes() for p in history.iterdir()} == retained

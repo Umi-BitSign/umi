@@ -442,6 +442,100 @@ def test_archive_sync_is_retried_before_repair_reports_success(tmp_path, tx, mon
         assert state.initialize(tx.case.obs, now=tx.case.now) == signed(tx)
 
 
+@pytest.mark.parametrize("resource", ["files", "bytes", "both"])
+def test_exact_archive_retry_at_capacity_preserves_evidence(tmp_path, tx, monkeypatch, resource):
+    root = tmp_path.resolve() / "state"
+    with bridge.RegistrationBridgeState(root) as state:
+        journal = begin(state, tx, "signed")
+        retained = archive_bytes(root)
+        current = state.path.read_bytes()
+        if resource in {"files", "both"}:
+            monkeypatch.setattr(persistence, "MAX_HISTORY_FILES", len(retained))
+        if resource in {"bytes", "both"}:
+            monkeypatch.setattr(
+                persistence, "MAX_HISTORY_BYTES", sum(map(len, retained.values())) + len(current)
+            )
+        state.store(journal, archive=True)
+        state.require_unchanged()
+        assert state.path.read_bytes() == current
+    with bridge.RegistrationBridgeState(root) as state:
+        assert state.initialize(tx.case.obs, now=tx.case.now) == journal
+    assert archive_bytes(root) == retained
+
+
+@pytest.mark.parametrize("phase", ["preparing", "signed"])
+@pytest.mark.parametrize("crash_at", ["archive_sync", "journal_replace"])
+def test_torn_publication_recovers_without_reserving_existing_archive_twice(
+    tmp_path, tx, monkeypatch, phase, crash_at
+):
+    root = tmp_path.resolve() / "state"
+    with bridge.RegistrationBridgeState(root) as state:
+        state.initialize(tx.case.obs, now=tx.case.now)
+        if phase == "signed":
+            state.store(tx.preparing, archive=True)
+        target = tx.preparing if phase == "preparing" else signed(tx)
+        raw = canonical_json_bytes(target)
+        if phase == "preparing":
+            maximum = len(raw) + 2 * bridge.MAX_SIGNED_EXTRINSIC_BYTES + 4096
+            byte_limit = len(state.path.read_bytes()) + 8 * maximum
+            file_limit = 7
+        else:
+            # Exact projected size of the current journal and both archives.
+            byte_limit = len(canonical_json_bytes(tx.preparing)) + 2 * len(raw)
+            file_limit = 2
+        monkeypatch.setattr(persistence, "MAX_HISTORY_BYTES", byte_limit)
+        monkeypatch.setattr(persistence, "MAX_HISTORY_FILES", file_limit)
+        sync, replace = persistence._fsync, persistence.os.replace
+
+        def fail_sync(path):
+            if path.name == "registration-bridge-history":
+                raise OSError("injected archive sync failure")
+            sync(path)
+
+        def fail_replace(source, destination):
+            if destination == state.path:
+                raise OSError("injected journal replace failure")
+            replace(source, destination)
+
+        with monkeypatch.context() as patch:
+            if crash_at == "archive_sync":
+                patch.setattr(persistence, "_fsync", fail_sync)
+            else:
+                patch.setattr(persistence.os, "replace", fail_replace)
+            with pytest.raises(OSError, match="injected"):
+                state.store(target, archive=True)
+    retained = archive_bytes(root)
+    with bridge.RegistrationBridgeState(root) as state:
+        assert state.initialize(tx.case.obs, now=tx.case.now) == target
+        state.require_unchanged()
+        assert state.path.read_bytes() == raw
+    assert archive_bytes(root) == retained
+
+
+@pytest.mark.parametrize("resource", ["files", "bytes", "unarchived_growth"])
+def test_capacity_rejection_precedes_archive_and_journal_mutation(
+    tmp_path, tx, monkeypatch, resource
+):
+    with bridge.RegistrationBridgeState(tmp_path.resolve() / "state") as state:
+        journal = begin(state, tx, "signed")
+        target = evolve_journal(journal, phase="submitting")
+        retained, current = archive_bytes(state.root), state.path.read_bytes()
+        if resource == "files":
+            monkeypatch.setattr(persistence, "MAX_HISTORY_FILES", len(retained))
+        else:
+            if resource == "unarchived_growth":
+                target = evolve_journal(journal, updated_at_unix_ms=2**53 - 1)
+            projected = sum(map(len, retained.values())) + len(canonical_json_bytes(target)) * (
+                1 if resource == "unarchived_growth" else 2
+            )
+            monkeypatch.setattr(persistence, "MAX_HISTORY_BYTES", projected - 1)
+        with pytest.raises(bridge.RegistrationBridgeError, match=r"history_.*capacity_reached"):
+            state.store(target, archive=resource != "unarchived_growth")
+        assert state.path.read_bytes() == current
+        assert archive_bytes(state.root) == retained
+        state.require_unchanged()
+
+
 @pytest.mark.asyncio
 async def test_applied_and_expired_histories_cannot_coexist(tmp_path, tx):
     root = tmp_path.resolve() / "state"

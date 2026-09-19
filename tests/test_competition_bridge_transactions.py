@@ -132,8 +132,16 @@ async def test_nonwriting_attempt_preserves_lastupdate_continuity(tmp_path, tx, 
                 tx.case.obs, 54, last_update=prior.last_observed_block + 1
             )
         current = prepare(tx.policy, tx.case, proven, prior)
-        state.store(current, archive=True)
+        if not gap:
+            state.store(current, archive=True)
     if gap:
+        # Preserve coverage of malformed history written by an older worker.
+        # The current writer rejects this gap before publishing its intent.
+        from tests.test_competition_upgrade import write
+
+        raw = canonical_json_bytes(current)
+        write(root / HISTORY / f"{current.attempt.attempt_id}-preparing.json", raw, 0o600)
+        write(root / JOURNAL, raw, 0o600)
         with pytest.raises(ValueError, match="LastUpdate gap"):
             audit_bridge_history(files_at(root), hotkey=current.validator_hotkey)
     else:

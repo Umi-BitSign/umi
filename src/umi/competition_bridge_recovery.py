@@ -10,7 +10,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from .bridge.journal_history import MAX_HISTORY_FILES, audit_attempt_phases, audit_current_history
+from .bridge.journal_history import (
+    MAX_HISTORY_FILES,
+    HistoryContinuity,
+    audit_attempt_phases,
+    audit_current_history,
+    audit_history_sequence,
+)
 from .bridge.policy import RegistrationBridgeError
 from .bridge.transactions import (
     BridgeJournal,
@@ -47,7 +53,14 @@ def audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHisto
         return _audit_bridge_history(files, hotkey=hotkey)
     except RegistrationBridgeError as exc:
         # Preserve the stopped-recovery API's validation exception family.
-        raise ValueError(f"bridge recovery {exc.reason_code}") from exc
+        reason = {
+            "history_attempt_order_changed": "attempt ordering changed",
+            "history_preflight_predates_observation": (
+                "preflight predates the previous terminal observation"
+            ),
+            "history_lastupdate_gap": "attempts have an unexplained LastUpdate gap",
+        }.get(exc.reason_code, exc.reason_code)
+        raise ValueError(f"bridge recovery {reason}") from exc
 
 
 def _audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHistoryAudit:
@@ -140,25 +153,8 @@ def _audit_bridge_history(files: dict[str, bytes], *, hotkey: str) -> BridgeHist
     records.sort(key=lambda pair: pair[1].attempt.preflight_block)
     if records[-1][0] != JOURNAL:
         raise ValueError("bridge recovery current attempt is not the latest")
-    prior_preflight = -1
-    for _, record in records:
-        attempt = record.attempt
-        if attempt.preflight_block <= prior_preflight:
-            raise ValueError("bridge recovery attempt ordering changed")
-        if attempt.preflight_block < prior_observation:
-            raise ValueError("bridge recovery preflight predates the previous terminal observation")
-        if prior_receipt is not None and (
-            attempt.prior_last_update != prior_receipt or attempt.preflight_block < prior_receipt
-        ):
-            raise ValueError("bridge recovery attempts have an unexplained LastUpdate gap")
-        prior_preflight = attempt.preflight_block
-        if record.weight_call is not None:
-            prior_receipt = record.weight_call.block_number
-        elif type(record) is RegistrationBridgeTransactionJournal:
-            # A failed or expired call does not account for a new LastUpdate.
-            # Preserve this continuity check across non-writing attempts.
-            prior_receipt = attempt.prior_last_update
-        else:
-            prior_receipt = None
-        prior_observation = record.last_observed_block
+    audit_history_sequence(
+        (record for _, record in records),
+        after=HistoryContinuity(last_update=prior_receipt, observed_block=prior_observation),
+    )
     return BridgeHistoryAudit(current, tuple(records), frozenset(recognized), tuple(sorted(holds)))
