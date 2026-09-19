@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi.competition_chain import OwnedFinalityStale
 from umi.competition_miner_finality import CompetitionMinerFinality
 from umi.miner import build_runtime
 
@@ -20,6 +21,7 @@ class Provider:
         self.closed = False
         self.failed = False
         self.requests = []
+        self.config = SimpleNamespace(collection_timeout_seconds=1)
 
     async def start(self):
         self.started.set()
@@ -115,6 +117,77 @@ async def test_proof_failure_is_not_replaced_with_rpc_data():
     finally:
         stop.set()
         await task
+
+
+@pytest.mark.parametrize("height", [None, 320])
+async def test_stale_head_waits_for_owned_recovery_of_the_original_header_query(height):
+    value = service()
+    value._running = True
+    original = value._provider.verified_blocks
+    attempts = []
+
+    async def recovering(heights=()):
+        attempts.append(heights)
+        if len(attempts) == 1:
+            raise OwnedFinalityStale("owned finalized head is stale")
+        return await original(heights)
+
+    value._provider.verified_blocks = recovering
+    result = (
+        await value.finalized_head_height()
+        if height is None
+        else (await value.verified_block_at(height)).height
+    )
+    assert result == (500 if height is None else height)
+    assert attempts == ([(), ()] if height is None else [(height,), (height,)])
+
+
+async def test_stale_head_wait_is_bounded_by_existing_collection_timeout():
+    value = service()
+    value._running = True
+    value._provider.config.collection_timeout_seconds = 0.02
+
+    async def stale(heights=()):
+        raise OwnedFinalityStale("owned finalized head is stale")
+
+    value._provider.verified_blocks = stale
+    with pytest.raises(asyncio.TimeoutError):
+        await value.finalized_head_height()
+
+
+async def test_stale_head_recovery_does_not_hide_terminal_observer_failure():
+    value = service()
+    value._running = True
+
+    async def stopped(heights=()):
+        value._provider.failed = True
+        raise OwnedFinalityStale("owned finalized head is stale")
+
+    value._provider.verified_blocks = stopped
+    with pytest.raises(RuntimeError, match="observer failed"):
+        await value.finalized_head_height()
+
+
+async def test_cancelling_stale_head_wait_joins_its_collection_task():
+    value = service()
+    value._running = True
+    entered = asyncio.Event()
+    exited = asyncio.Event()
+
+    async def blocked(heights=()):
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+        finally:
+            exited.set()
+
+    value._provider.verified_blocks = blocked
+    task = asyncio.create_task(value.finalized_head_height())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert exited.is_set()
 
 
 def test_partial_configuration_fails_before_wallet_access(monkeypatch):

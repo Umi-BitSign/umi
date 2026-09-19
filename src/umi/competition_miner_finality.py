@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from .competition_chain import CompetitionChainConfig
+from .competition_chain import CompetitionChainConfig, OwnedFinalityStale
 from .open_competition import CompetitionPolicy
 from .policy import ScoringPolicy
 from .protocol import canonical_json_bytes
@@ -50,11 +50,30 @@ class CompetitionMinerFinality:
         self._provider.ensure_observer_running()
 
     async def finalized_head_height(self) -> int:
-        self._check_running()
-        head, _ = await self._provider.verified_blocks()
+        head, _ = await self._verified_blocks()
         return head.height
 
     async def verified_block_at(self, height: int):
-        self._check_running()
-        _, blocks = await self._provider.verified_blocks((height,))
+        _, blocks = await self._verified_blocks((height,))
         return blocks[0]
+
+    async def _verified_blocks(self, heights=()):
+        """Wait for a recovering observer within one existing collection budget.
+
+        Only stale owned heads are retryable here. Invalid evidence, missing
+        history and stopped observers still propagate immediately. No request,
+        nonce or inference is repeated, and stale evidence is never returned.
+        """
+        self._check_running()
+
+        async def collect():
+            while True:
+                self._check_running()
+                try:
+                    return await self._provider.verified_blocks(heights)
+                except OwnedFinalityStale:
+                    await asyncio.sleep(0.25)
+
+        return await asyncio.wait_for(
+            collect(), timeout=self._provider.config.collection_timeout_seconds
+        )
