@@ -77,7 +77,8 @@ def _verified_host_tree(tmp_path, monkeypatch, config):
     revision = "73" * 20
     parent = tmp_path / "signed-hosts"
     root = parent / revision
-    root.mkdir(parents=True)
+    parent.mkdir(mode=0o700)
+    root.mkdir()
     files = []
     for name in sorted(artifacts._REQUIRED_FILES | set(_HELPERS)):
         path = root / name
