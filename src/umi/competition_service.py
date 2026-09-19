@@ -147,9 +147,7 @@ def create_intake_app(
             raise ValueError("the first staged transition requires one predecessor archive")
         predecessor = historical_archives[0]
         predecessor_summary = predecessor.summary()
-        if policy.predecessor_sha256 != predecessor_summary["policy_sha256"] or predecessor_summary[
-            "public_launch_sha256"
-        ] != digest(config.public_deployment.launch_identity()):
+        if policy.predecessor_sha256 != predecessor_summary["policy_sha256"]:
             raise ValueError(
                 "historical archive is not the durable immediate predecessor for this launch"
             )
@@ -172,6 +170,19 @@ def create_intake_app(
         submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
         historical_intake_archive_bindings=archive_bindings,
     )
+    if historical_archives:
+        launch = config.public_deployment.launch_identity()
+        archived_launch = historical_archives[0].manifest.public_launch_sha256
+        # The archive preserves the predecessor's original schedule. Only a
+        # retained, signature-verified amendment may connect it to this launch.
+        if archived_launch != digest(launch) and not any(
+            item["amendment"]["previous_launch_sha256"] == archived_launch
+            and item["amendment"]["replacement"] == launch.model_dump(mode="json", by_alias=True)
+            for item in store.public_launch_amendments()
+        ):
+            raise ValueError(
+                "historical archive is not the durable immediate predecessor for this launch"
+            )
     store.verify_retained_intake_state(
         baseline_promotion_sha256=config.retained_state.baseline_promotion_sha256,
         required_submission_sha256s=config.retained_state.required_submission_sha256s,
