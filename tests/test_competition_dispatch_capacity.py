@@ -128,9 +128,7 @@ def test_in_flight_miner_counts_at_slot_contention_boundary(limits, budget):
     limits = limits.model_copy(update={"maximum_concurrency": 2})
     jobs = (job(1, miner=1), job(2, miner=2))
     spare = plan(jobs, limits, budget)
-    occupied = plan(
-        (*jobs, job(3, miner=3, state="in_flight", issue_close_ms=100)), limits, budget
-    )
+    occupied = plan((*jobs, job(3, miner=3, state="in_flight", issue_close_ms=100)), limits, budget)
     padded = limits.request_timeout_seconds * 1000 + occupied.scan_cycles * (
         limits.poll_seconds * 1000 + budget.local_cycle_ms
     )
