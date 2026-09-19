@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -450,22 +451,30 @@ def _case(*, proof_accepted: bool = True, break_weight: bool = False):
     return canonical_json_bytes(signed), owner_cli, canonical_json_bytes(capture), ports
 
 
-def test_intake_builds_complete_archive_and_existing_observer_publication(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mask", [0o000, 0o002, 0o022])
+def test_intake_builds_complete_archive_and_existing_observer_publication(
+    tmp_path: Path, mask: int
+) -> None:
     signed, owner, capture, ports = _case()
     archive = tmp_path / "archive"
     publication = tmp_path / "publication"
 
-    manifest_path, publication_path = build_bootstrap_result_archive(
-        signed_result_bytes=signed,
-        owner_cli_response_bytes=owner,
-        captured_chain_material_bytes=capture,
-        archive_root=archive,
-        observer_publication_root=publication,
-        ports=ports,
-    )
+    previous_mask = os.umask(mask)
+    try:
+        manifest_path, publication_path = build_bootstrap_result_archive(
+            signed_result_bytes=signed,
+            owner_cli_response_bytes=owner,
+            captured_chain_material_bytes=capture,
+            archive_root=archive,
+            observer_publication_root=publication,
+            ports=ports,
+        )
+    finally:
+        os.umask(previous_mask)
 
     assert manifest_path == archive / "manifest.json"
     assert publication_path == publication / "manifest.json"
+    assert (archive / "objects").stat().st_mode & 0o777 == 0o700
     verified = verify_bootstrap_result_archive(archive, ports=ports)
     assert verified.signed_result_sha256 == hashlib.sha256(signed).hexdigest()
     assert [item.semantic_call for item in verified.blocks] == [
