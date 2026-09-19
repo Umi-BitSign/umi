@@ -16,7 +16,6 @@ import re
 import stat
 import time
 import weakref
-from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +35,7 @@ from .competition_worker import (
     _prepare_private_directory,
     _verify_sqlite_family,
 )
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .grandpa_finality_supervisor import (
@@ -359,15 +359,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         if self._runtime_executor is None:
             return await super()._runtime_context(ref)
         evidence = await self._runtime_proofs.storage_evidence(ref, b":code")
-        task = asyncio.create_task(asyncio.to_thread(self._runtime_executor.execute, ref, evidence))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # Retain the collection lock until the bounded subprocess exits.
-            # A cancelled collection must not leave concurrent executors behind.
-            with suppress(Exception):
-                await task
-            raise
+        # Retain the collection lock until the bounded subprocess exits,
+        # including repeated cancellation during shutdown.
+        return await run_owned_thread(self._runtime_executor.execute, ref, evidence)
 
     def _validate_runtime_context(self, runtime, ref):
         if not isinstance(runtime, PinnedRuntimeContext) or runtime.snapshot != ref:
@@ -473,14 +467,17 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             maximum_database_bytes=maximum,
         )
 
-    async def aclose(self):
+    async def _close_resources(self):
         try:
-            await super().aclose()
+            await super()._close_resources()
         finally:
             try:
-                for rpc in (self._weight_rpc, self._runtime_rpc):
-                    if rpc is not None:
-                        await rpc.aclose()
+                try:
+                    if self._weight_rpc is not None:
+                        await self._weight_rpc.aclose()
+                finally:
+                    if self._runtime_rpc is not None:
+                        await self._runtime_rpc.aclose()
             finally:
                 self._release_cache_lease()
 
@@ -544,6 +541,8 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
 
     async def _collect_weights_locked(self, hotkey, recipients, anchor):
         async with self._lock:
+            if self._closed:
+                raise ValueError("weight provider is closed")
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
             ref = await self._proofs.finalized_snapshot()
