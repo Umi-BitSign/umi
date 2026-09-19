@@ -11,6 +11,7 @@ import asyncio
 from contextlib import suppress
 
 from .competition_chain import CompetitionChainConfig, OwnedFinalityStale
+from .concurrency import wait_for_owned
 from .open_competition import CompetitionPolicy
 from .policy import ScoringPolicy
 from .protocol import canonical_json_bytes
@@ -74,6 +75,6 @@ class CompetitionMinerFinality:
                 except OwnedFinalityStale:
                     await asyncio.sleep(0.25)
 
-        return await asyncio.wait_for(
+        return await wait_for_owned(
             collect(), timeout=self._provider.config.collection_timeout_seconds
         )

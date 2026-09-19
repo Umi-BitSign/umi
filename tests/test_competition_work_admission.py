@@ -194,9 +194,7 @@ async def test_cancellation_drains_native_commits_before_unlocking_signer(setup,
     monkeypatch.setattr(signer.admission, "reserve", pause)
     task = asyncio.create_task(signer.endorse(setup.authorization))
     try:
-        async with asyncio.timeout(5):
-            while not entered.is_set():
-                await asyncio.sleep(0.01)
+        assert await asyncio.to_thread(entered.wait, 5), "reservation did not start"
         task.cancel()
         await asyncio.sleep(0)
         task.cancel()

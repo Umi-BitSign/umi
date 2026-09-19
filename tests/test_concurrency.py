@@ -6,7 +6,55 @@ import threading
 
 import pytest
 
-from umi.concurrency import await_owned_task, run_owned_thread
+from umi.concurrency import await_owned_task, run_owned_thread, wait_for_owned
+
+
+@pytest.mark.parametrize("times_out", [False, True])
+async def test_owned_timeout_drains_cleanup_despite_repeated_cancellation(times_out):
+    entered, cleaning, finish, finished = (asyncio.Event() for _ in range(4))
+
+    async def work():
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await finish.wait()
+            finished.set()
+
+    waiter = asyncio.create_task(wait_for_owned(work(), timeout=0.02 if times_out else 5))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        if not times_out:
+            waiter.cancel()
+        await asyncio.wait_for(cleaning.wait(), timeout=3)
+        waiter.cancel()
+        await asyncio.sleep(0)
+        waiter.cancel()
+        await asyncio.sleep(0)
+        assert not waiter.done() and not finished.is_set()
+        finish.set()
+        with pytest.raises(asyncio.TimeoutError if times_out else asyncio.CancelledError):
+            await waiter
+        assert finished.is_set()
+    finally:
+        finish.set()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def test_owned_timeout_returns_result_and_original_error():
+    async def work():
+        return 42
+
+    assert await wait_for_owned(work(), timeout=1) == 42
+    error = ValueError("invalid proof")
+
+    async def fail():
+        raise error
+
+    with pytest.raises(ValueError) as caught:
+        await wait_for_owned(fail(), timeout=1)
+    assert caught.value is error
 
 
 async def test_owned_task_returns_result():

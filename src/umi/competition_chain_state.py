@@ -39,6 +39,7 @@ from .competition_worker import (
     _prepare_private_directory,
     _verify_sqlite_family,
 )
+from .concurrency import wait_for_owned
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .grandpa_finality_supervisor import (
@@ -633,7 +634,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             or any(char not in "0123456789abcdef" for char in manifest_anchor_sha256)
         ):
             raise ValueError("invalid expected manifest anchor")
-        return await asyncio.wait_for(
+        return await wait_for_owned(
             self._collect_weights_locked(validator_hotkey, recipients, manifest_anchor_sha256),
             timeout=self.config.collection_timeout_seconds,
         )

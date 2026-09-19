@@ -231,7 +231,11 @@ class VerifiedRegistrationCache:
                 )
                 self._inflight = task
                 task.add_done_callback(self._collection_finished)
-        raw = await asyncio.shield(task)
+        # The cache owns collection after a caller disconnects. wait() neither
+        # cancels it nor logs its eventual exception; the completion callback
+        # consumes that exception without exposing private provider details.
+        await asyncio.wait((task,))
+        raw = task.result()
         return self._remember(raw)
 
     def _collection_finished(self, task: asyncio.Task) -> None:
@@ -263,7 +267,10 @@ class VerifiedRegistrationCache:
             task = self._inflight
         if task is not None:
             try:
-                raw = await asyncio.wait_for(asyncio.shield(task), timeout=self._public_wait)
+                done, _ = await asyncio.wait((task,), timeout=self._public_wait)
+                if not done:
+                    raise asyncio.TimeoutError
+                raw = task.result()
             except Exception as error:
                 # Never reveal provider, filesystem or RPC details publicly.
                 raise VerifiedCaptureUnavailable(
