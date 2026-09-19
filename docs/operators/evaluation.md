@@ -78,8 +78,10 @@ checks enabled; changing the RPC endpoint does not grant finality authority.
 
 The owned observer uses `startup_timeout_seconds` for its first verified record
 (600 seconds by default, configurable up to 900). The source implementation now
-uses a separate 120-second follow-stream timeout and recovers from the last
-retained head after reaping the old process. Signing and execution still require
+reconnects a silent follow stream after 45 seconds or half the configured head-age
+limit, whichever is shorter. This leaves time for recovery before an already-aged
+header becomes stale. It recovers from the last retained head after reaping the
+old process. Signing and execution still require
 a fresh verified head. See [observer recovery and release qualification](rounds.md#open-competition-round-coordinator--capacity-operations-and-verification);
 an installed service needs the corresponding qualified release to use this behavior.
 

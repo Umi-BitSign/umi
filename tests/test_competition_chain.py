@@ -529,9 +529,12 @@ async def test_two_heads_reuse_one_retained_runtime_artifact(chain):
         assert connection.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 2
 
 
-@pytest.mark.parametrize("startup_seconds,head_age_ms", [(600, 120_000), (30, 10_000)])
+@pytest.mark.parametrize(
+    "startup_seconds,head_age_ms,record_timeout",
+    [(600, 120_000, 45.0), (30, 10_000, 5.0), (60, 60_000, 30.0)],
+)
 async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanly(
-    chain, monkeypatch, startup_seconds, head_age_ms
+    chain, monkeypatch, startup_seconds, head_age_ms, record_timeout
 ):
     chain.config = chain.config.model_copy(
         update={
@@ -559,7 +562,8 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
         assert kwargs["binary_path"] == chain.config.finality_binary
         assert kwargs["chain_spec_path"] == chain.config.chain_spec
         assert kwargs["first_record_timeout_seconds"] == chain.config.startup_timeout_seconds
-        assert kwargs["record_timeout_seconds"] == 120.0
+        assert kwargs["record_timeout_seconds"] == record_timeout
+        assert kwargs["record_timeout_seconds"] < chain.config.maximum_head_age_ms / 1000
         return "pinned-test-observer"
 
     def durable_port(**kwargs):

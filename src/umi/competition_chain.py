@@ -61,9 +61,10 @@ from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
-# Recycle a silent follow stream after two minutes. Bootstrap keeps its own
-# allowance; consumers independently reject stale heads throughout recovery.
-_OBSERVER_RECORD_TIMEOUT_SECONDS = 120.0
+# Reconnect silent follow streams before consuming the full freshness budget.
+# Headers already have network/finality age when accepted; restart also takes
+# time. Bootstrap keeps its separate allowance, and stale heads stay rejected.
+_OBSERVER_RECORD_TIMEOUT_SECONDS = 45.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -478,7 +479,9 @@ class FinalizedRegistrationProvider:
                 target_triple=config.target_triple,
                 binary_path=config.finality_binary,
                 chain_spec_path=config.chain_spec,
-                record_timeout_seconds=_OBSERVER_RECORD_TIMEOUT_SECONDS,
+                record_timeout_seconds=min(
+                    _OBSERVER_RECORD_TIMEOUT_SECONDS, config.maximum_head_age_ms / 2000
+                ),
                 first_record_timeout_seconds=config.startup_timeout_seconds,
             )
             finality = DurableGrandpaFinalityPort(
