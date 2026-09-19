@@ -338,7 +338,11 @@ umi-competition --policy policy.json discover-assignments \
 ```
 
 The server binds loopback port 8099 and requires an operator-managed HTTPS proxy
-with ingress limits before external use. Discovery signs a fresh read query
+with ingress limits before external use. For nondefault scheduling budgets, add
+`--scheduling-capacity /ABSOLUTE/CAPACITY.json` to both `serve-assignment-feed`
+and `assemble-endpoint-execution`, matching the dispatcher and evaluator configs.
+See [shared scheduling capacity](../operators/dispatch.md#shared-scheduling-capacity).
+Discovery signs a fresh read query
 using the named hotkey; it needs no per-miner credential. Add
 `--publication PUBLICATION_SHA256` to retrieve and verify one exact signed
 publication. Treat its output as private operational data because video URLs
@@ -546,6 +550,17 @@ The database must already exist; the service refuses a new path, another
 baseline or a ledger missing any anchored submission. The required
 `submission_head_checkpoint_directory` is a pre-existing, private external
 journal disjoint from intake and finality state.
+
+If readiness returns `503` with `verified registration unavailable`, inspect
+the intake service's private `registration_refresh_failed` log. The fixed
+`reason_code` distinguishes RPC rate limiting (`proof_rpc_rate_limited`), stale
+owned finality (`owned_finality_stale`), and registration-cache capacity
+(`registration_cache_capacity`). Unknown failures use a redacted fallback.
+A running process or advancing observer does not prove that storage-proof
+collection succeeds. Check the provider's request/connection quota for rate
+limits; a larger local cache does not fix them. Do not clear retained evidence,
+relax proof checks, or restart repeatedly to force readiness. Recovery requires
+a fresh verified capture, followed by public readiness and admission checks.
 
 For a successor-policy deployment, `historical_archives` names the pinned,
 read-only predecessor archive. Its directory must be separate from intake,

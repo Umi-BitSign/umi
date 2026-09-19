@@ -226,6 +226,22 @@ def validate_publication(
     return publication
 
 
+def scheduled_assignment_key(body, assignment) -> str:
+    """Local assignment identity, unchanged by re-signing or attempted retiming."""
+    return hashlib.sha256(
+        b"umi-scheduled-endpoint-assignment-v1\0"
+        + canonical_json_bytes(
+            [
+                body.policy_sha256,
+                digest(body.round),
+                assignment.submission_sha256,
+                identity(assignment.evaluator_hotkey),
+                assignment.case_sha256,
+            ]
+        )
+    ).hexdigest()
+
+
 def validate_publication_body(
     body: EndpointAuthorizationPublication, policy: CompetitionPolicy, legacy_policy: ScoringPolicy
 ) -> EndpointAuthorizationPublication:

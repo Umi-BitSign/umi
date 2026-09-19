@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Coroutine
+from typing import Any, TypeVar
+
+_Result = TypeVar("_Result")
 
 
 class PausedCall:
@@ -30,3 +34,28 @@ class PausedCall:
             return self.original(*args, **kwargs)
         finally:
             self.finished.set()
+
+    async def drive(
+        self,
+        operation: Coroutine[Any, Any, _Result],
+        serial: asyncio.Lock,
+        *,
+        cancel: bool = False,
+    ) -> _Result:
+        """Exercise event-loop progress and repeated cancellation, then drain."""
+        task = asyncio.create_task(operation)
+        try:
+            await asyncio.wait_for(self.entered.wait(), timeout=5)
+            assert self.thread_id != threading.get_ident()
+            assert serial.locked() and not task.done()
+            if cancel:
+                for _ in range(2):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    assert serial.locked() and not task.done()
+            self.release.set()
+            return await asyncio.wait_for(task, timeout=5)
+        finally:
+            self.release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            assert self.finished.is_set() and not serial.locked()

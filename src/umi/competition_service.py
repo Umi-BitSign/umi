@@ -231,13 +231,16 @@ def create_intake_app(
             capture = await finality_cache.cached()
             snapshot, provenance = capture.snapshot, capture.provenance
             schedule_not_open = snapshot.block < schedule.intake_opened_block
-            schedule_closed = snapshot.block > schedule.roster_close_latest_block
+            schedule_closed = not schedule_not_open and (
+                not config.public_deployment.launch_identity().accepts_at(snapshot.block)
+                or snapshot.block > policy.valid_through_block
+            )
             if not admission["accepting_new"] and not schedule_not_open and not schedule_closed:
                 raise ValueError("admission capacity is exhausted")
         except Exception as error:
             # Provider errors can include filesystem/RPC details; keep them private.
             raise HTTPException(503, "verified registration unavailable; retry later") from error
-        return {
+        result = {
             "schema": "umi-competition-readiness/2",
             "mode": "intake_no_weight",
             "ready_for": (
@@ -245,6 +248,8 @@ def create_intake_app(
                 if schedule_not_open
                 else "first_round_intake_closed"
                 if schedule_closed
+                else "continuous_intake"
+                if config.public_deployment.round_stride_blocks is not None
                 else "first_round_intake"
             ),
             "policy_sha256": digest(policy),
@@ -273,6 +278,16 @@ def create_intake_app(
             "rewards_active": False,
             "chain_submission_authorized": False,
         }
+        if config.public_deployment.round_stride_blocks is not None:
+            result["continuous_intake"] = True
+            result["next_intake_schedule"] = (
+                config.public_deployment.launch_identity()
+                .next_intake_schedule(snapshot.block)
+                .model_dump(mode="json", by_alias=True)
+                if result["admission_accepting_new"]
+                else None
+            )
+        return result
 
     return app
 

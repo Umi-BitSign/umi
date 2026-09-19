@@ -19,6 +19,7 @@ from .competition_evidence import (
     replay_independent_evaluation,
 )
 from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
+from .competition_launch_amendment import SignedLaunchAmendment, verify_launch_amendment
 from .competition_outcomes import (
     OutcomeEvidence,
     binding_ids,
@@ -173,6 +174,7 @@ class CompetitionStore(VoidEvidenceRetention):
         "suite_usage",
         "public_schedule_usage",
         "public_launch_history",
+        "public_launch_amendments",
         "evaluation_results",
         "evaluation_signatures",
         "round_conflicts",
@@ -195,6 +197,8 @@ class CompetitionStore(VoidEvidenceRetention):
         preparation_capacity: RoundPreparationCapacity | None = None,
         role: Literal["intake", "evaluator_review"] = "intake",
         public_launch: PublicLaunchIdentity | None = None,
+        launch_amendment: SignedLaunchAmendment | None = None,
+        amendment_observed_block: int | None = None,
         migrate_writer_generation: bool = False,
         submission_head_checkpoint_directory: Path | None = None,
         initial_checkpoint_submission_sha256s: tuple[str, ...] | None = None,
@@ -217,6 +221,18 @@ class CompetitionStore(VoidEvidenceRetention):
         launch_id = None if public_launch is None else digest(public_launch)
         self.public_launch = public_launch
         self.public_launch_id = launch_id
+        if (launch_amendment is None) != (amendment_observed_block is None):
+            raise ValueError("launch amendment requires its finalized observation")
+        if launch_amendment is not None and (
+            public_launch is None or role != "intake" or not migrate_writer_generation
+        ):
+            raise ValueError("launch amendment requires explicit quiesced intake migration")
+        self.launch_amendment = (
+            SignedLaunchAmendment.model_validate_json(canonical_json_bytes(launch_amendment))
+            if launch_amendment is not None
+            else None
+        )
+        self.amendment_observed_block = amendment_observed_block
         if historical_intake_archive_bindings is None:
             self.historical_intake_archive_bindings = None
         else:
@@ -371,6 +387,9 @@ class CompetitionStore(VoidEvidenceRetention):
                     digest TEXT UNIQUE NOT NULL,
                     schedule TEXT UNIQUE NOT NULL,
                     body BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS public_launch_amendments (
+                    successor TEXT PRIMARY KEY, body BLOB NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS evaluation_results (
                     digest TEXT PRIMARY KEY, round TEXT NOT NULL, submission TEXT NOT NULL,
@@ -778,8 +797,8 @@ class CompetitionStore(VoidEvidenceRetention):
             elif schedule_usage != expected:
                 raise ValueError("stored public schedule usage is corrupt")
 
-    @staticmethod
     def _public_launch_history(
+        self,
         connection: sqlite3.Connection,
     ) -> list[tuple[int, str, str, PublicLaunchIdentity]]:
         rows = connection.execute(
@@ -799,7 +818,17 @@ class CompetitionStore(VoidEvidenceRetention):
                 or canonical_json_bytes(launch) != body
             ):
                 raise ValueError("stored public launch history is corrupt")
-            if (
+            amendment_row = connection.execute(
+                "SELECT body FROM public_launch_amendments WHERE successor=?", (launch_id,)
+            ).fetchone()
+            if amendment_row is not None:
+                if previous is None:
+                    raise ValueError("initial public launch cannot have an amendment")
+                amendment = SignedLaunchAmendment.model_validate_json(amendment_row[0])
+                if canonical_json_bytes(amendment) != amendment_row[0]:
+                    raise ValueError("stored launch amendment is not canonical")
+                verify_launch_amendment(amendment, previous, launch, self.policy)
+            elif (
                 previous is not None
                 and launch.round_schedule.intake_opened_block
                 <= previous.round_schedule.round_valid_through_block
@@ -809,16 +838,17 @@ class CompetitionStore(VoidEvidenceRetention):
             previous = launch
         return parsed
 
-    @classmethod
     def _bind_public_launch(
-        cls,
+        self,
         connection: sqlite3.Connection,
         supplied: PublicLaunchIdentity | None,
     ) -> None:
         bound = connection.execute(
             "SELECT value FROM metadata WHERE key='public_launch_identity'"
         ).fetchone()
-        history = cls._public_launch_history(connection)
+        history = self._public_launch_history(connection)
+        if self.launch_amendment is not None and (bound is None or not history):
+            raise ValueError("launch amendment requires an existing public launch history")
         if supplied is None:
             if bound is not None or history:
                 raise ValueError("state directory requires its public launch identity")
@@ -838,7 +868,7 @@ class CompetitionStore(VoidEvidenceRetention):
                     latest_round = EvaluationRound.model_validate_json(latest[0])
                 except (TypeError, ValidationError, ValueError) as error:
                     raise ValueError("stored competition round is corrupt") from error
-                if cls._round_public_launch(latest_round) != supplied:
+                if not self._launch_contains_round(supplied, latest_round):
                     raise ValueError(
                         "legacy intake history requires the latest round public launch"
                     )
@@ -865,6 +895,10 @@ class CompetitionStore(VoidEvidenceRetention):
         if bound[0] == launch_id:
             if history[-1][3] != supplied:
                 raise ValueError("stored public launch digest has non-canonical semantics")
+            if self.launch_amendment is not None and connection.execute(
+                "SELECT body FROM public_launch_amendments WHERE successor=?", (launch_id,)
+            ).fetchone() != (canonical_json_bytes(self.launch_amendment),):
+                raise ValueError("launch amendment retry differs from retained authorization")
             return
         if any(prior_id == launch_id for _, prior_id, _, _ in history):
             raise ValueError("public launch rollback is forbidden")
@@ -872,6 +906,20 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("public round schedule reuse is forbidden")
 
         current = history[-1][3]
+        if self.launch_amendment is not None:
+            self._apply_launch_amendment(connection, current, supplied)
+            connection.execute(
+                "INSERT INTO public_launch_history VALUES (?, ?, ?, ?)",
+                (history[-1][0] + 1, launch_id, schedule_id, body),
+            )
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='public_launch_identity'", (launch_id,)
+            )
+            return
+        if current.round_stride_blocks is not None:
+            raise ValueError(
+                "continuous public launch requires explicit retirement before succession"
+            )
         if (
             supplied.round_schedule.intake_opened_block
             <= current.round_schedule.round_valid_through_block
@@ -896,7 +944,7 @@ class CompetitionStore(VoidEvidenceRetention):
         if (
             digest(round_) != round_id
             or round_.suite_sha256 != suite_id
-            or cls._round_public_launch(round_) != current
+            or not self._launch_contains_round(current, round_)
         ):
             raise ValueError("current public launch usage is corrupt")
         settlement_row = connection.execute(
@@ -906,7 +954,7 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("current public launch must be finalized before succession")
         if connection.execute(
             "SELECT 1 FROM round_conflicts UNION ALL SELECT 1 FROM settlement_disputes LIMIT 1"
-        ).fetchone() or cls._baseline_conflicted(connection):
+        ).fetchone() or self._baseline_conflicted(connection):
             raise ValueError("current public launch has unresolved conflicts")
         try:
             settlement = CompetitionSettlement.model_validate_json(settlement_row[1])
@@ -929,6 +977,48 @@ class CompetitionStore(VoidEvidenceRetention):
             "UPDATE metadata SET value=? WHERE key='public_launch_identity'", (launch_id,)
         )
 
+    @staticmethod
+    def _launch_contains_round(launch: PublicLaunchIdentity, round_: EvaluationRound) -> bool:
+        return launch.eligible_tracks == round_.eligible_tracks and launch.contains_schedule(
+            round_.public_schedule
+        )
+
+    def _apply_launch_amendment(
+        self,
+        connection: sqlite3.Connection,
+        current: PublicLaunchIdentity,
+        supplied: PublicLaunchIdentity,
+    ) -> None:
+        signed = self.launch_amendment
+        if signed is None:
+            raise ValueError("launch amendment authorization is missing")
+        verify_launch_amendment(signed, current, supplied, self.policy)
+        observed = self.amendment_observed_block
+        if type(observed) is not int or not (
+            signed.amendment.effective_block
+            <= observed
+            < supplied.round_schedule.roster_close_earliest_block
+        ):
+            raise ValueError("launch amendment is outside its application window")
+        for table in (
+            "rounds",
+            "round_preparations",
+            "suite_usage",
+            "public_schedule_usage",
+            "evidence_cutoff_schedules",
+            "round_conflicts",
+            "settlement_disputes",
+        ):
+            if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                raise ValueError("launch amendment requires an unused first-cohort schedule")
+        if self._baseline_conflicted(connection):
+            raise ValueError("launch amendment requires an unconflicted baseline")
+        _advance_block(connection, observed)
+        connection.execute(
+            "INSERT INTO public_launch_amendments VALUES (?, ?)",
+            (digest(supplied), canonical_json_bytes(signed)),
+        )
+
     def _require_current_public_launch(
         self, connection: sqlite3.Connection
     ) -> PublicLaunchIdentity | None:
@@ -945,6 +1035,19 @@ class CompetitionStore(VoidEvidenceRetention):
         if not history or history[-1][1] != bound[0]:
             raise ValueError("current public launch differs from immutable history")
         return history[-1][3]
+
+    def public_launch_amendments(self) -> list[dict]:
+        """Public schedule authorizations, in retained launch-history order."""
+        with self._connection() as connection:
+            history = self._public_launch_history(connection)
+            amendments = []
+            for _, launch_id, _, _ in history:
+                row = connection.execute(
+                    "SELECT body FROM public_launch_amendments WHERE successor=?", (launch_id,)
+                ).fetchone()
+                if row is not None:
+                    amendments.append(json.loads(row[0]))
+            return amendments
 
     def admit(
         self,
@@ -983,9 +1086,7 @@ class CompetitionStore(VoidEvidenceRetention):
                 if old:
                     return json.loads(old[0])  # Historical retry, never an expiry renewal.
                 if launch is not None and (
-                    sub.track not in launch.eligible_tracks
-                    or current_block < launch.round_schedule.intake_opened_block
-                    or current_block > launch.round_schedule.roster_close_latest_block
+                    sub.track not in launch.eligible_tracks or not launch.accepts_at(current_block)
                 ):
                     raise ValueError("submission is outside the current public launch")
                 _advance_block(connection, current_block)
@@ -2363,7 +2464,7 @@ class CompetitionStore(VoidEvidenceRetention):
         with self._transaction() as connection:
             launch = self._require_current_public_launch(connection)
             if launch is not None and (
-                launch.round_schedule != public_schedule
+                not launch.contains_schedule(public_schedule)
                 or launch.eligible_tracks != eligible_tracks
             ):
                 raise ValueError("round preparation differs from the current public launch")
@@ -2650,7 +2751,7 @@ class CompetitionStore(VoidEvidenceRetention):
         with self._transaction() as connection:
             launch = self._require_current_public_launch(connection)
             if launch is not None and (
-                launch.round_schedule != round_.public_schedule
+                not launch.contains_schedule(round_.public_schedule)
                 or launch.eligible_tracks != round_.eligible_tracks
             ):
                 raise ValueError("round differs from the current public launch")

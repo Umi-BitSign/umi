@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from .competition_commands.common import load_json
+from .competition_launch_amendment import SignedLaunchAmendment
 from .competition_service import CompetitionServiceConfig
 from .competition_store import CompetitionStore
 from .open_competition import CompetitionPolicy, digest
@@ -18,9 +19,15 @@ def migrate(
     *,
     confirmed: bool,
     service_config=None,
+    launch_amendment: SignedLaunchAmendment | None = None,
+    amendment_observed_block: int | None = None,
 ) -> dict:
     if not confirmed:
         raise ValueError("writer migration requires a quiesced store and verified backup")
+    if launch_amendment is not None and service_config is None:
+        raise ValueError("launch amendment requires the replacement service configuration")
+    if (launch_amendment is None) != (amendment_observed_block is None):
+        raise ValueError("launch amendment requires its finalized observation")
     state = state.absolute()
     if not (state / "competition.sqlite3").is_file():
         raise ValueError("writer migration requires the existing durable ledger")
@@ -35,6 +42,8 @@ def migrate(
             "admission_capacity": config.admission_capacity,
             "public_launch": config.public_deployment.launch_identity(),
             "migrate_writer_generation": True,
+            "launch_amendment": launch_amendment,
+            "amendment_observed_block": amendment_observed_block,
         }
         store = CompetitionStore(
             state,
@@ -53,7 +62,9 @@ def migrate(
         store = CompetitionStore(state, policy, migrate_writer_generation=True)
     return {
         "status": (
-            "writer_generation_and_submission_checkpoint_migrated"
+            "public_launch_amended_receipts_preserved"
+            if launch_amendment is not None
+            else "writer_generation_and_submission_checkpoint_migrated"
             if config is not None
             else "writer_generation_migrated"
         ),
@@ -74,6 +85,12 @@ def main(argv: list[str] | None = None) -> None:
         help="launch-bound service config used to initialize the independent checkpoint",
     )
     parser.add_argument("--confirm-quiesced-backup", action="store_true")
+    parser.add_argument("--launch-amendment", help="evaluator-signed schedule amendment JSON")
+    parser.add_argument(
+        "--amendment-observed-block",
+        type=int,
+        help="current finalized block from the owned registration verifier",
+    )
     args = parser.parse_args(argv)
     try:
         result = migrate(
@@ -85,6 +102,12 @@ def main(argv: list[str] | None = None) -> None:
                 if args.service_config
                 else None
             ),
+            launch_amendment=(
+                load_json(args.launch_amendment, SignedLaunchAmendment)
+                if args.launch_amendment
+                else None
+            ),
+            amendment_observed_block=args.amendment_observed_block,
         )
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(2, f"competition store migration rejected ({type(error).__name__})\n")

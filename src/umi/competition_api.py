@@ -126,6 +126,10 @@ def create_app(
             if acquired:
                 capacity.release()
 
+    @app.get("/v1/competition/launch-amendments")
+    async def launch_amendments():
+        return {"amendments": await run_in_threadpool(store.public_launch_amendments)}
+
     @app.get("/v1/competition/status")
     async def status():
         try:
@@ -148,7 +152,9 @@ def create_app(
                 if snapshot.block < public_deployment.round_schedule.intake_opened_block:
                     admission_accepting_new = False
                     admission_phase = "not_open"
-                elif snapshot.block > public_deployment.round_schedule.roster_close_latest_block:
+                elif not public_deployment.launch_identity().accepts_at(snapshot.block) or (
+                    snapshot.block > store.policy.valid_through_block
+                ):
                     admission_accepting_new = False
                     admission_phase = "closed"
                 elif not admission_accepting_new:
@@ -186,6 +192,15 @@ def create_app(
                     "rewards_active": False,
                 }
             )
+            if public_deployment.round_stride_blocks is not None:
+                result["continuous_intake"] = True
+                result["next_intake_schedule"] = (
+                    public_deployment.launch_identity()
+                    .next_intake_schedule(admission_checked_block)
+                    .model_dump(mode="json", by_alias=True)
+                    if admission_checked_block is not None and admission_accepting_new
+                    else None
+                )
         return result
 
     @app.get("/v1/competition/submissions")
@@ -339,9 +354,18 @@ def create_app(
             ) from error
         if (
             public_deployment is not None
-            and snapshot.block > public_deployment.round_schedule.roster_close_latest_block
+            and snapshot.block >= public_deployment.round_schedule.intake_opened_block
+            and (
+                not public_deployment.launch_identity().accepts_at(snapshot.block)
+                or snapshot.block > store.policy.valid_through_block
+            )
         ):
-            raise HTTPException(409, "first-round endpoint intake is closed")
+            raise HTTPException(
+                409,
+                "first-round endpoint intake is closed"
+                if public_deployment.round_stride_blocks is None
+                else "competition intake is closed",
+            )
         if (
             public_deployment is not None
             and snapshot.block < public_deployment.round_schedule.intake_opened_block

@@ -383,6 +383,43 @@ def test_dispatch_concurrency_can_be_raised_without_extending_proof_timeout(disp
     assert config.chain.collection_timeout_seconds == 15
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True])
+async def test_dispatch_opener_uses_shared_scheduling_capacity(dispatch, monkeypatch, configured):
+    import bittensor as bt
+
+    from umi import competition_dispatch as module
+    from umi.competition_scheduling import SchedulingCapacity
+
+    raw = dispatch.config.model_dump(by_alias=True, exclude={"scheduling_capacity"})
+    capacity = SchedulingCapacity()
+    if configured:
+        capacity = SchedulingCapacity(
+            maximum_publications=2048,
+            maximum_assignments=32768,
+            maximum_bytes=2 * 1024**3,
+            maximum_outcome_bytes=2 * 1024**2,
+        )
+        raw["scheduling_capacity"] = capacity.model_dump()
+    config = EndpointDispatchConfig.model_validate_json(canonical_json_bytes(raw))
+    assert config.scheduling_capacity == capacity
+    monkeypatch.setattr(bt, "Wallet", lambda **_kw: dispatch.feed.item.validator_wallet)
+
+    class CapturedJournal(Exception):
+        pass
+
+    def capture(directory, policy, legacy, **limits):
+        assert directory == Path(config.journal_directory)
+        assert limits == capacity.model_dump()
+        raise CapturedJournal
+
+    monkeypatch.setattr(module, "AssignmentPublicationJournal", capture)
+    with pytest.raises(CapturedJournal):
+        await module.run_dispatch(
+            config, dispatch.feed.item.policy, dispatch.feed.item.legacy_policy, once=True
+        )
+
+
 def test_wrong_wallet_rejected(dispatch):
     with pytest.raises(ValueError, match="wallet"):
         EndpointDispatcher(dispatch.config, dispatch.feed.journal, dispatch.provider, wallet("Bob"))

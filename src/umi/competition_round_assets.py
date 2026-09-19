@@ -11,10 +11,10 @@ from typing import Annotated, Literal
 
 from pydantic import Field, RootModel
 
-from .competition_evaluator import _read
 from .competition_runner import OfflineRuntime
 from .competition_work_plans import RoundWorkAssets
 from .open_competition import EvaluationRound, ModelBundle, digest, validate_bundle_policy
+from .private_files import read_private_model as _read
 from .protocol import Hex32, StrictProtocolModel, Video, canonical_json_bytes
 
 

@@ -28,10 +28,10 @@ from .competition_publication import (
     sign_settlement_publication,
     verify_settlement_endorsement,
 )
+from .competition_round_journal import RoundJournal
+from .competition_round_plan import RoundProposal
 from .competition_rounds import (
     CutoffEndorsement,
-    RoundJournal,
-    RoundProposal,
     validate_proposal,
     verify_endorsement,
 )

@@ -445,7 +445,7 @@ def test_inbox_requires_bounded_private_regular_canonical_bytes(setup, tmp_path,
     elif kind == "noncanonical":
         path.write_bytes(path.read_bytes() + b"\n")
     else:
-        monkeypatch.setattr(worker, "MAX_BYTES", 10)
+        monkeypatch.setattr("umi.private_files.MAX_PRIVATE_BYTES", 10)
     with pytest.raises((OSError, ValueError)):
         first.ingest_once()
 
@@ -457,6 +457,73 @@ def test_config_separates_hotkey_state_and_inputs(setup):
             worker.EvaluatorConfig.model_validate_json(
                 canonical_json_bytes(config.model_copy(update={field: config.state_directory}))
             )
+
+
+def test_scheduling_capacity_preserves_historical_evaluator_binding(setup):
+    from umi.competition_scheduling import SchedulingCapacity
+
+    first = setup.drivers[0]
+    legacy_config = worker.EvaluatorConfig.model_validate_json(
+        canonical_json_bytes(
+            first.config.model_dump(by_alias=True, exclude={"scheduling_capacity"})
+        )
+    )
+    assert legacy_config.scheduling_capacity == SchedulingCapacity()
+    with first.journal.transaction() as db:
+        retained = bytes(db.execute("SELECT body FROM binding").fetchone()[0])
+    assert b'"scheduling_capacity"' not in retained
+    changed = legacy_config.model_copy(
+        update={
+            "scheduling_capacity": SchedulingCapacity(
+                maximum_publications=2048,
+                maximum_assignments=32768,
+                maximum_bytes=2 * 1024**3,
+            )
+        }
+    )
+    reopened = worker.EvaluatorJournal(changed)
+    with reopened.transaction() as db:
+        assert bytes(db.execute("SELECT body FROM binding").fetchone()[0]) == retained
+    with pytest.raises(ValueError, match="configuration changed"):
+        worker.EvaluatorJournal(changed.model_copy(update={"wallet_name": "another-wallet"}))
+
+
+def test_evaluator_opener_uses_shared_scheduling_capacity(paired_setup, chain_config, tmp_path):
+    from umi.competition_scheduling import SchedulingCapacity
+
+    item = paired_setup.dispatch.feed.item
+    first = make_driver(
+        tmp_path / "capacity-evaluator",
+        chain_config,
+        item.policy,
+        paired_setup.archive,
+        paired_setup.videos,
+        item.evaluator_wallets[0],
+        legacy=item.legacy_policy,
+        dispatch=paired_setup.dispatch.feed.journal.path.parent,
+    )
+    capacity = SchedulingCapacity(
+        maximum_publications=2048, maximum_assignments=32768, maximum_bytes=2 * 1024**3
+    )
+    reopened = worker.ContinuousEvaluator(
+        first.config.model_copy(update={"scheduling_capacity": capacity}),
+        first.policy,
+        first.wallet,
+        first.provider,
+        legacy=item.legacy_policy,
+    )
+    assert {name: getattr(reopened.dispatch, name) for name in SchedulingCapacity.model_fields} == (
+        capacity.model_dump()
+    )
+    changed = capacity.model_copy(update={"maximum_outcome_bytes": 2 * 1024**2})
+    with pytest.raises(ValueError, match="outcome capacity mismatch"):
+        worker.ContinuousEvaluator(
+            first.config.model_copy(update={"scheduling_capacity": changed}),
+            first.policy,
+            first.wallet,
+            first.provider,
+            legacy=item.legacy_policy,
+        )
 
 
 def test_capacity_failure_retains_history_and_does_not_execute(setup):

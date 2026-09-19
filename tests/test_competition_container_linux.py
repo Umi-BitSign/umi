@@ -22,6 +22,7 @@ from umi.competition_container import PodmanSuccessorContainer, SuccessorContain
 from umi.competition_package import CompetitionReleaseIdentity
 from umi.competition_supervisor import SuccessorSupervisorReleaseTarget
 from umi.crypto import sign_response_digest
+from umi.policy import umi_source_tree_sha256
 from umi.protocol import canonical_json_bytes
 
 pytestmark = pytest.mark.skipif(
@@ -46,6 +47,9 @@ async def test_real_signed_oci_load_and_inert_sandbox(tmp_path):
     assert len(inspected.stdout) <= 1024 * 1024
     (record,) = json.loads(inspected.stdout)
     labels = record["Config"]["Labels"]
+    assert labels.get("vision.umi.source-tree-sha256") == umi_source_tree_sha256(), (
+        "rebuild the rehearsal image from this checkout; its Python source digest differs"
+    )
     archive = archive_path.read_bytes()
     manifest = releases.SuccessorOCIReleaseManifest(
         schema=releases.SUCCESSOR_RELEASE_SCHEMA,

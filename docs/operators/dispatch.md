@@ -38,6 +38,8 @@ unknown fields and overlapping state/wallet directories. Supply these fields:
 | `evaluator_hotkey` | This evaluator's public hotkey, registered in both policies |
 | `wallet_name`, `hotkey_name`, `wallet_path` | Local hotkey wallet identifiers and absolute wallet root |
 | `no_weight` | `true` |
+| `scheduling_capacity` | Optional shared journal limits, described below |
+| `timing_budget` | Qualified timing assumptions required before new endpoint work can be endorsed |
 
 Defaults are a five-second poll, ten-second discovery grace, four concurrent
 requests, pages of 32 assignments, and a 180-second total request timeout. At
@@ -52,14 +54,16 @@ a time; miner HTTP requests can overlap. This queue does not extend any signed
 deadline. A request that reaches its issue cutoff while queued remains unclaimed
 and is recorded as infrastructure expiry, not a miner failure.
 
-Budget for every assigned case, not just one request. Six tasks at a 120-second
-inference limit already require at least 720 seconds for one single-worker miner,
-before proof collection and delivery. A 300-second issue window is insufficient.
+Budget for every assigned case. If six serialized tasks each consume the full
+120-second inference limit, inference takes 720 seconds and the last task starts
+after 600 seconds, before proof collection and delivery overhead. A 300-second
+issue window cannot cover that case; actual inference may finish sooner.
 The prospective dependence suite assigns three fingerspelling cases, 12 scored
 continuous cases and 12 matched-swap controls. Its 27 serialized requests can
 consume 3,240 seconds at the inference cap before proof, delivery and scheduling
-overhead. Use the 5,400-second competition default unless complete measured
-qualification supports a shorter signed value.
+overhead. Dependence-gated work requires a signed 5,400-second allowance.
+Profiles that permit shorter allowances still need complete measured
+qualification before selecting one.
 For a larger cohort, qualify the shared proof queue, HTTP concurrency, publication
 discovery, and total per-miner serial workload before signing the window. Preserve
 the per-request inference limit; do not edit deadlines after publication.
@@ -112,6 +116,97 @@ This is a storage-read mode only. The weight transport rejects transaction
 encoding with this context before signing. It does not authorize a newer runtime's
 call encoding or transaction extensions. Without the optional field, the existing
 exact-runtime checks and serialized configuration remain unchanged.
+
+### Shared scheduling capacity
+
+The dispatcher, endpoint evaluator, assignment feed and evidence assembler open
+the same scheduling journal. Use the same limits in all four. The optional
+`scheduling_capacity` object in dispatcher and evaluator configs has these defaults:
+
+```json
+{
+  "maximum_publications": 1024,
+  "maximum_assignments": 16384,
+  "maximum_bytes": 1073741824,
+  "maximum_outcome_bytes": 1048576
+}
+```
+
+For `serve-assignment-feed` and `assemble-endpoint-execution`, supply that object
+as a JSON file with `--scheduling-capacity /ABSOLUTE/CAPACITY.json`. Omission keeps
+the historical defaults. This is source configuration; installed binaries must
+support the option before using it. The outcome limit is bound into existing
+journals and cannot be changed in place. The other limits can be increased
+without rewriting retained evidence or changing signed assignments.
+
+The default 1 GiB is insufficient for 256 endpoints with six cases: reserved
+outcomes and events alone need 1,623,195,648 bytes per evaluator represented in
+each publication, before publication bodies and finality proofs. Filesystem
+overhead needs additional space. Configure and qualify the entire cohort.
+The settings alone do not reserve work. Before a new endpoint endorsement, the
+signer reconstructs the complete frozen cohort and reserves its publication,
+assignment, outcome and event storage atomically. It also reserves up to 4 MiB
+of verifier evidence plus 64 KiB of block metadata for each missing proof height
+through the cohort's last deadline. Overlapping intervals share that allowance;
+retained proofs count at their actual size. Separate unsigned-body and admission
+records are charged too. Never delete evidence or retime work to regain capacity.
+Evaluators sharing a journal share the immutable assignment and proof reservation.
+Each evaluator must qualify its own dispatcher profile; those timing receipts are
+separate and cannot substitute for one another.
+Unused future-proof allowance is released only after every publication is
+consumed and every assignment is recorded completed or expired. An unknown claim
+or an unpublished body keeps its allowance. Retained evidence remains charged.
+
+The first successful reservation upgrades the private journal to generation 2
+and fences older writers, including already-open SQLite connections. Drain any
+dispatched claim without a recorded completion before migration. Failed admission
+rolls back the migration and the new reservation together. Historical signed
+publications remain readable; new publications must match their reserved bodies.
+Upgrade all services sharing this journal before enabling new endorsements.
+
+### Timing qualification before endorsement
+
+Configure `timing_budget` on the actual dispatcher before the work signer runs.
+It records its operative concurrency, page size, poll cadence, discovery grace,
+request timeout and publication inbox in the shared journal. Omitting this object
+keeps an unqualified legacy dispatcher usable, but cannot authorize new endpoint
+work or bypass an existing profile. Do not copy synthetic test timings.
+
+Every budget field is explicit:
+
+| Field | Required bound |
+| --- | --- |
+| `proof_collection_ms`, `origin_collection_ms` | Serialized owned-proof and serving-origin collection |
+| `publication_ingestion_ms` | Parse, verify and durably ingest one publication |
+| `local_cycle_ms` | Remaining polling and per-job local processing |
+| `publication_delay_ms` | Endorsement through delivery of the complete signed inbox |
+| `block_advance_numerator`, `block_advance_denominator_ms` | Assumed maximum block advance over elapsed milliseconds |
+| `finality_headroom_blocks` | Observation age and finality catch-up allowance |
+| `measurement_sha256` | Digest identifying the retained qualification measurements |
+
+The calculation includes pending and reserved local assignments, per-miner
+serialization, bounded page scans, repeated discovery waits, the current inbox
+and full request timeouts. An unresolved claim holds further admission. The
+block prediction is conditional on the supplied bound; a target block interval
+does not establish that bound. Actual deadline and finality checks still apply.
+The first qualification receipt is retained with the reservation.
+
+Continuation of the exact admitted cohort reuses its receipt, so an active
+request does not block the cohort's remaining endorsements. This never resets
+the delivery allowance. After that allowance elapses, continuation requires all
+cohort publications to have been journaled before its original deadline.
+Budget for authorization/order signing, delivery and ingestion.
+
+The dispatcher rechecks its profile each poll and inside the atomic claim path.
+The production command holds an exclusive evaluator/journal lease through
+shutdown, keeping its per-miner serialization and concurrency bound enforceable.
+Changing a profile with unfinished work is rejected. These checks reserve
+scheduler storage and qualify dispatch timing only. Whole-cohort work admission
+also checks native signing, evaluator, execution and configured review-store
+reservations before a new signature. A publication may use fewer bytes than its
+reserved maximum; its verified receipt keeps the original bound and timing.
+Full-round runtime and filesystem qualification still require a connected
+rehearsal before release.
 
 <a id="open-competition-dispatch--run-and-feed-miners"></a>
 

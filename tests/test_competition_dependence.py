@@ -18,7 +18,7 @@ from umi.competition_evidence import (
     sign_evaluator_run,
 )
 from umi.competition_execution import ExecutionBoundary
-from umi.competition_runner import OfflineCaseExecution, OfflineCpuRuntime
+from umi.competition_runner import OfflineCaseExecution, OfflineCpuRuntime, validate_case_execution
 from umi.competition_settlement import EvidenceCutoffSchedule
 from umi.competition_store import CompetitionStore
 from umi.open_competition import (
@@ -39,6 +39,7 @@ from umi.open_competition import (
     continuous_dependence_report,
     digest,
     has_case_coverage,
+    replay_evaluation,
     sign_object,
     validate_dependence_calibration,
     validate_suite_profile,
@@ -221,6 +222,160 @@ def test_matched_swap_gate_uses_score_loss_not_output_change():
         "fingerspelling": Fraction(0),
         "continuous": Fraction(0),
     }
+
+
+def _replace_output(outputs, case_id, **changes):
+    return tuple(
+        CaseOutput.model_validate(output.model_dump() | changes)
+        if output.case_id == case_id
+        else output
+        for output in outputs
+    )
+
+
+def _replay_outputs(policy, suite, candidate, incumbent):
+    signed = submission(policy)
+    round_ = round_for(policy, suite, (signed,))
+    result = EvaluationResult(
+        schema="umi-competition-result/1",
+        round_sha256=digest(round_),
+        submission_sha256=digest(signed.submission),
+        model_revision=signed.submission.model_revision,
+        incumbent_model_sha256=round_.incumbent_model_sha256,
+        runtime_sha256=round_.runtime_sha256,
+        finished_block=round_.evaluation_close_block,
+        candidate=candidate,
+        incumbent=incumbent,
+    )
+    attested = AttestedResult(
+        result=result,
+        signatures=(sign_object(result, wallet("Charlie")),),
+    )
+    return replay_evaluation(
+        attested, signed, round_, suite, policy, current_block=round_.reveal_block
+    )
+
+
+@pytest.mark.parametrize("role", ["candidate", "incumbent"])
+def test_missing_control_evidence_cannot_be_omitted_from_scoring(role):
+    policy = dependence_policy()
+    suite = dependence_suite(policy)
+    complete = outputs_for(suite, blind=False)
+    control = suite.matched_swap_pairs[0].control_case_id
+    missing = tuple(output for output in complete if output.case_id != control)
+
+    with pytest.raises(ValueError, match="complete suite"):
+        continuous_dependence_report(missing, suite, policy)
+    with pytest.raises(ValueError, match="complete suite"):
+        _quality(missing, suite, policy, incumbent=role == "incumbent")
+    with pytest.raises(ValueError, match="paired outputs"):
+        _replay_outputs(
+            policy,
+            suite,
+            missing if role == "candidate" else complete,
+            missing if role == "incumbent" else complete,
+        )
+
+
+@pytest.mark.parametrize("failure", ["miner_failure", "late", "oversized"])
+def test_failed_control_is_incomplete_even_when_other_pairs_prove_dependence(failure):
+    policy = dependence_policy()
+    suite = dependence_suite(policy)
+    complete = outputs_for(suite, blind=False)
+    control = suite.matched_swap_pairs[0].control_case_id
+    changes = {
+        "miner_failure": {"status": "miner_failure", "hypothesis": ""},
+        "late": {"elapsed_ms": policy.maximum_inference_ms + 1},
+        # Below the CaseOutput character bound, above the policy's UTF-8 byte bound.
+        "oversized": {"hypothesis": "é" * (policy.maximum_output_bytes // 2 + 1)},
+    }[failure]
+    failed = _replace_output(complete, control, **changes)
+    report = continuous_dependence_report(failed, suite, policy)
+    assert report.complete is False
+    assert report.observed_margin > Fraction(policy.minimum_continuous_observed_margin_bps, 10_000)
+    candidate, incumbent = _replay_outputs(policy, suite, failed, complete)
+    assert candidate == {stratum: Fraction(0) for stratum in policy.stratum_weights}
+    assert incumbent == {stratum: Fraction(1) for stratum in policy.stratum_weights}
+    with pytest.raises(ValueError, match="incumbent execution failed"):
+        _replay_outputs(policy, suite, complete, failed)
+
+
+@pytest.mark.parametrize("bound", ["time", "utf8_bytes"])
+def test_control_resource_boundaries_are_inclusive(bound):
+    policy = dependence_policy()
+    suite = dependence_suite(policy)
+    outputs = outputs_for(suite, blind=False)
+    control = suite.matched_swap_pairs[0].control_case_id
+    changes = (
+        {"elapsed_ms": policy.maximum_inference_ms}
+        if bound == "time"
+        else {"hypothesis": "é" * (policy.maximum_output_bytes // 2)}
+    )
+    outputs = _replace_output(outputs, control, **changes)
+    report = continuous_dependence_report(outputs, suite, policy)
+    assert report.complete is True
+    assert report.observed_margin == 1
+    candidate, incumbent = _replay_outputs(policy, suite, outputs, outputs)
+    assert candidate == incumbent == {stratum: Fraction(1) for stratum in policy.stratum_weights}
+
+
+@pytest.mark.parametrize("role", ["candidate", "incumbent"])
+def test_control_infrastructure_failure_voids_evaluation_instead_of_scoring_zero(role):
+    policy = dependence_policy()
+    suite = dependence_suite(policy)
+    complete = outputs_for(suite, blind=False)
+    failed = _replace_output(
+        complete,
+        suite.matched_swap_pairs[0].control_case_id,
+        status="infrastructure_failure",
+        hypothesis="",
+    )
+    with pytest.raises(ValueError, match="infrastructure failure voids evaluation"):
+        continuous_dependence_report(failed, suite, policy)
+    with pytest.raises(ValueError, match="infrastructure failure voids evaluation"):
+        _replay_outputs(
+            policy,
+            suite,
+            failed if role == "candidate" else complete,
+            failed if role == "incumbent" else complete,
+        )
+
+
+@pytest.mark.parametrize("failure", ["missing", "late", "oversized"])
+def test_positive_control_preparation_rejects_incomplete_retained_control(failure):
+    policy = dependence_policy()
+    suite = dependence_suite(policy)
+    execution = calibration_preparation(policy, suite).execution
+    control = suite.matched_swap_pairs[0].control_case_id
+    if failure == "missing":
+        records = tuple(item for item in execution.executions if item.output.case_id != control)
+        message = "omits suite cases"
+    else:
+        records = []
+        for item in execution.executions:
+            if item.output.case_id == control:
+                item = item.model_copy(
+                    update={
+                        "output": CaseOutput(
+                            case_id=control,
+                            status="miner_failure",
+                            hypothesis="",
+                            elapsed_ms=policy.maximum_inference_ms + 1 if failure == "late" else 10,
+                        ),
+                        "reason": "deadline" if failure == "late" else "output_limit",
+                        "stdout_hex": ""
+                        if failure == "late"
+                        else (b"x" * (policy.maximum_output_bytes + 1)).hex(),
+                        "returncode": None,
+                    }
+                )
+                validate_case_execution(item, policy)
+            records.append(item)
+        records = tuple(records)
+        message = "positive control did not prove"
+    changed = execution.model_copy(update={"executions": records})
+    with pytest.raises(ValueError, match=message):
+        prepare_dependence_calibration(changed, suite, policy)
 
 
 def test_observed_effect_and_confidence_floor_are_independent_gates():

@@ -10,6 +10,7 @@ from umi import competition_work_plans as plans
 from umi import competition_work_signing as signing
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_authorization import SignedEndpointAuthorization, validate_publication
+from umi.competition_dispatch_capacity import DispatchTimingBudget, DispatchTimingLimits
 from umi.competition_evaluator import SignedEvaluationOrder, validate_order
 from umi.competition_execution import execution_boundary
 from umi.competition_publication import PublicationReplayLimits, sign_cutoff_publication
@@ -21,10 +22,12 @@ from umi.competition_rounds import (
     RoundProposal,
     SignedLocalCutoffProof,
 )
+from umi.competition_scheduling import AssignmentPublicationJournal
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
-from .test_competition_evaluator import Provider
+from .test_competition_evaluator import Provider, make_driver
+from .test_competition_evaluator import chain_config as chain_config
 from .test_competition_work_plans import policy as policy
 from .test_competition_work_plans import runtime as runtime
 from .test_competition_work_plans import setup as work_fixture
@@ -46,7 +49,7 @@ class Transport:
 
 
 @pytest.fixture
-def setup(work, tmp_path, monkeypatch):
+def setup(work, tmp_path, monkeypatch, chain_config):
     clock = SimpleNamespace(now=work.options["now_ms"])
     monkeypatch.setattr(signing.time, "time_ns", lambda: clock.now * 1_000_000)
     proposal = RoundProposal(
@@ -73,6 +76,49 @@ def setup(work, tmp_path, monkeypatch):
             wallet=hotkey,
             provider=provider,
             boundary=boundary,
+            dispatch=AssignmentPublicationJournal(
+                tmp_path / f"dispatch-{index}",
+                work.policy,
+                work.item.legacy_policy,
+                maximum_bytes=16 * 1024**3,
+            ),
+        )
+        native = make_driver(
+            tmp_path / f"worker-{index}",
+            chain_config,
+            work.policy,
+            tmp_path / "archive",
+            tmp_path / "videos",
+            hotkey,
+            legacy=work.item.legacy_policy,
+            dispatch=tmp_path / f"dispatch-{index}",
+        )
+        worker.config = native.config
+        worker.journal, worker.executions = native.journal, native.executions
+        worker.legacy, worker.review_store = native.legacy, None
+        inbox = tmp_path / f"inbox-{index}"
+        inbox.mkdir(mode=0o700)
+        worker.dispatch.configure_dispatch(
+            evaluator_hotkey=hotkey.hotkey.ss58_address,
+            limits=DispatchTimingLimits(
+                maximum_concurrency=4,
+                page_size=32,
+                poll_seconds=1,
+                discovery_grace_seconds=5,
+                request_timeout_seconds=1,
+            ),
+            budget=DispatchTimingBudget(
+                proof_collection_ms=1,
+                origin_collection_ms=1,
+                publication_ingestion_ms=1,
+                local_cycle_ms=1,
+                publication_delay_ms=0,
+                block_advance_numerator=1,
+                block_advance_denominator_ms=12000,
+                finality_headroom_blocks=0,
+                measurement_sha256="99" * 32,
+            ),
+            publication_directory=inbox,
         )
         cutoff = RoundJournal(tmp_path / f"cutoff-{index}", {"worker": index})
         cutoff.put("intent", str(proposal.cutoff.round.sequence), proposal)
@@ -104,7 +150,11 @@ def setup(work, tmp_path, monkeypatch):
     )
 
     def statement(body):
-        return signing.WorkStatement(schema="umi-work-statement/1", plan=work.plan, body=body)
+        return (
+            None
+            if body is None
+            else signing.WorkStatement(schema="umi-work-statement/1", plan=work.plan, body=body)
+        )
 
     return SimpleNamespace(
         work=work,
@@ -112,7 +162,9 @@ def setup(work, tmp_path, monkeypatch):
         workers=workers,
         signers=signers,
         authorization=statement(authorization),
-        model=statement(next(o for o in orders if o.submission.submission.track == "model")),
+        model=statement(
+            next((o for o in orders if o.submission.submission.track == "model"), None)
+        ),
         endpoint=statement(next(o for o in orders if o.submission.submission.track == "endpoint")),
     )
 
@@ -155,16 +207,16 @@ async def test_work_signer_records_only_its_independently_checked_cutoff(setup, 
             db.execute("DELETE FROM records WHERE kind='vote'")
     if fault is not None:
         with pytest.raises(ValueError):
-            await signer.endorse(s.model)
+            await signer.endorse(s.authorization)
         assert not worker.review_store.submissions()
         assert signer.journal.get("vote", signing.statement_slot(s.model)) is None
     else:
-        vote = await signer.endorse(s.model)
+        vote = await signer.endorse(s.authorization)
         assert calls == [plan.cutoff.publication.registration_snapshot.block]
         entries = worker.review_store.submissions()
         assert len(entries) == len(plan.submissions)
         assert all(e["receipt"]["first_observed_block"] == worker.provider.block for e in entries)
-        assert await signer.endorse(s.model) == vote
+        assert await signer.endorse(s.authorization) == vote
         assert worker.review_store.submissions() == entries
 
 
@@ -258,11 +310,11 @@ async def test_retained_owned_cutoff_proof_survives_historical_age_not_current_c
     worker.provider.collect_at = expired_historical_read
     if fault is not None:
         with pytest.raises(ValueError):
-            await signer.endorse(s.model)
+            await signer.endorse(s.authorization)
         assert signer.journal.get("vote", signing.statement_slot(s.model)) is None
         assert not worker.review_store.submissions()
     else:
-        vote = await signer.endorse(s.model)
+        vote = await signer.endorse(s.authorization)
         assert worker.review_store.submissions()
         restarted = signing.IndependentWorkSigner(
             worker,
@@ -271,17 +323,21 @@ async def test_retained_owned_cutoff_proof_survives_historical_age_not_current_c
             transport_provider=signer.transport_provider,
             minimum_issue_ms=1000,
         )
-        assert await restarted.endorse(s.model) == vote
+        assert await restarted.endorse(s.authorization) == vote
 
 
 @pytest.mark.asyncio
 async def test_model_work_needs_no_endpoint_transport_provider(setup):
     signer = setup.signers[0]
+    await signer.endorse(setup.authorization)
     signer.transport_provider = None
     assert await signer.endorse(setup.model)
+    setup.signers[1].transport_provider = None
     with pytest.raises(ValueError, match="owned transport"):
-        await signer.endorse(setup.authorization)
-    assert signer.journal.get("intent", signing.statement_slot(setup.authorization)) is None
+        await setup.signers[1].endorse(setup.authorization)
+    assert (
+        setup.signers[1].journal.get("intent", signing.statement_slot(setup.authorization)) is None
+    )
 
 
 @pytest.mark.asyncio
@@ -365,6 +421,7 @@ async def test_missing_cutoff_reservation_is_not_authority_to_sign(setup, kind):
 @pytest.mark.asyncio
 async def test_held_cutoff_blocks_even_previously_signed_work(setup):
     signer = setup.signers[0]
+    await signer.endorse(setup.authorization)
     await signer.endorse(setup.model)
     with pytest.raises(ValueError, match="conflict"):
         signer.cutoffs.put("suite", setup.model.body.round.suite_sha256, {"proposal": "ff" * 32})
@@ -376,6 +433,7 @@ async def test_held_cutoff_blocks_even_previously_signed_work(setup):
 @pytest.mark.parametrize("kind", ["intent", "suite"])
 async def test_missing_work_reservation_blocks_retained_vote(setup, kind):
     signer = setup.signers[0]
+    await signer.endorse(setup.authorization)
     await signer.endorse(setup.model)
     with signer.journal.transaction() as db:
         db.execute("DELETE FROM records WHERE kind=?", (kind,))
@@ -417,10 +475,11 @@ async def test_transport_window_must_be_independently_reconstructed(setup):
 @pytest.mark.asyncio
 async def test_head_regression_is_not_ignored(setup):
     signer = setup.signers[0]
+    await signer.endorse(setup.authorization)
     await signer.endorse(setup.model)
     setup.workers[0].provider.block -= 1
     with pytest.raises(ValueError, match="regressed"):
-        await signer.endorse(setup.authorization)
+        await signer.endorse(setup.endpoint)
 
 
 @pytest.mark.asyncio
@@ -428,7 +487,7 @@ async def test_wrong_wallet_cannot_supply_the_configured_endorsement(setup):
     setup.workers[0].wallet = wallet("Eve")
     signer = setup.signers[0]
     with pytest.raises(ValueError, match="configured hotkey"):
-        await signer.endorse(setup.model)
+        await signer.endorse(setup.authorization)
     assert signer.journal.get("vote", signing.statement_slot(setup.model)) is None
 
 
@@ -443,7 +502,7 @@ async def test_concurrent_retry_produces_one_durable_endorsement(setup, monkeypa
 
     monkeypatch.setattr(signing, "sign_object", count)
     first, second = await asyncio.gather(
-        setup.signers[0].endorse(setup.model), setup.signers[0].endorse(setup.model)
+        setup.signers[0].endorse(setup.authorization), setup.signers[0].endorse(setup.authorization)
     )
     assert first == second and calls == [1]
 

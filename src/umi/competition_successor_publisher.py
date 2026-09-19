@@ -15,6 +15,7 @@ from pathlib import Path
 from .competition_chain import CompetitionChainConfig
 from .competition_execution import execution_boundary
 from .competition_package import PreparedCompetitionPackage
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .open_competition import RegistrationSnapshot, digest
 from .protocol import canonical_json_bytes
@@ -169,20 +170,4 @@ class CurrentSuccessorRoundPublisher:
                     renew=renew,
                 )
 
-            task = asyncio.create_task(asyncio.to_thread(work))
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                stopped.set()
-                while not task.done():
-                    try:
-                        await asyncio.shield(task)
-                    except asyncio.CancelledError:
-                        continue
-                    except Exception:
-                        break
-                # Retrieve the terminal exception even if cancellation arrived
-                # immediately after the thread failed.
-                if not task.cancelled():
-                    task.exception()
-                raise
+            return await run_owned_thread(work, on_cancel=stopped.set)

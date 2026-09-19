@@ -7,6 +7,7 @@ import ast
 import hashlib
 import importlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,15 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
     # This additive command has its own parser/handler tests. Preserve the
     # original digest so changes to any pre-existing command still fail here.
     commands.pop("verify-miner-feed-profile")
+    # Capacity is an optional operational addition, not a signed protocol field.
+    # Check its defaults explicitly, then preserve the historical argument hash.
+    for command in ("serve-assignment-feed", "assemble-endpoint-execution"):
+        actions = commands[command]["actions"]
+        added = next(action for action in actions if action["dest"] == "scheduling_capacity")
+        assert added["option_strings"] == ["--scheduling-capacity"]
+        assert added["default"] is None
+        assert added["required"] is False
+        actions.remove(added)
     assert json_sha256(current) == contracts["competition_cli_sha256"]
 
 
@@ -97,6 +107,38 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
         assert json_sha256(schema) == expected, reference
 
 
+def runtime_nodes(node: ast.AST) -> Iterator[ast.AST]:
+    """Annotation-only imports do not create a runtime dependency cycle."""
+    yield node
+    if (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "TYPE_CHECKING"
+    ):
+        children = node.orelse
+    else:
+        children = ast.iter_child_nodes(node)
+    for child in children:
+        yield from runtime_nodes(child)
+
+
+def test_dependency_walk_skips_annotations_but_keeps_runtime_branches() -> None:
+    tree = ast.parse(
+        "if TYPE_CHECKING:\n"
+        "    from .annotations import Type\n"
+        "else:\n"
+        "    from .fallback import Runtime\n"
+        "if enabled:\n"
+        "    from .conditional import Runtime\n"
+        "from .ordinary import Runtime\n"
+    )
+    assert [node.module for node in runtime_nodes(tree) if isinstance(node, ast.ImportFrom)] == [
+        "fallback",
+        "conditional",
+        "ordinary",
+    ]
+
+
 @pytest.mark.parametrize(
     ("module_name", "forbidden"),
     [
@@ -109,15 +151,93 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
         ("releases.wheel", {"shadow_release", "releases.models", "releases.sources"}),
         ("bridge.policy", {"registration_bridge", "bridge.selection"}),
         ("bridge.selection", {"registration_bridge", "bootstrap_weight_operator"}),
+        (
+            "bridge.journal",
+            {"registration_bridge", "registration_bridge_recover", "bridge.signing"},
+        ),
+        ("bridge.signing", {"registration_bridge", "competition_weights", "competition_chain"}),
+        (
+            "bridge.submission",
+            {"registration_bridge", "registration_bridge_recover", "competition_weights"},
+        ),
+        (
+            "bridge.transactions",
+            {"registration_bridge", "registration_bridge_recover", "competition_weights"},
+        ),
+        (
+            "bridge.journal_history",
+            {"registration_bridge", "registration_bridge_recover", "competition_recovery"},
+        ),
+        (
+            "competition_bridge_recovery",
+            {"registration_bridge", "registration_bridge_recover", "competition_recovery"},
+        ),
+        ("runtime_metadata", {"registration_bridge", "competition_weights", "competition_chain"}),
+        ("signed_extrinsic", {"competition_weights", "registration_bridge", "competition_chain"}),
         ("competition_commands.common", {"competition_cli"}),
         ("competition_commands.arguments", {"competition_cli"}),
+        (
+            "competition_evaluator_capacity",
+            {"competition_evaluator", "competition_work_signing", "competition_work_queue"},
+        ),
+        (
+            "competition_evaluator_budget",
+            {"competition_work_signing", "competition_work_admission"},
+        ),
+        ("competition_work_admission", {"competition_work_signing", "competition_work_transport"}),
+        (
+            "competition_round_journal",
+            {
+                "competition_rounds",
+                "competition_work_signing",
+                "competition_work_admission",
+                "competition_work_queue",
+                "competition_settlement_delivery",
+                "competition_successor_feed",
+            },
+        ),
+        (
+            "competition_round_plan",
+            {"competition_rounds", "competition_round_journal", "competition_work_signing"},
+        ),
+        (
+            "competition_scheduling_receipts",
+            {"competition_scheduling", "competition_work_admission"},
+        ),
+        (
+            "grandpa_finality_accounting",
+            {"grandpa_finality_supervisor", "competition_chain", "bootstrap_chain_capture"},
+        ),
+        (
+            "private_files",
+            {
+                "competition_evaluator",
+                "competition_exchange",
+                "competition_rounds",
+                "competition_work_queue",
+                "competition_settlement_delivery",
+                "competition_successor_feed",
+                "competition_successor_follow",
+            },
+        ),
+        (
+            "concurrency",
+            {
+                "competition_chain",
+                "competition_chain_state",
+                "competition_successor_feed",
+                "competition_successor_follow",
+                "competition_successor_publisher",
+                "grandpa_finality_supervisor",
+            },
+        ),
     ],
 )
 def test_lower_layers_do_not_import_their_callers(module_name: str, forbidden: set[str]) -> None:
     path = ROOT / "src" / "umi" / (module_name.replace(".", "/") + ".py")
     tree = ast.parse(path.read_text())
-    package = "umi." + module_name.rsplit(".", 1)[0]
-    for node in ast.walk(tree):
+    package = ("umi." + module_name).rpartition(".")[0]
+    for node in runtime_nodes(tree):
         if isinstance(node, ast.ImportFrom):
             name = (
                 importlib.util.resolve_name("." * node.level + (node.module or ""), package)
@@ -138,10 +258,51 @@ def test_lower_layers_do_not_import_their_callers(module_name: str, forbidden: s
         ("shadow_release", "releases.wheel", "_verify_wheel_matches_source"),
         ("registration_bridge", "bridge.policy", "SignedRegistrationBridgePolicy"),
         ("registration_bridge", "bridge.selection", "validate_registration_bridge_observation"),
+        ("registration_bridge", "bridge.journal", "RegistrationBridgeAttempt"),
+        ("registration_bridge", "bridge.journal", "RegistrationBridgeChurnAttempt"),
+        ("registration_bridge", "bridge.journal", "RegistrationBridgeJournal"),
+        ("registration_bridge", "bridge.journal", "reconcile_registration_bridge_journal"),
+        ("registration_bridge", "bridge.journal", "_new_attempt"),
+        ("registration_bridge", "bridge.submission", "build_registration_bridge_call"),
+        ("registration_bridge", "bridge.journal_history", "MAX_HISTORY_FILES"),
         ("competition_cli", "competition_commands.common", "SettlementInput"),
+        ("competition_rounds", "competition_round_plan", "RoundPlan"),
+        ("competition_rounds", "competition_round_plan", "RoundProposal"),
+        ("competition_rounds", "competition_round_journal", "RoundJournal"),
+        ("competition_rounds", "competition_round_journal", "RecordReservation"),
+        ("competition_rounds", "competition_round_journal", "MAX_BYTES"),
     ],
 )
 def test_compatibility_exports_are_the_same_objects(old: str, new: str, name: str) -> None:
     assert getattr(importlib.import_module("umi." + old), name) is getattr(
         importlib.import_module("umi." + new), name
     )
+
+
+@pytest.mark.parametrize(
+    ("legacy", "owner"),
+    [
+        ("Directory", "Directory"),
+        ("_path", "private_path"),
+        ("_private", "ensure_private_directory"),
+        ("_read", "read_private_model"),
+        ("_lock_file", "lock_private_file"),
+        ("_publish", "publish_private_model"),
+        ("_publish_locked", "_publish_locked"),
+    ],
+)
+def test_evaluator_file_helpers_remain_compatible_exports(legacy: str, owner: str) -> None:
+    evaluator = importlib.import_module("umi.competition_evaluator")
+    private_files = importlib.import_module("umi.private_files")
+    assert getattr(evaluator, legacy) is getattr(private_files, owner)
+
+
+def test_competition_consumers_import_file_helpers_from_owner() -> None:
+    helpers = {"Directory", "_path", "_private", "_read", "_lock_file", "_publish", "MAX_BYTES"}
+    for path in (ROOT / "src" / "umi").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom) and node.module in {
+                "competition_evaluator",
+                "umi.competition_evaluator",
+            }:
+                assert not (helpers & {alias.name for alias in node.names}), path

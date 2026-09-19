@@ -8,23 +8,27 @@ Private inbox/outbox delivery is external. This worker never submits weights.
 from __future__ import annotations
 
 import asyncio
-import fcntl
+import hashlib
 import os
 import signal
 import sqlite3
 import stat
-import tempfile
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import AfterValidator, Field, model_validator
+from pydantic import Field, model_validator
 
+from . import competition_evaluator_capacity as evaluator_capacity
+from .competition_authorization import (
+    EndpointAuthorizationPublication,
+    validate_publication,
+    validate_publication_body,
+)
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_endpoint_execution import (
     RetainedRevealPulse,
     assemble_endpoint_observations,
-    prepare_incumbent_job,
 )
 from .competition_evaluator_orders import EvaluationOrder, SignedEvaluationOrder
 from .competition_evidence import (
@@ -38,6 +42,7 @@ from .competition_evidence import (
 from .competition_execution import (
     EndpointIncumbentJob,
     ExecutionBoundary,
+    ExecutionCase,
     ExecutionJournal,
     ModelEvaluationJob,
     common_execution_result,
@@ -47,6 +52,7 @@ from .competition_execution import (
     run_endpoint_incumbent,
     run_model_evaluation,
     run_record_from_execution,
+    validate_incumbent_job,
     validate_job,
 )
 from .competition_observations import (
@@ -55,7 +61,7 @@ from .competition_observations import (
     execution_observations,
 )
 from .competition_publication import PublicationReplayLimits
-from .competition_scheduling import AssignmentPublicationJournal
+from .competition_scheduling import AssignmentPublicationJournal, SchedulingCapacity
 from .competition_void import (
     AttestedEvaluationVoid,
     EvaluationVoidVote,
@@ -74,15 +80,25 @@ from .open_competition import (
     EvaluationSuite,
     Hotkey,
     Signature,
+    SignedSubmission,
     digest,
     identity,
     sign_object,
     verify_signature,
 )
-from .policy import scoring_policy_hash
+from .policy import ScoringPolicy, scoring_policy_hash
+from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
+from .private_files import Directory as Directory
+from .private_files import _publish_locked as _publish_locked
+from .private_files import ensure_private_directory as _private
+from .private_files import lock_private_file as _lock_file
+from .private_files import private_path as _path
+from .private_files import publish_private_model as _publish
+from .private_files import read_private_model as _read
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
-MAX_BYTES = 64 * 1024**2
+if TYPE_CHECKING:
+    from .competition_work_plans import WorkPlan
 
 
 class EvaluationVote(StrictProtocolModel):
@@ -154,22 +170,6 @@ def _validate_observation(receipt, order, evidence_sha256, hotkey, *, model, cut
     return receipt
 
 
-def _path(value):
-    p = Path(value)
-    if (
-        not p.is_absolute()
-        or p == Path(p.anchor)
-        or ".." in p.parts
-        or "\x00" in value
-        or any(x.is_symlink() for x in (p, *p.parents))
-    ):
-        raise ValueError("evaluator paths must be explicit absolute non-symlink directories")
-    return value
-
-
-Directory = Annotated[str, Field(min_length=1, max_length=4096), AfterValidator(_path)]
-
-
 class EvaluatorConfig(StrictProtocolModel):
     schema_: Literal["umi-evaluator-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -199,6 +199,7 @@ class EvaluatorConfig(StrictProtocolModel):
     page_size: Annotated[int, Field(ge=1, le=16)] = 4
     maximum_parallel_jobs: Annotated[int, Field(ge=1, le=4)] = 1
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    scheduling_capacity: SchedulingCapacity = Field(default_factory=SchedulingCapacity)
     no_weight: Literal[True] = True
 
     @model_validator(mode="after")
@@ -257,13 +258,10 @@ class EvaluatorConfig(StrictProtocolModel):
         return self
 
 
-def order_job(order, evaluator, policy, legacy=None):
-    """Validate the same reference-free assignment for each nominated evaluator."""
-    fields = {
-        k: getattr(order, k) for k in ("round", "submission", "incumbent", "runtime", "cases")
-    }
-    if order.submission.submission.track == "model":
-        if order.publication is not None:
+def _job_from_order_inputs(fields, evaluator, policy, publication, legacy):
+    """Derive a job from fixed order fields, without granting execution authority."""
+    if fields["submission"].submission.track == "model":
+        if publication is not None:
             raise ValueError("model order must not contain endpoint authorization")
         return validate_job(
             ModelEvaluationJob(
@@ -271,20 +269,105 @@ def order_job(order, evaluator, policy, legacy=None):
             ),
             policy,
         )
-    if order.publication is None or legacy is None:
-        raise ValueError("endpoint order requires its signed transport authorization")
-    job = prepare_incumbent_job(
-        publication=order.publication,
-        submission_sha256=digest(order.submission.submission),
-        incumbent=order.incumbent,
-        runtime=order.runtime,
-        evaluator_hotkey=evaluator,
-        policy=policy,
-        legacy_policy=legacy,
+    if publication is None or legacy is None:
+        raise ValueError("endpoint order requires its transport authorization")
+    # Both entry points have already validated this unsigned body. The signed
+    # path additionally verifies its publication quorum before deriving a job.
+    body = publication
+    submission_sha = digest(fields["submission"].submission)
+    submissions = [s for s in body.submissions if digest(s.submission) == submission_sha]
+    if len(submissions) != 1:
+        raise ValueError("endpoint submission is absent from the publication")
+    job = validate_incumbent_job(
+        EndpointIncumbentJob(
+            schema="umi-endpoint-incumbent-job/1",
+            round=body.round,
+            submission=submissions[0],
+            incumbent=fields["incumbent"],
+            runtime=fields["runtime"],
+            evaluator_hotkey=evaluator,
+            cases=tuple(
+                ExecutionCase(case_id=c.case_id, video_sha256=c.video_sha256, stratum=c.stratum)
+                for c in body.cases
+            ),
+        ),
+        policy,
     )
+    assigned = {
+        a.case_sha256
+        for a in body.assignments
+        if a.submission_sha256 == submission_sha
+        and identity(a.evaluator_hotkey) == identity(evaluator)
+    }
+    if assigned != {digest(c) for c in body.cases}:
+        raise ValueError("endpoint evaluator does not have all paired assignments")
     if any(getattr(job, k) != v for k, v in fields.items()):
         raise ValueError("endpoint order differs from signed transport assignments")
     return job
+
+
+def order_job(order, evaluator, policy, legacy=None):
+    """Validate the same reference-free assignment for each nominated evaluator."""
+    fields = {
+        k: getattr(order, k) for k in ("round", "submission", "incumbent", "runtime", "cases")
+    }
+    publication = order.publication
+    if publication is not None and order.submission.submission.track == "endpoint":
+        if legacy is None:
+            raise ValueError("endpoint order requires its signed transport authorization")
+        publication = validate_publication(publication, policy, legacy).publication
+    return _job_from_order_inputs(fields, evaluator, policy, publication, legacy)
+
+
+def _validate_order_evaluators(evaluators, policy):
+    groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
+    keys = [identity(k) for k in evaluators]
+    if keys != sorted(set(keys)) or any(k not in groups for k in keys):
+        raise ValueError("order evaluators must be canonical authorized identities")
+    if len({groups[k] for k in keys}) != len(keys) or len(keys) < policy.required_evaluator_groups:
+        raise ValueError("order requires distinct independent evaluator groups")
+
+
+def order_from_unsigned_inputs(
+    *,
+    plan: WorkPlan,
+    submission: SignedSubmission,
+    policy: CompetitionPolicy,
+    evaluator_hotkey: Hotkey,
+    endpoint_publication: EndpointAuthorizationPublication | None = None,
+    legacy_policy: ScoringPolicy | None = None,
+) -> tuple[dict[str, object], ModelEvaluationJob]:
+    """Return signature-independent order fields and a validated local job.
+
+    The caller authenticates the frozen cutoff with ``validate_work_plan``.
+    These fields are a capacity binding, not an EvaluationOrder or permission
+    to execute. Their digest equals ``order_binding`` once signatures arrive.
+    """
+    if submission not in plan.submissions:
+        raise ValueError("order submission is absent from its frozen plan")
+    _validate_order_evaluators(plan.evaluators, policy)
+    if identity(evaluator_hotkey) not in {identity(k) for k in plan.evaluators}:
+        raise ValueError("order job evaluator is not nominated by its frozen plan")
+    fields = {k: getattr(plan, k) for k in ("incumbent", "runtime", "cases")}
+    fields.update(round=plan.cutoff.publication.round, submission=submission)
+    publication = endpoint_publication
+    if publication is not None:
+        publication = validate_publication_body(publication, policy, legacy_policy)
+        if publication.submissions != (submission,) or {
+            identity(a.evaluator_hotkey) for a in publication.assignments
+        } != {identity(k) for k in plan.evaluators}:
+            raise ValueError("order authorization differs from its frozen plan")
+    job = _job_from_order_inputs(fields, evaluator_hotkey, policy, publication, legacy_policy)
+    encoded = job.model_dump(mode="json", by_alias=True, exclude={"evaluator_hotkey"})
+    encoded.update(
+        schema="umi-evaluation-order/1",
+        evaluators=list(plan.evaluators),
+        publication=(
+            None if publication is None else publication.model_dump(mode="json", by_alias=True)
+        ),
+        no_weight=True,
+    )
+    return encoded, job
 
 
 def validate_order(signed, policy, legacy=None):
@@ -308,99 +391,10 @@ def validate_order(signed, policy, legacy=None):
 def validate_order_body(order, policy, legacy=None):
     """Check a reference-free proposal without authorizing execution."""
     order = EvaluationOrder.model_validate_json(canonical_json_bytes(order))
-    groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
-    keys = [identity(k) for k in order.evaluators]
-    if keys != sorted(set(keys)) or any(k not in groups for k in keys):
-        raise ValueError("order evaluators must be canonical authorized identities")
-    if len({groups[k] for k in keys}) != len(keys) or len(keys) < policy.required_evaluator_groups:
-        raise ValueError("order requires distinct independent evaluator groups")
+    _validate_order_evaluators(order.evaluators, policy)
     for evaluator in order.evaluators:
         order_job(order, evaluator, policy, legacy)
     return order
-
-
-def _private(path):
-    _path(str(path))
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ValueError("evaluator directory must be owned and private")
-
-
-def _read(path, model):
-    _path(str(path))
-    _private(path.parent)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
-            raise ValueError("evaluator input must be an owned private regular file")
-        if not 1 <= info.st_size <= MAX_BYTES:
-            raise ValueError("evaluator input exceeds its byte bound")
-        raw = stream.read(MAX_BYTES + 1)
-    value = model.model_validate_json(raw)
-    if len(raw) != info.st_size or raw != canonical_json_bytes(value):
-        raise ValueError("evaluator input must have stable canonical bytes")
-    return value
-
-
-def _publish(path, value):
-    raw = canonical_json_bytes(value)
-    if len(raw) > MAX_BYTES:
-        raise ValueError("evaluator output exceeds its byte bound")
-    _private(path.parent)
-    lock = _lock_file(path.parent / ".publish.lock")
-    try:
-        _publish_locked(path, value, raw)
-    finally:
-        os.close(lock)
-
-
-def _lock_file(path):
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    try:
-        info = os.fstat(fd)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
-            raise ValueError("evaluator lock must be an owned private regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
-
-
-def _publish_locked(path, value, raw):
-    if path.exists() or path.is_symlink():
-        if canonical_json_bytes(_read(path, type(value))) != raw:
-            raise ValueError("evaluator outbox already contains different bytes")
-        return
-    fd, name = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        # All writers hold the dedicated directory lock. Atomic rename publishes
-        # one link, including when the process dies immediately afterward.
-        os.rename(name, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
 
 
 class EvaluatorJournal:
@@ -438,6 +432,7 @@ class EvaluatorJournal:
                     exclude={
                         "maximum_orders",
                         "maximum_journal_bytes",
+                        "scheduling_capacity",
                         "maximum_parallel_jobs",
                         "page_size",
                         "poll_seconds",
@@ -469,13 +464,19 @@ class EvaluatorJournal:
                 "CREATE TABLE IF NOT EXISTS artifacts (slot TEXT NOT NULL, kind TEXT NOT NULL, "
                 "body BLOB NOT NULL, PRIMARY KEY(slot,kind))"
             )
+            if evaluator_capacity.generation(db):
+                self._capacity(db, 0)
+                if self._order_count(db) > config.maximum_orders:
+                    raise ValueError("evaluator reserved order capacity exhausted")
 
     @contextmanager
     def transaction(self):
         db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
         try:
+            evaluator_capacity.connect(db)
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
+            evaluator_capacity.generation(db)
             yield db
             db.commit()
         except BaseException:
@@ -484,13 +485,61 @@ class EvaluatorJournal:
         finally:
             db.close()
 
-    def _capacity(self, db, size):
+    def _order_count(self, db):
+        return (
+            db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+            + evaluator_capacity.usage(db)[1]
+        )
+
+    def _capacity(self, db, size, *, credit=0):
         used = sum(
             db.execute(f"SELECT COALESCE(SUM(LENGTH(body)),0) FROM {table}").fetchone()[0]
             for table in ("orders", "artifacts")
         )
-        if size > MAX_BYTES or used + size > self.config.maximum_journal_bytes:
+        used += evaluator_capacity.usage(db)[0]
+        if size > MAX_BYTES or used + size - credit > self.config.maximum_journal_bytes:
             raise ValueError("evaluator journal capacity exhausted; preserve its history")
+
+    def reserve_orders(self, batch_id, specs):
+        """Reserve a complete private order/artifact inventory without admitting work."""
+        with self.transaction() as db:
+            return evaluator_capacity.reserve(
+                db,
+                batch_id,
+                specs,
+                path=self.path,
+                config=self.config,
+                check_capacity=self._capacity,
+            )
+
+    def reservation(self, batch_id):
+        with self.transaction() as db:
+            if not evaluator_capacity.generation(db):
+                return None
+            size = db.execute(
+                "SELECT length(body) FROM capacity_batches WHERE id=?", (batch_id,)
+            ).fetchone()
+            if size is None:
+                return None
+            if not 0 < size[0] <= MAX_BYTES:
+                raise ValueError("evaluator reservation receipt exceeds its byte bound")
+            row = db.execute("SELECT body FROM capacity_batches WHERE id=?", (batch_id,)).fetchone()
+            receipt = evaluator_capacity.parse_receipt(bytes(row[0]))
+            if (
+                canonical_json_bytes(receipt) != bytes(row[0])
+                or receipt["batch_id"] != batch_id
+                or receipt["journal_path"] != str(self.path.resolve())
+                or receipt["binding_sha256"]
+                != hashlib.sha256(
+                    bytes(db.execute("SELECT body FROM binding").fetchone()[0])
+                ).hexdigest()
+            ):
+                raise ValueError("evaluator capacity receipt binding changed")
+            evaluator_capacity.verify(db, receipt)
+            self._capacity(db, 0)
+            if self._order_count(db) > self.config.maximum_orders:
+                raise ValueError("evaluator reserved order capacity exhausted")
+            return receipt
 
     def admit(self, signed, slot):
         raw = canonical_json_bytes(signed)
@@ -513,13 +562,19 @@ class EvaluatorJournal:
                             (slot, "conflict:" + digest(signed.order), raw),
                         )
             else:
-                if (
-                    db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-                    >= self.config.maximum_orders
-                ):
-                    raise ValueError("evaluator order capacity exhausted")
-                self._capacity(db, len(raw))
-                db.execute("INSERT INTO orders(slot,body) VALUES (?,?)", (slot, raw))
+                try:
+                    credit = evaluator_capacity.credit(
+                        db, slot, None, raw, binding=evaluator_capacity.order_binding(signed.order)
+                    )
+                except evaluator_capacity.ReservedOrderConflict:
+                    db.execute("UPDATE capacity_orders SET conflict=1 WHERE slot=?", (slot,))
+                    conflict = True
+                else:
+                    if self._order_count(db) - int(credit > 0) >= self.config.maximum_orders:
+                        raise ValueError("evaluator order capacity exhausted")
+                    self._capacity(db, len(raw), credit=credit)
+                    db.execute("INSERT INTO orders(slot,body) VALUES (?,?)", (slot, raw))
+                    evaluator_capacity.consume(db, slot, None)
         if conflict:
             raise ValueError("conflicting signed evaluation order retained")
 
@@ -629,8 +684,10 @@ class EvaluatorJournal:
                             (slot, "conflict:" + kind + ":" + digest(value), raw),
                         )
             else:
-                self._capacity(db, len(raw))
+                credit = evaluator_capacity.credit(db, slot, kind, raw)
+                self._capacity(db, len(raw), credit=credit)
                 db.execute("INSERT INTO artifacts VALUES (?,?,?)", (slot, kind, raw))
+                evaluator_capacity.consume(db, slot, kind)
         if conflict:
             raise ValueError("retained evaluator artifact changed; conflict held")
 
@@ -666,7 +723,12 @@ class ContinuousEvaluator:
         self.dispatch = (
             None
             if legacy is None
-            else AssignmentPublicationJournal(Path(config.dispatch_directory), policy, legacy)
+            else AssignmentPublicationJournal(
+                Path(config.dispatch_directory),
+                policy,
+                legacy,
+                **config.scheduling_capacity.model_dump(),
+            )
         )
         for name in ("order_directory", "reveal_directory", "peer_directory", "outbox_directory"):
             _private(Path(getattr(config, name)))
