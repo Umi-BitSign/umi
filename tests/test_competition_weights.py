@@ -607,6 +607,37 @@ async def test_signing_failure_leaves_durable_intent_and_no_automatic_retry(
     assert not item.encoded
 
 
+async def test_unsigned_intent_cannot_recover_matching_external_effect(weight_case, monkeypatch):
+    item = weight_case
+    encode_calls = 0
+
+    def fail_encode(*args, **kwargs):
+        nonlocal encode_calls
+        encode_calls += 1
+        raise RuntimeError("fixture signer unavailable")
+
+    monkeypatch.setattr(item.transport, "encode", fail_encode)
+    with pytest.raises(RuntimeError, match="signer unavailable"):
+        await _run(item)
+    with sqlite3.connect(item.worker.path) as db:
+        intent = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+    assert intent["phase"] == "intent" and intent["signed_extrinsic"] is None
+    assert (intent["preflight_block"], intent["nonce"], intent["era_death"]) == (170, 4, 186)
+
+    # Another writer can produce the same row and consume the observed nonce.
+    # Neither proves an effect by this attempt, which retained no signed bytes.
+    _advance(item, 171, applied=True, nonce=5)
+    for _ in range(2):
+        outcome = await _run(item)
+        assert outcome.status == "unknown" and outcome.exact_row_currently_applied
+        assert not outcome.submitted_by_this_attempt and not outcome.automatic_retry_permitted
+        assert outcome.extrinsic_sha256 is None
+    with sqlite3.connect(item.worker.path) as db:
+        retained = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+    assert retained == {**intent, "phase": "unknown"}
+    assert encode_calls == 1 and not item.encoded
+
+
 @pytest.mark.parametrize("mode", ["reviewed_storage_codec/1", "executed_runtime/1"])
 async def test_unapproved_codec_never_signs_a_transaction(weight_case, monkeypatch, mode):
     from umi.validator_chain import PinnedRuntimeContext
@@ -851,7 +882,10 @@ async def test_runtime_code_bad_proof_never_executes(executed_weight_case, monke
         await item.provider.collect_weights(item.hotkey, item.recipients)
 
 
-async def test_cancelled_collection_waits_for_bounded_executor(executed_weight_case, monkeypatch):
+@pytest.mark.parametrize("cancel_again", [False, True])
+async def test_cancelled_collection_waits_for_bounded_executor(
+    executed_weight_case, monkeypatch, cancel_again
+):
     import threading
 
     item = executed_weight_case
@@ -871,6 +905,10 @@ async def test_cancelled_collection_waits_for_bounded_executor(executed_weight_c
         await asyncio.sleep(0.02)
         assert not task.done()
         assert item.provider._lock.locked()
+        if cancel_again:
+            task.cancel()
+            await asyncio.sleep(0.02)
+            assert not task.done() and item.provider._lock.locked()
     finally:
         release.set()
         with pytest.raises(asyncio.CancelledError):
