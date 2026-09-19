@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
-from .bridge.receipts import BridgeReceiptReader, VerifiedBridgeReceipt
+from .bridge.receipts import BridgeReceiptReader, VerifiedBridgeExpiry, VerifiedBridgeReceipt
 from .bridge.signing import FinalizedIdentity
 from .bridge.transactions import RegistrationBridgeTransactionJournal, parse_bridge_journal
 from .chain_evidence import FinalizedSnapshotRef
@@ -518,24 +518,34 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         if type(journal) is not RegistrationBridgeTransactionJournal:
             raise ValueError("bridge receipt collection requires a version-2 transaction")
         async with self._lock:
-            if self._closed:
-                raise ValueError("weight provider is closed")
-            if not self._owned or self._task is None or self._task.done():
-                raise ValueError("owned finality observer is not running")
-            if self._runtime_executor is None or self._weight_rpc is None:
-                raise ValueError("bridge receipt collection requires owned runtime proof tools")
-            if self._bridge_receipts is None:
-                self._bridge_receipts = BridgeReceiptReader(
-                    finality=_ReceiptFinality(self._proofs, self.config.minimum_finalized_block),
-                    rpc=self._weight_rpc,
-                    verifier=SubprocessStorageProofVerifier(
-                        binary_path=self.config.proof_binary,
-                        expected_sha256=self.config.proof_binary_sha256,
-                    ),
-                    runtime_executor=self._runtime_executor,
-                    timeout_seconds=min(120, self.config.collection_timeout_seconds),
-                )
-            return await self._bridge_receipts.find(journal)
+            return await self._bridge_reader().find(journal)
+
+    async def read_bridge_expiry(
+        self, journal: RegistrationBridgeTransactionJournal
+    ) -> VerifiedBridgeExpiry:
+        async with self._lock:
+            return await self._bridge_reader().expiry(journal)
+
+    def _bridge_reader(self) -> BridgeReceiptReader:
+        # Caller holds the same collection lock used by shutdown.
+        if self._closed:
+            raise ValueError("weight provider is closed")
+        if not self._owned or self._task is None or self._task.done():
+            raise ValueError("owned finality observer is not running")
+        if self._runtime_executor is None or self._weight_rpc is None:
+            raise ValueError("bridge receipt collection requires owned runtime proof tools")
+        if self._bridge_receipts is None:
+            self._bridge_receipts = BridgeReceiptReader(
+                finality=_ReceiptFinality(self._proofs, self.config.minimum_finalized_block),
+                rpc=self._weight_rpc,
+                verifier=SubprocessStorageProofVerifier(
+                    binary_path=self.config.proof_binary,
+                    expected_sha256=self.config.proof_binary_sha256,
+                ),
+                runtime_executor=self._runtime_executor,
+                timeout_seconds=min(120, self.config.collection_timeout_seconds),
+            )
+        return self._bridge_receipts
 
     async def collect(self):
         raise ValueError("weight collection needs an explicit validator and recipients")

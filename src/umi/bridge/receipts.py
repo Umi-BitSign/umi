@@ -10,6 +10,7 @@ attempt's eight-block era is retained; a long outage does not grow the cache.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -42,6 +43,15 @@ class VerifiedBridgeReceipt:
     receipt: BootstrapExtrinsicReference
     successful: bool
     signed_extrinsic_hash: str
+    owned_head: FinalizedSnapshotRef
+
+
+@dataclass(frozen=True)
+class VerifiedBridgeExpiry:
+    """Proven nonce availability after mortality, not historical non-inclusion."""
+
+    snapshot: FinalizedSnapshotRef
+    nonce: int
     owned_head: FinalizedSnapshotRef
 
 
@@ -166,6 +176,91 @@ class BridgeReceiptReader:
         self._era: dict[int, _Header] = {}
         self._checked: set[int] = set()
         self._found: VerifiedBridgeReceipt | None = None
+        self._expiry_result: VerifiedBridgeExpiry | None = None
+
+    async def expiry(self, journal: RegistrationBridgeTransactionJournal) -> VerifiedBridgeExpiry:
+        """Authenticate the retained expiry snapshot, or use the owned head.
+
+        Historical attempts need their original expiry snapshot because later
+        transactions may have consumed the same nonce. This never treats the
+        journal's recorded nonce or state root as proof.
+        """
+        journal = parse_bridge_journal(canonical_json_bytes(journal))
+        _require(
+            type(journal) is RegistrationBridgeTransactionJournal
+            and journal.phase
+            in {"preparing", "signed", "submitting", "outcome_unknown", "expired_nonce_available"},
+            "bridge_expiry_attempt_invalid",
+        )
+        task = asyncio.create_task(asyncio.wait_for(self._expiry(journal), self._timeout))
+        return await await_owned_task(task, on_cancel=task.cancel)
+
+    async def _expiry(self, journal):
+        async with self._lock:
+            retained = journal.expiry_observation
+            target = retained.block_number if retained is not None else None
+            identity = ("expiry", hashlib.sha256(canonical_json_bytes(journal)).hexdigest())
+            if identity != self._identity:
+                earlier = (
+                    target is not None
+                    and self._cursor is not None
+                    and target <= self._cursor.snapshot.block_number
+                )
+                if not earlier:
+                    self._anchor = self._cursor = None
+                self._identity = identity
+                self._found = self._expiry_result = None
+                self._era.clear()
+                self._checked.clear()
+            if self._cursor is None:
+                owned = await self._finality.read_finalized_identity()
+                anchor = await self._header(owned.block_hash, owned.number)
+                self._anchor = self._cursor = anchor
+            if target is None:
+                target = self._anchor.snapshot.block_number
+            ready = journal.attempt.era_death <= target <= self._anchor.snapshot.block_number
+            if not ready:
+                self._anchor = self._cursor = None
+            _require(
+                ready,
+                "bridge_expiry_not_finalized",
+            )
+            if self._expiry_result is None:
+                while self._cursor.snapshot.block_number > target:
+                    self._cursor = await self._header(
+                        self._cursor.snapshot.parent_hash, self._cursor.snapshot.block_number - 1
+                    )
+                ref = self._cursor.snapshot
+                _require(
+                    retained is None
+                    or (
+                        ref.block_hash == retained.block_hash
+                        and ref.state_root == retained.state_root
+                    ),
+                    "bridge_expiry_ancestry_mismatch",
+                )
+                runtime = await collect_executed_runtime(self._code_proofs, self._executor, ref)
+                key = runtime.storage_key("System", "Account", (journal.validator_hotkey,))
+                evidence = await self._proofs.storage_evidence(ref, key)
+                value = runtime.decode_storage("System", "Account", evidence.value)
+                nonce = value.get("nonce") if isinstance(value, dict) else None
+                _require(
+                    type(nonce) is int
+                    and 0 <= nonce < 2**32
+                    and nonce == journal.attempt.signing.nonce,
+                    "bridge_expiry_nonce_unavailable",
+                )
+                self._expiry_result = VerifiedBridgeExpiry(ref, nonce, self._anchor.snapshot)
+            birth = journal.attempt.preflight_block
+            while self._cursor.snapshot.block_number > birth:
+                self._cursor = await self._header(
+                    self._cursor.snapshot.parent_hash, self._cursor.snapshot.block_number - 1
+                )
+            _require(
+                self._cursor.snapshot.block_hash == journal.attempt.preflight_block_hash,
+                "bridge_expiry_preflight_ancestry_mismatch",
+            )
+            return self._expiry_result
 
     async def find(
         self, journal: RegistrationBridgeTransactionJournal
@@ -217,6 +312,7 @@ class BridgeReceiptReader:
                 if not earlier_era:
                     self._anchor = self._cursor = None
                 self._found = None
+                self._expiry_result = None
                 self._era.clear()
                 self._checked.clear()
             if self._found is not None:

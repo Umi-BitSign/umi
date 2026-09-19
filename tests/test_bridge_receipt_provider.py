@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.test_bridge_expiry import expired
 from tests.test_bridge_receipts import history as history
 from tests.test_bridge_transactions import case as case
 from tests.test_bridge_transactions import idle
@@ -93,6 +94,24 @@ async def test_provider_collects_receipt_with_its_owned_ports_and_reuses_reader(
 
 
 @pytest.mark.asyncio
+async def test_provider_owns_historical_expiry_reader_and_drains_before_close(
+    provider, history, tx
+):
+    history.head = history.birth + 20
+    journal = expired(history, tx)
+    before = canonical_json_bytes(journal)
+    result = await provider.read_bridge_expiry(journal)
+    assert result.snapshot.block_number == history.birth + 10
+    assert result.nonce == journal.attempt.signing.nonce
+    assert provider.proof_captures == 1 and history.heads == 0
+    assert canonical_json_bytes(journal) == before
+    await provider.aclose()
+    assert provider.rpc_closed and provider._bridge_receipts is None
+    with pytest.raises(ValueError, match="closed"):
+        await provider.read_bridge_expiry(journal)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("missing", ["owner", "task", "runtime", "rpc", "floor"])
 async def test_provider_requires_owned_tools_and_finality_floor(provider, history, missing):
     if missing == "owner":
@@ -118,17 +137,37 @@ async def test_provider_does_not_apply_exact_byte_recovery_to_legacy_journals(pr
 
 
 @pytest.mark.asyncio
-async def test_provider_close_waits_for_cancelled_receipt_native_work(provider, history):
+@pytest.mark.parametrize("operation", ["receipt", "expiry"])
+async def test_provider_close_waits_for_cancelled_receipt_native_work(
+    provider, history, tx, monkeypatch, operation
+):
     entered, release = threading.Event(), threading.Event()
-    verify = history.verifier.verify_extrinsics_root
+    if operation == "receipt":
+        verify = history.verifier.verify_extrinsics_root
 
-    def blocked(**kwargs):
-        entered.set()
-        assert release.wait(10)
-        return verify(**kwargs)
+        def blocked(**kwargs):
+            entered.set()
+            assert release.wait(10)
+            return verify(**kwargs)
 
-    history.verifier.verify_extrinsics_root = blocked
-    read = asyncio.create_task(provider.read_bridge_receipt(history.journal))
+        monkeypatch.setattr(history.verifier, "verify_extrinsics_root", blocked)
+        journal = history.journal
+        capture = provider.read_bridge_receipt
+    else:
+        verifier = type(history.verifier)
+        verify = verifier.__call__
+
+        def blocked(self, **kwargs):
+            if kwargs["storage_key"] == b"System.Account":
+                entered.set()
+                assert release.wait(10)
+            return verify(self, **kwargs)
+
+        monkeypatch.setattr(verifier, "__call__", blocked)
+        history.head = history.birth + 20
+        journal = expired(history, tx)
+        capture = provider.read_bridge_expiry
+    read = asyncio.create_task(capture(journal))
     close = None
     queued = None
     try:
@@ -140,7 +179,7 @@ async def test_provider_close_waits_for_cancelled_receipt_native_work(provider, 
         read.cancel()
         await asyncio.sleep(0.01)
         read.cancel()
-        queued = asyncio.create_task(provider.read_bridge_receipt(history.journal))
+        queued = asyncio.create_task(capture(journal))
         close = asyncio.create_task(provider.aclose())
         await asyncio.sleep(0.01)
         assert not read.done() and not close.done() and not queued.done()

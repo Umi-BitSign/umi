@@ -59,11 +59,14 @@ def history(tx, monkeypatch):
 
     class Codec(old_codec):
         def storage_key(self, pallet, name, params):
+            if (pallet, name) == ("System", "Account"):
+                assert params == [tx.preparing.validator_hotkey]
+                return b"System.Account"
             assert (pallet, name, params) == ("System", "Events", [])
             return b"System.Events"
 
         def storage_entry(self, pallet, name):
-            assert (pallet, name) == ("System", "Events")
+            assert (pallet, name) in {("System", "Events"), ("System", "Account")}
             return SimpleNamespace(modifier="Default", default_bytes=b"[]", value_type=name)
 
     monkeypatch.setattr(metadata.bittensor_core, "Runtime", Codec)
@@ -80,6 +83,7 @@ def history(tx, monkeypatch):
         rejected_body=False,
         rejected_events=False,
         rejected_code=False,
+        rejected_account=False,
         fail_call=False,
         heads=0,
     )
@@ -119,6 +123,7 @@ def history(tx, monkeypatch):
         item.values[state_root] = {
             b":code": f"wasm-at-{number}".encode(),
             b"System.Events": json.dumps(events).encode(),
+            b"System.Account": json.dumps({"nonce": tx.preparing.attempt.signing.nonce}).encode(),
         }
         parent = block_hash
     assert item.hashes[birth] == tx.preparing.attempt.preflight_block_hash
@@ -156,6 +161,8 @@ def history(tx, monkeypatch):
             if item.rejected_code and storage_key == b":code":
                 return False
             if item.rejected_events and storage_key == b"System.Events":
+                return False
+            if item.rejected_account and storage_key == b"System.Account":
                 return False
             return (
                 proof == (b"fixture",)
