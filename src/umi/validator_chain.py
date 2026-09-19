@@ -19,14 +19,16 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from functools import partial
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import bittensor_core
 from websockets.asyncio.client import connect as websocket_connect
-from websockets.exceptions import PayloadTooBig
+from websockets.exceptions import InvalidStatus, PayloadTooBig
 
 from .chain_evidence import FinalizedSnapshotRef, StorageEvidence, StorageProofVerifier
+from .concurrency import run_owned_thread
 from .protocol import canonical_json_bytes
 
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -200,6 +202,15 @@ class BittensorRawJsonRpc:
             raise
         except PayloadTooBig as error:
             raise ValidatorChainError("proof_rpc_response_limit") from error
+        except InvalidStatus as error:
+            # Preserve a useful, fixed diagnostic without exposing response
+            # headers, provider error bodies or credential-bearing endpoints.
+            reason = (
+                "proof_rpc_rate_limited"
+                if error.response.status_code == 429
+                else "proof_rpc_failed"
+            )
+            raise ValidatorChainError(reason) from error
         except Exception as error:
             raise ValidatorChainError("proof_rpc_failed") from error
 
@@ -747,12 +758,15 @@ class FinalizedProofCollector:
             nodes = await self._read_proof(snapshot, (key_hex,))
 
             try:
-                return StorageEvidence(
-                    snapshot=snapshot,
-                    storage_key=storage_key,
-                    value=value,
-                    proof=nodes,
-                    verifier=self._verifier,
+                return await run_owned_thread(
+                    partial(
+                        StorageEvidence,
+                        snapshot=snapshot,
+                        storage_key=storage_key,
+                        value=value,
+                        proof=nodes,
+                        verifier=self._verifier,
+                    )
                 )
             except (TypeError, ValueError) as error:
                 raise ValidatorChainError("storage_proof_verification_failed") from error
@@ -813,11 +827,14 @@ class FinalizedProofCollector:
             if not callable(verify_many):
                 raise ValidatorChainError("storage_multi_proof_verifier_unavailable")
             try:
-                return MultiStorageEvidence(
-                    snapshot=snapshot,
-                    claims=claims,
-                    proof=proof,
-                    verifier=verify_many,
+                return await run_owned_thread(
+                    partial(
+                        MultiStorageEvidence,
+                        snapshot=snapshot,
+                        claims=tuple(claims),
+                        proof=proof,
+                        verifier=verify_many,
+                    )
                 )
             except (TypeError, ValueError) as error:
                 raise ValidatorChainError("storage_proof_verification_failed") from error
