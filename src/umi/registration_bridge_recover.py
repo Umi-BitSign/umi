@@ -55,6 +55,12 @@ def _call_params(call) -> dict:
 def prove_applied_attempt(journal, observation, block_info, events):
     """Return the unique finalized receipt proving this uncertain attempt."""
 
+    # V2 requires exact signed-byte inclusion, not merely a matching decoded
+    # call from the same hotkey. This historical repair cannot supply that proof.
+    _require(
+        type(journal) is RegistrationBridgeJournal,
+        "recovery_version_requires_exact_transaction_proof",
+    )
     _require(
         isinstance(journal, RegistrationBridgeJournal)
         and journal.phase in {"submitting", "outcome_unknown"}
@@ -146,6 +152,10 @@ def prove_applied_attempt(journal, observation, block_info, events):
 def persist_recovered_attempt(state, journal, observation, receipt, *, now_ms: int):
     """Archive the proof-backed receipt and applied transitions atomically."""
 
+    _require(
+        type(journal) is RegistrationBridgeJournal,
+        "recovery_version_requires_exact_transaction_proof",
+    )
     returned = RegistrationBridgeJournal.model_validate(
         journal.model_copy(
             update={

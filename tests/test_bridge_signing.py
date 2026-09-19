@@ -61,16 +61,16 @@ def case(monkeypatch, tmp_path):
         async def request(self, method, params):
             item.calls.append((method, params))
             if method == "chain_getHeader":
-                assert params == (block_hash,)
+                assert params == (item.obs.block_hash,)
                 return copy.deepcopy(item.header)
             if method == "state_getStorageAt":
                 key, at = params
-                assert at == block_hash
+                assert at == item.obs.block_hash
                 raw = item.values[bytes.fromhex(key[2:])]
                 return None if raw is None else "0x" + raw.hex()
             if method == "state_getReadProof":
                 keys, at = params
-                assert at == block_hash
+                assert at == item.obs.block_hash
                 assert keys and all(bytes.fromhex(key[2:]) in item.values for key in keys)
                 return {"at": at, "proof": ["0x" + b"synthetic-proof".hex()]}
             pytest.fail(f"unexpected RPC method: {method}")

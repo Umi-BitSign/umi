@@ -58,6 +58,7 @@ from .bridge.journal import (
 from .bridge.journal import (
     reconcile_registration_bridge_journal as reconcile_registration_bridge_journal,
 )
+from .bridge.journal_history import reconcile_archived_transition, validate_next_journal
 
 # Preserve the public bridge API while policy and selection remain independently testable.
 from .bridge.policy import (
@@ -174,10 +175,16 @@ from .bridge.selection import (
 from .bridge.selection import (
     validate_registration_bridge_observation as validate_registration_bridge_observation,
 )
+from .bridge.transactions import (
+    BridgeJournal,
+    RegistrationBridgeTransactionJournal,
+    parse_bridge_journal,
+)
 from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .protocol import canonical_json_bytes
+from .signed_extrinsic import MAX_SIGNED_EXTRINSIC_BYTES
 from .simple_bootstrap_validator import (
     SIMPLE_BOOTSTRAP_MANIFEST_SHA256,
     SimpleBootstrapJournal,
@@ -696,8 +703,7 @@ class RegistrationBridgeState:
                 for count, entry in enumerate(entries, 1):
                     _require(count <= MAX_HISTORY_FILES, "history_capacity_reached")
                     raw = _read_bytes(Path(entry.path), private=True)
-                    _canonical_object(raw)
-                    retained = RegistrationBridgeJournal.model_validate_json(raw)
+                    retained = parse_bridge_journal(raw)
                     _require(
                         canonical_json_bytes(retained) == raw
                         and retained.attempt is not None
@@ -709,76 +715,36 @@ class RegistrationBridgeState:
                         entry.name == f"{retained.attempt.attempt_id}-{retained.phase}.json",
                         "history_filename_changed",
                     )
-                    _require(
-                        retained.last_observed_block <= current.last_observed_block,
-                        "history_finality_rollback",
-                    )
                     groups.setdefault(retained.attempt.attempt_id, {})[retained.phase] = retained
-        if current.attempt is None:
-            _require(not groups, "current_journal_rolled_back")
-            return
-        _require(current.attempt.attempt_id in groups, "current_attempt_history_missing")
-        for identity, phases in groups.items():
-            _require("submitting" in phases, "history_intent_missing")
-            attempt = phases["submitting"].attempt
-            _require(
-                all(item.attempt == attempt for item in phases.values()), "history_attempt_changed"
-            )
-            _require(
-                attempt.preflight_block <= current.attempt.preflight_block,
-                "current_journal_rolled_back",
-            )
-            if identity != current.attempt.attempt_id:
-                # Recovery retains the original uncertainty record. A later
-                # applied transition resolves it without rewriting that history.
-                _require(
-                    attempt.preflight_block < current.attempt.preflight_block
-                    and "applied" in phases,
-                    "retained_unresolved_attempt",
-                )
-            else:
-                _require(
-                    current.attempt == attempt and current.phase in phases,
-                    "current_journal_rolled_back",
-                )
-                order = {"submitting": 0, "outcome_unknown": 1, "receipt_returned": 2, "applied": 3}
-                _require(
-                    order[current.phase] == max(order[phase] for phase in phases),
-                    "current_journal_rolled_back",
-                )
-                _require(
-                    phases[current.phase].weight_call == current.weight_call,
-                    "current_receipt_changed",
-                )
-            receipts = [
-                item.weight_call for item in phases.values() if item.weight_call is not None
-            ]
-            _require(
-                not receipts or all(receipt == receipts[0] for receipt in receipts),
-                "history_receipt_changed",
-            )
+        return reconcile_archived_transition(current, groups)
 
     def load(self):
         self.require_unchanged()
         raw = _read_bytes(self.path, private=True, optional=True)
         if raw is None:
             return None
-        _canonical_object(raw)
-        journal = RegistrationBridgeJournal.model_validate_json(raw)
-        _require(canonical_json_bytes(journal) == raw, "journal_noncanonical")
-        return journal
+        return parse_bridge_journal(raw)
 
     def legacy(self):
         self.require_unchanged()
         raw = _read_bytes(self.root / "journal.json", private=True, optional=True)
         return raw, None if raw is None else hashlib.sha256(raw).hexdigest()
 
-    def store(self, journal: RegistrationBridgeJournal, *, archive: bool = False):
+    def store(self, journal: BridgeJournal, *, archive: bool = False):
         self.require_unchanged()
-        journal = RegistrationBridgeJournal.model_validate(
-            journal.model_dump(mode="python", by_alias=True)
-        )
         raw = canonical_json_bytes(journal)
+        journal = parse_bridge_journal(raw)
+        previous_raw = _read_bytes(self.path, private=True, optional=True)
+        previous = None if previous_raw is None else parse_bridge_journal(previous_raw)
+        validate_next_journal(
+            previous,
+            journal,
+            archive=archive,
+        )
+        if type(journal) is RegistrationBridgeTransactionJournal and (
+            previous.attempt is None or previous.attempt.attempt_id != journal.attempt.attempt_id
+        ):
+            self._require_transaction_headroom(raw)
         if archive and journal.attempt is not None:
             history = self.root / "registration-bridge-history"
             history.mkdir(mode=0o700, exist_ok=True)
@@ -806,9 +772,11 @@ class RegistrationBridgeState:
             existing = _read_bytes(path, private=True, optional=True)
             if existing is None:
                 _write_new(path, raw)
-                _fsync(history)
             else:
                 _require(existing == raw, "history_record_changed")
+            # A retry may observe a file whose preceding directory sync failed.
+            # Matching bytes alone do not establish durable publication.
+            _fsync(history)
         temporary = self.root / f".registration-bridge-{os.getpid()}-{os.urandom(8).hex()}.tmp"
         _write_new(temporary, raw)
         # All runtime state writers share service.lock; existing legacy bytes are never touched.
@@ -816,13 +784,47 @@ class RegistrationBridgeState:
         _fsync(self.root)
         self._expected = self._snapshot()
 
+    def _require_transaction_headroom(self, preparing: bytes) -> None:
+        """Reserve configured capacity before any new-format signing intent.
+
+        The service lock and unchanged-state check serialize all writers. Seven
+        archive slots cover every phase (including both exclusive resolutions).
+        The byte allowance includes maximum encoded bytes and bounded receipt,
+        expiry and counter fields. Disk space can still be consumed externally;
+        I/O failures retain the existing journal and never authorize a retry.
+        """
+        maximum_record = len(preparing) + 2 * MAX_SIGNED_EXTRINSIC_BYTES + 4096
+        _require(maximum_record <= MAX_DOCUMENT_BYTES, "transaction_document_headroom_insufficient")
+        history_count = sum(
+            name.startswith("registration-bridge-history/") for name in self._expected
+        )
+        _require(
+            history_count + 7 <= MAX_HISTORY_FILES, "transaction_history_file_headroom_insufficient"
+        )
+        used = sum(
+            item[6]
+            for name, item in self._expected.items()
+            if item is not None and name != "registration-bridge-history"
+        )
+        _require(
+            used + 8 * maximum_record <= MAX_HISTORY_BYTES,
+            "transaction_history_byte_headroom_insufficient",
+        )
+        available = os.statvfs(self.root)
+        _require(
+            available.f_bavail * available.f_frsize >= 9 * maximum_record,
+            "transaction_disk_headroom_insufficient",
+        )
+
     def initialize(self, observation: RegistrationBridgeObservation, *, now: datetime):
         raw, digest = self.legacy()
         existing = self.load()
         if existing is not None:
             _require(existing.legacy_journal_sha256 == digest, "legacy_journal_changed")
-            self._audit_history(existing, raw)
-            return existing
+            recovered = self._audit_history(existing, raw)
+            if recovered != existing:
+                self.store(recovered, archive=True)
+            return recovered
         # A missing current journal never resets retained attempts or a prior
         # completed handoff, including a crash between archive and journal write.
         _require(

@@ -1,0 +1,255 @@
+"""Pure validation of immutable bridge archives and versioned transitions."""
+
+from __future__ import annotations
+
+from itertools import pairwise
+
+from .journal import RegistrationBridgeJournal
+from .policy import _require
+from .transactions import BridgeJournal, RegistrationBridgeTransactionJournal
+
+_LEGACY_ORDER = {"submitting": 0, "outcome_unknown": 1, "receipt_returned": 2, "applied": 3}
+_TRANSACTION_ORDER = {
+    "preparing": 0,
+    "signed": 1,
+    "submitting": 2,
+    "outcome_unknown": 3,
+    "receipt_returned": 4,
+    "applied": 5,
+    "expired_nonce_available": 5,
+}
+_TRANSACTION_EDGES = {
+    "preparing": {"signed", "outcome_unknown", "expired_nonce_available"},
+    "signed": {"submitting", "outcome_unknown", "expired_nonce_available"},
+    "submitting": {"outcome_unknown", "receipt_returned", "expired_nonce_available"},
+    "outcome_unknown": {"receipt_returned", "expired_nonce_available"},
+    "receipt_returned": {"applied"},
+    "applied": set(),
+    "expired_nonce_available": set(),
+}
+
+
+def _transaction_identity(
+    older: RegistrationBridgeTransactionJournal, newer: RegistrationBridgeTransactionJournal
+) -> None:
+    if older.signed_extrinsic is not None:
+        _require(
+            (older.signed_extrinsic, older.signed_extrinsic_hash)
+            == (newer.signed_extrinsic, newer.signed_extrinsic_hash),
+            "history_signed_extrinsic_changed",
+        )
+    if older.expiry_observation is not None:
+        _require(
+            older.expiry_observation == newer.expiry_observation,
+            "history_expiry_observation_changed",
+        )
+
+
+def validate_next_journal(
+    previous: BridgeJournal | None, current: BridgeJournal, *, archive: bool
+) -> None:
+    """Prevent a new-format writer from dropping transaction identity or intent.
+
+    This validates a local transition, not the chain evidence authorizing it.
+    Legacy-to-legacy transitions keep their existing validation path.
+    """
+    if (
+        type(previous) is not RegistrationBridgeTransactionJournal
+        and type(current) is RegistrationBridgeJournal
+    ):
+        return
+    _require(previous is not None, "bridge_transaction_initial_state_missing")
+    _require(type(current) is RegistrationBridgeTransactionJournal, "bridge_journal_downgrade")
+    _require(
+        current.validator_hotkey == previous.validator_hotkey
+        and current.legacy_journal_sha256 == previous.legacy_journal_sha256,
+        "history_binding_changed",
+    )
+    _require(
+        current.last_observed_block >= previous.last_observed_block, "journal_finality_rollback"
+    )
+    _require(
+        current.last_observed_block != previous.last_observed_block
+        or current.last_observed_block_hash == previous.last_observed_block_hash,
+        "journal_finality_equivocation",
+    )
+    if previous.attempt is None or previous.attempt.attempt_id != current.attempt.attempt_id:
+        _require(
+            previous.phase in {"idle", "applied", "expired_nonce_available"},
+            "retained_unresolved_attempt",
+        )
+        _require(current.phase == "preparing" and archive, "history_intent_missing")
+        _require(
+            current.attempt.preflight_block >= previous.last_observed_block
+            and (
+                previous.attempt is None
+                or current.attempt.preflight_block > previous.attempt.preflight_block
+            ),
+            "current_journal_rolled_back",
+        )
+        return
+    _require(
+        type(previous) is RegistrationBridgeTransactionJournal
+        and current.attempt == previous.attempt,
+        "history_attempt_changed",
+    )
+    _transaction_identity(previous, current)
+    _require(
+        previous.signed_extrinsic is not None
+        or current.signed_extrinsic is None
+        or (previous.phase == "preparing" and current.phase == "signed"),
+        "bridge_signed_bytes_without_signing_transition",
+    )
+    _require(
+        previous.weight_call is None or current.weight_call == previous.weight_call,
+        "history_receipt_changed",
+    )
+    if current.phase == previous.phase:
+        _require(
+            current.signed_extrinsic == previous.signed_extrinsic
+            and current.expiry_observation == previous.expiry_observation,
+            "history_transaction_changed",
+        )
+    else:
+        _require(
+            archive and current.phase in _TRANSACTION_EDGES[previous.phase],
+            "bridge_journal_transition_invalid",
+        )
+
+
+def audit_attempt_phases(phases: dict[str, BridgeJournal]) -> BridgeJournal:
+    """Return the latest archived transition after checking one attempt."""
+    _require(bool(phases), "history_intent_missing")
+    transaction = any(
+        type(item) is RegistrationBridgeTransactionJournal for item in phases.values()
+    )
+    first = "preparing" if transaction else "submitting"
+    _require(first in phases, "history_intent_missing")
+    original = phases[first]
+    _require(
+        all(
+            type(item) is type(original) and item.attempt == original.attempt
+            for item in phases.values()
+        ),
+        "history_attempt_changed",
+    )
+    order = _TRANSACTION_ORDER if transaction else _LEGACY_ORDER
+    ordered = sorted(phases.values(), key=lambda item: order[item.phase])
+    receipts = [item.weight_call for item in ordered if item.weight_call is not None]
+    _require(
+        not receipts or all(receipt == receipts[0] for receipt in receipts),
+        "history_receipt_changed",
+    )
+    if transaction:
+        _require(
+            not (
+                "expired_nonce_available" in phases
+                and ({"applied", "receipt_returned"} & phases.keys())
+            ),
+            "history_conflicting_resolution",
+        )
+        if any(item.signed_extrinsic is not None for item in ordered):
+            _require("signed" in phases, "history_signed_extrinsic_missing")
+        if receipts:
+            _require(
+                "submitting" in phases and "receipt_returned" in phases,
+                "history_submission_missing",
+            )
+        for older, newer in pairwise(ordered):
+            _transaction_identity(older, newer)
+            _require(
+                older.last_observed_block <= newer.last_observed_block
+                and (
+                    older.last_observed_block != newer.last_observed_block
+                    or older.last_observed_block_hash == newer.last_observed_block_hash
+                ),
+                "history_finality_rollback",
+            )
+    return ordered[-1]
+
+
+def audit_current_history(
+    current: BridgeJournal, groups: dict[str, dict[str, BridgeJournal]]
+) -> None:
+    if current.attempt is None:
+        _require(not groups, "current_journal_rolled_back")
+        return
+    _require(current.attempt.attempt_id in groups, "current_attempt_history_missing")
+    for identity, phases in groups.items():
+        terminal = audit_attempt_phases(phases)
+        attempt = terminal.attempt
+        _require(
+            attempt.preflight_block <= current.attempt.preflight_block,
+            "current_journal_rolled_back",
+        )
+        if identity != current.attempt.attempt_id:
+            _require(
+                attempt.preflight_block < current.attempt.preflight_block
+                and terminal.phase in {"applied", "expired_nonce_available"},
+                "retained_unresolved_attempt",
+            )
+            _require(
+                type(terminal) is not RegistrationBridgeTransactionJournal
+                or type(current) is RegistrationBridgeTransactionJournal,
+                "bridge_journal_downgrade",
+            )
+        else:
+            _require(
+                type(current) is type(terminal)
+                and current.attempt == attempt
+                and current.phase == terminal.phase,
+                "current_journal_rolled_back",
+            )
+            _require(current.weight_call == terminal.weight_call, "current_receipt_changed")
+            if type(current) is RegistrationBridgeTransactionJournal:
+                _transaction_identity(terminal, current)
+                _require(
+                    current.signed_extrinsic == terminal.signed_extrinsic,
+                    "history_signed_extrinsic_changed",
+                )
+
+
+def reconcile_archived_transition(
+    current: BridgeJournal, groups: dict[str, dict[str, BridgeJournal]]
+) -> BridgeJournal:
+    """Complete at most one archived v2 transition after a torn publication.
+
+    No signing or transaction retry follows from this repair. The current
+    record and its complete earlier history must describe the direct predecessor
+    of the archived record. Legacy records never gain a new recovery rule.
+    """
+    result = current
+    if groups:
+        newest = max(
+            groups.values(), key=lambda phases: next(iter(phases.values())).attempt.preflight_block
+        )
+        terminal = audit_attempt_phases(newest)
+        if type(terminal) is RegistrationBridgeTransactionJournal and (
+            current.attempt is None
+            or current.attempt.attempt_id != terminal.attempt.attempt_id
+            or current.phase != terminal.phase
+        ):
+            preceding = {identity: dict(phases) for identity, phases in groups.items()}
+            identity = terminal.attempt.attempt_id
+            del preceding[identity][terminal.phase]
+            if not preceding[identity]:
+                del preceding[identity]
+            # A missing earlier intent, changed signed bytes, or more than one
+            # skipped durable transition is corruption, not a recoverable tear.
+            audit_current_history(current, preceding)
+            validate_next_journal(current, terminal, archive=True)
+            result = terminal
+    for phases in groups.values():
+        for retained in phases.values():
+            _require(
+                retained.last_observed_block <= result.last_observed_block,
+                "history_finality_rollback",
+            )
+            if type(retained) is RegistrationBridgeTransactionJournal:
+                _require(
+                    retained.last_observed_block != result.last_observed_block
+                    or retained.last_observed_block_hash == result.last_observed_block_hash,
+                    "history_finality_equivocation",
+                )
+    audit_current_history(result, groups)
+    return result

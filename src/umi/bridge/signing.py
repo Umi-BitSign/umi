@@ -9,6 +9,7 @@ versioned journal and qualified release must opt in before the bridge uses it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from ..chain import _header_hash
 from ..chain_evidence import FinalizedSnapshotRef, StorageProofVerifier
 from ..concurrency import await_owned_task
 from ..encoding import account_id32, datetime_to_unix_ms
+from ..protocol import canonical_json_bytes
 from ..runtime_metadata import (
     MAX_CODE_BYTES,
     ExecutedRuntimeContext,
@@ -112,6 +114,47 @@ class BridgeSigningState:
     def _value(self, pallet: str, item: str):
         read = next(r for r in self.batch.reads if (r.spec.pallet, r.spec.item) == (pallet, item))
         return self.runtime.decode_storage(pallet, item, read.raw_value)
+
+
+def signing_state_digest(state: BridgeSigningState) -> str:
+    """Commit to the captured proof inputs without hex-expanding runtime code."""
+    runtime = state.runtime
+    snapshot = runtime.snapshot
+    digest = hashlib.sha256(b"umi-bridge-signing-state-v1\0")
+
+    def bind(value: bytes):
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
+    bind(
+        canonical_json_bytes(
+            {
+                "validator_hotkey": state.validator_hotkey,
+                "nonce": state.nonce,
+                "timestamp_ms": state.timestamp_ms,
+                "block_number": snapshot.block_number,
+                "block_hash": snapshot.block_hash,
+                "parent_hash": snapshot.parent_hash,
+                "state_root": snapshot.state_root,
+                "executor_sha256": runtime.executor_sha256,
+            }
+        )
+    )
+    bind(runtime.metadata_bytes)
+    bind(runtime.runtime_version_bytes)
+    bind(runtime.code_evidence.storage_key)
+    bind(runtime.code_evidence.value)
+    bind(len(runtime.code_evidence.proof).to_bytes(8, "big"))
+    for node in runtime.code_evidence.proof:
+        bind(node)
+    bind(len(state.batch.evidence.claims).to_bytes(8, "big"))
+    for claim in state.batch.evidence.claims:
+        bind(claim.storage_key)
+        bind(b"\x00" if claim.value is None else b"\x01" + claim.value)
+    bind(len(state.batch.evidence.proof).to_bytes(8, "big"))
+    for node in state.batch.evidence.proof:
+        bind(node)
+    return digest.hexdigest()
 
 
 class BridgeSigningStateReader:

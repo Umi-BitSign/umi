@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import Field, model_validator
 from typing_extensions import Self
@@ -39,6 +39,7 @@ REGISTRATION_BRIDGE_JOURNAL_SCHEMA = "umi-registration-bridge-journal/1"
 
 
 class RegistrationBridgeAttempt(StrictProtocolModel):
+    _identity_domain: ClassVar[bytes] = b"umi-registration-bridge-attempt-v1\0"
     attempt_id: Hex32
     signed_policy: SignedRegistrationBridgePolicy
     policy_sha256: Hex32
@@ -66,9 +67,7 @@ class RegistrationBridgeAttempt(StrictProtocolModel):
         immutable = self.model_dump(mode="json", by_alias=True, exclude={"attempt_id"})
         if (
             self.attempt_id
-            != hashlib.sha256(
-                b"umi-registration-bridge-attempt-v1\0" + canonical_json_bytes(immutable)
-            ).hexdigest()
+            != hashlib.sha256(self._identity_domain + canonical_json_bytes(immutable)).hexdigest()
         ):
             raise ValueError("bridge attempt identity mismatch")
         return self
