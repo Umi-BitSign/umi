@@ -10,6 +10,7 @@ from tests.test_registration_bridge_runtime import (
     run,
     writer_observation,
 )
+from umi.bridge import state as persistence
 
 signed_policy = runtime.signed_policy
 wallet = runtime.wallet
@@ -28,7 +29,7 @@ def test_snapshot_retains_more_than_old_byte_limit(tmp_path, monkeypatch):
     with bridge.RegistrationBridgeState(root) as state:
         state.require_unchanged()
         assert len(list(history.iterdir())) == 65
-    monkeypatch.setattr(bridge, "MAX_HISTORY_BYTES", 64 * 1024 * 1024)
+    monkeypatch.setattr(persistence, "MAX_HISTORY_BYTES", 64 * 1024 * 1024)
     with (
         pytest.raises(bridge.RegistrationBridgeError, match="history_byte_capacity_reached"),
         bridge.RegistrationBridgeState(root),
@@ -49,7 +50,7 @@ def test_archive_write_keeps_byte_ceiling_and_existing_receipt(
         history = state.root / "registration-bridge-history"
         retained = {p.name: p.read_bytes() for p in history.iterdir()}
         total = sum(len(value) for value in retained.values()) + len(original)
-        monkeypatch.setattr(bridge, "MAX_HISTORY_BYTES", total)
+        monkeypatch.setattr(persistence, "MAX_HISTORY_BYTES", total)
         # Snapshot permits the exact ceiling. An additional archived payload
         # must still fail, even with an already existing destination record.
         oversized = journal.model_copy(update={"last_observed_block": 10**12})
@@ -68,7 +69,7 @@ def test_file_count_ceiling_is_still_enforced(tmp_path, monkeypatch):
         path = history / f"{index}.json"
         path.write_bytes(b"{}")
         path.chmod(0o600)
-    monkeypatch.setattr(bridge, "MAX_HISTORY_FILES", 1)
+    monkeypatch.setattr(persistence, "MAX_HISTORY_FILES", 1)
     with (
         pytest.raises(bridge.RegistrationBridgeError, match="history_capacity_reached"),
         bridge.RegistrationBridgeState(root),

@@ -15,6 +15,7 @@ import umi.registration_bridge as bridge
 from tests.test_bridge_signing import case as case
 from tests.test_registration_bridge import REVISION, decision, health, replace_participant
 from tests.test_registration_bridge import signed_policy as signed_policy
+from umi.bridge import state as persistence
 from umi.bridge.transactions import (
     TRANSACTION_JOURNAL_SCHEMA,
     BridgeSigningRecord,
@@ -374,9 +375,9 @@ def test_reserve_all_transition_capacity_before_first_intent(tmp_path, tx, monke
             len(canonical_json_bytes(tx.preparing)) + 2 * bridge.MAX_SIGNED_EXTRINSIC_BYTES + 4096
         )
         if resource == "files":
-            monkeypatch.setattr(bridge, "MAX_HISTORY_FILES", 6)
+            monkeypatch.setattr(persistence, "MAX_HISTORY_FILES", 6)
         elif resource == "bytes":
-            monkeypatch.setattr(bridge, "MAX_HISTORY_BYTES", len(original) + 8 * maximum - 1)
+            monkeypatch.setattr(persistence, "MAX_HISTORY_BYTES", len(original) + 8 * maximum - 1)
         elif resource == "disk":
             monkeypatch.setattr(
                 bridge.os,
@@ -384,7 +385,7 @@ def test_reserve_all_transition_capacity_before_first_intent(tmp_path, tx, monke
                 lambda path: SimpleNamespace(f_bavail=9 * maximum - 1, f_frsize=1),
             )
         else:
-            monkeypatch.setattr(bridge, "MAX_DOCUMENT_BYTES", maximum - 1)
+            monkeypatch.setattr(persistence, "MAX_DOCUMENT_BYTES", maximum - 1)
         with pytest.raises(bridge.RegistrationBridgeError, match="headroom_insufficient"):
             state.store(tx.preparing, archive=True)
         assert state.path.read_bytes() == original
@@ -428,12 +429,12 @@ def test_archive_sync_is_retried_before_repair_reports_success(tmp_path, tx, mon
             sync(path)
 
         with monkeypatch.context() as patch:
-            patch.setattr(bridge, "_fsync", unavailable)
+            patch.setattr(persistence, "_fsync", unavailable)
             with pytest.raises(OSError, match="injected archive sync"):
                 state.store(signed(tx), archive=True)
     with bridge.RegistrationBridgeState(root) as state:
         with monkeypatch.context() as patch:
-            patch.setattr(bridge, "_fsync", unavailable)
+            patch.setattr(persistence, "_fsync", unavailable)
             with pytest.raises(OSError, match="injected archive sync"):
                 state.initialize(tx.case.obs, now=tx.case.now)
         assert state.path.read_bytes() == original

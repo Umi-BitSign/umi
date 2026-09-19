@@ -14,6 +14,7 @@ from tests.test_registration_bridge_runtime import (
 )
 from tests.test_registration_bridge_runtime import signed_policy as signed_policy
 from tests.test_registration_bridge_runtime import wallet as wallet
+from umi.bridge import state as persistence
 
 
 @pytest.mark.asyncio
@@ -47,7 +48,7 @@ async def test_cancelled_history_write_keeps_service_lock_until_drained(
         finally:
             finished.set()
 
-    monkeypatch.setattr(bridge, "_write_new", paused_write)
+    monkeypatch.setattr(persistence, "_write_new", paused_write)
     monkeypatch.setattr(state, "initialize", owned_initialize)
 
     async def service():
