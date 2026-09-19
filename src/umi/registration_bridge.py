@@ -36,7 +36,6 @@ from .bootstrap_weight_operator import (
     _datetime_ms,
     _participants,
     _pending_commit_summary,
-    _successful_extrinsic,
     _uint,
     _validate_finalized_block,
 )
@@ -176,10 +175,19 @@ from .bridge.selection import (
 from .bridge.selection import (
     validate_registration_bridge_observation as validate_registration_bridge_observation,
 )
+from .bridge.submission import build_registration_bridge_call as build_registration_bridge_call
+from .bridge.submission import (
+    persist,
+    recover_transaction,
+    submit_transaction,
+    validate_active_observation,
+)
+from .bridge.submission import submission_freshness as _submission_freshness  # noqa: F401
 from .bridge.transactions import (
     BridgeJournal,
     RegistrationBridgeTransactionJournal,
     parse_bridge_journal,
+    reconcile_transaction_journal,
 )
 from .concurrency import run_owned_thread
 from .encoding import account_id32
@@ -264,32 +272,6 @@ async def probe_registration_bridge_health(
         )
     except asyncio.TimeoutError as error:
         raise RegistrationBridgeError("health_batch_incomplete") from error
-
-
-def build_registration_bridge_call(decision: RegistrationBridgeDecision, *, call_builder=None):
-    _require(decision.action == "submit", "weight_submission_not_due")
-    _validate_row(decision.expected_row)
-    call = (call_builder or bt.calls.SubtensorModule.set_mechanism_weights)(
-        netuid=78,
-        mecid=0,
-        dests=list(range(256)),
-        weights=[pair[1] for pair in decision.expected_row],
-        version_key=4_294_967_296,
-    )
-    _require(
-        call.module == "SubtensorModule"
-        and call.function == "set_mechanism_weights"
-        and call.params
-        == {
-            "netuid": 78,
-            "mecid": 0,
-            "dests": list(range(256)),
-            "weights": [pair[1] for pair in decision.expected_row],
-            "version_key": 4_294_967_296,
-        },
-        "weight_call_shape_changed",
-    )
-    return call
 
 
 async def _registration_bindings(pinned, participants):
@@ -970,7 +952,32 @@ async def run_registration_bridge_iteration(
         # also write the first journal. Keep it off the event loop and drain
         # cancellation before the caller can release service.lock.
         journal = await run_owned_thread(partial(state.initialize, before, now=chain.clock()))
-        if journal.phase in {"submitting", "outcome_unknown"}:
+        if type(journal) is RegistrationBridgeTransactionJournal and journal.phase in {
+            "preparing",
+            "signed",
+            "submitting",
+            "outcome_unknown",
+            "receipt_returned",
+        }:
+            journal, refreshed = await recover_transaction(
+                journal, state=state, chain=chain, client=client
+            )
+            _require(refreshed.block_number >= before.block_number, "journal_finality_rollback")
+            _require(
+                refreshed.block_number != before.block_number
+                or refreshed.block_hash == before.block_hash,
+                "journal_finality_equivocation",
+            )
+            before = refreshed
+            validate_active_observation(
+                policy,
+                before,
+                chain,
+                expected_revision,
+                directive_valid_from,
+                directive_valid_through,
+            )
+        elif journal.phase in {"submitting", "outcome_unknown"}:
             # Recover only a finalized, exact, successful call from this attempt.
             # The helper never signs or broadcasts. If proof is absent, retain the
             # original durable hold below.
@@ -978,7 +985,7 @@ async def run_registration_bridge_iteration(
 
             with contextlib.suppress(RegistrationBridgeError):
                 journal, _ = await recover_with_client(state, journal, before, client, chain)
-        if journal.phase == "receipt_returned":
+        if type(journal) is RegistrationBridgeJournal and journal.phase == "receipt_returned":
             # A full retained-history audit can outlive the snapshot's freshness
             # limit. Reobserve after it; never relax the age or receipt checks.
             refreshed = await chain.observation_with_client(
@@ -1003,8 +1010,8 @@ async def run_registration_bridge_iteration(
             validate_registration_bridge_chain(
                 policy, before, expected_revision=expected_revision, now=chain.clock()
             )
-        reconciled = reconcile_registration_bridge_journal(journal, before, now=chain.clock())
-        state.store(reconciled, archive=reconciled.phase != journal.phase)
+        reconciled = reconcile_transaction_journal(journal, before, now=chain.clock())
+        await persist(state, reconciled, archive=reconciled.phase != journal.phase)
         journal = reconciled
         if before.block_number + policy.body.submission_headroom_blocks >= min(
             policy.body.submission_limit, directive_valid_through + 1
@@ -1018,6 +1025,9 @@ async def run_registration_bridge_iteration(
         state.require_unchanged()
         fresh = await chain.observation_with_client(client, validator_hotkey=signer.ss58_address)
         state.require_unchanged()
+        validate_active_observation(
+            policy, fresh, chain, expected_revision, directive_valid_from, directive_valid_through
+        )
         decision = validate_registration_bridge_observation(
             policy,
             fresh,
@@ -1026,8 +1036,8 @@ async def run_registration_bridge_iteration(
             now=chain.clock(),
             health_observation=before,
         )
-        journal = reconcile_registration_bridge_journal(journal, fresh, now=chain.clock())
-        state.store(journal)
+        journal = reconcile_transaction_journal(journal, fresh, now=chain.clock())
+        await persist(state, journal)
         if fresh.block_number + policy.body.submission_headroom_blocks >= min(
             policy.body.submission_limit, directive_valid_through + 1
         ):
@@ -1044,27 +1054,17 @@ async def run_registration_bridge_iteration(
                 "eligible_coldkey_count": decision.eligible_coldkey_count,
                 "finalized_block": fresh.block_number,
             }
-        call = build_registration_bridge_call(decision)
-        _submission_freshness(policy, fresh, health, now=chain.clock())
-        attempt = _new_attempt(policy, fresh, decision, health, health_observation=before)
-        journal = RegistrationBridgeJournal(
-            schema=REGISTRATION_BRIDGE_JOURNAL_SCHEMA,
-            validator_hotkey=signer.ss58_address,
-            legacy_journal_sha256=journal.legacy_journal_sha256,
-            phase="submitting",
-            attempt=attempt,
-            weight_call=None,
-            last_observed_block=fresh.block_number,
-            last_observed_block_hash=fresh.block_hash,
-            updated_at_unix_ms=_datetime_ms(chain.clock()),
+        # Idle polls do not execute runtime Wasm or collect signing proofs.
+        # A due submission selects a new proven head and rechecks the roster,
+        # health, policy and rate limit there before any durable signing intent.
+        fresh, signing = await chain.signing_observation_with_client(
+            client, validator_hotkey=signer.ss58_address
         )
-        state.store(journal, archive=True)  # Durable exact intent before signing or broadcast.
         state.require_unchanged()
-        _, legacy_digest = state.legacy()
-        _require(
-            legacy_digest == journal.legacy_journal_sha256, "legacy_journal_changed_before_submit"
+        validate_active_observation(
+            policy, fresh, chain, expected_revision, directive_valid_from, directive_valid_through
         )
-        validate_registration_bridge_observation(
+        decision = validate_registration_bridge_observation(
             policy,
             fresh,
             health,
@@ -1072,103 +1072,48 @@ async def run_registration_bridge_iteration(
             now=chain.clock(),
             health_observation=before,
         )
-        _submission_freshness(policy, fresh, health, now=chain.clock())
-        try:
-            result = await asyncio.wait_for(
-                client.submit_call(
-                    call,
-                    wallet,
-                    signer="hotkey",
-                    period=policy.body.submission_era_period,
-                    wait_for_inclusion=True,
-                    wait_for_finalization=True,
-                ),
-                timeout=policy.body.submission_timeout_seconds,
-            )
-            receipt = _successful_extrinsic(result, reason="bridge_weight_submission_failed")
-            # Preserve the actual returned finalized transaction identity before
-            # a following RPC can fail. An uncertain no-receipt attempt still
-            # cannot use mere row equality as permission to send again.
-            journal = RegistrationBridgeJournal.model_validate(
-                journal.model_copy(
-                    update={
-                        "phase": "receipt_returned",
-                        "weight_call": receipt,
-                        "updated_at_unix_ms": _datetime_ms(chain.clock()),
-                    }
-                ).model_dump(mode="python", by_alias=True)
-            )
-            state.store(journal, archive=True)
-            after = await chain.observation_with_client(
-                client, validator_hotkey=signer.ss58_address
-            )
-            state.require_unchanged()
-            await chain.verify_finalized_receipt_with_client(client, receipt, observation=after)
-            state.require_unchanged()
-            writer = validate_registration_bridge_chain(
-                policy, after, expected_revision=expected_revision, now=chain.clock()
-            )
-            _require(
-                after.block_number >= receipt.block_number
-                and receipt.block_number < policy.body.submission_limit
-                and after.validator_row == attempt.expected_row
-                and writer.last_update == receipt.block_number,
-                "finalized_weight_application_mismatch",
-            )
-            _require(
-                receipt.block_number
-                > max(
-                    p.registered_at_block
-                    for p in attempt.roster
-                    if attempt.expected_row[p.uid][1] > 0
-                ),
-                "weight_did_not_follow_registration",
-            )
-        except BaseException:
-            if journal.phase == "submitting":
-                unknown = journal.model_copy(
-                    update={
-                        "phase": "outcome_unknown",
-                        "updated_at_unix_ms": _datetime_ms(chain.clock()),
-                    }
-                )
-                state.store(unknown, archive=True)
-            raise
-        applied = journal.model_copy(
-            update={
-                "phase": "applied",
-                "weight_call": receipt,
-                "last_observed_block": after.block_number,
-                "last_observed_block_hash": after.block_hash,
-                "updated_at_unix_ms": _datetime_ms(chain.clock()),
+        journal = reconcile_transaction_journal(journal, fresh, now=chain.clock())
+        await persist(state, journal)
+        if fresh.block_number + policy.body.submission_headroom_blocks >= min(
+            policy.body.submission_limit, directive_valid_through + 1
+        ):
+            return {
+                "status": "retiring",
+                "reason_code": "submission_cutoff_reached",
+                "finalized_block": fresh.block_number,
             }
+        if decision.action != "submit":
+            return {
+                "status": decision.action,
+                "reason_code": decision.reason_code,
+                "eligible_count": decision.eligible_count,
+                "eligible_coldkey_count": decision.eligible_coldkey_count,
+                "finalized_block": fresh.block_number,
+            }
+        applied, after = await submit_transaction(
+            policy,
+            observation=fresh,
+            health=health,
+            health_observation=before,
+            decision=decision,
+            signing_state=signing,
+            previous=journal,
+            signer=signer,
+            state=state,
+            chain=chain,
+            client=client,
+            expected_revision=expected_revision,
+            directive_valid_from=directive_valid_from,
+            directive_valid_through=directive_valid_through,
         )
-        state.store(applied, archive=True)
         return {
             "status": "submitted",
             "reason_code": "exact_bridge_row_finalized",
             "eligible_count": decision.eligible_count,
             "eligible_coldkey_count": decision.eligible_coldkey_count,
             "finalized_block": after.block_number,
-            "weight_block": receipt.block_number,
+            "weight_block": applied.weight_call.block_number,
         }
-
-
-def _submission_freshness(policy, observation, health, *, now):
-    now_ms = _datetime_ms(now)
-    reserve_ms = policy.body.submission_timeout_seconds * 1000
-    _require(
-        now_ms - observation.block_timestamp_ms + reserve_ms
-        <= policy.body.maximum_finalized_age_seconds * 1000,
-        "submission_finality_headroom_insufficient",
-    )
-    _require(
-        all(
-            now_ms - item.checked_at_unix_ms + reserve_ms <= policy.body.health_ttl_seconds * 1000
-            for item in health
-        ),
-        "submission_health_headroom_insufficient",
-    )
 
 
 def _validate_directive_interval(policy, valid_from, valid_through):
