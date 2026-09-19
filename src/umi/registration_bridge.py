@@ -10,35 +10,53 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import fcntl
 import hashlib
 import os
 import platform
-import stat
 import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, Literal
+from typing import Any
 
 import bittensor as bt
 import httpx
 from bittensor._generated import storage
-from pydantic import Field, model_validator
-from typing_extensions import Self
 
 from .bootstrap_weight_operator import (
-    BootstrapExtrinsicReference,
+    BootstrapExtrinsicReference as BootstrapExtrinsicReference,
+)
+from .bootstrap_weight_operator import (
     _block_time,
     _bool,
     _datetime_ms,
     _participants,
     _pending_commit_summary,
-    _successful_extrinsic,
     _uint,
     _validate_finalized_block,
 )
+from .bridge.journal import (
+    REGISTRATION_BRIDGE_JOURNAL_SCHEMA as REGISTRATION_BRIDGE_JOURNAL_SCHEMA,
+)
+from .bridge.journal import (
+    RegistrationBridgeAttempt as RegistrationBridgeAttempt,
+)
+from .bridge.journal import (
+    RegistrationBridgeChurnAttempt as RegistrationBridgeChurnAttempt,
+)
+from .bridge.journal import (
+    RegistrationBridgeJournal as RegistrationBridgeJournal,
+)
+from .bridge.journal import (
+    _new_attempt as _new_attempt,
+)
+from .bridge.journal import (
+    reconcile_registration_bridge_journal as reconcile_registration_bridge_journal,
+)
+from .bridge.legacy_recovery import recover_with_client
+from .bridge.native import receipt_reader, signing_reader
 
 # Preserve the public bridge API while policy and selection remain independently testable.
 from .bridge.policy import (
@@ -155,22 +173,38 @@ from .bridge.selection import (
 from .bridge.selection import (
     validate_registration_bridge_observation as validate_registration_bridge_observation,
 )
+from .bridge.state import MAX_HISTORY_BYTES as MAX_HISTORY_BYTES
+from .bridge.state import MAX_HISTORY_FILES as MAX_HISTORY_FILES
+from .bridge.state import RegistrationBridgeState as RegistrationBridgeState
+from .bridge.state import _fsync as _fsync
+from .bridge.state import _read_bytes as _read_bytes
+from .bridge.state import _write_new as _write_new
+from .bridge.submission import build_registration_bridge_call as build_registration_bridge_call
+from .bridge.submission import (
+    persist,
+    recover_transaction,
+    submit_transaction,
+    validate_active_observation,
+)
+from .bridge.submission import submission_freshness as _submission_freshness  # noqa: F401
+from .bridge.transactions import BridgeJournal as BridgeJournal
+from .bridge.transactions import RegistrationBridgeTransactionJournal, reconcile_transaction_journal
+from .bridge.transactions import parse_bridge_journal as parse_bridge_journal
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
-from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
+from .protocol import canonical_json_bytes
+from .signed_extrinsic import MAX_SIGNED_EXTRINSIC_BYTES as MAX_SIGNED_EXTRINSIC_BYTES
 from .simple_bootstrap_validator import (
-    SIMPLE_BOOTSTRAP_MANIFEST_SHA256,
-    SimpleBootstrapJournal,
+    SIMPLE_BOOTSTRAP_MANIFEST_SHA256 as SIMPLE_BOOTSTRAP_MANIFEST_SHA256,
+)
+from .simple_bootstrap_validator import SimpleBootstrapJournal as SimpleBootstrapJournal
+from .simple_bootstrap_validator import (
     _account_bytes,
     _runtime_spec_version,
     verify_simple_bootstrap_checkout,
 )
 
-REGISTRATION_BRIDGE_JOURNAL_SCHEMA = "umi-registration-bridge-journal/1"
-# Retain every transition and its recovery protections. These are resource
-# ceilings, not a retention policy; archival needs a separate verified design.
-MAX_HISTORY_FILES = 4096
-MAX_HISTORY_BYTES = 512 * 1024 * 1024
 _FINALITY_HASHES = {
     "x86_64": "cd696ea86acd691112413a7909b6bf469f90042747c87b9350f01dacfe4ae8c3",
     "aarch64": "b263758fb273aed83868e986f4738ff14008996b200226e34c14633a863e5587",
@@ -239,32 +273,6 @@ async def probe_registration_bridge_health(
         raise RegistrationBridgeError("health_batch_incomplete") from error
 
 
-def build_registration_bridge_call(decision: RegistrationBridgeDecision, *, call_builder=None):
-    _require(decision.action == "submit", "weight_submission_not_due")
-    _validate_row(decision.expected_row)
-    call = (call_builder or bt.calls.SubtensorModule.set_mechanism_weights)(
-        netuid=78,
-        mecid=0,
-        dests=list(range(256)),
-        weights=[pair[1] for pair in decision.expected_row],
-        version_key=4_294_967_296,
-    )
-    _require(
-        call.module == "SubtensorModule"
-        and call.function == "set_mechanism_weights"
-        and call.params
-        == {
-            "netuid": 78,
-            "mecid": 0,
-            "dests": list(range(256)),
-            "weights": [pair[1] for pair in decision.expected_row],
-            "version_key": 4_294_967_296,
-        },
-        "weight_call_shape_changed",
-    )
-    return call
-
-
 async def _registration_bindings(pinned, participants):
     """Read the pinned roster in bounded batches, not 1,024 point requests."""
     direct = storage.SubtensorModule
@@ -292,9 +300,20 @@ async def _registration_bindings(pinned, participants):
 class BittensorRegistrationBridgeChain:
     """Owned finality identities with all mutable RPC reads pinned to that identity."""
 
-    def __init__(self, *, client_factory=None, finality_reader=None, clock=None):
+    def __init__(
+        self,
+        *,
+        client_factory=None,
+        finality_reader=None,
+        clock=None,
+        signing_reader_factory=None,
+        receipt_reader_factory=None,
+    ):
         self.client_factory = client_factory or (lambda network: bt.Client(network))
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._signing_reader_factory = signing_reader_factory or signing_reader
+        self._receipt_reader_factory = receipt_reader_factory or receipt_reader
+        self._receipt_reader = None
         if finality_reader is None:
             # Host adapters import our policy schemas; keep this runtime import lazy.
             from .validator_supervisor_adapters import FinneyFinalizedBlockReader
@@ -342,6 +361,43 @@ class BittensorRegistrationBridgeChain:
         substrate = getattr(client, "_substrate", None)
         _require(await substrate.block_hash(0) == f"0x{FINNEY_GENESIS_HASH}", "chain_not_finney")
         owned = await self.finality.read_finalized_identity()
+        return await self._observation_at(client, validator_hotkey=validator_hotkey, owned=owned)
+
+    async def signing_observation_with_client(self, client, *, validator_hotkey: str):
+        substrate = getattr(client, "_substrate", None)
+        _require(await substrate.block_hash(0) == f"0x{FINNEY_GENESIS_HASH}", "chain_not_finney")
+        reader = await run_owned_thread(
+            partial(
+                self._signing_reader_factory,
+                client=client,
+                finality=self.finality,
+                clock=self.clock,
+            )
+        )
+        signing = await reader.read(validator_hotkey)
+        snapshot = signing.runtime.snapshot
+        observation = await self._observation_at(
+            client,
+            validator_hotkey=validator_hotkey,
+            owned=SimpleNamespace(number=snapshot.block_number, block_hash=snapshot.block_hash),
+        )
+        _require(
+            observation.block_timestamp_ms == signing.timestamp_ms,
+            "bridge_signing_timestamp_mismatch",
+        )
+        return observation, signing
+
+    async def exact_receipt_with_client(self, client, journal):
+        # The read-only RPC adapter owns its endpoint, not an SDK session. Keep
+        # one reader across loop iterations so bounded timeouts retain progress.
+        if self._receipt_reader is None:
+            self._receipt_reader = await run_owned_thread(
+                partial(self._receipt_reader_factory, client=client, finality=self.finality)
+            )
+        return await self._receipt_reader.find(journal)
+
+    async def _observation_at(self, client, *, validator_hotkey, owned):
+        substrate = getattr(client, "_substrate", None)
         pinned = await client.at(owned.number)
         _require(getattr(pinned, "block", None) == owned.number, "snapshot_block_mismatch")
         direct = storage.SubtensorModule
@@ -489,537 +545,6 @@ class BittensorRegistrationBridgeChain:
         )
 
 
-class RegistrationBridgeAttempt(StrictProtocolModel):
-    attempt_id: Hex32
-    signed_policy: SignedRegistrationBridgePolicy
-    policy_sha256: Hex32
-    validator_hotkey: str
-    preflight_block: PositiveInt
-    preflight_block_hash: BlockHash
-    prior_last_update: UInt
-    roster: Annotated[list[RegistrationBridgeParticipant], Field(min_length=256, max_length=256)]
-    owner_associated_hotkeys: Annotated[list[str], Field(min_length=1, max_length=4096)]
-    roster_sha256: Hex32
-    expected_row: Annotated[list[list[int]], Field(min_length=256, max_length=256)]
-    health: Annotated[list[RegistrationBridgeHealth], Field(max_length=255)]
-
-    @model_validator(mode="after")
-    def identity(self) -> Self:
-        account_id32(self.validator_hotkey)
-        _validate_row(self.expected_row)
-        if self.policy_sha256 != registration_bridge_policy_sha256(self.signed_policy):
-            raise ValueError("bridge attempt policy identity mismatch")
-        verify_registration_bridge_policy(
-            self.signed_policy,
-            expected_revision=self.signed_policy.body.umi_git_revision,
-            current_block=self.preflight_block,
-        )
-        immutable = self.model_dump(mode="json", by_alias=True, exclude={"attempt_id"})
-        if (
-            self.attempt_id
-            != hashlib.sha256(
-                b"umi-registration-bridge-attempt-v1\0" + canonical_json_bytes(immutable)
-            ).hexdigest()
-        ):
-            raise ValueError("bridge attempt identity mismatch")
-        return self
-
-
-class RegistrationBridgeChurnAttempt(RegistrationBridgeAttempt):
-    """Retain the original probe snapshot alongside the final submission roster.
-
-    Historical attempts keep their exact bytes and hash. Only a changed roster
-    needs this additional evidence; receipts are never relabeled as fresh probes.
-    """
-
-    health_observation: RegistrationBridgeObservation
-
-    @model_validator(mode="after")
-    def probe_snapshot(self) -> Self:
-        if (
-            self.health_observation.validator_hotkey != self.validator_hotkey
-            or self.health_observation.block_number >= self.preflight_block
-        ):
-            raise ValueError("bridge probe snapshot does not precede the same writer's submission")
-        return self
-
-
-class RegistrationBridgeJournal(StrictProtocolModel):
-    schema_: Literal[REGISTRATION_BRIDGE_JOURNAL_SCHEMA] = Field(alias="schema")
-    validator_hotkey: str
-    legacy_journal_sha256: Hex32 | None
-    phase: Literal["idle", "submitting", "outcome_unknown", "receipt_returned", "applied"]
-    attempt: RegistrationBridgeChurnAttempt | RegistrationBridgeAttempt | None
-    weight_call: BootstrapExtrinsicReference | None
-    last_observed_block: PositiveInt
-    last_observed_block_hash: BlockHash
-    updated_at_unix_ms: PositiveInt
-
-    @model_validator(mode="after")
-    def bindings(self) -> Self:
-        account_id32(self.validator_hotkey)
-        if (self.phase == "idle") != (self.attempt is None):
-            raise ValueError("bridge journal attempt missing or unexpected")
-        if (self.phase in {"receipt_returned", "applied"}) != (self.weight_call is not None):
-            raise ValueError("bridge journal finalized receipt missing or unexpected")
-        if self.attempt is not None:
-            if self.validator_hotkey != self.attempt.validator_hotkey:
-                raise ValueError("bridge journal validator mismatch")
-            if self.last_observed_block < self.attempt.preflight_block:
-                raise ValueError("bridge journal finality rollback")
-            if self.weight_call is not None and not (
-                self.attempt.preflight_block
-                < self.weight_call.block_number
-                < self.attempt.signed_policy.body.submission_limit
-            ):
-                raise ValueError("bridge receipt outside attempted interval")
-        return self
-
-
-def reconcile_registration_bridge_journal(
-    journal: RegistrationBridgeJournal, observation: RegistrationBridgeObservation, *, now: datetime
-) -> RegistrationBridgeJournal:
-    _require(journal.validator_hotkey == observation.validator_hotkey, "journal_validator_changed")
-    _require(observation.block_number >= journal.last_observed_block, "journal_finality_rollback")
-    _require(
-        observation.block_number != journal.last_observed_block
-        or observation.block_hash == journal.last_observed_block_hash,
-        "journal_finality_equivocation",
-    )
-    updates = {
-        "last_observed_block": observation.block_number,
-        "last_observed_block_hash": observation.block_hash,
-        "updated_at_unix_ms": _datetime_ms(now),
-    }
-    if journal.phase in {"submitting", "outcome_unknown"}:
-        # Equality proves an effect, not that this exact uncertain attempt is
-        # drained. Without signed transaction identity/nonce/era we never retry.
-        raise RegistrationBridgeError("prior_submission_outcome_unknown")
-    if journal.phase == "receipt_returned":
-        receipt, attempt = journal.weight_call, journal.attempt
-        writer = next(p for p in observation.participants if p.hotkey == journal.validator_hotkey)
-        _require(
-            observation.block_number >= receipt.block_number
-            and writer.last_update == receipt.block_number
-            and observation.validator_row == attempt.expected_row,
-            "retained_finalized_receipt_effect_not_visible",
-        )
-        if observation.block_number == receipt.block_number:
-            _require(observation.block_hash == receipt.block_hash, "retained_receipt_hash_mismatch")
-        updates["phase"] = "applied"
-    return RegistrationBridgeJournal.model_validate(
-        journal.model_copy(update=updates).model_dump(mode="python", by_alias=True)
-    )
-
-
-def _read_bytes(path: Path, *, private: bool, optional: bool = False) -> bytes | None:
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        if optional:
-            return None
-        raise
-    with os.fdopen(fd, "rb") as handle:
-        before = os.fstat(handle.fileno())
-        _require(
-            stat.S_ISREG(before.st_mode)
-            and before.st_nlink == 1
-            and 0 < before.st_size <= MAX_DOCUMENT_BYTES,
-            "state_file_unsafe",
-        )
-        if private:
-            _require(
-                before.st_uid == os.geteuid() and stat.S_IMODE(before.st_mode) == 0o600,
-                "state_file_permissions",
-            )
-        payload = handle.read(MAX_DOCUMENT_BYTES + 1)
-        after = os.fstat(handle.fileno())
-        _require(
-            (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-            == (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-            and len(payload) == before.st_size,
-            "state_file_changed",
-        )
-        return payload
-
-
-def _write_new(path: Path, payload: bytes):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _fsync(path: Path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-class RegistrationBridgeState:
-    """Same service.lock inode as the old worker, with separate durable journals."""
-
-    def __init__(self, root: Path):
-        self.root = root
-        self.path = root / "registration-bridge-journal.json"
-        self.descriptor = -1
-        self._root_identity = None
-        self._expected = None
-
-    def __enter__(self):
-        _require(self.root.is_absolute() and self.root.resolve() == self.root, "state_path_unsafe")
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        metadata = self.root.lstat()
-        _require(
-            stat.S_ISDIR(metadata.st_mode)
-            and metadata.st_uid == os.geteuid()
-            and stat.S_IMODE(metadata.st_mode) == 0o700,
-            "state_root_unsafe",
-        )
-        self._root_identity = (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_uid,
-            metadata.st_gid,
-            metadata.st_mode,
-        )
-        self.descriptor = os.open(
-            self.root / "service.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600
-        )
-        try:
-            meta = os.fstat(self.descriptor)
-            _require(
-                stat.S_ISREG(meta.st_mode)
-                and meta.st_uid == os.geteuid()
-                and meta.st_nlink == 1
-                and stat.S_IMODE(meta.st_mode) == 0o600,
-                "service_lock_unsafe",
-            )
-            fcntl.flock(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BaseException:
-            os.close(self.descriptor)
-            self.descriptor = -1
-            raise
-        self._expected = self._snapshot()
-        return self
-
-    def __exit__(self, *_args):
-        if self.descriptor >= 0:
-            os.close(self.descriptor)
-            self.descriptor = -1
-
-    def require_locked(self):
-        _require(self.descriptor >= 0, "state_lock_not_held")
-        root = self.root.lstat()
-        _require(
-            self.root.resolve() == self.root
-            and (root.st_dev, root.st_ino, root.st_uid, root.st_gid, root.st_mode)
-            == self._root_identity,
-            "state_root_changed",
-        )
-        actual = (self.root / "service.lock").lstat()
-        held = os.fstat(self.descriptor)
-        _require(
-            (actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino)
-            and stat.S_ISREG(actual.st_mode)
-            and actual.st_uid == os.geteuid()
-            and actual.st_nlink == held.st_nlink == 1
-            and stat.S_IMODE(actual.st_mode) == 0o600,
-            "state_lock_replaced",
-        )
-
-    def _snapshot(self):
-        self.require_locked()
-        result = {}
-        paths = [
-            self.path,
-            self.root / "journal.json",
-            self.root / "registration-bridge-legacy-journal.json",
-        ]
-        history = self.root / "registration-bridge-history"
-        if os.path.lexists(history):
-            meta = history.lstat()
-            _require(
-                stat.S_ISDIR(meta.st_mode)
-                and meta.st_uid == os.geteuid()
-                and stat.S_IMODE(meta.st_mode) == 0o700,
-                "history_root_unsafe",
-            )
-            result[history.name] = (
-                meta.st_dev,
-                meta.st_ino,
-                meta.st_uid,
-                meta.st_gid,
-                meta.st_mode,
-            )
-            with os.scandir(history) as entries:
-                for count, entry in enumerate(entries, 1):
-                    _require(count <= MAX_HISTORY_FILES, "history_capacity_reached")
-                    paths.append(Path(entry.path))
-        total = 0
-        for path in paths:
-            raw = _read_bytes(path, private=True, optional=True)
-            if raw is None:
-                result[str(path.relative_to(self.root))] = None
-                continue
-            total += len(raw)
-            _require(total <= MAX_HISTORY_BYTES, "history_byte_capacity_reached")
-            meta = path.lstat()
-            result[str(path.relative_to(self.root))] = (
-                meta.st_dev,
-                meta.st_ino,
-                meta.st_uid,
-                meta.st_gid,
-                meta.st_mode,
-                meta.st_nlink,
-                meta.st_size,
-                meta.st_mtime_ns,
-                meta.st_ctime_ns,
-                hashlib.sha256(raw).hexdigest(),
-            )
-        return result
-
-    def require_unchanged(self):
-        _require(
-            self._expected is not None and self._snapshot() == self._expected,
-            "retained_state_changed",
-        )
-
-    def _audit_history(self, current, legacy_raw):
-        archive = _read_bytes(
-            self.root / "registration-bridge-legacy-journal.json", private=True, optional=True
-        )
-        _require(archive == legacy_raw, "legacy_archive_changed")
-        history = self.root / "registration-bridge-history"
-        groups = {}
-        if history.exists():
-            with os.scandir(history) as entries:
-                for count, entry in enumerate(entries, 1):
-                    _require(count <= MAX_HISTORY_FILES, "history_capacity_reached")
-                    raw = _read_bytes(Path(entry.path), private=True)
-                    _canonical_object(raw)
-                    retained = RegistrationBridgeJournal.model_validate_json(raw)
-                    _require(
-                        canonical_json_bytes(retained) == raw
-                        and retained.attempt is not None
-                        and retained.validator_hotkey == current.validator_hotkey
-                        and retained.legacy_journal_sha256 == current.legacy_journal_sha256,
-                        "history_binding_changed",
-                    )
-                    _require(
-                        entry.name == f"{retained.attempt.attempt_id}-{retained.phase}.json",
-                        "history_filename_changed",
-                    )
-                    _require(
-                        retained.last_observed_block <= current.last_observed_block,
-                        "history_finality_rollback",
-                    )
-                    groups.setdefault(retained.attempt.attempt_id, {})[retained.phase] = retained
-        if current.attempt is None:
-            _require(not groups, "current_journal_rolled_back")
-            return
-        _require(current.attempt.attempt_id in groups, "current_attempt_history_missing")
-        for identity, phases in groups.items():
-            _require("submitting" in phases, "history_intent_missing")
-            attempt = phases["submitting"].attempt
-            _require(
-                all(item.attempt == attempt for item in phases.values()), "history_attempt_changed"
-            )
-            _require(
-                attempt.preflight_block <= current.attempt.preflight_block,
-                "current_journal_rolled_back",
-            )
-            if identity != current.attempt.attempt_id:
-                _require(
-                    attempt.preflight_block < current.attempt.preflight_block
-                    and "applied" in phases
-                    and "outcome_unknown" not in phases,
-                    "retained_unresolved_attempt",
-                )
-            else:
-                _require(
-                    current.attempt == attempt and current.phase in phases,
-                    "current_journal_rolled_back",
-                )
-                order = {"submitting": 0, "outcome_unknown": 1, "receipt_returned": 2, "applied": 3}
-                _require(
-                    order[current.phase] == max(order[phase] for phase in phases),
-                    "current_journal_rolled_back",
-                )
-                _require(
-                    phases[current.phase].weight_call == current.weight_call,
-                    "current_receipt_changed",
-                )
-            receipts = [
-                item.weight_call for item in phases.values() if item.weight_call is not None
-            ]
-            _require(
-                not receipts or all(receipt == receipts[0] for receipt in receipts),
-                "history_receipt_changed",
-            )
-
-    def load(self):
-        self.require_unchanged()
-        raw = _read_bytes(self.path, private=True, optional=True)
-        if raw is None:
-            return None
-        _canonical_object(raw)
-        journal = RegistrationBridgeJournal.model_validate_json(raw)
-        _require(canonical_json_bytes(journal) == raw, "journal_noncanonical")
-        return journal
-
-    def legacy(self):
-        self.require_unchanged()
-        raw = _read_bytes(self.root / "journal.json", private=True, optional=True)
-        return raw, None if raw is None else hashlib.sha256(raw).hexdigest()
-
-    def store(self, journal: RegistrationBridgeJournal, *, archive: bool = False):
-        self.require_unchanged()
-        journal = RegistrationBridgeJournal.model_validate(
-            journal.model_dump(mode="python", by_alias=True)
-        )
-        raw = canonical_json_bytes(journal)
-        if archive and journal.attempt is not None:
-            history = self.root / "registration-bridge-history"
-            history.mkdir(mode=0o700, exist_ok=True)
-            meta = history.lstat()
-            _require(
-                stat.S_ISDIR(meta.st_mode)
-                and meta.st_uid == os.geteuid()
-                and stat.S_IMODE(meta.st_mode) == 0o700,
-                "history_root_unsafe",
-            )
-            total = 0
-            with os.scandir(history) as entries:
-                for count, entry in enumerate(entries, start=1):
-                    _require(count < MAX_HISTORY_FILES, "history_capacity_reached")
-                    item = entry.stat(follow_symlinks=False)
-                    _require(
-                        stat.S_ISREG(item.st_mode)
-                        and item.st_uid == os.geteuid()
-                        and item.st_nlink == 1,
-                        "history_file_unsafe",
-                    )
-                    total += item.st_size
-                    _require(total + len(raw) <= MAX_HISTORY_BYTES, "history_byte_capacity_reached")
-            path = history / f"{journal.attempt.attempt_id}-{journal.phase}.json"
-            existing = _read_bytes(path, private=True, optional=True)
-            if existing is None:
-                _write_new(path, raw)
-                _fsync(history)
-            else:
-                _require(existing == raw, "history_record_changed")
-        temporary = self.root / f".registration-bridge-{os.getpid()}-{os.urandom(8).hex()}.tmp"
-        _write_new(temporary, raw)
-        # All runtime state writers share service.lock; existing legacy bytes are never touched.
-        os.replace(temporary, self.path)
-        _fsync(self.root)
-        self._expected = self._snapshot()
-
-    def initialize(self, observation: RegistrationBridgeObservation, *, now: datetime):
-        raw, digest = self.legacy()
-        existing = self.load()
-        if existing is not None:
-            _require(existing.legacy_journal_sha256 == digest, "legacy_journal_changed")
-            self._audit_history(existing, raw)
-            return existing
-        # A missing current journal never resets retained attempts or a prior
-        # completed handoff, including a crash between archive and journal write.
-        _require(
-            not (self.root / "registration-bridge-history").exists()
-            and not (self.root / "registration-bridge-legacy-journal.json").exists(),
-            "bridge_journal_missing_with_retained_state",
-        )
-        if raw is not None:
-            _canonical_object(raw)
-            legacy = SimpleBootstrapJournal.model_validate_json(raw)
-            _require(
-                canonical_json_bytes(legacy) == raw
-                and legacy.validator_hotkey == observation.validator_hotkey
-                and legacy.manifest_sha256 == SIMPLE_BOOTSTRAP_MANIFEST_SHA256,
-                "legacy_journal_binding_changed",
-            )
-            _require(
-                legacy.phase == "applied" and legacy.weight_call is not None,
-                "legacy_attempt_not_proven_terminal",
-            )
-            writer = next(
-                p for p in observation.participants if p.hotkey == observation.validator_hotkey
-            )
-            old_row = [[uid, 65535 if uid in {6, 247} else 0] for uid in range(256)]
-            _require(
-                observation.validator_row == old_row
-                and writer.last_update > legacy.prior_last_update
-                and writer.last_update >= legacy.preflight_block
-                and observation.block_number
-                >= (legacy.observation_block or legacy.preflight_block),
-                "legacy_terminal_effect_not_visible",
-            )
-            if legacy.weight_call is not None:
-                _require(
-                    writer.last_update == legacy.weight_call.block_number,
-                    "legacy_receipt_lastupdate_changed",
-                )
-            archive = self.root / "registration-bridge-legacy-journal.json"
-            prior = _read_bytes(archive, private=True, optional=True)
-            if prior is None:
-                _write_new(archive, raw)
-                _fsync(self.root)
-                self._expected = self._snapshot()
-            else:
-                _require(prior == raw, "legacy_archive_changed")
-        else:
-            writer = next(
-                p for p in observation.participants if p.hotkey == observation.validator_hotkey
-            )
-            _require(
-                not observation.validator_row and writer.last_update <= writer.registered_at_block,
-                "legacy_journal_missing_for_existing_writer",
-            )
-        journal = RegistrationBridgeJournal(
-            schema=REGISTRATION_BRIDGE_JOURNAL_SCHEMA,
-            validator_hotkey=observation.validator_hotkey,
-            legacy_journal_sha256=digest,
-            phase="idle",
-            attempt=None,
-            weight_call=None,
-            last_observed_block=observation.block_number,
-            last_observed_block_hash=observation.block_hash,
-            updated_at_unix_ms=_datetime_ms(now),
-        )
-        self.store(journal)
-        return journal
-
-
-def _new_attempt(policy, observation, decision, health, *, health_observation=None):
-    body = {
-        "signed_policy": policy.model_dump(mode="json", by_alias=True),
-        "policy_sha256": registration_bridge_policy_sha256(policy),
-        "validator_hotkey": observation.validator_hotkey,
-        "preflight_block": observation.block_number,
-        "preflight_block_hash": observation.block_hash,
-        "prior_last_update": decision.validator_last_update,
-        "roster": [p.model_dump(mode="json") for p in observation.participants],
-        "owner_associated_hotkeys": observation.owner_associated_hotkeys,
-        "roster_sha256": decision.roster_sha256,
-        "expected_row": decision.expected_row,
-        "health": [h.model_dump(mode="json") for h in health],
-    }
-    attempt_type = RegistrationBridgeAttempt
-    if health_observation is not None and (
-        registration_bridge_roster_sha256(health_observation) != decision.roster_sha256
-    ):
-        body["health_observation"] = health_observation.model_dump(mode="json")
-        attempt_type = RegistrationBridgeChurnAttempt
-    body["attempt_id"] = hashlib.sha256(
-        b"umi-registration-bridge-attempt-v1\0" + canonical_json_bytes(body)
-    ).hexdigest()
-    return attempt_type.model_validate(body)
-
-
 async def run_registration_bridge_iteration(
     policy,
     *,
@@ -1044,19 +569,42 @@ async def run_registration_bridge_iteration(
         validate_registration_bridge_chain(
             policy, before, expected_revision=expected_revision, now=chain.clock()
         )
-        # Retained-history verification is bounded but disk-heavy. Keep it off
-        # the event loop so the owned finality observer can continue ingesting
-        # heads while recovery audits old receipts.
-        journal = await asyncio.to_thread(state.initialize, before, now=chain.clock())
-        if journal.phase in {"submitting", "outcome_unknown"}:
+        # History verification is bounded but disk-heavy; initialization may
+        # also write the first journal. Keep it off the event loop and drain
+        # cancellation before the caller can release service.lock.
+        journal = await run_owned_thread(partial(state.initialize, before, now=chain.clock()))
+        if type(journal) is RegistrationBridgeTransactionJournal and journal.phase in {
+            "preparing",
+            "signed",
+            "submitting",
+            "outcome_unknown",
+            "receipt_returned",
+        }:
+            journal, refreshed = await recover_transaction(
+                journal, state=state, chain=chain, client=client
+            )
+            _require(refreshed.block_number >= before.block_number, "journal_finality_rollback")
+            _require(
+                refreshed.block_number != before.block_number
+                or refreshed.block_hash == before.block_hash,
+                "journal_finality_equivocation",
+            )
+            before = refreshed
+            validate_active_observation(
+                policy,
+                before,
+                chain,
+                expected_revision,
+                directive_valid_from,
+                directive_valid_through,
+            )
+        elif journal.phase in {"submitting", "outcome_unknown"}:
             # Recover only a finalized, exact, successful call from this attempt.
             # The helper never signs or broadcasts. If proof is absent, retain the
             # original durable hold below.
-            from .registration_bridge_recover import recover_with_client
-
             with contextlib.suppress(RegistrationBridgeError):
                 journal, _ = await recover_with_client(state, journal, before, client, chain)
-        if journal.phase == "receipt_returned":
+        if type(journal) is RegistrationBridgeJournal and journal.phase == "receipt_returned":
             # A full retained-history audit can outlive the snapshot's freshness
             # limit. Reobserve after it; never relax the age or receipt checks.
             refreshed = await chain.observation_with_client(
@@ -1081,8 +629,8 @@ async def run_registration_bridge_iteration(
             validate_registration_bridge_chain(
                 policy, before, expected_revision=expected_revision, now=chain.clock()
             )
-        reconciled = reconcile_registration_bridge_journal(journal, before, now=chain.clock())
-        state.store(reconciled, archive=reconciled.phase != journal.phase)
+        reconciled = reconcile_transaction_journal(journal, before, now=chain.clock())
+        await persist(state, reconciled, archive=reconciled.phase != journal.phase)
         journal = reconciled
         if before.block_number + policy.body.submission_headroom_blocks >= min(
             policy.body.submission_limit, directive_valid_through + 1
@@ -1096,6 +644,9 @@ async def run_registration_bridge_iteration(
         state.require_unchanged()
         fresh = await chain.observation_with_client(client, validator_hotkey=signer.ss58_address)
         state.require_unchanged()
+        validate_active_observation(
+            policy, fresh, chain, expected_revision, directive_valid_from, directive_valid_through
+        )
         decision = validate_registration_bridge_observation(
             policy,
             fresh,
@@ -1104,8 +655,8 @@ async def run_registration_bridge_iteration(
             now=chain.clock(),
             health_observation=before,
         )
-        journal = reconcile_registration_bridge_journal(journal, fresh, now=chain.clock())
-        state.store(journal)
+        journal = reconcile_transaction_journal(journal, fresh, now=chain.clock())
+        await persist(state, journal)
         if fresh.block_number + policy.body.submission_headroom_blocks >= min(
             policy.body.submission_limit, directive_valid_through + 1
         ):
@@ -1122,27 +673,17 @@ async def run_registration_bridge_iteration(
                 "eligible_coldkey_count": decision.eligible_coldkey_count,
                 "finalized_block": fresh.block_number,
             }
-        call = build_registration_bridge_call(decision)
-        _submission_freshness(policy, fresh, health, now=chain.clock())
-        attempt = _new_attempt(policy, fresh, decision, health, health_observation=before)
-        journal = RegistrationBridgeJournal(
-            schema=REGISTRATION_BRIDGE_JOURNAL_SCHEMA,
-            validator_hotkey=signer.ss58_address,
-            legacy_journal_sha256=journal.legacy_journal_sha256,
-            phase="submitting",
-            attempt=attempt,
-            weight_call=None,
-            last_observed_block=fresh.block_number,
-            last_observed_block_hash=fresh.block_hash,
-            updated_at_unix_ms=_datetime_ms(chain.clock()),
+        # Idle polls do not execute runtime Wasm or collect signing proofs.
+        # A due submission selects a new proven head and rechecks the roster,
+        # health, policy and rate limit there before any durable signing intent.
+        fresh, signing = await chain.signing_observation_with_client(
+            client, validator_hotkey=signer.ss58_address
         )
-        state.store(journal, archive=True)  # Durable exact intent before signing or broadcast.
         state.require_unchanged()
-        _, legacy_digest = state.legacy()
-        _require(
-            legacy_digest == journal.legacy_journal_sha256, "legacy_journal_changed_before_submit"
+        validate_active_observation(
+            policy, fresh, chain, expected_revision, directive_valid_from, directive_valid_through
         )
-        validate_registration_bridge_observation(
+        decision = validate_registration_bridge_observation(
             policy,
             fresh,
             health,
@@ -1150,103 +691,48 @@ async def run_registration_bridge_iteration(
             now=chain.clock(),
             health_observation=before,
         )
-        _submission_freshness(policy, fresh, health, now=chain.clock())
-        try:
-            result = await asyncio.wait_for(
-                client.submit_call(
-                    call,
-                    wallet,
-                    signer="hotkey",
-                    period=policy.body.submission_era_period,
-                    wait_for_inclusion=True,
-                    wait_for_finalization=True,
-                ),
-                timeout=policy.body.submission_timeout_seconds,
-            )
-            receipt = _successful_extrinsic(result, reason="bridge_weight_submission_failed")
-            # Preserve the actual returned finalized transaction identity before
-            # a following RPC can fail. An uncertain no-receipt attempt still
-            # cannot use mere row equality as permission to send again.
-            journal = RegistrationBridgeJournal.model_validate(
-                journal.model_copy(
-                    update={
-                        "phase": "receipt_returned",
-                        "weight_call": receipt,
-                        "updated_at_unix_ms": _datetime_ms(chain.clock()),
-                    }
-                ).model_dump(mode="python", by_alias=True)
-            )
-            state.store(journal, archive=True)
-            after = await chain.observation_with_client(
-                client, validator_hotkey=signer.ss58_address
-            )
-            state.require_unchanged()
-            await chain.verify_finalized_receipt_with_client(client, receipt, observation=after)
-            state.require_unchanged()
-            writer = validate_registration_bridge_chain(
-                policy, after, expected_revision=expected_revision, now=chain.clock()
-            )
-            _require(
-                after.block_number >= receipt.block_number
-                and receipt.block_number < policy.body.submission_limit
-                and after.validator_row == attempt.expected_row
-                and writer.last_update == receipt.block_number,
-                "finalized_weight_application_mismatch",
-            )
-            _require(
-                receipt.block_number
-                > max(
-                    p.registered_at_block
-                    for p in attempt.roster
-                    if attempt.expected_row[p.uid][1] > 0
-                ),
-                "weight_did_not_follow_registration",
-            )
-        except BaseException:
-            if journal.phase == "submitting":
-                unknown = journal.model_copy(
-                    update={
-                        "phase": "outcome_unknown",
-                        "updated_at_unix_ms": _datetime_ms(chain.clock()),
-                    }
-                )
-                state.store(unknown, archive=True)
-            raise
-        applied = journal.model_copy(
-            update={
-                "phase": "applied",
-                "weight_call": receipt,
-                "last_observed_block": after.block_number,
-                "last_observed_block_hash": after.block_hash,
-                "updated_at_unix_ms": _datetime_ms(chain.clock()),
+        journal = reconcile_transaction_journal(journal, fresh, now=chain.clock())
+        await persist(state, journal)
+        if fresh.block_number + policy.body.submission_headroom_blocks >= min(
+            policy.body.submission_limit, directive_valid_through + 1
+        ):
+            return {
+                "status": "retiring",
+                "reason_code": "submission_cutoff_reached",
+                "finalized_block": fresh.block_number,
             }
+        if decision.action != "submit":
+            return {
+                "status": decision.action,
+                "reason_code": decision.reason_code,
+                "eligible_count": decision.eligible_count,
+                "eligible_coldkey_count": decision.eligible_coldkey_count,
+                "finalized_block": fresh.block_number,
+            }
+        applied, after = await submit_transaction(
+            policy,
+            observation=fresh,
+            health=health,
+            health_observation=before,
+            decision=decision,
+            signing_state=signing,
+            previous=journal,
+            signer=signer,
+            state=state,
+            chain=chain,
+            client=client,
+            expected_revision=expected_revision,
+            directive_valid_from=directive_valid_from,
+            directive_valid_through=directive_valid_through,
         )
-        state.store(applied, archive=True)
         return {
             "status": "submitted",
             "reason_code": "exact_bridge_row_finalized",
             "eligible_count": decision.eligible_count,
             "eligible_coldkey_count": decision.eligible_coldkey_count,
             "finalized_block": after.block_number,
-            "weight_block": receipt.block_number,
+            "weight_block": applied.weight_call.block_number,
         }
-
-
-def _submission_freshness(policy, observation, health, *, now):
-    now_ms = _datetime_ms(now)
-    reserve_ms = policy.body.submission_timeout_seconds * 1000
-    _require(
-        now_ms - observation.block_timestamp_ms + reserve_ms
-        <= policy.body.maximum_finalized_age_seconds * 1000,
-        "submission_finality_headroom_insufficient",
-    )
-    _require(
-        all(
-            now_ms - item.checked_at_unix_ms + reserve_ms <= policy.body.health_ttl_seconds * 1000
-            for item in health
-        ),
-        "submission_health_headroom_insufficient",
-    )
 
 
 def _validate_directive_interval(policy, valid_from, valid_through):

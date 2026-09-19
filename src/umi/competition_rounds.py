@@ -8,32 +8,32 @@ signing. Cutoff certificates alone do not authorize execution or weights.
 from __future__ import annotations
 
 import asyncio
-import fcntl
-import json
 import os
 import sqlite3
-import stat
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import Field, model_serializer, model_validator
+from pydantic import Field, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
-from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+from .competition_chain import (
+    CompetitionChainConfig,
+    FinalizedRegistrationProvider,
+    RegistrationCapture,
+)
 from .competition_client import validate_intake_origin
-from .competition_evaluator import Directory, _lock_file, _private, _publish, _read
 from .competition_execution import (
     ExecutionBoundary,
     RegistrationBoundary,
     execution_boundary,
     registration_boundary,
 )
-from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
+from .competition_launch import PublicLaunchIdentity
 from .competition_package import CompetitionPackageLimits, CompetitionReleaseIdentity
 from .competition_promotion_delivery import ReviewedPromotion
 from .competition_publication import (
@@ -45,101 +45,37 @@ from .competition_publication import (
     sign_cutoff_publication,
     verify_cutoff_publication,
 )
+from .competition_round_journal import MAX_BYTES as MAX_BYTES
+from .competition_round_journal import RecordReservation as RecordReservation
+from .competition_round_journal import RoundJournal as RoundJournal
+from .competition_round_plan import Block
+from .competition_round_plan import RoundPlan as RoundPlan
+from .competition_round_plan import RoundProposal as RoundProposal
 from .competition_store import CompetitionStore
-from .competition_work_plans import RoundWorkConfig
+from .competition_work_plans import RoundWorkConfig, WorkPlan
+from .concurrency import run_owned_thread
 from .crypto import verify_response_signature
 from .nonce import SQLiteNonceStore
 from .open_competition import (
     DEPENDENCE_POLICY_SCHEMA,
-    AttestedDependenceCalibration,
     CompetitionPolicy,
-    EvaluationSuite,
     Hotkey,
     Signature,
     SignedSubmission,
-    Track,
     digest,
     identity,
     sign_object,
     validate_dependence_calibration,
     verify_signature,
 )
-from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .private_files import Directory
+from .private_files import ensure_private_directory as _private
+from .private_files import lock_private_file as _lock_file
+from .private_files import publish_private_model as _publish
+from .private_files import read_private_model as _read
+from .protocol import Hex32, StrictProtocolModel, Video, canonical_json_bytes
 
-MAX_BYTES = 16 * 1024**2
 ROUTE = "/v1/competition/rounds"
-Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
-
-
-class RoundPlan(StrictProtocolModel):
-    """Private operator input with explicit windows, never a remote request."""
-
-    schema_: Literal["umi-round-plan/2"] = Field(alias="schema")
-    suite: EvaluationSuite
-    dependence_calibration: AttestedDependenceCalibration | None = None
-    public_schedule: PublicRoundSchedule
-    eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)]
-    intake_opened_block: Block
-    not_before_block: Block
-    admission_close_by_block: Block
-    signing_close_block: Block
-    evaluation_close_block: Block
-    reveal_block: Block
-    evidence_cutoff_block: Block
-    valid_through_block: Block
-
-    @model_serializer(mode="wrap")
-    def preserve_legacy_bytes(self, handler):
-        value = handler(self)
-        if self.dependence_calibration is None:
-            value.pop("dependence_calibration", None)
-        return value
-
-    @model_validator(mode="after")
-    def windows(self):
-        schedule = self.public_schedule
-        if not (
-            self.intake_opened_block
-            <= self.not_before_block
-            <= self.admission_close_by_block
-            < self.signing_close_block
-            < self.evaluation_close_block
-            < self.reveal_block
-            <= self.evidence_cutoff_block
-            <= self.valid_through_block
-        ):
-            raise ValueError("round plan windows are not ordered")
-        if (
-            self.intake_opened_block,
-            self.not_before_block,
-            self.admission_close_by_block,
-            self.signing_close_block,
-            self.evaluation_close_block,
-            self.reveal_block,
-            self.evidence_cutoff_block,
-            self.valid_through_block,
-        ) != (
-            schedule.intake_opened_block,
-            schedule.roster_close_earliest_block,
-            schedule.roster_close_latest_block,
-            schedule.work_signing_close_block,
-            schedule.evaluation_close_block,
-            schedule.protected_reference_reveal_block,
-            schedule.evidence_cutoff_block,
-            schedule.round_valid_through_block,
-        ):
-            raise ValueError("round plan differs from its public schedule")
-        if tuple(sorted(set(self.eligible_tracks))) != self.eligible_tracks:
-            raise ValueError("eligible tracks must be sorted and unique")
-        return self
-
-
-class RoundProposal(StrictProtocolModel):
-    schema_: Literal["umi-round-proposal/1"] = Field(alias="schema")
-    cutoff: CutoffPublication
-    submissions: Annotated[tuple[SignedSubmission, ...], Field(min_length=1, max_length=512)]
-    signing_close_block: Block
-    chain_submission_authorized: Literal[False] = False
 
 
 class CutoffEndorsement(StrictProtocolModel):
@@ -357,328 +293,6 @@ def verify_endorsement(vote, proposal, policy):
     return vote
 
 
-class RoundJournal:
-    """Bounded immutable records and durable conflict holds, shared by both roles."""
-
-    def __init__(self, root, binding, *, maximum_rounds=1024, maximum_bytes=1024**3):
-        if (
-            type(maximum_rounds) is not int
-            or not 1 <= maximum_rounds <= 65536
-            or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 16 * 1024**3)
-        ):
-            raise ValueError("round journal requires bounded capacity")
-        self.root, self.maximum_rounds, self.maximum_bytes = root, maximum_rounds, maximum_bytes
-        _private(root)
-        self.path = root / "rounds.sqlite3"
-        self.lock_path = root / "rounds.lock"
-        self._check_files()
-        for path in (self.path, self.lock_path):
-            os.close(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600))
-        self._check_files()
-        with self.transaction() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS binding (body BLOB NOT NULL)")
-            raw = canonical_json_bytes(binding)
-            if len(raw) > MAX_BYTES:
-                raise ValueError("round journal binding exceeds its byte bound")
-            sizes = db.execute("SELECT LENGTH(body) FROM binding LIMIT 2").fetchall()
-            if len(sizes) > 1 or (sizes and sizes[0][0] != len(raw)):
-                raise ValueError("round journal configuration changed")
-            old = db.execute("SELECT body FROM binding LIMIT 1").fetchall()
-            if old and (len(old) != 1 or bytes(old[0][0]) != raw):
-                raise ValueError("round journal configuration changed")
-            if not old:
-                db.execute("INSERT INTO binding VALUES (?)", (raw,))
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS records (kind TEXT, id TEXT, body BLOB NOT NULL, "
-                "PRIMARY KEY(kind,id))"
-            )
-            db.execute("CREATE TABLE IF NOT EXISTS holds (id TEXT PRIMARY KEY)")
-            db.execute("CREATE TABLE IF NOT EXISTS highwater (block INTEGER NOT NULL)")
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS round_index "
-                "(sequence INTEGER PRIMARY KEY, suite TEXT UNIQUE, proposal TEXT UNIQUE, "
-                "snapshot_block INTEGER NOT NULL, signing_close INTEGER NOT NULL)"
-            )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS plan_index "
-                "(suite TEXT PRIMARY KEY, opens INTEGER NOT NULL, closes INTEGER NOT NULL)"
-            )
-            if "execution_close" not in {
-                r[1] for r in db.execute("PRAGMA table_info(round_index)")
-            }:
-                db.execute(
-                    "ALTER TABLE round_index ADD COLUMN execution_close INTEGER NOT NULL DEFAULT 0"
-                )
-                rows = db.execute(
-                    "SELECT sequence,suite FROM round_index LIMIT ?", (maximum_rounds + 1,)
-                ).fetchall()
-                if len(rows) > maximum_rounds:
-                    raise ValueError("round journal index capacity exhausted")
-                for sequence, suite in rows:
-                    raw = self._record(db, "prepared", suite)
-                    if raw is None:
-                        raise ValueError("round index is missing its prepared record")
-                    proposal = RoundProposal.model_validate_json(raw)
-                    if (
-                        proposal.cutoff.round.sequence != sequence
-                        or proposal.cutoff.round.suite_sha256 != suite
-                    ):
-                        raise ValueError("round index migration binding mismatch")
-                    db.execute(
-                        "UPDATE round_index SET execution_close=? WHERE sequence=?",
-                        (proposal.cutoff.round.evaluation_close_block, sequence),
-                    )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS round_settlement_index "
-                "(sequence INTEGER PRIMARY KEY, cutoff INTEGER NOT NULL, "
-                "valid_through INTEGER NOT NULL)"
-            )
-            rows = db.execute(
-                "SELECT sequence,suite FROM round_index LIMIT ?", (maximum_rounds + 1,)
-            ).fetchall()
-            if len(rows) > maximum_rounds:
-                raise ValueError("round settlement index capacity exhausted")
-            for sequence, suite in rows:
-                proposal = RoundProposal.model_validate_json(self._record(db, "prepared", suite))
-                if proposal.cutoff.round.sequence != sequence or (
-                    proposal.cutoff.round.suite_sha256 != suite
-                ):
-                    raise ValueError("round settlement index binding mismatch")
-                expected = (
-                    proposal.cutoff.cutoff_schedule.evidence_cutoff_block,
-                    proposal.cutoff.round.valid_through_block,
-                )
-                prior = db.execute(
-                    "SELECT cutoff,valid_through FROM round_settlement_index WHERE sequence=?",
-                    (sequence,),
-                ).fetchone()
-                if prior is not None and prior != expected:
-                    raise ValueError("round settlement index windows changed")
-                db.execute(
-                    "INSERT OR IGNORE INTO round_settlement_index VALUES (?,?,?)",
-                    (sequence, *expected),
-                )
-
-    def _check_files(self):
-        _private(self.root)
-        paths = [Path(str(self.path) + suffix) for suffix in ("", "-journal", "-wal", "-shm")]
-        paths.append(self.lock_path)
-        for p in paths:
-            if p.is_symlink():
-                raise ValueError("round journal symlink")
-            if p.exists():
-                s = p.stat()
-                if (
-                    not stat.S_ISREG(s.st_mode)
-                    or s.st_nlink != 1
-                    or (s.st_uid != os.getuid() or s.st_mode & 0o077)
-                ):
-                    raise ValueError("round journal must be private and owned")
-
-    @contextmanager
-    def locked(self):
-        """Serialize compound operations without locking the SQLite file.
-
-        BSD ``flock`` interacts with SQLite's byte-range locks on macOS. The
-        private sibling file keeps the process mutex independent of SQLite's
-        transaction locks on every supported platform.
-        """
-        self._check_files()
-        descriptor = os.open(
-            self.lock_path,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-        )
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self._check_files()
-            opened = os.fstat(descriptor)
-            current = self.lock_path.stat()
-            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-                raise ValueError("round journal lock identity changed")
-            yield
-        finally:
-            os.close(descriptor)
-
-    @contextmanager
-    def transaction(self):
-        self._check_files()
-        db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
-        try:
-            db.execute("PRAGMA synchronous=FULL")
-            db.execute(f"PRAGMA max_page_count={(self.maximum_bytes + 16 * 1024**2) // 4096}")
-            db.execute("BEGIN IMMEDIATE")
-            yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
-
-    def put(self, kind, key, value):
-        raw = canonical_json_bytes(value)
-        if len(raw) > MAX_BYTES:
-            raise ValueError("round journal object exceeds its byte bound")
-        conflict = False
-        with self.transaction() as db:
-            if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
-                raise ValueError("round journal conflict held")
-            prior = self._record(db, kind, key)
-            if prior:
-                conflict = prior != raw
-                if conflict:
-                    db.execute("INSERT OR IGNORE INTO holds VALUES (?)", (key,))
-            else:
-                if kind in {"plan", "prepared", "intent", "suite", "certificate"} and (
-                    db.execute("SELECT COUNT(*) FROM records WHERE kind=?", (kind,)).fetchone()[0]
-                    >= self.maximum_rounds
-                ):
-                    raise ValueError("round journal record capacity exhausted")
-                count, used = db.execute(
-                    "SELECT COUNT(*),COALESCE(SUM(LENGTH(body)),0) FROM records"
-                ).fetchone()
-                if used + len(raw) > self.maximum_bytes or (count >= self.maximum_rounds * 80):
-                    raise ValueError("round journal capacity exhausted")
-                db.execute("INSERT INTO records VALUES (?,?,?)", (kind, key, raw))
-                if kind == "prepared":
-                    proposal = RoundProposal.model_validate_json(raw)
-                    if key != proposal.cutoff.round.suite_sha256:
-                        raise ValueError("round index suite binding mismatch")
-                    db.execute(
-                        "INSERT INTO round_index VALUES (?,?,?,?,?,?)",
-                        (
-                            proposal.cutoff.round.sequence,
-                            key,
-                            digest(proposal),
-                            proposal.cutoff.registration_snapshot.block,
-                            proposal.signing_close_block,
-                            proposal.cutoff.round.evaluation_close_block,
-                        ),
-                    )
-                    db.execute(
-                        "INSERT INTO round_settlement_index VALUES (?,?,?)",
-                        (
-                            proposal.cutoff.round.sequence,
-                            proposal.cutoff.cutoff_schedule.evidence_cutoff_block,
-                            proposal.cutoff.round.valid_through_block,
-                        ),
-                    )
-                elif kind == "plan":
-                    plan = RoundPlan.model_validate_json(raw)
-                    if key != digest(plan.suite):
-                        raise ValueError("round plan suite binding mismatch")
-                    db.execute(
-                        "INSERT INTO plan_index VALUES (?,?,?)",
-                        (key, plan.not_before_block, plan.admission_close_by_block),
-                    )
-        if conflict:
-            raise ValueError("round journal conflict retained")
-
-    @staticmethod
-    def _record(db, kind, key):
-        size = db.execute(
-            "SELECT length(body) FROM records WHERE kind=? AND id=?", (kind, key)
-        ).fetchone()
-        if size is None:
-            return None
-        if type(size[0]) is not int or not 1 <= size[0] <= MAX_BYTES:
-            raise ValueError("retained round object exceeds its byte bound")
-        row = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
-        raw = bytes(row[0])
-        if raw != canonical_json_bytes(json.loads(raw)):
-            raise ValueError("retained round object is not canonical")
-        return raw
-
-    def get(self, kind, key):
-        with self.transaction() as db:
-            if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
-                raise ValueError("round journal conflict held")
-            raw = self._record(db, kind, key)
-        return json.loads(raw) if raw is not None else None
-
-    def keys(self, kind):
-        with self.transaction() as db:
-            rows = db.execute(
-                "SELECT id FROM records WHERE kind=? ORDER BY id LIMIT ?",
-                (kind, self.maximum_rounds + 1),
-            ).fetchall()
-        if len(rows) > self.maximum_rounds:
-            raise ValueError("round journal record limit")
-        return [row[0] for row in rows]
-
-    def observe(self, block):
-        with self.transaction() as db:
-            old = db.execute("SELECT block FROM highwater LIMIT 2").fetchall()
-            if (
-                type(block) is not int
-                or not 0 <= block <= 2**53 - 1
-                or (old and (len(old) != 1 or old[0][0] > block))
-            ):
-                raise ValueError("round finalized head regressed")
-            db.execute("DELETE FROM highwater")
-            db.execute("INSERT INTO highwater VALUES (?)", (block,))
-
-    def due_plans(self, block):
-        with self.transaction() as db:
-            rows = db.execute(
-                "SELECT suite FROM plan_index WHERE opens<=? AND closes>=? "
-                "AND suite NOT IN (SELECT suite FROM round_index) "
-                "AND suite NOT IN (SELECT id FROM holds) ORDER BY closes,suite LIMIT 4",
-                (block, block),
-            ).fetchall()
-        return [r[0] for r in rows]
-
-    def prepared_entries(
-        self, after_sequence=0, proposal_id=None, *, block=None, maximum_age=360, for_work=False
-    ):
-        with self.transaction() as db:
-            if proposal_id is not None:
-                rows = db.execute(
-                    "SELECT sequence,suite,proposal,snapshot_block,signing_close "
-                    "FROM round_index WHERE proposal=?",
-                    (proposal_id,),
-                ).fetchall()
-            elif for_work and block is not None:
-                rows = db.execute(
-                    "SELECT sequence,suite,proposal,snapshot_block,signing_close FROM round_index "
-                    "WHERE sequence>? AND snapshot_block<=? AND execution_close>? "
-                    "AND suite NOT IN (SELECT id FROM holds) ORDER BY sequence LIMIT 4",
-                    (after_sequence, block, block),
-                ).fetchall()
-            else:
-                rows = db.execute(
-                    "SELECT sequence,suite,proposal,snapshot_block,signing_close "
-                    "FROM round_index WHERE sequence>? "
-                    "AND (? IS NULL OR suite NOT IN (SELECT id FROM holds)) "
-                    "AND (? IS NULL OR (snapshot_block<=? AND signing_close>=? "
-                    "AND snapshot_block+?>=?)) ORDER BY sequence LIMIT 4",
-                    (after_sequence, block, block, block, block, maximum_age, block),
-                ).fetchall()
-        return rows
-
-    def settlement_entries(self, block, after_sequence=0):
-        with self.transaction() as db:
-            rows = db.execute(
-                "SELECT r.sequence,r.suite,s.cutoff,s.valid_through FROM round_index r "
-                "JOIN round_settlement_index s ON s.sequence=r.sequence "
-                "WHERE r.sequence>? AND s.cutoff<=? AND s.valid_through>=? "
-                "AND r.suite NOT IN (SELECT id FROM holds) ORDER BY r.sequence LIMIT 4",
-                (after_sequence, block, block),
-            ).fetchall()
-            result = []
-            for sequence, suite, cutoff, valid_through in rows:
-                proposal = RoundProposal.model_validate_json(self._record(db, "prepared", suite))
-                if (
-                    proposal.cutoff.round.sequence != sequence
-                    or proposal.cutoff.round.suite_sha256 != suite
-                    or proposal.cutoff.cutoff_schedule.evidence_cutoff_block != cutoff
-                    or proposal.cutoff.round.valid_through_block != valid_through
-                ):
-                    raise ValueError("round settlement index differs from its retained proposal")
-                result.append(proposal)
-        return result
-
-
 class RoundCoordinator:
     def __init__(self, config, policy, provider, *, legacy=None, transport_provider=None):
         self.config = RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
@@ -767,9 +381,26 @@ class RoundCoordinator:
                 maximum_bytes=config.maximum_journal_bytes,
             )
 
-    async def prepare_work(self, proposal):
+    async def prepare_work(self, proposal: RoundProposal) -> None:
         if self.work_queue is None:
             return
+        # Certificate publication, private assets and full-plan validation can
+        # block. Drain that work before caller cancellation releases ownership;
+        # the queue keeps its async providers on the event loop.
+        inputs = await run_owned_thread(self._prepare_work_inputs, proposal)
+        if inputs is not None:
+            plan, videos = inputs
+            await self.work_queue.prepare(plan, videos=videos)
+
+    async def _publish_cutoff_and_work(self, proposal: RoundProposal) -> None:
+        if self.work_queue is None:
+            await run_owned_thread(self.publish_certificate, proposal)
+        else:
+            await self.prepare_work(proposal)
+
+    def _prepare_work_inputs(
+        self, proposal: RoundProposal
+    ) -> tuple[WorkPlan, tuple[Video, ...]] | None:
         from .competition_round_assets import RoundWorkAssetFile, resolve_incumbent
         from .competition_work_plans import prepare_work_plan
 
@@ -802,15 +433,145 @@ class RoundCoordinator:
             runtime=assets.runtime,
             policy=self.policy,
         )
-        await self.work_queue.prepare(plan, videos=assets.videos)
+        return plan, assets.videos
 
-    async def capture(self):
+    async def capture(self) -> RegistrationCapture:
         capture = await self.provider.collect()
         block = execution_boundary(capture).block
         if not self.policy.valid_from_block <= block <= self.policy.valid_through_block:
             raise ValueError("round policy is not current")
-        self.journal.observe(block)
+        await run_owned_thread(self.journal.observe, block)
         return capture
+
+    def _pending_plans(self, block: int) -> list[str]:
+        root = Path(self.config.plan_directory)
+        _private(root)
+        names = []
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if len(names) >= self.config.maximum_rounds:
+                    raise ValueError("round plan inbox capacity exhausted")
+                names.append(entry.name)
+        names = sorted(n for n in names if n.endswith(".json"))
+        known = {k + ".json" for k in self.journal.keys("plan")}
+        fresh = [n for n in names if n not in known]
+        fresh = [n for n in fresh if n > self.new_cursor] or fresh
+        if fresh:
+            self.new_cursor = fresh[min(1, len(fresh) - 1)]
+        maintenance = ([n for n in names if n > self.cursor] or names)[:1]
+        if maintenance:
+            self.cursor = maintenance[0]
+        active = self.journal.prepared_entries(
+            block=block, maximum_age=self.policy.maximum_snapshot_age_blocks
+        )
+        if self.work_queue is not None:
+            working = self.journal.prepared_entries(self.work_cursor, block=block, for_work=True)
+            if not working:
+                working = self.journal.prepared_entries(block=block, for_work=True)
+            if working:
+                self.work_cursor = working[-1][0]
+            active += working
+        pending = list(
+            dict.fromkeys(
+                [key + ".json" for key in self.journal.due_plans(block)]
+                + [r[1] + ".json" for r in active]
+                + fresh[:2]
+                + maintenance
+            )
+        )
+        return pending
+
+    def _prepare_plan(
+        self, name: str, capture: RegistrationCapture
+    ) -> RoundProposal | Literal["waiting", "expired"]:
+        """Retain one plan at its captured snapshot while the caller owns serial."""
+        root = Path(self.config.plan_directory)
+        block = capture.snapshot.block
+        plan = _read(root / name, RoundPlan)
+        suite_id = digest(plan.suite)
+        if name != suite_id + ".json" or plan.suite.policy_sha256 != digest(self.policy):
+            raise ValueError("round plan filename or policy mismatch")
+        if not self.policy.valid_from_block <= plan.intake_opened_block or (
+            plan.valid_through_block > self.policy.valid_through_block
+        ):
+            raise ValueError("round plan lies outside the policy")
+        if self.policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
+            if plan.dependence_calibration is None:
+                raise ValueError("dependence round lacks its positive control")
+            validate_dependence_calibration(
+                plan.dependence_calibration,
+                plan.suite,
+                self.policy,
+                latest_block=block,
+            )
+        elif plan.dependence_calibration is not None:
+            raise ValueError("legacy round cannot carry a dependence calibration")
+        # Keep the protected plan private and never retime a used suite.
+        self.journal.put("plan", suite_id, plan)
+        if (
+            not self.config.public_launch.contains_schedule(plan.public_schedule)
+            or plan.eligible_tracks != self.config.public_launch.eligible_tracks
+        ):
+            raise ValueError("round plan differs from the public deployment")
+        existing = self.journal.get("prepared", suite_id)
+        if existing is not None:
+            proposal = RoundProposal.model_validate_json(canonical_json_bytes(existing))
+            if self.work_queue is None:
+                self.publish_certificate(proposal)
+            return proposal
+        prepared = self.store.prepared_round(suite_id, self.config.replay_limits)
+        if prepared is None and block < plan.not_before_block:
+            return "waiting"
+        if prepared is None and block > plan.admission_close_by_block:
+            return "expired"
+        prepared = prepared or self.store.prepare_round(
+            snapshot=capture.snapshot,
+            suite=plan.suite,
+            public_schedule=plan.public_schedule,
+            eligible_tracks=plan.eligible_tracks,
+            intake_opened_block=plan.intake_opened_block,
+            evaluation_close_block=plan.evaluation_close_block,
+            reveal_block=plan.reveal_block,
+            evidence_cutoff_block=plan.evidence_cutoff_block,
+            valid_through_block=plan.valid_through_block,
+            limits=self.config.replay_limits,
+        )
+        proposal = validate_proposal(
+            RoundProposal(
+                schema="umi-round-proposal/1",
+                cutoff=CutoffPublication.model_validate_json(
+                    canonical_json_bytes(prepared["cutoff_publication"])
+                ),
+                submissions=tuple(
+                    SignedSubmission.model_validate_json(canonical_json_bytes(s))
+                    for s in prepared["submissions"]
+                ),
+                signing_close_block=plan.signing_close_block,
+            ),
+            self.policy,
+            self.config.replay_limits,
+        )
+        prepared_round = proposal.cutoff.round
+        if (
+            prepared["intake_opened_block"] != plan.intake_opened_block
+            or not (
+                plan.not_before_block
+                <= prepared_round.submission_close_block
+                <= plan.admission_close_by_block
+            )
+            or any(
+                getattr(prepared_round, field) != getattr(plan, field)
+                for field in (
+                    "evaluation_close_block",
+                    "reveal_block",
+                    "valid_through_block",
+                )
+            )
+            or proposal.cutoff.cutoff_schedule.evidence_cutoff_block != plan.evidence_cutoff_block
+        ):
+            raise ValueError("recovered round differs from its original plan window")
+        self.journal.put("prepared", suite_id, proposal)
+        return proposal
 
     async def cycle(self):
         async with self.serial:
@@ -820,141 +581,19 @@ class RoundCoordinator:
             # capture to prepare a round or advance the intake high-water mark.
             if self.config.promotion_delivery is not None:
                 capture = await self.capture()
-            root = Path(self.config.plan_directory)
-            _private(root)
-            names = []
-            with os.scandir(root) as entries:
-                for entry in entries:
-                    if len(names) >= self.config.maximum_rounds:
-                        raise ValueError("round plan inbox capacity exhausted")
-                    names.append(entry.name)
-            names = sorted(n for n in names if n.endswith(".json"))
             block = capture.snapshot.block
-            known = {k + ".json" for k in self.journal.keys("plan")}
-            fresh = [n for n in names if n not in known]
-            fresh = [n for n in fresh if n > self.new_cursor] or fresh
-            if fresh:
-                self.new_cursor = fresh[min(1, len(fresh) - 1)]
-            maintenance = ([n for n in names if n > self.cursor] or names)[:1]
-            if maintenance:
-                self.cursor = maintenance[0]
-            active = self.journal.prepared_entries(
-                block=block, maximum_age=self.policy.maximum_snapshot_age_blocks
-            )
-            if self.work_queue is not None:
-                working = self.journal.prepared_entries(
-                    self.work_cursor, block=block, for_work=True
-                )
-                if not working:
-                    working = self.journal.prepared_entries(block=block, for_work=True)
-                if working:
-                    self.work_cursor = working[-1][0]
-                active += working
-            pending = list(
-                dict.fromkeys(
-                    [key + ".json" for key in self.journal.due_plans(block)]
-                    + [r[1] + ".json" for r in active]
-                    + fresh[:2]
-                    + maintenance
-                )
-            )
+            pending = await run_owned_thread(self._pending_plans, block)
             counts = {"prepared": 0, "waiting": 0, "expired": 0, "held": 0}
             if promotions is not None:
                 counts.update(promotions)
             for name in pending:
                 try:
-                    plan = _read(root / name, RoundPlan)
-                    suite_id = digest(plan.suite)
-                    if name != suite_id + ".json" or plan.suite.policy_sha256 != digest(
-                        self.policy
-                    ):
-                        raise ValueError("round plan filename or policy mismatch")
-                    if not self.policy.valid_from_block <= plan.intake_opened_block or (
-                        plan.valid_through_block > self.policy.valid_through_block
-                    ):
-                        raise ValueError("round plan lies outside the policy")
-                    if self.policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
-                        if plan.dependence_calibration is None:
-                            raise ValueError("dependence round lacks its positive control")
-                        validate_dependence_calibration(
-                            plan.dependence_calibration,
-                            plan.suite,
-                            self.policy,
-                            latest_block=block,
-                        )
-                    elif plan.dependence_calibration is not None:
-                        raise ValueError("legacy round cannot carry a dependence calibration")
-                    # Keep the protected plan private and never retime a used suite.
-                    self.journal.put("plan", suite_id, plan)
-                    if (
-                        plan.public_schedule != self.config.public_launch.round_schedule
-                        or plan.eligible_tracks != self.config.public_launch.eligible_tracks
-                    ):
-                        raise ValueError("round plan differs from the public deployment")
-                    existing = self.journal.get("prepared", suite_id)
-                    if existing is not None:
-                        proposal = RoundProposal.model_validate_json(canonical_json_bytes(existing))
-                        self.publish_certificate(proposal)
-                        await self.prepare_work(proposal)
+                    prepared = await run_owned_thread(self._prepare_plan, name, capture)
+                    if isinstance(prepared, str):
+                        counts[prepared] += 1
+                    else:
+                        await self.prepare_work(prepared)
                         counts["prepared"] += 1
-                        continue
-                    prepared = self.store.prepared_round(suite_id, self.config.replay_limits)
-                    if prepared is None and block < plan.not_before_block:
-                        counts["waiting"] += 1
-                        continue
-                    if prepared is None and block > plan.admission_close_by_block:
-                        counts["expired"] += 1
-                        continue
-                    prepared = prepared or self.store.prepare_round(
-                        snapshot=capture.snapshot,
-                        suite=plan.suite,
-                        public_schedule=plan.public_schedule,
-                        eligible_tracks=plan.eligible_tracks,
-                        intake_opened_block=plan.intake_opened_block,
-                        evaluation_close_block=plan.evaluation_close_block,
-                        reveal_block=plan.reveal_block,
-                        evidence_cutoff_block=plan.evidence_cutoff_block,
-                        valid_through_block=plan.valid_through_block,
-                        limits=self.config.replay_limits,
-                    )
-                    proposal = validate_proposal(
-                        RoundProposal(
-                            schema="umi-round-proposal/1",
-                            cutoff=CutoffPublication.model_validate_json(
-                                canonical_json_bytes(prepared["cutoff_publication"])
-                            ),
-                            submissions=tuple(
-                                SignedSubmission.model_validate_json(canonical_json_bytes(s))
-                                for s in prepared["submissions"]
-                            ),
-                            signing_close_block=plan.signing_close_block,
-                        ),
-                        self.policy,
-                        self.config.replay_limits,
-                    )
-                    prepared_round = proposal.cutoff.round
-                    if (
-                        prepared["intake_opened_block"] != plan.intake_opened_block
-                        or not (
-                            plan.not_before_block
-                            <= prepared_round.submission_close_block
-                            <= plan.admission_close_by_block
-                        )
-                        or any(
-                            getattr(prepared_round, field) != getattr(plan, field)
-                            for field in (
-                                "evaluation_close_block",
-                                "reveal_block",
-                                "valid_through_block",
-                            )
-                        )
-                        or proposal.cutoff.cutoff_schedule.evidence_cutoff_block
-                        != plan.evidence_cutoff_block
-                    ):
-                        raise ValueError("recovered round differs from its original plan window")
-                    self.journal.put("prepared", suite_id, proposal)
-                    await self.prepare_work(proposal)
-                    counts["prepared"] += 1
                 except (OSError, ValueError, sqlite3.Error):
                     counts["held"] += 1
             if self.config.settlement_directory is not None:
@@ -1043,7 +682,7 @@ class RoundCoordinator:
         for proposal in proposals:
             self.settlement_cursor = proposal.cutoff.round.sequence
             try:
-                certificate = self.publish_certificate(proposal)
+                certificate = await run_owned_thread(self.publish_certificate, proposal)
                 if certificate is None:
                     counts["settlement_incomplete"] += 1
                     continue
@@ -1147,39 +786,54 @@ class RoundCoordinator:
         _publish(Path(self.config.certificate_directory) / (key + ".cutoff.json"), certificate)
         return certificate
 
-    async def query(self, query):
+    async def query(self, query: RoundQuery) -> RoundReply:
         async with self.serial:
             block = (await self.capture()).snapshot.block
-            if query.vote is None:
-                selected = tuple(self.proposals(after_sequence=query.after_sequence, block=block))
-                return RoundReply(
-                    query_sha256=digest(query),
-                    policy_sha256=digest(self.policy),
-                    proposals=selected,
-                    promotions=self.promotion_deliveries(query.after_promotion_sequence),
-                )
-            proposals = self.proposals(proposal_id=query.vote.proposal_sha256)
-            proposal = next((p for p in proposals if digest(p) == query.vote.proposal_sha256), None)
-            if proposal is None or identity(query.hotkey) != identity(query.vote.signature.hotkey):
-                raise ValueError("unknown proposal or different endorsement signer")
-            vote = verify_endorsement(query.vote, proposal, self.policy)
-            key = digest(proposal) + ":" + identity(query.hotkey)
-            old = self.journal.get("vote", key)
-            if (
-                old is None
-                and not proposal.cutoff.round.submission_close_block
-                <= block
-                <= proposal.signing_close_block
-            ):
-                raise ValueError("new endorsement outside its original signing window")
-            self.journal.put("vote", key, vote)
-            self.publish_certificate(proposal)
-            await self.prepare_work(proposal)
+            reply, proposal = await run_owned_thread(self._query_snapshot, query, block)
+            if proposal is not None:
+                await self._publish_cutoff_and_work(proposal)
+            return reply
+
+    def _query_snapshot(
+        self, query: RoundQuery, block: int
+    ) -> tuple[RoundReply, RoundProposal | None]:
+        """Read or retain a vote while the caller owns the serial lock.
+
+        This operation may finish after caller cancellation. A retained vote
+        stays binding and its exact retry keeps the original signing window.
+        Network providers and work publication remain with the async caller.
+        """
+        if query.vote is None:
+            selected = tuple(self.proposals(after_sequence=query.after_sequence, block=block))
             return RoundReply(
                 query_sha256=digest(query),
                 policy_sha256=digest(self.policy),
+                proposals=selected,
+                promotions=self.promotion_deliveries(query.after_promotion_sequence),
+            ), None
+        proposals = self.proposals(proposal_id=query.vote.proposal_sha256)
+        proposal = next((p for p in proposals if digest(p) == query.vote.proposal_sha256), None)
+        if proposal is None or identity(query.hotkey) != identity(query.vote.signature.hotkey):
+            raise ValueError("unknown proposal or different endorsement signer")
+        vote = verify_endorsement(query.vote, proposal, self.policy)
+        key = digest(proposal) + ":" + identity(query.hotkey)
+        old = self.journal.get("vote", key)
+        if (
+            old is None
+            and not proposal.cutoff.round.submission_close_block
+            <= block
+            <= proposal.signing_close_block
+        ):
+            raise ValueError("new endorsement outside its original signing window")
+        self.journal.put("vote", key, vote)
+        return (
+            RoundReply(
+                query_sha256=digest(query),
+                policy_sha256=digest(self.policy),
                 accepted_proposal_sha256=digest(proposal),
-            )
+            ),
+            proposal,
+        )
 
 
 def create_round_app(
@@ -1296,7 +950,7 @@ def create_round_app(
                 )
             ):
                 raise HTTPException(401, "round authentication rejected")
-            if not nonces.check_and_store(q.hotkey, int(q.nonce_unix_ns)):
+            if not await run_owned_thread(nonces.check_and_store, q.hotkey, int(q.nonce_unix_ns)):
                 raise HTTPException(401, "round nonce rejected")
             reply = await asyncio.wait_for(coordinator.query(q), timeout=25)
             body = canonical_json_bytes(reply)

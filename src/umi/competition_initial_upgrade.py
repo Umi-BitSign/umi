@@ -26,6 +26,10 @@ from pathlib import Path
 
 from . import competition_host_activation as activation
 from . import competition_host_anchor as anchors
+from .bridge.transactions import RegistrationBridgeTransactionJournal
+from .competition_bridge_recovery import JOURNAL as BRIDGE_JOURNAL
+from .competition_bridge_recovery import audit_bridge_history
+from .competition_chain_state import OwnedCompetitionChainObservation
 from .competition_host_artifacts import (
     _STAGE_PARENT,
     SignedSuccessorHostArtifact,
@@ -35,12 +39,16 @@ from .competition_host_artifacts import (
     _read_tree,
 )
 from .competition_host_bundle import stage_successor_host_bundle
-from .competition_host_observer import StoppedUpgradeObserver
+from .competition_host_observer import (
+    StoppedBridgeObservation,
+    StoppedUpgradeObserver,
+)
 from .competition_host_service import _path, validate_host_service_resources
 from .competition_host_start import _systemctl, start_committed_successor_service
 from .competition_host_switch import commit_successor_service_switch
 from .competition_host_upgrade import (
     HostUpgradeError,
+    StoppedSupervisor,
     _require_root_linux,
     hold_stopped_supervisor,
     inspect_legacy_service,
@@ -49,7 +57,10 @@ from .competition_recovery import (
     RecoveryLimits,
     SignedBootstrapEligibilityManifest,
     SignedSimpleBootstrapLease,
+    _snapshot_kwargs,
+    load_recovery_checkpoint_context,
     prepare_recovery_checkpoint,
+    snapshot_legacy_bootstrap,
     verify_recovery_checkpoint,
 )
 from .competition_supervisor import (
@@ -426,6 +437,25 @@ def _retained_anchor(control, config_path):
     return anchor
 
 
+async def _observe_stopped_history(
+    stopped: StoppedSupervisor,
+    observer: StoppedUpgradeObserver,
+    limits: RecoveryLimits,
+    manifests: tuple[SignedBootstrapEligibilityManifest, ...] = (),
+    leases: tuple[SignedSimpleBootstrapLease, ...] = (),
+) -> tuple[OwnedCompetitionChainObservation, StoppedBridgeObservation | None]:
+    with snapshot_legacy_bootstrap(
+        stopped.worker_state_root,
+        **_snapshot_kwargs(stopped, limits, manifests, leases),
+    ) as snapshot:
+        if BRIDGE_JOURNAL in snapshot._files:
+            audit = audit_bridge_history(snapshot._files, hotkey=stopped.validator_hotkey)
+            if any(type(j) is RegistrationBridgeTransactionJournal for _, j in audit.attempts):
+                collected = await observer.observe_bridge(audit, snapshot.sha256)
+                return collected.observation, collected
+        return await observer.observe(), None
+
+
 async def _switch_stopped(
     control,
     config_path,
@@ -457,25 +487,39 @@ async def _switch_stopped(
         try:
             anchor = _retained_anchor(control, config_path)
             if anchor is None:
+                observation, bridge_observation = await _observe_stopped_history(
+                    stopped, observer, limits, historical_manifests, historical_leases
+                )
                 prepared = prepare_recovery_checkpoint(
                     stopped,
-                    await observer.observe(),
+                    observation,
                     destination_root=recovery_root,
                     limits=limits,
                     historical_manifests=historical_manifests,
                     historical_leases=historical_leases,
+                    bridge_observation=bridge_observation,
                 )
                 checkpoint_path = Path(prepared.checkpoint_path)
                 checkpoint_sha = prepared.checkpoint_sha256
             else:
                 checkpoint_sha = anchor.receipt.checkpoint_sha256
                 checkpoint_path = recovery_root / checkpoint_sha
+                historical_manifests, historical_leases = load_recovery_checkpoint_context(
+                    checkpoint_path,
+                    expected_sha256=checkpoint_sha,
+                    owner=user.pw_uid,
+                    limits=limits,
+                )
+            observation, bridge_observation = await _observe_stopped_history(
+                stopped, observer, limits, historical_manifests, historical_leases
+            )
             verified = verify_recovery_checkpoint(
                 checkpoint_path,
                 expected_checkpoint_sha256=checkpoint_sha,
                 stopped=stopped,
-                observation=await observer.observe(),
+                observation=observation,
                 limits=limits,
+                bridge_observation=bridge_observation,
             )
         finally:
             await observer.aclose()

@@ -202,7 +202,8 @@ async def test_refresh_failures_log_class_once_and_recovery_without_private_deta
     assert attempts == 3
     messages = [record.getMessage() for record in caplog.records]
     assert messages == [
-        "registration_refresh_failed error_type=RegistrationCacheFull",
+        "registration_refresh_failed error_type=RegistrationCacheFull "
+        "reason_code=registration_cache_capacity",
         "registration_refresh_recovered",
     ]
     assert "PRIVATE" not in caplog.text
@@ -1082,6 +1083,70 @@ async def test_client_verified_service_retries_without_personal_credentials(conf
             origin="https://intake.example", policy=policy, signed=signed, transport=transport
         )
         assert first == second
+    assert provider.closed
+
+
+async def test_http_intake_rate_limit_cooldown_resumes_after_one_shared_pause(
+    config, policy, monkeypatch, caplog
+):
+    from umi.validator_chain import ValidatorChainError
+
+    app, provider = app_for(config, policy)
+    cache = app.state.registration_snapshot_cache
+    clock = [100.0]
+    monkeypatch.setattr(cache, "_monotonic", lambda: clock[0])
+    provider.error = ValidatorChainError("proof_rpc_rate_limited")
+    provider.error.__cause__ = RuntimeError("PRIVATE_RPC_TOKEN")
+    original = provider.collect
+    attempts = 0
+
+    async def collect():
+        nonlocal attempts
+        attempts += 1
+        return await original()
+
+    monkeypatch.setattr(provider, "collect", collect)
+    signed = (submission(policy), submission(policy, name="Bob"))
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://intake.example"
+        ) as client,
+    ):
+        for candidate in (*signed, *signed):
+            response = await client.post(
+                "/v1/competition/submissions",
+                content=canonical_json_bytes(candidate),
+                headers={"content-type": "application/json"},
+            )
+            assert response.status_code == 503
+            assert response.json() == {
+                "detail": "registration snapshot unavailable; retry unchanged"
+            }
+        assert attempts == 1
+        status = await client.get("/v1/competition/status")
+        assert status.status_code == 200
+        assert status.json()["admission_phase"] == "unverified"
+        assert not status.json()["admission_accepting_new"]
+        readiness = await client.get("/v1/competition/readiness")
+        assert readiness.status_code == 503
+        assert (await client.get("/v1/competition/submissions")).status_code == 200
+        assert attempts == 1
+        assert "PRIVATE_RPC_TOKEN" not in status.text + readiness.text + caplog.text
+
+        provider.error = None
+        clock[0] = 130.0
+        response = await client.post(
+            "/v1/competition/submissions",
+            content=canonical_json_bytes(signed[0]),
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 200
+        receipt = response.json()
+        assert receipt["status"] == "accepted_no_weight"
+        assert receipt["registration_source"] == "verifier_attested_finality"
+        assert receipt["submission_sha256"] == digest(signed[0].submission)
+        assert attempts == 2
     assert provider.closed
 
 

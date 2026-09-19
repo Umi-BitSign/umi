@@ -50,13 +50,13 @@ def test_successor_image_contains_bounded_chain_verifiers_at_fixed_paths() -> No
     dockerfile = (DEPLOYMENT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "rust:1.98.0-bookworm@sha256:" in dockerfile
-    assert dockerfile.count("cargo +1.98.0 build --locked --release") == 3
-    assert "/opt/umi/bin/umi-runtime-metadata" in dockerfile
     assert (
-        "COPY rust/grandpa-finality-observer/vendor /build/grandpa-finality-observer/vendor"
-        in dockerfile
-    )
-    assert "cargo +1.98.0 test --locked --release" in dockerfile
+        "sh /build/build-native-verifiers.sh grandpa-finality-observer "
+        "substrate-proof-verifier runtime-metadata"
+    ) in dockerfile
+    assert "/opt/umi/bin/umi-runtime-metadata" in dockerfile
+    assert "COPY rust /build/rust" in dockerfile
+    assert "COPY deploy/native-verifiers/build.sh /build/build-native-verifiers.sh" in dockerfile
     assert "/opt/umi/bin/umi-grandpa-finality-observer --conformance-self-test" in dockerfile
     assert "printf '' | /opt/umi/bin/umi-substrate-proof-verifier" in dockerfile
     assert "/opt/umi/raw_spec_finney.json" in dockerfile
@@ -68,6 +68,7 @@ def test_successor_image_sources_are_in_the_bounded_docker_context() -> None:
     patterns = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
     required = (
         "!deploy/linux-competition-worker/Dockerfile",
+        "!deploy/native-verifiers/build.sh",
         "!rust/substrate-proof-verifier/Cargo.toml",
         "!rust/substrate-proof-verifier/Cargo.lock",
         "!rust/substrate-proof-verifier/src/**",

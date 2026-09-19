@@ -313,6 +313,11 @@ def flow(monkeypatch):
     events = []
     lock = {"held": False, "writer": False}
 
+    async def observe_history(_stopped, observer, _limits, _manifests, _leases):
+        return await observer.observe(), None
+
+    monkeypatch.setattr(upgrade, "_observe_stopped_history", observe_history)
+
     def record(name):
         def call(*args, **kwargs):
             assert lock["held"]
@@ -573,6 +578,20 @@ def test_retained_anchor_is_reconciled_again_before_commit(flow, monkeypatch):
     retained = SimpleNamespace(receipt=SimpleNamespace(checkpoint_sha256="e" * 64))
     monkeypatch.setattr(upgrade, "_retained_anchor", lambda *args: retained)
     verified = []
+    context = ((object(),), (object(),))
+
+    def load_context(path, **kwargs):
+        assert path == Path("/archive") / ("e" * 64)
+        assert kwargs["expected_sha256"] == "e" * 64
+        assert kwargs["owner"] == 1001
+        return context
+
+    async def observe_history(_stopped, observer, _limits, manifests, leases):
+        assert (manifests, leases) == context
+        return await observer.observe(), None
+
+    monkeypatch.setattr(upgrade, "load_recovery_checkpoint_context", load_context)
+    monkeypatch.setattr(upgrade, "_observe_stopped_history", observe_history)
 
     def verify(path, **kwargs):
         verified.append((path, kwargs))

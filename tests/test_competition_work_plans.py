@@ -125,6 +125,52 @@ def sign_publications(setup, proposals):
     )
 
 
+def two_endpoint_work(work):
+    """Use the same registered Alice/Bob cutoff with both serving endpoints."""
+    roster = tuple(
+        sorted(
+            (
+                next(s for s in work.plan.submissions if s.submission.track == "endpoint"),
+                submission(work.policy, name="Bob", start=1000, end=1900),
+            ),
+            key=lambda s: digest(s.submission),
+        )
+    )
+    old = work.plan.cutoff.publication
+    round_ = old.round.model_copy(
+        update={
+            "roster": tuple(digest(s.submission) for s in roster),
+            "eligible_tracks": ("endpoint",),
+        }
+    )
+    cutoff = build_cutoff_publication(
+        round_=round_,
+        submissions=roster,
+        registration_snapshot=old.registration_snapshot,
+        policy=work.policy,
+        cutoff_schedule=old.cutoff_schedule.model_copy(update={"round_sha256": digest(round_)}),
+        limits=PublicationReplayLimits(
+            maximum_roster_bytes=plans.MAX_BYTES,
+            maximum_certificate_bytes=plans.MAX_BYTES,
+            maximum_evidence_bytes=plans.MAX_BYTES,
+        ),
+    )
+    work.plan = plans.validate_work_plan(
+        work.plan.model_copy(
+            update={
+                "submissions": roster,
+                "cutoff": SignedCutoffPublication(
+                    publication=cutoff,
+                    signatures=tuple(sign_cutoff_publication(cutoff, w) for w in work.signers),
+                ),
+            }
+        ),
+        work.policy,
+    )
+    work.options["plan"] = work.plan
+    return work
+
+
 def test_both_tracks_derive_from_one_cutoff_without_signing_or_references(setup):
     assert b'"references"' not in canonical_json_bytes(setup.plan)
     proposals = plans.endpoint_proposals(**setup.options)

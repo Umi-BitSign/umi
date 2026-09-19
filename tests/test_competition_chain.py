@@ -559,7 +559,7 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
         assert kwargs["binary_path"] == chain.config.finality_binary
         assert kwargs["chain_spec_path"] == chain.config.chain_spec
         assert kwargs["first_record_timeout_seconds"] == chain.config.startup_timeout_seconds
-        assert kwargs["record_timeout_seconds"] == 900.0
+        assert kwargs["record_timeout_seconds"] == 120.0
         return "pinned-test-observer"
 
     def durable_port(**kwargs):

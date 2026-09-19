@@ -41,6 +41,7 @@ from .bootstrap_direct_weights import (
     OwnerFenceReceipt,
 )
 from .bootstrap_weights import SignedBootstrapEligibilityManifest
+from .concurrency import kill_and_reap
 from .crypto import verify_response_signature
 from .encoding import account_id32
 from .grandpa_finality import (
@@ -1752,11 +1753,10 @@ async def _run_bounded_command(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    if process.stdout is None:
-        process.kill()
-        raise ValidatorSupervisorAdapterError("podman_command_failed")
 
     async def collect() -> bytes:
+        if process.stdout is None:
+            raise ValidatorSupervisorAdapterError("podman_command_failed")
         chunks: list[bytes] = []
         total = 0
         while True:
@@ -1765,8 +1765,6 @@ async def _run_bounded_command(
                 break
             total += len(chunk)
             if total > maximum_output_bytes:
-                process.kill()
-                await process.wait()
                 raise ValidatorSupervisorAdapterError("podman_output_limit")
             chunks.append(chunk)
         returncode = await process.wait()
@@ -1776,11 +1774,12 @@ async def _run_bounded_command(
 
     try:
         return await asyncio.wait_for(collect(), timeout=timeout_seconds)
-    except asyncio.TimeoutError as error:
-        process.kill()
+    except BaseException as error:
         with contextlib.suppress(Exception):
-            await process.wait()
-        raise ValidatorSupervisorAdapterError("podman_command_timeout") from error
+            await kill_and_reap(process)
+        if isinstance(error, asyncio.TimeoutError):
+            raise ValidatorSupervisorAdapterError("podman_command_timeout") from error
+        raise
 
 
 async def _spawn_foreground(arguments: tuple[str, ...]) -> SpawnedProcess:

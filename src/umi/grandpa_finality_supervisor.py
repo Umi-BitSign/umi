@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from .chain_evidence import FinalizedSnapshotRef
+from .concurrency import run_owned_thread
 from .grandpa_finality import (
     CARGO_LOCK_SHA256,
     EVIDENCE_CLASS,
@@ -51,6 +53,7 @@ from .grandpa_finality import (
     GrandpaFinalityObserver,
     GrandpaFinalityObserverError,
 )
+from .grandpa_finality_accounting import AccountingError, install_accounting, read_usage
 from .policy import LiveChainObservationPin, ScoringPolicy, scoring_policy_hash
 from .protocol import canonical_json_bytes
 from .validator_chain_scan import (
@@ -60,7 +63,7 @@ from .validator_chain_scan import (
 from .validator_plans import MAX_FINALITY_EVIDENCE_BYTES, VerifiedFinalizedBlock
 
 STORE_SCHEMA = "umi-grandpa-finality-supervisor-store/1"
-STORE_SCHEMA_VERSION = 2
+STORE_SCHEMA_VERSION = 3
 ACCEPTANCE_RECEIPT_SCHEMA = "umi-grandpa-finality-acceptance/1"
 
 _APPLICATION_ID = 0x554D4946  # "UMIF"
@@ -69,6 +72,9 @@ _ZERO_DIGEST = bytes(32)
 _MAX_CANONICAL_INTEGER = (1 << 53) - 1
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BLOCK_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
+_LOGGER = logging.getLogger(__name__)
+_OBSERVER_RETRY_INITIAL_SECONDS = 1.0
+_OBSERVER_RETRY_MAXIMUM_SECONDS = 30.0
 
 
 class GrandpaFinalitySupervisorError(RuntimeError):
@@ -613,13 +619,20 @@ class DurableGrandpaFinalityPort:
         return self._commit(binding, attestation)
 
     def run_blocking(self, stop_event: threading.Event) -> None:
-        """Run the owned observer until stopped; any observer fault is terminal."""
+        """Recover terminated record timeouts from the last committed header.
+
+        The observer closes and reaps its process before raising a timeout.
+        A replacement receives a new transcript binding and must advance the
+        persisted head. Invalid evidence and store faults remain terminal.
+        Consumers still reject stale state while recovery is in progress.
+        """
 
         if not isinstance(stop_event, threading.Event):
             raise TypeError("stop_event must be a threading.Event")
         if not self._run_lock.acquire(blocking=False):
             raise GrandpaFinalitySupervisorError("observer_already_running")
         try:
+            retry_delay = _OBSERVER_RETRY_INITIAL_SECONDS
             while not stop_event.is_set():
                 binding = self.next_run_binding()
                 try:
@@ -630,9 +643,20 @@ class DurableGrandpaFinalityPort:
                         stop_requested=stop_event.is_set,
                     ):
                         self.accept_attestation(binding, attestation)
+                        retry_delay = _OBSERVER_RETRY_INITIAL_SECONDS
                         if stop_event.is_set():
                             break
                 except GrandpaFinalityObserverError as error:
+                    if error.reason_code == "record_timeout":
+                        _LOGGER.warning(
+                            "finality_observer_record_timeout retry_seconds=%s segment_index=%s",
+                            retry_delay,
+                            binding.segment_index,
+                        )
+                        if stop_event.wait(retry_delay):
+                            return
+                        retry_delay = min(retry_delay * 2, _OBSERVER_RETRY_MAXIMUM_SECONDS)
+                        continue
                     raise GrandpaFinalitySupervisorError(f"observer_{error.reason_code}") from error
         finally:
             self._run_lock.release()
@@ -650,7 +674,7 @@ class DurableGrandpaFinalityPort:
 
         watcher = asyncio.create_task(bridge_stop())
         try:
-            await asyncio.to_thread(self.run_blocking, thread_stop)
+            await run_owned_thread(self.run_blocking, thread_stop, on_cancel=thread_stop.set)
         finally:
             thread_stop.set()
             watcher.cancel()
@@ -658,54 +682,84 @@ class DurableGrandpaFinalityPort:
                 await watcher
 
     def audit(self) -> None:
-        """Replay every segment through the pinned parser and compare all rows."""
+        """Replay one snapshot without retaining the complete evidence history.
+
+        The read transaction stays open through parser replay. WAL writers can
+        continue, but checkpoint progress may be held until this audit closes.
+        """
 
         try:
             with self._connect(read_only=True) as connection:
-                if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                    raise GrandpaFinalityStoreCorruption("sqlite_quick_check_failed")
-                if connection.execute("PRAGMA foreign_key_check").fetchall():
-                    raise GrandpaFinalityStoreCorruption("sqlite_foreign_key_check_failed")
-                stored_config = connection.execute(
-                    "SELECT value FROM store_meta WHERE key = 'config'"
-                ).fetchone()
-                stored_config_hash = connection.execute(
-                    "SELECT value FROM store_meta WHERE key = 'config_sha256'"
-                ).fetchone()
-                stored_head_digest = connection.execute(
-                    "SELECT value FROM store_meta WHERE key = 'head_acceptance_digest'"
-                ).fetchone()
-                if (
-                    stored_config is None
-                    or stored_config_hash is None
-                    or stored_head_digest is None
-                ):
-                    raise GrandpaFinalityStoreCorruption("store_meta_missing")
-                expected_config = self._config_bytes()
-                if stored_config[0] != expected_config:
-                    raise GrandpaFinalityStoreConflict("store_binding_mismatch")
-                if stored_config_hash[0] != hashlib.sha256(expected_config).digest():
-                    raise GrandpaFinalityStoreCorruption("config_digest_mismatch")
-                segments = connection.execute(
-                    "SELECT * FROM observer_segments ORDER BY segment_index"
-                ).fetchall()
-                rows = connection.execute(
-                    "SELECT * FROM finalized_headers ORDER BY height"
-                ).fetchall()
+                # WAL writers may commit while auditing. Read metadata, segments,
+                # and headers from one snapshot so valid progress is not mistaken
+                # for a digest mismatch. Closing this read-only connection ends it.
+                connection.execute("BEGIN")
+                self._audit_snapshot(connection)
+        except AccountingError as error:
+            raise GrandpaFinalityStoreCorruption("evidence_accounting_corrupt") from error
         except sqlite3.DatabaseError as error:
             raise GrandpaFinalityStoreCorruption("sqlite_read_failed") from error
+        self._assert_database_bound()
 
-        if len(rows) > self._limits.maximum_headers:
+    def _audit_snapshot(
+        self, connection: sqlite3.Connection, *, legacy_accounting: bool = False
+    ) -> tuple[int, int]:
+        """Validate indexed cursors while the caller owns their read snapshot."""
+
+        if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise GrandpaFinalityStoreCorruption("sqlite_quick_check_failed")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise GrandpaFinalityStoreCorruption("sqlite_foreign_key_check_failed")
+        expected_version = 2 if legacy_accounting else STORE_SCHEMA_VERSION
+        if (
+            connection.execute("PRAGMA application_id").fetchone()[0] != _APPLICATION_ID
+            or connection.execute("PRAGMA user_version").fetchone()[0] != expected_version
+        ):
+            raise GrandpaFinalityStoreConflict("store_schema_mismatch")
+        stored_config = connection.execute(
+            "SELECT value FROM store_meta WHERE key = 'config'"
+        ).fetchone()
+        stored_config_hash = connection.execute(
+            "SELECT value FROM store_meta WHERE key = 'config_sha256'"
+        ).fetchone()
+        stored_head_digest = connection.execute(
+            "SELECT value FROM store_meta WHERE key = 'head_acceptance_digest'"
+        ).fetchone()
+        if stored_config is None or stored_config_hash is None or stored_head_digest is None:
+            raise GrandpaFinalityStoreCorruption("store_meta_missing")
+        expected_config = self._config_bytes()
+        if stored_config[0] != expected_config:
+            raise GrandpaFinalityStoreConflict("store_binding_mismatch")
+        if stored_config_hash[0] != hashlib.sha256(expected_config).digest():
+            raise GrandpaFinalityStoreCorruption("config_digest_mismatch")
+        count, total_evidence = connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(length(canonical_evidence)), 0) FROM finalized_headers"
+        ).fetchone()
+        if count > self._limits.maximum_headers:
             raise GrandpaFinalityStoreCorruption("header_count_limit")
-        total_evidence = sum(len(row["canonical_evidence"]) for row in rows)
         if total_evidence > self._limits.maximum_total_evidence_bytes:
             raise GrandpaFinalityStoreCorruption("total_evidence_limit")
-        by_segment: dict[int, list[sqlite3.Row]] = {}
-        for row in rows:
-            by_segment.setdefault(row["segment_index"], []).append(row)
-        if set(by_segment) != {row["segment_index"] for row in segments}:
+        usage = read_usage(connection, allow_missing=legacy_accounting)
+        if legacy_accounting:
+            if usage is not None:
+                raise AccountingError("legacy evidence store has accounting objects")
+        elif usage != (count, total_evidence):
+            raise AccountingError("evidence accounting differs from retained history")
+        if (
+            connection.execute(
+                "SELECT 1 FROM observer_segments AS s WHERE NOT EXISTS "
+                "(SELECT 1 FROM finalized_headers AS h "
+                "WHERE h.segment_index = s.segment_index) LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
             raise GrandpaFinalityStoreCorruption("empty_or_orphan_segment")
 
+        # Both cursors use primary-key order. A per-segment ORDER BY height can
+        # instead sort full evidence rows against the segment/sequence index.
+        segments = connection.execute("SELECT * FROM observer_segments ORDER BY segment_index")
+        rows = connection.execute("SELECT * FROM finalized_headers ORDER BY height")
+        row = next(rows, None)
         previous_global: _StoredHeader | None = None
         previous_acceptance = _ZERO_DIGEST
         previous_accepted_at_unix_ms = 0
@@ -723,9 +777,14 @@ class DurableGrandpaFinalityPort:
                 or segment["startup_timeout_seconds"] != self._startup_timeout_seconds
             ):
                 raise GrandpaFinalityStoreCorruption("segment_run_binding_mismatch")
-            segment_rows = by_segment[segment["segment_index"]]
+            # Empty/orphan segments were excluded in this same snapshot. A
+            # different next segment means segment order rolls global heights
+            # backward; never skip it while merging the two cursors.
+            if row is None or row["segment_index"] != segment["segment_index"]:
+                raise GrandpaFinalityStoreCorruption("global_height_rollback")
             previous_segment: FinalityAttestation | None = None
-            for expected_sequence, row in enumerate(segment_rows):
+            expected_sequence = 0
+            while row is not None and row["segment_index"] == segment["segment_index"]:
                 stored = _stored_header(row)
                 try:
                     parsed = self._observer.validate_attestation(
@@ -797,13 +856,18 @@ class DurableGrandpaFinalityPort:
                 previous_accepted_at_unix_ms = accepted_at_unix_ms
                 previous_segment = parsed
                 previous_global = stored
+                expected_sequence += 1
+                row = next(rows, None)
+        if row is not None:
+            raise GrandpaFinalityStoreCorruption("global_height_rollback")
         if stored_head_digest[0] != previous_acceptance:
             raise GrandpaFinalityStoreCorruption("head_acceptance_digest_mismatch")
-        self._assert_database_bound()
+        return count, total_evidence
 
     def _initialize(self) -> None:
+        audited = False
         try:
-            with self._connect(read_only=False) as connection:
+            with self._connect(read_only=False) as connection, self._transaction(connection):
                 application_id = connection.execute("PRAGMA application_id").fetchone()[0]
                 user_version = connection.execute("PRAGMA user_version").fetchone()[0]
                 has_tables = bool(
@@ -812,25 +876,40 @@ class DurableGrandpaFinalityPort:
                     ).fetchone()
                 )
                 if not has_tables:
-                    with self._transaction(connection):
-                        for statement in _SCHEMA_STATEMENTS:
-                            connection.execute(statement)
-                        connection.execute(f"PRAGMA application_id = {_APPLICATION_ID}")
-                        connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
-                        config = self._config_bytes()
-                        connection.executemany(
-                            "INSERT INTO store_meta(key, value) VALUES (?, ?)",
-                            (
-                                ("config", config),
-                                ("config_sha256", hashlib.sha256(config).digest()),
-                                ("head_acceptance_digest", _ZERO_DIGEST),
-                            ),
-                        )
-                elif application_id != _APPLICATION_ID or user_version != STORE_SCHEMA_VERSION:
+                    for statement in _SCHEMA_STATEMENTS:
+                        connection.execute(statement)
+                    connection.execute(f"PRAGMA application_id = {_APPLICATION_ID}")
+                    connection.execute("PRAGMA user_version = 2")
+                    user_version = 2
+                    config = self._config_bytes()
+                    connection.executemany(
+                        "INSERT INTO store_meta(key, value) VALUES (?, ?)",
+                        (
+                            ("config", config),
+                            ("config_sha256", hashlib.sha256(config).digest()),
+                            ("head_acceptance_digest", _ZERO_DIGEST),
+                        ),
+                    )
+                elif application_id != _APPLICATION_ID or user_version not in (
+                    2,
+                    STORE_SCHEMA_VERSION,
+                ):
                     raise GrandpaFinalityStoreConflict("store_schema_mismatch")
+                if user_version == 2:
+                    # Audit and backfill under the same write lock. Old opened
+                    # connections automatically execute the installed triggers.
+                    usage = self._audit_snapshot(connection, legacy_accounting=True)
+                    install_accounting(connection, usage)
+                    connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
+                    audited = True
+        except AccountingError as error:
+            raise GrandpaFinalityStoreCorruption("evidence_accounting_corrupt") from error
         except sqlite3.DatabaseError as error:
             raise GrandpaFinalityStoreCorruption("sqlite_initialize_failed") from error
-        self.audit()
+        if audited:
+            self._assert_database_bound()
+        else:
+            self.audit()
 
     def _commit(
         self, binding: ObserverRunBinding, attestation: FinalityAttestation
@@ -912,10 +991,7 @@ class DurableGrandpaFinalityPort:
 
                 record = json.loads(attestation.canonical_bytes)
                 request_id = record["request_id"]
-                count, total_evidence = connection.execute(
-                    "SELECT COUNT(*), COALESCE(SUM(length(canonical_evidence)), 0) "
-                    "FROM finalized_headers"
-                ).fetchone()
+                count, total_evidence = read_usage(connection)
                 if count >= self._limits.maximum_headers:
                     raise GrandpaFinalitySupervisorError("header_count_limit")
                 if (
@@ -1058,6 +1134,8 @@ class DurableGrandpaFinalityPort:
                 page_count = connection.execute("PRAGMA page_count").fetchone()[0]
                 if page_size * page_count > self._limits.maximum_database_bytes:
                     raise GrandpaFinalitySupervisorError("database_size_limit")
+        except AccountingError as error:
+            raise GrandpaFinalityStoreCorruption("evidence_accounting_corrupt") from error
         except sqlite3.IntegrityError as error:
             raise GrandpaFinalityStoreConflict("sqlite_constraint_conflict") from error
         except sqlite3.DatabaseError as error:

@@ -27,14 +27,9 @@ from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProv
 from .competition_client import validate_intake_origin
 from .competition_endpoint_execution import EndpointPairedEvidence
 from .competition_evaluator import (
-    MAX_BYTES,
-    Directory,
     EvaluationVote,
     SignedEvaluationOrder,
     SignedExecutionAnnouncement,
-    _private,
-    _publish,
-    _read,
     order_job,
     validate_order,
 )
@@ -66,6 +61,11 @@ from .open_competition import (
     verify_signature,
 )
 from .policy import scoring_policy_hash
+from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
+from .private_files import Directory
+from .private_files import ensure_private_directory as _private
+from .private_files import publish_private_model as _publish
+from .private_files import read_private_model as _read
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 Kind = Literal["order", "suite", "execution", "vote", "independent", "void_vote", "void"]

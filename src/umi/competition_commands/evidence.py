@@ -128,14 +128,21 @@ def verify_cutoff_publication(args: argparse.Namespace, policy: CompetitionPolic
 def assemble_endpoint_execution(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
     from ..competition_endpoint_execution import assemble_endpoint_evidence
     from ..competition_execution import EndpointIncumbentEvidence
-    from ..competition_scheduling import AssignmentPublicationJournal
+    from ..competition_scheduling import AssignmentPublicationJournal, SchedulingCapacity
     from ..policy import ScoringPolicy
 
     pulses = load_json(args.reveal_pulses, ExecutionRevealPulses).pulses
     if len({p.round for p in pulses}) != len(pulses):
         raise ValueError("duplicate retained reveal pulse")
+    capacity_path = getattr(args, "scheduling_capacity", None)
+    capacity = (
+        load_json(capacity_path, SchedulingCapacity) if capacity_path else SchedulingCapacity()
+    )
     journal = AssignmentPublicationJournal(
-        Path(args.dispatch_state).absolute(), policy, load_json(args.legacy_policy, ScoringPolicy)
+        Path(args.dispatch_state).absolute(),
+        policy,
+        load_json(args.legacy_policy, ScoringPolicy),
+        **capacity.model_dump(),
     )
     return assemble_endpoint_evidence(
         incumbent=load_json(args.incumbent_execution, EndpointIncumbentEvidence),

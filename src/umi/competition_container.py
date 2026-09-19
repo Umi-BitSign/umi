@@ -33,6 +33,7 @@ from .competition_release import (
 )
 from .competition_supervisor import SuccessorSupervisorReleaseTarget
 from .competition_worker import _open_directory_without_links
+from .concurrency import kill_and_reap
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
 from .validator_supervisor import ValidatorSupervisorConfig
@@ -338,11 +339,8 @@ async def _run_command(arguments, *, timeout_seconds, maximum_output_bytes):
     try:
         return await asyncio.wait_for(collect(), timeout_seconds)
     except BaseException:
-        if process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
         with contextlib.suppress(Exception):
-            await process.wait()
+            await kill_and_reap(process)
         raise
 
 

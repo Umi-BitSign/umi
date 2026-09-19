@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 import sqlite3
+import threading
 from dataclasses import replace
 
 import pytest
@@ -79,6 +80,82 @@ async def test_origin_collects_proven_bidirectional_registration_and_axon(
     with sqlite3.connect(item.origin_provider._path) as db:
         assert db.execute("SELECT COUNT(*) FROM origins").fetchone()[0] == 1
     assert not any(method.startswith("author_") for method, _ in item.rpc.calls)
+
+
+@pytest.mark.parametrize("operation", ["_check_origin_prior", "_save_origin"])
+async def test_origin_disk_work_does_not_block_dispatch(origin_chain, monkeypatch, operation):
+    provider = origin_chain.origin_provider
+    original = getattr(provider, operation)
+    entered, release = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        assert threading.get_ident() != loop_thread, "origin disk work blocked dispatch"
+        assert release.wait(3), "origin test did not release disk work"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(provider, operation, blocked)
+    task = asyncio.create_task(provider.collect_origin(origin_chain.signed))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert not task.done()
+        assert provider._lock.locked()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await provider.aclose()
+    assert task.result().uid == 0
+
+
+@pytest.mark.parametrize("cancellations", [1, 2])
+async def test_origin_cancelled_write_drains_and_rolls_back(
+    origin_chain, monkeypatch, cancellations
+):
+    provider = origin_chain.origin_provider
+    original = provider._connect
+    entered, release = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+
+    class BlockedConnection:
+        def __init__(self):
+            self.connection = original()
+
+        def execute(self, sql, *args):
+            result = self.connection.execute(sql, *args)
+            if sql.startswith("INSERT INTO origins "):
+                entered.set()
+                assert threading.get_ident() != loop_thread, "origin write blocked dispatch"
+                assert release.wait(3), "origin test did not release its transaction"
+            return result
+
+        def commit(self):
+            return self.connection.commit()
+
+        def close(self):
+            self.connection.close()
+
+    monkeypatch.setattr(provider, "_connect", BlockedConnection)
+    task = asyncio.create_task(
+        provider._collect_origin_locked(origin_chain.signed, "https://8.8.8.8:443")
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert not task.done()
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(0.01)
+            assert not task.done(), "cancelled origin write outlived its lock"
+            assert provider._lock.locked()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await provider.aclose()
+    assert task.cancelled()
+    assert not provider._lock.locked()
+    with sqlite3.connect(provider._path) as db:
+        assert db.execute("SELECT COUNT(*) FROM origins").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM artifacts").fetchone() == (0,)
 
 
 @pytest.mark.parametrize("protocol_tag", [1, 2, 3, 5, 255, -1, 256, True])

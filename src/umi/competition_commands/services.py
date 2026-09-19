@@ -71,15 +71,20 @@ def serve_assignment_feed(args: argparse.Namespace, policy: CompetitionPolicy) -
     import uvicorn
 
     from ..competition_feed import create_assignment_feed
-    from ..competition_scheduling import AssignmentPublicationJournal
+    from ..competition_scheduling import AssignmentPublicationJournal, SchedulingCapacity
     from ..policy import ScoringPolicy
 
     if not 1024 <= args.port <= 65535:
         raise ValueError("assignment feed port is invalid")
+    capacity_path = getattr(args, "scheduling_capacity", None)
+    capacity = (
+        load_json(capacity_path, SchedulingCapacity) if capacity_path else SchedulingCapacity()
+    )
     journal = AssignmentPublicationJournal(
         Path(args.state).absolute(),
         policy,
         load_json(args.legacy_policy, ScoringPolicy),
+        **capacity.model_dump(),
     )
     app = create_assignment_feed(journal, nonce_path=Path(args.nonce_path).absolute())
     uvicorn.run(

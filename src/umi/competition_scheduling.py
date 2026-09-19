@@ -24,11 +24,23 @@ from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Annotated
 
+from pydantic import Field, ValidationError
+
+from . import competition_scheduling_receipts as scheduling_receipts
 from .competition_authorization import (
     EndpointAssignment,
     SignedEndpointAuthorization,
+    scheduled_assignment_key,
     validate_publication,
+    validate_publication_body,
+)
+from .competition_scheduling_timing import (
+    check_dispatch_profile,
+    configure_dispatch,
+    qualify_dispatch,
+    recover_dispatch_qualification,
 )
 from .config import Limits
 from .open_competition import CompetitionPolicy, digest, identity
@@ -38,30 +50,41 @@ from .policy import (
     require_live_chain_observation,
     scoring_policy_hash,
 )
-from .protocol import canonical_json_bytes, request_digest
-from .validator_plans import VerifiedFinalizedBlock
+from .protocol import StrictProtocolModel, canonical_json_bytes, request_digest
+from .validator_plans import MAX_FINALITY_EVIDENCE_BYTES, VerifiedFinalizedBlock
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, WindowClock
 
 _APPLICATION_ID = 0x554D4953
 _SCHEMA = "umi-assignment-publication-journal/1"
 _EVENT_RESERVE_BYTES = 8192
+_BLOCK_DOCUMENT_BYTES = 64 * 1024
+_BLOCK_RESERVE_BYTES = MAX_FINALITY_EVIDENCE_BYTES + _BLOCK_DOCUMENT_BYTES
+
+
+class SchedulingCapacity(StrictProtocolModel):
+    """Logical journal limits shared by every service opening the same state.
+
+    These limits do not reserve a whole round or establish throughput. Existing
+    journals bind the outcome size; the other limits may be raised without
+    changing retained evidence. Filesystem and SQLite overhead need extra space.
+    """
+
+    maximum_publications: Annotated[int, Field(ge=1, le=65536)] = 1024
+    maximum_assignments: Annotated[int, Field(ge=1, le=262144)] = 16384
+    maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    maximum_outcome_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 1024**2
+
+
+_DEFAULT_CAPACITY = SchedulingCapacity()
 
 
 def assignment_key(publication, assignment: EndpointAssignment) -> str:
     """Stable across attempted wire retiming or publication re-signing."""
-    body = publication.publication
-    return hashlib.sha256(
-        b"umi-scheduled-endpoint-assignment-v1\0"
-        + canonical_json_bytes(
-            [
-                body.policy_sha256,
-                digest(body.round),
-                assignment.submission_sha256,
-                identity(assignment.evaluator_hotkey),
-                assignment.case_sha256,
-            ]
-        )
-    ).hexdigest()
+    return _assignment_key(publication.publication, assignment)
+
+
+def _assignment_key(body, assignment):
+    return scheduled_assignment_key(body, assignment)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,29 +150,34 @@ class AssignmentPublicationJournal:
         policy: CompetitionPolicy,
         legacy_policy: ScoringPolicy,
         *,
-        maximum_publications: int = 1024,
-        maximum_assignments: int = 16384,
-        maximum_bytes: int = 1024**3,
-        maximum_outcome_bytes: int = 1024**2,
+        maximum_publications: int = _DEFAULT_CAPACITY.maximum_publications,
+        maximum_assignments: int = _DEFAULT_CAPACITY.maximum_assignments,
+        maximum_bytes: int = _DEFAULT_CAPACITY.maximum_bytes,
+        maximum_outcome_bytes: int = _DEFAULT_CAPACITY.maximum_outcome_bytes,
         maximum_observation_age_seconds: int = 60,
         maximum_future_skew_seconds: int = 5,
     ):
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.legacy_policy = ScoringPolicy.model_validate_json(canonical_json_bytes(legacy_policy))
+        try:
+            capacity = SchedulingCapacity(
+                maximum_publications=maximum_publications,
+                maximum_assignments=maximum_assignments,
+                maximum_bytes=maximum_bytes,
+                maximum_outcome_bytes=maximum_outcome_bytes,
+            )
+        except ValidationError as error:
+            raise ValueError("invalid scheduling capacity or freshness bound") from error
         for value, lower, upper in (
-            (maximum_publications, 1, 65536),
-            (maximum_assignments, 1, 262144),
-            (maximum_bytes, 1024, 16 * 1024**3),
-            (maximum_outcome_bytes, 1, 16 * 1024**2),
             (maximum_observation_age_seconds, 1, 600),
             (maximum_future_skew_seconds, 0, 30),
         ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError("invalid scheduling capacity or freshness bound")
-        self.maximum_publications = maximum_publications
-        self.maximum_assignments = maximum_assignments
-        self.maximum_bytes = maximum_bytes
-        self.maximum_outcome_bytes = maximum_outcome_bytes
+        self.maximum_publications = capacity.maximum_publications
+        self.maximum_assignments = capacity.maximum_assignments
+        self.maximum_bytes = capacity.maximum_bytes
+        self.maximum_outcome_bytes = capacity.maximum_outcome_bytes
         self.maximum_observation_age_seconds = maximum_observation_age_seconds
         self.maximum_future_skew_seconds = maximum_future_skew_seconds
         pins = self.legacy_policy.implementation_pins
@@ -184,7 +212,7 @@ class AssignmentPublicationJournal:
                 if application_id or tables:
                     raise ValueError("unrecognized scheduling database")
                 self._initialize(db)
-            if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2):
                 raise ValueError("unsupported scheduling schema")
             metadata = dict(db.execute("SELECT key,value FROM metadata"))
             if any(
@@ -205,10 +233,12 @@ class AssignmentPublicationJournal:
     def _transaction(self):
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         db.row_factory = sqlite3.Row
+        db.create_function("umi_scheduling_writer_generation", 0, lambda: 2)
         try:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("PRAGMA foreign_keys=ON")
             db.execute("BEGIN IMMEDIATE")
+            self._check_generation(db)
             yield db
             db.commit()
         except BaseException:
@@ -216,6 +246,28 @@ class AssignmentPublicationJournal:
             raise
         finally:
             db.close()
+
+    @staticmethod
+    def _check_generation(db):
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (0, 1, 2):
+            raise ValueError("unsupported scheduling journal schema generation")
+        if version in (0, 1):
+            objects = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name GLOB 'reservation_*' "
+                "OR name GLOB 'generation_*' OR name GLOB 'immutable_reservation_*' LIMIT 1"
+            ).fetchone()
+            has_metadata = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+            ).fetchone()
+            marker = (
+                has_metadata
+                and db.execute(
+                    "SELECT 1 FROM metadata WHERE key='reservation_journal_identity' LIMIT 1"
+                ).fetchone()
+            )
+            if objects or marker:
+                raise ValueError("scheduling reservation generation marker was downgraded")
 
     def _initialize(self, db):
         db.execute(f"PRAGMA application_id={_APPLICATION_ID}")
@@ -273,13 +325,146 @@ class AssignmentPublicationJournal:
         block_bytes = db.execute(
             "SELECT COALESCE(SUM(LENGTH(document)+LENGTH(evidence)),0) FROM blocks"
         ).fetchone()[0]
+        used += db.execute(
+            "SELECT COALESCE(SUM(LENGTH(value)),0) FROM metadata "
+            "WHERE key LIKE 'dispatch_profile:%'"
+        ).fetchone()[0]
         assignment_count = db.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
+        if self._reservation_enabled(db):
+            pending = db.execute(
+                "SELECT COUNT(*),COALESCE(SUM(assignment_count),0),"
+                "COALESCE(SUM(allowance),0) FROM reservation_publications r "
+                "WHERE NOT EXISTS (SELECT 1 FROM reservation_consumptions c "
+                "WHERE c.publication_id=r.id)"
+            ).fetchone()
+            count += pending[0]
+            assignment_count += pending[1]
+            used += pending[2]
+            used += db.execute(
+                "SELECT COALESCE(SUM(LENGTH(body)),0) FROM reservation_publications"
+            ).fetchone()[0]
+            used += db.execute(
+                "SELECT COALESCE(SUM(LENGTH(document)),0) FROM reservation_batches"
+            ).fetchone()[0]
+            used += db.execute(
+                "SELECT COALESCE(SUM(LENGTH(document)),0) FROM reservation_qualifications"
+            ).fetchone()[0]
+            used += self._proof_allowance(db)
+            used += 64  # Stable private journal identity retained with native reservations.
         if (
             count + publications > self.maximum_publications
             or assignment_count + assignments > self.maximum_assignments
             or used + block_bytes + reserved > self.maximum_bytes
         ):
             raise ValueError("scheduling capacity exhausted; retain history and provision capacity")
+
+    @staticmethod
+    def _reservation_enabled(db):
+        return db.execute("PRAGMA user_version").fetchone()[0] == 2
+
+    @staticmethod
+    def _proof_allowance(db):
+        """Retain future proof credit until every reserved task is known terminal.
+
+        Publication consumption alone is insufficient. Unpublished bodies,
+        missing assignments and uncertain dispatched claims retain the interval;
+        recorded completed/expired events release only its unobserved heights.
+        Historical block bytes remain charged separately.
+        """
+        intervals = []
+        for start, end in db.execute(
+            "SELECT b.proof_start,b.proof_end FROM reservation_batches b WHERE EXISTS "
+            "(SELECT 1 FROM reservation_publications p WHERE p.batch_id=b.id AND NOT EXISTS "
+            "(SELECT 1 FROM reservation_consumptions c WHERE c.publication_id=p.id)) OR EXISTS "
+            "(SELECT 1 FROM reservation_publications p JOIN reservation_assignments a "
+            "ON a.publication_id=p.id WHERE p.batch_id=b.id AND COALESCE("
+            "(SELECT kind FROM events e WHERE e.assignment_id=a.id ORDER BY ordinal DESC LIMIT 1),"
+            "'') NOT IN ('completed','expired')) ORDER BY b.proof_start,b.proof_end"
+        ):
+            if intervals and start <= intervals[-1][1] + 1:
+                intervals[-1][1] = max(end, intervals[-1][1])
+            else:
+                intervals.append([start, end])
+        missing = 0
+        for start, end in intervals:
+            retained = db.execute(
+                "SELECT COUNT(*) FROM blocks WHERE height BETWEEN ? AND ?", (start, end)
+            ).fetchone()[0]
+            missing += end - start + 1 - retained
+        return missing * _BLOCK_RESERVE_BYTES
+
+    def _enable_reservations(self, db):
+        if self._reservation_enabled(db):
+            return
+        if db.execute(
+            "SELECT 1 FROM events dispatched WHERE kind='dispatched' AND NOT EXISTS "
+            "(SELECT 1 FROM events completed WHERE completed.assignment_id="
+            "dispatched.assignment_id AND completed.kind='completed') LIMIT 1"
+        ).fetchone():
+            raise ValueError("drain dispatched incomplete claims before scheduling migration")
+        for row in db.execute("SELECT document,evidence FROM blocks"):
+            if len(row[0]) > _BLOCK_DOCUMENT_BYTES or len(row[1]) > MAX_FINALITY_EVIDENCE_BYTES:
+                raise ValueError("retained scheduling proof exceeds reservation byte bound")
+        db.execute(
+            "INSERT INTO metadata VALUES (?,?)",
+            ("reservation_journal_identity", secrets.token_hex(32)),
+        )
+        db.execute(
+            "CREATE TABLE reservation_batches (id TEXT PRIMARY KEY,round_sequence INTEGER "
+            "UNIQUE NOT NULL,round_sha256 TEXT NOT NULL,proof_start INTEGER NOT NULL,"
+            "proof_end INTEGER NOT NULL,document BLOB NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE reservation_publications (id TEXT PRIMARY KEY,batch_id TEXT NOT NULL "
+            "REFERENCES reservation_batches(id),body BLOB NOT NULL,allowance INTEGER NOT NULL,"
+            "assignment_count INTEGER NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE reservation_assignments (id TEXT PRIMARY KEY,publication_id TEXT "
+            "NOT NULL REFERENCES reservation_publications(id))"
+        )
+        db.execute(
+            "CREATE TABLE reservation_consumptions (publication_id TEXT PRIMARY KEY "
+            "REFERENCES reservation_publications(id))"
+        )
+        db.execute(
+            "CREATE TABLE reservation_qualifications (batch_id TEXT NOT NULL "
+            "REFERENCES reservation_batches(id),evaluator TEXT NOT NULL,"
+            "document BLOB NOT NULL,PRIMARY KEY(batch_id,evaluator))"
+        )
+        db.execute("CREATE INDEX reservation_batch_bodies ON reservation_publications(batch_id,id)")
+        db.execute(
+            "CREATE INDEX reservation_body_tasks ON reservation_assignments(publication_id,id)"
+        )
+        db.execute(
+            "CREATE INDEX assignment_publication ON assignments(publication_id,evaluator,id)"
+        )
+        for _, sql in scheduling_receipts.writer_fences():
+            db.execute(sql)
+        for table in scheduling_receipts.TABLES:
+            if table.startswith("reservation_"):
+                for operation in ("UPDATE", "DELETE"):
+                    db.execute(
+                        f"CREATE TRIGGER immutable_{table}_{operation.lower()} BEFORE {operation} "
+                        f"ON {table} BEGIN SELECT RAISE(ABORT,"
+                        "'append-only scheduling evidence'); END"
+                    )
+        db.execute("PRAGMA user_version=2")
+
+    def _qualify_capacity(self, db, publications, observed, now, evaluator_hotkey):
+        return qualify_dispatch(self, db, publications, observed, now, evaluator_hotkey)
+
+    def _recover_capacity(self, db, batch_id, evaluator_hotkey, now):
+        return recover_dispatch_qualification(db, batch_id, evaluator_hotkey, now)
+
+    def configure_dispatch(self, *, evaluator_hotkey, limits, budget, publication_directory=None):
+        configure_dispatch(
+            self,
+            evaluator_hotkey=evaluator_hotkey,
+            limits=limits,
+            budget=budget,
+            publication_directory=publication_directory,
+        )
 
     def _block(self, block: VerifiedFinalizedBlock) -> VerifiedFinalizedBlock:
         if not isinstance(block, VerifiedFinalizedBlock):
@@ -310,6 +495,12 @@ class AssignmentPublicationJournal:
 
     def _retain_block(self, db, block):
         document = self._block_document(block)
+        reservations = self._reservation_enabled(db)
+        if reservations and (
+            len(document) > _BLOCK_DOCUMENT_BYTES
+            or len(block.finality_evidence) > MAX_FINALITY_EVIDENCE_BYTES
+        ):
+            raise ValueError("scheduling proof exceeds reservation byte bound")
         existing = db.execute(
             "SELECT document,evidence FROM blocks WHERE height=?", (block.height,)
         ).fetchone()
@@ -320,10 +511,13 @@ class AssignmentPublicationJournal:
             ):
                 raise ValueError("verified block changed at a retained height")
             return
-        self._capacity(db, reserved=len(document) + len(block.finality_evidence))
+        if not reservations:
+            self._capacity(db, reserved=len(document) + len(block.finality_evidence))
         db.execute(
             "INSERT INTO blocks VALUES (?,?,?)", (block.height, document, block.finality_evidence)
         )
+        if reservations:
+            self._capacity(db)
 
     def _retained_block(self, db, height):
         row = db.execute("SELECT * FROM blocks WHERE height=?", (height,)).fetchone()
@@ -420,7 +614,7 @@ class AssignmentPublicationJournal:
             raise ValueError("assignment differs from verified legacy schedule")
         return schedule
 
-    def _quotas(self, db, additions):
+    def _quotas(self, db, additions, *, exclude_reservation=None):
         counts, totals = Counter(), Counter()
         videos, total_videos = defaultdict(dict), defaultdict(dict)
         existing = [
@@ -432,6 +626,16 @@ class AssignmentPublicationJournal:
             )
             for row in db.execute("SELECT * FROM assignments")
         ]
+        if self._reservation_enabled(db):
+            for row in db.execute(
+                "SELECT id,body FROM reservation_publications r WHERE id!=? AND NOT EXISTS "
+                "(SELECT 1 FROM reservation_consumptions c WHERE c.publication_id=r.id)",
+                (exclude_reservation or "",),
+            ):
+                body = validate_publication_body(
+                    json.loads(bytes(row["body"])), self.policy, self.legacy_policy
+                )
+                existing.extend(self._quota_assignments(body))
         for miner, evaluator, window, assignment in [*existing, *additions]:
             key, miner_key = (miner, evaluator, window), (miner, window)
             counts[key] += 1
@@ -458,6 +662,225 @@ class AssignmentPublicationJournal:
         ):
             raise ValueError("aggregate scheduling assignments exceed legacy window quotas")
 
+    def _quota_assignments(self, body):
+        submissions = {digest(s.submission): s.submission for s in body.submissions}
+        return [
+            (
+                identity(submissions[a.submission_sha256].hotkey),
+                identity(a.evaluator_hotkey),
+                (a.request.issued_block - self.legacy_policy.activation_block)
+                // self.legacy_policy.clock.window_stride_blocks,
+                a,
+            )
+            for a in body.assignments
+        ]
+
+    def _publication_rows(self, body, blocks, observed):
+        key, required, rows = digest(body), set(), []
+        additions = self._quota_assignments(body)
+        for assignment, (miner, evaluator, index, _) in zip(
+            body.assignments, additions, strict=True
+        ):
+            height = (
+                self.legacy_policy.activation_block
+                + index * self.legacy_policy.clock.window_stride_blocks
+            )
+            required.add(height)
+            if height not in blocks or height > observed.height:
+                raise ValueError("publication lacks an already finalized announcement")
+            schedule = self._schedule(assignment, blocks[height])
+            rows.append(
+                (
+                    _assignment_key(body, assignment),
+                    key,
+                    canonical_json_bytes(assignment),
+                    height,
+                    index,
+                    _round_ms(schedule.selection_round),
+                    _round_ms(schedule.issue_close_round),
+                    assignment.request.issued_block,
+                    assignment.request.deadline_block,
+                    miner,
+                    evaluator,
+                )
+            )
+        return rows, additions, required
+
+    def _publication_allowance(self, body, rows):
+        # Hotkeys admit at most 64 characters, both signature schemes have seven,
+        # and each eligible evaluator contributes at most one fixed-size signature.
+        envelope = {
+            "publication": {},
+            "signatures": [
+                {"hotkey": "0" * 64, "scheme": "sr25519", "signature": "0x" + "0" * 128}
+                for _ in self.policy.evaluators
+            ],
+        }
+        signed_bytes = len(canonical_json_bytes(body)) + len(canonical_json_bytes(envelope)) - 2
+        return self._publication_bytes(signed_bytes, rows)
+
+    def _publication_bytes(self, signed_bytes, rows):
+        return signed_bytes + sum(
+            len(row[2]) + self.maximum_outcome_bytes + _EVENT_RESERVE_BYTES for row in rows
+        )
+
+    def reserve_batch(self, *, batch_id, publications, observed, announcements, evaluator_hotkey):
+        """Reserve shared cohort storage and this evaluator's dispatch timing.
+
+        This explicitly upgrades the private journal and fences older writers.
+        The migration, immutable bodies, all future assignment/publication bytes,
+        and every proof height through the final deadline commit together. No
+        reservation is released merely because its wall-clock window elapsed.
+        """
+        if (
+            not isinstance(batch_id, str)
+            or len(batch_id) != 64
+            or any(c not in "0123456789abcdef" for c in batch_id)
+            or not isinstance(publications, tuple)
+            or not 1
+            <= len(publications)
+            <= min(self.maximum_publications, self.policy.maximum_uids)
+            or not isinstance(announcements, tuple)
+            or not 1 <= len(announcements) <= self.maximum_assignments
+        ):
+            raise ValueError("invalid bounded scheduling reservation cohort")
+        evaluator = identity(evaluator_hotkey)
+        validated, staged_bytes, assignments = [], 0, 0
+        for body in publications:
+            body = validate_publication_body(body, self.policy, self.legacy_policy)
+            staged_bytes += len(canonical_json_bytes(body))
+            assignments += len(body.assignments)
+            if staged_bytes > self.maximum_bytes or assignments > self.maximum_assignments:
+                raise ValueError(
+                    "scheduling capacity exhausted; retain history and provision capacity"
+                )
+            validated.append(body)
+        publications = tuple(validated)
+        body_ids = tuple(digest(body) for body in publications)
+        round_ = publications[0].round
+        if len(set(body_ids)) != len(body_ids) or any(
+            body.round != round_ for body in publications
+        ):
+            raise ValueError("reservation cohort has duplicate bodies or different rounds")
+        if any(
+            evaluator not in {identity(a.evaluator_hotkey) for a in body.assignments}
+            for body in publications
+        ):
+            raise ValueError("reservation evaluator is not assigned the complete cohort")
+        blocks = {block.height: self._block(block) for block in announcements}
+        if len(blocks) != len(announcements):
+            raise ValueError("duplicate verified announcement heights")
+        proof_start = min(blocks)
+        proof_end = max(a.request.deadline_block for b in publications for a in b.assignments)
+        document = canonical_json_bytes(
+            {
+                "batch_id": batch_id,
+                "publications": sorted(body_ids),
+                "proof_start": proof_start,
+                "proof_end": proof_end,
+            }
+        )
+        with self._transaction() as db:
+            self._enable_reservations(db)
+            prior = db.execute(
+                "SELECT document FROM reservation_batches WHERE id=?", (batch_id,)
+            ).fetchone()
+            if prior is not None and bytes(prior[0]) != document:
+                raise ValueError("scheduling reservation cohort changed")
+            observed, now = self._observation(db, observed)
+            if prior is None:
+                if db.execute(
+                    "SELECT 1 FROM reservation_batches WHERE round_sequence=?",
+                    (round_.sequence,),
+                ).fetchone():
+                    raise ValueError("round already has another scheduling reservation")
+                old_round = db.execute(
+                    "SELECT sha256 FROM rounds WHERE sequence=?", (round_.sequence,)
+                ).fetchone()
+                if old_round is not None and old_round[0] != digest(round_):
+                    raise ValueError("round sequence already binds another immutable round")
+                additions, prepared, required, identities = [], [], set(), set()
+                for body, key in zip(publications, body_ids, strict=True):
+                    rows, quota, heights = self._publication_rows(body, blocks, observed)
+                    required.update(heights)
+                    retained = db.execute(
+                        "SELECT signed FROM publications WHERE id=?", (key,)
+                    ).fetchone()
+                    if retained is not None:
+                        original = SignedEndpointAuthorization.model_validate_json(
+                            bytes(retained[0])
+                        )
+                        if canonical_json_bytes(original.publication) != canonical_json_bytes(body):
+                            raise ValueError("reservation differs from retained publication")
+                    else:
+                        additions.extend(quota)
+                    for row in rows:
+                        old = db.execute(
+                            "SELECT publication_id,body FROM assignments WHERE id=?", (row[0],)
+                        ).fetchone()
+                        if row[0] in identities or (
+                            old is not None and (old[0] != key or bytes(old[1]) != row[2])
+                        ):
+                            raise ValueError("assignment identity already reserved or retimed")
+                        identities.add(row[0])
+                    prepared.append((body, key, rows, retained is not None))
+                if required != set(blocks):
+                    raise ValueError("reservation includes unrelated verified announcements")
+                self._quotas(db, additions)
+                for block in blocks.values():
+                    self._retain_block(db, block)
+                db.execute(
+                    "INSERT INTO reservation_batches VALUES (?,?,?,?,?,?)",
+                    (batch_id, round_.sequence, digest(round_), proof_start, proof_end, document),
+                )
+                for body, key, rows, retained in prepared:
+                    db.execute(
+                        "INSERT INTO reservation_publications VALUES (?,?,?,?,?)",
+                        (
+                            key,
+                            batch_id,
+                            canonical_json_bytes(body),
+                            self._publication_allowance(body, rows),
+                            len(rows),
+                        ),
+                    )
+                    db.executemany(
+                        "INSERT INTO reservation_assignments VALUES (?,?)",
+                        ((row[0], key) for row in rows),
+                    )
+                    if retained:
+                        db.execute("INSERT INTO reservation_consumptions VALUES (?)", (key,))
+            self._capacity(db)
+            observed, now = self._observation(db, observed)
+            qualification_exists = db.execute(
+                "SELECT 1 FROM reservation_qualifications WHERE batch_id=? AND evaluator=?",
+                (batch_id, evaluator),
+            ).fetchone()
+            if qualification_exists is None:
+                qualification = self._qualify_capacity(
+                    db, publications, observed, now, evaluator_hotkey
+                )
+                if not isinstance(qualification, dict):
+                    raise ValueError("dispatch capacity qualification must be a document")
+                db.execute(
+                    "INSERT INTO reservation_qualifications VALUES (?,?,?)",
+                    (batch_id, evaluator, canonical_json_bytes(qualification)),
+                )
+            else:
+                self._recover_capacity(db, batch_id, evaluator_hotkey, now)
+            self._capacity(db)
+        return {"batch_id": batch_id, "publication_sha256s": sorted(body_ids), "no_weight": True}
+
+    def reservation(self, batch_id, *, evaluator_hotkey):
+        """Verify the original capacity and timing receipt without extending it."""
+        with self._transaction() as db:
+            return scheduling_receipts.reservation(
+                self,
+                db,
+                batch_id,
+                evaluator_hotkey,
+            )
+
     def publish(
         self,
         publication: SignedEndpointAuthorization,
@@ -481,6 +904,15 @@ class AssignmentPublicationJournal:
                     raise ValueError("publication digest collision or corrupt retained bytes")
                 self._expire_elapsed(db)
                 return self._publication_status(db, key)
+            reservation = None
+            if self._reservation_enabled(db):
+                reservation = db.execute(
+                    "SELECT body,allowance,assignment_count FROM reservation_publications "
+                    "WHERE id=?",
+                    (key,),
+                ).fetchone()
+                if reservation is None or bytes(reservation[0]) != canonical_json_bytes(body):
+                    raise ValueError("new publication requires its exact cohort reservation")
             if not isinstance(announcements, tuple) or not 1 <= len(announcements) <= len(
                 body.assignments
             ):
@@ -495,52 +927,22 @@ class AssignmentPublicationJournal:
             ).fetchone()
             if prior_round and prior_round[0] != round_sha:
                 raise ValueError("round sequence already binds another immutable round")
-            required = set()
-            additions, rows = [], []
-            submissions = {digest(s.submission): s.submission for s in body.submissions}
-            for assignment in body.assignments:
-                assignment_id = assignment_key(publication, assignment)
-                if db.execute("SELECT 1 FROM assignments WHERE id=?", (assignment_id,)).fetchone():
+            rows, additions, required = self._publication_rows(body, blocks, observed)
+            for row in rows:
+                if db.execute("SELECT 1 FROM assignments WHERE id=?", (row[0],)).fetchone():
                     raise ValueError(
                         "assignment identity already published; retiming or reuse refused"
                     )
-                index = (
-                    assignment.request.issued_block - self.legacy_policy.activation_block
-                ) // self.legacy_policy.clock.window_stride_blocks
-                height = (
-                    self.legacy_policy.activation_block
-                    + index * self.legacy_policy.clock.window_stride_blocks
-                )
-                required.add(height)
-                if height not in blocks or height > observed.height:
-                    raise ValueError("publication lacks an already finalized announcement")
-                schedule = self._schedule(assignment, blocks[height])
-                sub = submissions[assignment.submission_sha256]
-                miner, evaluator = identity(sub.hotkey), identity(assignment.evaluator_hotkey)
-                additions.append((miner, evaluator, index, assignment))
-                rows.append(
-                    (
-                        assignment_id,
-                        key,
-                        canonical_json_bytes(assignment),
-                        height,
-                        index,
-                        _round_ms(schedule.selection_round),
-                        _round_ms(schedule.issue_close_round),
-                        assignment.request.issued_block,
-                        assignment.request.deadline_block,
-                        miner,
-                        evaluator,
-                    )
-                )
             if required != set(blocks):
                 raise ValueError("publication includes unrelated verified announcements")
-            self._quotas(db, additions)
-            reserved = len(raw) + sum(
-                len(row[2]) + self.maximum_outcome_bytes + _EVENT_RESERVE_BYTES for row in rows
-            )
+            self._quotas(db, additions, exclude_reservation=key)
+            reserved = self._publication_bytes(len(raw), rows)
             for block in blocks.values():
                 self._retain_block(db, block)
+            if reservation is not None:
+                if reserved > reservation[1] or len(rows) != reservation[2]:
+                    raise ValueError("publication exceeds its exact cohort allowance")
+                db.execute("INSERT INTO reservation_consumptions VALUES (?)", (key,))
             self._capacity(db, publications=1, assignments=len(rows), reserved=reserved)
             db.execute(
                 "INSERT OR IGNORE INTO rounds VALUES (?,?)", (body.round.sequence, round_sha)
@@ -701,6 +1103,7 @@ class AssignmentPublicationJournal:
         *,
         observed: VerifiedFinalizedBlock,
         issuance: VerifiedFinalizedBlock | None = None,
+        expected_dispatch_profile: str | None = None,
     ) -> AssignmentClaim | None:
         """Commit one dispatch token or return None for scheduled/expired work.
 
@@ -717,6 +1120,7 @@ class AssignmentPublicationJournal:
             if last["kind"] in {"dispatched", "completed"}:
                 raise ValueError("assignment already dispatched; uncertain work is never retried")
             assignment = EndpointAssignment.model_validate_json(bytes(row["body"]))
+            check_dispatch_profile(db, assignment.evaluator_hotkey, expected_dispatch_profile)
             observed, now = self._observation(db, observed)
             request = assignment.request
             if now >= row["issue_close_ms"] or observed.height > request.deadline_block:

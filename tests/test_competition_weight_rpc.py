@@ -2,13 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from websockets.exceptions import PayloadTooBig
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus, PayloadTooBig
+from websockets.http11 import Response
 
 from umi.competition_weight_rpc import WeightProofRpc
-from umi.validator_chain import ValidatorChainError
+from umi.validator_chain import BittensorRawJsonRpc, ValidatorChainError
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+async def test_handshake_rate_limit_has_fixed_reason_without_retry(status):
+    calls = []
+    private = "private-provider-token-must-not-escape"
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        calls.append(1)
+        raise InvalidStatus(Response(status, private, Headers(), body=private.encode()))
+        yield  # pragma: no cover
+
+    rpc = BittensorRawJsonRpc(
+        SimpleNamespace(endpoint="wss://proofs.example.org"), connect_factory=connect
+    )
+    with pytest.raises(ValidatorChainError) as caught:
+        await rpc.request("chain_getHeader", [])
+    expected = "proof_rpc_rate_limited" if status == 429 else "proof_rpc_failed"
+    assert caught.value.reason_code == str(caught.value) == expected
+    assert private not in str(caught.value)
+    assert len(calls) == 1
 
 
 @pytest.fixture
@@ -89,18 +114,20 @@ async def test_methods_keep_original_separate_receive_limits(rpc, sockets):
         "state_getMetadata",
         "state_getRuntimeVersion",
         "chain_getHeader",
+        "chain_getBlock",
         "chain_getBlockHash",
     )
     for _ in range(3):
         for method in methods:
             await rpc.request(method, [])
-    assert len(state.connections) == 6
+    assert len(state.connections) == 7
     assert [c.kwargs["max_size"] for c in state.connections] == [
         129 * 1024**2,
         65 * 1024**2,
         33 * 1024**2,
         1024**2,
         1024**2,
+        130 * 1024**2,
         1024**2,
     ]
     assert all(c.kwargs["open_timeout"] == 15 for c in state.connections)

@@ -121,5 +121,19 @@ second writer for the same hotkey. Supervisor `durable_hold:false` describes onl
 the supervisor's state, not the worker's submission state.
 
 The bridge retains bounded history: 512 MiB and 4,096 files. Monitor growth.
-Exhaustion holds writes; deleting history to resume is unsafe. Registration and
-healthy endpoints do not guarantee incentives or recovery of operating costs.
+Capacity checks include the replacement current journal and any new archive
+before either is written. An exact archive retry consumes no additional slot;
+recovery still syncs the retained archive before publishing the repaired journal.
+Exhaustion holds new writes; automatic history compaction is not implemented.
+Deleting history to resume is unsafe.
+
+The running worker and stopped recovery reader share attempt-order and
+`LastUpdate` continuity checks. A new version-2 intent is rejected before
+publication if its prior `LastUpdate` disagrees with the preceding outcome.
+Failed or expired attempts preserve the previous `LastUpdate`; they do not
+account for a new weight write. `history_lastupdate_gap` requires investigation
+of the retained attempts and chain evidence. Restarting or deleting history
+cannot explain that gap. These local checks do not replace finalized proofs.
+
+Registration and healthy endpoints do not guarantee incentives or recovery of
+operating costs.

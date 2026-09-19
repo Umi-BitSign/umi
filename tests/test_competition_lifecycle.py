@@ -21,6 +21,7 @@ from umi import competition_execution as execution
 from umi import competition_rounds as rounds
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_dispatch import EndpointDispatcher
+from umi.competition_dispatch_capacity import DispatchTimingBudget
 from umi.competition_evaluator import (
     ContinuousEvaluator,
     EvaluatorConfig,
@@ -148,6 +149,34 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
     setup = paired_setup
     dispatch = setup.dispatch
     item = dispatch.feed.item
+    # These timings describe only this in-process fixture and its synthetic
+    # translator. Configure real dispatchers before requesting work signatures;
+    # the ordinary dispatch fixture intentionally has no admission profile.
+    dispatch.config = dispatch.config.model_copy(
+        update={
+            "poll_seconds": 1,
+            "discovery_grace_seconds": 5,
+            "request_timeout_seconds": 1,
+            "timing_budget": DispatchTimingBudget(
+                proof_collection_ms=1,
+                origin_collection_ms=1,
+                publication_ingestion_ms=1,
+                local_cycle_ms=1,
+                publication_delay_ms=1000,
+                block_advance_numerator=1,
+                block_advance_denominator_ms=12000,
+                finality_headroom_blocks=0,
+                measurement_sha256=digest({"fixture": "competition_lifecycle", "synthetic": True}),
+            ),
+        }
+    )
+    dispatch.driver = EndpointDispatcher(
+        dispatch.config,
+        dispatch.feed.journal,
+        dispatch.provider,
+        item.validator_wallet,
+        transport=dispatch.driver.transport,
+    )
     preserve_bundle(item.candidate, tmp_path / "candidate", setup.archive, item.policy)
     if item.unstable is not None:
         preserve_bundle(item.unstable, tmp_path / "unstable", setup.archive, item.policy)
@@ -311,6 +340,7 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
             return DrandPulse(**pulse_record())
 
     drivers, review_stores = [], []
+    dispatchers = [dispatch.driver]
     for index, signer in enumerate(item.evaluator_wallets[:2]):
         root = tmp_path / f"worker-{index}"
         review_store = EvaluatorReviewStore(root / "reviews", item.policy, limits=limits)
@@ -359,6 +389,16 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
         driver.exchange.transport = httpx.ASGITransport(app=exchange_app)
         drivers.append(driver)
         review_stores.append(review_store)
+        if index:
+            dispatchers.append(
+                EndpointDispatcher(
+                    dispatch.config.model_copy(update={"evaluator_hotkey": cfg.evaluator_hotkey}),
+                    dispatch.feed.journal,
+                    dispatch.provider,
+                    signer,
+                    transport=dispatch.driver.transport,
+                )
+            )
     yield SimpleNamespace(
         item=item,
         paired=setup,
@@ -368,6 +408,7 @@ def lifecycle(paired_setup, package_limits, release_identity, tmp_path, monkeypa
         store=store,
         plan=plan,
         drivers=drivers,
+        dispatchers=dispatchers,
         reviews=review_stores,
         fetched=fetched,
         exchange_config=exchange_config,
@@ -404,6 +445,14 @@ def completed_voids(driver):
     ]
 
 
+async def endorse_pending_work(drivers):
+    # A page may put model work before the endpoint cohort needed to reserve it.
+    # Cursor wrap must recover those temporary holds without skipping work.
+    for _ in range(3):
+        results = [await driver.work_client.sync_once() for driver in drivers]
+    assert all(result["held"] == 0 for result in results), results
+
+
 async def complete_first_round(lifecycle):
     s = lifecycle
     item, dispatch = s.item, s.paired.dispatch
@@ -424,10 +473,7 @@ async def complete_first_round(lifecycle):
             await driver.round_client.sync_once()
             assert driver.round_client.journal.get("vote", str(item.round.sequence)) is not None
         assert all(not review.submissions() for review in s.reviews)
-        for _ in range(3):
-            for driver in s.drivers:
-                result = await driver.work_client.sync_once()
-                assert result["held"] == 0, result
+        await endorse_pending_work(s.drivers)
         for review in s.reviews:
             entries = review.submissions()
             assert len(entries) == len(item.submissions)
@@ -447,19 +493,7 @@ async def complete_first_round(lifecycle):
         for driver in s.drivers:
             await driver.exchange.sync_once()
         assert len(list(Path(dispatch.config.publication_directory).glob("*.json"))) == 1
-        dispatchers = [dispatch.driver]
-        dispatchers.extend(
-            EndpointDispatcher(
-                dispatch.config.model_copy(
-                    update={"evaluator_hotkey": s.drivers[index].config.evaluator_hotkey}
-                ),
-                dispatch.feed.journal,
-                dispatch.provider,
-                item.evaluator_wallets[index],
-                transport=dispatch.driver.transport,
-            )
-            for index in range(1, evaluator_count)
-        )
+        dispatchers = s.dispatchers
         try:
             for turn in range(6):
                 for driver in s.drivers:
@@ -589,7 +623,7 @@ async def complete_first_round(lifecycle):
         assert paths[0].read_bytes() == prior
         assert len([c for c in s.paired.calls if isinstance(c, dict)]) == inference_count
     finally:
-        for driver in s.drivers:
+        for driver in (*s.drivers, *s.dispatchers):
             await driver.aclose()
 
 
@@ -791,9 +825,7 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
         for driver in s.drivers:
             driver.provider.block = s.provider.block
             await driver.round_client.sync_once()
-        for _ in range(3):
-            for driver in s.drivers:
-                await driver.work_client.sync_once()
+        await endorse_pending_work(s.drivers)
         orders = [
             _read(p, SignedEvaluationOrder)
             for p in Path(s.config.work.order_directory).glob("*.json")

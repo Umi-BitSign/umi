@@ -10,6 +10,7 @@ from umi.competition_work_signing import statement_slot
 from umi.open_competition import digest, sign_object
 
 from .test_competition_evaluator import Provider
+from .test_competition_work_signing import chain_config as chain_config
 from .test_competition_work_signing import policy as policy
 from .test_competition_work_signing import runtime as runtime
 from .test_competition_work_signing import setup as signing_fixture
@@ -45,10 +46,32 @@ async def prepare(setup):
 async def collect(setup):
     for signer in setup.signers:
         cursor, statements = await setup.queue.pending(signer.worker.config.evaluator_hotkey)
+        held_model = False
         for statement in statements:
-            vote = await signer.endorse(statement)
+            try:
+                vote = await signer.endorse(statement)
+            except ValueError as error:
+                # The production client continues through a held first model
+                # and retries it after processing endpoint authorization.
+                if (
+                    str(error) != "whole-round admission requires endpoint assignments first"
+                    or statement != setup.model
+                    or held_model
+                ):
+                    raise
+                held_model = True
+                continue
             assert await setup.queue.accept(vote) == digest(statement)
+        if held_model:
+            assert signer.journal.get("vote", statement_slot(setup.authorization)) is not None
     return cursor
+
+
+async def endorse_model(setup, signer):
+    # Establish the local cohort reservation without giving the queue an
+    # authorization vote or publishing an unrelated quorum certificate.
+    await signer.endorse(setup.authorization)
+    return await signer.endorse(setup.model)
 
 
 @pytest.mark.asyncio
@@ -74,9 +97,59 @@ async def test_both_tracks_reach_signed_delivery_without_manual_assembly(setup):
 
 
 @pytest.mark.asyncio
+async def test_delivered_certificates_do_not_collect_extra_heads_on_replay(setup):
+    original = setup.provider.collect
+    observations = []
+
+    async def observe():
+        observations.append(1)
+        return await original()
+
+    setup.provider.collect = observe
+    await prepare(setup)
+    unsigned_collections = len(observations)
+    await collect(setup)
+    await collect(setup)
+    paths = tuple(setup.queue.order_directory.glob("*.json")) + tuple(
+        setup.queue.publication_directory.glob("*.json")
+    )
+    assert len(paths) == 3
+    original_bytes = {path: path.read_bytes() for path in paths}
+    observations.clear()
+    await prepare(setup)
+    assert len(observations) <= unsigned_collections
+    assert {path: path.read_bytes() for path in paths} == original_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["bytes", "permissions", "symlink"])
+async def test_replay_still_verifies_existing_delivery(setup, damage):
+    await prepare(setup)
+    for signer in setup.signers:
+        await setup.queue.accept(await endorse_model(setup, signer))
+    path = setup.queue.order_directory / (digest(setup.model.body) + ".json")
+    if damage == "bytes":
+        # A valid signed envelope can still differ from the immutable outbox.
+        value = _read(path, SignedEvaluationOrder)
+        path.write_bytes(
+            queue_module.canonical_json_bytes(
+                value.model_copy(update={"signatures": tuple(reversed(value.signatures))})
+            )
+        )
+    elif damage == "permissions":
+        path.chmod(0o644)
+    else:
+        other = path.with_suffix(".retained")
+        path.rename(other)
+        path.symlink_to(other)
+    with pytest.raises(ValueError, match=r"different bytes|owned private|non-symlink"):
+        await prepare(setup)
+
+
+@pytest.mark.asyncio
 async def test_one_signature_is_insufficient_and_retry_does_not_add_a_group(setup):
     await prepare(setup)
-    vote = await setup.signers[0].endorse(setup.model)
+    vote = await endorse_model(setup, setup.signers[0])
     assert await setup.queue.accept(vote) == digest(setup.model)
     assert await setup.queue.accept(vote) == digest(setup.model)
     assert not list(Path(setup.arguments["order_directory"]).glob("*.json"))
@@ -85,7 +158,7 @@ async def test_one_signature_is_insufficient_and_retry_does_not_add_a_group(setu
 @pytest.mark.asyncio
 async def test_unsigned_or_unrelated_work_vote_is_rejected(setup):
     await prepare(setup)
-    vote = await setup.signers[0].endorse(setup.model)
+    vote = await endorse_model(setup, setup.signers[0])
     with pytest.raises(ValueError, match="unknown work"):
         await setup.queue.accept(vote.model_copy(update={"statement_sha256": "ff" * 32}))
     with pytest.raises(ValueError, match="signer or statement"):
@@ -98,7 +171,7 @@ async def test_unsigned_or_unrelated_work_vote_is_rejected(setup):
 @pytest.mark.asyncio
 async def test_late_first_arrival_cannot_complete_quorum(setup):
     await prepare(setup)
-    first, second = [await s.endorse(setup.model) for s in setup.signers]
+    first, second = [await endorse_model(setup, s) for s in setup.signers]
     await setup.queue.accept(first)
     setup.provider.block = setup.model.body.round.evaluation_close_block
     with pytest.raises(ValueError, match="outside its original window"):
@@ -165,7 +238,7 @@ async def test_crash_after_intent_recovers_index_without_new_issuance(setup):
 @pytest.mark.asyncio
 async def test_crash_after_certificate_repairs_exact_delivery_on_retry(setup, monkeypatch):
     await prepare(setup)
-    votes = [await s.endorse(setup.model) for s in setup.signers]
+    votes = [await endorse_model(setup, s) for s in setup.signers]
     await setup.queue.accept(votes[0])
     original_publish = queue_module._publish
 
@@ -187,7 +260,7 @@ async def test_crash_after_certificate_repairs_exact_delivery_on_retry(setup, mo
 @pytest.mark.asyncio
 async def test_expired_crash_repair_does_not_publish_a_late_job(setup, monkeypatch):
     await prepare(setup)
-    votes = [await s.endorse(setup.model) for s in setup.signers]
+    votes = [await endorse_model(setup, s) for s in setup.signers]
     await setup.queue.accept(votes[0])
     original = queue_module._publish
 
@@ -210,7 +283,7 @@ async def test_conflicting_plan_blocks_prior_work_and_survives_restart(setup):
     with pytest.raises(ValueError, match="conflict retained"):
         setup.queue.journal.put("work-plan", setup.model.body.round.suite_sha256, {"changed": True})
     setup.queue = queue_module.WorkQueue(**setup.arguments)
-    vote = await setup.signers[0].endorse(setup.model)
+    vote = await endorse_model(setup, setup.signers[0])
     with pytest.raises(ValueError, match="conflict held"):
         await setup.queue.accept(vote)
     _, statements = await setup.queue.pending(setup.signers[0].worker.config.evaluator_hotkey)

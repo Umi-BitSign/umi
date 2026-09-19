@@ -10,10 +10,12 @@ import os
 import shutil
 import sqlite3
 import stat
+import threading
 import time
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal
@@ -24,6 +26,7 @@ from typing_extensions import Self
 from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
+from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
 from .grandpa_finality import EVIDENCE_CLASS, FINNEY_GENESIS_HASH, GrandpaFinalityObserver
@@ -58,10 +61,9 @@ from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
-# A stale head pauses authorization while the observer catches up. Its process
-# lifetime must not share that freshness cutoff. Match the observer's bounded
-# default, leaving all capture freshness checks unchanged.
-_OBSERVER_RECORD_TIMEOUT_SECONDS = 900.0
+# Recycle a silent follow stream after two minutes. Bootstrap keeps its own
+# allowance; consumers independently reject stale heads throughout recovery.
+_OBSERVER_RECORD_TIMEOUT_SECONDS = 120.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -448,6 +450,7 @@ class FinalizedRegistrationProvider:
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._closed = False
         self._prefetch: _PrefetchRpc | None = None
         self._registration_rpc: _RegistrationRpc | None = None
@@ -647,12 +650,27 @@ class FinalizedRegistrationProvider:
     async def aclose(self) -> None:
         self._closed = True
         self._stop.set()
-        if self._task is not None:
-            with suppress(asyncio.TimeoutError, asyncio.CancelledError, RuntimeError):
-                await asyncio.wait_for(self._task, timeout=5)
-        self._latest = None
-        if self._registration_rpc is not None:
-            await self._registration_rpc.aclose()
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                self._close(), name="competition-finality-provider-close"
+            )
+        await await_owned_task(self._close_task)
+
+    async def _close(self) -> None:
+        # Collection keeps this lock until its persistence thread has stopped.
+        # Cleanup, including subclass leases, must not outlive close's owner.
+        async with self._lock:
+            await self._close_resources()
+
+    async def _close_resources(self) -> None:
+        try:
+            if self._task is not None:
+                with suppress(asyncio.TimeoutError, asyncio.CancelledError, RuntimeError):
+                    await asyncio.wait_for(self._task, timeout=5)
+        finally:
+            self._latest = None
+            if self._registration_rpc is not None:
+                await self._registration_rpc.aclose()
 
     async def __call__(self) -> RegistrationSnapshot:
         return (await self.collect()).snapshot
@@ -683,6 +701,8 @@ class FinalizedRegistrationProvider:
 
     async def _collect_locked(self, height: int | None = None) -> RegistrationCapture:
         async with self._lock:
+            if self._closed:
+                raise ValueError("registration provider is closed")
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
             ref = await self._proofs.finalized_snapshot()
@@ -695,7 +715,7 @@ class FinalizedRegistrationProvider:
             block = await self._finality.verified_block_at(ref.block_number)
             self._check_finality(ref, block)
             self._fresh(block.timestamp_ms)
-            self._check_prior(ref)
+            await run_owned_thread(self._check_prior, ref)
             head = ref
             ancestry = None
             if height is not None and height != head.block_number:
@@ -906,7 +926,18 @@ class FinalizedRegistrationProvider:
                     "chain_submission_authorized": False,
                 },
             )
-            self._save(capture, evidence, runtime.metadata_bytes, head=newest)
+            cancelled = threading.Event()
+            await run_owned_thread(
+                partial(
+                    self._save,
+                    capture,
+                    evidence,
+                    runtime.metadata_bytes,
+                    head=newest,
+                    cancelled=cancelled,
+                ),
+                on_cancel=cancelled.set,
+            )
             if ref == head:
                 self._latest = capture
             return capture
@@ -1007,7 +1038,10 @@ class FinalizedRegistrationProvider:
         metadata: bytes,
         *,
         head: FinalizedSnapshotRef | None = None,
+        cancelled: threading.Event | None = None,
     ) -> None:
+        if cancelled is not None and cancelled.is_set():
+            raise ValueError("registration persistence cancelled")
         snapshot = capture.snapshot
         connection = self._connect()
         capacity = None
@@ -1042,6 +1076,8 @@ class FinalizedRegistrationProvider:
                 retained = frozenset()
                 if self._retained_capture_blocks is not None:
                     retained = self._retained_capture_blocks()
+                    if cancelled is not None and cancelled.is_set():
+                        raise ValueError("registration persistence cancelled")
                     if not isinstance(retained, frozenset) or any(
                         type(block) is not int or not 0 <= block <= 2**53 - 1 for block in retained
                     ):
@@ -1087,6 +1123,8 @@ class FinalizedRegistrationProvider:
                         evidence,
                     ),
                 )
+            if cancelled is not None and cancelled.is_set():
+                raise ValueError("registration persistence cancelled")
             self._fresh(capture.provenance["timestamp_ms"])
             connection.execute(
                 "INSERT INTO observed_head VALUES (1, ?, ?) "

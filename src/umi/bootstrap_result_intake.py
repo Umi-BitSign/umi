@@ -1031,6 +1031,10 @@ def build_bootstrap_result_archive(
             submission_journal=result.submission_journal,
             output_root=temporary_observer,
         )
+        # This archive rejects group-writable directories on replay. Specify
+        # its private layout before the general-purpose evidence store opens
+        # it; an operator's umask must not make our own archive unverifiable.
+        (temporary_archive / "objects").mkdir(mode=0o700)
         store = EvidenceStore(
             temporary_archive,
             maximum_object_bytes=MAX_ARCHIVE_OBJECT_BYTES,

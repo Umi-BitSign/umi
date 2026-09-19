@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from umi.competition_store import (
@@ -8,7 +10,8 @@ from umi.competition_store import (
     CompetitionStore,
     _record_digest,
 )
-from umi.open_competition import Evaluator, digest, sign_object
+from umi.open_competition import Evaluator, digest, identity, sign_object
+from umi.protocol import canonical_json_bytes
 
 from . import test_open_competition
 from .test_open_competition import scenario as scenario
@@ -190,10 +193,108 @@ def test_reading_agreed_head_bounds_local_receipt(scenario):
     assert head.promotion_sha256 == _record_digest(record)
 
 
-def test_legacy_review_keeps_original_record_shape(scenario):
+@pytest.mark.parametrize("legacy_alias", [False, True])
+def test_legacy_review_keeps_original_record_shape(scenario, legacy_alias):
     s = scenario
     first = promote(s, s.store, s.review, 150)
     assert first["schema"] == "umi-model-baseline/1"
     assert first["promoted_at_block"] == 150
     assert receipt(s.store) is None
-    assert CompetitionStore(s.store.directory, s.policy).baseline() == first
+    if legacy_alias:
+        for body in (first["evaluation"]["result"], first["review"]["review"]):
+            body["schema_"] = body.pop("schema")
+        with s.store._transaction() as connection:
+            connection.execute(
+                "UPDATE promotions SET digest=?,body=? WHERE sequence=1",
+                (_record_digest(first), canonical_json_bytes(first)),
+            )
+    retained = canonical_json_bytes(first)
+    reopened = CompetitionStore(s.store.directory, s.policy)
+    assert reopened.baseline() == first
+    head = reopened.reviewed_promotion_head(digest(s.round), maximum_bytes=16 * 1024**2)
+    assert head.promotion_sha256 == _record_digest(first)
+    assert head.contributor_hotkey == s.model.submission.hotkey
+    with reopened._connection() as connection:
+        assert connection.execute("SELECT body FROM promotions WHERE sequence=1").fetchone() == (
+            retained,
+        )
+
+
+@pytest.mark.parametrize("read_path", ["head", "reopen"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "review_signature",
+        "review_binding",
+        "missing_review",
+        "contributor",
+        "submission",
+        "parent",
+        "kind",
+        "version",
+        "observation",
+    ],
+)
+def test_legacy_promotion_rehash_does_not_authenticate_corrupted_record(
+    scenario, mutation, read_path
+):
+    s = scenario
+    record = promote(s, s.store, s.review, 150)
+    if mutation == "review_signature":
+        record["review"]["signatures"][0]["signature"] = "0x" + "00" * 64
+    elif mutation == "review_binding":
+        changed = s.review.review.model_copy(update={"model_sha256": "df" * 32})
+        record["review"] = attest(changed).model_dump(mode="json", by_alias=True)
+    elif mutation == "missing_review":
+        record.pop("review")
+    elif mutation == "contributor":
+        record["contributor_hotkey"] = wallet("Bob").hotkey.ss58_address
+    elif mutation == "submission":
+        record["submission_sha256"] = digest(s.endpoint.submission)
+    elif mutation == "parent":
+        record["previous_promotion_sha256"] = "de" * 32
+    elif mutation == "kind":
+        record["kind"] = "unreviewed"
+    elif mutation == "version":
+        record["schema"] = "umi-model-baseline/3"
+    else:
+        record["promoted_at_block"] = 151
+    raw = canonical_json_bytes(record)
+    with s.store._transaction() as connection:
+        connection.execute(
+            "UPDATE promotions SET digest=?,body=?,contributor=? WHERE sequence=1",
+            (_record_digest(record), raw, identity(record["contributor_hotkey"])),
+        )
+
+    with pytest.raises(ValueError):
+        if read_path == "head":
+            s.store.reviewed_promotion_head(digest(s.round), maximum_bytes=16 * 1024**2)
+        else:
+            CompetitionStore(s.store.directory, s.policy)
+
+    # Failure must not normalize, replace, or erase the retained evidence.
+    with s.store._connection() as connection:
+        assert connection.execute("SELECT body FROM promotions WHERE sequence=1").fetchone() == (
+            raw,
+        )
+
+
+@pytest.mark.parametrize("read_path", ["head", "reopen"])
+def test_initial_reference_cannot_gain_contributor_by_rehash(scenario, read_path):
+    s = scenario
+    record = json.loads(canonical_json_bytes(s.store.baseline()))
+    record["contributor_hotkey"] = s.model.submission.hotkey
+    with s.store._transaction() as connection:
+        connection.execute(
+            "UPDATE promotions SET digest=?,body=?,contributor=? WHERE sequence=0",
+            (
+                _record_digest(record),
+                canonical_json_bytes(record),
+                identity(record["contributor_hotkey"]),
+            ),
+        )
+    with pytest.raises(ValueError):
+        if read_path == "head":
+            s.store.reviewed_promotion_head(digest(s.round), maximum_bytes=16 * 1024**2)
+        else:
+            CompetitionStore(s.store.directory, s.policy)

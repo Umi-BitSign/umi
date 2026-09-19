@@ -16,7 +16,6 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
-from .competition_evaluator import Directory, _read
 from .competition_launch import PublicLaunchIdentity
 from .competition_package import PreparedCompetitionPackage
 from .competition_store import CompetitionStore
@@ -29,6 +28,8 @@ from .competition_successor_publication import (
 from .competition_successor_publisher import CurrentSuccessorRoundPublisher
 from .competition_worker import CompetitionReplayWorker, CompetitionWorkerCapacity
 from .open_competition import CompetitionPolicy, digest
+from .private_files import Directory
+from .private_files import read_private_model as _read
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 

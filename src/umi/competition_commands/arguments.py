@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("legacy-policy", "state", "nonce-path"):
         feed.add_argument("--" + name, required=True)
     feed.add_argument("--port", type=int, default=8099)
+    feed.add_argument("--scheduling-capacity", help="shared scheduling-capacity JSON file")
     feed_sign = commands.add_parser("sign-assignment-query")
     for name in ("query", "wallet-name", "hotkey-name", "wallet-path"):
         feed_sign.add_argument("--" + name, required=True)
@@ -135,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         endpoint_pair.add_argument("--" + name, required=True)
     endpoint_pair.add_argument("--current-block", type=int, required=True)
+    endpoint_pair.add_argument("--scheduling-capacity", help="shared scheduling-capacity JSON file")
     execution_status = commands.add_parser("execution-status")
     execution_status.add_argument("--state", required=True)
     execution_status.add_argument("--execution-key", required=True)

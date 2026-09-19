@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import threading
 from dataclasses import replace
 from typing import Any
 
@@ -149,6 +151,63 @@ def _collector(
         verifier=verifier,
         limits=limits,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("many", [False, True])
+async def test_native_proof_verification_does_not_block_event_loop(many):
+    owner = threading.get_ident()
+    observed = []
+
+    def verify(**kwargs):
+        observed.append(threading.get_ident())
+        assert threading.get_ident() != owner
+        return True
+
+    verify.verify_many = verify
+    collector = _collector(_rpc(), verifier=verify)
+    snapshot = FakeFinality().snapshot
+    if many:
+        await collector.storage_evidence_many(snapshot, (b"key",))
+    else:
+        await collector.storage_evidence(snapshot, b"key")
+    assert len(observed) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("many", [False, True])
+async def test_native_proof_cancellation_drains_worker_before_return(many):
+    entered, release = threading.Event(), threading.Event()
+
+    def verify(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    verify.verify_many = verify
+    collector = _collector(_rpc(), verifier=verify)
+    snapshot = FakeFinality().snapshot
+    pending = (
+        collector.storage_evidence_many(snapshot, (b"key",))
+        if many
+        else collector.storage_evidence(snapshot, b"key")
+    )
+    task = asyncio.create_task(pending)
+    try:
+        for _ in range(1000):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert entered.is_set()
+        task.cancel()
+        await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio

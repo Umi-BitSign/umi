@@ -5,10 +5,13 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from copy import copy
 from pathlib import Path
 
 import pytest
@@ -21,6 +24,7 @@ from umi.grandpa_finality import (
     SOURCE_REVISION,
     FinalityAttestation,
     GrandpaFinalityObserver,
+    GrandpaFinalityObserverError,
 )
 from umi.grandpa_finality_supervisor import (
     ACCEPTANCE_RECEIPT_SCHEMA,
@@ -146,15 +150,20 @@ def _attestation(
     )
 
 
-def _write_observer(path: Path) -> str:
+def _write_observer(
+    path: Path, *, stall_after_output: bool = False, skip_minimum: int | None = None
+) -> str:
     source = f'''#!{sys.executable}
 import hashlib
 import json
 import rfc8785
 import sys
+import threading
 
 config = json.load(sys.stdin)
 target = config["minimum_finalized_block"]
+if target == {skip_minimum!r}:
+    target += 1
 parent_hash = "0x" + "{_GENESIS}"
 block = None
 for number in range(target + 1):
@@ -210,6 +219,9 @@ record["transcript_digest"] = hashlib.sha256(
     b"umi-grandpa-finality-attestation-v1\\0" + rfc8785.dumps(unsigned)
 ).hexdigest()
 sys.stdout.buffer.write(rfc8785.dumps(record) + b"\\n")
+sys.stdout.buffer.flush()
+if {stall_after_output!r}:
+    threading.Event().wait()
 '''
     path.write_text(source, encoding="utf-8")
     path.chmod(0o500)
@@ -433,6 +445,327 @@ def test_startup_audit_detects_acceptance_time_tamper(
         _port(tmp_path, observer, chain_observation)
 
 
+def test_audit_uses_one_snapshot_while_another_owner_commits(
+    tmp_path, observer, chain_observation, monkeypatch
+):
+    reader = _port(tmp_path, observer, chain_observation)
+    binding = reader.next_run_binding()
+    block10 = _header(10, parent_hash="0x" + "11" * 32, seed=20)
+    first = _attestation(observer, binding, block=block10, sequence=0, previous=None)
+    reader.accept_attestation(binding, first)
+    writer = _port(tmp_path, observer, chain_observation)
+    block11 = _header(11, parent_hash=str(block10["hash"]), seed=21)
+    second = _attestation(observer, binding, block=block11, sequence=1, previous=first)
+    connect, committed = reader._connect, []
+
+    @contextmanager
+    def concurrent_read(*, read_only):
+        assert read_only
+        with connect(read_only=True) as connection:
+
+            class ConcurrentRead:
+                def execute(self, sql, *args):
+                    if sql == "SELECT * FROM observer_segments ORDER BY segment_index":
+                        # Commit after audit read the head digest, before it reads
+                        # segments/headers. A healthy WAL writer must not turn this
+                        # audit into a false corruption report.
+                        committed.append(writer.accept_attestation(binding, second))
+                    return connection.execute(sql, *args)
+
+            yield ConcurrentRead()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reader, "_connect", concurrent_read)
+        reader.audit()
+    assert len(committed) == 1 and committed[0].height == 11
+    assert reader.persisted_head().height == 11
+    reader.audit()
+
+
+def _audit_history(port, observer, *, segment_lengths=(2, 2)):
+    records = []
+    parent_hash = "0x" + "11" * 32
+    height = 10
+    for length in segment_lengths:
+        binding = port.next_run_binding()
+        previous = None
+        for sequence in range(length):
+            block = _header(height, parent_hash=parent_hash, seed=height + 10)
+            attestation = _attestation(
+                observer, binding, block=block, sequence=sequence, previous=previous
+            )
+            port.accept_attestation(binding, attestation)
+            records.append(attestation)
+            previous = attestation
+            parent_hash = str(block["hash"])
+            height += 1
+    return records
+
+
+def test_audit_streams_history_before_reading_the_next_header(
+    tmp_path, observer, chain_observation, monkeypatch
+):
+    port = _port(tmp_path, observer, chain_observation)
+    records = _audit_history(port, observer, segment_lengths=(2,) * 12)
+    connect = port._connect
+    validate = observer.validate_attestation
+    counts = {"headers": 0, "segments": 0, "parsed": 0}
+
+    class StreamingCursor:
+        def __init__(self, cursor, kind):
+            self.cursor, self.kind = cursor, kind
+
+        def fetchall(self):
+            pytest.fail("audit must not materialize history")
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            row = next(self.cursor)
+            counts[self.kind] += 1
+            return row
+
+    @contextmanager
+    def streaming_read(*, read_only):
+        assert read_only
+        with connect(read_only=True) as connection:
+
+            class StreamingRead:
+                def execute(self, sql, *args):
+                    cursor = connection.execute(sql, *args)
+                    if sql == "SELECT * FROM finalized_headers ORDER BY height":
+                        return StreamingCursor(cursor, "headers")
+                    if sql == "SELECT * FROM observer_segments ORDER BY segment_index":
+                        return StreamingCursor(cursor, "segments")
+                    return cursor
+
+            yield StreamingRead()
+
+    def checked_validate(*args, **kwargs):
+        assert counts["headers"] == counts["parsed"] + 1
+        assert counts["segments"] == counts["parsed"] // 2 + 1
+        result = validate(*args, **kwargs)
+        counts["parsed"] += 1
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(port, "_connect", streaming_read)
+        patch.setattr(observer, "validate_attestation", checked_validate)
+        port.audit()
+    assert counts == {"headers": len(records), "segments": 12, "parsed": len(records)}
+
+
+def test_audit_snapshot_survives_commit_during_parser_replay(
+    tmp_path, observer, chain_observation, monkeypatch
+):
+    audit_observer = copy(observer)
+    reader = _port(tmp_path, audit_observer, chain_observation)
+    records = _audit_history(reader, audit_observer, segment_lengths=(2,))
+    writer = _port(tmp_path, observer, chain_observation)
+    binding = writer.next_run_binding()
+    third = _attestation(
+        observer,
+        binding,
+        block=_header(12, parent_hash=records[-1].block.hash, seed=22),
+        sequence=0,
+        previous=None,
+    )
+    validate = audit_observer.validate_attestation
+    replayed, checkpoints = [], []
+
+    def commit_during_replay(*args, **kwargs):
+        result = validate(*args, **kwargs)
+        replayed.append(result.block.number)
+        if len(replayed) == 1:
+            assert writer.accept_attestation(binding, third).height == 12
+            with sqlite3.connect(tmp_path / "finality.sqlite3") as connection:
+                checkpoints.append(connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone())
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(audit_observer, "validate_attestation", commit_during_replay)
+        reader.audit()
+    assert replayed == [10, 11]
+    assert len(checkpoints) == 1 and checkpoints[0][1] > checkpoints[0][2]
+    assert reader.persisted_head().height == 12
+    with sqlite3.connect(tmp_path / "finality.sqlite3") as connection:
+        assert connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+    reader.audit()
+
+
+@pytest.mark.parametrize(
+    ("statements", "reason"),
+    [
+        (
+            ["DELETE FROM finalized_headers WHERE segment_index = 1"],
+            "empty_or_orphan_segment",
+        ),
+        (
+            ["UPDATE finalized_headers SET segment_index = 99 WHERE height = 13"],
+            "sqlite_foreign_key_check_failed",
+        ),
+        (
+            [
+                "UPDATE observer_segments SET segment_index = 2 WHERE segment_index = 1",
+                "UPDATE finalized_headers SET segment_index = 2 WHERE segment_index = 1",
+            ],
+            "nonconsecutive_segment",
+        ),
+        (
+            [
+                "UPDATE finalized_headers SET segment_index = 1, segment_sequence = 2 "
+                "WHERE height = 10"
+            ],
+            "global_height_rollback",
+        ),
+        (
+            [
+                "UPDATE finalized_headers SET segment_index = 0, segment_sequence = 2 "
+                "WHERE height = 13"
+            ],
+            "global_height_rollback",
+        ),
+        (
+            ["UPDATE finalized_headers SET segment_sequence = 2 WHERE height = 11"],
+            "normalized_header_mismatch",
+        ),
+        (
+            ["UPDATE observer_segments SET minimum_finalized_block = 99 WHERE segment_index = 1"],
+            "segment_run_binding_mismatch",
+        ),
+        (
+            ["UPDATE observer_segments SET restart_gap = 1 WHERE segment_index = 1"],
+            "segment_boundary_mismatch",
+        ),
+        (
+            ["UPDATE store_meta SET value = zeroblob(32) WHERE key = 'head_acceptance_digest'"],
+            "head_acceptance_digest_mismatch",
+        ),
+        (
+            ["UPDATE finalized_headers SET canonical_evidence = x'7b7d' WHERE height = 11"],
+            "persisted_invalid_record_shape",
+        ),
+    ],
+)
+def test_streaming_audit_rejects_corrupt_history(
+    tmp_path, observer, chain_observation, statements, reason
+):
+    port = _port(tmp_path, observer, chain_observation)
+    _audit_history(port, observer)
+    with sqlite3.connect(tmp_path / "finality.sqlite3") as connection:
+        for statement in statements:
+            connection.execute(statement)
+    with pytest.raises(GrandpaFinalityStoreCorruption, match=reason):
+        port.audit()
+
+
+@pytest.mark.parametrize("exceeded", [None, "headers", "evidence"])
+def test_audit_scalar_limits_at_and_above_capacity(tmp_path, observer, chain_observation, exceeded):
+    port = _port(tmp_path, observer, chain_observation)
+    records = _audit_history(port, observer)
+    sizes = [len(record.canonical_bytes) for record in records]
+    port._limits = GrandpaFinalitySupervisorLimits(
+        maximum_headers=len(records) - (exceeded == "headers"),
+        maximum_evidence_bytes=max(sizes),
+        maximum_total_evidence_bytes=sum(sizes) - (exceeded == "evidence"),
+        maximum_records_per_process=2,
+    )
+    # Bind this fixture to its chosen exact budget before reopening the audit.
+    config = port._config_bytes()
+    with sqlite3.connect(tmp_path / "finality.sqlite3") as connection:
+        connection.execute("UPDATE store_meta SET value = ? WHERE key = 'config'", (config,))
+        connection.execute(
+            "UPDATE store_meta SET value = ? WHERE key = 'config_sha256'",
+            (hashlib.sha256(config).digest(),),
+        )
+    if exceeded is None:
+        port.audit()
+    else:
+        reason = "header_count_limit" if exceeded == "headers" else "total_evidence_limit"
+        with pytest.raises(GrandpaFinalityStoreCorruption, match=reason):
+            port.audit()
+
+
+def test_failed_streaming_audit_releases_its_snapshot(
+    tmp_path, observer, chain_observation, monkeypatch
+):
+    audit_observer = copy(observer)
+    reader = _port(tmp_path, audit_observer, chain_observation)
+    records = _audit_history(reader, audit_observer, segment_lengths=(2,))
+    writer = _port(tmp_path, observer, chain_observation)
+    binding = writer.next_run_binding()
+    third = _attestation(
+        observer,
+        binding,
+        block=_header(12, parent_hash=records[-1].block.hash, seed=22),
+        sequence=0,
+        previous=None,
+    )
+    validate = audit_observer.validate_attestation
+    replayed = []
+
+    def fail_after_commit(*args, **kwargs):
+        result = validate(*args, **kwargs)
+        replayed.append(result.block.number)
+        if len(replayed) == 2:
+            writer.accept_attestation(binding, third)
+            raise GrandpaFinalityObserverError("invalid_record_shape")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(audit_observer, "validate_attestation", fail_after_commit)
+        with pytest.raises(GrandpaFinalityStoreCorruption, match="persisted_invalid_record_shape"):
+            reader.audit()
+    assert replayed == [10, 11]
+    with sqlite3.connect(tmp_path / "finality.sqlite3") as connection:
+        assert connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+    assert reader.persisted_head().height == 12
+    reader.audit()
+
+
+def test_streaming_audit_wraps_cursor_failure_and_closes_connection(
+    tmp_path, observer, chain_observation, monkeypatch
+):
+    port = _port(tmp_path, observer, chain_observation)
+    _audit_history(port, observer, segment_lengths=(2,))
+    connect, opened = port._connect, []
+
+    @contextmanager
+    def failing_read(*, read_only):
+        assert read_only
+        with connect(read_only=True) as connection:
+            opened.append(connection)
+
+            class FailingCursor:
+                def __init__(self, cursor):
+                    self.cursor, self.read = cursor, 0
+
+                def __next__(self):
+                    self.read += 1
+                    if self.read == 2:
+                        raise sqlite3.OperationalError("injected cursor failure")
+                    return next(self.cursor)
+
+            class FailingRead:
+                def execute(self, sql, *args):
+                    cursor = connection.execute(sql, *args)
+                    if sql == "SELECT * FROM finalized_headers ORDER BY height":
+                        return FailingCursor(cursor)
+                    return cursor
+
+            yield FailingRead()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(port, "_connect", failing_read)
+        with pytest.raises(GrandpaFinalityStoreCorruption, match="sqlite_read_failed"):
+            port.audit()
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        opened[0].execute("SELECT 1")
+    port.audit()
+
+
 def test_acceptance_clock_rollback_is_rejected_before_insert(
     tmp_path: Path,
     observer: GrandpaFinalityObserver,
@@ -531,6 +864,238 @@ def test_blocking_supervisor_runs_multiple_segments_and_stops_promptly(
     assert not thread.is_alive()
     assert failure == []
     assert port.persisted_head() is not None
+    port.audit()
+
+
+def test_subprocess_timeout_reaps_before_restart_and_shutdown_preserves_gap(
+    tmp_path, chain_observation, monkeypatch
+):
+    binary = tmp_path / "stalled-observer"
+    binary_hash = _write_observer(binary, stall_after_output=True, skip_minimum=11)
+    chain_spec = tmp_path / "finney.json"
+    chain_spec.write_bytes(b"{}")
+    chain_spec.chmod(0o400)
+    selected = GrandpaFinalityObserver(
+        binary_path=binary,
+        expected_binary_sha256=binary_hash,
+        chain_spec_path=chain_spec,
+        expected_chain_spec_sha256=hashlib.sha256(b"{}").hexdigest(),
+        expected_genesis_hash=f"0x{_GENESIS}",
+        bootstrap_block_number=1,
+        bootstrap_block_hash=f"0x{_BOOTSTRAP}",
+        record_timeout_seconds=0.1,
+        first_record_timeout_seconds=5,
+    )
+    port = _port(tmp_path, selected, chain_observation)
+    stop, finished = threading.Event(), threading.Event()
+    processes, bindings, failures = [], [], []
+    popen, accept = subprocess.Popen, port.accept_attestation
+
+    def spawn(*args, **kwargs):
+        # Check the prior handle before starting its replacement. Calling poll()
+        # here could reap it ourselves and conceal missing production cleanup.
+        if processes:
+            assert processes[-1].returncode is not None
+        assert len(processes) < 2, "shutdown must not start a third observer"
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def accepted(binding, attestation):
+        head = accept(binding, attestation)
+        bindings.append(binding)
+        if len(bindings) == 2:
+            stop.set()
+        return head
+
+    def run():
+        try:
+            port.run_blocking(stop)
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(port, "accept_attestation", accepted)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        assert finished.wait(15), "supervisor did not recover and stop"
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert failures == []
+        assert len(processes) == 2
+        assert all(process.returncode is not None for process in processes)
+        assert [(b.segment_index, b.minimum_finalized_block) for b in bindings] == [
+            (0, 10),
+            (1, 11),
+        ]
+        head = port.persisted_head()
+        assert head is not None and head.height == 12 and head.restart_gap_before
+        assert asyncio.run(port.verified_block_at(11)) is None
+        assert asyncio.run(port.verified_scan_interval(11, 12)) is None
+        assert port.next_run_binding().segment_index == 2
+        port.audit()
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        # Keep failed assertions from leaving fixture children behind. Assertions
+        # above require production to reap both handles before this fallback.
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+        thread.join(timeout=5)
+
+
+def test_timeout_recovery_advances_persisted_head_without_inventing_gap_ancestry(
+    tmp_path, observer, chain_observation, monkeypatch, caplog
+):
+    port = _port(tmp_path, observer, chain_observation)
+    stop = threading.Event()
+    bindings = []
+    waits = []
+    finalized = []
+
+    def attestations(**kwargs):
+        binding = port.next_run_binding()
+        assert kwargs["minimum_finalized_block"] == binding.minimum_finalized_block
+        assert len(finalized) == len(bindings), "old iterator must close before replacement"
+        bindings.append(binding)
+        block = _header(10 if len(bindings) == 1 else 12, parent_hash="0x" + "11" * 32, seed=20)
+        try:
+            yield _attestation(observer, binding, block=block, sequence=0, previous=None)
+            if len(bindings) == 1:
+                raise GrandpaFinalityObserverError("record_timeout")
+            stop.set()
+        finally:
+            finalized.append(binding.segment_index)
+
+    monkeypatch.setattr(observer, "attestations", attestations)
+    monkeypatch.setattr(stop, "wait", lambda seconds: waits.append(seconds) or False)
+    port.run_blocking(stop)
+    assert [(b.segment_index, b.minimum_finalized_block) for b in bindings] == [(0, 10), (1, 11)]
+    assert waits == [1.0]
+    assert finalized == [0, 1]
+    head = port.persisted_head()
+    assert head is not None and head.height == 12 and head.restart_gap_before
+    assert "finality_observer_record_timeout" in caplog.text
+    assert asyncio.run(port.verified_block_at(11)) is None
+    assert asyncio.run(port.verified_scan_interval(11, 12)) is None
+    port.audit()
+
+
+def test_timeout_recovery_bounds_backoff_and_stop_interrupts_it(
+    tmp_path, observer, chain_observation, monkeypatch
+):
+    port = _port(tmp_path, observer, chain_observation)
+    stop = threading.Event()
+    waits = []
+    attempts = []
+
+    def attestations(**kwargs):
+        attempts.append(kwargs["minimum_finalized_block"])
+        raise GrandpaFinalityObserverError("record_timeout")
+        yield  # pragma: no cover - keep the test double an iterator
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 8:
+            stop.set()
+        return stop.is_set()
+
+    monkeypatch.setattr(observer, "attestations", attestations)
+    monkeypatch.setattr(stop, "wait", wait)
+    port.run_blocking(stop)
+    assert waits == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0]
+    assert attempts == [10] * 8
+    assert port.persisted_head() is None
+    assert port._run_lock.acquire(blocking=False)
+    port._run_lock.release()
+
+
+@pytest.mark.parametrize(
+    "reason", ["observer_failed", "record_size_limit", "invalid_json", "record_count_mismatch"]
+)
+def test_non_timeout_observer_faults_remain_terminal(
+    tmp_path, observer, chain_observation, monkeypatch, reason
+):
+    port = _port(tmp_path, observer, chain_observation)
+    stop = threading.Event()
+    calls = []
+
+    def attestations(**kwargs):
+        calls.append(kwargs)
+        raise GrandpaFinalityObserverError(reason)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(observer, "attestations", attestations)
+    with pytest.raises(GrandpaFinalitySupervisorError, match="observer_" + reason):
+        port.run_blocking(stop)
+    assert len(calls) == 1
+    assert port.persisted_head() is None
+
+
+@pytest.mark.parametrize("cancel_again", [False, True])
+async def test_cancellation_waits_for_owned_observer_cleanup(
+    tmp_path, observer, chain_observation, monkeypatch, cancel_again
+):
+    port = _port(tmp_path, observer, chain_observation)
+    entered, cleaning = asyncio.Event(), asyncio.Event()
+    finish_cleanup, finished = threading.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def blocking_run(stop):
+        loop.call_soon_threadsafe(entered.set)
+        stop.wait(3)
+        loop.call_soon_threadsafe(cleaning.set)
+        finish_cleanup.wait(3)
+        finished.set()
+
+    monkeypatch.setattr(port, "run_blocking", blocking_run)
+    running = asyncio.create_task(port.run(asyncio.Event()))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        running.cancel()
+        await asyncio.wait_for(cleaning.wait(), timeout=3)
+        assert not running.done(), "shutdown must wait for the owned process to finish cleanup"
+        if cancel_again:
+            running.cancel()
+            await asyncio.sleep(0)
+            assert not running.done()
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=3)
+        assert finished.is_set()
+    finally:
+        finish_cleanup.set()
+        await asyncio.gather(running, return_exceptions=True)
+        await asyncio.to_thread(finished.wait, 3)
+
+
+def test_timeout_backoff_resets_only_after_committed_progress(
+    tmp_path, observer, chain_observation, monkeypatch
+):
+    port = _port(tmp_path, observer, chain_observation)
+    stop, waits, calls = threading.Event(), [], []
+
+    def attestations(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 3:
+            binding = port.next_run_binding()
+            block = _header(10, parent_hash="0x" + "11" * 32, seed=20)
+            yield _attestation(observer, binding, block=block, sequence=0, previous=None)
+        elif len(calls) == 4:
+            stop.set()
+            return
+        raise GrandpaFinalityObserverError("record_timeout")
+
+    monkeypatch.setattr(observer, "attestations", attestations)
+    monkeypatch.setattr(stop, "wait", lambda delay: waits.append(delay) or False)
+    port.run_blocking(stop)
+    assert waits == [1.0, 2.0, 1.0]
+    assert [c["minimum_finalized_block"] for c in calls] == [10, 10, 10, 11]
     port.audit()
 
 

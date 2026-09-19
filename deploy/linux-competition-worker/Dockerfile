@@ -2,29 +2,9 @@
 
 FROM docker.io/library/rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-builder
 
-WORKDIR /build/finality
-COPY rust/grandpa-finality-observer/Cargo.toml rust/grandpa-finality-observer/Cargo.lock ./
-COPY rust/grandpa-finality-observer/build.rs ./
-COPY rust/grandpa-finality-observer/rust-toolchain.toml ./
-COPY rust/grandpa-finality-observer/src ./src
-COPY rust/grandpa-finality-observer/fixtures ./fixtures
-COPY rust/grandpa-finality-observer/vendor ./vendor
-RUN cargo +1.98.0 build --locked --release \
-    && target/release/umi-grandpa-finality-observer --conformance-self-test
-
-WORKDIR /build/proof
-COPY rust/substrate-proof-verifier/Cargo.toml rust/substrate-proof-verifier/Cargo.lock ./
-COPY rust/substrate-proof-verifier/src ./src
-COPY rust/substrate-proof-verifier/fixtures ./fixtures
-RUN cargo +1.98.0 test --locked --release \
-    && cargo +1.98.0 build --locked --release
-
-WORKDIR /build/runtime-metadata
-COPY rust/runtime-metadata/Cargo.toml rust/runtime-metadata/Cargo.lock ./
-COPY rust/runtime-metadata/src ./src
-COPY rust/grandpa-finality-observer/vendor /build/grandpa-finality-observer/vendor
-RUN cargo +1.98.0 test --locked --release \
-    && cargo +1.98.0 build --locked --release
+COPY rust /build/rust
+COPY deploy/native-verifiers/build.sh /build/build-native-verifiers.sh
+RUN sh /build/build-native-verifiers.sh grandpa-finality-observer substrate-proof-verifier runtime-metadata
 
 FROM ghcr.io/astral-sh/uv:0.12.9@sha256:8b940d3a9d65bed080436972241af2e21c84b5e8c9193f7014ed71479ee795ff AS uv
 FROM docker.io/library/python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
@@ -73,13 +53,13 @@ RUN uv sync --locked --no-dev \
       /usr/local/bin/umi-competition-worker
 
 COPY --from=rust-builder \
-  /build/finality/target/release/umi-grandpa-finality-observer \
+  /build/bin/umi-grandpa-finality-observer \
   /opt/umi/bin/umi-grandpa-finality-observer
 COPY --from=rust-builder \
-  /build/proof/target/release/umi-substrate-proof-verifier \
+  /build/bin/umi-substrate-proof-verifier \
   /opt/umi/bin/umi-substrate-proof-verifier
 COPY --from=rust-builder \
-  /build/runtime-metadata/target/release/umi-runtime-metadata \
+  /build/bin/umi-runtime-metadata \
   /opt/umi/bin/umi-runtime-metadata
 # Podman 4.9 does not support ADD --checksum. The next RUN verifies these bytes
 # before either verifier executes or the image can finish building.
