@@ -531,7 +531,7 @@ async def test_two_heads_reuse_one_retained_runtime_artifact(chain):
 
 @pytest.mark.parametrize(
     "startup_seconds,head_age_ms,record_timeout",
-    [(600, 120_000, 45.0), (30, 10_000, 5.0), (60, 60_000, 30.0)],
+    [(600, 120_000, 15.0), (30, 10_000, 5.0), (60, 60_000, 15.0)],
 )
 async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanly(
     chain, monkeypatch, startup_seconds, head_age_ms, record_timeout

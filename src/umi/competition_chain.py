@@ -62,9 +62,10 @@ from .validator_plans import VerifiedFinalizedBlock
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
 # Reconnect silent follow streams before consuming the full freshness budget.
-# Headers already have network/finality age when accepted; restart also takes
-# time. Bootstrap keeps its separate allowance, and stale heads stay rejected.
-_OBSERVER_RECORD_TIMEOUT_SECONDS = 45.0
+# Publication journals require observations younger than 60 seconds. Headers
+# already have network/finality age when accepted; restart also takes time.
+# Bootstrap keeps its separate allowance, and stale heads stay rejected.
+_OBSERVER_RECORD_TIMEOUT_SECONDS = 15.0
 _LOGGER = logging.getLogger(__name__)
 
 

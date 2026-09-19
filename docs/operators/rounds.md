@@ -250,10 +250,11 @@ observer now exits the parent service even when no work is queued. HTTP shutdown
 drains requests before closing providers; journals are retained. The durable
 observer also recovers a silent follow-stream timeout: it reaps the old process
 and restarts from the last retained head, with interruptible backoff from one to
-30 seconds. Competition providers use a follow-stream timeout of 45 seconds or
-half their configured head-age limit, whichever is shorter. Initial bootstrap
-has its own allowance. Invalid evidence and store faults remain
-terminal. Recovery never invents missing ancestry or makes stale heads usable.
+30 seconds. Competition providers use a follow-stream timeout of 15 seconds or
+half their configured head-age limit, whichever is shorter. This accounts for
+publication journals' stricter 60-second freshness check as well as head age and
+restart time. Initial bootstrap has its own allowance. Invalid evidence and store
+faults remain terminal. Recovery never invents missing ancestry or makes stale heads usable.
 An active process alone does not prove that the service has a fresh finalized
 head. This describes the source implementation; installed services need the
 corresponding qualified release to acquire new recovery behavior.

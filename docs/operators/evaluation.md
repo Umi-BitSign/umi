@@ -78,9 +78,10 @@ checks enabled; changing the RPC endpoint does not grant finality authority.
 
 The owned observer uses `startup_timeout_seconds` for its first verified record
 (600 seconds by default, configurable up to 900). The source implementation now
-reconnects a silent follow stream after 45 seconds or half the configured head-age
-limit, whichever is shorter. This leaves time for recovery before an already-aged
-header becomes stale. It recovers from the last retained head after reaping the
+reconnects a silent follow stream after 15 seconds or half the configured head-age
+limit, whichever is shorter. Publication journals have a stricter 60-second
+freshness check; the reconnect allowance also needs room for a header's existing
+age and restart time. It recovers from the last retained head after reaping the
 old process. Signing and execution still require
 a fresh verified head. See [observer recovery and release qualification](rounds.md#open-competition-round-coordinator--capacity-operations-and-verification);
 an installed service needs the corresponding qualified release to use this behavior.
