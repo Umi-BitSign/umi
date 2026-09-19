@@ -172,9 +172,11 @@ def plan_dispatch_capacity(
     The caller must hold its capacity transaction while reading that inventory.
 
     The envelope first charges all ingestion, serialized proofs and grace probes
-    without taking overlap credit. HTTP work uses the list-scheduling bound
-    W/C + (1-1/C)L: C actual task slots, W total padded work, L the longest miner
-    chain. Each job includes a full cursor sweep delay, including a wrap, to cover
+    without taking overlap credit. With a slot for every distinct miner, HTTP
+    work is bounded by the longest miner chain: only one task per miner can run.
+    Otherwise use the list-scheduling bound W/C + (1-1/C)L: C actual task slots,
+    W total padded work, L the longest miner chain. Each job includes a full
+    cursor sweep delay, including a wrap, to cover
     the dispatcher's bounded page scan and polling rather than assuming immediate
     refill. An extra full HTTP timeout covers the last permissible start. This is
     intentionally conservative; it is not an optimal ordering or a throughput
@@ -227,14 +229,17 @@ def plan_dispatch_capacity(
         else 0
     )
     padded = timeout + scans * (poll + budget.local_cycle_ms)
-    parallel = (
-        ceil_div(
+    # Count miners from the complete workload, including already in-flight jobs.
+    # poll_once retires done tasks before admission and never starts a second
+    # task for a busy miner. Enough slots therefore eliminate HTTP contention;
+    # serialized I/O and cursor-sweep delays remain charged above and below.
+    if len(miners) <= limits.maximum_concurrency:
+        parallel = longest * padded
+    else:
+        parallel = ceil_div(
             (count + (limits.maximum_concurrency - 1) * longest) * padded,
             limits.maximum_concurrency,
         )
-        if count
-        else 0
-    )
     last_start = now_ms + serial + parallel
     last_finish = last_start + timeout if count else now_ms
     finish_block = (

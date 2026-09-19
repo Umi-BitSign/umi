@@ -109,6 +109,34 @@ def test_concurrency_only_helps_when_multiple_miners_can_run(limits, budget):
     assert parallel.serial_overhead_ms == single.serial_overhead_ms
 
 
+@pytest.mark.parametrize("slots", [3, 4, 128])
+def test_one_slot_per_miner_bounds_http_by_longest_chain(limits, budget, slots):
+    jobs = tuple(job(i, miner=1 if i <= 6 else i - 5) for i in range(1, 9))
+    limits = limits.model_copy(update={"maximum_concurrency": slots})
+    result = plan(jobs, limits, budget)
+    padded = limits.request_timeout_seconds * 1000 + result.scan_cycles * (
+        limits.poll_seconds * 1000 + budget.local_cycle_ms
+    )
+    assert result.maximum_miner_assignments == 6
+    assert result.parallel_work_ms == 6 * padded
+    # Spare slots cannot accelerate a miner's serialized work or remove I/O cost.
+    saturated = plan(jobs, limits.model_copy(update={"maximum_concurrency": 3}), budget)
+    assert result.last_finish_upper_bound_ms == saturated.last_finish_upper_bound_ms
+
+
+def test_in_flight_miner_counts_at_slot_contention_boundary(limits, budget):
+    limits = limits.model_copy(update={"maximum_concurrency": 2})
+    jobs = (job(1, miner=1), job(2, miner=2))
+    spare = plan(jobs, limits, budget)
+    occupied = plan((*jobs, job(3, miner=3, state="in_flight", issue_close_ms=100)), limits, budget)
+    padded = limits.request_timeout_seconds * 1000 + occupied.scan_cycles * (
+        limits.poll_seconds * 1000 + budget.local_cycle_ms
+    )
+    assert occupied.parallel_work_ms == 2 * padded
+    assert occupied.parallel_work_ms > spare.parallel_work_ms
+    assert occupied.pending_count == 2
+
+
 def test_existing_work_consumes_slots_and_time(limits, budget):
     candidate = job(1)
     alone = plan((candidate,), limits, budget)
@@ -616,6 +644,27 @@ async def test_capacity_bound_covers_real_poll_loop_with_serial_publication_grac
     if concurrency == 1:
         # First-page grace holds really do monopolize the single dispatch slot.
         assert max(observed.finishes.values()) - 1000 >= observed.publication_count * grace * 1000
+
+
+@pytest.mark.parametrize("slots", [3, 128])
+@pytest.mark.parametrize("ordering", ["grouped", "interleaved", "shuffled"])
+async def test_uncontended_bound_covers_real_poll_loop(limits, budget, slots, ordering):
+    limits = limits.model_copy(
+        update={"maximum_concurrency": slots, "page_size": 2, "poll_seconds": 1}
+    )
+    entries = [(miner, case) for miner, count in ((1, 6), (2, 4), (3, 1)) for case in range(count)]
+    if ordering == "interleaved":
+        entries.sort(key=lambda item: (item[1], item[0]))
+    elif ordering == "shuffled":
+        random.Random(314159).shuffle(entries)
+    jobs = tuple(job(index, miner=miner) for index, (miner, _case) in enumerate(entries, 1))
+    extra_inbox = tuple(f"{index:064x}" for index in range(1, 4))
+    result = plan(jobs, limits, budget, additional_inbox_publications=len(extra_inbox))
+    observed = await _exercise_poll_loop(jobs, limits, budget, extra_inbox=extra_inbox)
+    assert observed.metrics.full_pages > 0 and observed.metrics.cursor_wraps > 0
+    assert 1 < observed.metrics.peak_http <= 3
+    assert max(observed.starts.values()) <= result.last_start_upper_bound_ms
+    assert max(observed.finishes.values()) <= result.last_finish_upper_bound_ms
 
 
 @pytest.mark.parametrize(
