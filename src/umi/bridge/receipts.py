@@ -51,17 +51,9 @@ class _Header:
     extrinsics_root: str
 
 
-def retain_verified_receipt(journal, proven: VerifiedBridgeReceipt, *, now: datetime):
-    """Build one transition from a local reader result, never an RPC receipt.
-
-    Receipt inclusion settles transaction uncertainty. A successful call still
-    needs the separate current-row check before the journal becomes applied.
-    """
-    journal = parse_bridge_journal(canonical_json_bytes(journal))
+def _check_receipt(journal: RegistrationBridgeTransactionJournal, proven: VerifiedBridgeReceipt):
     _require(
-        type(journal) is RegistrationBridgeTransactionJournal
-        and journal.phase in {"submitting", "outcome_unknown", "receipt_returned"}
-        and type(proven) is VerifiedBridgeReceipt
+        type(proven) is VerifiedBridgeReceipt
         and proven.signed_extrinsic_hash == journal.signed_extrinsic_hash,
         "bridge_receipt_attempt_mismatch",
     )
@@ -73,9 +65,29 @@ def retain_verified_receipt(journal, proven: VerifiedBridgeReceipt, *, now: date
         "bridge_receipt_position_invalid",
     )
     _require(
-        journal.weight_call is None or (proven.successful and journal.weight_call == receipt),
+        (journal.weight_call is None or (proven.successful and journal.weight_call == receipt))
+        and (
+            journal.failed_call is None
+            or (not proven.successful and journal.failed_call == receipt)
+        ),
         "bridge_receipt_conflict",
     )
+
+
+def retain_verified_receipt(journal, proven: VerifiedBridgeReceipt, *, now: datetime):
+    """Build one transition from a local reader result, never an RPC receipt.
+
+    Receipt inclusion settles transaction uncertainty. A successful call still
+    needs the separate current-row check before the journal becomes applied.
+    """
+    journal = parse_bridge_journal(canonical_json_bytes(journal))
+    _require(
+        type(journal) is RegistrationBridgeTransactionJournal
+        and journal.phase in {"submitting", "outcome_unknown", "receipt_returned"},
+        "bridge_receipt_attempt_mismatch",
+    )
+    _check_receipt(journal, proven)
+    receipt, anchor = proven.receipt, proven.owned_head
     updates = dict(updated_at_unix_ms=datetime_to_unix_ms(now))
     if anchor.block_number >= journal.last_observed_block:
         _require(
@@ -100,6 +112,8 @@ class BridgeReceiptReader:
     Progress is not loaded from operator JSON or accepted as finality evidence.
     After process restart the ancestry is authenticated again. The caller still
     checks the current row and policy before allowing another submission.
+    Descending historical attempts can share the verified ancestry prefix;
+    their results keep its original owned head, not a refreshed observation.
     """
 
     def __init__(
@@ -159,12 +173,16 @@ class BridgeReceiptReader:
         journal = parse_bridge_journal(canonical_json_bytes(journal))
         _require(
             type(journal) is RegistrationBridgeTransactionJournal
-            and journal.phase in {"submitting", "outcome_unknown", "receipt_returned", "applied"}
+            and journal.phase
+            in {"submitting", "outcome_unknown", "receipt_returned", "applied", "failed"}
             and journal.signed_extrinsic is not None,
             "bridge_receipt_signed_attempt_required",
         )
         task = asyncio.create_task(asyncio.wait_for(self._find(journal), self._timeout))
-        return await await_owned_task(task, on_cancel=task.cancel)
+        proven = await await_owned_task(task, on_cancel=task.cancel)
+        if proven is not None:
+            _check_receipt(journal, proven)
+        return proven
 
     async def _header(self, block_hash: str, number: int, raw=None) -> _Header:
         raw = await self._rpc.request("chain_getHeader", (block_hash,)) if raw is None else raw
@@ -181,17 +199,28 @@ class BridgeReceiptReader:
 
     async def _find(self, journal):
         async with self._lock:
+            attempt = journal.attempt
+            birth, last = attempt.preflight_block, attempt.era_death - 1
+            _require(last - birth == 7, "bridge_receipt_era_unsupported")
             identity = (journal.attempt.attempt_id, journal.signed_extrinsic_hash)
             if identity != self._identity:
+                # A stopped handoff visits attempts newest first. The cursor
+                # already authenticates the prefix from its owned head; keep
+                # that prefix when the entire next era is below the cursor.
+                # Newer or overlapping eras start with a new owned head.
+                earlier_era = (
+                    self._anchor is not None
+                    and self._cursor is not None
+                    and last <= self._cursor.snapshot.block_number
+                )
                 self._identity = identity
-                self._anchor = self._cursor = self._found = None
+                if not earlier_era:
+                    self._anchor = self._cursor = None
+                self._found = None
                 self._era.clear()
                 self._checked.clear()
             if self._found is not None:
                 return self._found
-            attempt = journal.attempt
-            birth, last = attempt.preflight_block, attempt.era_death - 1
-            _require(last - birth == 7, "bridge_receipt_era_unsupported")
             # Refresh only after completing the available part of a live era.
             # A timeout midway through an old path resumes that path instead.
             if self._cursor is None or (

@@ -19,6 +19,36 @@ from umi.bridge.policy import RegistrationBridgeError
 from umi.bridge.receipts import BridgeReceiptReader, retain_verified_receipt
 from umi.bridge.transactions import evolve_journal
 from umi.chain import _header_hash
+from umi.protocol import canonical_json_bytes
+
+
+def journal_at(history, offset):
+    """Rebind synthetic receipt fixtures to another era on the same test chain."""
+    original = history.journal
+    number = history.birth + offset
+    block_hash = history.hashes[number]
+    immutable = original.attempt.model_dump(mode="json", by_alias=True, exclude={"attempt_id"})
+    immutable.update(preflight_block=number, preflight_block_hash=block_hash)
+    immutable["signing"].update(
+        block_number=number,
+        block_hash=block_hash,
+        state_root=history.headers[block_hash]["stateRoot"],
+    )
+    immutable["attempt_id"] = hashlib.sha256(
+        original.attempt._identity_domain + canonical_json_bytes(immutable)
+    ).hexdigest()
+    attempt = type(original.attempt).model_validate(immutable)
+    encoded = b"unrelated"
+    from umi.signed_extrinsic import exact_signed_extrinsic
+
+    return evolve_journal(
+        original,
+        attempt=attempt,
+        last_observed_block=number,
+        last_observed_block_hash=block_hash,
+        signed_extrinsic=encoded.hex(),
+        signed_extrinsic_hash=exact_signed_extrinsic(encoded).extrinsic_hash,
+    )
 
 
 @pytest.fixture
@@ -262,6 +292,150 @@ async def test_no_matching_exact_bytes_is_uncertainty_not_a_receipt(history, tx)
     )
     different = retain_signed_extrinsic(preparing, b"different", now=tx.case.now)
     assert await history.reader.find(evolve_journal(different, phase="submitting")) is None
+
+
+@pytest.mark.asyncio
+async def test_newest_first_attempts_reuse_only_authenticated_ancestry(history):
+    history.head = history.birth + 200
+    newer = journal_at(history, 40)
+    first = await history.reader.find(newer)
+    assert first.receipt.block_number == history.birth + 41
+    assert history.reader._cursor.snapshot.block_number == history.birth + 40
+    boundary = len(history.calls)
+    older = await history.reader.find(history.journal)
+    assert older.receipt.block_number == history.birth + 2
+    assert older.owned_head == first.owned_head
+    headers = [params[0] for method, params in history.calls if method == "chain_getHeader"]
+    assert len(headers) == 201 and len(set(headers)) == 201
+    assert history.heads == 1
+    assert history.calls[boundary] == ("chain_getHeader", (history.hashes[history.birth + 39],))
+    assert len(history.reader._era) == 8
+    assert history.reader._found == older
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset", [37, 40, 60])
+async def test_overlapping_or_newer_era_gets_a_new_owned_head(history, offset):
+    history.head = history.birth + 200
+    await history.reader.find(journal_at(history, 40))
+    if offset == 40:
+        # Same era but a different retained envelope is a new attempt identity.
+        journal = journal_at(history, offset)
+        journal = evolve_journal(
+            journal,
+            signed_extrinsic=history.journal.signed_extrinsic,
+            signed_extrinsic_hash=history.journal.signed_extrinsic_hash,
+        )
+    else:
+        journal = journal_at(history, offset)
+    await history.reader.find(journal)
+    assert history.heads == 2
+    assert len(history.reader._era) == 8
+
+
+@pytest.mark.asyncio
+async def test_earlier_era_still_checks_its_preflight_hash(history):
+    history.head = history.birth + 200
+    await history.reader.find(journal_at(history, 40))
+    # Rebind a valid record to another claimed preflight hash. The archive
+    # digest can be recalculated, but it cannot authenticate another chain.
+    immutable = history.journal.attempt.model_dump(
+        mode="json", by_alias=True, exclude={"attempt_id"}
+    )
+    immutable["preflight_block_hash"] = "0x" + "ff" * 32
+    immutable["signing"]["block_hash"] = immutable["preflight_block_hash"]
+    immutable["attempt_id"] = hashlib.sha256(
+        history.journal.attempt._identity_domain + canonical_json_bytes(immutable)
+    ).hexdigest()
+    changed = evolve_journal(
+        history.journal,
+        attempt=type(history.journal.attempt).model_validate(immutable),
+        last_observed_block_hash=immutable["preflight_block_hash"],
+    )
+    with pytest.raises(RegistrationBridgeError, match="preflight_ancestry_mismatch"):
+        await history.reader.find(changed)
+    assert history.heads == 1
+
+
+@pytest.mark.asyncio
+async def test_earlier_era_hash_walk_resumes_after_cancellation(history):
+    history.head = history.birth + 200
+    await history.reader.find(journal_at(history, 40))
+    request = history.rpc.request
+    entered = asyncio.Event()
+    pause_hash = history.hashes[history.birth + 20]
+
+    async def pause(method, params):
+        if method == "chain_getHeader" and params == (pause_hash,):
+            entered.set()
+            await asyncio.Event().wait()
+        return await request(method, params)
+
+    history.rpc.request = pause
+    task = asyncio.create_task(history.reader.find(history.journal))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert history.reader._cursor.snapshot.block_number == history.birth + 21
+    assert not history.reader._lock.locked()
+    history.rpc.request = request
+    count = len(history.calls)
+    result = await history.reader.find(history.journal)
+    assert result.receipt.block_number == history.birth + 2
+    assert history.calls[count] == ("chain_getHeader", (pause_hash,))
+    assert history.heads == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["receipt_returned", "applied", "failed"])
+async def test_stopped_terminal_claim_is_reverified_by_a_new_reader(history, tx, phase):
+    if phase == "failed":
+        state = history.values[history.headers[history.hashes[history.birth + 2]]["stateRoot"]]
+        events = json.loads(state[b"System.Events"])
+        events[1]["event_id"] = "ExtrinsicFailed"
+        state[b"System.Events"] = json.dumps(events).encode()
+    first = await history.reader.find(history.journal)
+    retained = retain_verified_receipt(history.journal, first, now=tx.case.now)
+    if phase == "applied":
+        retained = evolve_journal(retained, phase="applied")
+    reader = BridgeReceiptReader(
+        finality=history.finality,
+        rpc=history.rpc,
+        verifier=history.verifier,
+        runtime_executor=tx.case.executor,
+    )
+    count = len(history.calls)
+    assert await reader.find(retained) == first
+
+    assert len(history.calls) > count and history.heads == 2
+    key = "failed_call" if phase == "failed" else "weight_call"
+    receipt = getattr(retained, key)
+    changed = evolve_journal(
+        retained,
+        **{
+            key: receipt.model_copy(
+                update={"extrinsic_index": 0, "extrinsic_id": f"{receipt.block_number}-0000"}
+            )
+        },
+    )
+    with pytest.raises(RegistrationBridgeError, match="receipt_conflict"):
+        await reader.find(changed)
+    assert await reader.find(retained) == first
+
+
+@pytest.mark.asyncio
+async def test_failed_status_claim_cannot_override_verified_success(history):
+    proven = await history.reader.find(history.journal)
+    claimed = evolve_journal(
+        history.journal,
+        phase="failed",
+        failed_call=proven.receipt,
+        last_observed_block=proven.owned_head.block_number,
+        last_observed_block_hash=proven.owned_head.block_hash,
+    )
+    with pytest.raises(RegistrationBridgeError, match="receipt_conflict"):
+        await history.reader.find(claimed)
 
 
 @pytest.mark.asyncio

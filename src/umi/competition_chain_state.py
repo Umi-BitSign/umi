@@ -18,7 +18,11 @@ import time
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
+from .bridge.receipts import BridgeReceiptReader, VerifiedBridgeReceipt
+from .bridge.signing import FinalizedIdentity
+from .bridge.transactions import RegistrationBridgeTransactionJournal, parse_bridge_journal
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import (
     FinalizedRegistrationProvider,
@@ -288,6 +292,19 @@ def validate_owned_weight_observation(observation: OwnedCompetitionChainObservat
         raise ValueError("weight observation was not issued by the owned proof adapter")
 
 
+class _ReceiptFinality:
+    """Adapt the owned proof collector without consulting RPC finality labels."""
+
+    def __init__(self, proofs: FinalizedProofCollector, minimum_block: int):
+        self._proofs, self._minimum_block = proofs, minimum_block
+
+    async def read_finalized_identity(self) -> FinalizedIdentity:
+        ref = await self._proofs.finalized_snapshot()
+        if type(ref) is not FinalizedSnapshotRef or ref.block_number < self._minimum_block:
+            raise ValueError("bridge receipt requires an owned snapshot at the configured floor")
+        return SimpleNamespace(number=ref.block_number, block_hash=ref.block_hash)
+
+
 class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
     """Use the existing pinned GRANDPA owner with bounded weight-state proofs.
 
@@ -301,6 +318,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         self._cache_lease = None
         self._weight_rpc = None
         self._runtime_rpc = None
+        self._bridge_receipts = None
         try:
             super().__init__(*args, **kwargs)
             self._configure_weight_collector()
@@ -471,6 +489,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         )
 
     async def _close_resources(self):
+        # The base close method holds the collection lock until all receipt
+        # reads and their native proof work have drained.
+        self._bridge_receipts = None
         try:
             await super()._close_resources()
         finally:
@@ -483,6 +504,38 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                         await self._runtime_rpc.aclose()
             finally:
                 self._release_cache_lease()
+
+    async def read_bridge_receipt(
+        self, journal: RegistrationBridgeTransactionJournal
+    ) -> VerifiedBridgeReceipt | None:
+        """Read exact historical bytes using this provider's owned finality.
+
+        This method neither updates the bridge journal nor grants a stopped-host
+        capability. Missing evidence remains unknown. Repeated calls preserve
+        the reader's bounded ancestry progress until the provider closes.
+        """
+        journal = parse_bridge_journal(canonical_json_bytes(journal))
+        if type(journal) is not RegistrationBridgeTransactionJournal:
+            raise ValueError("bridge receipt collection requires a version-2 transaction")
+        async with self._lock:
+            if self._closed:
+                raise ValueError("weight provider is closed")
+            if not self._owned or self._task is None or self._task.done():
+                raise ValueError("owned finality observer is not running")
+            if self._runtime_executor is None or self._weight_rpc is None:
+                raise ValueError("bridge receipt collection requires owned runtime proof tools")
+            if self._bridge_receipts is None:
+                self._bridge_receipts = BridgeReceiptReader(
+                    finality=_ReceiptFinality(self._proofs, self.config.minimum_finalized_block),
+                    rpc=self._weight_rpc,
+                    verifier=SubprocessStorageProofVerifier(
+                        binary_path=self.config.proof_binary,
+                        expected_sha256=self.config.proof_binary_sha256,
+                    ),
+                    runtime_executor=self._runtime_executor,
+                    timeout_seconds=min(120, self.config.collection_timeout_seconds),
+                )
+            return await self._bridge_receipts.find(journal)
 
     async def collect(self):
         raise ValueError("weight collection needs an explicit validator and recipients")

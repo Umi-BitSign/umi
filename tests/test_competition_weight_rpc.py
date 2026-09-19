@@ -114,18 +114,20 @@ async def test_methods_keep_original_separate_receive_limits(rpc, sockets):
         "state_getMetadata",
         "state_getRuntimeVersion",
         "chain_getHeader",
+        "chain_getBlock",
         "chain_getBlockHash",
     )
     for _ in range(3):
         for method in methods:
             await rpc.request(method, [])
-    assert len(state.connections) == 6
+    assert len(state.connections) == 7
     assert [c.kwargs["max_size"] for c in state.connections] == [
         129 * 1024**2,
         65 * 1024**2,
         33 * 1024**2,
         1024**2,
         1024**2,
+        130 * 1024**2,
         1024**2,
     ]
     assert all(c.kwargs["open_timeout"] == 15 for c in state.connections)
