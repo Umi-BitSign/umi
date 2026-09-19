@@ -16,6 +16,11 @@
 !deploy/linux-validator-supervisor-worker/Dockerfile
 !deploy/linux-competition-worker/
 !deploy/linux-competition-worker/Dockerfile
+!deploy/linux-registration-bridge/
+!deploy/linux-registration-bridge/Dockerfile
+!deploy/linux-registration-bridge/seal-native.py
+!deploy/native-verifiers/
+!deploy/native-verifiers/build.sh
 !rust/
 !rust/grandpa-finality-observer/
 !rust/grandpa-finality-observer/Cargo.toml
