@@ -232,8 +232,16 @@ def test_unknown_never_retries_even_if_another_writer_lands_equal_row(
         assert not chain.client.calls
 
 
-def test_unknown_exact_successful_chain_call_recovers_without_rebroadcast(
-    tmp_path, signed_policy, wallet
+@pytest.mark.parametrize(
+    ("history_mutation", "reason"),
+    [
+        (None, None),
+        ("missing_applied", "retained_unresolved_attempt"),
+        ("conflicting_receipt", "history_receipt_changed"),
+    ],
+)
+def test_unknown_exact_successful_chain_call_recovers_and_allows_next_submission_after_restart(
+    tmp_path, signed_policy, wallet, history_mutation, reason
 ):
     before = writer_observation(wallet)
     root = tmp_path.resolve() / "state"
@@ -282,6 +290,67 @@ def test_unknown_exact_successful_chain_call_recovers_without_rebroadcast(
         assert not chain.client.calls
         assert state.load().phase == "applied"
         assert state.load().weight_call.extrinsic_id == f"{included}-0000"
+
+    history = root / "registration-bridge-history"
+    recovered_history = {path.name: path.read_bytes() for path in history.iterdir()}
+    assert set(recovered_history) == {
+        f"{attempt.attempt_id}-{phase}.json"
+        for phase in ("submitting", "outcome_unknown", "receipt_returned", "applied")
+    }
+    next_block = included + signed_policy.body.required_activity_cutoff_blocks
+    next_before = after.model_copy(
+        update={"block_number": next_block, "block_hash": "0x" + "55" * 32}
+    )
+    next_after = applied_observation(wallet, signed_policy, block=next_block + 1)
+
+    class LaterClient(Client):
+        async def submit_call(self, call, wallet, **kwargs):
+            # Keep the existing durable-intent/SDK-call assertions, changing only
+            # the synthetic receipt to the later finalized transaction.
+            receipt = await super().submit_call(call, wallet, **kwargs)
+            receipt.extrinsic_id = f"{next_block + 1}-0002"
+            receipt.block_hash = next_after.block_hash
+            return receipt
+
+    with bridge.RegistrationBridgeState(root) as state:
+        chain = Chain(state, [next_before, next_before, next_after])
+        chain.client = LaterClient(state)
+        result = run(signed_policy, wallet, chain, state)
+        assert result["status"] == "submitted"
+        assert len(chain.client.calls) == 1 and len(chain.receipts) == 1
+        current = state.load()
+        assert current.phase == "applied"
+        assert current.attempt.attempt_id != attempt.attempt_id
+        assert current.weight_call.extrinsic_id == f"{next_block + 1}-0002"
+
+    if history_mutation == "missing_applied":
+        (history / f"{attempt.attempt_id}-applied.json").unlink()
+    elif history_mutation == "conflicting_receipt":
+        path = history / f"{attempt.attempt_id}-receipt_returned.json"
+        retained = bridge.RegistrationBridgeJournal.model_validate_json(path.read_bytes())
+        changed = retained.model_copy(
+            update={
+                "weight_call": retained.weight_call.model_copy(
+                    update={"block_hash": "0x" + "66" * 32}
+                )
+            }
+        )
+        path.write_bytes(canonical_json_bytes(changed))
+
+    # Recovery must remain auditable without turning the archived uncertainty
+    # into a permanent hold once a later attempt becomes the current journal.
+    with bridge.RegistrationBridgeState(root) as state:
+        chain = Chain(state, [next_after, next_after])
+        if reason is None:
+            assert run(signed_policy, wallet, chain, state)["status"] == "wait"
+        else:
+            with pytest.raises(bridge.RegistrationBridgeError, match=reason):
+                run(signed_policy, wallet, chain, state)
+        assert not chain.client.calls
+        assert state.load().attempt == current.attempt
+        assert state.load().weight_call == current.weight_call
+    if history_mutation is None:
+        assert all((history / name).read_bytes() == raw for name, raw in recovered_history.items())
 
 
 def test_returned_receipt_survives_post_submit_rpc_failure_and_recovers_without_send(
