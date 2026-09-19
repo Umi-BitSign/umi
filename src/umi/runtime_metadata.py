@@ -21,6 +21,7 @@ from pathlib import Path
 import bittensor_core
 
 from .chain_evidence import FinalizedSnapshotRef, StorageEvidence
+from .concurrency import run_owned_thread
 from .pinned_artifact import PinnedArtifact, PinnedArtifactError, staged_pinned_artifacts
 from .protocol import canonical_json_bytes
 from .validator_chain import FinalizedRuntimePin, PinnedRuntimeContext
@@ -200,3 +201,21 @@ class RuntimeMetadataExecutor:
             raise RuntimeMetadataError(error.reason_code) from error
         except OSError as error:
             raise RuntimeMetadataError("runtime_executor_unavailable") from error
+
+
+async def collect_executed_runtime(proofs, executor: RuntimeMetadataExecutor, snapshot):
+    """Drain proof-backed execution before releasing the caller's ownership.
+
+    The caller owns finality and the executor's release authorization. This
+    operation supplies neither, and it never falls back to node metadata.
+    """
+    evidence = await proofs.storage_evidence(snapshot, b":code")
+    runtime = await run_owned_thread(executor.execute, snapshot, evidence)
+    if (
+        type(runtime) is not ExecutedRuntimeContext
+        or runtime.snapshot != snapshot
+        or runtime.code_evidence is not evidence
+        or runtime.executor_sha256 != executor.expected_sha256
+    ):
+        raise RuntimeMetadataError("executed_runtime_binding_invalid")
+    return runtime

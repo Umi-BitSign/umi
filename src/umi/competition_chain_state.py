@@ -35,7 +35,6 @@ from .competition_worker import (
     _prepare_private_directory,
     _verify_sqlite_family,
 )
-from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .grandpa_finality_supervisor import (
@@ -44,7 +43,12 @@ from .grandpa_finality_supervisor import (
 )
 from .open_competition import BurnDestination, Registration, digest
 from .protocol import canonical_json_bytes
-from .runtime_metadata import MAX_CODE_BYTES, ExecutedRuntimeContext, RuntimeMetadataExecutor
+from .runtime_metadata import (
+    MAX_CODE_BYTES,
+    ExecutedRuntimeContext,
+    RuntimeMetadataExecutor,
+    collect_executed_runtime,
+)
 from .simple_bootstrap_validator import _manifest_anchor_state
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
@@ -358,10 +362,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
     async def _runtime_context(self, ref):
         if self._runtime_executor is None:
             return await super()._runtime_context(ref)
-        evidence = await self._runtime_proofs.storage_evidence(ref, b":code")
         # Retain the collection lock until the bounded subprocess exits,
         # including repeated cancellation during shutdown.
-        return await run_owned_thread(self._runtime_executor.execute, ref, evidence)
+        return await collect_executed_runtime(self._runtime_proofs, self._runtime_executor, ref)
 
     def _validate_runtime_context(self, runtime, ref):
         if not isinstance(runtime, PinnedRuntimeContext) or runtime.snapshot != ref:
