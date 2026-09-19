@@ -178,6 +178,18 @@ class BridgeReceiptReader:
         self._found: VerifiedBridgeReceipt | None = None
         self._expiry_result: VerifiedBridgeExpiry | None = None
 
+    @property
+    def progress(self) -> tuple:
+        """Opaque in-process progress marker, not a proof or persisted cursor."""
+        return (
+            self._identity,
+            self._anchor,
+            self._cursor,
+            frozenset(self._checked),
+            self._found is not None,
+            self._expiry_result is not None,
+        )
+
     async def expiry(self, journal: RegistrationBridgeTransactionJournal) -> VerifiedBridgeExpiry:
         """Authenticate the retained expiry snapshot, or use the owned head.
 

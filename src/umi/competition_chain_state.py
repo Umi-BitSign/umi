@@ -526,6 +526,39 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         async with self._lock:
             return await self._bridge_reader().expiry(journal)
 
+    async def read_bridge_outcome(
+        self, journal: RegistrationBridgeTransactionJournal
+    ) -> VerifiedBridgeReceipt | VerifiedBridgeExpiry:
+        """Resolve one retained attempt; retry timeouts only after verified progress."""
+        journal = parse_bridge_journal(canonical_json_bytes(journal))
+        if type(journal) is not RegistrationBridgeTransactionJournal:
+            raise ValueError("bridge outcome requires a version-2 transaction")
+        async with self._lock:
+
+            async def read(operation):
+                while True:
+                    reader = self._bridge_reader()
+                    before = reader.progress
+                    try:
+                        return await operation(reader, journal)
+                    except asyncio.TimeoutError:
+                        if reader.progress == before:
+                            raise
+
+            if journal.phase in {
+                "submitting",
+                "outcome_unknown",
+                "receipt_returned",
+                "applied",
+                "failed",
+            }:
+                receipt = await read(BridgeReceiptReader.find)
+                if receipt is not None:
+                    return receipt
+                if journal.phase in {"receipt_returned", "applied", "failed"}:
+                    raise ValueError("recorded bridge receipt was not verified")
+            return await read(BridgeReceiptReader.expiry)
+
     def _bridge_reader(self) -> BridgeReceiptReader:
         # Caller holds the same collection lock used by shutdown.
         if self._closed:

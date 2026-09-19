@@ -167,3 +167,86 @@ class PreparedRecoveryCheckpoint(StrictProtocolModel):
     prior_effects_reconciled: bool
     holds: list[str]
     chain_submission_authorized: Literal[False] = False
+
+
+class BridgeRecoveryOutcome(StrictProtocolModel):
+    """A retained result summary, never a substitute for fresh proof collection."""
+
+    path: Annotated[str, Field(min_length=1, max_length=2048)]
+    attempt_id: Hex32
+    journal_sha256: Hex32
+    disposition: Literal["applied", "failed", "expired_nonce_available"]
+    resolution_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
+    resolution_block_hash: BlockHash
+    extrinsic_index: Annotated[int, Field(ge=0, le=2**32 - 1)] | None
+    nonce: Annotated[int, Field(ge=0, le=2**32 - 1)] | None
+    verified_head_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
+    verified_head_hash: BlockHash
+
+    @model_validator(mode="after")
+    def outcome_binding(self) -> Self:
+        _parts(self.path)
+        expiry = self.disposition == "expired_nonce_available"
+        if expiry != (self.nonce is not None) or expiry != (self.extrinsic_index is None):
+            raise ValueError("bridge recovery outcome has inconsistent fields")
+        if self.resolution_block > self.verified_head_block or (
+            self.resolution_block == self.verified_head_block
+            and self.resolution_block_hash != self.verified_head_hash
+        ):
+            raise ValueError("bridge recovery outcome exceeds its verified head")
+        return self
+
+
+class TransactionRecoveryEffect(LegacyEffect):
+    classification: Literal[
+        "prepared_without_effect_intent",
+        "retained_anchor_receipt",
+        "retained_weight_receipt",
+        "retained_bridge_receipt",
+        "retained_recovered_effect",
+        "proven_current_anchor",
+        "proven_current_weight",
+        "proven_superseded_weight",
+        "unresolved",
+        "proven_failed_bridge_call",
+        "proven_expired_bridge_attempt",
+    ]
+
+
+class TransactionRecoveryCheckpointBody(RecoveryCheckpointBody):
+    schema_: Literal["umi-successor-recovery-checkpoint/2"] = Field(alias="schema")
+    reconciled_effects: Annotated[list[TransactionRecoveryEffect], Field(max_length=65536)]
+    bridge_outcomes: Annotated[list[BridgeRecoveryOutcome], Field(min_length=1, max_length=4096)]
+
+    @model_validator(mode="after")
+    def outcome_coverage(self) -> Self:
+        paths = [item.path for item in self.bridge_outcomes]
+        if paths != sorted(set(paths)):
+            raise ValueError("checkpoint bridge outcomes must be uniquely sorted")
+        expected = {
+            item.path
+            for item in self.legacy_snapshot.effects
+            if item.reason == "registration_bridge_transaction_proof_required"
+        }
+        if set(paths) != expected:
+            raise ValueError("checkpoint outcomes do not cover version-2 bridge records")
+        files = {item.path: item for item in self.legacy_snapshot.files}
+        for item in self.bridge_outcomes:
+            if item.path not in files or files[item.path].sha256 != item.journal_sha256:
+                raise ValueError("checkpoint outcome journal bytes changed")
+            if item.verified_head_block > self.finalized_block or (
+                item.verified_head_block == self.finalized_block
+                and item.verified_head_hash != self.finalized_block_hash
+            ):
+                raise ValueError("checkpoint observation predates outcome collection")
+        return self
+
+
+def recovery_checkpoint_digest(body: RecoveryCheckpointBody) -> str:
+    domains = {
+        RecoveryCheckpointBody: b"umi-successor-recovery-checkpoint-v1\0",
+        TransactionRecoveryCheckpointBody: b"umi-successor-recovery-checkpoint-v2\0",
+    }
+    if type(body) not in domains:
+        raise CompetitionRecoveryError("unsupported recovery checkpoint type")
+    return hashlib.sha256(domains[type(body)] + canonical_json_bytes(body)).hexdigest()

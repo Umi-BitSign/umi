@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 
@@ -15,6 +16,8 @@ from tests.test_bridge_transactions import idle
 from tests.test_bridge_transactions import signed_policy as signed_policy
 from tests.test_bridge_transactions import tx as tx
 from umi import competition_chain_state as chain_state
+from umi.bridge.receipts import BridgeReceiptReader, VerifiedBridgeExpiry, VerifiedBridgeReceipt
+from umi.bridge.transactions import evolve_journal
 from umi.chain_evidence import FinalizedSnapshotRef
 from umi.protocol import canonical_json_bytes
 
@@ -137,12 +140,12 @@ async def test_provider_does_not_apply_exact_byte_recovery_to_legacy_journals(pr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["receipt", "expiry"])
+@pytest.mark.parametrize("operation", ["receipt", "expiry", "outcome_receipt", "outcome_expiry"])
 async def test_provider_close_waits_for_cancelled_receipt_native_work(
     provider, history, tx, monkeypatch, operation
 ):
     entered, release = threading.Event(), threading.Event()
-    if operation == "receipt":
+    if operation in {"receipt", "outcome_receipt"}:
         verify = history.verifier.verify_extrinsics_root
 
         def blocked(**kwargs):
@@ -167,6 +170,8 @@ async def test_provider_close_waits_for_cancelled_receipt_native_work(
         history.head = history.birth + 20
         journal = expired(history, tx)
         capture = provider.read_bridge_expiry
+    if operation.startswith("outcome_"):
+        capture = provider.read_bridge_outcome
     read = asyncio.create_task(capture(journal))
     close = None
     queued = None
@@ -194,4 +199,80 @@ async def test_provider_close_waits_for_cancelled_receipt_native_work(
             with pytest.raises(ValueError, match="closed"):
                 await queued
     assert provider.rpc_closed and provider._bridge_receipts is None
+    assert not provider._lock.locked()
+
+
+@pytest.mark.parametrize("successful", [True, False])
+async def test_outcome_uses_proven_dispatch_status(provider, history, successful):
+    root = history.headers[history.hashes[history.birth + 2]]["stateRoot"]
+    events = json.loads(history.values[root][b"System.Events"])
+    events[1]["event_id"] = "ExtrinsicSuccess" if successful else "ExtrinsicFailed"
+    history.values[root][b"System.Events"] = json.dumps(events).encode()
+    result = await provider.read_bridge_outcome(history.journal)
+    assert type(result) is VerifiedBridgeReceipt
+    assert result.successful is successful
+    assert result.receipt.block_number == history.birth + 2
+
+
+async def test_outcome_proves_expiry_without_receipt_for_preparing(provider, history, tx):
+    history.head = history.birth + 20
+    result = await provider.read_bridge_outcome(tx.preparing)
+    assert type(result) is VerifiedBridgeExpiry
+    assert result.nonce == tx.preparing.attempt.signing.nonce
+    assert result.snapshot.block_number == history.head
+    assert not any(method == "chain_getBlock" for method, _ in history.calls)
+
+
+@pytest.mark.parametrize("phase", ["receipt_returned", "applied", "failed"])
+async def test_missing_recorded_receipt_never_falls_back_to_expiry(
+    provider, history, monkeypatch, phase
+):
+    receipt = await provider.read_bridge_receipt(history.journal)
+    journal = evolve_journal(
+        history.journal,
+        phase=phase,
+        last_observed_block=receipt.receipt.block_number,
+        last_observed_block_hash=receipt.receipt.block_hash,
+        **{"failed_call" if phase == "failed" else "weight_call": receipt.receipt},
+    )
+
+    async def missing(reader, value):
+        assert value == journal
+        return None
+
+    async def forbidden(*args):
+        pytest.fail("recorded dispatch was replaced by expiry")
+
+    monkeypatch.setattr(BridgeReceiptReader, "find", missing)
+    monkeypatch.setattr(BridgeReceiptReader, "expiry", forbidden)
+    with pytest.raises(ValueError, match="recorded bridge receipt"):
+        await provider.read_bridge_outcome(journal)
+
+
+@pytest.mark.parametrize("progress", [False, True])
+async def test_outcome_retries_timeout_only_after_reader_progress(
+    provider, history, monkeypatch, progress
+):
+    find = BridgeReceiptReader.find
+    calls = 0
+
+    async def interrupted(reader, journal):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            if progress:
+                # Actual authenticated work advances the reader, then the
+                # transport loses its response. No fake progress marker.
+                await find(reader, journal)
+            raise asyncio.TimeoutError("injected lost response")
+        return await find(reader, journal)
+
+    monkeypatch.setattr(BridgeReceiptReader, "find", interrupted)
+    if progress:
+        result = await provider.read_bridge_outcome(history.journal)
+        assert result.successful and calls == 2
+    else:
+        with pytest.raises(asyncio.TimeoutError, match="lost response"):
+            await provider.read_bridge_outcome(history.journal)
+        assert calls == 1
     assert not provider._lock.locked()

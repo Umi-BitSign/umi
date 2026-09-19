@@ -7,6 +7,7 @@ import pytest
 
 from umi import competition_recovery as recovery
 from umi import competition_recovery_models as models
+from umi import competition_recovery_observation as observation
 
 
 @pytest.mark.parametrize(
@@ -42,3 +43,16 @@ def test_model_module_has_no_runtime_host_or_filesystem_dependency():
         "protocol",
     }
     assert not any(isinstance(node, (ast.AsyncFunctionDef, ast.Await)) for node in ast.walk(tree))
+
+
+def test_recovery_observation_boundary_does_not_import_host_orchestration():
+    tree = ast.parse(Path(observation.__file__).read_text())
+    imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert not imports & {
+        "competition_host_observer",
+        "competition_host_activation",
+        "competition_recovery",
+    }
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            assert not any(isinstance(n, (ast.Import, ast.ImportFrom)) for n in ast.walk(node))

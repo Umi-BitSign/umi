@@ -33,6 +33,10 @@ from .bootstrap_weights import (
     verify_signed_bootstrap_eligibility_manifest,
 )
 from .bridge.transactions import RegistrationBridgeTransactionJournal
+from .competition_bridge_reconciliation import (
+    bridge_outcomes_match_current_state,
+    retained_outcomes_agree,
+)
 from .competition_bridge_recovery import (
     HISTORY as BRIDGE_HISTORY,
 )
@@ -52,8 +56,12 @@ from .competition_recovery_models import (
     RecoveryCheckpointBody,
     RecoveryContextReference,
     RecoveryLimits,
+    TransactionRecoveryCheckpointBody,
+    TransactionRecoveryEffect,
     _parts,
+    recovery_checkpoint_digest,
 )
+from .competition_recovery_observation import validate_stopped_bridge_observation
 from .encoding import account_id32
 from .file_identity import file_fingerprint as _fingerprint
 from .protocol import canonical_json_bytes
@@ -752,6 +760,7 @@ def _reconcile_snapshot(
     snapshot: LegacySnapshot,
     observation: Any,
     manifests: tuple[SignedBootstrapEligibilityManifest, ...],
+    bridge_outcomes=(),
 ):
     manifests_by_digest = {item.manifest_sha256: item for item in manifests}
     for path, content in snapshot._files.items():
@@ -762,10 +771,19 @@ def _reconcile_snapshot(
     effects: list[LegacyEffect] = []
     bridge = None
     bridge_proven = False
+    outcomes_by_path = {item.path: item for item in bridge_outcomes}
     if BRIDGE_JOURNAL in snapshot._files:
         bridge = audit_bridge_history(snapshot._files, hotkey=snapshot.manifest.validator_hotkey)
         current = bridge.current
-        if current.weight_call is not None:
+        if bridge_outcomes:
+            bridge_proven = bridge_outcomes_match_current_state(
+                bridge, bridge_outcomes, observation
+            )
+            if bridge_proven:
+                holds.discard("registration_bridge_transaction_proof_required")
+            else:
+                holds.add("registration_bridge_latest_effect_not_proven")
+        elif current.weight_call is not None:
             receipt = current.weight_call
             writers = [p for p in current.attempt.roster if p.hotkey == current.validator_hotkey]
             bridge_proven = (
@@ -789,15 +807,39 @@ def _reconcile_snapshot(
             holds.add("owned_observation_predates_historical_record")
             effects.append(update)
             continue
+        outcome = outcomes_by_path.get(effect.path)
+        if outcome is not None:
+            if bridge_proven:
+                category = {
+                    "applied": "proven_current_weight"
+                    if outcome.resolution_block == observation.validator_last_update
+                    else "proven_superseded_weight",
+                    "failed": "proven_failed_bridge_call",
+                    "expired_nonce_available": "proven_expired_bridge_attempt",
+                }[outcome.disposition]
+                update = TransactionRecoveryEffect.model_validate(
+                    {
+                        **effect.model_dump(mode="python"),
+                        "classification": category,
+                        "reason": "owned_bridge_" + outcome.disposition,
+                    }
+                )
+            effects.append(update)
+            continue
         if effect.classification == "retained_bridge_receipt":
             if bridge_proven:
+                current_effect = (
+                    effect.minimum_effect_block == observation.validator_last_update
+                    if bridge_outcomes
+                    else effect.path == BRIDGE_JOURNAL
+                )
                 update = effect.model_copy(
                     update={
                         "classification": "proven_current_weight"
-                        if effect.path == BRIDGE_JOURNAL
+                        if current_effect
                         else "proven_superseded_weight",
                         "reason": "owned_finality_proves_latest_bridge_row"
-                        if effect.path == BRIDGE_JOURNAL
+                        if current_effect
                         else "terminal_bridge_history_precedes_proven_latest_row",
                     }
                 )
@@ -827,11 +869,12 @@ def _reconcile_snapshot(
                 and bridge_proven
                 and bridge.attempts
                 and bridge.attempts[0][1].attempt.prior_last_update == effect.minimum_effect_block
+                and observation.validator_last_update > effect.minimum_effect_block
             ):
                 # This exact terminal journal was archived at bridge handoff.
-                # All subsequent attempts retain terminal receipts, each next
-                # preflight binds the prior LastUpdate, and the latest effect
-                # is now proven by owned storage. No uncertain intent is cleared.
+                # Subsequent outcomes preserve LastUpdate continuity, and a
+                # newer weight effect is proven by owned storage. Nonwriting
+                # bridge attempts leave the common row for the check below.
                 update = effect.model_copy(
                     update={
                         "classification": "proven_superseded_weight",
@@ -878,6 +921,14 @@ def _snapshot_kwargs(stopped: Any, limits: RecoveryLimits, manifests: tuple, lea
         limits=limits,
         historical_manifests=manifests,
         historical_leases=leases,
+    )
+
+
+def _verified_bridge_outcomes(value, *, snapshot, stopped, observation):
+    if value is None:
+        return ()
+    return validate_stopped_bridge_observation(
+        value, stopped=stopped, observation=observation, snapshot_sha256=snapshot.sha256
     )
 
 
@@ -1031,7 +1082,7 @@ def _archive(
         or len(objects) + 1 > limits.maximum_files
     ):
         raise CompetitionRecoveryError("checkpoint aggregate byte limit exceeded")
-    sha = hashlib.sha256(_CHECKPOINT_DOMAIN + payload).hexdigest()
+    sha = recovery_checkpoint_digest(body)
     target = root / sha
     with _archive_root(root, service_uid=owner, limits=limits) as (parent, count):
         try:
@@ -1109,8 +1160,17 @@ def _load_archive(
         payload = reader.files.get("checkpoint.json", b"")
         if not 0 < len(payload) <= limits.maximum_checkpoint_bytes:
             raise CompetitionRecoveryError("checkpoint manifest is missing or oversized")
-        body = _model(payload, RecoveryCheckpointBody)
-        if hashlib.sha256(_CHECKPOINT_DOMAIN + payload).hexdigest() != expected_sha256:
+        value = json.loads(payload)
+        model = (
+            TransactionRecoveryCheckpointBody
+            if (
+                isinstance(value, dict)
+                and value.get("schema") == "umi-successor-recovery-checkpoint/2"
+            )
+            else RecoveryCheckpointBody
+        )
+        body = _model(payload, model)
+        if recovery_checkpoint_digest(body) != expected_sha256:
             raise CompetitionRecoveryError("checkpoint body digest mismatch")
         sizes: dict[str, int] = {}
         for item in [*body.legacy_snapshot.files, *body.context]:
@@ -1145,6 +1205,7 @@ def prepare_recovery_checkpoint(
     limits: RecoveryLimits,
     historical_manifests: tuple[SignedBootstrapEligibilityManifest, ...] = (),
     historical_leases: tuple[SignedSimpleBootstrapLease, ...] = (),
+    bridge_observation=None,
 ) -> PreparedRecoveryCheckpoint:
     """Archive stopped historical state; unresolved effects produce a held checkpoint."""
     _check_stopped(stopped)
@@ -1162,14 +1223,20 @@ def prepare_recovery_checkpoint(
     ) as snapshot:
         _check_stopped(stopped)
         _check_current_manifest(snapshot, stopped)
-        effects, holds = _reconcile_snapshot(snapshot, observation, historical_manifests)
+        outcomes = _verified_bridge_outcomes(
+            bridge_observation, snapshot=snapshot, stopped=stopped, observation=observation
+        )
+        effects, holds = _reconcile_snapshot(snapshot, observation, historical_manifests, outcomes)
         refs, objects = _context_payloads(
             historical_manifests, historical_leases, observation, limits
         )
         for content in snapshot._files.values():
             objects[hashlib.sha256(content).hexdigest()] = content
-        body = RecoveryCheckpointBody(
-            schema="umi-successor-recovery-checkpoint/1",
+        model = TransactionRecoveryCheckpointBody if outcomes else RecoveryCheckpointBody
+        body = model(
+            schema="umi-successor-recovery-checkpoint/2"
+            if outcomes
+            else "umi-successor-recovery-checkpoint/1",
             legacy_snapshot_sha256=snapshot.sha256,
             legacy_snapshot=snapshot.manifest,
             context=refs,
@@ -1178,9 +1245,12 @@ def prepare_recovery_checkpoint(
             genesis_hash=observation.genesis_hash,
             chain_config_sha256=observation.chain_config_sha256,
             owned_observation_sha256=observation.evidence_sha256,
-            reconciled_effects=effects,
+            reconciled_effects=[item.model_dump(mode="python") for item in effects]
+            if outcomes
+            else effects,
             holds=holds,
             prior_effects_reconciled=not holds,
+            **({"bridge_outcomes": list(outcomes)} if outcomes else {}),
         )
         _check_owned(observation, stopped)
         _check_stopped(stopped)
@@ -1272,6 +1342,32 @@ def copy_retained_checkpoint_archive(
     return result
 
 
+def _checkpoint_context(
+    body: RecoveryCheckpointBody, objects: dict[str, bytes]
+) -> tuple[tuple[SignedBootstrapEligibilityManifest, ...], tuple[SignedSimpleBootstrapLease, ...]]:
+    return (
+        tuple(
+            _model(objects[item.sha256], SignedBootstrapEligibilityManifest)
+            for item in body.context
+            if item.kind == "manifest"
+        ),
+        tuple(
+            _model(objects[item.sha256], SignedSimpleBootstrapLease)
+            for item in body.context
+            if item.kind == "lease"
+        ),
+    )
+
+
+def load_recovery_checkpoint_context(
+    path: Path, *, expected_sha256: str, owner: int, limits: RecoveryLimits
+) -> tuple[tuple[SignedBootstrapEligibilityManifest, ...], tuple[SignedSimpleBootstrapLease, ...]]:
+    """Read retained classification inputs without granting checkpoint authority."""
+    return _checkpoint_context(
+        *_load_archive(path, expected_sha256=expected_sha256, owner=owner, limits=limits)
+    )
+
+
 def verify_recovery_checkpoint(
     checkpoint_path: Path,
     *,
@@ -1279,6 +1375,7 @@ def verify_recovery_checkpoint(
     stopped: Any,
     observation: Any,
     limits: RecoveryLimits,
+    bridge_observation=None,
 ) -> VerifiedRecoveryCheckpoint:
     """Recheck archive, original files, stopped host and fresh owned chain state."""
     _check_stopped(stopped)
@@ -1301,16 +1398,7 @@ def verify_recovery_checkpoint(
         or body.chain_config_sha256 != observation.chain_config_sha256
     ):
         raise CompetitionRecoveryError("recovery chain observation configuration changed")
-    manifests = tuple(
-        _model(objects[item.sha256], SignedBootstrapEligibilityManifest)
-        for item in body.context
-        if item.kind == "manifest"
-    )
-    leases = tuple(
-        _model(objects[item.sha256], SignedSimpleBootstrapLease)
-        for item in body.context
-        if item.kind == "lease"
-    )
+    manifests, leases = _checkpoint_context(body, objects)
     with snapshot_legacy_bootstrap(
         stopped.worker_state_root, **_snapshot_kwargs(stopped, limits, manifests, leases)
     ) as snapshot:
@@ -1322,10 +1410,29 @@ def verify_recovery_checkpoint(
             raise CompetitionRecoveryError(
                 "current historical snapshot differs from the checkpoint"
             )
-        _, holds = _reconcile_snapshot(snapshot, observation, manifests)
+        outcomes = ()
+        if type(body) is TransactionRecoveryCheckpointBody:
+            if bridge_observation is None:
+                raise CompetitionRecoveryError(
+                    "version-2 checkpoint requires recollected bridge proofs"
+                )
+            outcomes = _verified_bridge_outcomes(
+                bridge_observation, snapshot=snapshot, stopped=stopped, observation=observation
+            )
+            retained_outcomes_agree(body.bridge_outcomes, outcomes)
+        elif bridge_observation is not None:
+            raise CompetitionRecoveryError("version-1 checkpoint cannot accept version-2 outcomes")
+        effects, holds = _reconcile_snapshot(snapshot, observation, manifests, outcomes)
         if holds:
             raise CompetitionRecoveryError(
                 "fresh chain observation does not reconcile historical effects"
+            )
+        if type(body) is TransactionRecoveryCheckpointBody and (
+            [item.model_dump(mode="json") for item in effects]
+            != [item.model_dump(mode="json") for item in body.reconciled_effects]
+        ):
+            raise CompetitionRecoveryError(
+                "checkpoint effect report differs from verified outcomes"
             )
         for ref in body.legacy_snapshot.files:
             if snapshot._files[ref.path] != objects[ref.sha256]:
