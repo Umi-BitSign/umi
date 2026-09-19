@@ -35,13 +35,14 @@ def files(case):
     info = root.lstat()
     assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0
     assert stat.S_IMODE(info.st_mode) == 0o700
-    directory = Path(tempfile.mkdtemp(prefix="run-", dir=root))
     plan = _plan(case)
-    return replace(
-        plan,
-        cleanup_unit_path=directory / plan.cleanup_unit_name,
-        drop_in_path=directory / (plan.unit_name + ".d") / plan.drop_in_path.name,
-    )
+    with tempfile.TemporaryDirectory(prefix="run-", dir=root) as name:
+        directory = Path(name)
+        yield replace(
+            plan,
+            cleanup_unit_path=directory / plan.cleanup_unit_name,
+            drop_in_path=directory / (plan.unit_name + ".d") / plan.drop_in_path.name,
+        )
 
 
 def _publish(files):
@@ -51,6 +52,18 @@ def _publish(files):
         switch._write_drop_in_once(files, marker)
     finally:
         os.close(marker)
+
+
+def test_fixture_removes_its_own_disposable_tree(case):
+    fixture = files.__wrapped__(case)
+    plan = next(fixture)
+    directory = plan.cleanup_unit_path.parent
+    try:
+        _publish(plan)
+        assert directory.is_dir()
+    finally:
+        fixture.close()
+    assert not directory.exists()
 
 
 def test_actual_root_publication_preserves_exact_bytes_and_refuses_replace(files):
