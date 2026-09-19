@@ -59,6 +59,7 @@ from .bridge.journal import (
     reconcile_registration_bridge_journal as reconcile_registration_bridge_journal,
 )
 from .bridge.journal_history import reconcile_archived_transition, validate_next_journal
+from .bridge.native import receipt_reader, signing_reader
 
 # Preserve the public bridge API while policy and selection remain independently testable.
 from .bridge.policy import (
@@ -318,9 +319,20 @@ async def _registration_bindings(pinned, participants):
 class BittensorRegistrationBridgeChain:
     """Owned finality identities with all mutable RPC reads pinned to that identity."""
 
-    def __init__(self, *, client_factory=None, finality_reader=None, clock=None):
+    def __init__(
+        self,
+        *,
+        client_factory=None,
+        finality_reader=None,
+        clock=None,
+        signing_reader_factory=None,
+        receipt_reader_factory=None,
+    ):
         self.client_factory = client_factory or (lambda network: bt.Client(network))
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._signing_reader_factory = signing_reader_factory or signing_reader
+        self._receipt_reader_factory = receipt_reader_factory or receipt_reader
+        self._receipt_reader = None
         if finality_reader is None:
             # Host adapters import our policy schemas; keep this runtime import lazy.
             from .validator_supervisor_adapters import FinneyFinalizedBlockReader
@@ -368,6 +380,43 @@ class BittensorRegistrationBridgeChain:
         substrate = getattr(client, "_substrate", None)
         _require(await substrate.block_hash(0) == f"0x{FINNEY_GENESIS_HASH}", "chain_not_finney")
         owned = await self.finality.read_finalized_identity()
+        return await self._observation_at(client, validator_hotkey=validator_hotkey, owned=owned)
+
+    async def signing_observation_with_client(self, client, *, validator_hotkey: str):
+        substrate = getattr(client, "_substrate", None)
+        _require(await substrate.block_hash(0) == f"0x{FINNEY_GENESIS_HASH}", "chain_not_finney")
+        reader = await run_owned_thread(
+            partial(
+                self._signing_reader_factory,
+                client=client,
+                finality=self.finality,
+                clock=self.clock,
+            )
+        )
+        signing = await reader.read(validator_hotkey)
+        snapshot = signing.runtime.snapshot
+        observation = await self._observation_at(
+            client,
+            validator_hotkey=validator_hotkey,
+            owned=SimpleNamespace(number=snapshot.block_number, block_hash=snapshot.block_hash),
+        )
+        _require(
+            observation.block_timestamp_ms == signing.timestamp_ms,
+            "bridge_signing_timestamp_mismatch",
+        )
+        return observation, signing
+
+    async def exact_receipt_with_client(self, client, journal):
+        # The read-only RPC adapter owns its endpoint, not an SDK session. Keep
+        # one reader across loop iterations so bounded timeouts retain progress.
+        if self._receipt_reader is None:
+            self._receipt_reader = await run_owned_thread(
+                partial(self._receipt_reader_factory, client=client, finality=self.finality)
+            )
+        return await self._receipt_reader.find(journal)
+
+    async def _observation_at(self, client, *, validator_hotkey, owned):
+        substrate = getattr(client, "_substrate", None)
         pinned = await client.at(owned.number)
         _require(getattr(pinned, "block", None) == owned.number, "snapshot_block_mismatch")
         direct = storage.SubtensorModule

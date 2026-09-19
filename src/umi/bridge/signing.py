@@ -217,33 +217,48 @@ class BridgeSigningStateReader:
         observation = RegistrationBridgeObservation.model_validate_json(
             observation.model_dump_json()
         )
-        task = asyncio.create_task(self._capture_with_timeout(observation))
+        return await self._read_owned(observation.validator_hotkey, observation)
+
+    async def read(self, validator_hotkey: str) -> BridgeSigningState:
+        """Choose an owned head before the caller collects its SDK roster.
+
+        The caller must read the remaining bridge state at this exact returned
+        snapshot and recheck freshness before signing. No SDK observation is
+        promoted to finality authority by this method.
+        """
+        account_id32(validator_hotkey)
+        return await self._read_owned(validator_hotkey, None)
+
+    async def _read_owned(self, validator_hotkey, observation):
+        task = asyncio.create_task(self._capture_with_timeout(validator_hotkey, observation))
         return await await_owned_task(task, on_cancel=task.cancel)
 
-    async def _capture_with_timeout(self, observation):
-        return await asyncio.wait_for(self._capture(observation), self._timeout)
+    async def _capture_with_timeout(self, validator_hotkey, observation):
+        return await asyncio.wait_for(self._capture(validator_hotkey, observation), self._timeout)
 
-    async def _capture(self, observation):
+    async def _capture(self, validator_hotkey, observation):
         async with self._lock:
             ref = await self._snapshots.verified_finalized_snapshot()
-            _require(
-                (ref.block_number, ref.block_hash)
-                == (observation.block_number, observation.block_hash),
-                "bridge_signing_observation_changed",
-            )
+            if observation is not None:
+                _require(
+                    (ref.block_number, ref.block_hash)
+                    == (observation.block_number, observation.block_hash),
+                    "bridge_signing_observation_changed",
+                )
             runtime = await collect_executed_runtime(self._code_proofs, self._executor, ref)
             batch = await self._proofs.storage_reads(
                 runtime,
                 (
-                    StorageReadSpec("System", "Account", (observation.validator_hotkey,)),
+                    StorageReadSpec("System", "Account", (validator_hotkey,)),
                     StorageReadSpec("Timestamp", "Now"),
                 ),
             )
-            state = BridgeSigningState(observation.validator_hotkey, runtime, batch)
-            _require(
-                state.timestamp_ms == observation.block_timestamp_ms,
-                "bridge_signing_timestamp_mismatch",
-            )
+            state = BridgeSigningState(validator_hotkey, runtime, batch)
+            if observation is not None:
+                _require(
+                    state.timestamp_ms == observation.block_timestamp_ms,
+                    "bridge_signing_timestamp_mismatch",
+                )
             newest = await self._snapshots.finality.read_finalized_identity()
             _require(
                 type(newest.number) is int

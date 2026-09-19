@@ -151,6 +151,51 @@ async def test_signing_state_is_proven_at_exact_owned_header(case):
 
 
 @pytest.mark.asyncio
+async def test_proof_first_read_chooses_owned_head_without_sdk_observation(case):
+    state = await case.reader.read(case.obs.validator_hotkey)
+    assert state.nonce == 7 and state.runtime.snapshot.block_hash == case.head.block_hash
+    assert case.heads == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timestamp_mismatch", [False, True])
+async def test_chain_collects_sdk_roster_only_at_the_proven_signing_head(case, timestamp_mismatch):
+    from umi.registration_bridge import FINNEY_GENESIS_HASH, BittensorRegistrationBridgeChain
+
+    class Substrate:
+        async def block_hash(self, number):
+            assert number == 0
+            return "0x" + FINNEY_GENESIS_HASH
+
+    client = SimpleNamespace(_substrate=Substrate())
+    chain = BittensorRegistrationBridgeChain(
+        finality_reader=case.finality,
+        clock=lambda: case.now,
+        signing_reader_factory=lambda **kw: case.reader,
+    )
+
+    async def at(sdk, *, validator_hotkey, owned):
+        assert sdk is client and validator_hotkey == case.obs.validator_hotkey
+        assert (owned.number, owned.block_hash) == (case.head.number, case.head.block_hash)
+        assert case.proofs  # The roster is read after proof selection.
+        return case.obs.model_copy(
+            update={"block_timestamp_ms": case.obs.block_timestamp_ms + int(timestamp_mismatch)}
+        )
+
+    chain._observation_at = at
+    if timestamp_mismatch:
+        with pytest.raises(RegistrationBridgeError, match="timestamp_mismatch"):
+            await chain.signing_observation_with_client(
+                client, validator_hotkey=case.obs.validator_hotkey
+            )
+    else:
+        obs, state = await chain.signing_observation_with_client(
+            client, validator_hotkey=case.obs.validator_hotkey
+        )
+        assert obs == case.obs and state.nonce == 7
+
+
+@pytest.mark.asyncio
 async def test_raw_rpc_hex_height_hashes_like_sdk_integer_height(case):
     case.header["number"] = hex(BLOCK)
     assert (await case.reader.capture(case.obs)).nonce == 7

@@ -15,6 +15,7 @@ from typing import Annotated, ClassVar, Literal
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
+from ..bootstrap_weight_operator import BootstrapExtrinsicReference
 from ..encoding import account_id32, datetime_to_unix_ms
 from ..protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 from ..signed_extrinsic import MAX_SIGNED_EXTRINSIC_BYTES, exact_signed_extrinsic
@@ -109,6 +110,7 @@ class RegistrationBridgeTransactionJournal(RegistrationBridgeJournal):
         "receipt_returned",
         "applied",
         "expired_nonce_available",
+        "failed",
     ]
     attempt: RegistrationBridgeSigningAttempt
     signed_extrinsic: (
@@ -124,6 +126,7 @@ class RegistrationBridgeTransactionJournal(RegistrationBridgeJournal):
     )
     signed_extrinsic_hash: BlockHash | None
     expiry_observation: BridgeSigningRecord | None
+    failed_call: BootstrapExtrinsicReference | None = None
 
     @model_validator(mode="after")
     def transaction_bindings(self) -> Self:
@@ -142,12 +145,25 @@ class RegistrationBridgeTransactionJournal(RegistrationBridgeJournal):
         if self.phase == "preparing" and encoded is not None:
             raise ValueError("preparing bridge attempt cannot already contain signed bytes")
         if (
-            self.phase in {"signed", "submitting", "receipt_returned", "applied"}
+            self.phase in {"signed", "submitting", "receipt_returned", "applied", "failed"}
             and encoded is None
         ):
             raise ValueError("bridge phase requires retained signed bytes")
         if self.weight_call is not None and self.weight_call.block_number >= self.attempt.era_death:
             raise ValueError("bridge receipt is outside the retained mortal era")
+        if (self.phase == "failed") != (self.failed_call is not None):
+            raise ValueError("bridge failed receipt missing or unexpected")
+        if self.failed_call is not None and not (
+            self.attempt.preflight_block
+            < self.failed_call.block_number
+            < min(self.attempt.era_death, self.attempt.signed_policy.body.submission_limit)
+            and self.failed_call.block_number <= self.last_observed_block
+            and (
+                self.failed_call.block_number != self.last_observed_block
+                or self.failed_call.block_hash == self.last_observed_block_hash
+            )
+        ):
+            raise ValueError("bridge failed receipt is outside its finalized attempt")
         if (self.phase == "expired_nonce_available") != (self.expiry_observation is not None):
             raise ValueError("bridge expiry observation missing or unexpected")
         if self.expiry_observation is not None:
@@ -232,7 +248,7 @@ def new_transaction_journal(
 ) -> RegistrationBridgeTransactionJournal:
     previous = parse_bridge_journal(canonical_json_bytes(previous))
     _require(
-        previous.phase in {"idle", "applied", "expired_nonce_available"},
+        previous.phase in {"idle", "applied", "expired_nonce_available", "failed"},
         "prior_submission_outcome_unknown",
     )
     _observation_follows(previous, observation)

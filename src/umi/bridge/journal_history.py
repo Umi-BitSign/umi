@@ -17,15 +17,17 @@ _TRANSACTION_ORDER = {
     "receipt_returned": 4,
     "applied": 5,
     "expired_nonce_available": 5,
+    "failed": 5,
 }
 _TRANSACTION_EDGES = {
     "preparing": {"signed", "outcome_unknown", "expired_nonce_available"},
     "signed": {"submitting", "outcome_unknown", "expired_nonce_available"},
-    "submitting": {"outcome_unknown", "receipt_returned", "expired_nonce_available"},
-    "outcome_unknown": {"receipt_returned", "expired_nonce_available"},
+    "submitting": {"outcome_unknown", "receipt_returned", "expired_nonce_available", "failed"},
+    "outcome_unknown": {"receipt_returned", "expired_nonce_available", "failed"},
     "receipt_returned": {"applied"},
     "applied": set(),
     "expired_nonce_available": set(),
+    "failed": set(),
 }
 
 
@@ -43,6 +45,8 @@ def _transaction_identity(
             older.expiry_observation == newer.expiry_observation,
             "history_expiry_observation_changed",
         )
+    if older.failed_call is not None:
+        _require(older.failed_call == newer.failed_call, "history_failed_receipt_changed")
 
 
 def validate_next_journal(
@@ -75,7 +79,7 @@ def validate_next_journal(
     )
     if previous.attempt is None or previous.attempt.attempt_id != current.attempt.attempt_id:
         _require(
-            previous.phase in {"idle", "applied", "expired_nonce_available"},
+            previous.phase in {"idle", "applied", "expired_nonce_available", "failed"},
             "retained_unresolved_attempt",
         )
         _require(current.phase == "preparing" and archive, "history_intent_missing")
@@ -107,7 +111,8 @@ def validate_next_journal(
     if current.phase == previous.phase:
         _require(
             current.signed_extrinsic == previous.signed_extrinsic
-            and current.expiry_observation == previous.expiry_observation,
+            and current.expiry_observation == previous.expiry_observation
+            and current.failed_call == previous.failed_call,
             "history_transaction_changed",
         )
     else:
@@ -141,6 +146,15 @@ def audit_attempt_phases(phases: dict[str, BridgeJournal]) -> BridgeJournal:
         "history_receipt_changed",
     )
     if transaction:
+        _require(
+            not (
+                "failed" in phases
+                and {"applied", "receipt_returned", "expired_nonce_available"} & phases.keys()
+            ),
+            "history_conflicting_resolution",
+        )
+        if "failed" in phases:
+            _require("submitting" in phases, "history_submission_missing")
         _require(
             not (
                 "expired_nonce_available" in phases
@@ -185,7 +199,7 @@ def audit_current_history(
         if identity != current.attempt.attempt_id:
             _require(
                 attempt.preflight_block < current.attempt.preflight_block
-                and terminal.phase in {"applied", "expired_nonce_available"},
+                and terminal.phase in {"applied", "expired_nonce_available", "failed"},
                 "retained_unresolved_attempt",
             )
             _require(
