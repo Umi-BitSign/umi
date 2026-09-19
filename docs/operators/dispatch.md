@@ -187,7 +187,11 @@ Every budget field is explicit:
 The calculation includes pending and reserved local assignments, per-miner
 serialization, bounded page scans, repeated discovery waits, the current inbox
 and full request timeouts. An unresolved claim holds further admission. The
-block prediction is conditional on the supplied bound; a target block interval
+dispatcher runs at most one request per miner. When its task slots cover every
+distinct miner in the complete workload, the HTTP bound uses the longest miner
+chain; spare slots do not shorten that chain. With fewer slots it also charges
+for contention. Serialized proofs, ingestion and scan delays remain charged.
+The block prediction is conditional on the supplied bound; a target block interval
 does not establish that bound. Actual deadline and finality checks still apply.
 The first qualification receipt is retained with the reservation.
 
