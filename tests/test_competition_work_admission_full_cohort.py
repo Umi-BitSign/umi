@@ -393,3 +393,52 @@ async def test_v4_full_roster_timing_rejection_survives_restart(cohort, monkeypa
         assert worker.journal.orders() == []
         assert not tuple(cohort.queue.publication_directory.iterdir())
         assert not tuple(cohort.queue.order_directory.iterdir())
+
+
+@pytest.mark.parametrize("work", [(4, "v2")], indirect=True)
+def test_validate_work_plan_memo_returns_an_equal_plan(work) -> None:
+    from umi.competition_work_plans import _PLAN_MEMO, validate_work_plan
+
+    _PLAN_MEMO.clear()
+    first = validate_work_plan(work.plan, work.policy)
+    assert len(_PLAN_MEMO) == 1
+    assert validate_work_plan(work.plan, work.policy) == first
+
+
+@pytest.mark.parametrize("work", [(4, "v2")], indirect=True)
+def test_validate_work_plan_memo_does_not_serve_a_different_plan(work) -> None:
+    from umi.competition_work_plans import _PLAN_MEMO, validate_work_plan
+
+    _PLAN_MEMO.clear()
+    validate_work_plan(work.plan, work.policy)
+    # A different plan must miss the memo and be verified on its own merits.
+    # Empty evaluators cannot match the canonical selection, so this must raise
+    # rather than be served the previously cached plan.
+    altered = work.plan.model_copy(update={"evaluators": ()})
+    with pytest.raises(ValueError):
+        validate_work_plan(altered, work.policy)
+    assert len(_PLAN_MEMO) == 1
+
+
+@pytest.mark.parametrize("work", [(4, "v2")], indirect=True)
+def test_endpoint_proposals_memo_returns_identical_publications(work) -> None:
+    from umi.competition_work_plans import _PROPOSAL_MEMO, endpoint_proposals
+
+    _PROPOSAL_MEMO.clear()
+    first = endpoint_proposals(**work.options)
+    assert len(_PROPOSAL_MEMO) == 1
+    assert endpoint_proposals(**work.options) == first
+
+
+@pytest.mark.parametrize("work", [(4, "v2")], indirect=True)
+def test_endpoint_proposals_memo_still_rejects_a_stale_caller(work) -> None:
+    """A warm memo must not let a caller skip the freshness checks."""
+    from umi.competition_work_plans import _PROPOSAL_MEMO, endpoint_proposals
+
+    _PROPOSAL_MEMO.clear()
+    endpoint_proposals(**work.options)
+    assert len(_PROPOSAL_MEMO) == 1
+    stale = dict(work.options)
+    stale["now_ms"] = work.options["now_ms"] + 3_600_000
+    with pytest.raises(ValueError):
+        endpoint_proposals(**stale)

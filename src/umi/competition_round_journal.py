@@ -18,7 +18,7 @@ from pydantic import JsonValue
 from .competition_round_plan import RoundPlan, RoundProposal
 from .open_competition import digest
 from .private_files import ensure_private_directory as _private
-from .protocol import canonical_json_bytes, sha256_hex
+from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
 
 MAX_BYTES = 16 * 1024**2
 
@@ -791,7 +791,7 @@ class RoundJournal:
             raise ValueError("retained round object exceeds its byte bound")
         row = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
         raw = bytes(row[0])
-        if raw != canonical_json_bytes(json.loads(raw)):
+        if not is_canonical_json(raw):
             raise ValueError("retained round object is not canonical")
         return raw
 

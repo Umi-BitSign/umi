@@ -81,7 +81,7 @@ from .open_competition import (
     validate_suite_profile,
     verify_signature,
 )
-from .protocol import canonical_json_bytes
+from .protocol import canonical_json_bytes, is_canonical_json
 
 
 class PromotionReview(StrictProtocolModel):
@@ -3519,7 +3519,7 @@ def _bounded_stored_body(connection, table, key_name, key, maximum_bytes, *, opt
     raw = connection.execute(f"SELECT body FROM {table} WHERE {key_name}=?", (key,)).fetchone()[0]
     if isinstance(raw, str):
         raw = raw.encode("utf-8")
-    if raw != canonical_json_bytes(json.loads(raw)):
+    if not is_canonical_json(raw):
         raise ValueError("settlement material is not canonical")
     return raw
 
