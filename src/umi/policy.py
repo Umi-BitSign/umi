@@ -235,7 +235,7 @@ class PolicyClock(StrictProtocolModel):
     def competition_transport(cls, issue_allowance_seconds: int = 300) -> PolicyClock:
         """Extend the issuance period and leave room for response and reveal."""
         value = cls.launch().model_dump()
-        if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 5400:
+        if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 28800:
             lifecycle_seconds = (
                 value["anchor_blocks"] * value["target_block_interval_seconds"]
                 + value["selection_finality_buffer_seconds"]
@@ -1076,8 +1076,8 @@ def _validate_initial_launch_profile(
 ) -> None:
     expected_clock = PolicyClock.launch()
     if competition_transport:
-        if not 300 <= clock.issue_allowance_seconds <= 5400:
-            raise ValueError("competition issue allowance must be between 300 and 5400 seconds")
+        if not 300 <= clock.issue_allowance_seconds <= 28800:
+            raise ValueError("competition issue allowance must be between 300 and 28800 seconds")
         expected_clock = PolicyClock.competition_transport(clock.issue_allowance_seconds)
         # Dispatch signs a fresh btauth nonce only after claiming each request.
         # A longer assignment queue must not extend authentication freshness.

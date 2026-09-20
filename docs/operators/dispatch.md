@@ -69,7 +69,7 @@ discovery, and total per-miner serial workload before signing the window. Preser
 the per-request inference limit; do not edit deadlines after publication.
 
 For the single-evaluator competition transport, prepare a new policy with an
-explicit `issue_allowance_seconds` between 300 and 5400. The builder retains
+explicit `issue_allowance_seconds` between 300 and 28800. The builder retains
 the historical 300-second default so existing policy construction and digests
 do not change silently. A dependence-gated release must explicitly pass 5400;
 work preparation rejects a shorter signed transport for that profile. The
