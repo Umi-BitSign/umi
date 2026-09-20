@@ -5,7 +5,10 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import re
+import threading
+from collections import OrderedDict
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -316,6 +319,38 @@ def sha256_hex(data: bytes) -> str:
     if not isinstance(data, bytes):
         raise TypeError("data must be bytes")
     return hashlib.sha256(data).hexdigest()
+
+
+_CANONICAL_VERIFIED: OrderedDict[str, None] = OrderedDict()
+_CANONICAL_VERIFIED_LOCK = threading.Lock()
+_CANONICAL_VERIFIED_MAXIMUM = 4096
+
+
+def is_canonical_json(raw: bytes) -> bool:
+    """Report whether raw is already RFC 8785 canonical JSON.
+
+    Retained records are reread on every access and reproving canonicality means
+    parsing and reserialising the whole record each time, so a record that grows
+    over a round costs O(size) per read. Bytes are immutable once retained, so
+    remember the ones already proven canonical here and key that on their own
+    digest: different bytes have a different key and are proven from scratch.
+    """
+
+    if not isinstance(raw, bytes):
+        raise TypeError("raw must be bytes")
+    key = sha256_hex(raw)
+    with _CANONICAL_VERIFIED_LOCK:
+        if key in _CANONICAL_VERIFIED:
+            _CANONICAL_VERIFIED.move_to_end(key)
+            return True
+    if raw != canonical_json_bytes(json.loads(raw)):
+        return False
+    with _CANONICAL_VERIFIED_LOCK:
+        _CANONICAL_VERIFIED[key] = None
+        _CANONICAL_VERIFIED.move_to_end(key)
+        while len(_CANONICAL_VERIFIED) > _CANONICAL_VERIFIED_MAXIMUM:
+            _CANONICAL_VERIFIED.popitem(last=False)
+    return True
 
 
 def request_digest(request: TranslationRequest) -> str:
