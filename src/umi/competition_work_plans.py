@@ -6,7 +6,9 @@ Signing and delivery must retain these exact bytes and original deadlines.
 
 from __future__ import annotations
 
-from collections import Counter
+import hashlib
+import threading
+from collections import Counter, OrderedDict
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -115,10 +117,35 @@ def evaluator_selection(policy, submissions, cutoff):
     return tuple(selected)
 
 
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+_PLAN_MEMO: "OrderedDict[str, WorkPlan]" = OrderedDict()
+_PLAN_MEMO_LOCK = threading.Lock()
+_PLAN_MEMO_MAXIMUM = 4
+
+
 def validate_work_plan(plan, policy):
     raw = canonical_json_bytes(plan)
     if len(raw) > MAX_BYTES:
         raise ValueError("work plan exceeds its byte bound")
+    # One signing round revalidates the same plan for every endorsement, and the
+    # cutoff signature replay inside it dominates. The result is a pure function
+    # of the plan and policy bytes, so reuse it. A miss still performs the whole
+    # verification; only an exact byte-for-byte repeat is served from the memo.
+    memo_key = digest(
+        {
+            "schema": "umi-work-plan-memo/1",
+            "plan_sha256": _sha256_bytes(raw),
+            "policy_sha256": digest(policy),
+        }
+    )
+    with _PLAN_MEMO_LOCK:
+        cached = _PLAN_MEMO.get(memo_key)
+        if cached is not None:
+            _PLAN_MEMO.move_to_end(memo_key)
+            return cached
     plan = WorkPlan.model_validate_json(raw)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     verify_cutoff_publication(
@@ -148,6 +175,11 @@ def validate_work_plan(plan, policy):
         or not has_case_coverage(plan.cases, policy)
     ):
         raise ValueError("work plan cases have invalid identity or stratum coverage")
+    with _PLAN_MEMO_LOCK:
+        _PLAN_MEMO[memo_key] = plan
+        _PLAN_MEMO.move_to_end(memo_key)
+        while len(_PLAN_MEMO) > _PLAN_MEMO_MAXIMUM:
+            _PLAN_MEMO.popitem(last=False)
     return plan
 
 
@@ -190,6 +222,35 @@ def _verified_transport_block(block, legacy):
     pin = legacy.implementation_pins.finality_verifier
     if pin is None or block.finality_verifier_sha256 not in pin.release_sha256_by_target.values():
         raise ValueError("work preparation finality verifier differs")
+
+
+_PROPOSAL_MEMO: "OrderedDict[str, tuple]" = OrderedDict()
+_PROPOSAL_MEMO_LOCK = threading.Lock()
+_PROPOSAL_MEMO_MAXIMUM = 4
+
+
+def _proposal_memo_key(
+    plan, policy, legacy, videos, announcement, issuance, submission_sha256
+) -> str:
+    """Identify one deterministic proposal build.
+
+    Deliberately excludes now_ms and verification_head: those gate freshness and
+    never reach the built publications, and every caller revalidates them.
+    """
+    return digest(
+        {
+            "schema": "umi-endpoint-proposal-memo/1",
+            "plan_sha256": digest(plan),
+            "policy_sha256": digest(policy),
+            "legacy_policy_sha256": scoring_policy_hash(legacy),
+            "videos_sha256": [digest(v) for v in videos],
+            "announcement": [
+                announcement.height, announcement.block_hash, announcement.timestamp_ms
+            ],
+            "issuance": [issuance.height, issuance.block_hash, issuance.timestamp_ms],
+            "submission_sha256": submission_sha256,
+        }
+    )
 
 
 def endpoint_proposals(
@@ -279,6 +340,14 @@ def endpoint_proposals(
         for c, v in zip(plan.cases, videos, strict=True)
     ):
         raise ValueError("work preparation video identity or byte limit differs")
+    memo_key = _proposal_memo_key(
+        plan, policy, legacy, videos, announcement, issuance, submission_sha256
+    )
+    with _PROPOSAL_MEMO_LOCK:
+        cached = _PROPOSAL_MEMO.get(memo_key)
+        if cached is not None:
+            _PROPOSAL_MEMO.move_to_end(memo_key)
+            return cached
     cases = tuple(EndpointAuthorizationCase(**c.model_dump()) for c in plan.cases)
     result = []
     for sub in sorted(plan.submissions, key=lambda s: digest(s.submission)):
@@ -335,7 +404,13 @@ def endpoint_proposals(
         )
     if submission_sha256 is not None and len(result) != 1:
         raise ValueError("work preparation selected an unknown endpoint submission")
-    return tuple(result)
+    built = tuple(result)
+    with _PROPOSAL_MEMO_LOCK:
+        _PROPOSAL_MEMO[memo_key] = built
+        _PROPOSAL_MEMO.move_to_end(memo_key)
+        while len(_PROPOSAL_MEMO) > _PROPOSAL_MEMO_MAXIMUM:
+            _PROPOSAL_MEMO.popitem(last=False)
+    return built
 
 
 def evaluation_order_proposals(*, plan, policy, publications=(), legacy=None):
