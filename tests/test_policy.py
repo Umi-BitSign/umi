@@ -321,7 +321,17 @@ def test_competition_transport_builder_needs_no_legacy_calibration_evidence() ->
 
 
 @pytest.mark.parametrize(
-    ("seconds", "stride"), [(300, 360), (2700, 360), (2879, 360), (2880, 720), (5400, 720)]
+    ("seconds", "stride"),
+    [
+        (300, 360),
+        (2700, 360),
+        (2879, 360),
+        (2880, 720),
+        (5400, 720),
+        (10800, 1080),
+        (21600, 2160),
+        (28800, 2880),
+    ],
 )
 def test_competition_issue_allowance_is_explicit_without_widening_authentication(seconds, stride):
     legacy = make_policy()
@@ -345,7 +355,7 @@ def test_competition_issue_allowance_is_explicit_without_widening_authentication
     assert ScoringPolicy.model_validate_json(canonical_json_bytes(extended)) == extended
 
 
-@pytest.mark.parametrize("seconds", [True, 299, 5401, 86400, "5400", 5400.0])
+@pytest.mark.parametrize("seconds", [True, 299, 28801, 86400, "5400", 5400.0])
 def test_competition_issue_allowance_rejects_out_of_profile_values(seconds) -> None:
     legacy = make_policy()
     with pytest.raises(ValidationError):
