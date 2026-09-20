@@ -72,6 +72,48 @@ class WorkAdmission:
             maximum_rounds=worker.config.maximum_orders,
             maximum_bytes=worker.config.maximum_journal_bytes,
         )
+        # One pure derivation, owned by this signer. Never cache native receipts
+        # or mutable models; every use still checks the retained manifest and
+        # all native journals. A restart or changed input derives from scratch.
+        self._completed_derivation: tuple[str, bytes] | None = None
+
+    def _paths(self) -> dict[str, str | None]:
+        worker = self.worker
+        return {
+            "signing": str(self.signing.path.resolve()),
+            "evaluator": str(worker.journal.path.resolve()),
+            "execution": str(worker.executions.path.resolve()),
+            "dispatch": None if worker.dispatch is None else str(worker.dispatch.path.resolve()),
+            "review": None
+            if worker.review_store is None
+            else str(worker.review_store.path.resolve()),
+        }
+
+    def _derivation_key(
+        self, plan: WorkPlan, publications: tuple[EndpointAuthorizationPublication, ...]
+    ) -> str:
+        return digest(
+            {
+                "plan": digest(plan),
+                "publications": [digest(p) for p in publications],
+                "policy": digest(self.worker.policy),
+                "legacy": digest(self.worker.legacy),
+                "config": digest(self.worker.config),
+                "paths": self._paths(),
+            }
+        )
+
+    def _remember_completed(
+        self,
+        key: str,
+        plan: WorkPlan,
+        publications: tuple[EndpointAuthorizationPublication, ...],
+        manifest: dict[str, Any],
+    ) -> None:
+        if self._completed_derivation is not None and self._completed_derivation[0] == key:
+            return
+        if key == self._derivation_key(plan, publications):
+            self._completed_derivation = key, canonical_json_bytes(manifest)
 
     def publications(self, plan: WorkPlan) -> tuple[EndpointAuthorizationPublication, ...]:
         """Recover only the original retained unsigned cohort, never retime it."""
@@ -201,17 +243,7 @@ class WorkAdmission:
                 }
                 for sub, budget in zip(plan.submissions, budgets, strict=True)
             ],
-            "paths": {
-                "signing": str(self.signing.path.resolve()),
-                "evaluator": str(worker.journal.path.resolve()),
-                "execution": str(worker.executions.path.resolve()),
-                "dispatch": None
-                if worker.dispatch is None
-                else str(worker.dispatch.path.resolve()),
-                "review": None
-                if worker.review_store is None
-                else str(worker.review_store.path.resolve()),
-            },
+            "paths": self._paths(),
         }
         return json.loads(canonical_json_bytes(manifest)), tuple(budgets), tuple(records)
 
@@ -239,14 +271,22 @@ class WorkAdmission:
         statement_body: EndpointAuthorizationPublication | EvaluationOrder,
     ) -> dict[str, Any]:
         """Caller validates the plan and holds its signing lease throughout."""
-        manifest, budgets, records = self._derive(plan, publications)
         plan_id = digest(plan)
+        key = self._derivation_key(plan, publications)
+        completed = self.journal.get("complete", plan_id)
+        cached = self._completed_derivation
+        budgets: tuple[OrderBudget, ...] = ()
+        records: tuple[RecordReservation, ...] = ()
+        if completed is not None and cached is not None and cached[0] == key:
+            manifest = json.loads(cached[1])
+        else:
+            self._completed_derivation = None
+            manifest, budgets, records = self._derive(plan, publications)
         if isinstance(statement_body, EvaluationOrder):
-            if order_binding(statement_body) not in {b.reservation.order_sha256 for b in budgets}:
+            if order_binding(statement_body) not in {b["order_sha256"] for b in manifest["orders"]}:
                 raise ValueError("work order differs from admitted whole-round assignments")
         elif digest(statement_body) not in manifest["publications"]:
             raise ValueError("work authorization is absent from admitted assignments")
-        completed = self.journal.get("complete", plan_id)
         retained = self.journal.get("manifest", plan_id)
         if retained is not None and retained != manifest:
             raise ValueError("whole-round admission manifest changed")
@@ -256,6 +296,7 @@ class WorkAdmission:
             receipts = self._native_receipts(plan_id, endpoints=bool(publications))
             if completed != {"manifest_sha256": digest(manifest), "receipts": receipts}:
                 raise ValueError("work admission completion receipt changed")
+            self._remember_completed(key, plan, publications, manifest)
             return completed
         # Reserve the completion row before committing any downstream promise.
         # It contains only a fixed set of native receipt digests, not their bodies.
@@ -294,6 +335,7 @@ class WorkAdmission:
         receipts = self._native_receipts(plan_id, endpoints=bool(publications))
         completed = {"manifest_sha256": digest(manifest), "receipts": receipts}
         self.journal.put("complete", plan_id, completed)
+        self._remember_completed(key, plan, publications, manifest)
         return completed
 
     def verify(self, plan: WorkPlan) -> dict[str, Any]:
