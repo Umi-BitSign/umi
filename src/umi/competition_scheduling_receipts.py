@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -60,6 +62,42 @@ def _bounded(raw: bytes, maximum: int) -> Any:
     return value
 
 
+_VALIDATED_PUBLICATIONS: OrderedDict[str, Any] = OrderedDict()
+_VALIDATED_PUBLICATIONS_LOCK = threading.Lock()
+_VALIDATED_PUBLICATIONS_MAXIMUM = 512
+_PUBLICATION_DOMAIN = b"umi-open-competition-v1\0"
+
+
+def _validated_publication(raw: bytes, publication_id: str, policy, legacy_policy):
+    """Return the validated body for bytes that hash to publication_id.
+
+    The reservation receipt is reverified on every endorsement, so one signing
+    round revalidates the whole reserved roster once per endorsement. The stored
+    bytes are immutable once reserved and their identity IS their digest, so any
+    substitution changes the digest and is rejected here before the memo is
+    consulted. Only the semantic revalidation of bytes already validated in this
+    process is skipped; a first sighting is fully validated.
+    """
+    if sha256_hex(_PUBLICATION_DOMAIN + raw) != publication_id:
+        raise ValueError("scheduling reservation publication binding changed")
+    with _VALIDATED_PUBLICATIONS_LOCK:
+        cached = _VALIDATED_PUBLICATIONS.get(publication_id)
+        if cached is not None:
+            _VALIDATED_PUBLICATIONS.move_to_end(publication_id)
+            return cached
+    body = validate_publication_body(
+        EndpointAuthorizationPublication.model_validate_json(raw), policy, legacy_policy
+    )
+    if canonical_json_bytes(body) != raw or digest(body) != publication_id:
+        raise ValueError("scheduling reservation publication binding changed")
+    with _VALIDATED_PUBLICATIONS_LOCK:
+        _VALIDATED_PUBLICATIONS[publication_id] = body
+        _VALIDATED_PUBLICATIONS.move_to_end(publication_id)
+        while len(_VALIDATED_PUBLICATIONS) > _VALIDATED_PUBLICATIONS_MAXIMUM:
+            _VALIDATED_PUBLICATIONS.popitem(last=False)
+    return body
+
+
 def reservation(
     journal: AssignmentPublicationJournal,
     db: sqlite3.Connection,
@@ -110,15 +148,9 @@ def reservation(
             "SELECT * FROM reservation_publications WHERE id=?", (entry["id"],)
         ).fetchone()
         raw = bytes(saved["body"])
-        body = validate_publication_body(
-            EndpointAuthorizationPublication.model_validate_json(raw),
-            journal.policy,
-            journal.legacy_policy,
-        )
+        body = _validated_publication(raw, entry["id"], journal.policy, journal.legacy_policy)
         if (
-            canonical_json_bytes(body) != raw
-            or digest(body) != entry["id"]
-            or digest(body.round) != row["round_sha256"]
+            digest(body.round) != row["round_sha256"]
             or body.round.sequence != row["round_sequence"]
         ):
             raise ValueError("scheduling reservation publication binding changed")

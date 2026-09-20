@@ -245,7 +245,9 @@ def _proposal_memo_key(
             "legacy_policy_sha256": scoring_policy_hash(legacy),
             "videos_sha256": [digest(v) for v in videos],
             "announcement": [
-                announcement.height, announcement.block_hash, announcement.timestamp_ms
+                announcement.height,
+                announcement.block_hash,
+                announcement.timestamp_ms,
             ],
             "issuance": [issuance.height, issuance.block_hash, issuance.timestamp_ms],
             "submission_sha256": submission_sha256,
