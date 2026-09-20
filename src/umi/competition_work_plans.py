@@ -121,7 +121,7 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-_PLAN_MEMO: "OrderedDict[str, WorkPlan]" = OrderedDict()
+_PLAN_MEMO: OrderedDict[str, WorkPlan] = OrderedDict()
 _PLAN_MEMO_LOCK = threading.Lock()
 _PLAN_MEMO_MAXIMUM = 4
 
@@ -224,7 +224,7 @@ def _verified_transport_block(block, legacy):
         raise ValueError("work preparation finality verifier differs")
 
 
-_PROPOSAL_MEMO: "OrderedDict[str, tuple]" = OrderedDict()
+_PROPOSAL_MEMO: OrderedDict[str, tuple] = OrderedDict()
 _PROPOSAL_MEMO_LOCK = threading.Lock()
 _PROPOSAL_MEMO_MAXIMUM = 4
 
