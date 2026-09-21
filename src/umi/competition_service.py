@@ -150,12 +150,21 @@ def create_intake_app(
     ):
         raise ValueError("public round signing can outlive its registration snapshot")
     historical_archives = tuple(load_intake_archive(item) for item in config.historical_archives)
+    predecessor_policies = tuple(
+        load_json(path, CompetitionPolicy) for path in config.predecessor_policies
+    )
+    # Validates the chain and makes it visible to every policy-bound check in-process.
+    lineage = register_lineage(policy, predecessor_policies)
     if historical_archives:
         if len(historical_archives) != 1:
             raise ValueError("the first staged transition requires one predecessor archive")
         predecessor = historical_archives[0]
         predecessor_summary = predecessor.summary()
-        if policy.predecessor_sha256 != predecessor_summary["policy_sha256"]:
+        # The archived (terms-changed) policy must immediately precede the OLDEST policy
+        # this ledger still honors: the live one, or the deal-preserving predecessors
+        # behind it that carried their submissions forward.
+        oldest_honored = lineage.policy(lineage.admitted_policy_sha256s[-1])
+        if oldest_honored.predecessor_sha256 != predecessor_summary["policy_sha256"]:
             raise ValueError(
                 "historical archive is not the durable immediate predecessor for this launch"
             )
@@ -170,11 +179,6 @@ def create_intake_app(
     database = Path(config.state_directory) / "competition.sqlite3"
     if not database.is_file() or database.is_symlink():
         raise ValueError("intake deployment requires its pre-existing durable ledger")
-    predecessor_policies = tuple(
-        load_json(path, CompetitionPolicy) for path in config.predecessor_policies
-    )
-    # Validates the chain and makes it visible to every policy-bound check in-process.
-    register_lineage(policy, predecessor_policies)
     store = CompetitionStore(
         Path(config.state_directory),
         policy,
