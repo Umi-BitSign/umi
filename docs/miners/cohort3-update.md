@@ -3,8 +3,10 @@
 # Cohort 3 connection update
 
 This update prepares the stock UMI endpoint miner for competition policy 7.
-Dispatch qualification is still in progress. Evaluation remains in no-weight
-mode; this page does not announce that assignments or rewards are active.
+The cohort 3 dispatch and evaluation services are ready for the scheduled roster
+cutoff at block **9,116,910**. Assignments follow the finalized cutoff and work
+authorization. Evaluation remains in no-weight mode; readiness does not mean
+that a live cohort has completed or that rewards are active.
 
 An existing accepted submission under policy 5 or 6 can carry forward. You do
 not need to resubmit merely because there are no assignments or your hotkey is
