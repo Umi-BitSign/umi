@@ -191,13 +191,21 @@ def create_intake_app(
     if historical_archives:
         launch = config.public_deployment.launch_identity()
         archived_launch = historical_archives[0].manifest.public_launch_sha256
-        # The archive preserves the predecessor's original schedule. Only a
-        # retained, signature-verified amendment may connect it to this launch.
-        if archived_launch != digest(launch) and not any(
-            item["amendment"]["previous_launch_sha256"] == archived_launch
-            and item["amendment"]["replacement"] == launch.model_dump(mode="json", by_alias=True)
-            for item in store.public_launch_amendments()
-        ):
+        # The store authenticates every link against immutable launch history.
+        # Walk back from the current launch; an older or disconnected path cannot
+        # establish continuity with the archive after another amendment.
+        linked_launch = digest(launch)
+        seen = {linked_launch}
+        for item in reversed(store.public_launch_amendments()):
+            if linked_launch == archived_launch:
+                break
+            amendment = item["amendment"]
+            previous = amendment["previous_launch_sha256"]
+            if digest(amendment["replacement"]) != linked_launch or previous in seen:
+                break
+            linked_launch = previous
+            seen.add(linked_launch)
+        if linked_launch != archived_launch:
             raise ValueError(
                 "historical archive is not the durable immediate predecessor for this launch"
             )

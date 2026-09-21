@@ -37,6 +37,21 @@ choose a cadence long enough for response, reveal and evidence collection.
 Authentication freshness remains unchanged: dispatch signs a fresh nonce when it
 claims each request. Longer queues do not make old authentication reusable.
 
+Future competition transports can also set `response_window_seconds` between
+300 and 3600. The default remains 300, preserving existing policy bytes. An
+18-hour issue allowance with `response_window_seconds=900` and
+`window_stride_blocks=7200` leaves 15 minutes after issue close for the last
+request to finish. The minimum stride calculation includes this response time.
+Compared with the default response window, 900 seconds moves response and reveal
+600 seconds later and increases the request's block deadline by 50 blocks.
+Recheck the public evaluation close and capacity with those deadlines. Legacy
+scoring policies retain their 300-second response window.
+
+Dispatch HTTP timeouts accept up to 900 seconds; their default remains 180. A
+615-second timeout for a 600-second inference allowance fits within the explicit
+900-second response window. Capacity admission charges the full configured HTTP
+timeout and checks the response and block deadlines before signing new work.
+
 A version-2 launch amendment with reason `extend_future_cohort_windows` names
 the first old cycle being replaced. It requires the evaluator quorum, preserves
 the original intake opening and eligible tracks, and cannot shorten any phase

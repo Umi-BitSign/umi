@@ -233,10 +233,17 @@ class PolicyClock(StrictProtocolModel):
 
     @classmethod
     def competition_transport(
-        cls, issue_allowance_seconds: int = 300, *, window_stride_blocks: int | None = None
+        cls,
+        issue_allowance_seconds: int = 300,
+        *,
+        response_window_seconds: int = 300,
+        window_stride_blocks: int | None = None,
     ) -> PolicyClock:
         """Extend the issuance period and leave room for response and reveal."""
+        if type(response_window_seconds) is not int or not 300 <= response_window_seconds <= 3600:
+            raise ValueError("competition response window must be between 300 and 3600 seconds")
         value = cls.launch().model_dump()
+        value["response_window_seconds"] = response_window_seconds
         if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 86400:
             lifecycle_seconds = (
                 value["anchor_blocks"] * value["target_block_interval_seconds"]
@@ -1012,6 +1019,7 @@ class ScoringPolicy(StrictProtocolModel):
         implementation_pins: PolicyImplementationPins,
         validator: ValidatorRegistryEntry,
         issue_allowance_seconds: int = 300,
+        response_window_seconds: int = 300,
         window_stride_blocks: int | None = None,
     ) -> ScoringPolicy:
         """Prepare the single-evaluator request transport without legacy publishers.
@@ -1022,6 +1030,8 @@ class ScoringPolicy(StrictProtocolModel):
         remains an independently verified property of the serving backend.
         An explicit issue allowance can accommodate serial cases and the shared
         proof queue. It changes the policy digest, never an existing assignment.
+        An explicit response window leaves time for the last issued request to
+        finish and extends the block deadline by the same allowance.
         An explicit stride can align transport windows with the public cohort
         cadence without extending request deadlines or authentication freshness.
         """
@@ -1039,7 +1049,9 @@ class ScoringPolicy(StrictProtocolModel):
             validator_cost_schedule_hash=None,
             implementation_pins=implementation_pins,
             clock=PolicyClock.competition_transport(
-                issue_allowance_seconds, window_stride_blocks=window_stride_blocks
+                issue_allowance_seconds,
+                response_window_seconds=response_window_seconds,
+                window_stride_blocks=window_stride_blocks,
             ),
             limits=PolicyLimits.launch(),
             thresholds=PolicyThresholds.launch(),
@@ -1095,7 +1107,9 @@ def _validate_initial_launch_profile(
     if competition_transport:
         if not 300 <= clock.issue_allowance_seconds <= 86400:
             raise ValueError("competition issue allowance must be between 300 and 86400 seconds")
-        expected_clock = PolicyClock.competition_transport(clock.issue_allowance_seconds)
+        expected_clock = PolicyClock.competition_transport(
+            clock.issue_allowance_seconds, response_window_seconds=clock.response_window_seconds
+        )
         if (
             expected_clock.window_stride_blocks <= clock.window_stride_blocks <= 2**53 - 1
             and clock.window_stride_blocks % PolicyClock.launch().window_stride_blocks == 0
