@@ -397,6 +397,47 @@ def test_legacy_policy_does_not_accept_competition_issue_allowance() -> None:
         ScoringPolicy.model_validate(data)
 
 
+def test_competition_stride_can_align_cohorts_without_extending_request_lifetime():
+    legacy = make_policy()
+    kwargs = dict(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+        issue_allowance_seconds=21600,
+    )
+    original = ScoringPolicy.competition_transport(**kwargs)
+    aligned = ScoringPolicy.competition_transport(**kwargs, window_stride_blocks=2880)
+    assert original.clock.window_stride_blocks == 2160
+    assert aligned.clock.window_stride_blocks == 2880
+    before = original.model_dump(mode="json", by_alias=True)
+    after = aligned.model_dump(mode="json", by_alias=True)
+    after["clock"]["window_stride_blocks"] = before["clock"]["window_stride_blocks"]
+    assert after == before
+    assert scoring_policy_hash(aligned) != scoring_policy_hash(original)
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(aligned)) == aligned
+    assert ScoringPolicy.competition_transport(**kwargs, window_stride_blocks=2160) == original
+
+
+@pytest.mark.parametrize("stride", [True, "2880", 2880.0, 0, 360, 1800, 2161, 2**53])
+def test_competition_stride_rejects_short_fractional_or_unsupported_values(stride):
+    legacy = make_policy()
+    with pytest.raises(ValueError):
+        ScoringPolicy.competition_transport(
+            activation_block=legacy.activation_block,
+            implementation_pins=legacy.implementation_pins,
+            validator=legacy.validator_registry[0],
+            issue_allowance_seconds=21600,
+            window_stride_blocks=stride,
+        )
+
+
+def test_legacy_scoring_policy_cannot_opt_into_competition_stride():
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["clock"]["window_stride_blocks"] = 2880
+    with pytest.raises(ValidationError, match="initial launch profile"):
+        ScoringPolicy.model_validate(data)
+
+
 @pytest.mark.parametrize(
     "field",
     [
