@@ -19,11 +19,11 @@ translation requests under the corresponding release and policy.
 
 ### Successor assignment discovery rehearsal
 
-First-round endpoint intake is live, but assignment delivery is not public yet.
-Do not use the placeholder values in this section for production. UMI will
-publish the exact signed feed configuration and a tested launch command before
-evaluation begins, with operating lead time. A coordinator, feed or evaluator
-infrastructure delay cannot be scored as miner failure.
+Endpoint intake is live. The [cohort 3 update](cohort3-update.md) provides the
+reviewed policy-7 connection inputs and restart instructions; cohort dispatch
+qualification is still in progress. The placeholders below are generic rehearsal
+examples. A coordinator, feed or evaluator infrastructure delay cannot be scored
+as miner failure.
 
 In a reviewed rehearsal, the weight-disabled miner can discover new
 quorum-signed assignments while running. Supply `--competition-policy`,
