@@ -296,6 +296,24 @@ def test_late_continuation_rejects_a_fit_without_twenty_percent_reserve(timed_sc
     assert snapshot(fixture.journal) == before
 
 
+@pytest.mark.parametrize(
+    "elapsed_ms,reason",
+    [(160_000, "required deadline reserve"), (200_000, r"cannot fit|deadline reserve")],
+)
+def test_warm_reservation_receipt_rechecks_remaining_time(timed_schedule, elapsed_ms, reason):
+    fixture = timed_schedule
+    fixture.budget = fixture.budget.model_copy(update={"publication_delay_ms": 100_000})
+    configure(fixture)
+    reserve(fixture)
+    assert fixture.journal.reservation("a" * 64, evaluator_hotkey=fixture.evaluator) is not None
+    advance(fixture, elapsed_ms)
+    fixture.journal.observe(observed=fixture.observed)
+    before = snapshot(fixture.journal)
+    with pytest.raises(ValueError, match=reason):
+        fixture.journal.reservation("a" * 64, evaluator_hotkey=fixture.evaluator)
+    assert snapshot(fixture.journal) == before
+
+
 def test_late_continuation_does_not_retry_a_dispatch_with_unknown_outcome(timed_schedule):
     fixture = timed_schedule
     fixture.budget = fixture.budget.model_copy(update={"publication_delay_ms": 100_000})
