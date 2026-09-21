@@ -506,9 +506,17 @@ class AssignmentPublicationJournal:
             "SELECT document,evidence FROM blocks WHERE height=?", (block.height,)
         ).fetchone()
         if existing:
+            retained = self._retained_block(db, block.height)
+            # Independent owned observers have different attestation transcripts
+            # for the same finalized block. Compare every block/context field,
+            # while keeping the first validated proof and its digest unchanged.
             if (
-                bytes(existing["document"]) != document
-                or bytes(existing["evidence"]) != block.finality_evidence
+                replace(
+                    retained,
+                    finality_evidence=block.finality_evidence,
+                    finality_evidence_sha256=block.finality_evidence_sha256,
+                )
+                != block
             ):
                 raise ValueError("verified block changed at a retained height")
             return
