@@ -247,7 +247,9 @@ class WorkAdmission:
         }
         return json.loads(canonical_json_bytes(manifest)), tuple(budgets), tuple(records)
 
-    def _native_receipts(self, plan_id: str, *, endpoints: bool) -> dict[str, str]:
+    def _native_receipts(
+        self, plan_id: str, *, endpoints: bool, continuing_order: bool = False
+    ) -> dict[str, str]:
         worker = self.worker
         values = {
             "signing": self.signing.reservation(plan_id),
@@ -257,7 +259,12 @@ class WorkAdmission:
         if worker.review_store is not None:
             values["review"] = worker.review_store.reservation(plan_id)
         if endpoints:
-            values["dispatch"] = worker.dispatch.reservation(
+            reservation = (
+                worker.dispatch.retained_reservation
+                if continuing_order
+                else worker.dispatch.reservation
+            )
+            values["dispatch"] = reservation(
                 plan_id, evaluator_hotkey=worker.config.evaluator_hotkey
             )
         if any(v is None for v in values.values()):
@@ -269,11 +276,19 @@ class WorkAdmission:
         plan: WorkPlan,
         publications: tuple[EndpointAuthorizationPublication, ...],
         statement_body: EndpointAuthorizationPublication | EvaluationOrder,
+        *,
+        continuing_order: bool = False,
     ) -> dict[str, Any]:
         """Caller validates the plan and holds its signing lease throughout."""
         plan_id = digest(plan)
         key = self._derivation_key(plan, publications)
         completed = self.journal.get("complete", plan_id)
+        if continuing_order and (
+            not isinstance(statement_body, EvaluationOrder) or completed is None
+        ):
+            raise ValueError(
+                "evaluation order continuation requires complete whole-round admission"
+            )
         cached = self._completed_derivation
         budgets: tuple[OrderBudget, ...] = ()
         records: tuple[RecordReservation, ...] = ()
@@ -293,7 +308,9 @@ class WorkAdmission:
         if completed is not None:
             if retained is None:
                 raise ValueError("work admission completion lost its manifest")
-            receipts = self._native_receipts(plan_id, endpoints=bool(publications))
+            receipts = self._native_receipts(
+                plan_id, endpoints=bool(publications), continuing_order=continuing_order
+            )
             if completed != {"manifest_sha256": digest(manifest), "receipts": receipts}:
                 raise ValueError("work admission completion receipt changed")
             self._remember_completed(key, plan, publications, manifest)
@@ -338,16 +355,26 @@ class WorkAdmission:
         self._remember_completed(key, plan, publications, manifest)
         return completed
 
-    def verify(self, plan: WorkPlan) -> dict[str, Any]:
+    def verify(self, plan: WorkPlan, *, order: EvaluationOrder | None = None) -> dict[str, Any]:
         """Recheck every native promise after the caller's last awaited proof."""
         plan_id = digest(plan)
         manifest = self.journal.get("manifest", plan_id)
         complete = self.journal.get("complete", plan_id)
         if manifest is None or complete is None:
             raise ValueError("whole-round admission is incomplete")
+        if order is not None and (
+            not isinstance(order, EvaluationOrder)
+            or manifest["plan_sha256"] != plan_id
+            or order_binding(order) not in {b["order_sha256"] for b in manifest["orders"]}
+        ):
+            raise ValueError("work order differs from admitted whole-round assignments")
         if complete != {
             "manifest_sha256": digest(manifest),
-            "receipts": self._native_receipts(plan_id, endpoints=bool(manifest["publications"])),
+            "receipts": self._native_receipts(
+                plan_id,
+                endpoints=bool(manifest["publications"]),
+                continuing_order=order is not None,
+            ),
         }:
             raise ValueError("whole-round native admission receipt changed")
         return complete

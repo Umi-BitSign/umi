@@ -454,8 +454,10 @@ class AssignmentPublicationJournal:
     def _qualify_capacity(self, db, publications, observed, now, evaluator_hotkey):
         return qualify_dispatch(self, db, publications, observed, now, evaluator_hotkey)
 
-    def _recover_capacity(self, db, batch_id, evaluator_hotkey, now):
-        return recover_dispatch_qualification(self, db, batch_id, evaluator_hotkey, now)
+    def _recover_capacity(self, db, batch_id, evaluator_hotkey, now, *, requalify=True):
+        return recover_dispatch_qualification(
+            self, db, batch_id, evaluator_hotkey, now, requalify=requalify
+        )
 
     def configure_dispatch(self, *, evaluator_hotkey, limits, budget, publication_directory=None):
         configure_dispatch(
@@ -887,6 +889,18 @@ class AssignmentPublicationJournal:
                 db,
                 batch_id,
                 evaluator_hotkey,
+            )
+
+    def retained_reservation(self, batch_id, *, evaluator_hotkey):
+        """Verify native obligations without promising another dispatch workload.
+
+        Only WorkAdmission's completed, exact evaluation-order continuation uses
+        this receipt. New admission and authorization recovery use reservation().
+        The original qualification digest and all native checks remain intact.
+        """
+        with self._transaction() as db:
+            return scheduling_receipts.reservation(
+                self, db, batch_id, evaluator_hotkey, requalify=False
             )
 
     def publish(
