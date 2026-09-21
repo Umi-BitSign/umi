@@ -19,6 +19,8 @@ from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, creat
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
+from .competition_commands.common import load_json
+from .competition_policy_lineage import register_lineage
 from .competition_store import (
     AdmissionCapacity,
     CompetitionStore,
@@ -61,6 +63,12 @@ class CompetitionServiceConfig(StrictProtocolModel):
     admission_capacity: AdmissionCapacity = Field(default_factory=AdmissionCapacity)
     api_limits: CompetitionApiLimits = Field(default_factory=CompetitionApiLimits)
     historical_archives: Annotated[tuple[IntakeArchiveConfig, ...], Field(max_length=8)] = ()
+    # Deal-preserving predecessor policy files, newest first. Their signed submissions
+    # stay admitted in this same ledger (see competition_policy_lineage). Distinct from
+    # historical_archives, which is the terms-change path that archives a predecessor.
+    predecessor_policies: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...], Field(max_length=8)
+    ] = ()
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
@@ -162,6 +170,11 @@ def create_intake_app(
     database = Path(config.state_directory) / "competition.sqlite3"
     if not database.is_file() or database.is_symlink():
         raise ValueError("intake deployment requires its pre-existing durable ledger")
+    predecessor_policies = tuple(
+        load_json(path, CompetitionPolicy) for path in config.predecessor_policies
+    )
+    # Validates the chain and makes it visible to every policy-bound check in-process.
+    register_lineage(policy, predecessor_policies)
     store = CompetitionStore(
         Path(config.state_directory),
         policy,
@@ -169,6 +182,7 @@ def create_intake_app(
         public_launch=config.public_deployment.launch_identity(),
         submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
         historical_intake_archive_bindings=archive_bindings,
+        predecessor_policies=predecessor_policies,
     )
     if historical_archives:
         launch = config.public_deployment.launch_identity()

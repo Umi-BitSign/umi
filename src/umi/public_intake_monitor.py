@@ -249,6 +249,10 @@ class CompetitionStatus(StrictProtocolModel):
     admission_phase: Literal["not_open", "open", "closed", "capacity_exhausted", "unverified"]
     admission_checked_block: Annotated[int, Field(ge=0, le=2**53 - 1)]
     chain_submission_authorized: Literal[False]
+    # Deal-preserving predecessors whose signed submissions the intake still admits
+    # (competition_policy_lineage). Absent from statuses published before this field.
+    honored_policy_sha256s: Annotated[tuple[Hex32, ...], Field(max_length=16)] | None = None
+    deal_sha256: Hex32 | None = None
     deployment: dict[str, JsonValue]
     round_schedule: PublicRoundSchedule
     assignment_delivery_ready: bool
