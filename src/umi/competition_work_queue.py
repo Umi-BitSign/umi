@@ -281,6 +281,11 @@ class WorkQueue:
         def statements():
             # Generate one body at a time so the journal can enforce its byte
             # budget without staging every publication in memory first.
+            # The atomic batch chooses one fresh issuance when construction
+            # starts. Serialization time must not give later members a different
+            # freshness decision. Retention still checks the real clock against
+            # the original issue deadline before committing the whole batch.
+            construction_ms = time.time_ns() // 1_000_000
             for sub in plan.submissions:
                 if sub.submission.track != "endpoint":
                     continue
@@ -291,7 +296,7 @@ class WorkQueue:
                     videos=videos,
                     announcement=announcement,
                     issuance=issuance,
-                    now_ms=time.time_ns() // 1_000_000,
+                    now_ms=construction_ms,
                     minimum_issue_ms=self.minimum_issue_ms,
                     submission_sha256=digest(sub.submission),
                 )[0]
