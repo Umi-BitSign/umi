@@ -16,12 +16,22 @@ absent from the first page of the submissions list.
 
 ## Release and public inputs
 
-Use release `29c4988a528f07aab71df21ac71c8bf00a7598f9`. In the Python environment
-that runs your UMI protocol service:
+Use release `29c4988a528f07aab71df21ac71c8bf00a7598f9`. The Linux transport policy
+requires **CPython 3.12.14**, `regex==2026.9.3`, and exact package content hashes.
+A distro Python with a different patch version fails startup even if it is
+Python 3.12. Install into the locked environment that runs your protocol service:
 
 ```sh
 python -m pip install 'umi-subnet @ git+https://github.com/Umi-BitSign/umi.git@29c4988a528f07aab71df21ac71c8bf00a7598f9'
 ```
+
+For a fresh environment, follow the reference model's
+[locked environment instructions](https://github.com/Umi-BitSign/umi-reference-model/blob/main/docs/RUN_MINER.md#2-install-the-locked-environment),
+using the UMI revision above. In that procedure, use
+`uv venv --python 3.12.14 .venv` explicitly; `--python 3.12` can select an
+incompatible system interpreter. Preserve an existing working environment until
+the replacement passes the runtime check below. Matching version numbers alone
+does not establish that the installed package contents match the policy.
 
 Download the public policies and signed connection profile into a new directory.
 This checks the published manifest hash and every downloaded file:
@@ -56,6 +66,23 @@ print(root.resolve())
 PY
 ```
 
+After installing the release and downloading the policies, check the actual
+service environment before restarting it. Run this with that environment's
+Python, from the directory containing `umi-cohort3-inputs`:
+
+```sh
+python - <<'PY'
+from pathlib import Path
+from umi.policy import ScoringPolicy, validate_scoring_runtime
+
+policy = ScoringPolicy.model_validate_json(
+    Path('umi-cohort3-inputs/transport-policy.json').read_bytes()
+)
+validate_scoring_runtime(policy)
+print('Scoring runtime matches the transport policy.')
+PY
+```
+
 The signed profile's protocol digest is
 `29faab249b1945bd344020d13913666420bd685f949fe7e40083573155bc2cc2`.
 The profile binds `https://api.umi.vision` as the feed and the permitted video
@@ -80,6 +107,9 @@ umi-competition --policy umi-cohort3-inputs/competition-policy-seq7.json \
 
 For `x86_64-unknown-linux-gnu`, download the exact observer binary pinned by the
 transport policy. It requires GLIBC 2.34 or newer and the system `libgcc_s.so.1`.
+For Ubuntu, use 22.04 or newer for this artifact; Ubuntu 20.04's GLIBC 2.31
+cannot run it. Check the host with `getconf GNU_LIBC_VERSION`. This release does
+not provide a policy-pinned build for older glibc.
 The existing [competition miner bundle release](https://github.com/Umi-BitSign/umi/releases/tag/umi-competition-miner-bundle-v1)
 contains the Linux and Darwin observers, storage-proof verifiers, chain templates
 and `SHA256SUMS`. Use the cohort 3 policy files above with that bundle.
@@ -183,12 +213,31 @@ Point `--competition-chain-config` at the printed path. Restart the protocol
 service once under the updated environment and command. Future ordinary rounds
 continue through the feed without another restart.
 
-Check `/healthz` on your miner. It should report `ok: true`,
+Check `/healthz` directly on the miner process, for example
+`curl --fail http://127.0.0.1:8091/healthz` if it listens on port 8091.
+It should report `ok: true`,
 `runtime_mode: competition_no_weight`, `finality_service: running`, and the
 policy-7 digest above. Before assignments are published, a feed 401 or
 `assignment_feed_unavailable` does not by itself indicate a bad hotkey or require
-resubmission. A health-only endpoint still needs a working translation backend
-to answer evaluation requests.
+resubmission. This is not a diagnosis of every 401: investigate a persistent
+failure once work has been published for your miner.
+
+If your TLS edge serves its own `/healthz`, that response cannot show the miner's
+profile. The registration bridge probes `/healthz` at the chain-announced public
+origin and currently checks HTTP availability, without interpreting these miner
+JSON fields. Competition dispatch does not use `/healthz` as its admission test;
+it verifies origin and authorization evidence and sends signed requests to
+`POST /v1/translate`. You can retain the edge health handler while proxying that
+route to the miner. Preserve the request path, body and authentication headers.
+A static health response does not establish translation readiness, so monitor
+the miner process separately.
+
+In this release, `protocol_conformance: false`, `activation_evidence: false`, and
+`serving_origin_finality_verified: false` are fixed health-response fields. They
+do not turn true after assignment delivery. `cached_publications: 0` is expected
+before the feed provides usable authorization for this miner; it counts current
+cached publications, not completed work. Neither these flags nor `ok: true`
+prove that a miner has answered an evaluation request.
 
 The same release, policy ancestry and preserved-state configuration have been
 started on UMI's Studio miner and checked through its health endpoint. A full
