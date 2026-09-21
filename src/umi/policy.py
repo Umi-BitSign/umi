@@ -232,7 +232,9 @@ class PolicyClock(StrictProtocolModel):
         )
 
     @classmethod
-    def competition_transport(cls, issue_allowance_seconds: int = 300) -> PolicyClock:
+    def competition_transport(
+        cls, issue_allowance_seconds: int = 300, *, window_stride_blocks: int | None = None
+    ) -> PolicyClock:
         """Extend the issuance period and leave room for response and reveal."""
         value = cls.launch().model_dump()
         if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 28800:
@@ -245,6 +247,16 @@ class PolicyClock(StrictProtocolModel):
             )
             stride_seconds = value["window_stride_blocks"] * value["target_block_interval_seconds"]
             value["window_stride_blocks"] *= lifecycle_seconds // stride_seconds + 1
+        if window_stride_blocks is not None:
+            if (
+                type(window_stride_blocks) is not int
+                or not value["window_stride_blocks"] <= window_stride_blocks <= 2**53 - 1
+                or window_stride_blocks % cls.launch().window_stride_blocks
+            ):
+                raise ValueError(
+                    "competition stride must be a sufficient whole launch-window multiple"
+                )
+            value["window_stride_blocks"] = window_stride_blocks
         value["issue_allowance_seconds"] = issue_allowance_seconds
         return cls.model_validate(value)
 
@@ -1000,6 +1012,7 @@ class ScoringPolicy(StrictProtocolModel):
         implementation_pins: PolicyImplementationPins,
         validator: ValidatorRegistryEntry,
         issue_allowance_seconds: int = 300,
+        window_stride_blocks: int | None = None,
     ) -> ScoringPolicy:
         """Prepare the single-evaluator request transport without legacy publishers.
 
@@ -1009,6 +1022,8 @@ class ScoringPolicy(StrictProtocolModel):
         remains an independently verified property of the serving backend.
         An explicit issue allowance can accommodate serial cases and the shared
         proof queue. It changes the policy digest, never an existing assignment.
+        An explicit stride can align transport windows with the public cohort
+        cadence without extending request deadlines or authentication freshness.
         """
 
         return cls(
@@ -1023,7 +1038,9 @@ class ScoringPolicy(StrictProtocolModel):
             validator_capacity_set_root=None,
             validator_cost_schedule_hash=None,
             implementation_pins=implementation_pins,
-            clock=PolicyClock.competition_transport(issue_allowance_seconds),
+            clock=PolicyClock.competition_transport(
+                issue_allowance_seconds, window_stride_blocks=window_stride_blocks
+            ),
             limits=PolicyLimits.launch(),
             thresholds=PolicyThresholds.launch(),
             validator_registry=[validator],
@@ -1079,6 +1096,13 @@ def _validate_initial_launch_profile(
         if not 300 <= clock.issue_allowance_seconds <= 28800:
             raise ValueError("competition issue allowance must be between 300 and 28800 seconds")
         expected_clock = PolicyClock.competition_transport(clock.issue_allowance_seconds)
+        if (
+            expected_clock.window_stride_blocks <= clock.window_stride_blocks <= 2**53 - 1
+            and clock.window_stride_blocks % PolicyClock.launch().window_stride_blocks == 0
+        ):
+            expected_clock = expected_clock.model_copy(
+                update={"window_stride_blocks": clock.window_stride_blocks}
+            )
         # Dispatch signs a fresh btauth nonce only after claiming each request.
         # A longer assignment queue must not extend authentication freshness.
     expected_limits = PolicyLimits.launch()
