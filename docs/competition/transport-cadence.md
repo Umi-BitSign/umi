@@ -31,6 +31,28 @@ allowances, authentication freshness, retry limits and reward settings. Extendin
 the issue allowance instead would also extend the request's block deadline,
 which can exceed the cohort's already frozen evaluation close.
 
+For a future cohort, the issue allowance can be between 300 and 86,400 seconds.
+Extend the public signing and evaluation phases along with the transport clock;
+choose a cadence long enough for response, reveal and evidence collection.
+Authentication freshness remains unchanged: dispatch signs a fresh nonce when it
+claims each request. Longer queues do not make old authentication reusable.
+
+A version-2 launch amendment with reason `extend_future_cohort_windows` names
+the first old cycle being replaced. It requires the evaluator quorum, preserves
+the original intake opening and eligible tracks, and cannot shorten any phase
+or the cadence. Apply it after the preceding cycle's validity ends and before
+the original next roster cutoff. The store rejects an extension of any already
+prepared or active cohort and retains prior rounds, receipts, checkpoint history
+and evidence. A quiesced migration fences stale writers. Version-1 amendments
+retain their existing bytes and first-cohort scope.
+
+Before signing, project the full intended miner count with measured costs,
+publication/signing delays, faster block progress, slower operations and recovery.
+Require explicit reserve against issue, response and block deadlines. Then run
+the actual host rehearsal with advancing clocks; a projection alone does not
+qualify a deployment. Apply only to future unconsumed cohorts; existing signed
+assignments keep their original deadlines.
+
 This produces a different transport digest. It requires a reviewed deployment,
 compatible miner and replay releases, signed connection inputs, and new state
 namespaces wherever journals bind the old transport. Older releases reject a

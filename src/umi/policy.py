@@ -237,7 +237,7 @@ class PolicyClock(StrictProtocolModel):
     ) -> PolicyClock:
         """Extend the issuance period and leave room for response and reveal."""
         value = cls.launch().model_dump()
-        if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 28800:
+        if type(issue_allowance_seconds) is int and 300 <= issue_allowance_seconds <= 86400:
             lifecycle_seconds = (
                 value["anchor_blocks"] * value["target_block_interval_seconds"]
                 + value["selection_finality_buffer_seconds"]
@@ -1093,8 +1093,8 @@ def _validate_initial_launch_profile(
 ) -> None:
     expected_clock = PolicyClock.launch()
     if competition_transport:
-        if not 300 <= clock.issue_allowance_seconds <= 28800:
-            raise ValueError("competition issue allowance must be between 300 and 28800 seconds")
+        if not 300 <= clock.issue_allowance_seconds <= 86400:
+            raise ValueError("competition issue allowance must be between 300 and 86400 seconds")
         expected_clock = PolicyClock.competition_transport(clock.issue_allowance_seconds)
         if (
             expected_clock.window_stride_blocks <= clock.window_stride_blocks <= 2**53 - 1
