@@ -155,13 +155,20 @@ class WorkQueue:
             if sub.submission.track == "endpoint":
                 kinds.insert(0, ("umi-endpoint-authorization-publication/1", True))
             for kind, required in kinds:
-                slots.append((digest({
-                    "policy": round_.policy_sha256,
-                    "sequence": round_.sequence,
-                    "submission": digest(sub.submission),
-                    "kind": kind,
-                }), required))
-        page = slots[after:after + 4]
+                slots.append(
+                    (
+                        digest(
+                            {
+                                "policy": round_.policy_sha256,
+                                "sequence": round_.sequence,
+                                "submission": digest(sub.submission),
+                                "kind": kind,
+                            }
+                        ),
+                        required,
+                    )
+                )
+        page = slots[after : after + 4]
         validator = _StatementValidator(self.policy, self.legacy)
         statements = []
         for slot, required in page:
@@ -172,9 +179,12 @@ class WorkQueue:
             if statement.plan != plan:
                 raise ValueError("retained maintenance statement has a different plan")
             statements.append(statement)
-        self.journal.put_many((), index=lambda db: self._write_indexes(
-            db, (self._index_record(statement) for statement in statements)
-        ))
+        self.journal.put_many(
+            (),
+            index=lambda db: self._write_indexes(
+                db, (self._index_record(statement) for statement in statements)
+            ),
+        )
         cursor = after + len(page)
         return (0 if cursor >= len(slots) else cursor), tuple(statements)
 
