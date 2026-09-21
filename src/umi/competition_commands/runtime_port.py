@@ -9,7 +9,6 @@ from pathlib import Path
 
 from ..competition_artifacts import verify_preserved_bundle
 from ..competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
-from ..competition_evaluator import EvaluatorConfig
 from ..competition_execution import execution_boundary
 from ..competition_intake_archive import load_intake_archive
 from ..competition_policy_lineage import registered_lineage
@@ -20,7 +19,6 @@ from ..competition_runtime_port import (
     runtime_port_record,
     verify_runtime_port,
 )
-from ..competition_service import CompetitionServiceConfig
 from ..competition_store import CompetitionStore, HistoricalIntakeArchiveBinding
 from ..concurrency import run_owned_thread
 from ..open_competition import CompetitionPolicy, digest
@@ -28,6 +26,8 @@ from .common import load_json
 
 
 def _open_store(config, policy, record):
+    from ..competition_service import CompetitionServiceConfig
+
     if isinstance(config, CompetitionServiceConfig):
         if config.retained_state.baseline_promotion_sha256 != baseline_record_digest(record):
             raise ValueError("replacement intake config must pin the reviewed runtime-port head")
@@ -58,6 +58,9 @@ def _open_store(config, policy, record):
 
 
 def activate(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    from ..competition_evaluator import EvaluatorConfig
+    from ..competition_service import CompetitionServiceConfig
+
     if not args.confirm_quiesced_backup:
         raise ValueError("runtime port requires quiesced services and a verified backup")
     certificate = verify_runtime_port(
