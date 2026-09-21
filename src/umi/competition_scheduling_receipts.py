@@ -103,6 +103,8 @@ def reservation(
     db: sqlite3.Connection,
     batch_id: str,
     evaluator_hotkey: str,
+    *,
+    requalify: bool = True,
 ) -> dict[str, Any] | None:
     if not isinstance(batch_id, str) or not re.fullmatch("[0-9a-f]{64}", batch_id):
         raise ValueError("invalid scheduling reservation identity")
@@ -228,6 +230,7 @@ def reservation(
         batch_id,
         evaluator_hotkey,
         time.time_ns() // 1_000_000,
+        requalify=requalify,
     )
     journal._capacity(db)
     return {

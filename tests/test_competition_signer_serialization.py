@@ -299,8 +299,8 @@ async def test_delayed_model_signing_recollects_finality_before_signing(setup, m
     else:
         original_verify = signer.admission.verify
 
-        def delayed_verify(plan):
-            original_verify(plan)
+        def delayed_verify(plan, **kwargs):
+            original_verify(plan, **kwargs)
             loop.call_soon_threadsafe(entered.set)
             wait_for_release()
 
@@ -361,8 +361,8 @@ async def test_final_signing_proof_drains_before_releasing_process_lock(setup, m
             ),
         )
 
-    def verify(plan):
-        original_verify(plan)
+    def verify(plan, **kwargs):
+        original_verify(plan, **kwargs)
         verified.set()
 
     def blocked_proof():
@@ -426,8 +426,8 @@ async def test_final_signing_proof_runs_with_one_default_executor_worker(setup, 
     verified = threading.Event()
     proof_threads, signing_threads = [], []
 
-    def verify(plan):
-        original_verify(plan)
+    def verify(plan, **kwargs):
+        original_verify(plan, **kwargs)
         verified.set()
 
     async def boundary():

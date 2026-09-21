@@ -271,9 +271,23 @@ async def test_finality_failure_retains_observation_and_refuses_rerun(paired_set
     assert len(paired_setup.calls) == 2
 
 
-async def test_incomplete_dispatch_is_not_scored_as_miner_failure(paired_setup, tmp_path):
+@pytest.mark.parametrize("claimed", [False, True])
+async def test_incomplete_dispatch_is_not_scored_as_miner_failure(paired_setup, tmp_path, claimed):
     item = paired_setup.dispatch.feed.item
     incumbent, _ = await run_incumbent(paired_setup, tmp_path)
+    if claimed:
+        from umi.competition_scheduling import assignment_key
+
+        journal = paired_setup.dispatch.feed.journal
+        assignment = next(
+            a
+            for a in item.publication.publication.assignments
+            if a.evaluator_hotkey == incumbent.job.evaluator_hotkey
+        )
+        block = item.finalized_blocks.blocks[assignment.request.issued_block]
+        key = assignment_key(item.publication, assignment)
+        assert journal.claim(key, observed=block, issuance=block) is not None
+        assert journal.status(key)["state"] == "uncertain_dispatched"
     with pytest.raises(ValueError, match="incomplete"):
         assemble_endpoint_evidence(
             incumbent=incumbent,
