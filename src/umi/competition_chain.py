@@ -490,6 +490,7 @@ class FinalizedRegistrationProvider:
                 observer=observer,
                 state_path=directory / "finality.sqlite3",
                 scoring_policy_digest=self._finality_policy_hash(),
+                accepted_predecessor_policy_digests=self._predecessor_finality_policy_hashes(),
                 chain_observation=config.chain_pin,
                 finality_verifier_sha256=config.finality_pin.release_sha256_by_target[
                     config.target_triple
@@ -559,6 +560,10 @@ class FinalizedRegistrationProvider:
 
     def _finality_policy_hash(self) -> str:
         return digest(self.policy)
+
+    def _predecessor_finality_policy_hashes(self) -> tuple[str, ...]:
+        """Deal-preserving predecessors whose finality store this provider may adopt."""
+        return tuple(admitted_policy_sha256s(self.policy)[1:])
 
     def _cache_binding_hash(self) -> str:
         """Bind the registration cache to the chain configuration, not the policy.
