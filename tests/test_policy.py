@@ -355,7 +355,22 @@ def test_competition_issue_allowance_is_explicit_without_widening_authentication
     assert ScoringPolicy.model_validate_json(canonical_json_bytes(extended)) == extended
 
 
-@pytest.mark.parametrize("seconds", [True, 299, 28801, 86400, "5400", 5400.0])
+@pytest.mark.parametrize("seconds", [28801, 43200, 57600, 86400])
+def test_competition_transport_accepts_longer_queues_without_longer_authentication(seconds):
+    legacy = make_policy()
+    value = ScoringPolicy.competition_transport(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+        issue_allowance_seconds=seconds,
+    )
+    assert value.clock.issue_allowance_seconds == seconds
+    assert value.limits == legacy.limits
+    assert value.clock.response_window_seconds == legacy.clock.response_window_seconds
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(value)) == value
+
+
+@pytest.mark.parametrize("seconds", [True, 299, 86401, "5400", 5400.0])
 def test_competition_issue_allowance_rejects_out_of_profile_values(seconds) -> None:
     legacy = make_policy()
     with pytest.raises(ValidationError):
