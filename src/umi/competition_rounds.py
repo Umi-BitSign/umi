@@ -405,7 +405,7 @@ class RoundCoordinator:
         inputs = await run_owned_thread(self._prepare_work_inputs, proposal)
         if inputs is not None:
             plan, videos = inputs
-            await self.work_queue.prepare(plan, videos=videos)
+            await self.work_queue.maintain(plan, videos=videos)
 
     async def _publish_cutoff_and_work(self, proposal: RoundProposal) -> None:
         if self.work_queue is None:

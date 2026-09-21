@@ -130,6 +130,7 @@ def setup(preparation, chain_config, tmp_path):
                     evaluator_hotkey=signer.hotkey.ss58_address,
                     maximum_orders=1024,
                     maximum_journal_bytes=1024**3,
+                    journal_limit=lambda _name: 1024**3,
                 ),
                 policy=policy,
                 wallet=signer,
@@ -161,7 +162,9 @@ async def prepare(setup):
 
 
 @pytest.mark.asyncio
-async def test_round_hold_identifies_stage_without_logging_protected_values(setup, monkeypatch, caplog):
+async def test_round_hold_identifies_stage_without_logging_protected_values(
+    setup, monkeypatch, caplog
+):
     secret = "protected reference must never be logged"
 
     def fail(*args):

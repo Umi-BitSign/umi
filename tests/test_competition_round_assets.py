@@ -158,7 +158,7 @@ async def test_coordinator_resolves_assets_before_deriving_work(setup, tmp_path,
     async def prepared(plan, *, videos):
         calls.append((plan, videos))
 
-    coordinator.work_queue = SimpleNamespace(prepare=prepared)
+    coordinator.work_queue = SimpleNamespace(maintain=prepared)
     plan = RoundPlan(
         schema="umi-round-plan/2",
         suite=s.work.item.suite,
