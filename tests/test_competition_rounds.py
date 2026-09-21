@@ -130,6 +130,7 @@ def setup(preparation, chain_config, tmp_path):
                     evaluator_hotkey=signer.hotkey.ss58_address,
                     maximum_orders=1024,
                     maximum_journal_bytes=1024**3,
+                    journal_limit=lambda _name: 1024**3,
                 ),
                 policy=policy,
                 wallet=signer,
