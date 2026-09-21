@@ -32,6 +32,7 @@ from . import competition_scheduling_receipts as scheduling_receipts
 from .competition_authorization import (
     EndpointAssignment,
     SignedEndpointAuthorization,
+    _PublicationBodyValidator,
     scheduled_assignment_key,
     validate_publication,
     validate_publication_body,
@@ -746,8 +747,9 @@ class AssignmentPublicationJournal:
             raise ValueError("invalid bounded scheduling reservation cohort")
         evaluator = identity(evaluator_hotkey)
         validated, staged_bytes, assignments = [], 0, 0
+        validator = _PublicationBodyValidator(self.policy, self.legacy_policy)
         for body in publications:
-            body = validate_publication_body(body, self.policy, self.legacy_policy)
+            body = validator.validate(body)
             staged_bytes += len(canonical_json_bytes(body))
             assignments += len(body.assignments)
             if staged_bytes > self.maximum_bytes or assignments > self.maximum_assignments:

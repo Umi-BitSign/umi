@@ -247,15 +247,35 @@ def validate_publication_body(
     body: EndpointAuthorizationPublication, policy: CompetitionPolicy, legacy_policy: ScoringPolicy
 ) -> EndpointAuthorizationPublication:
     """Check an unsigned proposal. This never grants transmission authority."""
+    return _PublicationBodyValidator(policy, legacy_policy).validate(body)
+
+
+class _PublicationBodyValidator:
+    """Own policy snapshots for one synchronous batch, never across awaits.
+
+    Every body is reparsed and fully validated. Only the policies and their
+    digests are shared within this operation; no mutable model is cached.
+    """
+
+    def __init__(self, policy: CompetitionPolicy, legacy_policy: ScoringPolicy):
+        self._policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+        self._legacy = ScoringPolicy.model_validate_json(canonical_json_bytes(legacy_policy))
+        validate_transport_cohort(self._policy, self._legacy)
+        self._policy_sha = digest(self._policy)
+        self._legacy_sha = scoring_policy_hash(self._legacy)
+
+    def validate(self, body: EndpointAuthorizationPublication) -> EndpointAuthorizationPublication:
+        return _validate_publication_body(
+            body, self._policy, self._legacy, self._policy_sha, self._legacy_sha
+        )
+
+
+def _validate_publication_body(body, policy, legacy_policy, policy_sha, legacy_sha):
     raw = canonical_json_bytes(body)
     if len(raw) > MAX_AUTHORIZATION_BYTES:
         raise ValueError("endpoint authorization exceeds its byte bound")
     body = EndpointAuthorizationPublication.model_validate_json(raw)
-    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    legacy_policy = ScoringPolicy.model_validate_json(canonical_json_bytes(legacy_policy))
-    validate_transport_cohort(policy, legacy_policy)
-    policy_sha = digest(policy)
-    round_, legacy_sha = body.round, scoring_policy_hash(legacy_policy)
+    round_ = body.round
     if (
         body.policy_sha256 != policy_sha
         or round_.policy_sha256 != policy_sha
@@ -307,6 +327,7 @@ def validate_publication_body(
     legacy_keys = {identity(v.validator_hotkey) for v in legacy_policy.validator_registry}
     assignments, covered, assigned_groups = set(), defaultdict(set), defaultdict(set)
     wire_ids = set()
+    round_sha = digest(round_)
     for assignment in body.assignments:
         sub = submissions.get(assignment.submission_sha256)
         case = cases.get(assignment.case_sha256)
@@ -325,7 +346,7 @@ def validate_publication_body(
             raise ValueError("assignment case, submission, evaluator or transport mismatch")
         ids = {
             "policy_sha256": policy_sha,
-            "round_sha256": digest(round_),
+            "round_sha256": round_sha,
             "submission_sha256": assignment.submission_sha256,
             "evaluator_hotkey": assignment.evaluator_hotkey,
         }
