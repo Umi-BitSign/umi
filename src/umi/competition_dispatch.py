@@ -71,7 +71,7 @@ class EndpointDispatchConfig(StrictProtocolModel):
     discovery_grace_seconds: Annotated[int, Field(ge=5, le=60)] = 10
     maximum_concurrency: Annotated[int, Field(ge=1, le=128)] = 4
     page_size: Annotated[int, Field(ge=1, le=100)] = 32
-    request_timeout_seconds: Annotated[int, Field(ge=1, le=600)] = 180
+    request_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 180
     scheduling_capacity: SchedulingCapacity = Field(default_factory=SchedulingCapacity)
     timing_budget: DispatchTimingBudget | None = None
     no_weight: Literal[True] = True

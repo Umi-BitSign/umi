@@ -88,6 +88,26 @@ def test_empty_inventory_has_no_invented_work(limits, budget):
     assert result.conditional_block_advance is True
 
 
+@pytest.mark.parametrize("seconds", [615, 900])
+def test_future_timeout_is_charged_in_capacity_bound(limits, budget, seconds):
+    extended = DispatchTimingLimits.model_validate(
+        {
+            **limits.model_dump(),
+            "request_timeout_seconds": seconds,
+        }
+    )
+    before = plan((job(),), limits, budget)
+    after = plan((job(),), extended, budget)
+    assert after.last_finish_upper_bound_ms - after.last_start_upper_bound_ms == seconds * 1000
+    assert after.last_finish_upper_bound_ms > before.last_finish_upper_bound_ms
+    assert after.finish_block_upper_bound > before.finish_block_upper_bound
+
+
+def test_dispatch_timing_timeout_rejects_above_900(limits):
+    with pytest.raises(ValueError):
+        DispatchTimingLimits.model_validate({**limits.model_dump(), "request_timeout_seconds": 901})
+
+
 def test_input_order_does_not_change_the_capacity_bound(limits, budget):
     jobs = tuple(job(i, miner=i % 3) for i in range(1, 12))
     assert plan(jobs, limits, budget) == plan(tuple(reversed(jobs)), limits, budget)
