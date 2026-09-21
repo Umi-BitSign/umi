@@ -52,6 +52,15 @@ Dispatch HTTP timeouts accept up to 900 seconds; their default remains 180. A
 900-second response window. Capacity admission charges the full configured HTTP
 timeout and checks the response and block deadlines before signing new work.
 
+The 18-hour issue and 15-minute response profile also needs a larger scheduling
+journal budget. Configure `SchedulingCapacity.maximum_bytes=32 * 1024**3`
+consistently for its journal owners. The default remains 1 GiB and the ceiling is
+64 GiB. Reservations retain the full 4 MiB proof plus 64 KiB document allowance
+for every unobserved height through the request deadline, including announcement
+heights, as well as publication and outcome allowances. Unfinished or unknown
+claims keep their proof credit. Budget physical disk and operational reserve
+separately; the configured byte limit does not allocate disk space.
+
 A version-2 launch amendment with reason `extend_future_cohort_windows` names
 the first old cycle being replaced. It requires the evaluator quorum, preserves
 the original intake opening and eligible tracks, and cannot shorten any phase
