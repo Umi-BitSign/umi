@@ -57,6 +57,7 @@ from .protocol import (
 )
 from .validator_plans import VerifiedFinalizedAnnouncementPort
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, ceil_div
+from .competition_policy_lineage import submission_policy_admitted
 
 MAX_AUTHORIZATION_BYTES = 16 * 1024**2
 
@@ -282,7 +283,7 @@ def validate_publication_body(
     for sub_sha, sub in submissions.items():
         if (
             sub.track != "endpoint"
-            or sub.policy_sha256 != policy_sha
+            or not submission_policy_admitted(policy, sub.policy_sha256)
             or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
             or sub_sha not in round_.roster
             or not policy.valid_from_block <= sub.valid_from_block <= round_.submission_close_block

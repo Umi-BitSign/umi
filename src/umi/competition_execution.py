@@ -54,6 +54,7 @@ from .open_competition import (
     validate_suite_profile,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .competition_policy_lineage import submission_policy_admitted
 
 _MAX_EVIDENCE_BYTES = 208 * 1024**2
 _MAX_STEP_BYTES = 48 * 1024
@@ -212,7 +213,7 @@ def _validate_job(job, policy, model, track):
     round_, sub = job.round, job.submission.submission
     if (
         round_.policy_sha256 != digest(policy)
-        or sub.policy_sha256 != digest(policy)
+        or not submission_policy_admitted(policy, sub.policy_sha256)
         or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
         or digest(sub) not in round_.roster
         or sub.track != track

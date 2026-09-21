@@ -171,6 +171,30 @@ def policy_admits(
     return PolicyLineage(live, predecessors).admits(policy_sha256)
 
 
+# Process-wide lineage registry, keyed by live policy digest. The command entry
+# point registers the operator-supplied predecessors once; pure validation
+# functions deep in the round/dispatch/execution paths look the lineage up by
+# the policy they already hold. With nothing registered every site keeps its
+# exact-digest behavior, so the default is unchanged from before this module.
+_REGISTRY: dict[str, PolicyLineage] = {}
+
+
+def register_lineage(live: CompetitionPolicy, predecessors: Iterable[CompetitionPolicy] = ()) -> PolicyLineage:
+    lineage = PolicyLineage(live, predecessors)
+    _REGISTRY[digest(lineage.live)] = lineage
+    return lineage
+
+
+def admitted_policy_sha256s(policy: CompetitionPolicy) -> tuple[str, ...]:
+    """Policy digests whose signed submissions ``policy`` admits (itself first)."""
+    lineage = _REGISTRY.get(digest(policy))
+    return (digest(policy),) if lineage is None else lineage.admitted_policy_sha256s
+
+
+def submission_policy_admitted(policy: CompetitionPolicy, submission_policy_sha256: str) -> bool:
+    return submission_policy_sha256 in admitted_policy_sha256s(policy)
+
+
 __all__ = [
     "DEAL_FIELDS",
     "OPERATIONAL_FIELDS",
@@ -178,6 +202,9 @@ __all__ = [
     "deal_body",
     "deal_digest",
     "operational_successor_of",
+    "admitted_policy_sha256s",
     "policy_admits",
+    "register_lineage",
+    "submission_policy_admitted",
     "validate_operational_successor",
 ]

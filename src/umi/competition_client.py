@@ -19,6 +19,7 @@ from .open_competition import (
     validate_admission,
 )
 from .protocol import StrictProtocolModel, canonical_json_bytes
+from .competition_policy_lineage import submission_policy_admitted
 
 MAX_SUBMISSION_BYTES = 2 * 1024 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
@@ -89,7 +90,7 @@ async def submit_signed_submission(
     origin = validate_intake_origin(origin)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
-    if signed.submission.policy_sha256 != digest(policy):
+    if not submission_policy_admitted(policy, signed.submission.policy_sha256):
         raise ValueError("submission belongs to another policy")
     body = canonical_json_bytes(signed)
     if len(body) > MAX_SUBMISSION_BYTES:

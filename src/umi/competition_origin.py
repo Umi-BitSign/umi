@@ -29,6 +29,7 @@ from .open_competition import SignedSubmission, digest
 from .protocol import canonical_json_bytes
 from .validator import OriginResolver, _system_origin_resolver
 from .validator_chain import PinnedRuntimeContext, StorageReadSpec, ValidatorChainError
+from .competition_policy_lineage import submission_policy_admitted
 
 _MAX_ORIGIN_EVIDENCE_BYTES = 32 * 1024**2
 _MAX_DNS_ADDRESSES = 64
@@ -337,7 +338,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         sub = signed.submission
         if (
             sub.track != "endpoint"
-            or sub.policy_sha256 != digest(self.policy)
+            or not submission_policy_admitted(self.policy, sub.policy_sha256)
             or sub.accepted_terms_sha256 != self.policy.contribution_terms_sha256
             or sub.valid_through_block - sub.valid_from_block
             > self.policy.maximum_submission_lifetime_blocks

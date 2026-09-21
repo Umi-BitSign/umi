@@ -48,6 +48,7 @@ from .validator import (
     validate_response_plaintext,
 )
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
+from .competition_policy_lineage import submission_policy_admitted
 
 _HEX32 = re.compile(r"[0-9a-f]{64}\Z")
 _TIMESTAMP = re.compile(r"(?:0|[1-9][0-9]{0,19})\Z")
@@ -163,7 +164,7 @@ def prepare_endpoint_case(
         raise ValueError("request must keep its distinct legacy transport policy hash")
     if (
         round_.policy_sha256 != policy_sha
-        or sub.policy_sha256 != policy_sha
+        or not submission_policy_admitted(policy, sub.policy_sha256)
         or round_.runtime_sha256 != policy.evaluation_runtime_sha256
         or digest(sub) not in round_.roster
         or sub.track != "endpoint"
