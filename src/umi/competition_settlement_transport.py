@@ -13,7 +13,7 @@ from pydantic import Field, model_validator
 from starlette.responses import Response
 
 from .competition_client import validate_intake_origin
-from .competition_settlement_preparation import MAX_BYTES, SettlementPreparation
+from .competition_settlement_preparation import MAX_PREPARATION_BYTES, SettlementPreparation
 from .competition_settlement_signing import IndependentSettlementSigner, SettlementEndorsement
 from .nonce import SQLiteNonceStore
 from .open_competition import Signature, digest, identity, sign_object, verify_signature
@@ -21,7 +21,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 ROUTE = "/v1/competition/settlements"
 MAX_REQUEST = 16 * 1024
-MAX_REPLY = 4 * MAX_BYTES + 8192
+MAX_REPLY = 4 * MAX_PREPARATION_BYTES + 8192
 
 
 class SettlementQuery(StrictProtocolModel):

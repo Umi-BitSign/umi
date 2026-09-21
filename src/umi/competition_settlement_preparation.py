@@ -34,10 +34,14 @@ from .open_competition import (
     digest,
     validate_dependence_calibration,
 )
+from .private_files import MAX_PRIVATE_BYTES
 from .private_files import publish_private_model as _publish
 from .protocol import canonical_json_bytes
 
+# Existing publication consumers also use this smaller bound for promotion
+# history. Complete proposals include the whole cohort's evidence instead.
 MAX_BYTES = 16 * 1024**2
+MAX_PREPARATION_BYTES = MAX_PRIVATE_BYTES
 
 
 class SettlementPreparation(StrictProtocolModel):
@@ -61,7 +65,7 @@ class SettlementPreparation(StrictProtocolModel):
 
 def validate_preparation(prepared, policy, limits):
     raw = canonical_json_bytes(prepared)
-    if len(raw) > MAX_BYTES:
+    if len(raw) > MAX_PREPARATION_BYTES:
         raise ValueError("settlement preparation exceeds the transport byte bound")
     prepared = SettlementPreparation.model_validate_json(raw)
     calibration = prepared.publication.settlement.dependence_calibration
