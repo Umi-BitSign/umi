@@ -58,6 +58,7 @@ from .validator_chain import (
 )
 from .validator_chain_scan import VerifiedFinalizedBlockIdentity
 from .validator_plans import VerifiedFinalizedBlock
+from .competition_policy_lineage import admitted_policy_sha256s
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
@@ -560,7 +561,28 @@ class FinalizedRegistrationProvider:
         return digest(self.policy)
 
     def _cache_binding_hash(self) -> str:
-        return digest(self.config)
+        """Bind the registration cache to the chain configuration, not the policy.
+
+        The cache holds verified registrations and finality heads, none of which
+        depend on the competition policy, so a deal-preserving policy successor must
+        not invalidate it. ``policy_sha256`` is bound separately at construction.
+        """
+        return self._config_binding_hash(self.config)
+
+    @staticmethod
+    def _config_binding_hash(config: CompetitionChainConfig) -> str:
+        body = config.model_dump(mode="json", by_alias=True)
+        body.pop("policy_sha256", None)
+        return digest({"chain_config_without_policy": body})
+
+    def _acceptable_cache_bindings(self) -> frozenset[str]:
+        """The current binding, plus the legacy per-policy binding this cache would
+        have carried under the live policy or any honored predecessor."""
+        accepted = {self._cache_binding_hash()}
+        for policy_sha256 in admitted_policy_sha256s(self.policy):
+            legacy = self.config.model_copy(update={"policy_sha256": policy_sha256})
+            accepted.add(digest(legacy))
+        return frozenset(accepted)
 
     def _finality_storage_limits(self):
         return None
@@ -595,7 +617,11 @@ class FinalizedRegistrationProvider:
             if bound is None:
                 connection.execute("INSERT INTO binding VALUES (?)", (expected,))
             elif bound[0] != expected:
-                raise ValueError("registration cache belongs to another chain configuration")
+                if bound[0] not in self._acceptable_cache_bindings():
+                    raise ValueError("registration cache belongs to another chain configuration")
+                # Legacy per-policy binding from before this release, or from a
+                # deal-preserving predecessor: move it to the policy-free binding.
+                connection.execute("UPDATE binding SET digest=?", (expected,))
             connection.commit()
         finally:
             connection.close()

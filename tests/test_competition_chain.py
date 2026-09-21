@@ -426,11 +426,40 @@ def test_config_rejects_wrong_genesis(chain_config):
         CompetitionChainConfig.model_validate(body)
 
 
-def test_state_cannot_be_rebound_to_a_different_policy(chain):
+def test_cache_binds_the_chain_configuration_not_the_policy(chain):
+    # The registration cache holds verified registrations and finality heads, none of
+    # which depend on the competition policy: a policy change alone reopens it, so a
+    # deal-preserving successor keeps its warm cache instead of a cold finality sync.
     policy = chain.policy.model_copy(update={"sequence": 2})
     config = chain.config.model_copy(update={"policy_sha256": digest(policy)})
+    FinalizedRegistrationProvider(config, policy, finality=chain.finality, proofs=chain.proofs)
+    # A config that names a different policy than the one supplied is still refused.
+    with pytest.raises(ValueError, match="another competition policy"):
+        FinalizedRegistrationProvider(config, chain.policy, finality=chain.finality, proofs=chain.proofs)
+    # Any other chain-configuration change still invalidates the cache.
+    other = chain.config.model_copy(update={"minimum_finalized_block": chain.config.minimum_finalized_block + 1})
     with pytest.raises(ValueError, match="another chain configuration"):
-        FinalizedRegistrationProvider(config, policy, finality=chain.finality, proofs=chain.proofs)
+        FinalizedRegistrationProvider(other, chain.policy, finality=chain.finality, proofs=chain.proofs)
+
+
+def test_legacy_per_policy_cache_binding_is_upgraded_in_place(chain):
+    import sqlite3
+    from pathlib import Path
+
+    # Simulate a cache written by the previous release, whose binding was digest(config)
+    # including policy_sha256, then reopen under the same policy and under a successor.
+    path = Path(chain.config.state_directory) / "registrations.sqlite3"
+    legacy = digest(chain.config)
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE binding SET digest=?", (legacy,))
+    FinalizedRegistrationProvider(
+        chain.config, chain.policy, finality=chain.finality, proofs=chain.proofs
+    )
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT digest FROM binding").fetchone()[0] != legacy
+    successor = chain.policy.model_copy(update={"sequence": 2, "predecessor_sha256": digest(chain.policy)})
+    config = chain.config.model_copy(update={"policy_sha256": digest(successor)})
+    FinalizedRegistrationProvider(config, successor, finality=chain.finality, proofs=chain.proofs)
 
 
 async def test_prefetch_cancellation_drains_bounded_child_reads():

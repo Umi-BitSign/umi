@@ -53,6 +53,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import prepare_request_attempt, send_prepared_request
 from .validator_chain import StorageReadSpec
 from .validator_plans import VerifiedFinalizedBlock
+from .competition_policy_lineage import admitted_policy_sha256s
 
 
 class EndpointDispatchConfig(StrictProtocolModel):
@@ -155,8 +156,20 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
 
     def _cache_binding_hash(self):
         return digest(
-            {"chain": digest(self.config), "transport_policy": self._finality_policy_hash()}
+            {
+                "chain": self._config_binding_hash(self.config),
+                "transport_policy": self._finality_policy_hash(),
+            }
         )
+
+    def _acceptable_cache_bindings(self):
+        accepted = {self._cache_binding_hash()}
+        for policy_sha256 in admitted_policy_sha256s(self.policy):
+            legacy = self.config.model_copy(update={"policy_sha256": policy_sha256})
+            accepted.add(
+                digest({"chain": digest(legacy), "transport_policy": self._finality_policy_hash()})
+            )
+        return frozenset(accepted)
 
     async def _recover_historical_block(self, height, head):
         if not self._owned or self._registration_rpc is None:
