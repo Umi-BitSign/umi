@@ -20,6 +20,7 @@ from .competition_evidence import (
 )
 from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
 from .competition_launch_amendment import SignedLaunchAmendment, verify_launch_amendment
+from .competition_policy_lineage import PolicyLineage
 from .competition_outcomes import (
     OutcomeEvidence,
     binding_ids,
@@ -207,6 +208,7 @@ class CompetitionStore(VoidEvidenceRetention):
         historical_intake_archive_bindings: (
             tuple[HistoricalIntakeArchiveBinding, ...] | None
         ) = None,
+        predecessor_policies: tuple[CompetitionPolicy, ...] = (),
     ):
         if not directory.is_absolute() or directory.is_symlink():
             raise ValueError("competition state directory must be absolute and not a symlink")
@@ -214,6 +216,8 @@ class CompetitionStore(VoidEvidenceRetention):
         if directory.stat().st_mode & 0o077:
             raise ValueError("competition state directory must be private")
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+        # Deal-preserving predecessors whose signed submissions this policy still admits.
+        self.lineage = PolicyLineage(self.policy, predecessor_policies)
         if public_launch is not None:
             public_launch = PublicLaunchIdentity.model_validate_json(
                 canonical_json_bytes(public_launch)
@@ -334,10 +338,7 @@ class CompetitionStore(VoidEvidenceRetention):
                 raise ValueError("legacy competition store requires explicit quiesced migration")
             if bound is not None and bound[0] == policy_id and not migrate_writer_generation:
                 raise ValueError("legacy competition store requires explicit quiesced migration")
-            if bound is not None and bound[0] not in {
-                policy_id,
-                f"writer-{self._WRITER_GENERATION}:{policy_id}",
-            }:
+            if bound is not None and bound[0] not in self._acceptable_policy_bindings():
                 raise ValueError("state directory is bound to a different competition policy")
             if checkpoint_bound is not None and checkpoint_bound[0] != (
                 self._submission_checkpoint_binding
@@ -486,7 +487,8 @@ class CompetitionStore(VoidEvidenceRetention):
                 bound = connection.execute(
                     "SELECT value FROM metadata WHERE key='policy'"
                 ).fetchone()
-                policy_binding = f"writer-2:{digest(policy)}"
+                policy_binding = self._deal_policy_binding()
+                rolled_over_from = None
                 if bound is None:
                     connection.execute(
                         "INSERT INTO metadata VALUES ('policy', ?)", (policy_binding,)
@@ -500,7 +502,17 @@ class CompetitionStore(VoidEvidenceRetention):
                         "UPDATE metadata SET value=? WHERE key='policy'", (policy_binding,)
                     )
                 elif bound[0] != policy_binding:
-                    raise ValueError("state directory is bound to a different competition policy")
+                    if bound[0] not in self._acceptable_policy_bindings():
+                        raise ValueError(
+                            "state directory is bound to a different competition policy"
+                        )
+                    # Bound to a deal-preserving predecessor in this lineage: move the
+                    # binding forward to the live policy. The retained submission head
+                    # is advanced from the predecessor in the same transaction below.
+                    rolled_over_from = bound[0].rsplit(":", 1)[-1]
+                    connection.execute(
+                        "UPDATE metadata SET value=? WHERE key='policy'", (policy_binding,)
+                    )
                 prior_role = connection.execute(
                     "SELECT value FROM metadata WHERE key='role'"
                 ).fetchone()
@@ -536,6 +548,7 @@ class CompetitionStore(VoidEvidenceRetention):
                 self._bind_submission_head(
                     connection,
                     initialize=not database_existed or migrate_writer_generation,
+                    rolled_over_from=rolled_over_from,
                 )
                 if initialize_submission_checkpoint:
                     self._verify_retained_intake_state_locked(
@@ -669,6 +682,21 @@ class CompetitionStore(VoidEvidenceRetention):
             raise SubmissionCheckpointError(
                 "submission checkpoint cannot advance launches with changed records"
             )
+
+    def _deal_policy_binding(self) -> str:
+        """The ledger stays bound to the exact policy that most recently opened it;
+        the deal digest is recorded alongside so the binding is self-describing."""
+        return f"writer-{self._WRITER_GENERATION}:{digest(self.policy)}"
+
+    def _acceptable_policy_bindings(self) -> frozenset[str]:
+        """Bindings this store may open: the live policy, or any deal-preserving
+        predecessor in its lineage. An unrelated policy that merely shares the deal
+        is not in the lineage and is refused."""
+        accepted = set()
+        for policy_sha256 in self.lineage.admitted_policy_sha256s:
+            accepted.add(policy_sha256)
+            accepted.add(f"writer-{self._WRITER_GENERATION}:{policy_sha256}")
+        return frozenset(accepted)
 
     @classmethod
     def _install_writer_fence(cls, connection: sqlite3.Connection) -> None:
@@ -1065,7 +1093,7 @@ class CompetitionStore(VoidEvidenceRetention):
         signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
         snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(snapshot))
         sub = signed.submission
-        if sub.policy_sha256 != digest(self.policy):
+        if not self.lineage.admits(sub.policy_sha256):
             raise ValueError("submission belongs to another policy")
         sub_id, key = digest(sub), identity(sub.hotkey)
         checkpoint_lock = (
@@ -1097,7 +1125,13 @@ class CompetitionStore(VoidEvidenceRetention):
                     raise ValueError(
                         "the admission boundary is already closed; retry in a later block"
                     )
-                uid = validate_admission(signed, self.policy, snapshot, current_block)
+                uid = validate_admission(
+                    signed,
+                    self.policy,
+                    snapshot,
+                    current_block,
+                    admitted_policy_sha256s=self.lineage.admitted_policy_sha256s,
+                )
                 latest = connection.execute(
                     "SELECT sequence, accepted_block FROM submissions WHERE hotkey=? AND track=? "
                     "ORDER BY sequence DESC LIMIT 1",
@@ -1199,7 +1233,11 @@ class CompetitionStore(VoidEvidenceRetention):
         return head
 
     def _bind_submission_head(
-        self, connection: sqlite3.Connection, *, initialize: bool = False
+        self,
+        connection: sqlite3.Connection,
+        *,
+        initialize: bool = False,
+        rolled_over_from: str | None = None,
     ) -> dict:
         expected = self._submission_head_body(connection)
         expected_body = canonical_json_bytes(expected).decode("utf-8")
@@ -1213,6 +1251,13 @@ class CompetitionStore(VoidEvidenceRetention):
                 "INSERT INTO metadata VALUES ('retained_submission_head', ?)",
                 (expected_body,),
             )
+        elif rolled_over_from is not None:
+            # A deal-preserving policy rollover: the head must still be exactly the
+            # predecessor's commitment over the same submission set, then it advances.
+            prior = submission_head_body(rolled_over_from, self._submission_ids(connection))
+            if retained != (canonical_json_bytes(prior).decode("utf-8"),):
+                raise ValueError("retained submission head differs from the durable ledger")
+            self._write_submission_head(connection)
         elif retained != (expected_body,):
             raise ValueError("retained submission head differs from the durable ledger")
         return expected
@@ -1606,7 +1651,13 @@ class CompetitionStore(VoidEvidenceRetention):
             "chain_submission_authorized",
         }
         try:
-            observed_uid = validate_admission(signed, self.policy, snapshot, row[4])
+            observed_uid = validate_admission(
+                signed,
+                self.policy,
+                snapshot,
+                row[4],
+                admitted_policy_sha256s=self.lineage.admitted_policy_sha256s,
+            )
         except (TypeError, ValidationError, ValueError) as error:
             raise ValueError("retained submission record is corrupt") from error
         if (
@@ -1622,7 +1673,7 @@ class CompetitionStore(VoidEvidenceRetention):
             or set(receipt) != expected_receipt_keys
             or canonical_json_bytes(receipt) != row[7]
             or receipt["schema"] != "umi-competition-admission/2"
-            or receipt["policy_sha256"] != digest(self.policy)
+            or not self.lineage.admits(receipt["policy_sha256"])
             or receipt["submission_sha256"] != submission_id
             or receipt["accepted_block"] != row[4]
             or receipt["registration_snapshot_sha256"] != digest(snapshot)
@@ -3365,7 +3416,13 @@ class CompetitionStore(VoidEvidenceRetention):
         sub = signed.submission
         if sub.track != "model" or sub.model_bundle is None:
             raise ValueError("only contributed offline bundles can be promoted")
-        validate_admission(signed, self.policy, snapshot, current_block)
+        validate_admission(
+                    signed,
+                    self.policy,
+                    snapshot,
+                    current_block,
+                    admitted_policy_sha256s=self.lineage.admitted_policy_sha256s,
+                )
         candidate, incumbent = replay_evaluation(
             attested,
             signed,
