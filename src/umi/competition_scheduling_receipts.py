@@ -8,6 +8,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .competition_authorization import (
@@ -17,7 +18,7 @@ from .competition_authorization import (
     validate_publication_body,
 )
 from .open_competition import digest, identity
-from .protocol import canonical_json_bytes, sha256_hex
+from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
 
 if TYPE_CHECKING:
     import sqlite3
@@ -57,45 +58,99 @@ def _bounded(raw: bytes, maximum: int) -> Any:
     if not isinstance(raw, bytes) or not 0 < len(raw) <= maximum:
         raise ValueError("scheduling receipt exceeds its byte bound")
     value = json.loads(raw)
-    if canonical_json_bytes(value) != raw:
+    if not is_canonical_json(raw):
         raise ValueError("scheduling receipt is not canonical")
     return value
 
 
-_VALIDATED_PUBLICATIONS: OrderedDict[str, Any] = OrderedDict()
+@dataclass(frozen=True)
+class _PublicationFacts:
+    round_sha256: str
+    round_sequence: int
+    assignments: tuple[tuple[str, bytes], ...]
+    allowance: int
+    proof_end: int
+    proof_starts: frozenset[int]
+
+
+_VALIDATED_PUBLICATIONS: OrderedDict[tuple[str, str], _PublicationFacts] = OrderedDict()
 _VALIDATED_PUBLICATIONS_LOCK = threading.Lock()
 _VALIDATED_PUBLICATIONS_MAXIMUM = 512
+_FACTS_ENTRY_MAXIMUM_BYTES = 64 * 1024
+_CONSUMED_PUBLICATIONS: OrderedDict[tuple[str, str], None] = OrderedDict()
 _PUBLICATION_DOMAIN = b"umi-open-competition-v1\0"
 
 
-def _validated_publication(raw: bytes, publication_id: str, policy, legacy_policy):
-    """Return the validated body for bytes that hash to publication_id.
+def _validated_publication(raw: bytes, publication_id: str, journal, context: str):
+    """Memoize immutable derivations; callers still reread every durable row.
 
-    The reservation receipt is reverified on every endorsement, so one signing
-    round revalidates the whole reserved roster once per endorsement. The stored
-    bytes are immutable once reserved and their identity IS their digest, so any
-    substitution changes the digest and is rejected here before the memo is
-    consulted. Only the semantic revalidation of bytes already validated in this
-    process is skipped; a first sighting is fully validated.
+    The context binds the complete current policies and outcome-size allowance.
+    No cached model or mutable container escapes to a caller. Different bytes,
+    policy changes and changed allowances cannot reuse a previous validation.
     """
     if sha256_hex(_PUBLICATION_DOMAIN + raw) != publication_id:
         raise ValueError("scheduling reservation publication binding changed")
+    key = (context, publication_id)
     with _VALIDATED_PUBLICATIONS_LOCK:
-        cached = _VALIDATED_PUBLICATIONS.get(publication_id)
+        cached = _VALIDATED_PUBLICATIONS.get(key)
         if cached is not None:
-            _VALIDATED_PUBLICATIONS.move_to_end(publication_id)
+            _VALIDATED_PUBLICATIONS.move_to_end(key)
             return cached
     body = validate_publication_body(
-        EndpointAuthorizationPublication.model_validate_json(raw), policy, legacy_policy
+        EndpointAuthorizationPublication.model_validate_json(raw),
+        journal.policy,
+        journal.legacy_policy,
     )
     if canonical_json_bytes(body) != raw or digest(body) != publication_id:
         raise ValueError("scheduling reservation publication binding changed")
+    assignments = tuple(
+        (scheduled_assignment_key(body, assignment), canonical_json_bytes(assignment))
+        for assignment in body.assignments
+    )
+    rows = [(None, None, encoded) for _, encoded in assignments]
+    legacy = journal.legacy_policy
+    facts = _PublicationFacts(
+        round_sha256=digest(body.round),
+        round_sequence=body.round.sequence,
+        assignments=assignments,
+        allowance=journal._publication_allowance(body, rows),
+        proof_end=max(a.request.deadline_block for a in body.assignments),
+        proof_starts=frozenset(
+            legacy.activation_block
+            + (
+                (a.request.issued_block - legacy.activation_block)
+                // legacy.clock.window_stride_blocks
+            )
+            * legacy.clock.window_stride_blocks
+            for a in body.assignments
+        ),
+    )
+    # Bound retained encoded data to 32 MiB, with a bounded number of keys.
+    encoded_size = sum(len(assignment_id) + len(encoded) for assignment_id, encoded in assignments)
+    encoded_size += len(facts.round_sha256) + 8 * len(facts.proof_starts) + 16
+    if encoded_size <= _FACTS_ENTRY_MAXIMUM_BYTES:
+        with _VALIDATED_PUBLICATIONS_LOCK:
+            _VALIDATED_PUBLICATIONS[key] = facts
+            _VALIDATED_PUBLICATIONS.move_to_end(key)
+            while len(_VALIDATED_PUBLICATIONS) > _VALIDATED_PUBLICATIONS_MAXIMUM:
+                _VALIDATED_PUBLICATIONS.popitem(last=False)
+    return facts
+
+
+def _validate_consumed(raw: bytes, reserved: bytes, publication_id: str) -> None:
+    key = (publication_id, sha256_hex(raw))
     with _VALIDATED_PUBLICATIONS_LOCK:
-        _VALIDATED_PUBLICATIONS[publication_id] = body
-        _VALIDATED_PUBLICATIONS.move_to_end(publication_id)
-        while len(_VALIDATED_PUBLICATIONS) > _VALIDATED_PUBLICATIONS_MAXIMUM:
-            _VALIDATED_PUBLICATIONS.popitem(last=False)
-    return body
+        if key in _CONSUMED_PUBLICATIONS:
+            _CONSUMED_PUBLICATIONS.move_to_end(key)
+            return
+    signed = SignedEndpointAuthorization.model_validate_json(raw)
+    if canonical_json_bytes(signed.publication) != reserved:
+        raise ValueError("consumed scheduling reservation differs from publication")
+    with _VALIDATED_PUBLICATIONS_LOCK:
+        _CONSUMED_PUBLICATIONS[key] = None
+        _CONSUMED_PUBLICATIONS.move_to_end(key)
+        while len(_CONSUMED_PUBLICATIONS) > _VALIDATED_PUBLICATIONS_MAXIMUM:
+            _CONSUMED_PUBLICATIONS.popitem(last=False)
 
 
 def reservation(
@@ -140,7 +195,16 @@ def reservation(
         or [r["id"] for r in entries] != value["publications"]
     ):
         raise ValueError("scheduling reservation lost an original publication")
-    bodies: list[EndpointAuthorizationPublication] = []
+    context = sha256_hex(
+        canonical_json_bytes(
+            {
+                "policy": journal.policy.model_dump(mode="json", by_alias=True),
+                "legacy_policy": journal.legacy_policy.model_dump(mode="json", by_alias=True),
+                "maximum_outcome_bytes": journal.maximum_outcome_bytes,
+            }
+        )
+    )
+    proof_end, starts = 0, set()
     for entry in entries:
         if not 0 < entry["size"] <= 16 * 1024**2:
             raise ValueError("reserved scheduling publication exceeds its byte bound")
@@ -148,13 +212,13 @@ def reservation(
             "SELECT * FROM reservation_publications WHERE id=?", (entry["id"],)
         ).fetchone()
         raw = bytes(saved["body"])
-        body = _validated_publication(raw, entry["id"], journal.policy, journal.legacy_policy)
+        facts = _validated_publication(raw, entry["id"], journal, context)
         if (
-            digest(body.round) != row["round_sha256"]
-            or body.round.sequence != row["round_sequence"]
+            facts.round_sha256 != row["round_sha256"]
+            or facts.round_sequence != row["round_sequence"]
         ):
             raise ValueError("scheduling reservation publication binding changed")
-        assigned = sorted(scheduled_assignment_key(body, a) for a in body.assignments)
+        assigned = sorted(key for key, _ in facts.assignments)
         retained = [
             r[0]
             for r in db.execute(
@@ -162,11 +226,11 @@ def reservation(
                 (entry["id"],),
             )
         ]
-        rows = [(None, None, canonical_json_bytes(a)) for a in body.assignments]
+        rows = [(None, None, encoded) for _, encoded in facts.assignments]
         if (
             retained != assigned
             or saved["assignment_count"] != len(assigned)
-            or saved["allowance"] != journal._publication_allowance(body, rows)
+            or saved["allowance"] != facts.allowance
         ):
             raise ValueError("scheduling reservation assignment allowance changed")
         consumed = db.execute(
@@ -184,35 +248,23 @@ def reservation(
         if bool(consumed) != bool(published):
             raise ValueError("scheduling reservation consumption changed")
         if published is not None:
-            signed = SignedEndpointAuthorization.model_validate_json(bytes(published[0]))
+            _validate_consumed(bytes(published[0]), raw, entry["id"])
             if (
-                signed.publication != body
-                or published[1] != journal._publication_bytes(len(published[0]), rows)
+                published[1] != journal._publication_bytes(len(published[0]), rows)
                 or published[1] > saved["allowance"]
             ):
                 raise ValueError("consumed scheduling reservation differs from publication")
-            for assignment in body.assignments:
+            for assignment_key, encoded in facts.assignments:
                 current = db.execute(
                     "SELECT body,publication_id FROM assignments WHERE id=?",
-                    (scheduled_assignment_key(body, assignment),),
+                    (assignment_key,),
                 ).fetchone()
-                if (
-                    current is None
-                    or bytes(current[0]) != canonical_json_bytes(assignment)
-                    or current[1] != entry["id"]
-                ):
+                if current is None or bytes(current[0]) != encoded or current[1] != entry["id"]:
                     raise ValueError("consumed scheduling reservation lost an assignment")
-        bodies.append(body)
-    if max(a.request.deadline_block for b in bodies for a in b.assignments) != row["proof_end"]:
+        proof_end = max(proof_end, facts.proof_end)
+        starts.update(facts.proof_starts)
+    if proof_end != row["proof_end"]:
         raise ValueError("scheduling reservation proof interval changed")
-    legacy = journal.legacy_policy
-    starts = {
-        legacy.activation_block
-        + ((a.request.issued_block - legacy.activation_block) // legacy.clock.window_stride_blocks)
-        * legacy.clock.window_stride_blocks
-        for body in bodies
-        for a in body.assignments
-    }
     if min(starts) != row["proof_start"]:
         raise ValueError("scheduling reservation proof start changed")
     for height in starts:
