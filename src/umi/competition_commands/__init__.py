@@ -4,11 +4,12 @@ from argparse import Namespace
 from collections.abc import Callable
 
 from ..open_competition import CompetitionPolicy
-from . import evidence, host, models, services, store, submissions
+from . import evidence, host, models, runtime_port, services, store, submissions
 
 CommandHandler = Callable[[Namespace, CompetitionPolicy], dict]
 
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
+    "apply-runtime-port": runtime_port.activate,
     "admit": store.admit,
     "assemble-dependence-calibration": evidence.assemble_dependence_calibration,
     "assemble-endpoint-execution": evidence.assemble_endpoint_execution,

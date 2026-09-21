@@ -64,6 +64,9 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
     # This additive command has its own parser/handler tests. Preserve the
     # original digest so changes to any pre-existing command still fail here.
     commands.pop("verify-miner-feed-profile")
+    # The runtime-port command exercises the real parser and owned-provider
+    # handler separately, while existing argument contracts remain unchanged.
+    commands.pop("apply-runtime-port")
     # Capacity is an optional operational addition, not a signed protocol field.
     # Check its defaults explicitly, then preserve the historical argument hash.
     for command in ("serve-assignment-feed", "assemble-endpoint-execution"):
