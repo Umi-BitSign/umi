@@ -72,7 +72,7 @@ class SchedulingCapacity(StrictProtocolModel):
 
     maximum_publications: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_assignments: Annotated[int, Field(ge=1, le=262144)] = 16384
-    maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    maximum_bytes: Annotated[int, Field(ge=1024, le=64 * 1024**3)] = 1024**3
     maximum_outcome_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 1024**2
 
 

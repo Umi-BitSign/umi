@@ -20,7 +20,11 @@ from .competition_evidence import (
     replay_independent_evaluation,
 )
 from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
-from .competition_launch_amendment import SignedLaunchAmendment, verify_launch_amendment
+from .competition_launch_amendment import (
+    SignedLaunchAmendment,
+    verify_future_history,
+    verify_launch_amendment,
+)
 from .competition_outcomes import (
     OutcomeEvidence,
     binding_ids,
@@ -1139,7 +1143,7 @@ class CompetitionStore(VoidEvidenceRetention):
             < supplied.round_schedule.roster_close_earliest_block
         ):
             raise ValueError("launch amendment is outside its application window")
-        for table in (
+        unused_tables = (
             "rounds",
             "round_preparations",
             "suite_usage",
@@ -1147,9 +1151,20 @@ class CompetitionStore(VoidEvidenceRetention):
             "evidence_cutoff_schedules",
             "round_conflicts",
             "settlement_disputes",
-        ):
-            if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
-                raise ValueError("launch amendment requires an unused first-cohort schedule")
+        )
+        if signed.amendment.reason == "extend_future_cohort_windows":
+            if (
+                observed
+                >= current.schedule_for_cycle(
+                    signed.amendment.first_replaced_cycle
+                ).roster_close_earliest_block
+            ):
+                raise ValueError("future amendment missed the original roster application window")
+            verify_future_history(connection, current, signed.amendment)
+        else:
+            for table in unused_tables:
+                if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                    raise ValueError("launch amendment requires an unused first-cohort schedule")
         if self._baseline_conflicted(connection):
             raise ValueError("launch amendment requires an unconflicted baseline")
         _advance_block(connection, observed)

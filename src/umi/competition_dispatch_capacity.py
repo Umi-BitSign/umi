@@ -36,7 +36,7 @@ class DispatchTimingLimits(StrictProtocolModel):
     page_size: Annotated[int, Field(ge=1, le=100)]
     poll_seconds: Annotated[int, Field(ge=1, le=30)]
     discovery_grace_seconds: Annotated[int, Field(ge=5, le=60)]
-    request_timeout_seconds: Annotated[int, Field(ge=1, le=600)]
+    request_timeout_seconds: Annotated[int, Field(ge=1, le=900)]
 
 
 class DispatchTimingBudget(StrictProtocolModel):

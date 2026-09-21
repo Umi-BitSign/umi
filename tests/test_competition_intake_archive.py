@@ -252,7 +252,9 @@ def test_published_staged_policy_cannot_start_without_its_v1_archive(chain_confi
         create_intake_app(config, policy)
 
 
-@pytest.mark.parametrize("amend", (False, True))
+@pytest.mark.parametrize(
+    "amend", (False, True, "chained", "wrong_link", "missing_link", "link_cycle", "old_history")
+)
 def test_archived_intake_starts_after_authorized_schedule_amendment(chain_config, tmp_path, amend):
     from umi.competition_launch_amendment import LaunchAmendment, SignedLaunchAmendment
 
@@ -307,13 +309,14 @@ def test_archived_intake_starts_after_authorized_schedule_amendment(chain_config
             "evaluation_close_block": 270,
             "protected_reference_reveal_block": 280,
             "evidence_cutoff_block": 290,
+            "round_valid_through_block": 310,
         }
     )
     replacement = original.model_copy(
         update={
             "schema_": "umi-competition-intake-deployment/3",
             "round_schedule": schedule,
-            "round_stride_blocks": 1000,
+            "round_stride_blocks": 100,
         }
     )
     config = config.model_copy(update={"public_deployment": replacement})
@@ -340,6 +343,96 @@ def test_archived_intake_starts_after_authorized_schedule_amendment(chain_config
         launch_amendment=signed,
         amendment_observed_block=201,
     )
+    amendments = [signed]
+    if isinstance(amend, str):
+        # Startup works with the first amendment before extending the next cohort.
+        create_intake_app(config, successor, provider_factory=Provider)
+        previous = replacement.launch_identity()
+        schedule = previous.schedule_for_cycle(1)
+        fields = schedule.model_dump(mode="json", by_alias=True)
+        for key in (
+            "evaluation_close_block",
+            "protected_reference_reveal_block",
+            "evidence_cutoff_block",
+            "round_valid_through_block",
+        ):
+            fields[key] += 20
+        replacement = replacement.model_copy(
+            update={
+                "round_schedule": type(schedule).model_validate(fields),
+                "round_stride_blocks": 200,
+            }
+        )
+        amendment = LaunchAmendment(
+            schema="umi-competition-launch-amendment/2",
+            policy_sha256=digest(successor),
+            previous_launch_sha256=digest(previous),
+            replacement=replacement.launch_identity(),
+            effective_block=311,
+            first_replaced_cycle=1,
+            reason="extend_future_cohort_windows",
+        )
+        signed_future = SignedLaunchAmendment(
+            amendment=amendment,
+            signatures=(sign_object(amendment, wallet("Charlie")),),
+        )
+        config = config.model_copy(update={"public_deployment": replacement})
+        result = migrate(
+            state,
+            successor,
+            confirmed=True,
+            service_config=config,
+            launch_amendment=signed_future,
+            amendment_observed_block=311,
+        )
+        assert result["status"] == "public_launch_amended_receipts_preserved"
+        amendments.append(signed_future)
+        store = CompetitionStore(
+            state,
+            successor,
+            public_launch=replacement.launch_identity(),
+            submission_head_checkpoint_directory=checkpoint,
+        )
+        assert store.public_launch_amendments() == [
+            json.loads(canonical_json_bytes(item)) for item in amendments
+        ]
+        if amend != "chained":
+            with store._connection() as db:
+                if amend == "missing_link":
+                    db.execute(
+                        "DELETE FROM public_launch_amendments WHERE successor=?",
+                        (digest(previous),),
+                    )
+                else:
+                    if amend == "old_history":
+                        altered = signed
+                    else:
+                        predecessor = (
+                            digest(replacement.launch_identity())
+                            if amend == "link_cycle"
+                            else digest(original.launch_identity())
+                        )
+                        bad_link = amendment.model_copy(
+                            update={"previous_launch_sha256": predecessor}
+                        )
+                        altered = SignedLaunchAmendment(
+                            amendment=bad_link,
+                            signatures=(sign_object(bad_link, wallet("Charlie")),),
+                        )
+                    db.execute(
+                        "UPDATE public_launch_amendments SET body=? WHERE successor=?",
+                        (
+                            canonical_json_bytes(altered),
+                            digest(replacement.launch_identity()),
+                        ),
+                    )
+            with pytest.raises(ValueError, match=r"unauthorized semantics|overlaps or rolls back"):
+                create_intake_app(config, successor, provider_factory=Provider)
+            assert before == {
+                path.relative_to(archive_config.directory): path.read_bytes()
+                for path in Path(archive_config.directory).rglob("*.json")
+            }
+            return
     # Exercise the real service constructor, including archive, checkpoint,
     # retained submission and authenticated launch-history checks, twice.
     for _ in range(2):
@@ -354,7 +447,7 @@ def test_archived_intake_starts_after_authorized_schedule_amendment(chain_config
             assert current.status_code == 200
             assert current.json()["receipt"] == receipt
             assert client.get("/v1/competition/launch-amendments").json() == {
-                "amendments": [json.loads(canonical_json_bytes(signed))]
+                "amendments": [json.loads(canonical_json_bytes(item)) for item in amendments]
             }
     assert before == {
         path.relative_to(archive_config.directory): path.read_bytes()
