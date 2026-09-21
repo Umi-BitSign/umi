@@ -1,5 +1,12 @@
 # Maintenance
 
+- Maintain existing public setup guides in place. Keep one authoritative page
+  for current miner release, policy and download details, linked from the README
+  and role index. Test changed commands and download hashes, and check internal
+  links before publishing. Do not add dated incident reports or community replies
+  to the public repository. Link retired instructions at fixed Git revisions from
+  docs/reference/legacy.md rather than leaving competing setup guides.
+
 - Keep command entry points separate from policy, pure calculations, and I/O.
   Use explicit imports and typed boundaries; do not add runtime import tricks to
   preserve an oversized module.

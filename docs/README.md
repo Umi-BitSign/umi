@@ -5,8 +5,8 @@ live for endpoint submissions only, while the registration bridge remains the
 current reward mechanism. Open-competition rewards have not been activated. The
 public-endpoint pilot and calibration enrollment are closed. The
 [public status](https://api.umi.vision/v1/competition/status) exposes the exact
-live intake policy. Cohort 3 delivery is ready for its scheduled cutoff. Endpoint
-miners need the [policy-7 connection update](miners/cohort3-update.md), including
+live intake policy and next intake schedule. Endpoint
+miners need the [current connection guide](miners/cohort3-update.md), including
 miners whose earlier intake receipts remain valid. Model-artifact intake remains
 closed; service readiness does not establish a completed live cohort.
 
@@ -49,3 +49,9 @@ not another dated operator guide. The `main` branch may be ahead of production;
 merging code does not activate it. Deployment status needs a checked block,
 signed policy or release, and finalized chain evidence. A running process or an
 old report does not prove current rewards.
+
+Update the existing guide when its setup changes. Keep release downloads,
+policy hashes and runnable connection commands in the connection guide; link to
+it from role pages instead of copying those details. Preserve retired procedures
+through [fixed Git revisions](reference/legacy.md), and keep incident logs and
+community replies outside this public setup documentation.
