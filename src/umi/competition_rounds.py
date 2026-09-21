@@ -8,6 +8,7 @@ signing. Cutoff certificates alone do not authorize execution or weights.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 import time
@@ -76,6 +77,19 @@ from .private_files import read_private_model as _read
 from .protocol import Hex32, StrictProtocolModel, Video, canonical_json_bytes
 
 ROUTE = "/v1/competition/rounds"
+_LOGGER = logging.getLogger(__name__)
+
+
+def _failure_site(error: BaseException) -> str:
+    """Code location only: exception messages can contain protected payloads."""
+    trace = error.__traceback__
+    site = "unknown"
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        if Path(code.co_filename).parent.name == "umi":
+            site = f"{Path(code.co_filename).name}:{code.co_name}:{trace.tb_lineno}"
+        trace = trace.tb_next
+    return site
 
 
 class CutoffEndorsement(StrictProtocolModel):
@@ -343,6 +357,7 @@ class RoundCoordinator:
         self.work_cursor = 0
         self.settlement_cursor = 0
         self.promotion_cursor = ""
+        self._held_diagnostics: dict[str, tuple[str, str, str]] = {}
         self.settlement_queue = None
         if config.settlement_delivery is not None:
             from .competition_settlement_delivery import SettlementQueue
@@ -587,15 +602,27 @@ class RoundCoordinator:
             if promotions is not None:
                 counts.update(promotions)
             for name in pending:
+                stage = "prepare_plan"
                 try:
                     prepared = await run_owned_thread(self._prepare_plan, name, capture)
                     if isinstance(prepared, str):
                         counts[prepared] += 1
                     else:
+                        stage = "prepare_work"
                         await self.prepare_work(prepared)
                         counts["prepared"] += 1
-                except (OSError, ValueError, sqlite3.Error):
+                    self._held_diagnostics.pop(name, None)
+                except (OSError, ValueError, sqlite3.Error) as error:
                     counts["held"] += 1
+                    diagnostic = (stage, type(error).__name__, _failure_site(error))
+                    if self._held_diagnostics.get(name) != diagnostic:
+                        if len(self._held_diagnostics) >= self.config.maximum_rounds:
+                            self._held_diagnostics.clear()
+                        self._held_diagnostics[name] = diagnostic
+                        _LOGGER.warning(
+                            "round_plan_held file_digest=%s stage=%s error_type=%s site=%s",
+                            digest(name), *diagnostic,
+                        )
             if self.config.settlement_directory is not None:
                 counts.update(await self.prepare_settlements(block))
             return {
@@ -862,8 +889,11 @@ def create_round_app(
         while True:
             try:
                 result = await coordinator.cycle()
-            except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError):
-                result = {"status": "round_poll_failed", "chain_submission_authorized": False}
+            except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as error:
+                result = {
+                    "status": "round_poll_failed", "chain_submission_authorized": False,
+                    "error_type": type(error).__name__, "error_site": _failure_site(error),
+                }
             if report is not None:
                 # Never emit protected references, request bytes or exception text.
                 report(result)

@@ -867,6 +867,8 @@ def authenticate_evaluation(
     A failed inference or expired replay window cannot erase proof of two
     contradictory statements. Current eligibility and scoring are separate.
     """
+    from .competition_policy_lineage import submission_policy_admitted
+
     signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
     attested = AttestedResult.model_validate_json(canonical_json_bytes(attested))
     round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
@@ -879,7 +881,7 @@ def authenticate_evaluation(
     result, sub = attested.result, signed.submission
     if (
         round_.policy_sha256 != digest(policy)
-        or sub.policy_sha256 != digest(policy)
+        or not submission_policy_admitted(policy, sub.policy_sha256)
         or result.round_sha256 != digest(round_)
         or result.submission_sha256 != digest(sub)
         or digest(sub) not in round_.roster
