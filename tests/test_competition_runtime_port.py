@@ -158,6 +158,78 @@ def test_append_preserves_history_admissions_and_unallocated_credit(port):
     assert receipt["observed_block"] == 210
 
 
+def bind_intake_anchor(p):
+    required = (digest(p.signed.submission),)
+    p.store.verify_retained_intake_state(
+        baseline_promotion_sha256=baseline_record_digest(p.baseline),
+        required_submission_sha256s=required,
+    )
+    with p.store._connection() as connection:
+        raw = connection.execute(
+            "SELECT value FROM metadata WHERE key='retained_intake_anchor'"
+        ).fetchone()[0]
+        # Exercise a still-bound predecessor anchor, as in the live intake.
+        original = canonical_json_bytes(
+            {**json.loads(raw), "policy_sha256": digest(p.policy)}
+        ).decode()
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='retained_intake_anchor'", (original,)
+        )
+    return required, original
+
+
+def test_port_carries_intake_anchor_and_reopens_without_losing_receipts(port):
+    p = port
+    required, original = bind_intake_anchor(p)
+    result = apply(p)
+    reopened = CompetitionStore(p.store.directory, p.target, predecessor_policies=(p.policy,))
+    reopened.verify_retained_intake_state(
+        baseline_promotion_sha256=baseline_record_digest(result),
+        required_submission_sha256s=required,
+    )
+    assert rows(reopened)["submissions"] == p.old_rows["submissions"]
+    with reopened._connection() as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='runtime_port_prior_intake_anchor:1'"
+        ).fetchone() == (original,)
+    assert apply(p, block=211, store=reopened) == result
+
+
+@pytest.mark.parametrize("tamper", ["receipt", "anchor", "insert_failure"])
+def test_failed_port_preserves_intake_anchor_and_history(port, tamper, monkeypatch):
+    from umi import competition_runtime_port_history
+    from umi.open_competition import model_content_digest
+
+    p = port
+    _, original = bind_intake_anchor(p)
+    with p.store._connection() as connection:
+        if tamper == "receipt":
+            connection.execute("UPDATE submissions SET receipt='{}'")
+        elif tamper == "anchor":
+            original = canonical_json_bytes(
+                {**json.loads(original), "baseline_promotion_sha256": "ff" * 32}
+            ).decode()
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='retained_intake_anchor'", (original,)
+            )
+    if tamper == "insert_failure":
+        monkeypatch.setattr(
+            competition_runtime_port_history,
+            "model_content_digest",
+            lambda _: model_content_digest(p.original),
+        )
+    with pytest.raises((ValueError, sqlite3.IntegrityError)):
+        apply(p)
+    assert rows(p.store)["promotions"] == p.old_rows["promotions"]
+    with p.store._connection() as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='retained_intake_anchor'"
+        ).fetchone() == (original,)
+        assert not connection.execute(
+            "SELECT 1 FROM metadata WHERE key='runtime_port_prior_intake_anchor:1'"
+        ).fetchone()
+
+
 def test_independent_review_history_agrees_and_reopens(port, tmp_path):
     p = port
     reviews = EvaluatorReviewStore(

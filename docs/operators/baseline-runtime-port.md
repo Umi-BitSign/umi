@@ -35,6 +35,12 @@ checkpoint and historical archive bindings. An evaluator config must retain its
 existing review history and capacity limits. Migrating review history to another
 host requires a coherent copy after its owning services have stopped.
 
+The port authenticates any existing intake anchor and all retained receipts,
+then carries only its policy and baseline digest forward in the same transaction
+as the appended baseline. It preserves the original anchor as a recovery record
+and keeps the exact required-submission list. The replacement intake configuration
+can therefore reopen the completed transition without rebinding the ledger.
+
 ## Apply
 
 Stop the services that own the affected ledger, take a coherent backup, and

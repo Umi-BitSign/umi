@@ -138,6 +138,41 @@ def _require_between_rounds(store, connection, block):
                 raise ValueError("runtime port cannot replace a baseline during a published round")
 
 
+def _advance_intake_anchor(store, connection, review, record):
+    retained = connection.execute(
+        "SELECT value FROM metadata WHERE key='retained_intake_anchor'"
+    ).fetchone()
+    if retained is None:
+        return
+    if len(retained[0].encode()) > _MAX_BYTES:
+        raise ValueError("runtime port intake anchor exceeds its byte bound")
+    try:
+        required = tuple(json.loads(retained[0])["required_submission_sha256s"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("runtime port intake anchor is corrupt") from error
+    # Authenticate the existing anchor and every receipt before changing its
+    # baseline. This also carries an admitted predecessor's policy forward.
+    store._verify_retained_intake_state_locked(
+        connection,
+        baseline_promotion_sha256=review.previous_promotion_sha256,
+        required_submission_sha256s=required,
+    )
+    anchor = json.loads(
+        connection.execute(
+            "SELECT value FROM metadata WHERE key='retained_intake_anchor'"
+        ).fetchone()[0]
+    )
+    anchor["baseline_promotion_sha256"] = baseline_record_digest(record)
+    connection.execute(
+        "INSERT INTO metadata VALUES (?, ?)",
+        ("runtime_port_prior_intake_anchor:" + str(review.sequence), retained[0]),
+    )
+    connection.execute(
+        "UPDATE metadata SET value=? WHERE key='retained_intake_anchor'",
+        (canonical_json_bytes(anchor).decode(),),
+    )
+
+
 def apply_runtime_port(
     store: CompetitionStore,
     certificate: SignedRuntimePortReview,
@@ -198,6 +233,7 @@ def apply_runtime_port(
         ).fetchone()
         if head != (review.previous_promotion_sha256,):
             raise ValueError("runtime port parent is no longer the current head")
+        _advance_intake_anchor(store, connection, review, record)
         # Block already running older writers as well as future old-code opens.
         if connection.execute("SELECT 1 FROM metadata WHERE key=?", (_MARKER,)).fetchone() is None:
             for _, sql in _fences(store._WRITER_FENCED_TABLES):
