@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import Field
 
+from .competition_policy_lineage import submission_policy_admitted
 from .open_competition import (
     Block,
     CompetitionPolicy,
@@ -19,7 +20,6 @@ from .open_competition import (
     validate_admission,
 )
 from .protocol import StrictProtocolModel, canonical_json_bytes
-from .competition_policy_lineage import submission_policy_admitted
 
 MAX_SUBMISSION_BYTES = 2 * 1024 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024

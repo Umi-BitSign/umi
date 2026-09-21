@@ -1263,9 +1263,7 @@ class DurableGrandpaFinalityPort:
         """Move a store bound under a deal-preserving predecessor scoring policy to
         the live one. The verified chain evidence does not depend on the policy;
         only the binding row changes, under the initialize write lock."""
-        stored = connection.execute(
-            "SELECT value FROM store_meta WHERE key = 'config'"
-        ).fetchone()
+        stored = connection.execute("SELECT value FROM store_meta WHERE key = 'config'").fetchone()
         if stored is None or stored[0] == self._config_bytes():
             return
         for predecessor in self._accepted_predecessor_policy_digests:

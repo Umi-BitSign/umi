@@ -328,9 +328,14 @@ class ExchangeJournal:
 
         out = set()
         for policy_sha256 in registered_admitted_sha256s(config.policy_sha256)[1:]:
-            body = config.model_dump(mode="json", by_alias=True, exclude={"maximum_orders", "maximum_events", "maximum_bytes", "port", "host"})
+            body = config.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude={"maximum_orders", "maximum_events", "maximum_bytes", "port", "host"},
+            )
             body["policy_sha256"] = policy_sha256
-            if isinstance(body.get("chain"), dict): body["chain"]["policy_sha256"] = policy_sha256
+            if isinstance(body.get("chain"), dict):
+                body["chain"]["policy_sha256"] = policy_sha256
             out.add(canonical_json_bytes(body))
         return out
 

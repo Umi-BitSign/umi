@@ -411,14 +411,20 @@ def test_store_bound_to_a_declared_predecessor_policy_is_rebound(
     port = _port(tmp_path, observer, chain_observation)
     binding = port.next_run_binding()
     block = _header(10, parent_hash=f"0x{'11' * 32}", seed=20)
-    port.accept_attestation(binding, _attestation(observer, binding, block=block, sequence=0, previous=None))
+    port.accept_attestation(
+        binding, _attestation(observer, binding, block=block, sequence=0, previous=None)
+    )
     successor = "55" * 32
     # Not declared: still a mismatch.
     with pytest.raises(GrandpaFinalityStoreConflict, match="store_binding_mismatch"):
         _port(tmp_path, observer, chain_observation, scoring_digest=successor)
     # Declared deal-preserving predecessor: the store is adopted and rebound, evidence intact.
     rebound = _port(
-        tmp_path, observer, chain_observation, scoring_digest=successor, predecessor_digests=(_POLICY_DIGEST,)
+        tmp_path,
+        observer,
+        chain_observation,
+        scoring_digest=successor,
+        predecessor_digests=(_POLICY_DIGEST,),
     )
     head = rebound.persisted_head()
     assert head is not None and head.height == 10
@@ -428,7 +434,13 @@ def test_store_bound_to_a_declared_predecessor_policy_is_rebound(
         _port(tmp_path, observer, chain_observation)
     # And an undeclared third policy is refused even with the predecessor declared.
     with pytest.raises(GrandpaFinalityStoreConflict, match="store_binding_mismatch"):
-        _port(tmp_path, observer, chain_observation, scoring_digest="66" * 32, predecessor_digests=(_POLICY_DIGEST,))
+        _port(
+            tmp_path,
+            observer,
+            chain_observation,
+            scoring_digest="66" * 32,
+            predecessor_digests=(_POLICY_DIGEST,),
+        )
 
 
 def test_startup_audit_detects_normalized_row_corruption(

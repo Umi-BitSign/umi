@@ -115,6 +115,78 @@ class WorkQueue:
                 "opens INTEGER NOT NULL, closes INTEGER NOT NULL, issue_close INTEGER)"
             )
         self.serial = asyncio.Lock()
+        self._maintenance_cursors: dict[str, int] = {}
+        self._maintenance_capacity = maximum_orders
+
+    async def maintain(self, plan, *, videos=()):
+        """Prepare once per process, then repair bounded pages on later polls.
+
+        Only progress cursors survive calls, never validation results. A restart
+        performs the complete original recovery before using this bounded path.
+        """
+        plan = await run_owned_thread(validate_work_plan, plan, self.policy)
+        key = digest(plan)
+        if key not in self._maintenance_cursors:
+            await self.prepare(plan, videos=videos)
+            if len(self._maintenance_cursors) >= self._maintenance_capacity:
+                del self._maintenance_cursors[next(iter(self._maintenance_cursors))]
+            self._maintenance_cursors[key] = 0
+            return
+        async with self.serial:
+            with self.journal.locked():
+                block = await self._head()
+                round_ = plan.cutoff.publication.round
+                if not round_.submission_close_block <= block < round_.evaluation_close_block:
+                    raise ValueError("work maintenance is outside its execution window")
+                cursor, statements = await run_owned_thread(
+                    self._maintenance_page, plan, self._maintenance_cursors[key]
+                )
+                for statement in statements:
+                    certificate = await self._publish(statement, block)
+                    if isinstance(certificate, SignedEndpointAuthorization):
+                        await self._orders(plan, (certificate,))
+                self._maintenance_cursors[key] = cursor
+
+    def _maintenance_page(self, plan, after):
+        round_ = plan.cutoff.publication.round
+        slots = []
+        for sub in plan.submissions:
+            kinds = [("umi-evaluation-order/1", sub.submission.track == "model")]
+            if sub.submission.track == "endpoint":
+                kinds.insert(0, ("umi-endpoint-authorization-publication/1", True))
+            for kind, required in kinds:
+                slots.append(
+                    (
+                        digest(
+                            {
+                                "policy": round_.policy_sha256,
+                                "sequence": round_.sequence,
+                                "submission": digest(sub.submission),
+                                "kind": kind,
+                            }
+                        ),
+                        required,
+                    )
+                )
+        page = slots[after : after + 4]
+        validator = _StatementValidator(self.policy, self.legacy)
+        statements = []
+        for slot, required in page:
+            if self.journal.get("intent", slot) is None and not required:
+                # Endpoint orders are created only after authorization quorum.
+                continue
+            statement = self._statement(slot, validator=validator)
+            if statement.plan != plan:
+                raise ValueError("retained maintenance statement has a different plan")
+            statements.append(statement)
+        self.journal.put_many(
+            (),
+            index=lambda db: self._write_indexes(
+                db, (self._index_record(statement) for statement in statements)
+            ),
+        )
+        cursor = after + len(page)
+        return (0 if cursor >= len(slots) else cursor), tuple(statements)
 
     async def _head(self):
         head = execution_boundary(await self.provider.collect())

@@ -42,6 +42,7 @@ from .competition_origin import (
     FinalizedEndpointProvider,
     public_https_origin,
 )
+from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_scheduling import AssignmentPublicationJournal, SchedulingCapacity, assignment_key
 from .concurrency import await_owned_task
 from .config import Limits
@@ -53,7 +54,6 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import prepare_request_attempt, send_prepared_request
 from .validator_chain import StorageReadSpec
 from .validator_plans import VerifiedFinalizedBlock
-from .competition_policy_lineage import admitted_policy_sha256s
 
 
 class EndpointDispatchConfig(StrictProtocolModel):

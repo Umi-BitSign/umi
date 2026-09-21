@@ -439,6 +439,7 @@ async def test_pending_review_is_retried_without_skipping_its_sequence(
             evaluator_hotkey=key.hotkey.ss58_address,
             maximum_orders=1024,
             maximum_journal_bytes=1024**3,
+            journal_limit=lambda _name: 1024**3,
         ),
     )
     client = RoundSigningClient(worker, "https://rounds.example")
