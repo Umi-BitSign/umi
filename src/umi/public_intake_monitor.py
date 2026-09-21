@@ -249,8 +249,12 @@ class CompetitionStatus(StrictProtocolModel):
     admission_phase: Literal["not_open", "open", "closed", "capacity_exhausted", "unverified"]
     admission_checked_block: Annotated[int, Field(ge=0, le=2**53 - 1)]
     chain_submission_authorized: Literal[False]
+    honored_policy_sha256s: Annotated[tuple[Hex32, ...], Field(max_length=16)] | None = None
+    deal_sha256: Hex32 | None = None
     deployment: dict[str, JsonValue]
     round_schedule: PublicRoundSchedule
+    continuous_intake: Literal[True] | None = None
+    next_intake_schedule: PublicRoundSchedule | None = None
     assignment_delivery_ready: bool
     model_intake_ready: bool
     evaluation_ready: bool
@@ -261,11 +265,16 @@ class CompetitionReadiness(StrictProtocolModel):
     schema_: Literal["umi-competition-readiness/2"] = Field(alias="schema")
     mode: Literal["intake_no_weight"]
     ready_for: Literal[
-        "first_round_intake_not_open", "first_round_intake", "first_round_intake_closed"
+        "first_round_intake_not_open",
+        "first_round_intake",
+        "first_round_intake_closed",
+        "continuous_intake",
     ]
     policy_sha256: Hex32
     deployment: dict[str, JsonValue]
     round_schedule: PublicRoundSchedule
+    continuous_intake: Literal[True] | None = None
+    next_intake_schedule: PublicRoundSchedule | None = None
     retained_state: RetainedIntakeState
     retained_submission_head: RetainedSubmissionHead
     assignment_delivery_ready: bool
@@ -544,13 +553,17 @@ def _expected_identity(
     return index, expected
 
 
-def _phase(status: CompetitionStatus) -> tuple[str, str, bool]:
+def _phase(
+    status: CompetitionStatus, deployment: PublicIntakeDeployment, policy: CompetitionPolicy
+) -> tuple[str, str, bool]:
     schedule = status.round_schedule
     block = status.admission_checked_block
     if block < schedule.intake_opened_block:
         return "not_open", "first_round_intake_not_open", False
-    if block > schedule.roster_close_latest_block:
+    if not deployment.launch_identity().accepts_at(block) or block > policy.valid_through_block:
         return "closed", "first_round_intake_closed", False
+    if deployment.round_stride_blocks is not None:
+        return "open", "continuous_intake", True
     return "open", "first_round_intake", True
 
 
@@ -602,7 +615,19 @@ def _validate_status_readiness(
         or readiness.evaluation_ready != deployment.evaluation_ready
     ):
         _fail("deployment_readiness_flag_mismatch")
-    expected_phase, expected_ready_for, expected_accepting = _phase(status)
+    expected_phase, expected_ready_for, expected_accepting = _phase(status, deployment, policy)
+    continuous = deployment.round_stride_blocks is not None
+    expected_next = (
+        deployment.launch_identity().next_intake_schedule(status.admission_checked_block)
+        if continuous and status.admission_accepting_new
+        else None
+    )
+    if any(
+        value.continuous_intake != (True if continuous else None)
+        or value.next_intake_schedule != expected_next
+        for value in (status, readiness)
+    ):
+        _fail("continuous_intake_schedule_mismatch")
     issues: list[MonitorIssue] = []
     if status.baseline.held_for_conflict:
         issues.append(
@@ -622,7 +647,6 @@ def _validate_status_readiness(
             or readiness.admission_accepting_new
             or status.admission_capacity_available
             or expected_phase != "open"
-            or expected_ready_for != "first_round_intake"
             or not expected_accepting
             or readiness.ready_for != expected_ready_for
         ):
