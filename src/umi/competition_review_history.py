@@ -598,7 +598,10 @@ class EvaluatorReviewStore(CompetitionStore):
             for s in body["submissions"]
         )
         publication = verify_cutoff_publication(
-            certificate, policy=self.policy, submissions=submissions, limits=self.limits
+            certificate,
+            policy=self.lineage.policy(certificate.publication.round.policy_sha256),
+            submissions=submissions,
+            limits=self.limits,
         )
         round_ = publication.round
         if (
