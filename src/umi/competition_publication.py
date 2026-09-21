@@ -23,6 +23,7 @@ from .competition_evidence import (
     IndependentEvaluationEvidence,
 )
 from .competition_outcomes import OutcomeEvidence, outcome_binding, parse_outcome, replay_outcome
+from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_settlement import (
     CompetitionSettlement,
     EvidenceCutoffSchedule,
@@ -43,7 +44,6 @@ from .open_competition import (
     validate_admission,
 )
 from .protocol import Hex32, canonical_json_bytes
-from .competition_policy_lineage import admitted_policy_sha256s
 
 _CUTOFF_PUBLICATION_DOMAIN = b"umi-competition-cutoff-publication-v1\0"
 _SETTLEMENT_PUBLICATION_DOMAIN = b"umi-competition-settlement-publication-v1\0"

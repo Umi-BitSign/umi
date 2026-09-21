@@ -17,9 +17,9 @@ from typing_extensions import Self
 
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
-from .competition_commands.common import load_json
 from .competition_policy_lineage import register_lineage
 from .competition_store import (
     AdmissionCapacity,

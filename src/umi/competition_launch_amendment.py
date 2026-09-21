@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .competition_launch import PublicLaunchIdentity
+from .competition_policy_lineage import submission_policy_admitted
 from .open_competition import (
     CompetitionPolicy,
     Hex32,
@@ -14,7 +15,6 @@ from .open_competition import (
     verify_signature,
 )
 from .protocol import StrictProtocolModel, canonical_json_bytes
-from .competition_policy_lineage import submission_policy_admitted
 
 
 class LaunchAmendment(StrictProtocolModel):

@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import FinalizedRegistrationProvider, _AwaitingFinality, _hotkey, _uint
+from .competition_policy_lineage import submission_policy_admitted
 from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .grandpa_finality_supervisor import GrandpaFinalitySupervisorError
@@ -29,7 +30,6 @@ from .open_competition import SignedSubmission, digest
 from .protocol import canonical_json_bytes
 from .validator import OriginResolver, _system_origin_resolver
 from .validator_chain import PinnedRuntimeContext, StorageReadSpec, ValidatorChainError
-from .competition_policy_lineage import submission_policy_admitted
 
 _MAX_ORIGIN_EVIDENCE_BYTES = 32 * 1024**2
 _MAX_DNS_ADDRESSES = 64

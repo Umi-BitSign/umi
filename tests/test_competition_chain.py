@@ -435,11 +435,17 @@ def test_cache_binds_the_chain_configuration_not_the_policy(chain):
     FinalizedRegistrationProvider(config, policy, finality=chain.finality, proofs=chain.proofs)
     # A config that names a different policy than the one supplied is still refused.
     with pytest.raises(ValueError, match="another competition policy"):
-        FinalizedRegistrationProvider(config, chain.policy, finality=chain.finality, proofs=chain.proofs)
+        FinalizedRegistrationProvider(
+            config, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
     # Any other chain-configuration change still invalidates the cache.
-    other = chain.config.model_copy(update={"minimum_finalized_block": chain.config.minimum_finalized_block + 1})
+    other = chain.config.model_copy(
+        update={"minimum_finalized_block": chain.config.minimum_finalized_block + 1}
+    )
     with pytest.raises(ValueError, match="another chain configuration"):
-        FinalizedRegistrationProvider(other, chain.policy, finality=chain.finality, proofs=chain.proofs)
+        FinalizedRegistrationProvider(
+            other, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
 
 
 def test_legacy_per_policy_cache_binding_is_upgraded_in_place(chain):
@@ -457,7 +463,9 @@ def test_legacy_per_policy_cache_binding_is_upgraded_in_place(chain):
     )
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT digest FROM binding").fetchone()[0] != legacy
-    successor = chain.policy.model_copy(update={"sequence": 2, "predecessor_sha256": digest(chain.policy)})
+    successor = chain.policy.model_copy(
+        update={"sequence": 2, "predecessor_sha256": digest(chain.policy)}
+    )
     config = chain.config.model_copy(update={"policy_sha256": digest(successor)})
     FinalizedRegistrationProvider(config, successor, finality=chain.finality, proofs=chain.proofs)
 

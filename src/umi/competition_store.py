@@ -20,7 +20,6 @@ from .competition_evidence import (
 )
 from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
 from .competition_launch_amendment import SignedLaunchAmendment, verify_launch_amendment
-from .competition_policy_lineage import PolicyLineage, registered_lineage
 from .competition_outcomes import (
     OutcomeEvidence,
     binding_ids,
@@ -31,6 +30,7 @@ from .competition_outcomes import (
     parse_outcome,
     replay_outcome,
 )
+from .competition_policy_lineage import PolicyLineage, registered_lineage
 from .competition_publication import (
     CutoffPublication,
     PublicationReplayLimits,
@@ -349,9 +349,7 @@ class CompetitionStore(VoidEvidenceRetention):
                 raise ValueError("state directory is bound to a different competition policy")
             # Bound to an admitted predecessor: this open rolls the ledger forward.
             bound_policy = None if bound is None else bound[0].rsplit(":", 1)[-1]
-            pending_rollover_from = (
-                bound_policy if bound_policy not in {None, policy_id} else None
-            )
+            pending_rollover_from = bound_policy if bound_policy not in {None, policy_id} else None
             acceptable_checkpoint_bindings = self._acceptable_checkpoint_bindings()
             if checkpoint_bound is not None and checkpoint_bound[0] not in (
                 acceptable_checkpoint_bindings
@@ -3533,12 +3531,12 @@ class CompetitionStore(VoidEvidenceRetention):
         if sub.track != "model" or sub.model_bundle is None:
             raise ValueError("only contributed offline bundles can be promoted")
         validate_admission(
-                    signed,
-                    self.policy,
-                    snapshot,
-                    current_block,
-                    admitted_policy_sha256s=self.lineage.admitted_policy_sha256s,
-                )
+            signed,
+            self.policy,
+            snapshot,
+            current_block,
+            admitted_policy_sha256s=self.lineage.admitted_policy_sha256s,
+        )
         candidate, incumbent = replay_evaluation(
             attested,
             signed,
