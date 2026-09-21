@@ -22,6 +22,7 @@ import re
 from dataclasses import asdict, dataclass
 
 from .anchors import VerifiedAuthEvidence
+from .competition_policy_lineage import submission_policy_admitted
 from .config import Limits
 from .drand import DrandPulse
 from .open_competition import (
@@ -48,7 +49,6 @@ from .validator import (
     validate_response_plaintext,
 )
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
-from .competition_policy_lineage import submission_policy_admitted
 
 _HEX32 = re.compile(r"[0-9a-f]{64}\Z")
 _TIMESTAMP = re.compile(r"(?:0|[1-9][0-9]{0,19})\Z")

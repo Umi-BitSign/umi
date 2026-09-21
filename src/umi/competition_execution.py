@@ -26,6 +26,7 @@ from typing_extensions import Self
 from .competition_artifacts import verify_preserved_bundle
 from .competition_chain import OwnedFinalityStale, RegistrationCapture
 from .competition_evidence import EvaluatorRunRecord
+from .competition_policy_lineage import submission_policy_admitted
 from .competition_runner import (
     OfflineCaseExecution,
     OfflineRuntime,
@@ -54,7 +55,6 @@ from .open_competition import (
     validate_suite_profile,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
-from .competition_policy_lineage import submission_policy_admitted
 
 _MAX_EVIDENCE_BYTES = 208 * 1024**2
 _MAX_STEP_BYTES = 48 * 1024

@@ -86,23 +86,34 @@ def work(policy, runtime, tmp_path, request):
     submission_policies = (submission_policy,)
     if profile == "v2-successor":
         intermediate = CompetitionPolicy.model_validate_json(
-            canonical_json_bytes(item.policy.model_copy(update={
-                "sequence": item.policy.sequence + 1,
-                "predecessor_sha256": digest(submission_policy),
-                "maximum_inference_ms": item.policy.maximum_inference_ms * 2,
-            }))
+            canonical_json_bytes(
+                item.policy.model_copy(
+                    update={
+                        "sequence": item.policy.sequence + 1,
+                        "predecessor_sha256": digest(submission_policy),
+                        "maximum_inference_ms": item.policy.maximum_inference_ms * 2,
+                    }
+                )
+            )
         )
-        item.policy = intermediate.model_copy(update={
-            "sequence": intermediate.sequence + 1,
-            "predecessor_sha256": digest(intermediate),
-        })
+        item.policy = intermediate.model_copy(
+            update={
+                "sequence": intermediate.sequence + 1,
+                "predecessor_sha256": digest(intermediate),
+            }
+        )
         register_lineage(item.policy, (intermediate, submission_policy))
         submission_policies = (submission_policy, intermediate)
         item.suite = item.suite.model_copy(update={"policy_sha256": digest(item.policy)})
     roster = tuple(
         sorted(
             (
-                submission(submission_policies[index % len(submission_policies)], name=f"CohortMiner{index}", start=1000, end=1900)
+                submission(
+                    submission_policies[index % len(submission_policies)],
+                    name=f"CohortMiner{index}",
+                    start=1000,
+                    end=1900,
+                )
                 for index in range(count)
             ),
             key=lambda signed: digest(signed.submission),
@@ -283,7 +294,12 @@ def reopen_native_stores(setup):
     "work",
     [(77, "v2"), (256, "v2"), (77, "v4"), (256, "v2-successor")],
     indirect=True,
-    ids=("77-endpoints-six-cases", "256-endpoints-six-cases", "77-endpoints-v4-27-cases", "256-carried-endpoints"),
+    ids=(
+        "77-endpoints-six-cases",
+        "256-endpoints-six-cases",
+        "77-endpoints-v4-27-cases",
+        "256-carried-endpoints",
+    ),
 )
 async def test_full_cohort_reserves_before_signing_and_survives_paged_restart(cohort, monkeypatch):
     worker, signer = cohort.workers[0], cohort.signers[0]

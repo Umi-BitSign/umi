@@ -162,7 +162,9 @@ async def prepare(setup):
 
 
 @pytest.mark.asyncio
-async def test_round_hold_identifies_stage_without_logging_protected_values(setup, monkeypatch, caplog):
+async def test_round_hold_identifies_stage_without_logging_protected_values(
+    setup, monkeypatch, caplog
+):
     secret = "protected reference must never be logged"
 
     def fail(*args):

@@ -26,6 +26,7 @@ from typing_extensions import Self
 from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
+from .competition_policy_lineage import admitted_policy_sha256s
 from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
@@ -58,7 +59,6 @@ from .validator_chain import (
 )
 from .validator_chain_scan import VerifiedFinalizedBlockIdentity
 from .validator_plans import VerifiedFinalizedBlock
-from .competition_policy_lineage import admitted_policy_sha256s
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25

@@ -922,9 +922,12 @@ def _predecessor_bindings(binding: object) -> set[bytes]:
     out = set()
     for predecessor in registered_admitted_sha256s(live)[1:]:
 
-        def swap(o):
+        def swap(o, predecessor=predecessor):
             if isinstance(o, dict):
-                return {k: (predecessor if k in ("policy_sha256", "policy") and v == live else swap(v)) for k, v in o.items()}
+                return {
+                    k: (predecessor if k in ("policy_sha256", "policy") and v == live else swap(v))
+                    for k, v in o.items()
+                }
             if isinstance(o, list):
                 return [swap(v) for v in o]
             return o

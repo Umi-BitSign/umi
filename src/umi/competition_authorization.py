@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field
 
+from .competition_policy_lineage import submission_policy_admitted
 from .config import Limits
 from .miner_admission import (
     MinerAdmissionError,
@@ -57,7 +58,6 @@ from .protocol import (
 )
 from .validator_plans import VerifiedFinalizedAnnouncementPort
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, ceil_div
-from .competition_policy_lineage import submission_policy_admitted
 
 MAX_AUTHORIZATION_BYTES = 16 * 1024**2
 

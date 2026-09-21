@@ -61,7 +61,7 @@ def successor(prior: CompetitionPolicy, **changes) -> CompetitionPolicy:
 
 def test_every_policy_field_is_classified_exactly_once() -> None:
     names = {info.alias or name for name, info in CompetitionPolicy.model_fields.items()}
-    assert DEAL_FIELDS | OPERATIONAL_FIELDS == names
+    assert names == DEAL_FIELDS | OPERATIONAL_FIELDS
     assert not DEAL_FIELDS & OPERATIONAL_FIELDS
 
 
@@ -71,7 +71,9 @@ def test_deal_digest_ignores_operational_fields_only() -> None:
         successor(base, maximum_inference_ms=2000, evaluation_runtime_sha256="9" * 64)
     )
     assert deal_digest(base) != deal_digest(successor(base, contribution_terms_sha256="a" * 64))
-    assert deal_digest(base) != deal_digest(successor(base, endpoint_reward_bps=6000, model_reward_bps=4000))
+    assert deal_digest(base) != deal_digest(
+        successor(base, endpoint_reward_bps=6000, model_reward_bps=4000)
+    )
     assert deal_digest(base) != deal_digest(successor(base, maximum_bundle_bytes=20_000))
 
 

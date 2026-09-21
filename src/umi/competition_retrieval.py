@@ -29,6 +29,7 @@ from .competition_artifacts import (
     verify_bundle_directory,
     verify_preserved_bundle,
 )
+from .competition_policy_lineage import submission_policy_admitted
 from .open_competition import (
     BundleFile,
     CompetitionPolicy,
@@ -42,7 +43,6 @@ from .validator_supervisor_adapters import (
     PinnedHTTPSClient,
     ValidatorSupervisorAdapterError,
 )
-from .competition_policy_lineage import submission_policy_admitted
 
 _MAX_MANIFEST_FILES = 4096
 _MAX_MANIFEST_BYTES = 1024**4
