@@ -20,7 +20,9 @@ untouched, so a terms change still rejects carried submissions on its own.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from .open_competition import CompetitionPolicy, digest
 from .protocol import canonical_json_bytes
@@ -78,20 +80,19 @@ OPERATIONAL_FIELDS: frozenset[str] = frozenset(
 
 
 def _policy_field_names() -> frozenset[str]:
-    return frozenset(
-        info.alias or name for name, info in CompetitionPolicy.model_fields.items()
-    )
+    return frozenset(info.alias or name for name, info in CompetitionPolicy.model_fields.items())
 
 
 def _require_complete_partition() -> None:
     names = _policy_field_names()
     if DEAL_FIELDS & OPERATIONAL_FIELDS:
         raise RuntimeError("policy deal and operational field sets overlap")
-    if DEAL_FIELDS | OPERATIONAL_FIELDS != names:
+    if names != DEAL_FIELDS | OPERATIONAL_FIELDS:
         missing = names - DEAL_FIELDS - OPERATIONAL_FIELDS
         extra = (DEAL_FIELDS | OPERATIONAL_FIELDS) - names
         raise RuntimeError(
-            f"policy field partition is stale: unclassified={sorted(missing)} unknown={sorted(extra)}"
+            f"policy field partition is stale: unclassified={sorted(missing)} "
+            f"unknown={sorted(extra)}"
         )
 
 
@@ -147,7 +148,10 @@ class PolicyLineage:
         current = self.live
         for candidate in predecessors:
             candidate = CompetitionPolicy.model_validate_json(canonical_json_bytes(candidate))
-            if current.predecessor_sha256 is None or digest(candidate) != current.predecessor_sha256:
+            if (
+                current.predecessor_sha256 is None
+                or digest(candidate) != current.predecessor_sha256
+            ):
                 raise ValueError("policy lineage is not a contiguous predecessor chain")
             if not operational_successor_of(current, candidate):
                 break
@@ -177,9 +181,36 @@ def policy_admits(
 # the policy they already hold. With nothing registered every site keeps its
 # exact-digest behavior, so the default is unchanged from before this module.
 _REGISTRY: dict[str, PolicyLineage] = {}
+_REPLAY_LINEAGES: ContextVar[Mapping[str, PolicyLineage] | None] = ContextVar(
+    "competition_replay_lineages", default=None
+)
 
 
-def register_lineage(live: CompetitionPolicy, predecessors: Iterable[CompetitionPolicy] = ()) -> PolicyLineage:
+@contextmanager
+def replay_lineage(
+    live: CompetitionPolicy, predecessors: Iterable[CompetitionPolicy] = ()
+) -> Iterator[PolicyLineage]:
+    """Use only a package's declared lineage without changing service admission.
+
+    Context-local state keeps concurrent replay jobs and the operator's process
+    registry independent. Even an empty lineage overrides an existing registry.
+    """
+    lineage = PolicyLineage(live, predecessors)
+    token = _REPLAY_LINEAGES.set({**(_REPLAY_LINEAGES.get() or {}), digest(live): lineage})
+    try:
+        yield lineage
+    finally:
+        _REPLAY_LINEAGES.reset(token)
+
+
+def _lookup(policy_sha256: str) -> PolicyLineage | None:
+    scoped = _REPLAY_LINEAGES.get() or {}
+    return scoped[policy_sha256] if policy_sha256 in scoped else _REGISTRY.get(policy_sha256)
+
+
+def register_lineage(
+    live: CompetitionPolicy, predecessors: Iterable[CompetitionPolicy] = ()
+) -> PolicyLineage:
     lineage = PolicyLineage(live, predecessors)
     _REGISTRY[digest(lineage.live)] = lineage
     return lineage
@@ -192,18 +223,18 @@ def clear_lineage_registry() -> None:
 
 def registered_admitted_sha256s(policy_sha256: str) -> tuple[str, ...]:
     """Admitted digests for a registered live policy digest; the digest alone if unregistered."""
-    lineage = _REGISTRY.get(policy_sha256)
+    lineage = _lookup(policy_sha256)
     return (policy_sha256,) if lineage is None else lineage.admitted_policy_sha256s
 
 
 def registered_lineage(policy: CompetitionPolicy) -> PolicyLineage:
     """The lineage registered for ``policy`` by the command entry point, or the policy alone."""
-    return _REGISTRY.get(digest(policy)) or PolicyLineage(policy)
+    return _lookup(digest(policy)) or PolicyLineage(policy)
 
 
 def admitted_policy_sha256s(policy: CompetitionPolicy) -> tuple[str, ...]:
     """Policy digests whose signed submissions ``policy`` admits (itself first)."""
-    lineage = _REGISTRY.get(digest(policy))
+    lineage = _lookup(digest(policy))
     return (digest(policy),) if lineage is None else lineage.admitted_policy_sha256s
 
 
@@ -215,15 +246,16 @@ __all__ = [
     "DEAL_FIELDS",
     "OPERATIONAL_FIELDS",
     "PolicyLineage",
+    "admitted_policy_sha256s",
+    "clear_lineage_registry",
     "deal_body",
     "deal_digest",
     "operational_successor_of",
-    "admitted_policy_sha256s",
-    "clear_lineage_registry",
     "policy_admits",
     "register_lineage",
     "registered_admitted_sha256s",
     "registered_lineage",
+    "replay_lineage",
     "submission_policy_admitted",
     "validate_operational_successor",
 ]

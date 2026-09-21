@@ -13,6 +13,7 @@ from umi.competition_evidence import (
     SignedEvaluatorRunRecord,
     sign_evaluator_run,
 )
+from umi.competition_policy_lineage import clear_lineage_registry, register_lineage
 from umi.competition_publication import (
     PublicationCapacityError,
     PublicationJournal,
@@ -35,7 +36,6 @@ from umi.competition_settlement import (
     competition_settlement_digest,
 )
 from umi.competition_store import CompetitionStore
-from umi.competition_policy_lineage import register_lineage, clear_lineage_registry
 from umi.open_competition import Evaluator, digest
 from umi.protocol import canonical_json_bytes
 
@@ -122,6 +122,7 @@ def _scenario(
     snapshot_factory=snapshot,
     suite_factory=suite_for,
     successor_policy=None,
+    predecessor_policies=None,
 ):
     archive = root / "archive"
     baseline = bundle_at(root / "baseline")
@@ -138,7 +139,7 @@ def _scenario(
         store.admit(signed, snapshot_factory(), 110)
 
     if successor_policy is not None:
-        register_lineage(successor_policy, (policy,))
+        register_lineage(successor_policy, predecessor_policies or (policy,))
         policy = successor_policy
         store = CompetitionStore(root / "state", policy)
 
@@ -294,20 +295,31 @@ def test_real_store_promotion_and_70_30_settlement_replay(policy, replay_limits,
 
 
 def test_carried_submissions_replay_through_cutoff_and_settlement(policy, replay_limits, tmp_path):
-    successor = policy.model_copy(update={
-        "sequence": policy.sequence + 1,
-        "predecessor_sha256": digest(policy),
-        "maximum_inference_ms": policy.maximum_inference_ms * 2,
-    })
+    successor = policy.model_copy(
+        update={
+            "sequence": policy.sequence + 1,
+            "predecessor_sha256": digest(policy),
+            "maximum_inference_ms": policy.maximum_inference_ms * 2,
+        }
+    )
     scenario = _scenario(policy, tmp_path, replay_limits, successor_policy=successor)
     assert all(s.submission.policy_sha256 == digest(policy) for s in scenario.submissions)
     assert scenario.round.policy_sha256 == digest(successor)
     options = dict(policy=successor, submissions=scenario.submissions, limits=replay_limits)
-    assert verify_cutoff_publication(scenario.cutoff_certificate, **options) == scenario.cutoff_publication
-    assert verify_settlement_publication(
-        scenario.settlement_certificate, cutoff_certificate=scenario.cutoff_certificate,
-        evidence=scenario.evidence, retained_settlement=scenario.settlement, **options,
-    ) == scenario.settlement_publication
+    assert (
+        verify_cutoff_publication(scenario.cutoff_certificate, **options)
+        == scenario.cutoff_publication
+    )
+    assert (
+        verify_settlement_publication(
+            scenario.settlement_certificate,
+            cutoff_certificate=scenario.cutoff_certificate,
+            evidence=scenario.evidence,
+            retained_settlement=scenario.settlement,
+            **options,
+        )
+        == scenario.settlement_publication
+    )
     clear_lineage_registry()
     with pytest.raises(ValueError, match="submission belongs to another policy"):
         verify_cutoff_publication(scenario.cutoff_certificate, **options)

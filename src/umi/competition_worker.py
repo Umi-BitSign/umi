@@ -30,6 +30,7 @@ from .competition_package import (
     competition_release_identity_digest,
     load_competition_package,
 )
+from .competition_policy_lineage import replay_lineage
 from .competition_publication import (
     PublicationCapacityError,
     PublicationJournal,
@@ -232,7 +233,10 @@ class CompetitionReplayWorker:
             observed_release=observed_release,
             limits=self.package_limits,
         )
-        with self._exclusive_lock():
+        with (
+            self._exclusive_lock(),
+            replay_lineage(package.policy, package.roster.predecessor_policies),
+        ):
             retained = self._reserve(package)
             journal = self._publication_journal(package)
             cutoff_retained = False

@@ -424,6 +424,14 @@ bindings. It refuses extra files, path traversal, links and mismatched expected
 identities. The retained settlement must agree with its signed certificate and
 pass full replay. Agreement does not establish independent custody or execution.
 
+When preparing a package containing carried submissions, supply the operational
+predecessors with the global `--predecessor-policy` option, newest first. The
+package retains their exact policies in roster version 2. A fresh replay worker
+validates the contiguous chain and unchanged submission terms from those bytes;
+it does not need separately installed predecessor files. Replay uses only the
+package's declared lineage and leaves the service's admission configuration
+unchanged. Rosters without predecessors retain their version-1 bytes.
+
 Preparation claims a digest-named directory exclusively. An interrupted write
 leaves a mode-0700 partial directory that the loader refuses. The operator must
 inspect and quarantine that exact partial directory before retrying preparation;
