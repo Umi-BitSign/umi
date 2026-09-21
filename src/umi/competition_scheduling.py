@@ -455,7 +455,7 @@ class AssignmentPublicationJournal:
         return qualify_dispatch(self, db, publications, observed, now, evaluator_hotkey)
 
     def _recover_capacity(self, db, batch_id, evaluator_hotkey, now):
-        return recover_dispatch_qualification(db, batch_id, evaluator_hotkey, now)
+        return recover_dispatch_qualification(self, db, batch_id, evaluator_hotkey, now)
 
     def configure_dispatch(self, *, evaluator_hotkey, limits, budget, publication_directory=None):
         configure_dispatch(
