@@ -316,23 +316,50 @@ class IndependentWorkSigner:
         await self._current(statement)
         capacity = await self._endpoint_window(statement)
         await self._current(statement)
+        continuing_order = (
+            isinstance(statement.body, EvaluationOrder)
+            and (
+                await run_owned_thread(
+                    self.admission.journal.get, "complete", digest(statement.plan)
+                )
+            )
+            is not None
+        )
         if capacity is not None:
             if self.worker.dispatch is None:
                 raise ValueError("work signer requires its owned scheduling journal")
             publications, observed, announcements = capacity
+            if continuing_order:
+                # Refresh owned finality without admitting another dispatch.
+                # reserve() below authenticates the exact completed admission.
+                await run_owned_thread(partial(self.worker.dispatch.observe, observed=observed))
+            else:
+                await run_owned_thread(
+                    partial(
+                        self.worker.dispatch.reserve_batch,
+                        batch_id=digest(statement.plan),
+                        publications=publications,
+                        observed=observed,
+                        announcements=announcements,
+                        evaluator_hotkey=self.worker.config.evaluator_hotkey,
+                    )
+                )
+        else:
+            publications = await run_owned_thread(self.admission.publications, statement.plan)
+        if continuing_order:
             await run_owned_thread(
                 partial(
-                    self.worker.dispatch.reserve_batch,
-                    batch_id=digest(statement.plan),
-                    publications=publications,
-                    observed=observed,
-                    announcements=announcements,
-                    evaluator_hotkey=self.worker.config.evaluator_hotkey,
+                    self.admission.reserve,
+                    statement.plan,
+                    publications,
+                    statement.body,
+                    continuing_order=True,
                 )
             )
         else:
-            publications = await run_owned_thread(self.admission.publications, statement.plan)
-        await run_owned_thread(self.admission.reserve, statement.plan, publications, statement.body)
+            await run_owned_thread(
+                self.admission.reserve, statement.plan, publications, statement.body
+            )
         # Capacity derivation and native commits may have used the issue margin.
         await self._current(statement)
         loop = asyncio.get_running_loop()
@@ -392,7 +419,10 @@ class IndependentWorkSigner:
         self, statement: WorkStatement, slot: str, current_gate: Callable[[], None]
     ) -> WorkEndorsement:
         """The caller retains its process lease until this bounded operation stops."""
-        self.admission.verify(statement.plan)
+        if isinstance(statement.body, EvaluationOrder):
+            self.admission.verify(statement.plan, order=statement.body)
+        else:
+            self.admission.verify(statement.plan)
         # Executor queueing and native receipt checks can outlast the preceding
         # head. Recollect after both, including model orders with no issue clock.
         current_gate()

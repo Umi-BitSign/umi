@@ -34,7 +34,9 @@ schedule = schedule_fixture
 @pytest.fixture
 def reserved_schedule(schedule, monkeypatch):
     monkeypatch.setattr(AssignmentPublicationJournal, "_qualify_capacity", lambda *args: {})
-    monkeypatch.setattr(AssignmentPublicationJournal, "_recover_capacity", lambda *args: {})
+    monkeypatch.setattr(
+        AssignmentPublicationJournal, "_recover_capacity", lambda *args, **kwargs: {}
+    )
     return schedule
 
 

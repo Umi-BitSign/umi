@@ -167,6 +167,8 @@ def recover_dispatch_qualification(
     batch_id: str,
     evaluator_hotkey: str,
     now: int,
+    *,
+    requalify: bool = True,
 ) -> dict[str, Any]:
     """Continue the same admitted cohort without admitting its work twice.
 
@@ -180,6 +182,10 @@ def recover_dispatch_qualification(
     delivery assumption was missed, continuing requires a fresh conservative
     check of all remaining work with 20 percent deadline reserve. Unknown
     dispatch outcomes block that check; no claim is retried or deadline moved.
+
+    Receipt verification for an already admitted evaluation order may omit the
+    renewed timing calculation. It still checks the original receipt, profile,
+    clock and fresh owned finality; it grants no new dispatch commitment.
     """
     evaluator = identity(evaluator_hotkey)
     row = db.execute(
@@ -223,6 +229,8 @@ def recover_dispatch_qualification(
             <= now + journal.maximum_future_skew_seconds * 1000
         ):
             raise ValueError("late delivery recovery requires fresh owned finality")
+        if not requalify:
+            return receipt
         publications = tuple(
             EndpointAuthorizationPublication.model_validate_json(bytes(raw))
             for (raw,) in db.execute(
