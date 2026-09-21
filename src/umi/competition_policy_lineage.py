@@ -185,6 +185,22 @@ def register_lineage(live: CompetitionPolicy, predecessors: Iterable[Competition
     return lineage
 
 
+def clear_lineage_registry() -> None:
+    """Forget every registered lineage (test isolation; never called by services)."""
+    _REGISTRY.clear()
+
+
+def registered_admitted_sha256s(policy_sha256: str) -> tuple[str, ...]:
+    """Admitted digests for a registered live policy digest; the digest alone if unregistered."""
+    lineage = _REGISTRY.get(policy_sha256)
+    return (policy_sha256,) if lineage is None else lineage.admitted_policy_sha256s
+
+
+def registered_lineage(policy: CompetitionPolicy) -> PolicyLineage:
+    """The lineage registered for ``policy`` by the command entry point, or the policy alone."""
+    return _REGISTRY.get(digest(policy)) or PolicyLineage(policy)
+
+
 def admitted_policy_sha256s(policy: CompetitionPolicy) -> tuple[str, ...]:
     """Policy digests whose signed submissions ``policy`` admits (itself first)."""
     lineage = _REGISTRY.get(digest(policy))
@@ -203,8 +219,11 @@ __all__ = [
     "deal_digest",
     "operational_successor_of",
     "admitted_policy_sha256s",
+    "clear_lineage_registry",
     "policy_admits",
     "register_lineage",
+    "registered_admitted_sha256s",
+    "registered_lineage",
     "submission_policy_admitted",
     "validate_operational_successor",
 ]

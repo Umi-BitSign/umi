@@ -298,7 +298,11 @@ class ExchangeJournal:
             )
             old = db.execute("SELECT body FROM binding").fetchall()
             if old and (len(old) != 1 or bytes(old[0][0]) != binding):
-                raise ValueError("exchange configuration changed")
+                if len(old) != 1 or bytes(old[0][0]) not in self._predecessor_bindings(config):
+                    raise ValueError("exchange configuration changed")
+                # Bound under a deal-preserving predecessor policy: the same config with the
+                # predecessor's digest. Move the binding to the live policy.
+                db.execute("UPDATE binding SET body = ?", (binding,))
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (binding,))
             db.execute(
@@ -316,6 +320,19 @@ class ExchangeJournal:
         self._seen = set()
         self._cursor = ""
         self._collect_cursor = 0
+
+    @staticmethod
+    def _predecessor_bindings(config) -> set[bytes]:
+        """Bindings this journal would have carried under an honored predecessor policy."""
+        from .competition_policy_lineage import registered_admitted_sha256s
+
+        out = set()
+        for policy_sha256 in registered_admitted_sha256s(config.policy_sha256)[1:]:
+            body = config.model_dump(mode="json", by_alias=True, exclude={"maximum_orders", "maximum_events", "maximum_bytes", "port", "host"})
+            body["policy_sha256"] = policy_sha256
+            if isinstance(body.get("chain"), dict): body["chain"]["policy_sha256"] = policy_sha256
+            out.add(canonical_json_bytes(body))
+        return out
 
     def _check_files(self):
         _private(self.path.parent)

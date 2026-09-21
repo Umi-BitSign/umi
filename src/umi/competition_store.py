@@ -20,7 +20,7 @@ from .competition_evidence import (
 )
 from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
 from .competition_launch_amendment import SignedLaunchAmendment, verify_launch_amendment
-from .competition_policy_lineage import PolicyLineage
+from .competition_policy_lineage import PolicyLineage, registered_lineage
 from .competition_outcomes import (
     OutcomeEvidence,
     binding_ids,
@@ -217,7 +217,13 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("competition state directory must be private")
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         # Deal-preserving predecessors whose signed submissions this policy still admits.
-        self.lineage = PolicyLineage(self.policy, predecessor_policies)
+        # Explicit predecessors win; otherwise adopt the lineage the command entry point
+        # registered for this policy, so no construction site can silently drop it.
+        self.lineage = (
+            PolicyLineage(self.policy, predecessor_policies)
+            if predecessor_policies
+            else registered_lineage(self.policy)
+        )
         if public_launch is not None:
             public_launch = PublicLaunchIdentity.model_validate_json(
                 canonical_json_bytes(public_launch)
