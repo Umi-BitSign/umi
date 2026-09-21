@@ -39,6 +39,16 @@ checks exact signed publications against the configured model and origin, then
 admits only their exact authenticated requests. Polling does not load a different
 model or change the policy. New rounds do not require a process restart.
 
+An operational policy update requires restarting the miner with the reviewed
+current policy. If that policy carries earlier submissions forward, also pass
+`--competition-predecessor-policy` for each reviewed predecessor, newest first.
+The miner checks every link and rejects changes to contribution terms or reward
+allocations. This preserves the original signed submission; it does not authorize
+an assignment without the current policy's signatures and finality checks.
+Keep the existing nonce, assignment and response databases across the restart.
+Up to eight predecessor files are supported. With none supplied, only submissions
+under the configured current policy are accepted.
+
 The cache holds at most four unexpired publications. Reads and pages are bounded;
 unavailable or expired publications do not grant work or block attempts to read
 later entries. Overlapping usable publications remain available until response

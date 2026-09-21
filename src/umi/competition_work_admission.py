@@ -70,7 +70,7 @@ class WorkAdmission:
                 "evaluator": identity(worker.config.evaluator_hotkey),
             },
             maximum_rounds=worker.config.maximum_orders,
-            maximum_bytes=worker.config.maximum_journal_bytes,
+            maximum_bytes=worker.config.journal_limit("work_admission"),
         )
         # One pure derivation, owned by this signer. Never cache native receipts
         # or mutable models; every use still checks the retained manifest and

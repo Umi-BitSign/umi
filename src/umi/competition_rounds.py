@@ -621,7 +621,8 @@ class RoundCoordinator:
                         self._held_diagnostics[name] = diagnostic
                         _LOGGER.warning(
                             "round_plan_held file_digest=%s stage=%s error_type=%s site=%s",
-                            digest(name), *diagnostic,
+                            digest(name),
+                            *diagnostic,
                         )
             if self.config.settlement_directory is not None:
                 counts.update(await self.prepare_settlements(block))
@@ -889,10 +890,18 @@ def create_round_app(
         while True:
             try:
                 result = await coordinator.cycle()
-            except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as error:
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                asyncio.TimeoutError,
+            ) as error:
                 result = {
-                    "status": "round_poll_failed", "chain_submission_authorized": False,
-                    "error_type": type(error).__name__, "error_site": _failure_site(error),
+                    "status": "round_poll_failed",
+                    "chain_submission_authorized": False,
+                    "error_type": type(error).__name__,
+                    "error_site": _failure_site(error),
                 }
             if report is not None:
                 # Never emit protected references, request bytes or exception text.
@@ -1116,7 +1125,7 @@ class RoundSigningClient:
                 "origin": self.origin,
             },
             maximum_rounds=worker.config.maximum_orders,
-            maximum_bytes=worker.config.maximum_journal_bytes,
+            maximum_bytes=worker.config.journal_limit("round_signing"),
         )
         self.cursor, self.nonce = 0, 0
         self.promotion_cursor = 0

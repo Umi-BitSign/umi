@@ -170,6 +170,15 @@ def _validate_observation(receipt, order, evidence_sha256, hotkey, *, model, cut
     return receipt
 
 
+class EvaluatorJournalLimits(StrictProtocolModel):
+    """Optional per-store ceilings; omitted values use maximum_journal_bytes."""
+
+    execution: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+    round_signing: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+    work_signing: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+    work_admission: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+
+
 class EvaluatorConfig(StrictProtocolModel):
     schema_: Literal["umi-evaluator-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -199,8 +208,15 @@ class EvaluatorConfig(StrictProtocolModel):
     page_size: Annotated[int, Field(ge=1, le=16)] = 4
     maximum_parallel_jobs: Annotated[int, Field(ge=1, le=4)] = 1
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    journal_limits: EvaluatorJournalLimits = Field(default_factory=EvaluatorJournalLimits)
     scheduling_capacity: SchedulingCapacity = Field(default_factory=SchedulingCapacity)
     no_weight: Literal[True] = True
+
+    def journal_limit(
+        self, name: Literal["execution", "round_signing", "work_signing", "work_admission"]
+    ) -> int:
+        value = getattr(self.journal_limits, name)
+        return self.maximum_journal_bytes if value is None else value
 
     @model_validator(mode="after")
     def bindings(self):
@@ -432,6 +448,7 @@ class EvaluatorJournal:
                     exclude={
                         "maximum_orders",
                         "maximum_journal_bytes",
+                        "journal_limits",
                         "scheduling_capacity",
                         "maximum_parallel_jobs",
                         "page_size",
@@ -718,7 +735,7 @@ class ContinuousEvaluator:
             Path(config.state_directory) / "executions",
             policy,
             maximum_jobs=config.maximum_orders,
-            maximum_bytes=config.maximum_journal_bytes,
+            maximum_bytes=config.journal_limit("execution"),
         )
         self.dispatch = (
             None
