@@ -76,11 +76,15 @@ class RoundJournal:
             if len(raw) > MAX_BYTES:
                 raise ValueError("round journal binding exceeds its byte bound")
             sizes = db.execute("SELECT LENGTH(body) FROM binding LIMIT 2").fetchall()
-            if len(sizes) > 1 or (sizes and sizes[0][0] != len(raw)):
+            if len(sizes) > 1:
                 raise ValueError("round journal configuration changed")
             old = db.execute("SELECT body FROM binding LIMIT 1").fetchall()
             if old and (len(old) != 1 or bytes(old[0][0]) != raw):
-                raise ValueError("round journal configuration changed")
+                if len(old) != 1 or bytes(old[0][0]) not in _predecessor_bindings(binding):
+                    raise ValueError("round journal configuration changed")
+                # Bound under a deal-preserving predecessor policy (same binding body with the
+                # predecessor's digest wherever policy_sha256 appears): move it to the live policy.
+                db.execute("UPDATE binding SET body = ?", (raw,))
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (raw,))
             db.execute(
@@ -904,3 +908,26 @@ class RoundJournal:
                     raise ValueError("round settlement index differs from its retained proposal")
                 result.append(proposal)
         return result
+
+
+def _predecessor_bindings(binding: object) -> set[bytes]:
+    """Binding bodies this journal would carry under an honored predecessor policy."""
+    from .competition_policy_lineage import registered_admitted_sha256s
+
+    if not isinstance(binding, dict):
+        return set()
+    live = binding.get("policy_sha256") or binding.get("policy")
+    if not isinstance(live, str):
+        return set()
+    out = set()
+    for predecessor in registered_admitted_sha256s(live)[1:]:
+
+        def swap(o):
+            if isinstance(o, dict):
+                return {k: (predecessor if k in ("policy_sha256", "policy") and v == live else swap(v)) for k, v in o.items()}
+            if isinstance(o, list):
+                return [swap(v) for v in o]
+            return o
+
+        out.add(canonical_json_bytes(swap(binding)))
+    return out
