@@ -183,8 +183,20 @@ def test_one_byte_short_budget_rolls_back_first_reservation_and_migration(reserv
 
 
 @pytest.mark.parametrize("miners", [6, 256])
-def test_future_18h_cohort_reserves_full_proof_span_at_32gib(
-    policy, runtime, tmp_path, monkeypatch, miners
+@pytest.mark.parametrize(
+    "issue_seconds,stride_blocks,capacity_gib,deadline_blocks",
+    [(64800, 7200, 32, 5475), (86400, 14400, 48, 7275)],
+)
+def test_future_cohort_reserves_full_proof_span_with_explicit_capacity(
+    policy,
+    runtime,
+    tmp_path,
+    monkeypatch,
+    miners,
+    issue_seconds,
+    stride_blocks,
+    capacity_gib,
+    deadline_blocks,
 ):
     work = build_work_fixture(
         policy.model_copy(update={"maximum_inference_ms": 600000}),
@@ -192,11 +204,11 @@ def test_future_18h_cohort_reserves_full_proof_span_at_32gib(
         tmp_path,
         count=miners,
         profile="v2",
-        issue_allowance_seconds=64800,
+        issue_allowance_seconds=issue_seconds,
         response_window_seconds=900,
-        window_stride_blocks=7200,
-        policy_valid_through_block=10000,
-        submission_valid_through_block=9900,
+        window_stride_blocks=stride_blocks,
+        policy_valid_through_block=20000,
+        submission_valid_through_block=19900,
     )
     publications = plans.endpoint_proposals(**work.options)
     observed = work.options["issuance"]
@@ -227,7 +239,7 @@ def test_future_18h_cohort_reserves_full_proof_span_at_32gib(
             origin_collection_ms=3900,
             publication_ingestion_ms=5600,
             local_cycle_ms=250,
-            publication_delay_ms=7200000,
+            publication_delay_ms=10800000 if issue_seconds == 86400 else 7200000,
             block_advance_numerator=1,
             block_advance_denominator_ms=10000,
             finality_headroom_blocks=12,
@@ -251,7 +263,7 @@ def test_future_18h_cohort_reserves_full_proof_span_at_32gib(
         directory,
         work.policy,
         work.item.legacy_policy,
-        maximum_bytes=32 * 1024**3,
+        maximum_bytes=capacity_gib * 1024**3,
     )
     receipt = expanded.reserve_batch(**arguments)
     assert len(receipt["publication_sha256s"]) == miners
@@ -261,7 +273,7 @@ def test_future_18h_cohort_reserves_full_proof_span_at_32gib(
             "SELECT COUNT(*) FROM blocks WHERE height BETWEEN ? AND ?", (start, end)
         ).fetchone()[0]
         assert start == announcement.height
-        assert end == observed.height + 5475
+        assert end == observed.height + deadline_blocks
         assert MAX_FINALITY_EVIDENCE_BYTES == 4 * 1024**2
         assert _BLOCK_RESERVE_BYTES == MAX_FINALITY_EVIDENCE_BYTES + 64 * 1024
         allowance = expanded._proof_allowance(db)
@@ -274,13 +286,15 @@ def test_future_18h_cohort_reserves_full_proof_span_at_32gib(
         assert db.execute("SELECT COUNT(*) FROM reservation_qualifications").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
     used = logical_bytes(expanded)
-    assert 16 * 1024**3 < used <= 32 * 1024**3
+    assert 16 * 1024**3 < used <= capacity_gib * 1024**3
+    if issue_seconds == 86400:
+        assert used * 10 <= capacity_gib * 1024**3 * 7
     before = state(expanded)
     restarted = AssignmentPublicationJournal(
         directory,
         work.policy,
         work.item.legacy_policy,
-        maximum_bytes=32 * 1024**3,
+        maximum_bytes=capacity_gib * 1024**3,
     )
     assert restarted.reserve_batch(**arguments) == receipt
     assert state(restarted) == before
@@ -292,10 +306,13 @@ def test_future_18h_cohort_reserves_full_proof_span_at_32gib(
             maximum_bytes=16 * 1024**3,
         )
     assert state(restarted) == before
-    now[0] += 64800 * 1000 + 1
+    now[0] += issue_seconds * 1000 + 1
     with restarted._transaction() as db:
         assert restarted._proof_allowance(db) == allowance
-    print(f"future cohort miners={miners}: proof_credit_bytes={allowance}, logical_bytes={used}")
+    print(
+        f"future cohort miners={miners}, issue_seconds={issue_seconds}: "
+        f"proof_credit_bytes={allowance}, logical_bytes={used}"
+    )
 
 
 def test_assignment_budget_covers_entire_unsigned_cohort(reserved_schedule):
