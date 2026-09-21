@@ -2,9 +2,9 @@
 
 # What SN78 miners should run now
 
-For cohort 3, apply the [policy-7 connection update](miners/cohort3-update.md).
+For endpoint competition, use the [current connection guide](miners/cohort3-update.md).
 An accepted receipt can carry forward while the running miner still needs a
-configuration update. The roster closes at blocks `9,116,910` through `9,116,915`.
+configuration update. That guide owns the release, policy and download details.
 The temporary bridge described below remains the current reward mechanism.
 
 ## Temporary live-miner rewards
@@ -73,13 +73,14 @@ See the [signed-policy specification and rollout evidence](operators/bridge.md).
 The [version 0.2 successor design](../whitepaper/README.md) adds self-service
 endpoint participation and an optional reproducible-model contribution track.
 Public endpoint intake has been live since block `9,085,463`. It does not replace
-the bridge or activate competition weights by itself. Cohort 3 closes its roster
-at a finalized poll between blocks `9,116,910` and `9,116,915`. Submit any new or
-replacement endpoint before the earliest cutoff; acceptance after that height
-does not guarantee inclusion. Admitted submissions must remain valid through
-evaluation close at block `9,119,030`, and the hotkey must still be registered on
-SN78 in the finalized roster-close snapshot. Existing accepted policy-5 or policy-6
-submissions can carry forward under policy 7 without resubmission.
+the bridge or activate competition weights by itself. Check
+[public status](https://api.umi.vision/v1/competition/status) for
+`next_intake_schedule`. Submit a new or replacement endpoint before that
+schedule's earliest cutoff; a later acceptance does not guarantee inclusion.
+Admitted submissions must remain valid through evaluation close, and the hotkey
+must be registered on SN78 in the finalized roster-close snapshot. The
+[connection guide](miners/cohort3-update.md) identifies accepted predecessor
+policies and the configuration needed to serve current requests.
 
 Current intake uses version 2 contribution terms. If you submitted under version
 1, follow the [policy-transition instructions](reference/commands.md#required-version-1-to-version-2-acceptance)
@@ -94,11 +95,10 @@ saved `accepted_no_weight` receipt; it establishes admission only, not quality o
 earnings.
 
 The [cohort 3 update](miners/cohort3-update.md) provides the signed feed settings,
-exact release and tested configuration changes. Delivery and evaluation services
-are ready for the scheduled cutoff; assignments follow its finalized roster and
-work authorization. Readiness does not establish a completed live cohort. Before
-a miner has a published assignment, even a correctly signed feed query can return
-401. That response alone does not invalidate its receipt. A
+exact release and tested configuration changes. Assignments follow the finalized
+roster and published work authorization. Readiness does not establish a completed
+live cohort. Before a miner has a published assignment, even a correctly signed
+feed query can return 401. That response alone does not invalidate its receipt. A
 coordinator, feed or evaluator infrastructure delay cannot count as miner
 failure.
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Annotated, Literal
@@ -19,7 +20,11 @@ from .competition_evidence import (
     replay_independent_evaluation,
 )
 from .competition_launch import PublicLaunchIdentity, PublicRoundSchedule
-from .competition_launch_amendment import SignedLaunchAmendment, verify_launch_amendment
+from .competition_launch_amendment import (
+    SignedLaunchAmendment,
+    verify_future_history,
+    verify_launch_amendment,
+)
 from .competition_outcomes import (
     OutcomeEvidence,
     binding_ids,
@@ -30,11 +35,17 @@ from .competition_outcomes import (
     parse_outcome,
     replay_outcome,
 )
-from .competition_policy_lineage import PolicyLineage, registered_lineage
+from .competition_policy_lineage import PolicyLineage, registered_lineage, replay_lineage
 from .competition_publication import (
     CutoffPublication,
     PublicationReplayLimits,
     build_cutoff_publication,
+)
+from .competition_runtime_port import SignedRuntimePortReview, baseline_record_digest
+from .competition_runtime_port_history import (
+    apply_runtime_port,
+    read_runtime_port_receipt,
+    verify_runtime_port_fence,
 )
 from .competition_settlement import (
     CompetitionSettlement,
@@ -602,6 +613,8 @@ class CompetitionStore(VoidEvidenceRetention):
                 self._submission_checkpoint_lock_depth += 1
             connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
             try:
+                connection.create_function("umi_runtime_port_writer", 0, lambda: 1)
+                verify_runtime_port_fence(connection, self._WRITER_FENCED_TABLES)
                 connection.create_function(
                     "umi_writer_generation",
                     0,
@@ -1130,7 +1143,7 @@ class CompetitionStore(VoidEvidenceRetention):
             < supplied.round_schedule.roster_close_earliest_block
         ):
             raise ValueError("launch amendment is outside its application window")
-        for table in (
+        unused_tables = (
             "rounds",
             "round_preparations",
             "suite_usage",
@@ -1138,9 +1151,20 @@ class CompetitionStore(VoidEvidenceRetention):
             "evidence_cutoff_schedules",
             "round_conflicts",
             "settlement_disputes",
-        ):
-            if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
-                raise ValueError("launch amendment requires an unused first-cohort schedule")
+        )
+        if signed.amendment.reason == "extend_future_cohort_windows":
+            if (
+                observed
+                >= current.schedule_for_cycle(
+                    signed.amendment.first_replaced_cycle
+                ).roster_close_earliest_block
+            ):
+                raise ValueError("future amendment missed the original roster application window")
+            verify_future_history(connection, current, signed.amendment)
+        else:
+            for table in unused_tables:
+                if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                    raise ValueError("launch amendment requires an unused first-cohort schedule")
         if self._baseline_conflicted(connection):
             raise ValueError("launch amendment requires an unconflicted baseline")
         _advance_block(connection, observed)
@@ -1863,7 +1887,12 @@ class CompetitionStore(VoidEvidenceRetention):
         )
 
     def _store_certificate(
-        self, connection: sqlite3.Connection, attested: AttestedResult, observed_block: int
+        self,
+        connection: sqlite3.Connection,
+        attested: AttestedResult,
+        observed_block: int,
+        *,
+        historical_policy: CompetitionPolicy | None = None,
     ) -> dict:
         """Called only after authentication; never raises a conflict rejection."""
         result = attested.result
@@ -1878,7 +1907,10 @@ class CompetitionStore(VoidEvidenceRetention):
                 observed_block,
             ),
         )
-        groups = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
+        groups = {
+            identity(e.hotkey): e.control_group
+            for e in (historical_policy or self.policy).evaluators
+        }
         for signature in attested.signatures:
             signer = identity(signature.hotkey)
             connection.execute(
@@ -2263,7 +2295,12 @@ class CompetitionStore(VoidEvidenceRetention):
             if receipt is None:
                 continue
             attested, observed = receipt
-            self._store_certificate(connection, attested, observed)
+            self._store_certificate(
+                connection,
+                attested,
+                observed,
+                historical_policy=self.lineage.policy(record["policy_sha256"]),
+            )
             connection.execute(
                 "INSERT OR IGNORE INTO promotion_sources VALUES (?, ?)",
                 (sequence, attested.result.round_sha256),
@@ -2282,6 +2319,9 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("preserved promotion sequence is corrupt")
         if not self.lineage.admits(record.get("policy_sha256")):
             raise ValueError("preserved promotion belongs to another policy")
+        if record.get("schema") == "umi-model-baseline/3":
+            read_runtime_port_receipt(self, connection, record, maximum_bytes)
+            return None
         if record.get("schema") == "umi-model-baseline/2":
             return self._read_agreed_promotion_receipt(
                 connection, record, maximum_bytes=maximum_bytes
@@ -2322,7 +2362,8 @@ class CompetitionStore(VoidEvidenceRetention):
         review = AttestedPromotionReview.model_validate_json(
             canonical_json_bytes(normalized["review"])
         )
-        verify_review(review, self.policy)
+        historical_policy = self.lineage.policy(record["policy_sha256"])
+        verify_review(review, historical_policy)
         if isinstance(review.review, AgreedPromotionReview):
             raise ValueError("legacy promotion requires a version 1 review")
         result = attested.result
@@ -2339,7 +2380,8 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("preserved promotion lacks its closed round, submission or parent")
         round_ = EvaluationRound.model_validate_json(round_row[0])
         signed = SignedSubmission.model_validate_json(sub_row[0])
-        authenticate_evaluation(attested, signed, round_, self.policy)
+        with self._historical_replay(historical_policy):
+            authenticate_evaluation(attested, signed, round_, historical_policy)
         sub = signed.submission
         if (
             sub.track != "model"
@@ -2365,7 +2407,7 @@ class CompetitionStore(VoidEvidenceRetention):
         if normalized != {
             "schema": "umi-model-baseline/1",
             "sequence": sequence,
-            "policy_sha256": digest(self.policy),
+            "policy_sha256": digest(historical_policy),
             "model_sha256": sub.model_revision,
             "contributor_hotkey": sub.hotkey,
             "previous_promotion_sha256": previous[0],
@@ -2377,6 +2419,11 @@ class CompetitionStore(VoidEvidenceRetention):
         }:
             raise ValueError("preserved promotion differs from its local certificates")
         return attested, observed
+
+    def _historical_replay(self, policy: CompetitionPolicy):
+        ids = self.lineage.admitted_policy_sha256s
+        older = ids[ids.index(digest(policy)) + 1 :]
+        return replay_lineage(policy, (self.lineage.policy(key) for key in older))
 
     def _read_agreed_promotion_receipt(self, connection, record, *, maximum_bytes=None):
         sequence = record["sequence"]
@@ -2404,7 +2451,8 @@ class CompetitionStore(VoidEvidenceRetention):
             or canonical_json_bytes(review) != review_bytes
         ):
             raise ValueError("agreed promotion receipt is not canonical")
-        verify_review(review, self.policy)
+        historical_policy = self.lineage.policy(record["policy_sha256"])
+        verify_review(review, historical_policy)
         if not isinstance(review.review, AgreedPromotionReview):
             raise ValueError("agreed promotion requires a versioned local review")
         previous = connection.execute(
@@ -2426,7 +2474,8 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("agreed promotion lacks its admitted submission or round")
         round_ = EvaluationRound.model_validate_json(round_row[0])
         signed = SignedSubmission.model_validate_json(sub_row[0])
-        authenticate_evaluation(attested, signed, round_, self.policy)
+        with self._historical_replay(historical_policy):
+            authenticate_evaluation(attested, signed, round_, historical_policy)
         _validate_agreed_review(review.review, signed, attested, round_)
         if record != _agreed_promotion_record(signed, attested, review.review):
             raise ValueError("agreed promotion differs from its local certificates")
@@ -3472,6 +3521,15 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("stored evidence cutoff schedule is corrupt")
         return schedule
 
+    def apply_runtime_port(
+        self,
+        certificate: SignedRuntimePortReview,
+        *,
+        archive: Path,
+        observed_block: int | Callable[[], int],
+    ) -> dict:
+        return apply_runtime_port(self, certificate, archive=archive, observed_block=observed_block)
+
     def initialize_baseline(self, bundle: ModelBundle, archive: Path) -> dict:
         """Import an operator-selected historical baseline with no reward attribution."""
         verify_preserved_bundle(bundle, archive, self.policy)
@@ -3727,9 +3785,7 @@ def _require_hex32(value: str, label: str) -> None:
 
 
 def _record_digest(record: dict) -> str:
-    import hashlib
-
-    return hashlib.sha256(b"umi-baseline-history-v1\0" + canonical_json_bytes(record)).hexdigest()
+    return baseline_record_digest(record)
 
 
 def _advance_block(connection: sqlite3.Connection, block: int) -> None:

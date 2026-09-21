@@ -248,21 +248,89 @@ def advance(fixture, milliseconds):
     )
 
 
-def test_continuation_does_not_reset_original_delivery_allowance(timed_schedule):
+def test_late_continuation_requalifies_without_resetting_original_receipt(timed_schedule):
+    fixture = timed_schedule
+    fixture.budget = fixture.budget.model_copy(update={"publication_delay_ms": 100_000})
+    configure(fixture)
+    original_reservation = reserve(fixture)
+    receipt = qualification(fixture.journal)
+    advance(fixture, 50_000)
+    assert reserve(fixture) == original_reservation
+    assert qualification(fixture.journal) == receipt
+    advance(fixture, 50_001)
+    assert reserve(fixture) == original_reservation
+    assert qualification(fixture.journal) == receipt
+
+
+def test_late_continuation_rejects_stale_finality_without_changing_receipt(timed_schedule):
+    fixture = timed_schedule
+    reserve(fixture)
+    before = snapshot(fixture.journal)
+    fixture.now[0] += 60_001
+    with pytest.raises(ValueError, match="fresh owned finality"):
+        fixture.journal.reservation("a" * 64, evaluator_hotkey=fixture.evaluator)
+    assert snapshot(fixture.journal) == before
+
+
+def test_late_continuation_rejects_insufficient_remaining_time(timed_schedule):
     fixture = timed_schedule
     fixture.budget = fixture.budget.model_copy(update={"publication_delay_ms": 100_000})
     configure(fixture)
     reserve(fixture)
-    receipt = qualification(fixture.journal)
-    advance(fixture, 50_000)
-    reserve(fixture)
-    assert qualification(fixture.journal) == receipt
-    advance(fixture, 50_001)
+    advance(fixture, 200_000)
     before = snapshot(fixture.journal)
-    with pytest.raises(ValueError, match="publication delivery allowance elapsed"):
+    with pytest.raises(ValueError, match=r"cannot fit|deadline reserve"):
         reserve(fixture)
     assert snapshot(fixture.journal) == before
-    assert qualification(fixture.journal) == receipt
+
+
+def test_late_continuation_rejects_a_fit_without_twenty_percent_reserve(timed_schedule):
+    fixture = timed_schedule
+    fixture.budget = fixture.budget.model_copy(update={"publication_delay_ms": 100_000})
+    configure(fixture)
+    reserve(fixture)
+    advance(fixture, 160_000)
+    before = snapshot(fixture.journal)
+    with pytest.raises(ValueError, match="required deadline reserve"):
+        reserve(fixture)
+    assert snapshot(fixture.journal) == before
+
+
+@pytest.mark.parametrize(
+    "elapsed_ms,reason",
+    [(160_000, "required deadline reserve"), (200_000, r"cannot fit|deadline reserve")],
+)
+def test_warm_reservation_receipt_rechecks_remaining_time(timed_schedule, elapsed_ms, reason):
+    fixture = timed_schedule
+    fixture.budget = fixture.budget.model_copy(update={"publication_delay_ms": 100_000})
+    configure(fixture)
+    reserve(fixture)
+    assert fixture.journal.reservation("a" * 64, evaluator_hotkey=fixture.evaluator) is not None
+    advance(fixture, elapsed_ms)
+    fixture.journal.observe(observed=fixture.observed)
+    before = snapshot(fixture.journal)
+    with pytest.raises(ValueError, match=reason):
+        fixture.journal.reservation("a" * 64, evaluator_hotkey=fixture.evaluator)
+    assert snapshot(fixture.journal) == before
+
+
+def test_late_continuation_does_not_retry_a_dispatch_with_unknown_outcome(timed_schedule):
+    fixture = timed_schedule
+    fixture.budget = fixture.budget.model_copy(update={"publication_delay_ms": 100_000})
+    configure(fixture)
+    reserve(fixture)
+    issuance = fixture.observed
+    advance(fixture, 100_001)
+    _publish(fixture)
+    _claim(
+        fixture,
+        issuance=issuance,
+        expected_dispatch_profile=timing_profile_sha256(fixture.limits, fixture.budget),
+    )
+    before = snapshot(fixture.journal)
+    with pytest.raises(ValueError, match="awaits the prior claim outcome"):
+        reserve(fixture)
+    assert snapshot(fixture.journal) == before
 
 
 def test_timely_delivered_cohort_can_continue_after_delivery_allowance(timed_schedule):

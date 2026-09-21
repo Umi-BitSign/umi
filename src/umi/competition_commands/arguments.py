@@ -21,6 +21,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    port = commands.add_parser("apply-runtime-port")
+    port_config = port.add_mutually_exclusive_group(required=True)
+    port_config.add_argument("--intake-config")
+    port_config.add_argument("--evaluator-config")
+    for name in ("certificate", "archive", "chain-config"):
+        port.add_argument("--" + name, required=True)
+    port.add_argument("--confirm-quiesced-backup", action="store_true")
     commands.add_parser("inspect-policy")
     intake = commands.add_parser("serve-intake")
     intake.add_argument("--config", required=True)

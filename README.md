@@ -5,10 +5,21 @@ reproducible public model contributions. Endpoint miners may keep their models
 private; contributors can submit runnable, licensed artifacts for promotion
 into successive public baselines.
 
-Start with the [documentation](docs/README.md).
+## Miners: start here
 
-- [Miners: what to run now](docs/CURRENT_MINER_OPERATION.md)
-- [Validators: installation, updates and troubleshooting](docs/PERMANENT_VALIDATOR_SUPERVISOR.md)
+- **New to SN78?** Follow the official [Bittensor registration guide](https://www.bittensor.com/docs/guides/mining) using subnet **78**, then read [what UMI miners should run now](docs/CURRENT_MINER_OPERATION.md).
+- **Already running an endpoint?** Apply the [cohort 3 / policy-7 update](docs/miners/cohort3-update.md). An accepted receipt can remain valid while your service still needs this update.
+- **Set up and submit an endpoint:** [connect your model](docs/miners/model.md), [Apple Silicon setup](docs/miners/macos.md), and [competition intake instructions](docs/reference/commands.md#live-first-round-intake). On-chain registration and competition intake are separate steps.
+
+## Validators: start here
+
+- **Install:** [validator supervisor setup](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#install).
+- **Already installed?** [Check the service](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#check-the-service), [understand automatic updates](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#what-is-automatic), or [troubleshoot a hold or failed update](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#troubleshooting).
+- **Check weights and eligibility:** [current bridge rules](docs/operators/bridge.md) and [finalized-row diagnostics](docs/operators/bridge.md#check-current-rows).
+
+## Documentation
+
+- [All documentation](docs/README.md)
 - [Competition and the 70/30 allocation](docs/OPEN_COMPETITION.md)
 - [Model contributions](docs/contributors/models.md)
 - [Whitepaper](whitepaper/README.md) and [PDF](whitepaper/UMI-Whitepaper.pdf)
@@ -20,19 +31,14 @@ coldkey/IP/funding groups. It does not score translations. The public-endpoint
 pilot is closed. The ongoing bridge policy has no scheduled calendar sunset;
 historical finite policies retain their original expiry.
 
-Public competition intake is live for endpoint submissions only. Cohort 3 uses
-competition policy 7, with roster close at blocks `9,116,910` through `9,116,915`
-and evaluation close at block `9,119,030`. Miners should apply the
-[cohort 3 connection update](docs/miners/cohort3-update.md). Existing accepted
-policy-5 or policy-6 submissions can carry forward; the service configuration
-still needs the update. The submitted hotkey must remain registered on SN78 in
-the finalized roster-close snapshot, and the submission must remain valid
-through evaluation.
+Public competition intake is live for endpoint submissions only. Use the
+[current connection guide](docs/miners/cohort3-update.md) for the exact miner
+release, policy files, binary downloads and service configuration. Check the
+public status for the next intake schedule. Accepted submissions can carry
+forward when their terms, registration and validity interval remain eligible.
 Open-competition rewards have not replaced the bridge. An
 `accepted_no_weight` receipt records an admitted submission; it does not prove
-evaluation, settlement or payment. The cohort 3 delivery and evaluation services
-are ready for the scheduled cutoff; that does not establish a completed live
-cohort. Model-artifact intake remains closed. See the
+evaluation, settlement or payment. Model-artifact intake remains closed. See the
 [live competition status](https://api.umi.vision/v1/competition/status) and the
 [launch configuration](docs/competition/launch.md) for the exact policy and
 cutoffs. The status also publishes an operator-declared repository revision and

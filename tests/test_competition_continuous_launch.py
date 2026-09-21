@@ -291,3 +291,209 @@ def test_amendment_application_requires_current_future_cutoff(setup, observed):
         CompetitionStore(store.directory, setup.policy, public_launch=previous).public_launch
         == previous
     )
+
+
+def future_amendment(setup, *, previous=None, replacement=None, effective=200):
+    previous = previous or continuous(setup.options["public_schedule"])
+    if replacement is None:
+        schedule = previous.schedule_for_cycle(1)
+        replacement = previous.model_copy(
+            update={
+                "round_stride_blocks": 200,
+                "round_schedule": schedule.model_copy(
+                    update={
+                        "work_signing_close_block": schedule.work_signing_close_block + 20,
+                        "evaluation_close_block": schedule.evaluation_close_block + 60,
+                        "protected_reference_reveal_block": (
+                            schedule.protected_reference_reveal_block + 60
+                        ),
+                        "evidence_cutoff_block": schedule.evidence_cutoff_block + 60,
+                        "round_valid_through_block": schedule.round_valid_through_block + 60,
+                    }
+                ),
+            }
+        )
+    amendment = LaunchAmendment(
+        schema="umi-competition-launch-amendment/2",
+        policy_sha256=digest(setup.policy),
+        previous_launch_sha256=digest(previous),
+        replacement=replacement,
+        first_replaced_cycle=1,
+        effective_block=effective,
+        reason="extend_future_cohort_windows",
+    )
+    signed = SignedLaunchAmendment(
+        amendment=amendment,
+        signatures=tuple(sign_object(amendment, wallet(name)) for name in ("Charlie", "Dave")),
+    )
+    return previous, replacement, signed
+
+
+def test_future_extension_preserves_prior_preparation_receipts_and_checkpoint(setup, tmp_path):
+    previous, replacement, signed = future_amendment(setup)
+    checkpoint = tmp_path / "checkpoint"
+    store = bind_submission_checkpoint(setup.store, previous, checkpoint)
+    prepared = store.prepare_round(**setup.options)
+    retained_tables = (
+        "submissions",
+        "rounds",
+        "round_preparations",
+        "suite_usage",
+        "public_schedule_usage",
+        "evidence_cutoff_schedules",
+        "promotions",
+    )
+    with sqlite3.connect(store.path) as db:
+        before = {
+            name: db.execute(f"SELECT * FROM {name} ORDER BY 1").fetchall()
+            for name in retained_tables
+        }
+    checkpoint_before = store._submission_checkpoint.load()
+    migrated = CompetitionStore(
+        store.directory,
+        setup.policy,
+        public_launch=replacement,
+        submission_head_checkpoint_directory=checkpoint,
+        launch_amendment=signed,
+        amendment_observed_block=200,
+        migrate_writer_generation=True,
+    )
+    with sqlite3.connect(store.path) as db:
+        assert before == {
+            name: db.execute(f"SELECT * FROM {name} ORDER BY 1").fetchall()
+            for name in retained_tables
+        }
+    assert (
+        migrated.prepared_round(digest(setup.options["suite"]), setup.options["limits"]) == prepared
+    )
+    checkpoint_after = migrated._submission_checkpoint.load()
+    assert checkpoint_after.submission_sha256s == checkpoint_before.submission_sha256s
+    assert checkpoint_after.admission_record_sha256s == checkpoint_before.admission_record_sha256s
+    assert checkpoint_after.public_launch_sha256 == digest(replacement)
+    with pytest.raises(ValueError, match="stale public launch"):
+        store.admit(submission(setup.policy, sequence=2), snapshot(201), 201)
+    for retry in (False, True):
+        kwargs = (
+            dict(
+                launch_amendment=signed,
+                amendment_observed_block=200,
+                migrate_writer_generation=True,
+            )
+            if retry
+            else {}
+        )
+        reopened = CompetitionStore(
+            store.directory,
+            setup.policy,
+            public_launch=replacement,
+            submission_head_checkpoint_directory=checkpoint,
+            **kwargs,
+        )
+        assert reopened.public_launch_amendments() == [
+            signed.model_dump(mode="json", by_alias=True)
+        ]
+
+
+@pytest.mark.parametrize("effective", [190, 220])
+def test_future_extension_requires_a_gap_after_prior_validity_before_next_roster(setup, effective):
+    previous, replacement, signed = future_amendment(setup, effective=effective)
+    with pytest.raises(ValueError, match="follow prior cohorts"):
+        verify_launch_amendment(signed, previous, replacement, setup.policy)
+
+
+@pytest.mark.parametrize(
+    "change", ["shorter_phase", "earlier_roster", "shorter_cadence", "opening", "tracks", "quorum"]
+)
+def test_future_extension_rejects_shortening_or_changed_deal(setup, change):
+    previous, replacement, signed = future_amendment(setup)
+    schedule = replacement.round_schedule
+    if change == "shorter_phase":
+        replacement = replacement.model_copy(
+            update={
+                "round_schedule": schedule.model_copy(
+                    update={"roster_close_latest_block": schedule.roster_close_earliest_block}
+                )
+            }
+        )
+    elif change == "earlier_roster":
+        replacement = replacement.model_copy(
+            update={
+                "round_schedule": schedule.model_copy(update={"roster_close_earliest_block": 219})
+            }
+        )
+    elif change == "shorter_cadence":
+        replacement = replacement.model_copy(
+            update={"round_stride_blocks": 99, "round_schedule": previous.schedule_for_cycle(1)}
+        )
+    elif change == "opening":
+        replacement = replacement.model_copy(
+            update={"round_schedule": schedule.model_copy(update={"intake_opened_block": 101})}
+        )
+    elif change == "tracks":
+        replacement = replacement.model_copy(update={"eligible_tracks": ("endpoint",)})
+    if change != "quorum":
+        _, _, signed = future_amendment(setup, replacement=replacement)
+    else:
+        signed = signed.model_copy(update={"signatures": signed.signatures[:1]})
+    with pytest.raises(ValueError):
+        verify_launch_amendment(signed, previous, replacement, setup.policy)
+
+
+def test_legacy_amendment_encoding_omits_future_scope(setup):
+    previous, replacement = launch_pair(setup)
+    signed = signed_amendment(setup.policy, previous, replacement)
+    assert "first_replaced_cycle" not in signed.amendment.model_dump(mode="json", by_alias=True)
+    verify_launch_amendment(signed, previous, replacement, setup.policy)
+
+
+def test_future_extension_rejects_already_prepared_next_cohort_atomically(setup):
+    previous, replacement, signed = future_amendment(setup)
+    store = CompetitionStore(setup.store.directory, setup.policy, public_launch=previous)
+    schedule = previous.schedule_for_cycle(1)
+    store.prepare_round(
+        **{
+            **setup.options,
+            "snapshot": snapshot(220),
+            "public_schedule": schedule,
+            "evaluation_close_block": 240,
+            "reveal_block": 250,
+            "evidence_cutoff_block": 260,
+            "valid_through_block": 290,
+        }
+    )
+    with sqlite3.connect(store.path) as db:
+        before = tuple(db.iterdump())
+    with pytest.raises(ValueError, match="prepared or active cohort"):
+        CompetitionStore(
+            store.directory,
+            setup.policy,
+            public_launch=replacement,
+            launch_amendment=signed,
+            amendment_observed_block=200,
+            migrate_writer_generation=True,
+        )
+    with sqlite3.connect(store.path) as db:
+        assert tuple(db.iterdump()) == before
+
+
+def test_future_extension_cannot_be_applied_after_original_cutoff(setup):
+    previous, replacement, _ = future_amendment(setup)
+    fields = replacement.round_schedule.model_dump(mode="json", by_alias=True)
+    fields = {
+        key: value + 80 if key.endswith("_block") and key != "intake_opened_block" else value
+        for key, value in fields.items()
+    }
+    replacement = replacement.model_copy(
+        update={"round_schedule": type(replacement.round_schedule).model_validate(fields)}
+    )
+    _, _, signed = future_amendment(setup, replacement=replacement)
+    store = CompetitionStore(setup.store.directory, setup.policy, public_launch=previous)
+    with pytest.raises(ValueError, match="original roster application window"):
+        CompetitionStore(
+            store.directory,
+            setup.policy,
+            public_launch=replacement,
+            launch_amendment=signed,
+            amendment_observed_block=220,
+            migrate_writer_generation=True,
+        )

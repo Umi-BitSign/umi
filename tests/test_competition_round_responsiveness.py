@@ -36,7 +36,7 @@ def prepared_coordinator(setup, tmp_path):
     async def prepare(plan, *, videos):
         calls.append((plan, videos, threading.get_ident()))
 
-    coordinator.work_queue = SimpleNamespace(prepare=prepare)
+    coordinator.work_queue = SimpleNamespace(maintain=prepare)
     schedule = item.round.public_schedule
     plan = rounds.RoundPlan(
         schema="umi-round-plan/2",

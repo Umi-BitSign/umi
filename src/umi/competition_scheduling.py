@@ -32,6 +32,7 @@ from . import competition_scheduling_receipts as scheduling_receipts
 from .competition_authorization import (
     EndpointAssignment,
     SignedEndpointAuthorization,
+    _PublicationBodyValidator,
     scheduled_assignment_key,
     validate_publication,
     validate_publication_body,
@@ -71,7 +72,7 @@ class SchedulingCapacity(StrictProtocolModel):
 
     maximum_publications: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_assignments: Annotated[int, Field(ge=1, le=262144)] = 16384
-    maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    maximum_bytes: Annotated[int, Field(ge=1024, le=64 * 1024**3)] = 1024**3
     maximum_outcome_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 1024**2
 
 
@@ -454,8 +455,10 @@ class AssignmentPublicationJournal:
     def _qualify_capacity(self, db, publications, observed, now, evaluator_hotkey):
         return qualify_dispatch(self, db, publications, observed, now, evaluator_hotkey)
 
-    def _recover_capacity(self, db, batch_id, evaluator_hotkey, now):
-        return recover_dispatch_qualification(db, batch_id, evaluator_hotkey, now)
+    def _recover_capacity(self, db, batch_id, evaluator_hotkey, now, *, requalify=True):
+        return recover_dispatch_qualification(
+            self, db, batch_id, evaluator_hotkey, now, requalify=requalify
+        )
 
     def configure_dispatch(self, *, evaluator_hotkey, limits, budget, publication_directory=None):
         configure_dispatch(
@@ -505,9 +508,17 @@ class AssignmentPublicationJournal:
             "SELECT document,evidence FROM blocks WHERE height=?", (block.height,)
         ).fetchone()
         if existing:
+            retained = self._retained_block(db, block.height)
+            # Independent owned observers have different attestation transcripts
+            # for the same finalized block. Compare every block/context field,
+            # while keeping the first validated proof and its digest unchanged.
             if (
-                bytes(existing["document"]) != document
-                or bytes(existing["evidence"]) != block.finality_evidence
+                replace(
+                    retained,
+                    finality_evidence=block.finality_evidence,
+                    finality_evidence_sha256=block.finality_evidence_sha256,
+                )
+                != block
             ):
                 raise ValueError("verified block changed at a retained height")
             return
@@ -746,8 +757,9 @@ class AssignmentPublicationJournal:
             raise ValueError("invalid bounded scheduling reservation cohort")
         evaluator = identity(evaluator_hotkey)
         validated, staged_bytes, assignments = [], 0, 0
+        validator = _PublicationBodyValidator(self.policy, self.legacy_policy)
         for body in publications:
-            body = validate_publication_body(body, self.policy, self.legacy_policy)
+            body = validator.validate(body)
             staged_bytes += len(canonical_json_bytes(body))
             assignments += len(body.assignments)
             if staged_bytes > self.maximum_bytes or assignments > self.maximum_assignments:
@@ -879,6 +891,18 @@ class AssignmentPublicationJournal:
                 db,
                 batch_id,
                 evaluator_hotkey,
+            )
+
+    def retained_reservation(self, batch_id, *, evaluator_hotkey):
+        """Verify native obligations without promising another dispatch workload.
+
+        Only WorkAdmission's completed, exact evaluation-order continuation uses
+        this receipt. New admission and authorization recovery use reservation().
+        The original qualification digest and all native checks remain intact.
+        """
+        with self._transaction() as db:
+            return scheduling_receipts.reservation(
+                self, db, batch_id, evaluator_hotkey, requalify=False
             )
 
     def publish(

@@ -434,7 +434,7 @@ def test_wrong_wallet_rejected(dispatch):
         {"wallet_path": "/"},
         {"wallet_path": "relative"},
         {"no_weight": False},
-        {"request_timeout_seconds": 601},
+        {"request_timeout_seconds": 901},
         {"poll_seconds": 0},
         {"wallet_name": "../coldkey"},
     ],
@@ -444,6 +444,19 @@ def test_configuration_bounds(dispatch, change):
         EndpointDispatchConfig.model_validate(
             {**dispatch.config.model_dump(by_alias=True), **change}
         )
+
+
+@pytest.mark.parametrize("seconds", [615, 900])
+def test_future_dispatch_timeout_accepts_longer_runtime_without_changing_defaults(
+    dispatch, seconds
+):
+    assert dispatch.config.request_timeout_seconds == 180
+    raw = dispatch.config.model_dump(by_alias=True)
+    raw["request_timeout_seconds"] = seconds
+    extended = EndpointDispatchConfig.model_validate(raw)
+    assert extended.request_timeout_seconds == seconds
+    assert extended.chain == dispatch.config.chain
+    assert EndpointDispatchConfig.model_validate_json(canonical_json_bytes(extended)) == extended
 
 
 def test_state_and_wallet_paths_must_be_separate(dispatch):

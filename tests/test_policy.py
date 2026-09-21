@@ -355,7 +355,22 @@ def test_competition_issue_allowance_is_explicit_without_widening_authentication
     assert ScoringPolicy.model_validate_json(canonical_json_bytes(extended)) == extended
 
 
-@pytest.mark.parametrize("seconds", [True, 299, 28801, 86400, "5400", 5400.0])
+@pytest.mark.parametrize("seconds", [28801, 43200, 57600, 86400])
+def test_competition_transport_accepts_longer_queues_without_longer_authentication(seconds):
+    legacy = make_policy()
+    value = ScoringPolicy.competition_transport(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+        issue_allowance_seconds=seconds,
+    )
+    assert value.clock.issue_allowance_seconds == seconds
+    assert value.limits == legacy.limits
+    assert value.clock.response_window_seconds == legacy.clock.response_window_seconds
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(value)) == value
+
+
+@pytest.mark.parametrize("seconds", [True, 299, 86401, "5400", 5400.0])
 def test_competition_issue_allowance_rejects_out_of_profile_values(seconds) -> None:
     legacy = make_policy()
     with pytest.raises(ValidationError):
@@ -370,7 +385,7 @@ def test_competition_issue_allowance_rejects_out_of_profile_values(seconds) -> N
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [
-        ("clock", "response_window_seconds", 301),
+        ("clock", "anchor_blocks", 46),
         ("clock", "window_stride_blocks", 361),
         ("limits", "btauth_max_age_seconds", 2700),
         ("limits", "maximum_request_transmissions_per_assignment", 3),
@@ -394,6 +409,104 @@ def test_legacy_policy_does_not_accept_competition_issue_allowance() -> None:
     data = make_policy().model_dump(mode="json", by_alias=True)
     data["clock"]["issue_allowance_seconds"] = 2700
     with pytest.raises(ValidationError):
+        ScoringPolicy.model_validate(data)
+
+
+@pytest.mark.parametrize("seconds", [300, 301, 600, 900, 3600])
+def test_competition_response_window_is_explicit_and_preserves_other_terms(seconds):
+    legacy = make_policy()
+    kwargs = dict(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+        issue_allowance_seconds=64800,
+        window_stride_blocks=7200,
+    )
+    original = ScoringPolicy.competition_transport(**kwargs)
+    extended = ScoringPolicy.competition_transport(**kwargs, response_window_seconds=seconds)
+    before = original.model_dump(mode="json", by_alias=True)
+    after = extended.model_dump(mode="json", by_alias=True)
+    assert after["clock"].pop("response_window_seconds") == seconds
+    assert before["clock"].pop("response_window_seconds") == 300
+    assert after == before
+    assert (canonical_json_bytes(original) == canonical_json_bytes(extended)) == (seconds == 300)
+    assert (scoring_policy_hash(original) == scoring_policy_hash(extended)) == (seconds == 300)
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(extended)) == extended
+
+
+@pytest.mark.parametrize("seconds", [True, 299, 3601, "900", 900.0])
+def test_competition_response_window_rejects_out_of_profile_values(seconds):
+    legacy = make_policy()
+    kwargs = dict(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+        issue_allowance_seconds=64800,
+        window_stride_blocks=7200,
+    )
+    with pytest.raises(ValueError):
+        ScoringPolicy.competition_transport(**kwargs, response_window_seconds=seconds)
+    data = ScoringPolicy.competition_transport(**kwargs).model_dump(mode="json", by_alias=True)
+    data["clock"]["response_window_seconds"] = seconds
+    with pytest.raises(ValidationError):
+        ScoringPolicy.model_validate(data)
+
+
+def test_competition_response_window_counts_toward_minimum_stride():
+    assert PolicyClock.competition_transport(2700).window_stride_blocks == 360
+    extended = PolicyClock.competition_transport(2700, response_window_seconds=900)
+    assert extended.window_stride_blocks == 720
+    with pytest.raises(ValueError, match="sufficient whole launch-window"):
+        PolicyClock.competition_transport(
+            2700, response_window_seconds=900, window_stride_blocks=360
+        )
+
+
+def test_legacy_scoring_policy_cannot_extend_response_window():
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["clock"]["response_window_seconds"] = 900
+    with pytest.raises(ValidationError, match="initial launch profile"):
+        ScoringPolicy.model_validate(data)
+
+
+def test_competition_stride_can_align_cohorts_without_extending_request_lifetime():
+    legacy = make_policy()
+    kwargs = dict(
+        activation_block=legacy.activation_block,
+        implementation_pins=legacy.implementation_pins,
+        validator=legacy.validator_registry[0],
+        issue_allowance_seconds=21600,
+    )
+    original = ScoringPolicy.competition_transport(**kwargs)
+    aligned = ScoringPolicy.competition_transport(**kwargs, window_stride_blocks=2880)
+    assert original.clock.window_stride_blocks == 2160
+    assert aligned.clock.window_stride_blocks == 2880
+    before = original.model_dump(mode="json", by_alias=True)
+    after = aligned.model_dump(mode="json", by_alias=True)
+    after["clock"]["window_stride_blocks"] = before["clock"]["window_stride_blocks"]
+    assert after == before
+    assert scoring_policy_hash(aligned) != scoring_policy_hash(original)
+    assert ScoringPolicy.model_validate_json(canonical_json_bytes(aligned)) == aligned
+    assert ScoringPolicy.competition_transport(**kwargs, window_stride_blocks=2160) == original
+
+
+@pytest.mark.parametrize("stride", [True, "2880", 2880.0, 0, 360, 1800, 2161, 2**53])
+def test_competition_stride_rejects_short_fractional_or_unsupported_values(stride):
+    legacy = make_policy()
+    with pytest.raises(ValueError):
+        ScoringPolicy.competition_transport(
+            activation_block=legacy.activation_block,
+            implementation_pins=legacy.implementation_pins,
+            validator=legacy.validator_registry[0],
+            issue_allowance_seconds=21600,
+            window_stride_blocks=stride,
+        )
+
+
+def test_legacy_scoring_policy_cannot_opt_into_competition_stride():
+    data = make_policy().model_dump(mode="json", by_alias=True)
+    data["clock"]["window_stride_blocks"] = 2880
+    with pytest.raises(ValidationError, match="initial launch profile"):
         ScoringPolicy.model_validate(data)
 
 

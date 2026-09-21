@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from umi.competition_policy_lineage import register_lineage, registered_admitted_sha256s
 from umi.competition_publication import (
     PublicationReplayLimits,
     SignedCutoffPublication,
@@ -11,7 +12,7 @@ from umi.competition_publication import (
 from umi.competition_review_history import EvaluatorReviewStore
 from umi.competition_settlement import EvidenceCutoffSchedule
 from umi.competition_store import AdmissionCapacity, AdmissionCapacityError, CompetitionStore
-from umi.open_competition import digest
+from umi.open_competition import CompetitionPolicy, digest
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_publication import _independent
@@ -96,6 +97,81 @@ def test_reviewed_history_supports_actual_promotion_and_restart(setup):
     reopened = EvaluatorReviewStore(s.reviews.directory, s.policy, limits=s.limits)
     assert reopened.baseline() == first
     assert reopened.reviewed_promotion_head(digest(s.round), maximum_bytes=8_000_000).sequence == 1
+
+
+@pytest.mark.parametrize("change_runtime", [False, True])
+@pytest.mark.parametrize("carried_submissions", [False, True])
+def test_successor_reopens_cutoff_using_its_original_signed_policy(
+    setup, change_runtime, carried_submissions
+):
+    s = setup
+    ancestors = ()
+    if carried_submissions:
+        ancestors = (s.policy,)
+        s.policy = CompetitionPolicy.model_validate_json(
+            canonical_json_bytes(
+                s.policy.model_copy(
+                    update={
+                        "sequence": s.policy.sequence + 1,
+                        "predecessor_sha256": digest(s.policy),
+                    }
+                )
+            )
+        )
+        register_lineage(s.policy, ancestors)
+        s.round = s.round.model_copy(update={"policy_sha256": digest(s.policy)})
+        s.cutoff = attest(
+            build_cutoff_publication(
+                policy=s.policy,
+                round_=s.round,
+                submissions=s.roster,
+                registration_snapshot=s.cutoff_snapshot,
+                cutoff_schedule=EvidenceCutoffSchedule(
+                    schema="umi-competition-evidence-cutoff/1",
+                    policy_sha256=digest(s.policy),
+                    round_sha256=digest(s.round),
+                    evidence_cutoff_block=s.round.public_schedule.evidence_cutoff_block,
+                ),
+                limits=s.limits,
+            )
+        )
+        s.reviews = EvaluatorReviewStore(s.reviews.directory, s.policy, limits=s.limits)
+    observed = observe(s)
+    successor = CompetitionPolicy.model_validate_json(
+        canonical_json_bytes(
+            s.policy.model_copy(
+                update={
+                    "sequence": s.policy.sequence + 1,
+                    "predecessor_sha256": digest(s.policy),
+                    "evaluation_runtime_sha256": "ad" * 32
+                    if change_runtime
+                    else s.policy.evaluation_runtime_sha256,
+                }
+            )
+        )
+    )
+    register_lineage(successor, (s.policy, *ancestors))
+    # The historical reader must supply its own predecessor lineage, rather
+    # than depending on an older service's ambient registration.
+    register_lineage(s.policy)
+    with s.reviews._connection() as db:
+        before = db.execute("SELECT round,observed_block,body FROM reviewed_cutoffs").fetchall()
+    reopened = EvaluatorReviewStore(s.reviews.directory, successor, limits=s.limits)
+    with reopened._connection() as db:
+        publication, roster, retained_block = reopened._read_cutoff(db, digest(s.round))
+        assert publication == s.cutoff.publication
+        assert roster == s.roster and retained_block == observed
+        assert (
+            db.execute("SELECT round,observed_block,body FROM reviewed_cutoffs").fetchall()
+            == before
+        )
+    assert registered_admitted_sha256s(digest(s.policy)) == (digest(s.policy),)
+    # New observations still have to use the current policy, even though the
+    # historical reader accepts authenticated predecessor receipts.
+    with pytest.raises(ValueError, match="policy, round or runtime mismatch"):
+        reopened.observe_cutoff(
+            s.cutoff, s.roster, snapshot=s.cutoff_snapshot, observed_block=observed
+        )
 
 
 def test_records_independent_evidence_against_verified_schedule_without_intake_receipt(setup):

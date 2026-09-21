@@ -108,7 +108,10 @@ class CompetitionPolicy(StrictProtocolModel):
     maximum_bundle_files: Annotated[int, Field(ge=7, le=4096)]
     minimum_submission_interval_blocks: Annotated[int, Field(ge=1, le=100_000)]
     maximum_submission_lifetime_blocks: Annotated[int, Field(ge=1, le=1_000_000)]
-    maximum_snapshot_age_blocks: Annotated[int, Field(ge=0, le=360)]
+    # Long cohort signing windows need an explicit, bounded snapshot lifetime.
+    # Existing policies keep their signed limit; the parser allows up to one
+    # nominal day so operators can budget signing and recovery independently.
+    maximum_snapshot_age_blocks: Annotated[int, Field(ge=0, le=7200)]
     maximum_uids: Annotated[int, Field(ge=1, le=256)]
     evaluators: Annotated[tuple[Evaluator, ...], Field(min_length=1, max_length=64)]
     required_evaluator_groups: Annotated[int, Field(ge=1, le=64)]
