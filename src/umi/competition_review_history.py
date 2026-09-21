@@ -11,6 +11,7 @@ import secrets
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 
+from .competition_policy_lineage import replay_lineage
 from .competition_publication import (
     PublicationReplayLimits,
     SignedCutoffPublication,
@@ -597,12 +598,16 @@ class EvaluatorReviewStore(CompetitionStore):
             SignedSubmission.model_validate_json(canonical_json_bytes(s))
             for s in body["submissions"]
         )
-        publication = verify_cutoff_publication(
-            certificate,
-            policy=self.lineage.policy(certificate.publication.round.policy_sha256),
-            submissions=submissions,
-            limits=self.limits,
+        historical_id = certificate.publication.round.policy_sha256
+        historical_policy = self.lineage.policy(historical_id)
+        offset = self.lineage.admitted_policy_sha256s.index(historical_id)
+        predecessors = (
+            self.lineage.policy(key) for key in self.lineage.admitted_policy_sha256s[offset + 1 :]
         )
+        with replay_lineage(historical_policy, predecessors):
+            publication = verify_cutoff_publication(
+                certificate, policy=historical_policy, submissions=submissions, limits=self.limits
+            )
         round_ = publication.round
         if (
             type(row[0]) is not int
