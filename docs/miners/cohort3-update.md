@@ -78,9 +78,12 @@ umi-competition --policy umi-cohort3-inputs/competition-policy-seq7.json \
 
 For `x86_64-unknown-linux-gnu`, download the exact observer binary pinned by the
 transport policy. It requires GLIBC 2.34 or newer and the system `libgcc_s.so.1`.
+The existing [competition miner bundle release](https://github.com/Umi-BitSign/umi/releases/tag/umi-competition-miner-bundle-v1)
+contains the Linux and Darwin observers, storage-proof verifiers, chain templates
+and `SHA256SUMS`. Use the cohort 3 policy files above with that bundle.
 A local build from the same Rust source is not guaranteed to have identical
 bytes. The six-file JSON input manifest above is unchanged; this executable is
-published separately under its policy-pinned SHA-256.
+also available from a [verified mirror](https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/competition/artifacts/finality/x86_64-unknown-linux-gnu/67b4bb856b2230e12d9ce2ec74e0f03fb0e131043802b13326ab18bf9ec78925/umi-grandpa-finality-observer).
 
 Run this after downloading `umi-cohort3-inputs`:
 
@@ -97,10 +100,10 @@ root = Path('umi-cohort3-inputs')
 policy = json.loads((root / 'transport-policy.json').read_bytes())
 expected = '67b4bb856b2230e12d9ce2ec74e0f03fb0e131043802b13326ab18bf9ec78925'
 assert policy['implementation_pins']['finality_verifier']['release_sha256_by_target']['x86_64-unknown-linux-gnu'] == expected
-base = 'https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/competition/artifacts/finality/x86_64-unknown-linux-gnu/'
+base = 'https://github.com/Umi-BitSign/umi/releases/download/umi-competition-miner-bundle-v1/'
 opener = build_opener(ProxyHandler({}))
 opener.addheaders = [('User-Agent', 'umi-miner-setup/1')]
-with opener.open(base + expected + '/umi-grandpa-finality-observer', timeout=60) as response:
+with opener.open(base + 'umi-grandpa-finality-observer.x86_64-unknown-linux-gnu', timeout=60) as response:
     raw = response.read(7908289)
 assert len(raw) == 7908288 and hashlib.sha256(raw).hexdigest() == expected
 directory = root / 'artifacts'
