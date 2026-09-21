@@ -14,6 +14,7 @@ from .open_competition import (
     verify_signature,
 )
 from .protocol import StrictProtocolModel, canonical_json_bytes
+from .competition_policy_lineage import submission_policy_admitted
 
 
 class LaunchAmendment(StrictProtocolModel):
@@ -40,8 +41,11 @@ def verify_launch_amendment(
     signed = SignedLaunchAmendment.model_validate_json(canonical_json_bytes(signed))
     amendment = signed.amendment
     old, new = previous.round_schedule, replacement.round_schedule
+    # A schedule amendment signed under a deal-preserving predecessor stays valid: the
+    # signature is over the amendment bytes, and every scope clause below is re-checked
+    # against the live policy on each open.
     if (
-        amendment.policy_sha256 != digest(policy)
+        not submission_policy_admitted(policy, amendment.policy_sha256)
         or amendment.previous_launch_sha256 != digest(previous)
         or amendment.replacement != replacement
         or previous.round_stride_blocks is not None
