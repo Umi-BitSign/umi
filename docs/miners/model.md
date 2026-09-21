@@ -19,11 +19,12 @@ translation requests under the corresponding release and policy.
 
 ### Successor assignment discovery rehearsal
 
-First-round endpoint intake is live, but assignment delivery is not public yet.
-Do not use the placeholder values in this section for production. UMI will
-publish the exact signed feed configuration and a tested launch command before
-evaluation begins, with operating lead time. A coordinator, feed or evaluator
-infrastructure delay cannot be scored as miner failure.
+Endpoint intake is live. The [cohort 3 update](cohort3-update.md) provides the
+reviewed policy-7 connection inputs and restart instructions. Delivery and
+evaluation services are ready for the scheduled cutoff; live cohort completion
+is still pending. The placeholders below are generic rehearsal
+examples. A coordinator, feed or evaluator infrastructure delay cannot be scored
+as miner failure.
 
 In a reviewed rehearsal, the weight-disabled miner can discover new
 quorum-signed assignments while running. Supply `--competition-policy`,
@@ -38,6 +39,16 @@ The process starts with no authorized assignments. It polls using its own hotkey
 checks exact signed publications against the configured model and origin, then
 admits only their exact authenticated requests. Polling does not load a different
 model or change the policy. New rounds do not require a process restart.
+
+An operational policy update requires restarting the miner with the reviewed
+current policy. If that policy carries earlier submissions forward, also pass
+`--competition-predecessor-policy` for each reviewed predecessor, newest first.
+The miner checks every link and rejects changes to contribution terms or reward
+allocations. This preserves the original signed submission; it does not authorize
+an assignment without the current policy's signatures and finality checks.
+Keep the existing nonce, assignment and response databases across the restart.
+Up to eight predecessor files are supported. With none supplied, only submissions
+under the configured current policy are accepted.
 
 The cache holds at most four unexpired publications. Reads and pages are bounded;
 unavailable or expired publications do not grant work or block attempts to read

@@ -5,12 +5,16 @@ live for endpoint submissions only, while the registration bridge remains the
 current reward mechanism. Open-competition rewards have not been activated. The
 public-endpoint pilot and calibration enrollment are closed. The
 [public status](https://api.umi.vision/v1/competition/status) exposes the exact
-live intake policy. Assignment delivery and model-artifact intake are not yet
-open.
+live intake policy. Cohort 3 delivery is ready for its scheduled cutoff. Endpoint
+miners need the [policy-7 connection update](miners/cohort3-update.md), including
+miners whose earlier intake receipts remain valid. Model-artifact intake remains
+closed; service readiness does not establish a completed live cohort.
 
 | I want to... | Start here |
 | --- | --- |
+| Register a new SN78 hotkey | [Official Bittensor mining guide](https://www.bittensor.com/docs/guides/mining), using subnet **78** |
 | Run a miner now | [Miner requirements](CURRENT_MINER_OPERATION.md) |
+| Update an existing endpoint for cohort 3 | [Policy-7 connection update](miners/cohort3-update.md) |
 | Connect my translation model | [Model integration and HTTPS endpoints](miners/model.md) |
 | Run a miner on Apple Silicon | [Mac miner setup](miners/macos.md) |
 | Install or troubleshoot a validator | [Validator supervisor](PERMANENT_VALIDATOR_SUPERVISOR.md) |

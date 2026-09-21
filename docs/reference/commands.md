@@ -8,16 +8,20 @@ live first-round endpoint intake section. Start with the
 
 <a id="live-first-round-intake"></a>
 
-## Live first-round endpoint intake
+## Live endpoint intake
 
 The reviewed endpoint-intake origin is `https://api.umi.vision`. It has been
-publicly reachable since block `9,085,463`. A submission or replacement must be
-accepted on or after that opening block and by block `9,135,843` to guarantee
-consideration for round one. The
-coordinator may close the roster at any later poll through block `9,135,903`, so
-an acceptance in that interval is not guaranteed first-round inclusion. The
-same hotkey must still be registered on SN78 in the finalized roster-close
-snapshot, and the submission must remain valid through evaluation.
+publicly reachable since block `9,085,463`. For cohort 3, submit a new or
+replacement endpoint before block `9,116,910`; the coordinator closes the roster
+at a finalized poll through block `9,116,915`. Acceptance after the earliest
+cutoff does not guarantee inclusion. The same hotkey must still be registered on
+SN78 in that snapshot, and the submission must remain valid through evaluation
+close at block `9,119,030`.
+
+Existing accepted policy-5 or policy-6 submissions can carry forward without
+resubmission. Apply the [cohort 3 connection update](../miners/cohort3-update.md)
+to the running service as well. Use the live status for subsequent cohorts;
+these cutoff blocks describe cohort 3.
 
 Read the bounded status and finalized registration head, then extract the exact
 canonical policy:
@@ -67,9 +71,10 @@ jq -n -c \
   > submission.json
 ```
 
-The fixed validity end covers the first evaluation close and is within the
-policy's 72,000-block lifetime for submissions admitted during the announced
-intake. Do not reuse this template after the first roster closes.
+The fixed validity end covers cohort 3 evaluation and is within the policy's
+72,000-block lifetime for submissions admitted during this intake. For later
+cohorts, verify the live policy's lifetime limit and evaluation close before
+choosing a validity end.
 
 Sign with the registered hotkey only, save the public object, and submit it:
 
@@ -91,8 +96,8 @@ submission, increment its sequence and wait at least 360 blocks after the prior
 acceptance. The roster uses the latest accepted submission for each hotkey and
 track. A bad or expired replacement does not revive an older submission. There
 is no rollback or cancellation operation. The replacement must be accepted by
-the guaranteed deadline and remain valid through evaluation to guarantee
-first-round consideration. Its hotkey must also remain registered on SN78 in the
+the cohort cutoff and remain valid through evaluation to be considered. Its
+hotkey must also remain registered on SN78 in the
 finalized roster-close snapshot; an admission receipt does not preserve a slot
 after deregistration.
 
