@@ -85,7 +85,8 @@ def test_warm_receipt_does_not_cache_timing_admission(reserved_schedule, monkeyp
     reserve(fixture)
     assert receipt(fixture) is not None
 
-    def expired(*args):
+    def expired(*args, requalify):
+        assert requalify is True
         raise ValueError("dispatch timing no longer admits work")
 
     monkeypatch.setattr(fixture.journal, "_recover_capacity", expired)
