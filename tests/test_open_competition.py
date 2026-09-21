@@ -88,6 +88,30 @@ def policy():
     )
 
 
+def test_extended_snapshot_lifetime_still_expires_at_the_signed_limit(policy):
+    extended = CompetitionPolicy.model_validate_json(
+        canonical_json_bytes(
+            policy.model_copy(
+                update={
+                    "valid_through_block": 10000,
+                    "maximum_submission_lifetime_blocks": 9000,
+                    "maximum_snapshot_age_blocks": 1800,
+                }
+            )
+        )
+    )
+    signed = submission(extended, end=9000)
+    retained = snapshot(block=110)
+    assert validate_admission(signed, extended, retained, 1010) == 6
+    assert validate_admission(signed, extended, retained, 1910) == 6
+    with pytest.raises(ValueError, match="snapshot is stale"):
+        validate_admission(signed, extended, retained, 1911)
+    with pytest.raises(ValidationError):
+        CompetitionPolicy.model_validate_json(
+            canonical_json_bytes(extended.model_copy(update={"maximum_snapshot_age_blocks": 7201}))
+        )
+
+
 def snapshot(block: int = 110):
     return RegistrationSnapshot(
         network="finney",
