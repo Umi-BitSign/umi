@@ -17,10 +17,9 @@ from pydantic import JsonValue
 
 from .competition_round_plan import RoundPlan, RoundProposal
 from .open_competition import digest
+from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
 from .private_files import ensure_private_directory as _private
 from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
-
-MAX_BYTES = 16 * 1024**2
 
 # Bound reservation bodies and allowances before transferring them to Python.
 # Accounting validates key types and byte lengths separately. A rejected body
