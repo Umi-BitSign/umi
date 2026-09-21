@@ -73,6 +73,15 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
         assert added["default"] is None
         assert added["required"] is False
         actions.remove(added)
+    # Deal-preserving predecessor policies are an optional operator input, not a
+    # signed protocol field. Check the flag's shape, then preserve the historical hash.
+    predecessor = next(
+        action for action in current["actions"] if action["dest"] == "predecessor_policy"
+    )
+    assert predecessor["option_strings"] == ["--predecessor-policy"]
+    assert predecessor["default"] == []
+    assert predecessor["required"] is False
+    current["actions"].remove(predecessor)
     assert json_sha256(current) == contracts["competition_cli_sha256"]
 
 

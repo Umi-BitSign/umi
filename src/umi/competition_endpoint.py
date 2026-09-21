@@ -22,6 +22,7 @@ import re
 from dataclasses import asdict, dataclass
 
 from .anchors import VerifiedAuthEvidence
+from .competition_policy_lineage import submission_policy_admitted
 from .config import Limits
 from .drand import DrandPulse
 from .open_competition import (
@@ -163,7 +164,7 @@ def prepare_endpoint_case(
         raise ValueError("request must keep its distinct legacy transport policy hash")
     if (
         round_.policy_sha256 != policy_sha
-        or sub.policy_sha256 != policy_sha
+        or not submission_policy_admitted(policy, sub.policy_sha256)
         or round_.runtime_sha256 != policy.evaluation_runtime_sha256
         or digest(sub) not in round_.roster
         or sub.track != "endpoint"

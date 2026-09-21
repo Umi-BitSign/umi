@@ -20,18 +20,19 @@ coldkey/IP/funding groups. It does not score translations. The public-endpoint
 pilot is closed. The ongoing bridge policy has no scheduled calendar sunset;
 historical finite policies retain their original expiry.
 
-Public first-round competition intake is live for endpoint submissions only. It
-has been publicly reachable since block `9,085,463`. To guarantee consideration
-for round one, a submission or replacement must be accepted on or after that
-opening block and by block
-`9,135,843`; the coordinator may close the roster at any poll through its final
-close bound, block `9,135,903`. The submitted hotkey must still be registered on
-SN78 in the finalized roster-close snapshot, and the submission must remain
-valid through evaluation.
+Public competition intake is live for endpoint submissions only. Cohort 3 uses
+competition policy 7, with roster close at blocks `9,116,910` through `9,116,915`
+and evaluation close at block `9,119,030`. Miners should apply the
+[cohort 3 connection update](docs/miners/cohort3-update.md). Existing accepted
+policy-5 or policy-6 submissions can carry forward; the service configuration
+still needs the update. The submitted hotkey must remain registered on SN78 in
+the finalized roster-close snapshot, and the submission must remain valid
+through evaluation.
 Open-competition rewards have not replaced the bridge. An
 `accepted_no_weight` receipt records an admitted submission; it does not prove
-evaluation, settlement or payment. Assignment delivery and model-artifact
-intake are not yet open. See the
+evaluation, settlement or payment. The cohort 3 delivery and evaluation services
+are ready for the scheduled cutoff; that does not establish a completed live
+cohort. Model-artifact intake remains closed. See the
 [live competition status](https://api.umi.vision/v1/competition/status) and the
 [launch configuration](docs/competition/launch.md) for the exact policy and
 cutoffs. The status also publishes an operator-declared repository revision and

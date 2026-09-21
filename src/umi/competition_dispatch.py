@@ -42,6 +42,7 @@ from .competition_origin import (
     FinalizedEndpointProvider,
     public_https_origin,
 )
+from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_scheduling import AssignmentPublicationJournal, SchedulingCapacity, assignment_key
 from .concurrency import await_owned_task
 from .config import Limits
@@ -155,8 +156,20 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
 
     def _cache_binding_hash(self):
         return digest(
-            {"chain": digest(self.config), "transport_policy": self._finality_policy_hash()}
+            {
+                "chain": self._config_binding_hash(self.config),
+                "transport_policy": self._finality_policy_hash(),
+            }
         )
+
+    def _acceptable_cache_bindings(self):
+        accepted = {self._cache_binding_hash()}
+        for policy_sha256 in admitted_policy_sha256s(self.policy):
+            legacy = self.config.model_copy(update={"policy_sha256": policy_sha256})
+            accepted.add(
+                digest({"chain": digest(legacy), "transport_policy": self._finality_policy_hash()})
+            )
+        return frozenset(accepted)
 
     async def _recover_historical_block(self, height, head):
         if not self._owned or self._registration_rpc is None:

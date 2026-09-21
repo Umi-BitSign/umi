@@ -2,6 +2,11 @@
 
 # What SN78 miners should run now
 
+For cohort 3, apply the [policy-7 connection update](miners/cohort3-update.md).
+An accepted receipt can carry forward while the running miner still needs a
+configuration update. The roster closes at blocks `9,116,910` through `9,116,915`.
+The temporary bridge described below remains the current reward mechanism.
+
 ## Temporary live-miner rewards
 
 The [registration bridge](operators/bridge.md) replaces the frozen two-miner
@@ -67,19 +72,18 @@ See the [signed-policy specification and rollout evidence](operators/bridge.md).
 
 The [version 0.2 successor design](../whitepaper/README.md) adds self-service
 endpoint participation and an optional reproducible-model contribution track.
-Public endpoint intake for its first round has been live since block `9,085,463`.
-It does not replace the bridge or activate competition weights by itself. A
-submission or replacement must be accepted on or after the opening block and by
-block `9,135,843` to guarantee first-round consideration. The coordinator may
-close the roster at any later
-poll through block `9,135,903`, so later acceptance is not guaranteed for round
-one. Admitted submissions must remain valid through the evaluation close at
-block `9,156,243`. The submitted hotkey must still be registered on SN78 in the
-finalized roster-close snapshot.
+Public endpoint intake has been live since block `9,085,463`. It does not replace
+the bridge or activate competition weights by itself. Cohort 3 closes its roster
+at a finalized poll between blocks `9,116,910` and `9,116,915`. Submit any new or
+replacement endpoint before the earliest cutoff; acceptance after that height
+does not guarantee inclusion. Admitted submissions must remain valid through
+evaluation close at block `9,119,030`, and the hotkey must still be registered on
+SN78 in the finalized roster-close snapshot. Existing accepted policy-5 or policy-6
+submissions can carry forward under policy 7 without resubmission.
 
 Current intake uses version 2 contribution terms. If you submitted under version
 1, follow the [policy-transition instructions](reference/commands.md#required-version-1-to-version-2-acceptance)
-and receive a new acceptance by the same deadline. Your archived version 1
+and receive a new acceptance before the current cutoff. Your archived version 1
 receipt does not accept the new terms.
 
 Translation requests need the
@@ -89,9 +93,12 @@ A health-only keepalive cannot answer them. Use the exact live policy and
 saved `accepted_no_weight` receipt; it establishes admission only, not quality or
 earnings.
 
-Assignment delivery is not public yet. Do not run the placeholder feed examples
-as production configuration. UMI will publish the exact signed feed settings and
-a tested launch command before evaluation, with operating lead time. A
+The [cohort 3 update](miners/cohort3-update.md) provides the signed feed settings,
+exact release and tested configuration changes. Delivery and evaluation services
+are ready for the scheduled cutoff; assignments follow its finalized roster and
+work authorization. Readiness does not establish a completed live cohort. Before
+a miner has a published assignment, even a correctly signed feed query can return
+401. That response alone does not invalidate its receipt. A
 coordinator, feed or evaluator infrastructure delay cannot count as miner
 failure.
 
@@ -100,9 +107,8 @@ The open-competition endpoint path supports
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
-Model-artifact intake and evaluation are not open for this first round because
-the exact canonical runtime and its immutable environment have not been
-published. The 30% model allocation remains burned and does not accrue for a
+This cohort admits the endpoint track; model-artifact intake remains closed.
+The 30% model allocation remains burned and does not accrue for a
 later retroactive award. Before preparing a future model contribution, read the
 [provenance and rights checklist](contributors/models.md#model-contribution-review) and the approved
 [version 2 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS_V2.md).

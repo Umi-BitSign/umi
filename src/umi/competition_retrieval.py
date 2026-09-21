@@ -29,6 +29,7 @@ from .competition_artifacts import (
     verify_bundle_directory,
     verify_preserved_bundle,
 )
+from .competition_policy_lineage import submission_policy_admitted
 from .open_competition import (
     BundleFile,
     CompetitionPolicy,
@@ -172,7 +173,7 @@ async def retrieve_signed_model_bundle(
     bundle = submission.model_bundle
     if submission.track != "model" or bundle is None:
         raise CompetitionRetrievalError("artifact_submission_not_model")
-    if submission.policy_sha256 != digest(policy):
+    if not submission_policy_admitted(policy, submission.policy_sha256):
         raise CompetitionRetrievalError("artifact_policy_mismatch")
     if submission.accepted_terms_sha256 != policy.contribution_terms_sha256:
         raise CompetitionRetrievalError("artifact_terms_mismatch")

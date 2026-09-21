@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from fractions import Fraction
 from pathlib import PurePosixPath
 from types import MappingProxyType
@@ -417,11 +417,20 @@ def validate_admission(
     policy: CompetitionPolicy,
     snapshot: RegistrationSnapshot,
     current_block: int,
+    *,
+    admitted_policy_sha256s: Collection[str] | None = None,
 ) -> int:
+    """Admit a signed submission under ``policy``.
+
+    ``admitted_policy_sha256s`` widens the policy binding to deal-preserving
+    predecessors (see ``competition_policy_lineage``). It defaults to the live
+    policy alone, so every existing caller keeps exact-digest behavior.
+    """
     # Revalidate models constructed using unsafe Pydantic copy/construct helpers.
     signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
     sub = signed.submission
-    if sub.policy_sha256 != digest(policy):
+    admitted = (digest(policy),) if admitted_policy_sha256s is None else admitted_policy_sha256s
+    if sub.policy_sha256 not in admitted:
         raise ValueError("submission belongs to another policy")
     if not policy.valid_from_block <= current_block <= policy.valid_through_block:
         raise ValueError("policy is not current")
@@ -858,6 +867,8 @@ def authenticate_evaluation(
     A failed inference or expired replay window cannot erase proof of two
     contradictory statements. Current eligibility and scoring are separate.
     """
+    from .competition_policy_lineage import submission_policy_admitted
+
     signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
     attested = AttestedResult.model_validate_json(canonical_json_bytes(attested))
     round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
@@ -870,7 +881,7 @@ def authenticate_evaluation(
     result, sub = attested.result, signed.submission
     if (
         round_.policy_sha256 != digest(policy)
-        or sub.policy_sha256 != digest(policy)
+        or not submission_policy_admitted(policy, sub.policy_sha256)
         or result.round_sha256 != digest(round_)
         or result.submission_sha256 != digest(sub)
         or digest(sub) not in round_.roster

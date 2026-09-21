@@ -10,6 +10,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Local successor rehearsal commands. No command can submit chain weights."
     )
     parser.add_argument("--policy", required=True, help="reviewed successor policy JSON")
+    parser.add_argument(
+        "--predecessor-policy",
+        action="append",
+        default=[],
+        metavar="POLICY_JSON",
+        help=(
+            "deal-preserving predecessor policy whose signed submissions the live policy "
+            "still admits; repeat newest-first for a chain (see competition_policy_lineage)"
+        ),
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("inspect-policy")
     intake = commands.add_parser("serve-intake")

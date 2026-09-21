@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field
 
+from .competition_policy_lineage import submission_policy_admitted
 from .config import Limits
 from .miner_admission import (
     MinerAdmissionError,
@@ -282,7 +283,7 @@ def validate_publication_body(
     for sub_sha, sub in submissions.items():
         if (
             sub.track != "endpoint"
-            or sub.policy_sha256 != policy_sha
+            or not submission_policy_admitted(policy, sub.policy_sha256)
             or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
             or sub_sha not in round_.roster
             or not policy.valid_from_block <= sub.valid_from_block <= round_.submission_close_block

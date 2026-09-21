@@ -281,9 +281,52 @@ def test_replacement_and_retries_survive_restart(policy, tmp_path):
 
 def test_state_cannot_be_rebound_to_another_policy(policy, tmp_path):
     CompetitionStore(tmp_path / "state", policy)
+    # Same deal, but not a declared successor: an unrelated policy must not open the ledger.
     other = policy.model_copy(update={"sequence": 2})
     with pytest.raises(ValueError, match="different competition policy"):
         CompetitionStore(tmp_path / "state", other)
+    # A deal change is never allowed to open it either, even as a declared successor.
+    terms = policy.model_copy(
+        update={
+            "sequence": 2,
+            "predecessor_sha256": digest(policy),
+            "contribution_terms_sha256": "b1" * 32,
+        }
+    )
+    with pytest.raises(ValueError, match="different competition policy"):
+        CompetitionStore(tmp_path / "state", terms, predecessor_policies=(policy,))
+
+
+def test_operational_successor_reopens_the_ledger_and_keeps_submissions(policy, tmp_path):
+    store = CompetitionStore(tmp_path / "state", policy)
+    signed = submission(policy)
+    store.admit(signed, snapshot(), 110)
+    successor = policy.model_copy(
+        update={
+            "sequence": 2,
+            "predecessor_sha256": digest(policy),
+            "maximum_inference_ms": policy.maximum_inference_ms * 2,
+            "evaluation_runtime_sha256": "a3" * 32,
+        }
+    )
+    # Without the predecessor supplied, the successor is just another policy.
+    with pytest.raises(ValueError, match="different competition policy"):
+        CompetitionStore(tmp_path / "state", successor)
+    reopened = CompetitionStore(tmp_path / "state", successor, predecessor_policies=(policy,))
+    assert reopened.lineage.admitted_policy_sha256s == (digest(successor), digest(policy))
+    # The predecessor-signed submission is still there, still admitted, receipt replays.
+    assert [row["receipt"]["submission_sha256"] for row in reopened.submissions()] == [
+        digest(signed.submission)
+    ]
+    # The retained receipt still names the predecessor policy; replay accepts it via lineage.
+    with reopened._connection() as connection:
+        reopened._verify_retained_submission(connection, digest(signed.submission))
+    # And a repeat of the predecessor-signed submission returns its historical receipt.
+    again = reopened.admit(signed, snapshot(), 110)
+    assert again["submission_sha256"] == digest(signed.submission)
+    # Once moved forward, the original policy alone cannot reopen it.
+    with pytest.raises(ValueError, match="different competition policy"):
+        CompetitionStore(tmp_path / "state", policy)
 
 
 @pytest.mark.parametrize(

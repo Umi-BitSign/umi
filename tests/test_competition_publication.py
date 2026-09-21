@@ -13,6 +13,7 @@ from umi.competition_evidence import (
     SignedEvaluatorRunRecord,
     sign_evaluator_run,
 )
+from umi.competition_policy_lineage import clear_lineage_registry, register_lineage
 from umi.competition_publication import (
     PublicationCapacityError,
     PublicationJournal,
@@ -120,6 +121,8 @@ def _scenario(
     promote_model=True,
     snapshot_factory=snapshot,
     suite_factory=suite_for,
+    successor_policy=None,
+    predecessor_policies=None,
 ):
     archive = root / "archive"
     baseline = bundle_at(root / "baseline")
@@ -134,6 +137,11 @@ def _scenario(
     submissions = tuple(sorted((model, endpoint), key=lambda item: digest(item.submission)))
     for signed in submissions:
         store.admit(signed, snapshot_factory(), 110)
+
+    if successor_policy is not None:
+        register_lineage(successor_policy, predecessor_policies or (policy,))
+        policy = successor_policy
+        store = CompetitionStore(root / "state", policy)
 
     suite = suite_factory(policy)
     round_ = round_for(policy, suite, submissions, digest(baseline))
@@ -284,6 +292,37 @@ def test_real_store_promotion_and_70_30_settlement_replay(policy, replay_limits,
     assert verified_settlement.chain_submission_authorized is False
     assert verified_settlement.finalized_receipt_timing_proven is False
     assert verified_settlement.global_conflict_absence_proven is False
+
+
+def test_carried_submissions_replay_through_cutoff_and_settlement(policy, replay_limits, tmp_path):
+    successor = policy.model_copy(
+        update={
+            "sequence": policy.sequence + 1,
+            "predecessor_sha256": digest(policy),
+            "maximum_inference_ms": policy.maximum_inference_ms * 2,
+        }
+    )
+    scenario = _scenario(policy, tmp_path, replay_limits, successor_policy=successor)
+    assert all(s.submission.policy_sha256 == digest(policy) for s in scenario.submissions)
+    assert scenario.round.policy_sha256 == digest(successor)
+    options = dict(policy=successor, submissions=scenario.submissions, limits=replay_limits)
+    assert (
+        verify_cutoff_publication(scenario.cutoff_certificate, **options)
+        == scenario.cutoff_publication
+    )
+    assert (
+        verify_settlement_publication(
+            scenario.settlement_certificate,
+            cutoff_certificate=scenario.cutoff_certificate,
+            evidence=scenario.evidence,
+            retained_settlement=scenario.settlement,
+            **options,
+        )
+        == scenario.settlement_publication
+    )
+    clear_lineage_registry()
+    with pytest.raises(ValueError, match="submission belongs to another policy"):
+        verify_cutoff_publication(scenario.cutoff_certificate, **options)
 
 
 def test_modified_body_cannot_reuse_valid_signatures(policy, replay_limits, tmp_path):

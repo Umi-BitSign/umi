@@ -130,6 +130,7 @@ def setup(preparation, chain_config, tmp_path):
                     evaluator_hotkey=signer.hotkey.ss58_address,
                     maximum_orders=1024,
                     maximum_journal_bytes=1024**3,
+                    journal_limit=lambda _name: 1024**3,
                 ),
                 policy=policy,
                 wallet=signer,
@@ -158,6 +159,26 @@ async def prepare(setup):
     result = await setup.coordinator.cycle()
     assert result["prepared"] == 1 and result["held"] == 0
     return setup.coordinator.proposals()[0]
+
+
+@pytest.mark.asyncio
+async def test_round_hold_identifies_stage_without_logging_protected_values(
+    setup, monkeypatch, caplog
+):
+    secret = "protected reference must never be logged"
+
+    def fail(*args):
+        raise ValueError(secret)
+
+    monkeypatch.setattr(setup.coordinator, "_prepare_plan", fail)
+    for _ in range(2):
+        result = await setup.coordinator.cycle()
+        assert result["held"] == 1
+    messages = [r.message for r in caplog.records if "round_plan_held" in r.message]
+    assert len(messages) == 1
+    assert "stage=prepare_plan" in messages[0] and "error_type=ValueError" in messages[0]
+    assert digest(setup.plan_path.name) in messages[0]
+    assert secret not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -902,7 +923,11 @@ async def test_polling_reports_bounded_failure_without_reference_or_exception_le
     )
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(reported.wait(), 2)
-    assert reports == [{"status": "round_poll_failed", "chain_submission_authorized": False}]
+    assert len(reports) == 1
+    assert reports[0]["status"] == "round_poll_failed"
+    assert reports[0]["chain_submission_authorized"] is False
+    assert reports[0]["error_type"] == "ValueError"
+    assert reports[0]["error_site"].startswith("competition_rounds.py:polling:")
 
 
 def test_cli_routes_private_coordinator_config_without_constructing_wallet(

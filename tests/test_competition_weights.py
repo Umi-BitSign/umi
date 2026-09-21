@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import sys
 import time
 from dataclasses import replace
 from fractions import Fraction
@@ -244,10 +243,10 @@ def weight_case(
     context.refresh = refresh
 
     # Explicit fake host port. No fixture JSON can mint production activation.
-    monkeypatch.setitem(
-        sys.modules,
-        "umi.competition_host_upgrade",
-        SimpleNamespace(validate_authenticated_successor_activation=validate_host),
+    from umi import competition_host_upgrade
+
+    monkeypatch.setattr(
+        competition_host_upgrade, "validate_authenticated_successor_activation", validate_host
     )
     item.provider = provider
     item.package, item.case, item.body, item.signed = package, package_case, body, signed

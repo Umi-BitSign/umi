@@ -170,7 +170,7 @@ class IndependentWorkSigner:
                 "minimum_issue_ms": minimum_issue_ms,
             },
             maximum_rounds=worker.config.maximum_orders,
-            maximum_bytes=worker.config.maximum_journal_bytes,
+            maximum_bytes=worker.config.journal_limit("work_signing"),
         )
         self.serial = asyncio.Lock()
         self.admission = WorkAdmission(worker, self.journal)

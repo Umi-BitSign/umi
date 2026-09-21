@@ -21,6 +21,7 @@ from umi.competition_worker import (
 )
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_package import carried_package as carried_package
 from .test_competition_package import package_case as package_case
 from .test_competition_package import package_limits as package_limits
 from .test_competition_package import release_identity as release_identity
@@ -57,6 +58,24 @@ def _run(worker, case, policy, release_identity):
         expected_policy_sha256=digest(policy),
         observed_release=release_identity,
     )
+
+
+def test_carried_package_worker_replays_and_restarts_without_registry(
+    carried_package, package_limits, worker_capacity, release_identity, tmp_path
+):
+    from umi.competition_policy_lineage import clear_lineage_registry, registered_lineage
+
+    case = carried_package
+    clear_lineage_registry()
+    first = _run(
+        _worker(tmp_path, package_limits, worker_capacity), case, case.policy, release_identity
+    )
+    clear_lineage_registry()
+    second = _run(
+        _worker(tmp_path, package_limits, worker_capacity), case, case.policy, release_identity
+    )
+    assert first.receipt == second.receipt
+    assert registered_lineage(case.policy).admitted_policy_sha256s == (digest(case.policy),)
 
 
 def _record_cutoff_conflict(worker, case, policy, replay_limits):

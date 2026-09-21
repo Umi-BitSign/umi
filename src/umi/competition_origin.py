@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import FinalizedRegistrationProvider, _AwaitingFinality, _hotkey, _uint
+from .competition_policy_lineage import submission_policy_admitted
 from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .grandpa_finality_supervisor import GrandpaFinalitySupervisorError
@@ -337,7 +338,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         sub = signed.submission
         if (
             sub.track != "endpoint"
-            or sub.policy_sha256 != digest(self.policy)
+            or not submission_policy_admitted(self.policy, sub.policy_sha256)
             or sub.accepted_terms_sha256 != self.policy.contribution_terms_sha256
             or sub.valid_through_block - sub.valid_from_block
             > self.policy.maximum_submission_lifetime_blocks

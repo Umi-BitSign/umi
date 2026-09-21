@@ -17,12 +17,15 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal, TypeVar
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_outcomes import OutcomeEvidence, parse_outcome
+from .competition_policy_lineage import registered_lineage, replay_lineage
 from .competition_publication import (
+    CutoffPublication,
     PublicationReplayLimits,
+    SettlementPublication,
     SignedCutoffPublication,
     SignedSettlementPublication,
     authenticated_roster_digest,
@@ -160,11 +163,23 @@ class CompetitionPackageManifest(StrictProtocolModel):
 
 
 class CompetitionPackageRoster(StrictProtocolModel):
-    schema_: Literal["umi-competition-replay-roster/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-replay-roster/1", "umi-competition-replay-roster/2"] = Field(
+        alias="schema"
+    )
     submissions: Annotated[tuple[SignedSubmission, ...], Field(min_length=1, max_length=512)]
+    predecessor_policies: Annotated[tuple[CompetitionPolicy, ...], Field(max_length=8)] = ()
+
+    @model_serializer(mode="wrap")
+    def versioned_fields(self, handler):
+        result = handler(self)
+        if self.schema_ == "umi-competition-replay-roster/1":
+            result.pop("predecessor_policies", None)
+        return result
 
     @model_validator(mode="after")
     def canonical_order(self) -> Self:
+        if bool(self.predecessor_policies) != (self.schema_ == "umi-competition-replay-roster/2"):
+            raise ValueError("declared predecessor policies require roster version 2")
         ids = tuple(digest(item.submission) for item in self.submissions)
         if ids != tuple(sorted(ids)) or len(set(ids)) != len(ids):
             raise ValueError("package roster must be sorted and unique")
@@ -261,23 +276,17 @@ def prepare_competition_package(
     replay_limits = _canonical(PublicationReplayLimits, replay_limits)
     release_identity = _canonical(CompetitionReleaseIdentity, release_identity)
     limits = _canonical(CompetitionPackageLimits, limits)
-    normalized_roster = _roster(roster)
+    normalized_roster = _roster(roster, policy)
     normalized_evidence = _evidence(evidence)
 
-    cutoff = verify_cutoff_publication(
+    cutoff, settlement = _verify_publications(
+        policy,
+        normalized_roster,
         cutoff_certificate,
-        policy=policy,
-        submissions=normalized_roster.submissions,
-        limits=replay_limits,
-    )
-    settlement = verify_settlement_publication(
         settlement_certificate,
-        cutoff_certificate=cutoff_certificate,
-        policy=policy,
-        submissions=normalized_roster.submissions,
-        evidence=_evidence_pairs(normalized_evidence),
-        retained_settlement=retained_settlement,
-        limits=replay_limits,
+        normalized_evidence,
+        retained_settlement,
+        replay_limits,
     )
 
     objects: dict[str, StrictProtocolModel] = {
@@ -511,20 +520,14 @@ def load_competition_package(
     if release_identity != observed_release:
         raise ValueError("package release identity differs from the observed release")
 
-    cutoff = verify_cutoff_publication(
+    cutoff, settlement = _verify_publications(
+        policy,
+        roster,
         cutoff_certificate,
-        policy=policy,
-        submissions=roster.submissions,
-        limits=replay_limits,
-    )
-    settlement = verify_settlement_publication(
         settlement_certificate,
-        cutoff_certificate=cutoff_certificate,
-        policy=policy,
-        submissions=roster.submissions,
-        evidence=_evidence_pairs(evidence),
-        retained_settlement=retained_settlement,
-        limits=replay_limits,
+        evidence,
+        retained_settlement,
+        replay_limits,
     )
     expected = {
         "policy_sha256": digest(policy),
@@ -570,7 +573,41 @@ def load_competition_package(
     )
 
 
-def _roster(submissions: Sequence[SignedSubmission]) -> CompetitionPackageRoster:
+def _verify_publications(
+    policy: CompetitionPolicy,
+    roster: CompetitionPackageRoster,
+    cutoff_certificate: SignedCutoffPublication,
+    settlement_certificate: SignedSettlementPublication,
+    evidence: CompetitionPackageEvidence,
+    retained_settlement: CompetitionSettlement,
+    replay_limits: PublicationReplayLimits,
+) -> tuple[CutoffPublication, SettlementPublication]:
+    with replay_lineage(policy, roster.predecessor_policies) as lineage:
+        if len(lineage.admitted_policy_sha256s) != len(roster.predecessor_policies) + 1:
+            raise ValueError("package predecessor changes submission terms")
+        cutoff = verify_cutoff_publication(
+            cutoff_certificate,
+            policy=policy,
+            submissions=roster.submissions,
+            limits=replay_limits,
+        )
+        settlement = verify_settlement_publication(
+            settlement_certificate,
+            cutoff_certificate=cutoff_certificate,
+            policy=policy,
+            submissions=roster.submissions,
+            evidence=_evidence_pairs(evidence),
+            retained_settlement=retained_settlement,
+            limits=replay_limits,
+        )
+        return cutoff, settlement
+
+
+def _roster(
+    submissions: Sequence[SignedSubmission], policy: CompetitionPolicy
+) -> CompetitionPackageRoster:
+    lineage = registered_lineage(policy)
+    predecessors = tuple(lineage.policy(key) for key in lineage.admitted_policy_sha256s[1:])
     normalized = tuple(
         sorted(
             (_canonical(SignedSubmission, item) for item in submissions),
@@ -578,7 +615,10 @@ def _roster(submissions: Sequence[SignedSubmission]) -> CompetitionPackageRoster
         )
     )
     return CompetitionPackageRoster(
-        schema="umi-competition-replay-roster/1",
+        schema="umi-competition-replay-roster/2"
+        if predecessors
+        else "umi-competition-replay-roster/1",
+        predecessor_policies=predecessors,
         submissions=normalized,
     )
 

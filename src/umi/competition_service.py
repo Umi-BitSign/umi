@@ -17,8 +17,10 @@ from typing_extensions import Self
 
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
+from .competition_policy_lineage import register_lineage
 from .competition_store import (
     AdmissionCapacity,
     CompetitionStore,
@@ -61,6 +63,12 @@ class CompetitionServiceConfig(StrictProtocolModel):
     admission_capacity: AdmissionCapacity = Field(default_factory=AdmissionCapacity)
     api_limits: CompetitionApiLimits = Field(default_factory=CompetitionApiLimits)
     historical_archives: Annotated[tuple[IntakeArchiveConfig, ...], Field(max_length=8)] = ()
+    # Deal-preserving predecessor policy files, newest first. Their signed submissions
+    # stay admitted in this same ledger (see competition_policy_lineage). Distinct from
+    # historical_archives, which is the terms-change path that archives a predecessor.
+    predecessor_policies: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...], Field(max_length=8)
+    ] = ()
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
@@ -142,12 +150,21 @@ def create_intake_app(
     ):
         raise ValueError("public round signing can outlive its registration snapshot")
     historical_archives = tuple(load_intake_archive(item) for item in config.historical_archives)
+    predecessor_policies = tuple(
+        load_json(path, CompetitionPolicy) for path in config.predecessor_policies
+    )
+    # Validates the chain and makes it visible to every policy-bound check in-process.
+    lineage = register_lineage(policy, predecessor_policies)
     if historical_archives:
         if len(historical_archives) != 1:
             raise ValueError("the first staged transition requires one predecessor archive")
         predecessor = historical_archives[0]
         predecessor_summary = predecessor.summary()
-        if policy.predecessor_sha256 != predecessor_summary["policy_sha256"]:
+        # The archived (terms-changed) policy must immediately precede the OLDEST policy
+        # this ledger still honors: the live one, or the deal-preserving predecessors
+        # behind it that carried their submissions forward.
+        oldest_honored = lineage.policy(lineage.admitted_policy_sha256s[-1])
+        if oldest_honored.predecessor_sha256 != predecessor_summary["policy_sha256"]:
             raise ValueError(
                 "historical archive is not the durable immediate predecessor for this launch"
             )
@@ -169,6 +186,7 @@ def create_intake_app(
         public_launch=config.public_deployment.launch_identity(),
         submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
         historical_intake_archive_bindings=archive_bindings,
+        predecessor_policies=predecessor_policies,
     )
     if historical_archives:
         launch = config.public_deployment.launch_identity()

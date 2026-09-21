@@ -269,11 +269,13 @@ def _port(
     state_name: str = "finality.sqlite3",
     limits: GrandpaFinalitySupervisorLimits | None = None,
     scoring_digest: str = _POLICY_DIGEST,
+    predecessor_digests: tuple[str, ...] = (),
 ) -> DurableGrandpaFinalityPort:
     return DurableGrandpaFinalityPort(
         observer=observer,
         state_path=tmp_path / state_name,
         scoring_policy_digest=scoring_digest,
+        accepted_predecessor_policy_digests=predecessor_digests,
         chain_observation=chain_observation,
         finality_verifier_sha256=observer.expected_binary_sha256,
         initial_minimum_finalized_block=10,
@@ -398,6 +400,46 @@ def test_conflicting_replay_and_wrong_store_binding_fail_closed(
             observer,
             chain_observation,
             scoring_digest="99" * 32,
+        )
+
+
+def test_store_bound_to_a_declared_predecessor_policy_is_rebound(
+    tmp_path: Path,
+    observer: GrandpaFinalityObserver,
+    chain_observation: LiveChainObservationPin,
+) -> None:
+    port = _port(tmp_path, observer, chain_observation)
+    binding = port.next_run_binding()
+    block = _header(10, parent_hash=f"0x{'11' * 32}", seed=20)
+    port.accept_attestation(
+        binding, _attestation(observer, binding, block=block, sequence=0, previous=None)
+    )
+    successor = "55" * 32
+    # Not declared: still a mismatch.
+    with pytest.raises(GrandpaFinalityStoreConflict, match="store_binding_mismatch"):
+        _port(tmp_path, observer, chain_observation, scoring_digest=successor)
+    # Declared deal-preserving predecessor: the store is adopted and rebound, evidence intact.
+    rebound = _port(
+        tmp_path,
+        observer,
+        chain_observation,
+        scoring_digest=successor,
+        predecessor_digests=(_POLICY_DIGEST,),
+    )
+    head = rebound.persisted_head()
+    assert head is not None and head.height == 10
+    assert rebound.scoring_policy_digest == successor
+    # Once rebound, the predecessor alone no longer opens it.
+    with pytest.raises(GrandpaFinalityStoreConflict, match="store_binding_mismatch"):
+        _port(tmp_path, observer, chain_observation)
+    # And an undeclared third policy is refused even with the predecessor declared.
+    with pytest.raises(GrandpaFinalityStoreConflict, match="store_binding_mismatch"):
+        _port(
+            tmp_path,
+            observer,
+            chain_observation,
+            scoring_digest="66" * 32,
+            predecessor_digests=(_POLICY_DIGEST,),
         )
 
 

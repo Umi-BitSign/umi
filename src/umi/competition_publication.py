@@ -23,6 +23,7 @@ from .competition_evidence import (
     IndependentEvaluationEvidence,
 )
 from .competition_outcomes import OutcomeEvidence, outcome_binding, parse_outcome, replay_outcome
+from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_settlement import (
     CompetitionSettlement,
     EvidenceCutoffSchedule,
@@ -488,6 +489,7 @@ def _validate_cutoff_material(
             policy,
             registration_snapshot,
             round_.submission_close_block,
+            admitted_policy_sha256s=admitted_policy_sha256s(policy),
         )
         if submission.valid_through_block < round_.evaluation_close_block:
             raise ValueError("roster submission expires before evaluation close")

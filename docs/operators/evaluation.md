@@ -47,6 +47,13 @@ Use one hotkey per worker and a dedicated configuration with schema
   Supply both, or omit both for a model-only evaluator worker.
 - `scheduling_capacity`: optional [shared scheduling limits](dispatch.md#shared-scheduling-capacity),
   matching the dispatcher, assignment feed and evidence assembler for that journal.
+- `maximum_journal_bytes` limits the evaluator journal and supplies the default
+  for each auxiliary journal separately. Optional `journal_limits` overrides
+  `execution`, `round_signing`, `work_signing`, and `work_admission` independently.
+  Every value is a byte ceiling between 1 KiB and 16 GiB. Account for all stores,
+  scheduling history, chain caches and filesystem overhead when sizing a host.
+  Changing a ceiling preserves existing evidence and reservations; it does not
+  reclaim space or make an undersized store able to accept new work.
 - `exchange_origin` enables the [authenticated exchange](exchange.md#open-competition-exchange).
   For automatic endpoint publication delivery, set `assignment_directory` to
   the dispatcher's separate `publication_directory`. No extra upload key is used.

@@ -178,6 +178,9 @@ def create_app(
             "admission_checked_block": admission_checked_block,
             "chain_submission_authorized": False,
             "historical_intake_archives": [archive.summary() for archive in historical_archives],
+            # Deal-preserving predecessors whose signed submissions this ledger still admits.
+            "honored_policy_sha256s": list(store.lineage.admitted_policy_sha256s),
+            "deal_sha256": store.lineage.deal_sha256,
         }
         if public_deployment is not None:
             result.update(

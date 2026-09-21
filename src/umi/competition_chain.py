@@ -26,6 +26,7 @@ from typing_extensions import Self
 from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
+from .competition_policy_lineage import admitted_policy_sha256s
 from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
@@ -489,6 +490,7 @@ class FinalizedRegistrationProvider:
                 observer=observer,
                 state_path=directory / "finality.sqlite3",
                 scoring_policy_digest=self._finality_policy_hash(),
+                accepted_predecessor_policy_digests=self._predecessor_finality_policy_hashes(),
                 chain_observation=config.chain_pin,
                 finality_verifier_sha256=config.finality_pin.release_sha256_by_target[
                     config.target_triple
@@ -559,8 +561,33 @@ class FinalizedRegistrationProvider:
     def _finality_policy_hash(self) -> str:
         return digest(self.policy)
 
+    def _predecessor_finality_policy_hashes(self) -> tuple[str, ...]:
+        """Deal-preserving predecessors whose finality store this provider may adopt."""
+        return tuple(admitted_policy_sha256s(self.policy)[1:])
+
     def _cache_binding_hash(self) -> str:
-        return digest(self.config)
+        """Bind the registration cache to the chain configuration, not the policy.
+
+        The cache holds verified registrations and finality heads, none of which
+        depend on the competition policy, so a deal-preserving policy successor must
+        not invalidate it. ``policy_sha256`` is bound separately at construction.
+        """
+        return self._config_binding_hash(self.config)
+
+    @staticmethod
+    def _config_binding_hash(config: CompetitionChainConfig) -> str:
+        body = config.model_dump(mode="json", by_alias=True)
+        body.pop("policy_sha256", None)
+        return digest({"chain_config_without_policy": body})
+
+    def _acceptable_cache_bindings(self) -> frozenset[str]:
+        """The current binding, plus the legacy per-policy binding this cache would
+        have carried under the live policy or any honored predecessor."""
+        accepted = {self._cache_binding_hash()}
+        for policy_sha256 in admitted_policy_sha256s(self.policy):
+            legacy = self.config.model_copy(update={"policy_sha256": policy_sha256})
+            accepted.add(digest(legacy))
+        return frozenset(accepted)
 
     def _finality_storage_limits(self):
         return None
@@ -595,7 +622,11 @@ class FinalizedRegistrationProvider:
             if bound is None:
                 connection.execute("INSERT INTO binding VALUES (?)", (expected,))
             elif bound[0] != expected:
-                raise ValueError("registration cache belongs to another chain configuration")
+                if bound[0] not in self._acceptable_cache_bindings():
+                    raise ValueError("registration cache belongs to another chain configuration")
+                # Legacy per-policy binding from before this release, or from a
+                # deal-preserving predecessor: move it to the policy-free binding.
+                connection.execute("UPDATE binding SET digest=?", (expected,))
             connection.commit()
         finally:
             connection.close()

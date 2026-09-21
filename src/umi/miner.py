@@ -1171,6 +1171,11 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     chain_config_path = getattr(args, "competition_chain_config", None)
     if chain_config_path is not None and getattr(args, "competition_policy", None) is None:
         raise ValueError("competition chain configuration requires a competition policy")
+    predecessors = getattr(args, "competition_predecessor_policy", None) or []
+    if predecessors and getattr(args, "competition_policy", None) is None:
+        raise ValueError("competition predecessors require a competition policy")
+    if len(predecessors) > 8:
+        raise ValueError("competition policy lineage exceeds eight predecessors")
     feed_origin = getattr(args, "competition_feed", None)
     if feed_origin is not None and getattr(args, "competition_authorization", None) is not None:
         raise ValueError("choose either a competition feed or a static authorization")
@@ -1191,6 +1196,19 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         competition_policy = CompetitionPolicy.model_validate_json(
             _read_startup_file(competition_inputs[0], label="competition policy")
         )
+        from .competition_policy_lineage import register_lineage, validate_operational_successor
+
+        prior_policies = [
+            CompetitionPolicy.model_validate_json(
+                _read_startup_file(path, label="competition predecessor policy")
+            )
+            for path in predecessors
+        ]
+        current = competition_policy
+        for prior in prior_policies:
+            validate_operational_successor(current, prior)
+            current = prior
+        register_lineage(competition_policy, prior_policies)
         if feed_origin is not None:
             from .competition_client import validate_intake_origin
 
@@ -1530,6 +1548,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy", required=True, help="canonical inactive scoring policy")
     parser.add_argument(
         "--competition-policy", help="reviewed successor policy for weight-disabled requests"
+    )
+    parser.add_argument(
+        "--competition-predecessor-policy",
+        action="append",
+        default=[],
+        help="reviewed policy whose submissions carry forward; repeat newest first (maximum 8)",
     )
     parser.add_argument(
         "--competition-chain-config",

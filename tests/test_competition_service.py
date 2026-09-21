@@ -1190,3 +1190,79 @@ def test_authenticated_historical_retry_survives_proof_outage(config, policy):
             ).status_code
             == 422
         )
+
+
+def test_operational_successor_intake_keeps_predecessor_submissions(
+    config, chain_config, policy, tmp_path
+):
+    """A successor that changes only operational fields reopens the same ledger and
+    keeps every predecessor-signed submission admitted; a new miner can still join."""
+    successor = policy.model_copy(
+        update={
+            "sequence": policy.sequence + 1,
+            "predecessor_sha256": digest(policy),
+            "maximum_inference_ms": policy.maximum_inference_ms * 2,
+            "evaluation_runtime_sha256": "a3" * 32,
+        }
+    )
+    predecessor_path = tmp_path / "predecessor-policy.json"
+    predecessor_path.write_bytes(canonical_json_bytes(policy))
+    successor_config = config.model_copy(
+        update={
+            "policy_sha256": digest(successor),
+            "chain": chain_config.model_copy(update={"policy_sha256": digest(successor)}),
+            "predecessor_policies": (str(predecessor_path),),
+        }
+    )
+    # Without the predecessor declared, the successor cannot open the ledger at all.
+    with pytest.raises(ValueError, match="different competition policy"):
+        create_intake_app(
+            successor_config.model_copy(update={"predecessor_policies": ()}),
+            successor,
+            provider_factory=Provider,
+        )
+    app = create_intake_app(successor_config, successor, provider_factory=Provider)
+    with TestClient(app) as client:
+        status = client.get("/v1/competition/status").json()
+        assert status["policy_sha256"] == digest(successor)
+        assert status["honored_policy_sha256s"] == [digest(successor), digest(policy)]
+        assert status["accepted_submission_count"] == 1  # the anchor, signed under `policy`
+        assert status["retained_submission_head"]["record_count"] == 1
+        # A submission signed under the PREDECESSOR is admitted by the successor intake.
+        carried = submission(policy)
+        receipt = client.post(
+            "/v1/competition/submissions",
+            content=canonical_json_bytes(carried),
+            headers={"content-type": "application/json"},
+        )
+        assert receipt.status_code == 200, receipt.text
+        assert receipt.json()["status"] == "accepted_no_weight"
+        # A fresh submission signed under the successor itself is admitted too.
+        fresh = submission(successor, name="Bob", sequence=2)
+        receipt = client.post(
+            "/v1/competition/submissions",
+            content=canonical_json_bytes(fresh),
+            headers={"content-type": "application/json"},
+        )
+        assert receipt.status_code == 200, receipt.text
+        status = client.get("/v1/competition/status").json()
+        assert status["accepted_submission_count"] == 3
+    # A terms change is still a re-intake: it cannot open this ledger even as a successor.
+    terms = successor.model_copy(
+        update={
+            "sequence": successor.sequence + 1,
+            "predecessor_sha256": digest(successor),
+            "contribution_terms_sha256": "b1" * 32,
+        }
+    )
+    successor_path = tmp_path / "successor-policy.json"
+    successor_path.write_bytes(canonical_json_bytes(successor))
+    terms_config = successor_config.model_copy(
+        update={
+            "policy_sha256": digest(terms),
+            "chain": chain_config.model_copy(update={"policy_sha256": digest(terms)}),
+            "predecessor_policies": (str(successor_path), str(predecessor_path)),
+        }
+    )
+    with pytest.raises(ValueError, match="different competition policy"):
+        create_intake_app(terms_config, terms, provider_factory=Provider)
