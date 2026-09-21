@@ -74,6 +74,56 @@ umi-competition --policy umi-cohort3-inputs/competition-policy-seq7.json \
 
 ## Update the existing service
 
+### Linux finality observer download
+
+For `x86_64-unknown-linux-gnu`, download the exact observer binary pinned by the
+transport policy. It requires GLIBC 2.34 or newer and the system `libgcc_s.so.1`.
+A local build from the same Rust source is not guaranteed to have identical
+bytes. The six-file JSON input manifest above is unchanged; this executable is
+published separately under its policy-pinned SHA-256.
+
+Run this after downloading `umi-cohort3-inputs`:
+
+```sh
+python - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+from urllib.request import ProxyHandler, build_opener
+
+os.umask(0o077)
+root = Path('umi-cohort3-inputs')
+policy = json.loads((root / 'transport-policy.json').read_bytes())
+expected = '67b4bb856b2230e12d9ce2ec74e0f03fb0e131043802b13326ab18bf9ec78925'
+assert policy['implementation_pins']['finality_verifier']['release_sha256_by_target']['x86_64-unknown-linux-gnu'] == expected
+base = 'https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/competition/artifacts/finality/x86_64-unknown-linux-gnu/'
+opener = build_opener(ProxyHandler({}))
+opener.addheaders = [('User-Agent', 'umi-miner-setup/1')]
+with opener.open(base + expected + '/umi-grandpa-finality-observer', timeout=60) as response:
+    raw = response.read(7908289)
+assert len(raw) == 7908288 and hashlib.sha256(raw).hexdigest() == expected
+directory = root / 'artifacts'
+directory.mkdir(mode=0o700, exist_ok=True)
+target = directory / 'umi-grandpa-finality-observer'
+if target.exists():
+    assert not target.is_symlink() and target.read_bytes() == raw
+else:
+    with target.open('xb') as output:
+        output.write(raw)
+target.chmod(0o500)
+print(target.resolve())
+PY
+```
+
+Use the printed absolute path for the miner's `--finality-verifier-binary` and
+the chain configuration's `finality_binary`; those paths must agree. Keep the
+policy's verifier digest and the existing durable state directories. This
+download supplies the finality observer; it does not replace a signed validator
+host release or the separate storage-proof verifier.
+
+### Policy and service arguments
+
 Keep your existing wallet, hotkey, model revision, submitted serving origin,
 translator, finality binaries and durable database paths. Preserve the existing
 nonce, assignment, response and resource state across the restart.
