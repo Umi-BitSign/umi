@@ -20,8 +20,9 @@ translation requests under the corresponding release and policy.
 ### Successor assignment discovery rehearsal
 
 Endpoint intake is live. The [cohort 3 update](cohort3-update.md) provides the
-reviewed policy-7 connection inputs and restart instructions; cohort dispatch
-qualification is still in progress. The placeholders below are generic rehearsal
+reviewed policy-7 connection inputs and restart instructions. Check the
+[public status](https://api.umi.vision/v1/competition/status) for current readiness
+and the next intake cutoff. The placeholders below are generic rehearsal
 examples. A coordinator, feed or evaluator infrastructure delay cannot be scored
 as miner failure.
 
