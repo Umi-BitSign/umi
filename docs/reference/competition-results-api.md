@@ -2,11 +2,11 @@
 
 # Competition results API
 
-The public intake origin is `https://api.umi.vision`. The existing round and
-settlement reads below work when their round SHA-256 is known. The round index
-and public score pages are implemented in source but **pending deployment**.
-A merged commit does not
-establish that the public origin serves it.
+The public intake origin is `https://api.umi.vision`. Use the round index below
+to discover retained rounds, then follow each item's detail and results URLs.
+The index and C3 provisional score pages are deployed. A missing results URL
+means no score artifact has been published for that round. Scores alone do not
+confirm certification or on-chain rewards.
 
 ## Existing reads
 
@@ -33,7 +33,7 @@ The settlement response contains replay material as well as the projection.
 The index below returns only an explicit metadata allowlist. Website consumers
 should select the fields they display rather than republishing entire responses.
 
-## Round index (pending deployment)
+## Round index
 
 `GET /v1/competition/rounds/index?limit=20`
 
@@ -119,7 +119,7 @@ The newest retained round is not necessarily the current intake round. Read
 have a frozen round or round SHA. This index does not synthesize one. It makes no
 claim about finality, signing-window validity, active weights or payment.
 
-## Public score pages (pending deployment)
+## Public score pages
 
 `GET /v1/competition/rounds/{round_sha256}/results?offset=0&limit=20`
 
@@ -264,8 +264,25 @@ python -m umi.competition_public_results_cli --config /srv/umi/public-results-pu
 For an operator-managed persistent service, append `--watch`. It has no wallet,
 network, inference, signing or weight-submit path. The service should run under
 the intake operator, with read access to intake and policy files, write access
-only to its dedicated publication directory, and an appropriate CPU/memory
-budget. SIGTERM/SIGINT in watch mode finishes the current bounded batch before
+to its publication directory, and an appropriate CPU/memory budget. A live WAL
+database also needs access to SQLite's WAL/shared-memory sidecars, including
+permission to create them when absent. Keep the main database read-only and
+retain the exporter's `mode=ro` and `query_only` checks. For a systemd service
+using `ProtectSystem=strict`, the relevant path overrides are:
+
+```ini
+[Service]
+ReadWritePaths=/srv/umi/public-results /srv/umi/intake
+ReadOnlyPaths=/srv/umi/intake/competition.sqlite3
+```
+
+Replace these paths with the actual deployment paths. The database read-only
+bind mount pins its inode: stop and restart the publisher around an intentional
+database-file replacement. Do not mark the live database immutable to avoid
+sidecar access; that disables locking assumptions required for concurrent
+writers. See [SQLite's read-only WAL requirements](https://sqlite.org/wal.html#read_only_databases).
+
+SIGTERM/SIGINT in watch mode finishes the current bounded batch before
 exit; choose service stop grace to allow that work. One-shot mode exits nonzero
 when a round is held. Watch mode reports held rounds and retries them on later
 scans. Logs contain round identifiers and error classes, not validation payloads.
