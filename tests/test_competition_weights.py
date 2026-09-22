@@ -509,6 +509,10 @@ async def test_slow_evidence_commit_cannot_use_expired_post_send_proof(weight_ca
         assert (
             json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])["phase"] == "signed"
         )
+    # A restarted host authenticates a fresh activation observation as well.
+    item.context.refresh(
+        owned_observation=await item.provider.collect_weights(item.hotkey, item.recipients)
+    )
     assert (await _run(item)).status == "recovered_effect"
     assert len(item.encoded) == 1
 
