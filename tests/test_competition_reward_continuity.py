@@ -588,3 +588,63 @@ async def test_out_of_scope_replacement_does_not_consume_existing_continuity(
     assert (await c.service.tick())["round_sequence"] == prior.intent.round_sequence
     assert c.feed.history()[-1].intent.package == prior.intent.package
     assert len(c.publisher.builder.journal.keys("continuity_admission")) == 1
+
+
+@pytest.mark.parametrize("resume_offset", [1, 100], ids=["pending", "expired"])
+@pytest.mark.parametrize("crash_kind", ["continuity_admission", "intent", "authorization"])
+async def test_admitted_newer_package_resumes_after_its_original_end(
+    automatic, package_case, next_package, tmp_path, monkeypatch, crash_kind, resume_offset
+):
+    c = setup(automatic, package_case, tmp_path)
+    assert (await c.service.tick())["status"] == "published"
+    completed(c, next_package)
+    c.provider.block = 245
+    journal = c.publisher.builder.journal
+    put = journal.put
+    captured = {}
+
+    def crash(kind, slot, value):
+        result = put(kind, slot, value)
+        if kind == crash_kind:
+            captured[slot] = canonical_json_bytes(value)
+            raise RuntimeError("crash during newer publication")
+        return result
+
+    monkeypatch.setattr(journal, "put", crash)
+    with pytest.raises(RuntimeError, match="crash during newer publication"):
+        await c.service.tick()
+    monkeypatch.setattr(journal, "put", put)
+    admission = canonical_json_bytes(
+        journal.get("continuity_admission", next_package.prepared.package_sha256)
+    )
+    assert len(c.feed.history()) == 1
+    package = c.publisher.builder._load(next_package.prepared)
+    c.provider.block = (
+        package.settlement_certificate.publication.round.valid_through_block + resume_offset
+    )
+    c.publisher.builder = SuccessorRoundPublicationBuilder(journal.root, c.publisher.builder.plan)
+    c.service = AutomaticSuccessorPublisher(c.publisher, c.feed, c.config, **c.signers)
+    result = await c.service.tick()
+    assert result["status"] == "published" and result["round_sequence"] == 2
+    assert [p.intent.sequence for p in c.feed.history()] == [2, 3]
+    assert (
+        c.feed.history()[-1].intent.package.package_sha256 == next_package.prepared.package_sha256
+    )
+    assert (
+        canonical_json_bytes(
+            journal.get("continuity_admission", next_package.prepared.package_sha256)
+        )
+        == admission
+    )
+    assert not journal.keys("unavailable_continuity_admission")
+    for slot, raw in captured.items():
+        assert canonical_json_bytes(journal.get(crash_kind, slot)) == raw
+    if resume_offset == 1 and crash_kind in {"intent", "authorization"}:
+        # Resume preserves the still-live old lease; its renewal is already due.
+        assert (await c.service.tick())["status"] == "published"
+        assert (
+            c.feed.history()[-1].intent.package.package_sha256
+            == next_package.prepared.package_sha256
+        )
+        assert len(journal.keys("continuity_admission")) == 2
+    assert (await c.service.tick())["status"] == "waiting_for_completed_round"
