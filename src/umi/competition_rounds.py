@@ -1293,6 +1293,10 @@ def serve_rounds(config, policy, *, legacy=None):
         workers=1,
         proxy_headers=False,
         access_log=False,
-        limit_concurrency=4,
-        backlog=8,
+        # Uvicorn counts idle keep-alive connections against this ceiling too.
+        # Four pooled tunnel/client connections could therefore exclude every
+        # new request even while no application operation was running. Native
+        # replay/queue locks still serialize expensive settlement operations.
+        limit_concurrency=128,
+        backlog=256,
     )
