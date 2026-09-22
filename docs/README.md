@@ -40,6 +40,7 @@ and optional [funding audit](operators/funding-audit.md).
 ## Reference
 
 - [Competition CLI recipes](reference/commands.md)
+- [Public results API and pending round discovery](reference/competition-results-api.md)
 - [Observer API](reference/dashboard-api.md) and [example configurations](examples/)
 - [Whitepaper](../whitepaper/README.md), [PDF](../whitepaper/UMI-Whitepaper.pdf)
 - [Retired workflows and dated deployment evidence](reference/legacy.md)

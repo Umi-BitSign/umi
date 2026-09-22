@@ -7,6 +7,7 @@ owned-finality provider; fixture CLI operation remains loopback-only rehearsal.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Literal
 
@@ -18,6 +19,8 @@ from starlette.types import Lifespan
 
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
+from .competition_public_results import PublicResultsSource, public_results_page
+from .competition_round_discovery import MAXIMUM_ROUND_SEQUENCE, round_index
 from .competition_store import (
     AdmissionCapacityError,
     CompetitionStore,
@@ -57,6 +60,7 @@ def create_app(
     limits: CompetitionApiLimits | None = None,
     public_deployment: PublicIntakeDeployment | None = None,
     historical_archives: tuple[LoadedIntakeArchive, ...] = (),
+    public_results_sources: tuple[PublicResultsSource, ...] = (),
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
@@ -94,6 +98,13 @@ def create_app(
     )
     app = FastAPI(title=title, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.competition_store = store
+    public_results_sources = tuple(
+        PublicResultsSource.model_validate_json(canonical_json_bytes(source))
+        for source in public_results_sources
+    )
+    results_by_round = {source.round_sha256: source for source in public_results_sources}
+    if len(results_by_round) != len(public_results_sources):
+        raise ValueError("public result sources must name unique rounds")
     capacities = {
         "submission": asyncio.Semaphore(limits.maximum_concurrent_submissions),
         "read": asyncio.Semaphore(limits.maximum_concurrent_reads),
@@ -281,6 +292,50 @@ def create_app(
         if item is None:
             raise HTTPException(404, "archived submission not found")
         return Response(content=item, media_type="application/json")
+
+    @app.get("/v1/competition/rounds/index")
+    async def rounds(
+        before_sequence: int | None = Query(default=None, ge=1, le=MAXIMUM_ROUND_SEQUENCE),
+        limit: int = Query(
+            default=min(20, limits.maximum_page_size), ge=1, le=limits.maximum_page_size
+        ),
+    ):
+        try:
+            page = await run_in_threadpool(
+                round_index,
+                store.path,
+                policy_sha256=digest(store.policy),
+                before_sequence=before_sequence,
+                limit=limit,
+            )
+            for item in page["items"]:
+                round_id = item["round_sha256"]
+                item["results_url"] = (
+                    f"/v1/competition/rounds/{round_id}/results"
+                    if round_id in results_by_round
+                    else None
+                )
+            return page
+        except (OSError, ValueError, sqlite3.Error) as error:
+            raise HTTPException(503, "round index unavailable") from error
+
+    @app.get("/v1/competition/rounds/{round_sha256}/results")
+    async def public_results(
+        round_sha256: str,
+        offset: int = Query(default=0, ge=0, le=limits.maximum_page_offset),
+        limit: int = Query(
+            default=min(20, limits.maximum_page_size), ge=1, le=limits.maximum_page_size
+        ),
+    ):
+        source = results_by_round.get(round_sha256)
+        if source is None:
+            raise HTTPException(404, "public results not published")
+        try:
+            return await run_in_threadpool(
+                public_results_page, store.path, source, offset=offset, limit=limit
+            )
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+            raise HTTPException(503, "public results unavailable") from error
 
     @app.get("/v1/competition/rounds/{round_sha256}")
     async def round_status(
