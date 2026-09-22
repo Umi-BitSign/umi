@@ -346,6 +346,81 @@ async def test_repair_signing_requires_current_owned_capture_and_original_claim(
         sign_dispatch_repair(changed, capture=capture, **arguments)
 
 
+@pytest.mark.parametrize(
+    "mutation", ["missing", "order", "evaluator", "claim", "conflict", "bytes"]
+)
+async def test_retained_intent_cannot_bypass_original_scope_or_claim(lost, tmp_path, mutation):
+    from umi.competition_evaluator import execution_slot
+
+    from .test_competition_evaluator import make_driver
+
+    driver = make_driver(
+        tmp_path / "intent-reader",
+        lost.dispatch.config.chain,
+        lost.item.policy,
+        lost.setup.archive,
+        lost.setup.videos,
+        lost.signers[0],
+        legacy=lost.item.legacy_policy,
+        dispatch=lost.journal.path.parent,
+    )
+    try:
+        slot = execution_slot(
+            lost.item.round, lost.item.signed_submission, driver.config.evaluator_hotkey
+        )
+        driver.journal.admit(lost.order, slot)
+        original = lost.observations[0].announcement
+        driver.journal.put(slot, "announcement_intent", original)
+        lost.journal.complete(lost.original[0], evidence=lost.original_evidence[0])
+        context = dict(
+            journal=lost.journal,
+            evaluator_hotkey=driver.config.evaluator_hotkey,
+            retained_intent=(driver.journal, slot),
+            signed_order=lost.order,
+            policy=lost.item.policy,
+            legacy=lost.item.legacy_policy,
+            current_block=lost.item.round.reveal_block,
+        )
+        validate_local_repair(lost.repair, **context)
+        repair = lost.repair
+        changed = original
+        if mutation == "order":
+            changed = original.model_copy(update={"order_sha256": "00" * 32})
+        elif mutation == "evaluator":
+            changed = original.model_copy(
+                update={"evaluator_hotkey": lost.signers[1].hotkey.ss58_address}
+            )
+        elif mutation == "claim":
+            body = lost.body.model_copy(
+                update={"unavailable": (lost.claim.model_copy(update={"claim_sha256": "00" * 32}),)}
+            )
+            repair = SignedDispatchRepair(
+                amendment=body, signatures=tuple(sign_object(body, w) for w in lost.signers)
+            )
+            changed = original.model_copy(
+                update={"evidence": original.evidence.model_copy(update={"repair": repair})}
+            )
+        with driver.journal.transaction() as db:
+            if mutation == "missing":
+                db.execute(
+                    "DELETE FROM artifacts WHERE slot=? AND kind='announcement_intent'", (slot,)
+                )
+            elif mutation == "conflict":
+                db.execute("UPDATE orders SET conflict=1 WHERE slot=?", (slot,))
+            else:
+                raw = canonical_json_bytes(changed) + (b" " if mutation == "bytes" else b"")
+                db.execute(
+                    "UPDATE artifacts SET body=? WHERE slot=? AND kind='announcement_intent'",
+                    (raw, slot),
+                )
+        with pytest.raises(ValueError):
+            validate_local_repair(repair, **context)
+        with pytest.raises(ValueError, match="uncertain claim"):
+            retained_claim(lost.journal, lost.key)
+    finally:
+        await driver.aclose()
+
+
 @pytest.mark.parametrize("authorization", [173], indirect=True)
 async def test_full_174_roster_repair_preserves_other_173_and_replays_new_release_package(
     lost,
@@ -753,7 +828,9 @@ async def test_native_evaluators_certify_repair_and_recheck_local_settlement(
     assert crashes == ([retirement_crash] * 2 if retirement_crash else [])
 
 
-@pytest.mark.parametrize("arrival", ["before_announcement", "after_announcement"])
+@pytest.mark.parametrize(
+    "arrival", ["before_announcement", "after_announcement", "after_intent_crash"]
+)
 async def test_native_evaluator_progresses_when_outcome_recovers_before_retirement(
     lost, tmp_path, monkeypatch, arrival
 ):
@@ -766,7 +843,7 @@ async def test_native_evaluator_progresses_when_outcome_recovers_before_retireme
 
     from .test_competition_evaluator import exchange, execute, make_driver, put
 
-    drivers = tuple(
+    drivers = list(
         make_driver(
             tmp_path / f"late-worker-{i}",
             lost.dispatch.config.chain,
@@ -802,13 +879,17 @@ async def test_native_evaluator_progresses_when_outcome_recovers_before_retireme
             / (digest(lost.order.order) + ".json"),
             lost.repair,
         )
-        if i == 0 and arrival == "after_announcement":
+        if i == 0 and arrival in {"after_announcement", "after_intent_crash"}:
             original_put = driver.journal.put
 
             def after_announcement(slot, kind, value, original_put=original_put):
                 original_put(slot, kind, value)
-                if kind == "announcement":
+                if kind == (
+                    "announcement_intent" if arrival == "after_intent_crash" else "announcement"
+                ):
                     recover()
+                    if arrival == "after_intent_crash":
+                        raise RuntimeError("synthetic crash after durable announcement intent")
 
             monkeypatch.setattr(driver.journal, "put", after_announcement)
     await execute(drivers)
@@ -820,6 +901,31 @@ async def test_native_evaluator_progresses_when_outcome_recovers_before_retireme
         )
     if arrival == "before_announcement":
         recover()
+    if arrival == "after_intent_crash":
+        await drivers[0].poll_once()
+        from umi.competition_observations import ExecutionAnnouncement, SignedExecutionAnnouncement
+
+        intent_slot = execution_slot(
+            lost.item.round, lost.item.signed_submission, drivers[0].config.evaluator_hotkey
+        )
+        intent = drivers[0].journal.get(intent_slot, "announcement_intent", ExecutionAnnouncement)
+        assert intent is not None
+        assert (
+            drivers[0].journal.get(intent_slot, "announcement", SignedExecutionAnnouncement) is None
+        )
+        await drivers[0].aclose()
+        drivers[0] = make_driver(
+            tmp_path / "late-worker-0",
+            lost.dispatch.config.chain,
+            lost.item.policy,
+            lost.setup.archive,
+            lost.setup.videos,
+            lost.signers[0],
+            legacy=lost.item.legacy_policy,
+            dispatch=lost.journal.path.parent,
+        )
+        drivers[0].provider.block = lost.item.round.reveal_block
+        drivers[0].pulses = Pulses()
     for _ in range(8):
         for driver in drivers:
             await driver.poll_once()
@@ -828,6 +934,10 @@ async def test_native_evaluator_progresses_when_outcome_recovers_before_retireme
         slot = execution_slot(
             lost.item.round, lost.item.signed_submission, driver.config.evaluator_hotkey
         )
+        with driver.journal.transaction() as db:
+            assert db.execute("SELECT conflict FROM orders WHERE slot=?", (slot,)).fetchone() == (
+                0,
+            )
         if arrival == "before_announcement":
             assert (
                 driver.journal.get(slot, "independent", IndependentEvaluationEvidence) is not None
@@ -835,6 +945,11 @@ async def test_native_evaluator_progresses_when_outcome_recovers_before_retireme
         else:
             assert driver.journal.get(slot, "void", VoidEvaluationEvidence) is not None
         await driver.aclose()
+    if arrival == "after_intent_crash":
+        assert (
+            drivers[0].journal.get(intent_slot, "announcement_intent", ExecutionAnnouncement)
+            == intent
+        )
     assert lost.journal.status(lost.key)["state"] == "completed"
     assert lost.dispatch.miner.translator.calls == 6
     with pytest.raises(ValueError, match="uncertain claim"):
