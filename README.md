@@ -21,6 +21,7 @@ into successive public baselines.
 
 - [All documentation](docs/README.md)
 - [Competition and the 70/30 allocation](docs/OPEN_COMPETITION.md)
+- [Public round discovery and provisional results API](docs/reference/competition-results-api.md)
 - [Model contributions](docs/contributors/models.md)
 - [Whitepaper](whitepaper/README.md) and [PDF](whitepaper/UMI-Whitepaper.pdf)
 
