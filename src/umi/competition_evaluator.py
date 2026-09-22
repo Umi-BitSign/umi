@@ -1016,10 +1016,20 @@ class ContinuousEvaluator:
                     / (digest(order) + ".json")
                 )
                 repair = _read(repair_path, SignedDispatchRepair) if repair_path.exists() else None
-                if repair is not None and any(
-                    identity(c.evaluator_hotkey) == identity(job.evaluator_hotkey)
-                    for c in repair.amendment.unavailable
-                ):
+                own_repair_claims = (
+                    ()
+                    if repair is None
+                    else tuple(
+                        c
+                        for c in repair.amendment.unavailable
+                        if identity(c.evaluator_hotkey) == identity(job.evaluator_hotkey)
+                    )
+                )
+                recovered = own_repair_claims and all(
+                    (self.dispatch.status(c.assignment_key) or {}).get("state") == "completed"
+                    for c in own_repair_claims
+                )
+                if own_repair_claims and not recovered:
                     retained = assemble_unavailable_observations(
                         incumbent=retained,
                         journal=self.dispatch,

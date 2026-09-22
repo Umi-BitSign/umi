@@ -288,6 +288,36 @@ async def test_completed_claim_cannot_be_voided_as_unavailable(lost):
         retained_claim(lost.journal, complete_key)
 
 
+@pytest.mark.parametrize("completed", [False, True])
+async def test_historical_observation_requires_its_own_authentic_scope(lost, completed):
+    if completed:
+        lost.journal.complete(lost.original[0], evidence=lost.original_evidence[0])
+    context = dict(
+        journal=lost.journal,
+        evaluator_hotkey=lost.incumbent.job.evaluator_hotkey,
+        signed_order=lost.order,
+        policy=lost.item.policy,
+        legacy=lost.item.legacy_policy,
+        current_block=lost.item.round.reveal_block,
+    )
+    original = lost.observations[0]
+    validate_local_repair(lost.repair, signed_observation=original, **context)
+    forged = original.model_copy(update={"signature": lost.observations[1].signature})
+    with pytest.raises(ValueError):
+        validate_local_repair(lost.repair, signed_observation=forged, **context)
+    wrong_order = original.announcement.model_copy(update={"order_sha256": "00" * 32})
+    resigned = original.model_copy(
+        update={"announcement": wrong_order, "signature": sign_object(wrong_order, lost.signers[0])}
+    )
+    with pytest.raises(ValueError, match="original scope"):
+        validate_local_repair(lost.repair, signed_observation=resigned, **context)
+    other_signer = original.model_copy(
+        update={"signature": sign_object(original.announcement, lost.signers[1])}
+    )
+    with pytest.raises(ValueError, match="original scope"):
+        validate_local_repair(lost.repair, signed_observation=other_signer, **context)
+
+
 async def test_repair_signing_requires_current_owned_capture_and_original_claim(lost):
     from umi.competition_dispatch_repair import sign_dispatch_repair
 
@@ -721,6 +751,94 @@ async def test_native_evaluators_certify_repair_and_recheck_local_settlement(
     assert lost.journal.status(lost.key)["state"] == "uncertain_dispatched"
     assert lost.dispatch.miner.translator.calls == 6
     assert crashes == ([retirement_crash] * 2 if retirement_crash else [])
+
+
+@pytest.mark.parametrize("arrival", ["before_announcement", "after_announcement"])
+async def test_native_evaluator_progresses_when_outcome_recovers_before_retirement(
+    lost, tmp_path, monkeypatch, arrival
+):
+    from pathlib import Path
+
+    from umi.competition_evaluator import execution_slot
+    from umi.competition_evidence import IndependentEvaluationEvidence
+    from umi.competition_void import VoidEvaluationEvidence
+    from umi.drand import DrandPulse
+
+    from .test_competition_evaluator import exchange, execute, make_driver, put
+
+    drivers = tuple(
+        make_driver(
+            tmp_path / f"late-worker-{i}",
+            lost.dispatch.config.chain,
+            lost.item.policy,
+            lost.setup.archive,
+            lost.setup.videos,
+            w,
+            legacy=lost.item.legacy_policy,
+            dispatch=lost.journal.path.parent,
+        )
+        for i, w in enumerate(lost.signers)
+    )
+
+    class Pulses:
+        async def fetch(self, number):
+            assert number == ROUND
+            return DrandPulse(**pulse_record())
+
+    recovered = []
+
+    def recover():
+        if not recovered:
+            lost.journal.complete(lost.original[0], evidence=lost.original_evidence[0])
+            recovered.append(True)
+
+    for i, driver in enumerate(drivers):
+        driver.pulses = Pulses()
+        driver.provider.block = lost.item.request.issued_block
+        put(Path(driver.config.order_directory) / (digest(lost.order.order) + ".json"), lost.order)
+        put(
+            Path(driver.config.state_directory)
+            / "dispatch-repairs"
+            / (digest(lost.order.order) + ".json"),
+            lost.repair,
+        )
+        if i == 0 and arrival == "after_announcement":
+            original_put = driver.journal.put
+
+            def after_announcement(slot, kind, value, original_put=original_put):
+                original_put(slot, kind, value)
+                if kind == "announcement":
+                    recover()
+
+            monkeypatch.setattr(driver.journal, "put", after_announcement)
+    await execute(drivers)
+    for driver in drivers:
+        driver.provider.block = lost.item.round.reveal_block
+        put(
+            Path(driver.config.reveal_directory) / (digest(lost.item.suite) + ".json"),
+            lost.item.suite,
+        )
+    if arrival == "before_announcement":
+        recover()
+    for _ in range(8):
+        for driver in drivers:
+            await driver.poll_once()
+        exchange(drivers)
+    for driver in drivers:
+        slot = execution_slot(
+            lost.item.round, lost.item.signed_submission, driver.config.evaluator_hotkey
+        )
+        if arrival == "before_announcement":
+            assert (
+                driver.journal.get(slot, "independent", IndependentEvaluationEvidence) is not None
+            )
+        else:
+            assert driver.journal.get(slot, "void", VoidEvaluationEvidence) is not None
+        await driver.aclose()
+    assert lost.journal.status(lost.key)["state"] == "completed"
+    assert lost.dispatch.miner.translator.calls == 6
+    with pytest.raises(ValueError, match="uncertain claim"):
+        retained_claim(lost.journal, lost.key)  # Cannot sign a new absence claim.
 
 
 async def test_delivery_release_override_keeps_original_binding_and_requires_exact_identity(
