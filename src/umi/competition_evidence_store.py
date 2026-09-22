@@ -114,6 +114,10 @@ class EvidenceStore:
 
     def _bound(self):
         self._transaction()
+        if self.db.execute("SELECT id,length(body) FROM weight_proof_binding").fetchall() != [
+            (1, len(self.binding))
+        ]:
+            raise ValueError("evidence storage binding changed")
         if self.db.execute("SELECT id,body FROM weight_proof_binding").fetchall() != [
             (1, self.binding)
         ]:
@@ -145,14 +149,26 @@ class EvidenceStore:
         ).fetchone()
         if maximum > MAX_EVIDENCE_BYTES or recipe_max > MAX_RECIPE_BYTES:
             raise ValueError("evidence store contains oversized content")
+        if (
+            self.db.execute(
+                "SELECT 1 FROM weight_proof_objects WHERE length(sha256)!=64 LIMIT 1"
+            ).fetchone()
+            or self.db.execute(
+                "SELECT 1 FROM weight_proof_records WHERE length(sha256)!=64 "
+                "OR length(recipe_sha256)!=64 OR length(kind)>8 LIMIT 1"
+            ).fetchone()
+        ):
+            raise ValueError("evidence store identity exceeds bounds")
         usage = EvidenceBudget(size + recipes, expanded, records, count)
         if not self.limits.contains(usage):
             raise ValueError("evidence store exceeds limits")
         return usage
 
     def _reservations(self) -> dict[str, EvidenceBudget]:
-        count = self.db.execute("SELECT COUNT(*) FROM weight_proof_reservations").fetchone()[0]
-        if count > self.limits.records:
+        count, largest = self.db.execute(
+            "SELECT COUNT(*),COALESCE(MAX(length(id)),0) FROM weight_proof_reservations"
+        ).fetchone()
+        if count > self.limits.records or largest > 64:
             raise ValueError("too many evidence reservations")
         return {
             checked_digest(row[0]): EvidenceBudget(*row[1:])
@@ -208,9 +224,16 @@ class EvidenceStore:
     def _record(self, identity: str):
         checked_digest(identity)
         found = self.db.execute(
-            "SELECT length(recipe) FROM weight_proof_records WHERE sha256=?", (identity,)
+            "SELECT length(recipe),length(kind),length(recipe_sha256) "
+            "FROM weight_proof_records WHERE sha256=?",
+            (identity,),
         ).fetchone()
-        if found is None or not 0 < found[0] <= MAX_RECIPE_BYTES:
+        if (
+            found is None
+            or not 0 < found[0] <= MAX_RECIPE_BYTES
+            or not 0 < found[1] <= 8
+            or found[2] != 64
+        ):
             raise ValueError("evidence recipe missing or oversized")
         kind, expanded, recipe, checksum = self.db.execute(
             "SELECT kind,expanded_bytes,recipe,recipe_sha256 FROM weight_proof_records "

@@ -70,9 +70,12 @@ def copy_legacy_weight_journal(
         ).fetchone()
     ):
         raise ValueError("legacy weight journal schema changed")
-    binding = source.execute("SELECT * FROM binding").fetchall()
-    if len(binding) != 1:
+    count, size = source.execute(
+        "SELECT COUNT(*),COALESCE(MAX(length(hotkey)),0) FROM binding"
+    ).fetchone()
+    if count != 1 or not 1 <= size <= 128:
         raise ValueError("legacy copy needs exactly one existing owner binding")
+    binding = source.execute("SELECT * FROM binding").fetchall()
     hotkey, maximum_attempts, maximum_evidence_bytes = binding[0]
     if hashlib.sha256(canonical_json_bytes(binding)).hexdigest() != checked_digest(
         expected_binding_sha256
@@ -99,6 +102,13 @@ def copy_legacy_weight_journal(
         raise ValueError("legacy evidence exceeds capacity")
     if maximum > MAX_EVIDENCE_BYTES:
         raise ValueError("legacy evidence contains oversized object")
+    if (
+        source.execute(
+            "SELECT 1 FROM attempts WHERE length(id)!=64 OR length(sha256)!=64 LIMIT 1"
+        ).fetchone()
+        or source.execute("SELECT 1 FROM evidence WHERE length(sha256)!=64 LIMIT 1").fetchone()
+    ):
+        raise ValueError("legacy digest field exceeds copy bound")
     for identity, size in source.execute("SELECT id,length(body) FROM attempts"):
         if not 0 < size <= 256 * 1024:
             raise ValueError("legacy attempt exceeds size bound")
