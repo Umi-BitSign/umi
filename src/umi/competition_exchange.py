@@ -38,6 +38,7 @@ from .competition_evidence import (
     replay_independent_evaluation,
     verify_evaluator_run,
 )
+from .competition_exchange_migration import check_launch_fences, exchange_binding
 from .competition_execution import execution_boundary, execution_key
 from .competition_launch import PublicLaunchIdentity
 from .competition_observations import execution_observations
@@ -275,6 +276,7 @@ class ExchangeJournal:
         self.config = ExchangeConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.legacy = legacy
+        self._binding = exchange_binding(self.config)
         if (
             digest(policy) != config.policy_sha256
             or (legacy is None) != (config.legacy_policy_sha256 is None)
@@ -289,13 +291,7 @@ class ExchangeJournal:
         os.close(fd)
         with self.transaction() as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (body BLOB NOT NULL)")
-            binding = canonical_json_bytes(
-                config.model_dump(
-                    mode="json",
-                    by_alias=True,
-                    exclude={"maximum_orders", "maximum_events", "maximum_bytes", "port", "host"},
-                )
-            )
+            binding = self._binding
             old = db.execute("SELECT body FROM binding").fetchall()
             if old and (len(old) != 1 or bytes(old[0][0]) != binding):
                 if len(old) != 1 or bytes(old[0][0]) not in self._predecessor_bindings(config):
@@ -360,11 +356,17 @@ class ExchangeJournal:
         self._check_files()
         db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
         try:
+            allowed = {self._binding, *self._predecessor_bindings(self.config)}
+            db.create_function("umi_exchange_launch_writer", 1, lambda body: body in allowed)
             db.execute("PRAGMA synchronous=FULL")
             db.execute(
                 "PRAGMA max_page_count=" + str((self.config.maximum_bytes + 64 * 1024**2) // 4096)
             )
             db.execute("BEGIN IMMEDIATE")
+            if check_launch_fences(db) and db.execute(
+                "SELECT body FROM binding"
+            ).fetchall() not in ([(binding,)] for binding in allowed):
+                raise ValueError("stale exchange launch configuration")
             yield db
             db.commit()
         except BaseException:
