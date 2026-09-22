@@ -12,6 +12,8 @@ status. Superseded procedures and deployment reports were removed from the
 working documentation; the links below retain their exact pre-cleanup Git version.
 Signed policies, release artifacts, receipts and attribution files were not changed.
 
+- [Cohort 3 / policy-7 connection instructions](https://github.com/Umi-BitSign/umi/blob/d12b20822848db207238ce2c2b240cb8d8b9f1e3/docs/miners/cohort3-update.md)
+
 <a id="audit-bundle-publication-operator"></a>
 
 - [Public validator audit bundles](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/AUDIT_BUNDLE_PUBLICATION_OPERATOR.md)

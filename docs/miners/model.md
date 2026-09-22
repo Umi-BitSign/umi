@@ -19,10 +19,10 @@ translation requests under the corresponding release and policy.
 
 ### Successor assignment discovery rehearsal
 
-Endpoint intake is live. The [cohort 3 update](cohort3-update.md) provides the
-reviewed policy-7 connection inputs and restart instructions. Delivery and
-evaluation services are ready for the scheduled cutoff; live cohort completion
-is still pending. The placeholders below are generic rehearsal
+Endpoint intake is live. The [current connection guide](connection.md) provides the
+reviewed policy-8 connection inputs and restart instructions. Coordinator service
+cutover and reward-path verification remain in progress; check live readiness
+through that guide. The placeholders below are generic rehearsal
 examples. A coordinator, feed or evaluator infrastructure delay cannot be scored
 as miner failure.
 
