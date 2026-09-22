@@ -611,10 +611,13 @@ def _assert_repaired_public_export(tmp_path, item, settlement, pairs):
         export_round(database, rid, policy=item.policy, scoring_policy=item.legacy_policy)
 
 
-async def test_native_evaluators_certify_repair_and_recheck_local_settlement(lost, tmp_path):
+@pytest.mark.parametrize("retirement_crash", [None, "before", "after"])
+async def test_native_evaluators_certify_repair_and_recheck_local_settlement(
+    lost, tmp_path, monkeypatch, retirement_crash
+):
     from pathlib import Path
 
-    from umi.competition_evaluator import execution_slot
+    from umi.competition_evaluator import VoidEvidenceObservation, execution_slot
     from umi.competition_settlement_signing import IndependentSettlementSigner
     from umi.competition_void import VoidEvaluationEvidence
     from umi.drand import DrandPulse
@@ -634,6 +637,25 @@ async def test_native_evaluators_certify_repair_and_recheck_local_settlement(los
         )
         for i, w in enumerate(lost.signers)
     )
+    crashes = []
+
+    def with_crash(original):
+        seen = False
+
+        def crash_once(*, evidence, suite):
+            nonlocal seen
+            if retirement_crash and not seen:
+                seen = True
+                if retirement_crash == "after":
+                    original(evidence=evidence, suite=suite)
+                crashes.append(retirement_crash)
+                raise OSError("synthetic crash around scheduling retirement")
+            return original(evidence=evidence, suite=suite)
+
+        return crash_once
+
+    for driver in drivers:
+        monkeypatch.setattr(driver.dispatch, "retire_void", with_crash(driver.dispatch.retire_void))
 
     class Pulses:
         async def fetch(self, number):
@@ -668,6 +690,9 @@ async def test_native_evaluators_certify_repair_and_recheck_local_settlement(los
         )
         evidence = driver.journal.get(slot, "void", VoidEvaluationEvidence)
         assert evidence is not None
+        assert driver.journal.get(slot, "void_observation", VoidEvidenceObservation) is not None
+        with driver.dispatch._transaction() as db:
+            assert driver.dispatch.retired_claims(db) == {lost.key}
         completed.append(evidence)
         prepared = SimpleNamespace(
             publication=SimpleNamespace(
@@ -693,6 +718,7 @@ async def test_native_evaluators_certify_repair_and_recheck_local_settlement(los
     assert completed[0].certificate.void.reason == "coordinator_outcome_unavailable"
     assert lost.journal.status(lost.key)["state"] == "uncertain_dispatched"
     assert lost.dispatch.miner.translator.calls == 6
+    assert crashes == ([retirement_crash] * 2 if retirement_crash else [])
 
 
 async def test_delivery_release_override_keeps_original_binding_and_requires_exact_identity(

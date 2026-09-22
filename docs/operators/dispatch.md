@@ -153,13 +153,14 @@ records are charged too. Never delete evidence or retime work to regain capacity
 Evaluators sharing a journal share the immutable assignment and proof reservation.
 Each evaluator must qualify its own dispatcher profile; those timing receipts are
 separate and cannot substitute for one another.
-Unused future-proof allowance is released only after every publication is
-consumed and every assignment is recorded completed or expired. An unknown claim
-or an unpublished body keeps its allowance. Retained evidence remains charged.
+Unused future-proof allowance is released after every publication is consumed
+and every assignment is completed, expired, or separately retired by a certified
+coordinator-outcome repair void. An unresolved claim or an unpublished body keeps
+its allowance. Retained evidence remains charged.
 
 The first successful reservation upgrades the private journal to generation 2
 and fences older writers, including already-open SQLite connections. Drain any
-dispatched claim without a recorded completion before migration. Failed admission
+dispatched claim or obtain its certified repair void before migration. Failed admission
 rolls back the migration and the new reservation together. Historical signed
 publications remain readable; new publications must match their reserved bodies.
 Upgrade all services sharing this journal before enabling new endorsements.
@@ -294,6 +295,16 @@ Completed work is never resent. Cancellation, deadline or recording failure afte
 leaves `uncertain_dispatched`. That uncertainty cannot be automatically retried,
 even if the miner may never have received the request. Expired coordinator work
 is retained with `miner_fault: false`.
+
+An evaluator-authorized repair can certify a neutral void for an unavailable
+coordinator outcome after the request deadline. Once the evaluator verifies that
+certificate, it automatically appends a scheduling retirement tied to the exact
+original claim. This releases the claim's future proof reservation and lets a
+later cohort pass dispatch admission. The original `uncertain_dispatched` event
+and all recorded bytes remain unchanged; the request is never resent. Certificate
+bytes count toward journal capacity, and restart recovery repeats this operation
+idempotently. Scheduling retirement does not depend on settlement succeeding and
+does not authorize a score, timely settlement receipt, or weight submission.
 
 The private transcript retains exact request/authentication and response bytes,
 receipt times, and the digest of the separately retained origin proof. A

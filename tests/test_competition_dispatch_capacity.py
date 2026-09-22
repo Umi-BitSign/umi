@@ -591,6 +591,7 @@ async def _exercise_poll_loop(jobs, limits, budget, *, extra_inbox=(), restart_a
             **limits.model_dump(), evaluator_hotkey="synthetic-evaluator"
         )
         driver.journal = SimpleNamespace(pending_dispatches=pending_dispatches)
+        driver.spool = None
         driver._configure_timing = lambda: None
         driver._tasks, driver._cursor = {}, None
         driver._counts = {"completed": 0, "held": 0, "uncertain": 0}
