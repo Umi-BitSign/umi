@@ -125,7 +125,8 @@ def attach_settlement_route(app, queue):
                 raise HTTPException(401, "settlement authentication rejected")
             if q.vote is None:
                 cursor, proposals = await asyncio.wait_for(
-                    queue.pending(q.hotkey, after=q.after), timeout=25
+                    queue.pending(q.hotkey, after=q.after),
+                    timeout=queue.capacity.operation_timeout_seconds,
                 )
                 reply = SettlementReply(
                     query_sha256=digest(q),
@@ -134,7 +135,9 @@ def attach_settlement_route(app, queue):
                     proposals=proposals,
                 )
             else:
-                accepted = await asyncio.wait_for(queue.accept(q.vote), timeout=25)
+                accepted = await asyncio.wait_for(
+                    queue.accept(q.vote), timeout=queue.capacity.operation_timeout_seconds
+                )
                 reply = SettlementReply(
                     query_sha256=digest(q),
                     policy_sha256=digest(policy),
@@ -160,6 +163,8 @@ def attach_settlement_route(app, queue):
 
 async def request_settlement(origin, signed, *, transport=None, capacity=None):
     maximum_reply_bytes = MAX_REPLY if capacity is None else capacity.reply_bytes
+    read_timeout = 30 if capacity is None else capacity.read_timeout_seconds
+    request_timeout = 35 if capacity is None else capacity.request_timeout_seconds
     origin = validate_intake_origin(origin)
     signed = SignedSettlementQuery.model_validate_json(canonical_json_bytes(signed))
     raw = canonical_json_bytes(signed)
@@ -170,7 +175,7 @@ async def request_settlement(origin, signed, *, transport=None, capacity=None):
         async with (
             httpx.AsyncClient(
                 transport=transport,
-                timeout=httpx.Timeout(30, connect=5),
+                timeout=httpx.Timeout(read_timeout, connect=5),
                 follow_redirects=False,
                 trust_env=False,
             ) as client,
@@ -194,7 +199,7 @@ async def request_settlement(origin, signed, *, transport=None, capacity=None):
             return bytes(result)
 
     try:
-        raw = await asyncio.wait_for(fetch(), timeout=35)
+        raw = await asyncio.wait_for(fetch(), timeout=request_timeout)
     except (httpx.HTTPError, asyncio.TimeoutError):
         raise ValueError("settlement request failed") from None
     reply = SettlementReply.model_validate_json(raw)

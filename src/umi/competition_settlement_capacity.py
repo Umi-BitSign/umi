@@ -21,6 +21,24 @@ class SettlementCapacity:
     def reply_bytes(self) -> int:
         return self.page_size * self.preparation_bytes + 8192
 
+    @property
+    def operation_timeout_seconds(self) -> int:
+        # Complete-cohort discovery and vote acceptance replay retained evidence
+        # before returning. The large byte profile therefore also needs a long
+        # operational request budget. Signed snapshot/round expiry checks still
+        # apply inside each operation; this grants no additional signing time.
+        return 1800 if self.preparation_bytes > MAX_PRIVATE_BYTES else 25
+
+    @property
+    def read_timeout_seconds(self) -> int:
+        # Allow serialization after the server's semantic operation.
+        return 1860 if self.preparation_bytes > MAX_PRIVATE_BYTES else 30
+
+    @property
+    def request_timeout_seconds(self) -> int:
+        # Include connection and bounded-response transfer in the client budget.
+        return 1920 if self.preparation_bytes > MAX_PRIVATE_BYTES else 35
+
 
 def settlement_capacity(limits: PublicationReplayLimits) -> SettlementCapacity:
     # Preserve existing profiles and journal bindings. Increasing explicit

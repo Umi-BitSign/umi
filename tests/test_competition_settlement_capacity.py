@@ -36,6 +36,16 @@ def test_explicit_large_profile_keeps_global_caps_and_legacy_profile():
         1,
     )
     assert capacity.reply_bytes == 320 * MIB + 8192
+    assert (
+        legacy.operation_timeout_seconds,
+        legacy.read_timeout_seconds,
+        legacy.request_timeout_seconds,
+    ) == (25, 30, 35)
+    assert (
+        capacity.operation_timeout_seconds,
+        capacity.read_timeout_seconds,
+        capacity.request_timeout_seconds,
+    ) == (1800, 1860, 1920)
     assert MAX_BYTES == MAX_PRIVATE_BYTES == 64 * MIB
 
 

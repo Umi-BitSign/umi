@@ -249,6 +249,7 @@ async def test_conflict_after_preparation_prevents_discovery_and_vote_acceptance
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("block", [159, 171, 301])
+@pytest.mark.parametrize("replay_limits", [5_000_000, 256 * 1024**2], indirect=True)
 async def test_early_or_expired_preparations_do_not_enter_discovery(setup, block):
     s = setup
     s.provider.block = block
@@ -258,6 +259,7 @@ async def test_early_or_expired_preparations_do_not_enter_discovery(setup, block
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replay_limits", [5_000_000, 256 * 1024**2], indirect=True)
 async def test_late_new_vote_is_rejected_without_retiming(setup):
     s = setup
     await s.queue.prepare(s.prepared)
@@ -473,6 +475,7 @@ async def test_changed_retained_preparation_holds_across_restart(setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replay_limits", [5_000_000, 256 * 1024**2], indirect=True)
 async def test_expiry_during_package_creation_cannot_advertise_delivery(setup, monkeypatch):
     s = setup
     await s.queue.prepare(s.prepared)
@@ -558,6 +561,7 @@ async def test_evaluator_config_starts_and_joins_its_settlement_client(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["prepare", "discover", "publish"])
+@pytest.mark.parametrize("replay_limits", [5_000_000, 256 * 1024**2], indirect=True)
 async def test_conflict_during_finality_collection_is_rechecked_before_output(setup, stage):
     s = setup
     votes = [await signer.endorse(s.prepared) for signer in s.signers]
