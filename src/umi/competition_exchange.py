@@ -39,6 +39,11 @@ from .competition_evidence import (
     verify_evaluator_run,
 )
 from .competition_exchange_migration import check_launch_fences, exchange_binding
+from .competition_exchange_rpc_migration import (
+    check_rpc_history,
+    migrate_rpc_binding,
+    validate_rpc_addition,
+)
 from .competition_execution import execution_boundary, execution_key
 from .competition_launch import PublicLaunchIdentity
 from .competition_observations import execution_observations
@@ -289,16 +294,18 @@ class ExchangeJournal:
         self._check_files()
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         os.close(fd)
-        with self.transaction() as db:
+        with self.transaction(allow_rpc_migration=True) as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (body BLOB NOT NULL)")
             binding = self._binding
             old = db.execute("SELECT body FROM binding").fetchall()
             if old and (len(old) != 1 or bytes(old[0][0]) != binding):
-                if len(old) != 1 or bytes(old[0][0]) not in self._predecessor_bindings(config):
+                if len(old) != 1:
                     raise ValueError("exchange configuration changed")
-                # Bound under a deal-preserving predecessor policy: the same config with the
-                # predecessor's digest. Move the binding to the live policy.
-                db.execute("UPDATE binding SET body = ?", (binding,))
+                if bytes(old[0][0]) in self._predecessor_bindings(config):
+                    # Preserve the existing independently authorized policy migration.
+                    db.execute("UPDATE binding SET body = ?", (binding,))
+                else:
+                    migrate_rpc_binding(db, bytes(old[0][0]), binding)
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (binding,))
             db.execute(
@@ -352,21 +359,44 @@ class ExchangeJournal:
                     raise ValueError("exchange database must be private and owned")
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, *, allow_rpc_migration=False):
         self._check_files()
         db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
         try:
             allowed = {self._binding, *self._predecessor_bindings(self.config)}
             db.create_function("umi_exchange_launch_writer", 1, lambda body: body in allowed)
+            db.create_function("umi_exchange_rpc_writer", 1, lambda body: body in allowed)
             db.execute("PRAGMA synchronous=FULL")
             db.execute(
                 "PRAGMA max_page_count=" + str((self.config.maximum_bytes + 64 * 1024**2) // 4096)
             )
             db.execute("BEGIN IMMEDIATE")
+            migrated_rpc = check_rpc_history(db)
+            if (
+                allow_rpc_migration
+                and not migrated_rpc
+                and db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='binding' AND type='table'"
+                ).fetchone()
+            ):
+                old = db.execute("SELECT body FROM binding").fetchall()
+                if len(old) == 1 and old[0][0] not in allowed:
+                    try:
+                        validate_rpc_addition(bytes(old[0][0]), self._binding)
+                    except ValueError:
+                        # Preserve the launch-fence rejection for unrelated or
+                        # stale configs; the constructor also rejects them.
+                        pass
+                    else:
+                        allowed.add(bytes(old[0][0]))
             if check_launch_fences(db) and db.execute(
                 "SELECT body FROM binding"
             ).fetchall() not in ([(binding,)] for binding in allowed):
                 raise ValueError("stale exchange launch configuration")
+            if migrated_rpc and db.execute("SELECT body FROM binding").fetchall() not in (
+                [(binding,)] for binding in allowed
+            ):
+                raise ValueError("stale exchange RPC configuration")
             yield db
             db.commit()
         except BaseException:

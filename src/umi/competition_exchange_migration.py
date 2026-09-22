@@ -12,6 +12,7 @@ import sqlite3
 import stat
 from pathlib import Path
 
+from .competition_exchange_rpc_migration import check_rpc_history
 from .competition_launch_amendment import SignedLaunchAmendment, verify_launch_amendment
 from .competition_submission_checkpoint import SubmissionHeadCheckpointFile
 from .open_competition import CompetitionPolicy, digest
@@ -185,8 +186,10 @@ def migrate_exchange_launch(previous, replacement, policy, *, confirmed: bool) -
         db.create_function(
             "umi_exchange_launch_writer", 1, lambda b: b in (old_binding, new_binding)
         )
+        db.create_function("umi_exchange_rpc_writer", 1, lambda b: b in (old_binding, new_binding))
         db.execute("PRAGMA synchronous=FULL")
         db.execute("BEGIN IMMEDIATE")
+        check_rpc_history(db)
         migrated = check_launch_fences(db)
         binding = db.execute("SELECT body FROM binding").fetchall()
         if binding == [(new_binding,)]:
