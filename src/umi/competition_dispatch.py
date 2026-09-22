@@ -12,11 +12,13 @@ import hashlib
 import json
 import os
 import signal
+import sqlite3
 import stat
 import time
 from collections import OrderedDict
 from contextlib import closing, suppress
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -44,7 +46,7 @@ from .competition_origin import (
 )
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_scheduling import AssignmentPublicationJournal, SchedulingCapacity, assignment_key
-from .concurrency import await_owned_task
+from .concurrency import await_owned_task, run_owned_thread
 from .config import Limits
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
@@ -384,7 +386,9 @@ class EndpointDispatcher:
         directory = Path(self.config.publication_directory)
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            names = publication_names(fd)
+            names = publication_names(
+                fd, maximum_files=self.config.scheduling_capacity.maximum_publications
+            )
             pending = sorted(
                 n for n in names if n.endswith(".json") and n not in self._publications
             )
@@ -555,20 +559,35 @@ class EndpointDispatcher:
             return "uncertain" if claimed else "held"
 
     async def poll_once(self):
-        self._configure_timing()
         for key, (task, _miner) in tuple(self._tasks.items()):
             if task.done():
                 self._counts[task.result()] += 1
                 del self._tasks[key]
         try:
-            ingestion = await self.ingest_once()
-        except Exception:
-            ingestion = "held"
-        page = self.journal.pending_dispatches(
-            evaluator_hotkey=self.config.evaluator_hotkey,
-            after=self._cursor,
-            limit=self.config.page_size,
-        )
+            # Another scheduling writer can hold BEGIN IMMEDIATE for the
+            # journal's bounded busy timeout. Keep existing HTTP/proof tasks
+            # responsive and drain these operations before shutdown releases
+            # the service lease. Every retry rechecks the actual timing binding.
+            await run_owned_thread(self._configure_timing)
+            try:
+                ingestion = await self.ingest_once()
+            except Exception:
+                ingestion = "held"
+            page = await run_owned_thread(
+                partial(
+                    self.journal.pending_dispatches,
+                    evaluator_hotkey=self.config.evaluator_hotkey,
+                    after=self._cursor,
+                    limit=self.config.page_size,
+                )
+            )
+        except sqlite3.OperationalError as error:
+            code = getattr(error, "sqlite_errorcode", None)
+            if code is None or code & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise
+            # No new task or cursor advance; the normal poll interval retries.
+            # In-flight claims stay owned and are never cancelled or resent.
+            return self._poll_status("held")
         busy = {miner for _task, miner in self._tasks.values()}
         for item in page["items"]:
             if len(self._tasks) >= self.config.maximum_concurrency:
@@ -580,6 +599,9 @@ class EndpointDispatcher:
             busy.add(miner)
         # Holds cannot starve later pages. A wrapped scan revisits skipped work.
         self._cursor = page["next_cursor"]
+        return self._poll_status(ingestion)
+
+    def _poll_status(self, ingestion):
         return {
             "schema": "umi-endpoint-dispatch-status/1",
             **self._counts,

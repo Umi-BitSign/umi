@@ -316,7 +316,7 @@ def qualify_dispatch(
     try:
         # Retained history is not the inbox. Count only files actually present,
         # plus active bodies whose signed files are still to be delivered.
-        names = publication_names(fd)
+        names = publication_names(fd, maximum_files=journal.maximum_publications)
     finally:
         os.close(fd)
     expected_files = {key + ".json" for key in active_publications}
@@ -328,6 +328,7 @@ def qualify_dispatch(
         now_ms=now,
         observed_block=observed.height,
         additional_inbox_publications=additional,
+        maximum_inbox_files=journal.maximum_publications,
     )
     if minimum_margin_bps:
         for job in jobs:
