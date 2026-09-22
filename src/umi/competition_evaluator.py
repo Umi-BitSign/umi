@@ -14,6 +14,7 @@ import signal
 import sqlite3
 import stat
 from contextlib import contextmanager, suppress
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -72,6 +73,7 @@ from .competition_void import (
     verify_evaluation_void,
     void_evidence_digest,
 )
+from .concurrency import run_owned_thread
 from .drand import QuicknetClient
 from .open_competition import (
     AttestedResult,
@@ -938,19 +940,21 @@ class ContinuousEvaluator:
     async def advance(self, slot, signed, head):
         order = signed.order
         job = order_job(order, self.config.evaluator_hotkey, self.policy, self.legacy)
-        void = self.journal.get(slot, "void", VoidEvaluationEvidence)
+        void = await run_owned_thread(self.journal.get, slot, "void", VoidEvaluationEvidence)
         if void is not None:
             await self.observe_void(slot, order, void)
             self._output(order, "void", void.certificate)
             return "complete"
-        final = self.journal.get(slot, "independent", IndependentEvaluationEvidence)
+        final = await run_owned_thread(
+            self.journal.get, slot, "independent", IndependentEvaluationEvidence
+        )
         if final is not None:
             await self.observe_independent(slot, order, final)
             self._output(order, "independent", final)
             return "complete"
         if head > order.round.valid_through_block:
             return "expired"
-        state = self.executions.status(execution_key(job))
+        state = await run_owned_thread(self.executions.status, execution_key(job))
         if state is None or (
             state["status"] in {"failed", "authorized"} and self.executions.recovery_ready(job)
         ):
@@ -1210,43 +1214,63 @@ class ContinuousEvaluator:
         return True
 
     async def poll_once(self):
+        cursors = self._cursor, self._order_cursor
+        try:
+            return await self._poll_once()
+        except sqlite3.OperationalError as error:
+            code = getattr(error, "sqlite_errorcode", None)
+            if code is None or code & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise
+            # A contended control journal must not shut down this worker and
+            # cancel its one-use inference tasks. Revisit the same page at the
+            # normal poll interval; retained artifacts remain authoritative.
+            self._cursor, self._order_cursor = cursors
+            return {
+                "status": "waiting_database",
+                "reason_code": "sqlite_busy",
+                "in_flight": len(self._tasks),
+                "no_weight": True,
+                "chain_submission_authorized": False,
+            }
+
+    async def _poll_once(self):
         counts = {"held": 0, "waiting": 0, "complete": 0, "expired": 0, "executing": 0}
         if self.settlement_client is not None:
             if self._settlement_task is not None and self._settlement_task.done():
+                task, self._settlement_task = self._settlement_task, None
                 try:
-                    result = self._settlement_task.result()
+                    result = task.result()
                     counts["held"] += result["held"]
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._settlement_task = None
             if self._settlement_task is None:
                 self._settlement_task = asyncio.create_task(self.settlement_client.sync_once())
         if self.work_client is not None:
             if self._work_task is not None and self._work_task.done():
+                task, self._work_task = self._work_task, None
                 try:
-                    result = self._work_task.result()
+                    result = task.result()
                     counts["held"] += result["held"]
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._work_task = None
             if self._work_task is None:
                 self._work_task = asyncio.create_task(self.work_client.sync_once())
         if self.round_client is not None:
             if self._round_task is not None and self._round_task.done():
+                task, self._round_task = self._round_task, None
                 try:
-                    self._round_task.result()
+                    task.result()
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._round_task = None
             if self._round_task is None:
                 self._round_task = asyncio.create_task(self.round_client.sync_once())
         if self.exchange is not None:
             if self._exchange_task is not None and self._exchange_task.done():
+                task, self._exchange_task = self._exchange_task, None
                 try:
-                    self._exchange_task.result()
+                    task.result()
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._exchange_task = None
             if self._exchange_task is None:
                 self._exchange_task = asyncio.create_task(self.exchange.sync_once())
         for slot, task in list(self._tasks.items()):
@@ -1256,12 +1280,19 @@ class ContinuousEvaluator:
                 del self._tasks[slot]
         for _ in range(self.config.page_size):
             try:
-                self.ingest_once()
+                await run_owned_thread(self.ingest_once)
             except (OSError, ValueError, RuntimeError):
                 counts["held"] += 1
-        orders = self.journal.orders(after=self._order_cursor, limit=self.config.page_size)
+        orders = await run_owned_thread(
+            partial(self.journal.orders, after=self._order_cursor, limit=self.config.page_size)
+        )
         head = 0
-        if any(not conflict and self._order_needs_boundary(slot) for slot, _, conflict in orders):
+        needs_boundary = await run_owned_thread(
+            lambda: any(
+                not conflict and self._order_needs_boundary(slot) for slot, _, conflict in orders
+            )
+        )
+        if needs_boundary:
             try:
                 head = (await self.boundary()).block
             except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
