@@ -305,6 +305,10 @@ and all recorded bytes remain unchanged; the request is never resent. Certificat
 bytes count toward journal capacity, and restart recovery repeats this operation
 idempotently. Scheduling retirement does not depend on settlement succeeding and
 does not authorize a score, timely settlement receipt, or weight submission.
+If an authentic transcript is recovered later, its completion is appended as
+additional history. The certified void remains unchanged, and neither commit
+order prevents reopening the journal. Undispatched copies of peer assignments
+are not treated as local claims requiring retirement.
 
 The private transcript retains exact request/authentication and response bytes,
 receipt times, and the digest of the separately retained origin proof. A

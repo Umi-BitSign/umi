@@ -268,3 +268,82 @@ async def test_retirement_capacity_failure_rolls_back_only_new_disposition(lost)
         ).fetchone()
     lost.journal.maximum_bytes = 16 * 1024**3
     assert retire(lost) == {lost.key}
+
+
+@pytest.mark.parametrize("completed_first", [False, True])
+async def test_late_authentic_completion_and_retirement_commute(lost, completed_first, tmp_path):
+    from umi.competition_dispatch_repair import retained_claim, validate_local_repair
+    from umi.competition_dispatch_spool import DispatchSpoolConfig, DispatchTranscriptSpool
+
+    before = events(lost.journal)
+    if not completed_first:
+        retire(lost)
+    spool = DispatchTranscriptSpool(
+        DispatchSpoolConfig(directory=str(tmp_path / "restored-spool")),
+        lost.journal,
+        lost.incumbent.job.evaluator_hotkey,
+    )
+    transcript = json.loads(lost.original_evidence[0])
+    spool.reserve(lost.key)
+    spool.retain_intent(
+        lost.original[0],
+        SimpleNamespace(
+            request_bytes=bytes.fromhex(transcript["request_hex"]),
+            auth_headers=transcript["auth_headers"],
+        ),
+        origin_sha256=transcript["origin_evidence_sha256"],
+        origin_block=transcript["origin_block"],
+    )
+    spool.retain_outcome(lost.key, lost.original_evidence[0])
+    assert spool.recover(lost.journal) == 1
+    if completed_first:
+        with pytest.raises(ValueError, match="uncertain claim"):
+            retained_claim(lost.journal, lost.key, allow_retired=True)
+    assert retire(lost) == {lost.key}
+    assert spool.recover(lost.journal) == 0
+    # Recovery retains exactly one authentic completion, with original events unchanged.
+    lost.journal.complete(lost.original[0], evidence=lost.original_evidence[0])
+    after = events(lost.journal)
+    assert after[: len(before)] == before and len(after) == len(before) + 1
+    assert lost.journal.status(lost.key)["state"] == "completed"
+    restarted = AssignmentPublicationJournal(
+        lost.journal.path.parent,
+        lost.item.policy,
+        lost.item.legacy_policy,
+        maximum_bytes=16 * 1024**3,
+    )
+    with restarted._transaction() as db:
+        assert restarted.retired_claims(db) == {lost.key}
+        assert restarted._proof_allowance(db) == 0
+    with pytest.raises(ValueError, match="uncertain claim"):
+        retained_claim(restarted, lost.key)  # New repair signing remains forbidden.
+    validate_local_repair(
+        lost.repair,
+        journal=restarted,
+        evaluator_hotkey=lost.incumbent.job.evaluator_hotkey,
+        signed_order=lost.order,
+        policy=lost.item.policy,
+        legacy=lost.item.legacy_policy,
+        current_block=lost.item.round.reveal_block,
+    )
+    assert lost.dispatch.miner.translator.calls == 6
+
+
+async def test_peer_journal_assignment_copy_is_not_a_local_dispatch(lost, tmp_path):
+    peer = AssignmentPublicationJournal(
+        tmp_path / "separate-peer-journal",
+        lost.item.policy,
+        lost.item.legacy_policy,
+        maximum_bytes=16 * 1024**3,
+    )
+    peer.publish(
+        lost.item.publication,
+        observed=lost.item.finalized_blocks.blocks[lost.item.request.issued_block],
+        announcements=(lost.item.finalized_blocks.blocks[1000],),
+    )
+    before = events(peer)
+    assert peer.retire_void(evidence=lost.evidence, suite=lost.item.suite) == set()
+    assert events(peer) == before
+    with peer._transaction() as db:
+        assert peer.retired_claims(db) == set()
+    assert retire(lost) == {lost.key}

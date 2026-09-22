@@ -37,6 +37,7 @@ from .competition_authorization import (
     validate_publication,
     validate_publication_body,
 )
+from .competition_scheduling_retirement_cache import RetirementValidationCache
 from .competition_scheduling_timing import (
     check_dispatch_profile,
     configure_dispatch,
@@ -181,7 +182,7 @@ class AssignmentPublicationJournal:
         self.maximum_outcome_bytes = capacity.maximum_outcome_bytes
         self.maximum_observation_age_seconds = maximum_observation_age_seconds
         self.maximum_future_skew_seconds = maximum_future_skew_seconds
-        self._retirement_validation = {}
+        self._retirement_validation = RetirementValidationCache()
         pins = self.legacy_policy.implementation_pins
         if (
             pins.pin_profile != "live_shadow_calibration"

@@ -94,10 +94,12 @@ async def lost(paired_setup, tmp_path, monkeypatch, release_identity):
     key = dispatch.key
     complete = journal.complete
     original = []
+    original_evidence = []
 
     def lose(claim, *, evidence):
         if claim.assignment_key == key:
             original.append(claim)
+            original_evidence.append(evidence)
             raise OSError("synthetic completion storage failure")
         return complete(claim, evidence=evidence)
 
