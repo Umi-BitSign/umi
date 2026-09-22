@@ -19,7 +19,7 @@ SN78 in that snapshot, and the submission must remain valid through evaluation
 close at block `9,119,030`.
 
 Existing accepted policy-5 or policy-6 submissions can carry forward without
-resubmission. Apply the [cohort 3 connection update](../miners/cohort3-update.md)
+resubmission. Apply the [cohort 3 connection update](../miners/connection.md)
 to the running service as well. Use the live status for subsequent cohorts;
 these cutoff blocks describe cohort 3.
 

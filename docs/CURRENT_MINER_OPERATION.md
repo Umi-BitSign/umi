@@ -2,7 +2,7 @@
 
 # What SN78 miners should run now
 
-For endpoint competition, use the [current connection guide](miners/cohort3-update.md).
+For endpoint competition, use the [current connection guide](miners/connection.md).
 An accepted receipt can carry forward while the running miner still needs a
 configuration update. That guide owns the release, policy and download details.
 The temporary bridge described below remains the current reward mechanism.
@@ -79,7 +79,7 @@ the bridge or activate competition weights by itself. Check
 schedule's earliest cutoff; a later acceptance does not guarantee inclusion.
 Admitted submissions must remain valid through evaluation close, and the hotkey
 must be registered on SN78 in the finalized roster-close snapshot. The
-[connection guide](miners/cohort3-update.md) identifies accepted predecessor
+[connection guide](miners/connection.md) identifies accepted predecessor
 policies and the configuration needed to serve current requests.
 
 Current intake uses version 2 contribution terms. If you submitted under version
@@ -94,7 +94,7 @@ A health-only keepalive cannot answer them. Use the exact live policy and
 saved `accepted_no_weight` receipt; it establishes admission only, not quality or
 earnings.
 
-The [cohort 3 update](miners/cohort3-update.md) provides the signed feed settings,
+The [current connection guide](miners/connection.md) provides the signed feed settings,
 exact release and tested configuration changes. Assignments follow the finalized
 roster and published work authorization. Readiness does not establish a completed
 live cohort. Before a miner has a published assignment, even a correctly signed
