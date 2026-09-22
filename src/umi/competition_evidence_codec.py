@@ -73,11 +73,13 @@ def encode_evidence(raw: bytes, *, kind: str) -> EncodedEvidence:
         for match in _HEX.finditer(raw):
             if len(match[1]) % 2:
                 continue
+            # Reserve the trailing literal too; otherwise the encoder could
+            # emit MAX_SEGMENTS+1 while the bounded decoder correctly refuses it.
+            if len(segments) + 3 > MAX_SEGMENTS:
+                break
             append("b", raw[position : match.start(1)])
             append("x", bytes.fromhex(match[1].decode("ascii")))
             position = match.end(1)
-            if len(segments) >= MAX_SEGMENTS - 1:
-                break
     append("b", raw[position:])
     encoded = recipe(segments)
     plain = recipe([["b", identity, len(raw)]])

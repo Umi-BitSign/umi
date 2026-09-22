@@ -208,6 +208,31 @@ class EvidenceStore:
         checked_digest(identity)
         self.db.execute("DELETE FROM weight_proof_reservations WHERE id=?", (identity,))
 
+    def remaining_reservation(self, identity: str) -> EvidenceBudget | None:
+        self._bound()
+        return self._reservations().get(checked_digest(identity))
+
+    def ensure_reservation(self, identity: str, minimum: EvidenceBudget):
+        """Increase an existing allowance if capacity permits; never discard credit."""
+        checked_digest(identity)
+        usage = self.inventory()
+        reservations = self._reservations()
+        self._check_capacity(usage, reservations)
+        previous = reservations.get(identity)
+        if previous is None:
+            self.reserve(identity, minimum)
+            return
+        raised = EvidenceBudget(
+            *(max(a, b) for a, b in zip(previous.values(), minimum.values(), strict=True))
+        )
+        reservations[identity] = raised
+        self._check_capacity(usage, reservations)
+        self.db.execute(
+            "UPDATE weight_proof_reservations SET stored_bytes=?,expanded_bytes=?,"
+            "records=?,objects=? WHERE id=?",
+            (*raised.values(), identity),
+        )
+
     def _object(self, identity: str, size: int) -> bytes:
         found = self.db.execute(
             "SELECT length(body) FROM weight_proof_objects WHERE sha256=?", (identity,)
@@ -261,8 +286,11 @@ class EvidenceStore:
         if self.db.execute(
             "SELECT 1 FROM weight_proof_records WHERE sha256=?", (encoded.sha256,)
         ).fetchone():
-            if self._record(encoded.sha256)[0] != kind or self.get(encoded.sha256) != raw:
-                raise ValueError("existing evidence identity or kind changed")
+            # v1 copies have no trustworthy persisted kind tag. An incoming
+            # metadata body has already met the stricter metadata bound above;
+            # reuse identical imported bytes without relabeling the old record.
+            if self.get(encoded.sha256) != raw:
+                raise ValueError("existing evidence identity changed")
             return encoded.sha256
         additions = {}
         for key, value in encoded.objects.items():

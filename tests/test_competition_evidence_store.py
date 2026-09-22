@@ -107,6 +107,50 @@ def test_dedup_retains_original_hash_and_restart(tmp_path):
     db.close()
 
 
+def test_encoder_leaves_room_for_trailing_literal_at_segment_boundary():
+    raw = canonical_json_bytes(
+        ["0x" + (index.to_bytes(4, "big") + b"x" * 508).hex() for index in range(MAX_SEGMENTS // 2)]
+    )
+    encoded = encode_evidence(raw, kind="proof")
+    assert 1 < len(json.loads(encoded.recipe)["segments"]) <= MAX_SEGMENTS
+    assert (
+        decode_evidence(
+            encoded.recipe,
+            sha256=encoded.sha256,
+            expanded_bytes=len(raw),
+            kind="proof",
+            resolve=lambda key, _: encoded.objects[key],
+        )
+        == raw
+    )
+
+
+def test_imported_kind_reuse_never_relabels_history(store):
+    raw = b"historical metadata"
+    identity = store.put(raw, kind="proof")
+    before = store.db.execute("SELECT * FROM weight_proof_records").fetchall()
+    assert store.put(raw, kind="metadata") == identity
+    assert store.db.execute("SELECT * FROM weight_proof_records").fetchall() == before
+    too_large = b"x" * (MAX_METADATA_BYTES + 1)
+    store.put(too_large, kind="proof")
+    with pytest.raises(ValueError):
+        store.put(too_large, kind="metadata")
+
+
+def test_reservation_topup_preserves_credit_and_rejects_exhaustion(store):
+    prior = EvidenceBudget(100000, 90000, 10, 100)
+    store.reserve(ATTEMPT, prior)
+    store.put(b"proof", kind="proof", reservation=ATTEMPT)
+    remaining = store.remaining_reservation(ATTEMPT)
+    store.ensure_reservation(ATTEMPT, EvidenceBudget(1, 1, 1, 1))
+    assert store.remaining_reservation(ATTEMPT) == remaining
+    store.ensure_reservation(ATTEMPT, prior)
+    assert store.remaining_reservation(ATTEMPT) == prior
+    with pytest.raises(ValueError, match="capacity"):
+        store.ensure_reservation(ATTEMPT, store.limits)
+    assert store.remaining_reservation(ATTEMPT) == prior
+
+
 @pytest.mark.parametrize(
     "kind,size",
     [

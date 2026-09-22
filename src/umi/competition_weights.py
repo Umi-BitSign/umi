@@ -600,9 +600,7 @@ class CompetitionWeightWorker:
                 "CREATE TABLE IF NOT EXISTS attempts "
                 "(id TEXT PRIMARY KEY, body BLOB NOT NULL, sha256 TEXT NOT NULL)"
             )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS evidence (sha256 TEXT PRIMARY KEY, body BLOB NOT NULL)"
-            )
+            self._initialize_evidence(db)
             db.execute(
                 "CREATE TABLE IF NOT EXISTS highwater (id INTEGER PRIMARY KEY CHECK(id=1), "
                 "block INTEGER NOT NULL, hash TEXT NOT NULL)"
@@ -614,6 +612,18 @@ class CompetitionWeightWorker:
                 "round_sequence INTEGER NOT NULL, "
                 "package TEXT NOT NULL, admission TEXT NOT NULL)"
             )
+
+    def _initialize_evidence(self, db):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='weight_proof_binding'").fetchone():
+            raise ValueError("content addressed journal requires its explicit worker profile")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS evidence (sha256 TEXT PRIMARY KEY, body BLOB NOT NULL)"
+        )
+
+    def _has_evidence(self, db, identity):
+        return (
+            db.execute("SELECT 1 FROM evidence WHERE sha256=?", (identity,)).fetchone() is not None
+        )
 
     @contextmanager
     def _lock(self):
@@ -664,6 +674,38 @@ class CompetitionWeightWorker:
             self._retain_observation(db, observation)
             return result
 
+    async def _load_fresh(self, validator_hotkey, authorization_id, observe, validate):
+        """Audit retained history before capturing a proof with a short lifetime.
+
+        The caller holds the weight lock. Keep a write transaction and bracket
+        asynchronous capture with the same audited journal snapshot. No audit
+        result is cached across transactions, worker invocations or recovery.
+        """
+        with self._db() as db:
+            self._check_journal_binding(db, validator_hotkey)
+            attempt = self._inspect_attempts(db, validator_hotkey, authorization_id)
+            self._before_capture(db, authorization_id, attempt)
+            snapshot = _recovery_journal_snapshot(self.path)
+            known, total = self._audit_evidence(db)
+            if _recovery_journal_snapshot(self.path) != snapshot:
+                raise ValueError("weight journal changed during evidence audit")
+            observation = await observe()
+            validate_owned_weight_observation(observation)
+            if _recovery_journal_snapshot(self.path) != snapshot:
+                raise ValueError("weight journal changed during fresh capture")
+            validate(observation)
+            self._record_head(db, observation)
+            self._append_observation(
+                db, observation, known, total, authorization_id=authorization_id
+            )
+            validate_owned_weight_observation(observation)
+        # A slow durable commit also consumes the fresh proof's lifetime.
+        validate_owned_weight_observation(observation)
+        return attempt, observation
+
+    def _before_capture(self, db, authorization_id, attempt):
+        """Storage backends may reserve capacity under this owned transaction."""
+
     def _check_journal_binding(self, db, validator_hotkey):
         expected = (validator_hotkey, self.maximum_attempts, self.maximum_evidence_bytes)
         binding = db.execute(
@@ -707,12 +749,7 @@ class CompetitionWeightWorker:
                 raise ValueError("successor journal is corrupt")
             if item["validator_hotkey"] != validator_hotkey:
                 raise ValueError("successor journal attempt binds another hotkey")
-            if (
-                db.execute(
-                    "SELECT 1 FROM evidence WHERE sha256=?", (item["chain_evidence_sha256"],)
-                ).fetchone()
-                is None
-            ):
+            if not self._has_evidence(db, item["chain_evidence_sha256"]):
                 raise ValueError("successor attempt lost its retained preflight evidence")
             if key != authorization_id and item["phase"] not in {
                 "applied",
@@ -745,7 +782,7 @@ class CompetitionWeightWorker:
             known.add(identity)
         return known, total
 
-    def _append_observation(self, db, observation, known, total):
+    def _append_observation(self, db, observation, known, total, *, authorization_id=None):
         for raw in (observation.evidence, observation.runtime.metadata_bytes):
             identity = hashlib.sha256(raw).hexdigest()
             if identity in known:
@@ -861,15 +898,20 @@ class CompetitionWeightWorker:
                 expected_policy_sha256=body.policy_sha256,
                 observed_release=release,
             )
-            observation = await chain.collect_weights(hotkey, recipients)
-            validate_weight_preflight(package, body, observation, chain.config, submission=False)
+            attempt, observation = await self._load_fresh(
+                hotkey,
+                body.authorization_id,
+                lambda: chain.collect_weights(hotkey, recipients),
+                lambda current: validate_weight_preflight(
+                    package, body, current, chain.config, submission=False
+                ),
+            )
             context = context.refresh(owned_observation=observation)
             recovery_checkpoint = context.validate_retained_recovery(
                 context.checkpoint_sha256, hotkey, body.predecessor_directive_sha256
             )
             if observation.block < recovery_checkpoint.finalized_block:
                 raise ValueError("successor observation predates historical recovery")
-            attempt = self._load(hotkey, body.authorization_id, observation)
             if attempt is not None and (
                 attempt["authorization_sha256"] != auth_digest
                 or attempt["recovery_checkpoint_sha256"] != context.checkpoint_sha256
@@ -955,9 +997,14 @@ class CompetitionWeightWorker:
                 )
             # Signing may be slow. Recheck current chain state without altering
             # the frozen nonce, era, call, or durable signed extrinsic bytes.
-            before_send = await chain.collect_weights(hotkey, recipients)
-            validate_weight_preflight(package, body, before_send, chain.config, submission=True)
-            self._load(hotkey, body.authorization_id, before_send)
+            _, before_send = await self._load_fresh(
+                hotkey,
+                body.authorization_id,
+                lambda: chain.collect_weights(hotkey, recipients),
+                lambda current: validate_weight_preflight(
+                    package, body, current, chain.config, submission=True
+                ),
+            )
             context = context.refresh(owned_observation=before_send)
             if (
                 before_send.validator_nonce != attempt["nonce"]
@@ -997,9 +1044,14 @@ class CompetitionWeightWorker:
                 self._save(attempt)
                 raise
             # Never trust an SDK success flag as finalized proof of application.
-            after = await chain.collect_weights(hotkey, recipients)
-            validate_weight_preflight(package, body, after, chain.config, submission=False)
-            self._load(hotkey, body.authorization_id, after)
+            _, after = await self._load_fresh(
+                hotkey,
+                body.authorization_id,
+                lambda: chain.collect_weights(hotkey, recipients),
+                lambda current: validate_weight_preflight(
+                    package, body, current, chain.config, submission=False
+                ),
+            )
             outcome = self._recover(attempt, body, hotkey, after, expected_row)
             return outcome.model_copy(update={"submitted_by_this_attempt": True})
 
@@ -1076,8 +1128,9 @@ class CompetitionWeightWorker:
         with self._lock() as lock_descriptor, self._db() as db:
             lock_identity = _file_identity(os.fstat(lock_descriptor))
             self._check_journal_binding(db, hotkey)
-            journal_snapshot = _recovery_journal_snapshot(self.path)
             attempt = self._inspect_attempts(db, hotkey, body.authorization_id)
+            self._before_capture(db, body.authorization_id, attempt)
+            journal_snapshot = _recovery_journal_snapshot(self.path)
             known, total = self._audit_evidence(db)
             if _recovery_journal_snapshot(self.path) != journal_snapshot:
                 raise ValueError("stopped recovery journal changed during verification")
@@ -1118,7 +1171,9 @@ class CompetitionWeightWorker:
                 raise ValueError("stopped recovery journal changed after verification")
             validate_weight_preflight(package, body, observation, chain_config, submission=False)
             self._record_head(db, observation)
-            self._append_observation(db, observation, known, total)
+            self._append_observation(
+                db, observation, known, total, authorization_id=body.authorization_id
+            )
             validate_owned_weight_observation(observation)
             outcome = (
                 None

@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from fractions import Fraction
 from types import SimpleNamespace
@@ -316,6 +317,276 @@ async def test_offline_evidence_copy_preserves_native_weight_history(weight_case
     assert_native_copy(item)
 
 
+@pytest.mark.parametrize("candidate", [False, True])
+async def test_full_evidence_audit_precedes_each_fresh_capture(weight_case, monkeypatch, candidate):
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    if candidate:
+        use_candidate(item)
+    audit = item.worker._audit_evidence
+    original_time = time.monotonic_ns
+    elapsed = [0]
+    audit_times = []
+    monkeypatch.setattr(time, "monotonic_ns", lambda: original_time() + elapsed[0])
+
+    def slow_audit(db):
+        result = audit(db)
+        elapsed[0] += 121 * 10**9
+        audit_times.append(time.monotonic_ns())
+        return result
+
+    monkeypatch.setattr(item.worker, "_audit_evidence", slow_audit)
+    collect = item.provider.collect_weights
+
+    async def fresh(*args):
+        assert audit_times
+        observation = await collect(*args)
+        assert observation.captured_monotonic_ns >= audit_times[-1]
+        return observation
+
+    monkeypatch.setattr(item.provider, "collect_weights", fresh)
+    outcome = await _run(item)
+    assert outcome.exact_row_currently_applied and len(item.encoded) == 1
+    assert len(audit_times) == 3
+    if candidate:
+        with item.worker._db() as db:
+            store = item.worker._store(db)
+            store.audit()
+            assert store.remaining_reservation(item.body.authorization_id) is None
+
+
+@pytest.mark.parametrize("during", ["audit", "capture"])
+async def test_fresh_capture_rejects_same_bytes_journal_rewrite(weight_case, monkeypatch, during):
+    item = weight_case
+    if during == "audit":
+        audit = item.worker._audit_evidence
+
+        def changed(db):
+            result = audit(db)
+            raw, info = item.worker.path.read_bytes(), item.worker.path.stat()
+            item.worker.path.write_bytes(raw)
+            os.utime(item.worker.path, ns=(info.st_atime_ns, info.st_mtime_ns))
+            return result
+
+        monkeypatch.setattr(item.worker, "_audit_evidence", changed)
+    else:
+        collect = item.provider.collect_weights
+
+        async def changed(*args):
+            result = await collect(*args)
+            raw, info = item.worker.path.read_bytes(), item.worker.path.stat()
+            item.worker.path.write_bytes(raw)
+            os.utime(item.worker.path, ns=(info.st_atime_ns, info.st_mtime_ns))
+            return result
+
+        monkeypatch.setattr(item.provider, "collect_weights", changed)
+    with pytest.raises(ValueError, match="journal changed"):
+        await _run(item)
+    assert not item.encoded
+
+
+async def test_candidate_exhaustion_holds_before_signing(weight_case, monkeypatch):
+    from umi.competition_evidence_store import observation_reservation
+    from umi.competition_evidence_worker import EvidenceWorkerProfile
+
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    profile = EvidenceWorkerProfile(observation_reservation(4), 1)
+    use_candidate(item, profile=profile)
+    with item.worker._db() as db:
+        item.worker._check_journal_binding(db, item.hotkey)
+        item.worker._store(db).put(b"previous retained proof", kind="proof")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("capacity failure reached signing")
+
+    monkeypatch.setattr(item.transport, "encode", forbidden)
+    with pytest.raises(ValueError, match="capacity"):
+        await _run(item)
+    assert not item.encoded
+    with item.worker._db() as db:
+        assert db.execute("SELECT COUNT(*) FROM attempts").fetchone() == (0,)
+
+
+async def test_migrated_unknown_attempt_recovers_without_resending(stopped_weight_case):
+    from .evidence_worker_cases import use_candidate
+
+    item = stopped_weight_case
+    initial = await _unknown_stopped_attempt(item)
+    old = use_candidate(item, copy=True)
+    original = old.path.read_bytes()
+    with item.worker._db() as db:
+        previous = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+
+    async def observe():
+        return await item.provider.collect_weights(item.hotkey, item.recipients)
+
+    outcome, current = await _recover_stopped(item, initial, observe)
+    assert current.block == 187
+    assert outcome.status == "expired_unconsumed_nonce"
+    assert not outcome.submitted_by_this_attempt and len(item.encoded) == 1
+    with item.worker._db() as db:
+        retained = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+        assert retained["signed_extrinsic"] == previous["signed_extrinsic"]
+        assert retained["nonce"] == previous["nonce"]
+        assert item.worker._store(db).remaining_reservation(item.body.authorization_id) is None
+        item.worker._store(db).audit()
+    assert old.path.read_bytes() == original
+
+
+async def test_candidate_unknown_keeps_space_and_never_resends(weight_case):
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    use_candidate(item)
+    item.behavior = "disconnect"
+    with pytest.raises(ConnectionError):
+        await _run(item)
+    with item.worker._db() as db:
+        before = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+        assert item.worker._store(db).remaining_reservation(item.body.authorization_id) is not None
+    assert (await _run(item)).status == "unknown"
+    assert len(item.encoded) == 1
+    with item.worker._db() as db:
+        after = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+        assert after["signed_extrinsic"] == before["signed_extrinsic"]
+
+
+async def test_candidate_recovers_applied_effect_when_post_send_capture_fails(
+    weight_case, monkeypatch
+):
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    use_candidate(item)
+    collect = item.provider.collect_weights
+    captures = []
+
+    async def failing(*args):
+        captures.append(True)
+        if len(captures) == 3:
+            raise ConnectionError("post-send proof unavailable")
+        return await collect(*args)
+
+    monkeypatch.setattr(item.provider, "collect_weights", failing)
+    with pytest.raises(ConnectionError):
+        await _run(item)
+    with item.worker._db() as db:
+        before = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+        assert before["phase"] == "signed"
+        assert item.worker._store(db).remaining_reservation(item.body.authorization_id) is not None
+    outcome = await _run(item)
+    assert outcome.status == "recovered_effect" and outcome.exact_row_currently_applied
+    assert len(item.encoded) == 1
+    with item.worker._db() as db:
+        after = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+        assert before["signed_extrinsic"] == after["signed_extrinsic"]
+        assert item.worker._store(db).remaining_reservation(item.body.authorization_id) is None
+
+
+async def test_slow_evidence_commit_cannot_use_expired_post_send_proof(weight_case, monkeypatch):
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    use_candidate(item)
+    original_time, original_db = time.monotonic_ns, item.worker._db
+    elapsed = [0]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: original_time() + elapsed[0])
+
+    @contextmanager
+    def slow_commit():
+        with original_db() as db:
+            yield db
+        if item.encoded and not elapsed[0]:
+            elapsed[0] = 121 * 10**9
+
+    monkeypatch.setattr(item.worker, "_db", slow_commit)
+    with pytest.raises(ValueError, match="owned proof adapter"):
+        await _run(item)
+    with item.worker._db() as db:
+        assert (
+            json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])["phase"] == "signed"
+        )
+    assert (await _run(item)).status == "recovered_effect"
+    assert len(item.encoded) == 1
+
+
+async def test_candidate_disallows_downgrade_and_changed_profile(weight_case):
+    from umi.competition_evidence_worker import ContentAddressedWeightWorker
+
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    previous = use_candidate(item)
+    await _run(item)
+    before = item.worker.path.read_bytes()
+    options = dict(
+        package_limits=item.worker.package_limits,
+        replay_worker=item.worker.replay_worker,
+        maximum_attempts=item.worker.maximum_attempts,
+        maximum_evidence_bytes=item.worker.maximum_evidence_bytes,
+        submission_timeout_seconds=item.worker.submission_timeout_seconds,
+    )
+    with pytest.raises(ValueError, match="explicit worker profile"):
+        CompetitionWeightWorker(item.worker.state_root, **options)
+    with pytest.raises(ValueError, match="profile changed"):
+        ContentAddressedWeightWorker(
+            item.worker.state_root,
+            evidence_profile=replace(item.worker.evidence_profile, recovery_observations=15),
+            **options,
+        )
+    with pytest.raises(ValueError, match="stopped migration"):
+        ContentAddressedWeightWorker(
+            previous.state_root, evidence_profile=item.worker.evidence_profile, **options
+        )
+    assert item.worker.path.read_bytes() == before
+
+
+async def test_candidate_releases_abandoned_unsigned_allowance_without_losing_evidence(weight_case):
+    from umi.competition_evidence_store import observation_reservation
+
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    use_candidate(item)
+    with item.worker._db() as db:
+        item.worker._check_journal_binding(db, item.hotkey)
+        store = item.worker._store(db)
+        store.reserve("a" * 64, observation_reservation(19))
+        retained = store.put(b"orphaned pre-intent capture", kind="proof", reservation="a" * 64)
+    assert (await _run(item)).exact_row_currently_applied
+    with item.worker._db() as db:
+        store = item.worker._store(db)
+        assert store.remaining_reservation("a" * 64) is None
+        assert store.get(retained) == b"orphaned pre-intent capture"
+
+
+async def test_slow_audit_cannot_extend_signed_mortality(weight_case, monkeypatch):
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    use_candidate(item)
+    audit = item.worker._audit_evidence
+    calls = []
+
+    def advanced(db):
+        result = audit(db)
+        calls.append(True)
+        if len(calls) == 2:
+            _advance(item, 186)
+        return result
+
+    monkeypatch.setattr(item.worker, "_audit_evidence", advanced)
+    with pytest.raises(ValueError, match="mortal headroom"):
+        await _run(item)
+    assert not item.encoded
+    with item.worker._db() as db:
+        retained = json.loads(db.execute("SELECT body FROM attempts").fetchone()[0])
+        assert retained["phase"] == "signed" and retained["era_death"] == 186
+
+
 async def test_actual_proof_collection_then_durable_exact_sdk_row(weight_case):
     item = weight_case
     # The package fixture includes a preserved, reviewed promotion and two
@@ -383,8 +654,13 @@ async def test_preflight_failure_never_signs_or_submits(weight_case, mutation):
     assert not item.encoded
 
 
-async def test_single_use_binding_and_global_unknown_fence(weight_case):
+@pytest.mark.parametrize("candidate", [False, True])
+async def test_single_use_binding_and_global_unknown_fence(weight_case, candidate):
+    from .evidence_worker_cases import use_candidate
+
     item = weight_case
+    if candidate:
+        use_candidate(item)
     item.behavior = "noop"
     await _run(item)
     changed = item.body.model_copy(update={"authorization_id": "98" * 32})
@@ -400,8 +676,15 @@ async def test_single_use_binding_and_global_unknown_fence(weight_case):
     assert len(item.encoded) == 1
 
 
-async def test_late_publication_conflict_holds_without_corrective_write(weight_case, replay_limits):
+@pytest.mark.parametrize("candidate", [False, True])
+async def test_late_publication_conflict_holds_without_corrective_write(
+    weight_case, replay_limits, candidate
+):
+    from .evidence_worker_cases import use_candidate
+
     item = weight_case
+    if candidate:
+        use_candidate(item)
     await _run(item)
     _record_cutoff_conflict(item.worker.replay_worker, item.case, item.policy, replay_limits)
     assert (await _run(item)).status == "held_conflict"
@@ -1016,8 +1299,15 @@ async def test_collector_rejects_execution_binding_mismatch(
         await item.provider.collect_weights(item.hotkey, item.recipients)
 
 
-async def test_other_nonce_use_without_exact_row_stays_unknown_even_after_expiry(weight_case):
+@pytest.mark.parametrize("candidate", [False, True])
+async def test_other_nonce_use_without_exact_row_stays_unknown_even_after_expiry(
+    weight_case, candidate
+):
+    from .evidence_worker_cases import use_candidate
+
     item = weight_case
+    if candidate:
+        use_candidate(item)
     item.behavior = "noop"
     await _run(item)
     _advance(item, 201, nonce=5)
@@ -1234,10 +1524,16 @@ async def test_stopped_recovery_rejects_changed_inputs_and_bad_fresh_proof(
         )
 
 
+@pytest.mark.parametrize("candidate", [False, True])
 async def test_stopped_recovery_keeps_journal_lock_across_capture_and_cancellation(
     stopped_weight_case,
+    candidate,
 ):
+    from .evidence_worker_cases import use_candidate
+
     item = stopped_weight_case
+    if candidate:
+        use_candidate(item)
     initial = await _unknown_stopped_attempt(item)
     before = item.worker.path.read_bytes()
 
