@@ -181,6 +181,7 @@ class AssignmentPublicationJournal:
         self.maximum_outcome_bytes = capacity.maximum_outcome_bytes
         self.maximum_observation_age_seconds = maximum_observation_age_seconds
         self.maximum_future_skew_seconds = maximum_future_skew_seconds
+        self._retirement_validation = {}
         pins = self.legacy_policy.implementation_pins
         if (
             pins.pin_profile != "live_shadow_calibration"
@@ -320,6 +321,9 @@ class AssignmentPublicationJournal:
                 )
 
     def _capacity(self, db, *, publications=0, assignments=0, reserved=0):
+        from .competition_scheduling_retirement import retained_bytes, retired_claims
+
+        retired = retired_claims(self, db)
         count, used = db.execute(
             "SELECT COUNT(*),COALESCE(SUM(reserved),0) FROM publications"
         ).fetchone()
@@ -331,6 +335,7 @@ class AssignmentPublicationJournal:
             "WHERE key LIKE 'dispatch_profile:%'"
         ).fetchone()[0]
         assignment_count = db.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
+        used += retained_bytes(db)
         if self._reservation_enabled(db):
             pending = db.execute(
                 "SELECT COUNT(*),COALESCE(SUM(assignment_count),0),"
@@ -350,7 +355,7 @@ class AssignmentPublicationJournal:
             used += db.execute(
                 "SELECT COALESCE(SUM(LENGTH(document)),0) FROM reservation_qualifications"
             ).fetchone()[0]
-            used += self._proof_allowance(db)
+            used += self._proof_allowance(db, retired=retired)
             used += 64  # Stable private journal identity retained with native reservations.
         if (
             count + publications > self.maximum_publications
@@ -363,15 +368,18 @@ class AssignmentPublicationJournal:
     def _reservation_enabled(db):
         return db.execute("PRAGMA user_version").fetchone()[0] == 2
 
-    @staticmethod
-    def _proof_allowance(db):
+    def _proof_allowance(self, db, *, retired=None):
         """Retain future proof credit until every reserved task is known terminal.
 
         Publication consumption alone is insufficient. Unpublished bodies,
         missing assignments and uncertain dispatched claims retain the interval;
-        recorded completed/expired events release only its unobserved heights.
+        Recorded completed/expired events or an independently certified repair
+        void release only its unobserved heights. The original claim is retained.
         Historical block bytes remain charged separately.
         """
+        if retired is None:
+            retired = self.retired_claims(db)
+        db.create_function("umi_scheduling_claim_retired", 1, lambda key: key in retired)
         intervals = []
         for start, end in db.execute(
             "SELECT b.proof_start,b.proof_end FROM reservation_batches b WHERE EXISTS "
@@ -380,7 +388,8 @@ class AssignmentPublicationJournal:
             "(SELECT 1 FROM reservation_publications p JOIN reservation_assignments a "
             "ON a.publication_id=p.id WHERE p.batch_id=b.id AND COALESCE("
             "(SELECT kind FROM events e WHERE e.assignment_id=a.id ORDER BY ordinal DESC LIMIT 1),"
-            "'') NOT IN ('completed','expired')) ORDER BY b.proof_start,b.proof_end"
+            "'') NOT IN ('completed','expired') AND NOT umi_scheduling_claim_retired(a.id)) "
+            "ORDER BY b.proof_start,b.proof_end"
         ):
             if intervals and start <= intervals[-1][1] + 1:
                 intervals[-1][1] = max(end, intervals[-1][1])
@@ -394,14 +403,29 @@ class AssignmentPublicationJournal:
             missing += end - start + 1 - retained
         return missing * _BLOCK_RESERVE_BYTES
 
+    def retired_claims(self, db):
+        from .competition_scheduling_retirement import retired_claims
+
+        return retired_claims(self, db)
+
+    def retire_void(self, *, evidence, suite):
+        from .competition_scheduling_retirement import retire_void
+
+        return retire_void(self, evidence=evidence, suite=suite)
+
     def _enable_reservations(self, db):
         if self._reservation_enabled(db):
             return
-        if db.execute(
-            "SELECT 1 FROM events dispatched WHERE kind='dispatched' AND NOT EXISTS "
-            "(SELECT 1 FROM events completed WHERE completed.assignment_id="
-            "dispatched.assignment_id AND completed.kind='completed') LIMIT 1"
-        ).fetchone():
+        retired = self.retired_claims(db)
+        if any(
+            key not in retired
+            for (key,) in db.execute(
+                "SELECT dispatched.assignment_id FROM events dispatched "
+                "WHERE kind='dispatched' AND NOT EXISTS "
+                "(SELECT 1 FROM events completed WHERE completed.assignment_id="
+                "dispatched.assignment_id AND completed.kind='completed')"
+            )
+        ):
             raise ValueError("drain dispatched incomplete claims before scheduling migration")
         for row in db.execute("SELECT document,evidence FROM blocks"):
             if len(row[0]) > _BLOCK_DOCUMENT_BYTES or len(row[1]) > MAX_FINALITY_EVIDENCE_BYTES:

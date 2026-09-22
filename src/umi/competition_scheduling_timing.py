@@ -147,12 +147,13 @@ def configure_dispatch(
             return
         if old is not None:
             states = _states(db)
+            retired = journal.retired_claims(db)
             for body in _bodies(db, evaluator).values():
                 for assignment in body.assignments:
                     if identity(assignment.evaluator_hotkey) != evaluator:
                         continue
                     key_ = capacity_job(body, assignment, journal.legacy_policy).assignment_key
-                    if states.get(key_) not in {"completed", "expired"}:
+                    if states.get(key_) not in {"completed", "expired"} and key_ not in retired:
                         raise ValueError("dispatch timing profile has unfinished assigned work")
         db.execute(
             "INSERT INTO metadata VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -295,6 +296,7 @@ def qualify_dispatch(
     for body in publications:
         bodies[digest(body)] = body
     states = _states(db)
+    retired = journal.retired_claims(db)
     jobs = []
     for body_id, body in bodies.items():
         for assignment in body.assignments:
@@ -302,6 +304,8 @@ def qualify_dispatch(
                 continue
             job = capacity_job(body, assignment, journal.legacy_policy)
             state = states.get(job.assignment_key)
+            if job.assignment_key in retired:
+                continue
             if state == "dispatched":
                 raise ValueError("dispatch capacity awaits the prior claim outcome")
             if state in {"completed", "expired"}:

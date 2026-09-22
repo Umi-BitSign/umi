@@ -1146,6 +1146,15 @@ class ContinuousEvaluator:
         return "complete"
 
     async def observe_void(self, slot, order, evidence):
+        if evidence.certificate.void.reason == "coordinator_outcome_unavailable":
+            suite = await run_owned_thread(
+                _read,
+                Path(self.config.reveal_directory) / (order.round.suite_sha256 + ".json"),
+                EvaluationSuite,
+            )
+            await run_owned_thread(
+                partial(self.dispatch.retire_void, evidence=evidence, suite=suite)
+            )
         receipt = self.journal.get(slot, "void_observation", VoidEvidenceObservation)
         if receipt is None:
             receipt = VoidEvidenceObservation(
