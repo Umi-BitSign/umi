@@ -162,7 +162,7 @@ class AutomaticSuccessorPublisher:
                 try:
                     # Only candidate replacements need full native validation
                     # during selection. Existing round replay happens when due.
-                    builder._load(rounds[number])
+                    candidate = builder._load(rounds[number])
                 except ValueError:
                     with builder._locked():
                         builder.journal.put(
@@ -176,6 +176,32 @@ class AutomaticSuccessorPublisher:
                         )
                     del rounds[number]
                     continue
+                if signed:
+                    from .competition_reward_continuity import validate_admission_candidate
+
+                    with builder._locked():
+                        admitted = builder.journal.get(
+                            "continuity_admission", candidate.package_sha256
+                        )
+                    if admitted is None:
+                        try:
+                            validate_admission_candidate(builder.plan.continuity, candidate, block)
+                        except ValueError:
+                            # An unusable replacement cannot starve the last
+                            # admitted allocation. Its original admission
+                            # deadline and authority scope remain unchanged.
+                            with builder._locked():
+                                builder.journal.put(
+                                    "unavailable_continuity_admission",
+                                    digest(rounds[number]),
+                                    {
+                                        "package_sha256": rounds[number].package_sha256,
+                                        "round_sequence": number,
+                                        "reason": "native_admission_not_available",
+                                    },
+                                )
+                            del rounds[number]
+                            continue
                 verified_sequences.add(number)
                 break
         with builder._locked():

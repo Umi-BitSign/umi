@@ -187,7 +187,8 @@ def _admission_body(authority, package, boundary):
     )
 
 
-def validate_admission(authority, package, admission):
+def validate_admission_candidate(authority, package, block):
+    """Check whether an unadmitted package can enter this authority now."""
     body = authority.authority
     round_ = package.settlement_certificate.publication.round
     if (
@@ -198,7 +199,6 @@ def validate_admission(authority, package, admission):
             round_.sequence == body.first_round_sequence
             and digest(round_) != body.first_round_sha256
         )
-        or admission != _admission_body(authority, package, admission.owned_boundary)
     ):
         raise ValueError("continuity admission has different package or cohort bindings")
     # Native package loading already verifies signatures and original evidence
@@ -207,10 +207,16 @@ def validate_admission(authority, package, admission):
     # insufficient to admit a certificate first presented after expiry.
     if not (
         max(body.valid_from_block, package.retained_settlement.observed_block)
-        <= admission.admitted_at_block
+        <= block
         <= min(round_.valid_through_block, package.policy.valid_through_block)
     ):
         raise ValueError("certificate was not admitted within its original round validity")
+
+
+def validate_admission(authority, package, admission):
+    if admission != _admission_body(authority, package, admission.owned_boundary):
+        raise ValueError("continuity admission has different package or cohort bindings")
+    validate_admission_candidate(authority, package, admission.admitted_at_block)
 
 
 def admit_certified_allocation(authority, package, boundary, wallet):

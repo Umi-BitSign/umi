@@ -539,3 +539,52 @@ async def test_continuity_cannot_widen_its_exact_signed_scope(
         return
     with pytest.raises(ValueError):
         SuccessorRoundPublicationPlan.model_validate_json(json.dumps(raw))
+
+
+async def test_late_unadmitted_replacement_does_not_starve_prior_allocation(
+    automatic, package_case, next_package, tmp_path
+):
+    c = setup(automatic, package_case, tmp_path)
+    assert (await c.service.tick())["status"] == "published"
+    prior = c.feed.history()[-1]
+    completed(c, next_package)
+    later = c.publisher.builder._load(next_package.prepared)
+    c.provider.block = later.settlement_certificate.publication.round.valid_through_block + 1
+    for restart in (False, True):
+        if restart:
+            c.service = AutomaticSuccessorPublisher(c.publisher, c.feed, c.config, **c.signers)
+            c.provider.block += c.publisher.builder.plan.renewal_interval_blocks
+        result = await c.service.tick()
+        assert result["status"] == "published"
+        assert c.feed.history()[-1].intent.package == prior.intent.package
+        assert len(c.publisher.builder.journal.keys("continuity_admission")) == 1
+    assert len(c.publisher.builder.journal.keys("unavailable_continuity_admission")) == 1
+
+
+async def test_out_of_scope_replacement_does_not_consume_existing_continuity(
+    automatic, package_case, next_package, tmp_path
+):
+    plan = continuity_plan(automatic, package_case)
+    limited = plan.continuity.authority.model_copy(update={"last_round_sequence": 1})
+    signed = sign_reward_continuity_authority(limited, authority_wallets()[:2])
+    plan = SuccessorRoundPublicationPlan.model_validate_json(
+        canonical_json_bytes(
+            plan.model_copy(
+                update={
+                    "continuity": signed,
+                    "consent": plan.consent.model_copy(
+                        update={"reward_continuity_sha256": digest(signed)}
+                    ),
+                }
+            )
+        )
+    )
+    c = enable_follow(automatic, tmp_path, plan)
+    completed(c, package_case)
+    assert (await c.service.tick())["status"] == "published"
+    prior = c.feed.history()[-1]
+    completed(c, next_package)
+    c.provider.block = 245
+    assert (await c.service.tick())["round_sequence"] == prior.intent.round_sequence
+    assert c.feed.history()[-1].intent.package == prior.intent.package
+    assert len(c.publisher.builder.journal.keys("continuity_admission")) == 1
