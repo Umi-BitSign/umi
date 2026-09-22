@@ -619,11 +619,16 @@ class ExchangeJournal:
                 # The relay's earlier receipt is not the coordinator's receipt.
                 # Delayed collection must retain its actual owned arrival block.
                 if kind == "void":
+                    certificate = AttestedEvaluationVoid.model_validate_json(raw)
                     store.record_void_evaluation(
                         evidence=VoidEvaluationEvidence(
-                            schema="umi-competition-void-evidence/1",
+                            schema=(
+                                "umi-competition-void-evidence/2"
+                                if certificate.void.schema_ == "umi-competition-evaluation-void/2"
+                                else "umi-competition-void-evidence/1"
+                            ),
                             order=signed,
-                            certificate=AttestedEvaluationVoid.model_validate_json(raw),
+                            certificate=certificate,
                             legacy_policy=self.legacy,
                         ),
                         suite=suite,
