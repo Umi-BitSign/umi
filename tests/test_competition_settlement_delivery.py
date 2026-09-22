@@ -30,11 +30,11 @@ signing_setup = signing_fixture
 
 
 @pytest.fixture
-def replay_limits():
+def replay_limits(request):
     return PublicationReplayLimits(
         maximum_roster_bytes=1_000_000,
         maximum_certificate_bytes=4 * 1024**2,
-        maximum_evidence_bytes=5_000_000,
+        maximum_evidence_bytes=getattr(request, "param", 5_000_000),
     )
 
 
@@ -136,6 +136,7 @@ def package(s):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replay_limits", [5_000_000, 256 * 1024**2], indirect=True)
 async def test_coordinator_cycle_to_http_signatures_to_verified_70_30_package(setup):
     s = setup
     result = await s.coordinator.cycle()
@@ -153,6 +154,68 @@ async def test_coordinator_cycle_to_http_signatures_to_verified_70_30_package(se
     fresh = rounds.RoundCoordinator(s.config, s.policy, s.provider)
     assert (await fresh.cycle())["settlement_held"] == 0
     assert canonical_json_bytes(package(s)[1]) == prior
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replay_limits", [256 * 1024**2], indirect=True)
+async def test_large_profile_serializes_requests_through_response_send(setup, monkeypatch):
+    s = setup
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def pending(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return 0, ()
+
+    monkeypatch.setattr(s.queue, "pending", pending)
+    app = rounds.FastAPI()
+    transport.attach_settlement_route(app, s.queue)
+
+    async def delayed_app(scope, receive, send):
+        async def delayed_send(message):
+            if message["type"] == "http.response.body" and not entered.is_set():
+                entered.set()
+                await release.wait()
+            await send(message)
+
+        await app(scope, receive, delayed_send)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=delayed_app), base_url="https://rounds.example"
+    ) as client:
+
+        async def query():
+            return await client.post(
+                transport.ROUTE,
+                content=canonical_json_bytes(signed_query(s)),
+                headers={"Content-Type": "application/json"},
+            )
+
+        first = asyncio.create_task(query())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            assert (await query()).status_code == 503
+            assert calls == 1
+        finally:
+            release.set()
+            assert (await first).status_code == 200
+        assert (await query()).status_code == 200
+        assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_response_send_cancellation_releases_capacity():
+    capacity = asyncio.Semaphore(1)
+    await capacity.acquire()
+    response = transport._CapacityResponse(b"{}", capacity)
+
+    async def cancelled(message):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await response({"type": "http"}, None, cancelled)
+    await asyncio.wait_for(capacity.acquire(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -271,6 +334,61 @@ async def test_transport_requires_current_unique_evaluator_authentication(setup)
         assert (await send(b" " * (transport.MAX_REQUEST + 1))).status_code == 413
         assert (await send(b"private", **{"Content-Encoding": "gzip"})).status_code == 400
         assert (await send(raw + b" ")).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_large_profile_pending_cursor_advances_one_record_at_a_time(setup, monkeypatch):
+    from umi.competition_settlement_capacity import settlement_capacity
+
+    queue = setup.queue
+    queue.capacity = settlement_capacity(
+        setup.limits.model_copy(update={"maximum_evidence_bytes": 256 * 1024**2})
+    )
+    with queue.journal.transaction() as db:
+        db.executemany(
+            "INSERT INTO settlement_index VALUES (?,?,?,?)",
+            [(i, str(i), 0, 2**53 - 1) for i in (1, 2, 3)],
+        )
+    observed = []
+
+    def held(sequence):
+        observed.append(sequence)
+        raise ValueError("held proposal")
+
+    monkeypatch.setattr(queue, "_prepared", held)
+    hotkey = setup.signers[0].worker.config.evaluator_hotkey
+    cursor = 0
+    for expected in (1, 2, 3):
+        cursor, proposals = await queue.pending(hotkey, after=cursor)
+        assert cursor == expected and proposals == () and observed == list(range(1, expected + 1))
+
+
+@pytest.mark.asyncio
+async def test_large_profile_client_rejects_multiple_proposals(setup):
+    from umi.competition_settlement_capacity import settlement_capacity
+
+    signed = signed_query(setup)
+    reply = transport.SettlementReply(
+        query_sha256=digest(signed.query),
+        policy_sha256=digest(setup.policy),
+        cursor=setup.round.sequence,
+        proposals=(setup.prepared, setup.prepared),
+    )
+
+    def respond(_):
+        return httpx.Response(
+            200, content=canonical_json_bytes(reply), headers={"Content-Type": "application/json"}
+        )
+
+    with pytest.raises(ValueError, match="configured page size"):
+        await transport.request_settlement(
+            "https://rounds.example",
+            signed,
+            transport=httpx.MockTransport(respond),
+            capacity=settlement_capacity(
+                setup.limits.model_copy(update={"maximum_evidence_bytes": 256 * 1024**2})
+            ),
+        )
 
 
 @pytest.mark.asyncio

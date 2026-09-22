@@ -26,6 +26,7 @@ from .competition_publication import (
     verify_cutoff_publication,
 )
 from .competition_settlement import CompetitionSettlement
+from .competition_settlement_capacity import settlement_capacity
 from .competition_void import VoidEvaluationEvidence
 from .open_competition import (
     DEPENDENCE_POLICY_SCHEMA,
@@ -65,7 +66,7 @@ class SettlementPreparation(StrictProtocolModel):
 
 def validate_preparation(prepared, policy, limits):
     raw = canonical_json_bytes(prepared)
-    if len(raw) > MAX_PREPARATION_BYTES:
+    if len(raw) > settlement_capacity(limits).preparation_bytes:
         raise ValueError("settlement preparation exceeds the transport byte bound")
     prepared = SettlementPreparation.model_validate_json(raw)
     calibration = prepared.publication.settlement.dependence_calibration
@@ -177,5 +178,9 @@ async def prepare_retained_settlement(
         ),
     )
     validate_preparation(prepared, policy, limits)
-    _publish(Path(output_directory) / (digest(round_) + ".settlement-proposal.json"), prepared)
+    _publish(
+        Path(output_directory) / (digest(round_) + ".settlement-proposal.json"),
+        prepared,
+        maximum_bytes=settlement_capacity(limits).preparation_bytes,
+    )
     return "prepared"

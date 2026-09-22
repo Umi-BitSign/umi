@@ -306,7 +306,7 @@ def test_batch_iterable_bound_precedes_all_mutation(tmp_path):
 
 def test_batch_object_bound_precedes_all_mutation(journal, monkeypatch):
     before = retained(journal)
-    monkeypatch.setattr(rounds, "MAX_BYTES", 64)
+    monkeypatch.setattr(journal, "maximum_record_bytes", 64)
     with pytest.raises(ValueError, match="object exceeds its byte bound"):
         journal.put_many((("work", "a", {}), ("work", "b", "x" * 64)))
     assert retained(journal) == before

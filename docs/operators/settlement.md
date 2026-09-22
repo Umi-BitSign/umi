@@ -42,6 +42,29 @@ The existing private round plan supplies the committed suite and original
 windows. The coordinator's owned finality provider supplies the current
 registration snapshot; an HTTP caller cannot choose it.
 
+Settlement capacity follows the coordinator's `replay_limits` and the
+evaluator's matching `settlement_replay_limits`. Profiles with at most 64 MiB
+of evidence keep the existing 64 MiB proposal envelope and four-proposal page.
+For larger profiles, the proposal envelope includes evidence, another roster,
+two certificate allowances and 1 MiB of framing, rounded up to 64 MiB. The
+maximum envelope is 512 MiB; configurations that exceed it are rejected.
+For example, 256 MiB evidence with 4 MiB roster and certificate limits selects
+a 320 MiB proposal envelope, one proposal per reply, and one active settlement
+request through response transmission. The reply allows another 8192 bytes.
+Private proposal files and settlement journals use the same envelope.
+
+Package limits are configured separately: allow framing above the replay
+evidence allowance and increase the aggregate package budget accordingly.
+These changes do not increase native per-order reservations or total journal
+budgets. Replay limits are part of retained configuration bindings; establish
+the larger profile in newly staged state or use a separately reviewed migration.
+Do not overwrite an existing journal's bound configuration or delete its state.
+
+Byte envelopes are not process memory limits. Evidence is parsed, canonicalized
+and replayed repeatedly, and request timeouts still apply. Qualify full-sized
+structured evidence on the intended host, including concurrent model workloads,
+before relying on a larger profile for settlement timing or memory headroom.
+
 <a id="open-competition-settlement-preparation--output-and-retry-behavior"></a>
 
 ### Output and retry behavior

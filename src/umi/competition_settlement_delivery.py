@@ -15,6 +15,7 @@ from .competition_publication import (
     verify_settlement_publication,
 )
 from .competition_round_journal import RoundJournal
+from .competition_settlement_capacity import settlement_capacity
 from .competition_settlement_preparation import MAX_BYTES, validate_preparation
 from .competition_settlement_signing import SettlementEndorsement
 from .open_competition import digest, identity
@@ -27,6 +28,7 @@ class SettlementQueue:
     def __init__(self, config, store, provider, *, limits, maximum_rounds, maximum_bytes):
         self.config, self.store, self.provider = config, store, provider
         self.policy, self.limits = store.policy, limits
+        self.capacity = settlement_capacity(limits)
         for name in ("state_directory", "certificate_directory", "package_directory"):
             _private(Path(getattr(config, name)))
         self.journal = RoundJournal(
@@ -40,6 +42,7 @@ class SettlementQueue:
             },
             maximum_rounds=maximum_rounds,
             maximum_bytes=maximum_bytes,
+            maximum_record_bytes=self.capacity.preparation_bytes,
         )
         with self.journal.transaction() as db:
             db.execute(
@@ -227,8 +230,8 @@ class SettlementQueue:
             with self.journal.transaction() as db:
                 rows = db.execute(
                     "SELECT sequence,publication,opens,closes FROM settlement_index "
-                    "WHERE sequence>? AND opens<=? AND closes>=? ORDER BY sequence LIMIT 4",
-                    (after, block, block),
+                    "WHERE sequence>? AND opens<=? AND closes>=? ORDER BY sequence LIMIT ?",
+                    (after, block, block, self.capacity.page_size),
                 ).fetchall()
             result, cursor = [], after
             for sequence, publication_id, opens, closes in rows:

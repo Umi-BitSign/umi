@@ -700,6 +700,7 @@ class RoundCoordinator:
         return tuple(result)
 
     async def prepare_settlements(self, block):
+        from .competition_settlement_capacity import settlement_capacity
         from .competition_settlement_preparation import prepare_retained_settlement
         from .competition_store import SettlementNotReadyError
 
@@ -735,6 +736,9 @@ class RoundCoordinator:
                         Path(self.config.settlement_directory)
                         / (digest(proposal.cutoff.round) + ".settlement-proposal.json"),
                         SettlementPreparation,
+                        maximum_bytes=settlement_capacity(
+                            self.config.replay_limits
+                        ).preparation_bytes,
                     )
                     await self.settlement_queue.prepare(prepared)
                 counts[

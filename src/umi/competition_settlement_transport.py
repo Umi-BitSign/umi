@@ -24,6 +24,20 @@ MAX_REQUEST = 16 * 1024
 MAX_REPLY = 4 * MAX_PREPARATION_BYTES + 8192
 
 
+class _CapacityResponse(Response):
+    """Retain the request slot until its potentially large body has been sent."""
+
+    def __init__(self, body, capacity):
+        super().__init__(body, media_type="application/json", headers={"Cache-Control": "no-store"})
+        self.capacity = capacity
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.capacity.release()
+
+
 class SettlementQuery(StrictProtocolModel):
     schema_: Literal["umi-settlement-query/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -73,7 +87,7 @@ def attach_settlement_route(app, queue):
         maximum_total_nonces=256 * len(policy.evaluators),
         maximum_database_bytes=16 * 1024**2,
     )
-    capacity = asyncio.Semaphore(2)
+    capacity = asyncio.Semaphore(queue.capacity.concurrent_requests)
 
     @app.post(ROUTE)
     async def control(request: Request):
@@ -127,11 +141,14 @@ def attach_settlement_route(app, queue):
                     accepted_publication_sha256=accepted,
                 )
             body = canonical_json_bytes(reply)
-            if len(body) > MAX_REPLY:
+            if (
+                len(reply.proposals) > queue.capacity.page_size
+                or len(body) > queue.capacity.reply_bytes
+            ):
                 raise ValueError("settlement reply exceeds its byte bound")
-            return Response(
-                body, media_type="application/json", headers={"Cache-Control": "no-store"}
-            )
+            response = _CapacityResponse(body, capacity)
+            acquired = False  # Response owns the slot, including cancellation during send.
+            return response
         except HTTPException:
             raise
         except Exception:
@@ -141,7 +158,8 @@ def attach_settlement_route(app, queue):
                 capacity.release()
 
 
-async def request_settlement(origin, signed, *, transport=None):
+async def request_settlement(origin, signed, *, transport=None, capacity=None):
+    maximum_reply_bytes = MAX_REPLY if capacity is None else capacity.reply_bytes
     origin = validate_intake_origin(origin)
     signed = SignedSettlementQuery.model_validate_json(canonical_json_bytes(signed))
     raw = canonical_json_bytes(signed)
@@ -170,7 +188,7 @@ async def request_settlement(origin, signed, *, transport=None):
                 raise ValueError("settlement request rejected")
             result = bytearray()
             async for chunk in response.aiter_bytes():
-                if len(result) + len(chunk) > MAX_REPLY:
+                if len(result) + len(chunk) > maximum_reply_bytes:
                     raise ValueError("settlement reply exceeds byte limit")
                 result.extend(chunk)
             return bytes(result)
@@ -180,6 +198,8 @@ async def request_settlement(origin, signed, *, transport=None):
     except (httpx.HTTPError, asyncio.TimeoutError):
         raise ValueError("settlement request failed") from None
     reply = SettlementReply.model_validate_json(raw)
+    if capacity is not None and len(reply.proposals) > capacity.page_size:
+        raise ValueError("settlement reply exceeds configured page size")
     q = signed.query
     if (
         raw != canonical_json_bytes(reply)
@@ -229,6 +249,7 @@ class SettlementSigningClient:
             self.origin,
             SignedSettlementQuery(query=query, signature=sign_object(query, self.worker.wallet)),
             transport=self.transport,
+            capacity=self.signer.capacity,
         )
 
     async def sync_once(self):
