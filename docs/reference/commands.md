@@ -915,13 +915,15 @@ HTTP routes:
 | `GET /v1/competition/archives` | Content-addressed summaries of superseded intake ledgers |
 | `GET /v1/competition/archives/{policy_digest}/manifest` | Canonical archive manifest bytes |
 | `GET /v1/competition/archives/{policy_digest}/submissions/{submission_digest}` | Canonical archived submission and receipt bytes |
+| `GET /v1/competition/rounds/index?limit=20` | Public round discovery, progress, outcome counts and detail links |
+| `GET /v1/competition/rounds/{round_digest}/results?offset=0&limit=20` | Published provisional scores and within-track ranks; currently available for C3 |
 | `GET /v1/competition/rounds/{digest}?offset=0&limit=20` | Bounded result identities, conflict status and recorded group equivocations |
 | `GET /v1/competition/settlements/{round_digest}` | Immutable settlement and separate current dispute status, or 404 |
 
-See the [results API reference](competition-results-api.md) for allocation
-semantics and the new `GET /v1/competition/rounds/index` discovery contract.
-The index is pending deployment; existing detail URLs still require a known
-round digest. A computed settlement is not certification or a paid reward.
+See the [results API reference](competition-results-api.md) for live discovery,
+C3 score URLs and pagination. Scores are provisional; `certified`,
+`rewards_active` and `chain_submission_authorized` remain false. A computed
+settlement is not certification or a paid reward.
 
 List and status responses contain bounded summaries; they do not embed every
 model manifest or the complete evaluation history in each page.

@@ -2,11 +2,26 @@
 
 # Competition results API
 
-The public intake origin is `https://api.umi.vision`. The existing round and
-settlement reads below work when their round SHA-256 is known. The round index
-and public score pages are implemented in source but **pending deployment**.
-A merged commit does not
-establish that the public origin serves it.
+The public intake origin is `https://api.umi.vision`. Round discovery and C3
+score pages are live:
+
+- [Discover retained rounds](https://api.umi.vision/v1/competition/rounds/index?limit=100).
+- [Read C3 scores, first page](https://api.umi.vision/v1/competition/rounds/19cdf0a16b415190574b609d0852becdb54bef7b4e74416c862205bda418535f/results?offset=0&limit=100).
+- [Read C3 scores, second page](https://api.umi.vision/v1/competition/rounds/19cdf0a16b415190574b609d0852becdb54bef7b4e74416c862205bda418535f/results?offset=100&limit=100).
+
+The two score pages cover all 174 C3 outcomes: 70 scored and 104 infrastructure
+voids. They return `provisional: true`, `certified: false`,
+`rewards_active: false`, `chain_submission_authorized: false`, and
+`Cache-Control: no-store`. The state is `closed_computed_uncertified`.
+Publication does not create a certificate or activate rewards.
+
+The deployed API source is
+[`efa60d3`](https://github.com/Umi-BitSign/umi/commit/efa60d3e31ca95e9d1740400a7d6f7c9d8d73771).
+The C3 artifact is pinned to SHA-256
+`510a9e9f4509164a85d22dc858043caa3f61a8aa8e1600d8a79ec94dd8bcb374`;
+the [static JSON, CSV and checksums](https://github.com/Umi-BitSign/umi/releases/tag/cohort3-provisional-results-20260921)
+remain available. Later documentation commits do not change the deployed source
+identity.
 
 ## Existing reads
 
@@ -26,14 +41,15 @@ Its `projection.allocations` contains UID/hotkey allocations, exact
 `numerator`/`denominator` shares, and `raw_weight`; `projection.uids` and
 `projection.weights` contain the computed row. These are proposed allocations,
 not token payouts, finalized rewards, or a score ranking. Void outcomes are
-not zero scores. There is no separate public rankings or paid-rewards route in
-this intake API. Do not manufacture quality rankings from projected weights.
+not zero scores. The public score pages below provide provisional within-track
+ranks. There is no paid-rewards route in this intake API. Do not manufacture
+quality rankings from projected weights.
 
 The settlement response contains replay material as well as the projection.
 The index below returns only an explicit metadata allowlist. Website consumers
 should select the fields they display rather than republishing entire responses.
 
-## Round index (pending deployment)
+## Round index
 
 `GET /v1/competition/rounds/index?limit=20`
 
@@ -41,7 +57,7 @@ This unauthenticated, read-only route discovers retained round IDs, including
 historical rounds still in the configured intake ledger. It is registered ahead
 of `/rounds/{round_sha256}`. Its distinct path preserves the authenticated
 coordinator's `POST /v1/competition/rounds` transport and existing proxy routes.
-Deployment must route `/rounds/index` to intake, as it does round detail reads.
+The public proxy routes `/rounds/index` to intake, as it does round detail reads.
 
 The response schema is `umi-competition-round-index/1`:
 
@@ -82,7 +98,7 @@ Each item contains:
 | `conflicted`, `disputed` | Retained conflict/dispute markers; a round conflict also makes `disputed` true |
 | `settlement_sha256` | Computed settlement identity, or null |
 | `round_url`, `settlement_url` | Origin-relative existing detail URLs; settlement URL is null until a row exists |
-| `results_url` | New score-page URL when an operator has configured a public result artifact for this round; otherwise null |
+| `results_url` | Score-page URL when an operator has configured a public result artifact for this round; otherwise null |
 | `state`, `certification` | Retained progress and certification availability, defined below |
 | `chain_submission_authorized` | Always false |
 
@@ -119,9 +135,12 @@ The newest retained round is not necessarily the current intake round. Read
 have a frozen round or round SHA. This index does not synthesize one. It makes no
 claim about finality, signing-window validity, active weights or payment.
 
-## Public score pages (pending deployment)
+## Public score pages
 
 `GET /v1/competition/rounds/{round_sha256}/results?offset=0&limit=20`
+
+The public score route is currently available for C3 at the URLs above.
+Publishing another round requires its reviewed artifact and public route.
 
 This route serves a reviewed public score artifact from a local file pinned by
 SHA-256 in intake configuration. It never fetches a URL or runs score calculation
@@ -203,6 +222,6 @@ settlement and evidence indexes. Settlement metadata extraction is bounded to
 snapshot. GET does not load private evaluation bodies or certify that the
 publisher computed scores correctly; score provenance rests on the reviewed
 offline calculation and the pinned artifact. The file path and source selection
-cannot be supplied by a public request. A release-asset copy can serve as the
-immediate static publication; enabling its dynamic API source is a separate
-deployment action.
+cannot be supplied by a public request. The C3 API serves the pinned release
+asset; static publication and dynamic API deployment remain separate actions
+for future rounds.
