@@ -16,6 +16,7 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from .competition_round_plan import RoundPlan, RoundProposal
+from .competition_round_rpc_migration import has_transport_history, validate_rpc_binding
 from .open_competition import digest
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
@@ -85,12 +86,23 @@ class RoundJournal:
             if len(sizes) > 1:
                 raise ValueError("round journal configuration changed")
             old = db.execute("SELECT body FROM binding LIMIT 1").fetchall()
-            if old and (len(old) != 1 or bytes(old[0][0]) != raw):
-                if len(old) != 1 or bytes(old[0][0]) not in _predecessor_bindings(binding):
+            transport_history = has_transport_history(db)
+            if transport_history and not old:
+                raise ValueError("round RPC migration lacks original binding")
+            if old and (transport_history or bytes(old[0][0]) != raw):
+                prior = bytes(old[0][0])
+                if transport_history or (
+                    isinstance(binding, dict)
+                    and binding.get("schema") == "umi-round-coordinator-config/2"
+                    and prior not in _predecessor_bindings(binding)
+                ):
+                    validate_rpc_binding(db, prior, raw)
+                elif prior not in _predecessor_bindings(binding):
                     raise ValueError("round journal configuration changed")
                 # Bound under a deal-preserving predecessor policy (same binding body with the
                 # predecessor's digest wherever policy_sha256 appears): move it to the live policy.
-                db.execute("UPDATE binding SET body = ?", (raw,))
+                else:
+                    db.execute("UPDATE binding SET body = ?", (raw,))
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (raw,))
             db.execute(
