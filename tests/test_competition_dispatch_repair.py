@@ -548,28 +548,47 @@ def _assert_repaired_public_export(tmp_path, item, settlement, pairs):
     database = tmp_path / "export.sqlite3"
     rid = digest(item.round)
     with closing(sqlite3.connect(database)) as db, db:
-        for table, key in (("rounds", "digest"), ("submissions", "digest"),
-                           ("evidence_cutoff_schedules", "round")):
+        for table, key in (
+            ("rounds", "digest"),
+            ("submissions", "digest"),
+            ("evidence_cutoff_schedules", "round"),
+        ):
             db.execute(f"CREATE TABLE {table} ({key} TEXT, body BLOB)")
         db.execute("CREATE TABLE competition_settlements (round TEXT, digest TEXT, body BLOB)")
-        for table, decision in (("independent_evaluation_evidence", "result"),
-                                ("void_evaluation_evidence", "decision")):
-            db.execute(f"CREATE TABLE {table} (digest TEXT, round TEXT, submission TEXT, "
-                       f"{decision} TEXT, first_observed_block INTEGER, body BLOB)")
+        for table, decision in (
+            ("independent_evaluation_evidence", "result"),
+            ("void_evaluation_evidence", "decision"),
+        ):
+            db.execute(
+                f"CREATE TABLE {table} (digest TEXT, round TEXT, submission TEXT, "
+                f"{decision} TEXT, first_observed_block INTEGER, body BLOB)"
+            )
         db.execute("INSERT INTO rounds VALUES (?,?)", (rid, canonical_json_bytes(item.round)))
-        db.execute("INSERT INTO evidence_cutoff_schedules VALUES (?,?)",
-                   (rid, canonical_json_bytes(settlement.cutoff_schedule)))
-        db.execute("INSERT INTO competition_settlements VALUES (?,?,?)",
-                   (rid, competition_settlement_digest(settlement), canonical_json_bytes(settlement)))
+        db.execute(
+            "INSERT INTO evidence_cutoff_schedules VALUES (?,?)",
+            (rid, canonical_json_bytes(settlement.cutoff_schedule)),
+        )
+        db.execute(
+            "INSERT INTO competition_settlements VALUES (?,?,?)",
+            (rid, competition_settlement_digest(settlement), canonical_json_bytes(settlement)),
+        )
         for (signed, evidence), binding in zip(pairs, settlement.results, strict=True):
             sid = digest(signed.submission)
             assert sid == binding.submission_sha256
             db.execute("INSERT INTO submissions VALUES (?,?)", (sid, canonical_json_bytes(signed)))
             table, _ = outcome_storage(binding)
             decision, eid = binding_ids(binding)
-            db.execute(f"INSERT INTO {table} VALUES (?,?,?,?,?,?)",
-                       (eid, rid, sid, decision, binding.first_observed_block,
-                        canonical_json_bytes(evidence)))
+            db.execute(
+                f"INSERT INTO {table} VALUES (?,?,?,?,?,?)",
+                (
+                    eid,
+                    rid,
+                    sid,
+                    decision,
+                    binding.first_observed_block,
+                    canonical_json_bytes(evidence),
+                ),
+            )
     scores = export_round(database, rid, policy=item.policy, scoring_policy=item.legacy_policy)
     assert len(scores.items) == 174
     voids = [row for row in scores.items if row.status == "void"]
@@ -585,7 +604,9 @@ def _assert_repaired_public_export(tmp_path, item, settlement, pairs):
     descriptor = publish_scores(directory, scores)
     assert discover_source(directory, rid).artifact_sha256 == descriptor.artifact_sha256
     with closing(sqlite3.connect(database)) as db, db:
-        db.execute("UPDATE void_evaluation_evidence SET first_observed_block = first_observed_block - 1")
+        db.execute(
+            "UPDATE void_evaluation_evidence SET first_observed_block = first_observed_block - 1"
+        )
     with pytest.raises(ValueError, match="observation binding mismatch"):
         export_round(database, rid, policy=item.policy, scoring_policy=item.legacy_policy)
 
