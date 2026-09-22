@@ -515,6 +515,7 @@ async def test_full_174_roster_repair_preserves_other_173_and_replays_new_releas
             sum(Fraction(int(a.numerator), int(a.denominator)) for a in projection.allocations) == 1
         )
         assert len(projection.allocations) == 173
+        _assert_repaired_public_export(tmp_path, item, settlement, pairs)
         with pytest.raises(ValueError):
             build_settlement_publication(
                 cutoff_certificate=cutoff,
@@ -526,6 +527,88 @@ async def test_full_174_roster_repair_preserves_other_173_and_replays_new_releas
             )
     finally:
         Path(prepared.package_path).chmod(0o700)
+
+
+def _assert_repaired_public_export(tmp_path, item, settlement, pairs):
+    """Replay the new evidence format through the independently merged publisher."""
+    import sqlite3
+    from contextlib import closing
+
+    from umi.competition_outcomes import binding_ids, outcome_storage
+    from umi.competition_public_results_directory import (
+        PublicResultsDirectory,
+        discover_source,
+        publish_scores,
+    )
+    from umi.competition_public_results_export import export_round
+    from umi.competition_settlement import competition_settlement_digest
+
+    # Populate only the publisher's read contract with the signed synthetic
+    # package above. This fixture is not a native intake migration or receipt.
+    database = tmp_path / "export.sqlite3"
+    rid = digest(item.round)
+    with closing(sqlite3.connect(database)) as db, db:
+        for table, key in (
+            ("rounds", "digest"),
+            ("submissions", "digest"),
+            ("evidence_cutoff_schedules", "round"),
+        ):
+            db.execute(f"CREATE TABLE {table} ({key} TEXT, body BLOB)")
+        db.execute("CREATE TABLE competition_settlements (round TEXT, digest TEXT, body BLOB)")
+        for table, decision in (
+            ("independent_evaluation_evidence", "result"),
+            ("void_evaluation_evidence", "decision"),
+        ):
+            db.execute(
+                f"CREATE TABLE {table} (digest TEXT, round TEXT, submission TEXT, "
+                f"{decision} TEXT, first_observed_block INTEGER, body BLOB)"
+            )
+        db.execute("INSERT INTO rounds VALUES (?,?)", (rid, canonical_json_bytes(item.round)))
+        db.execute(
+            "INSERT INTO evidence_cutoff_schedules VALUES (?,?)",
+            (rid, canonical_json_bytes(settlement.cutoff_schedule)),
+        )
+        db.execute(
+            "INSERT INTO competition_settlements VALUES (?,?,?)",
+            (rid, competition_settlement_digest(settlement), canonical_json_bytes(settlement)),
+        )
+        for (signed, evidence), binding in zip(pairs, settlement.results, strict=True):
+            sid = digest(signed.submission)
+            assert sid == binding.submission_sha256
+            db.execute("INSERT INTO submissions VALUES (?,?)", (sid, canonical_json_bytes(signed)))
+            table, _ = outcome_storage(binding)
+            decision, eid = binding_ids(binding)
+            db.execute(
+                f"INSERT INTO {table} VALUES (?,?,?,?,?,?)",
+                (
+                    eid,
+                    rid,
+                    sid,
+                    decision,
+                    binding.first_observed_block,
+                    canonical_json_bytes(evidence),
+                ),
+            )
+    scores = export_round(database, rid, policy=item.policy, scoring_policy=item.legacy_policy)
+    assert len(scores.items) == 174
+    voids = [row for row in scores.items if row.status == "void"]
+    assert len(voids) == 1
+    assert voids[0].submission_sha256 == digest(item.signed_submission.submission)
+    assert voids[0].candidate is voids[0].incumbent is voids[0].score_rank is None
+    assert sum(row.status == "scored" for row in scores.items) == 173
+    assert scores.certification == scores.rewards == "not_checked"
+    assert not scores.chain_submission_authorized
+    raw = canonical_json_bytes(scores)
+    assert b'"hypothesis"' not in raw and b'"transcript_hex"' not in raw
+    directory = PublicResultsDirectory(directory=str(tmp_path / "public"))
+    descriptor = publish_scores(directory, scores)
+    assert discover_source(directory, rid).artifact_sha256 == descriptor.artifact_sha256
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute(
+            "UPDATE void_evaluation_evidence SET first_observed_block = first_observed_block - 1"
+        )
+    with pytest.raises(ValueError, match="observation binding mismatch"):
+        export_round(database, rid, policy=item.policy, scoring_policy=item.legacy_policy)
 
 
 async def test_native_evaluators_certify_repair_and_recheck_local_settlement(lost, tmp_path):

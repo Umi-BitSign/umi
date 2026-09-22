@@ -918,6 +918,11 @@ HTTP routes:
 | `GET /v1/competition/rounds/{digest}?offset=0&limit=20` | Bounded result identities, conflict status and recorded group equivocations |
 | `GET /v1/competition/settlements/{round_digest}` | Immutable settlement and separate current dispute status, or 404 |
 
+See the [results API reference](competition-results-api.md) for allocation
+semantics and the new `GET /v1/competition/rounds/index` discovery contract.
+The index is pending deployment; existing detail URLs still require a known
+round digest. A computed settlement is not certification or a paid reward.
+
 List and status responses contain bounded summaries; they do not embed every
 model manifest or the complete evaluation history in each page.
 

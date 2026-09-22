@@ -83,6 +83,37 @@ rehearsal. Returned data remains untrusted until the local verifier checks it
 against an owned finalized state root. Keep the collection timeout and proof
 checks enabled; changing the RPC endpoint does not grant finality authority.
 
+Registration proof providers, including intake, can add
+`proof_rpc_fallback_urls` with exactly two ordered, credential-free `wss://`
+endpoints. Qualify independently operated providers, their genesis, current
+proofs, and the historical depth each role requires. Different hostnames alone
+do not establish provider independence. A recent-state endpoint may serve live
+intake while lacking proofs for an older roster; keep an archive-capable primary
+and qualify historical reads on a backup too.
+
+Adding the two fallbacks to an otherwise identical configuration preserves the
+existing registration namespace, captures, metadata artifacts and observed head.
+The cache records the old and new configuration bindings and the explicit
+transport list. Changing the primary endpoint, verifier pins or other fields
+is not covered by this migration. Existing configs omit the new field from
+serialization, preserving their bytes. Back up the cache before deploying a
+reviewed control release and its new config; reverting to a config without the
+fallback list is rejected after its binding has advanced.
+
+The provider tries the primary, then each backup only as needed. Connections
+are lazy and persistent, with separate method receive limits. HTTP 429 is logged
+as `competition_proof_rpc_throttled` with provider index and bounded Retry-After;
+URLs, headers and payloads are omitted. Cooldown is shared across methods and
+concurrent requests. Invalid protocol data or proof/chain checks remain terminal.
+Unavailable-state RPC errors may try the next provider with the same capture
+hash; they never move an old request to the latest block. The original overall
+collection timeout and finality freshness checks still apply.
+
+This setting affects registration-proof clients using
+`FinalizedRegistrationProvider` when configured. It does not configure the Rust
+observer's P2P finality transport, unrelated JSON-RPC clients, or existing roles
+running another frozen source release. Keep those deployment scopes explicit.
+
 The owned observer uses `startup_timeout_seconds` for its first verified record
 (600 seconds by default, configurable up to 900). The source implementation now
 reconnects a silent follow stream after 15 seconds or half the configured head-age

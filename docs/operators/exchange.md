@@ -89,6 +89,41 @@ actual quorum-signed orders before their execution windows. The service rejects
 reuse of one protected suite across different rounds. It does not retime late
 orders or convert a missed coordinator deadline into miner fault.
 
+### Following a signed launch amendment
+
+An exchange journal remains bound to its launch even after intake accepts a
+signed schedule amendment. Replacing the exchange config alone is rejected.
+Use the native migration only after the intake amendment and its external
+submission checkpoint have committed successfully:
+
+1. Stop every intake and exchange writer. Verify backups of both existing
+   ledgers, the submission checkpoint, and the original configs.
+2. Prepare a replacement exchange config differing **only** in `public_launch`.
+   Keep every path, policy, audience, capacity, and transport setting unchanged.
+3. With the reviewed control release on `PYTHONPATH`, run:
+
+   ```sh
+   python -m umi.competition_exchange_migration_cli \
+     --policy /ABSOLUTE/POLICY.json \
+     --previous-config /ABSOLUTE/EXCHANGE-BEFORE.json \
+     --replacement-config /ABSOLUTE/EXCHANGE-AFTER.json \
+     --confirm-quiesced-backup
+   ```
+
+   Supply repeated `--predecessor-policy` arguments, newest first, when retained
+   signatures require the admitted policy lineage. The command reads the
+   signed amendment from intake history; a loose signed file is insufficient.
+4. Restart exchange with this release and the replacement config. Check
+   retained event IDs, collection progress, and finality before resuming work.
+
+The migration retains events, audiences, collected markers, the high-water
+block, and event sequence allocation. It changes the binding and appends an
+immutable migration receipt in one SQLite transaction. An exact retry is safe.
+No intake records, signed times, or independent checkpoints are rewritten.
+SQL fences prevent writes from old binaries and stale configs after migration;
+keep the new control release when restarting this namespace. Ordinary policy
+lineage reopen and operational capacity configuration remain supported.
+
 <a id="open-competition-exchange--evaluator-setup"></a>
 
 ### Evaluator setup

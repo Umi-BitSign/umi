@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
@@ -21,6 +21,8 @@ from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
 from .competition_policy_lineage import register_lineage
+from .competition_public_results import PublicResultsSource
+from .competition_public_results_directory import PublicResultsDirectory
 from .competition_store import (
     AdmissionCapacity,
     CompetitionStore,
@@ -63,12 +65,21 @@ class CompetitionServiceConfig(StrictProtocolModel):
     admission_capacity: AdmissionCapacity = Field(default_factory=AdmissionCapacity)
     api_limits: CompetitionApiLimits = Field(default_factory=CompetitionApiLimits)
     historical_archives: Annotated[tuple[IntakeArchiveConfig, ...], Field(max_length=8)] = ()
+    public_results_sources: Annotated[tuple[PublicResultsSource, ...], Field(max_length=1024)] = ()
+    public_results_directory: PublicResultsDirectory | None = None
     # Deal-preserving predecessor policy files, newest first. Their signed submissions
     # stay admitted in this same ledger (see competition_policy_lineage). Distinct from
     # historical_archives, which is the terms-change path that archives a predecessor.
     predecessor_policies: Annotated[
         tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...], Field(max_length=8)
     ] = ()
+
+    @model_serializer(mode="wrap")
+    def preserve_config_without_dynamic_results(self, handler):
+        value = handler(self)
+        if self.public_results_directory is None:
+            value.pop("public_results_directory", None)
+        return value
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
@@ -254,6 +265,8 @@ def create_intake_app(
         limits=config.api_limits,
         public_deployment=config.public_deployment,
         historical_archives=historical_archives,
+        public_results_sources=config.public_results_sources,
+        public_results_directory=config.public_results_directory,
     )
     app.state.finality_providers = (provider,)
     app.state.registration_snapshot_cache = finality_cache
