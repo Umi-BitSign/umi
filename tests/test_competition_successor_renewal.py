@@ -610,7 +610,7 @@ def test_expired_partial_renewal_is_not_resigned(
         build(case, package_case, 162, renew=True)
     authorization = case.builder.journal.get("authorization", "3:1")
     monkeypatch.setattr(publication_module, "sign_response_digest", original)
-    with pytest.raises(ValueError, match="reserved publication expired"):
+    with pytest.raises(ValueError, match="original activation and mortality window"):
         build(case, package_case, 171, renew=True)
     assert case.builder.history() == [first]
     later = build(case, next_package, 245)

@@ -830,3 +830,61 @@ Two further cases cover unfinished-signature priority and cancellation during
 discovery. All 46 cases in the combined publisher/feed regression passed on the
 Studio Linux VM in 567.77 seconds, with two dependency deprecation warnings.
 No live publisher service has been installed by this work.
+
+### Forward reward continuity
+
+A version 4 successor publication plan can opt into an independently signed
+`umi-reward-continuity-authority/1`. This is new authority for future weight
+writes. Original policies, rounds, evidence cutoffs, certificates and allocation
+bytes remain unchanged. Older plans retain their original expiry behavior.
+
+The control binds one policy, chain, compatible release identity, first round
+identity and an explicit range of eligible cohort sequences. Its lifetime is
+`until_superseded_or_revoked`. The last eligible certified allocation may keep
+renewing after the range's last round ends. Expanding the eligible cohort range
+requires another reviewed authority; no operator can supply a replacement row.
+
+Before the original round and policy end, the publisher must replay the complete
+certified package and retain a signed allocation admission with its current
+owned finality boundary. A certificate first presented after that deadline
+cannot be admitted for continuation, even if it claims an earlier observation.
+Admission is an explicit trusted-authority attestation, not independent proof
+of the historical wall-clock time at which every evaluator signed.
+
+Each new write still needs a fresh, short, single-use authorization, fresh
+recipient identities, validator permit, nonce, runtime and finality proofs.
+Version 2 weight authorizations carry the exact control and admission. The
+supervisor's local consent pins the control hash and final host manifest, with
+an explicit until-superseded lifetime. A longer ordinary consent cannot enable
+this mode. The host and worker retain the highest adopted round and exact
+package across restart. A newer certified allocation replaces it; older rounds
+cannot return. Pending or cryptographically invalid candidate packages confer
+no replacement authority. Corrupt discovery metadata or conflicts remain holds.
+
+If a recipient UID changes hotkey, the whole old row holds. The implementation
+neither pays the new hotkey nor drops or redistributes that allocation. A valid
+newer certified package can still replace the held row. This behavior does not
+create a permanent policy-conflict latch by itself.
+
+A threshold-signed continuity revocation durably stops new publisher leases.
+Already issued leases expire within the configured maximum write-authorization
+lifetime, normally 360 blocks. A native signed supervisor hold or local operator
+stop can stop execution sooner. The host latches a continuity hold; resuming
+requires a separately reviewed local consent transition. There is no automatic
+return to the old bridge or an older cohort allocation.
+
+Expired partial signing attempts remain immutable. A fresh owned head may
+reserve another attempt for the same round and next unconsumed directive
+sequence only after the prior lease expires. An expiry audit links the old
+intent; authorization and signature bytes are never overwritten or reused.
+
+Authority lifetime does not remove storage limits. Current weight journals are
+bounded at 16 GiB of retained evidence and 65,536 attempts. At three 12 MiB
+captures per write this permits at most 455 writes before overhead and retries,
+about 7.6 days at a 120-block interval with 12-second blocks. Capacity exhaustion
+holds without deleting history. Indefinite unattended operation additionally
+requires qualified archival or compaction; this release does not claim it.
+Archival must retain authenticated certificates, control/admission bindings,
+unresolved effects, nonce/finality high-water marks, adopted allocation and
+policy holds, and hash-linked durable evidence. An ordinary log rotation cannot
+replace native recovery qualification.
