@@ -22,7 +22,9 @@ from umi.open_competition import CompetitionPolicy, EvaluationSuite
 from umi.protocol import canonical_json_bytes
 
 
-def measure(path: Path) -> dict:
+def measure(path: Path, *, sample_count: int = 3, warmup: bool = True) -> dict:
+    if sample_count < 1:
+        raise ValueError("at least one sample is required")
     fixture = json.loads(path.read_bytes())
     if fixture.get("schema") != "umi-synthetic-void-replay-benchmark/1":
         raise ValueError("expected an explicitly synthetic benchmark fixture")
@@ -31,10 +33,11 @@ def measure(path: Path) -> dict:
     suite = EvaluationSuite.model_validate_json(json.dumps(fixture["suite"]))
     raw = canonical_json_bytes(evidence)
     context = dict(policy=policy, suite=suite, current_block=fixture["current_block"])
-    assert replay_void_evidence(evidence, **context) == evidence
+    if warmup:
+        assert replay_void_evidence(evidence, **context) == evidence
     gc.collect()
     samples = []
-    for _ in range(3):
+    for _ in range(sample_count):
         wall_start, cpu_start = time.perf_counter(), time.process_time()
         replayed = replay_void_evidence(evidence, **context)
         cpu_elapsed = time.process_time() - cpu_start
@@ -49,6 +52,7 @@ def measure(path: Path) -> dict:
         "machine": platform.machine(),
         "cases": len(suite.cases),
         "evaluators": len(evidence.certificate.void.observations),
+        "warmup": warmup,
         "evidence_bytes": len(raw),
         "evidence_sha256": hashlib.sha256(raw).hexdigest(),
         "median_cpu_seconds": statistics.median(s["cpu_seconds"] for s in samples),
@@ -62,9 +66,16 @@ def measure(path: Path) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", required=True, type=Path)
+    parser.add_argument("--samples", type=int, default=3)
+    parser.add_argument("--no-warmup", action="store_true")
     args = parser.parse_args()
     try:
-        print(json.dumps(measure(args.fixture), sort_keys=True))
+        print(
+            json.dumps(
+                measure(args.fixture, sample_count=args.samples, warmup=not args.no_warmup),
+                sort_keys=True,
+            )
+        )
     except Exception as error:
         # Do not expose fixture values through validation errors or tracebacks.
         print(json.dumps({"error_type": type(error).__name__}))
