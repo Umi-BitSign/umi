@@ -11,7 +11,7 @@ import pytest
 from umi import competition_rounds as rounds
 from umi import competition_settlement_delivery as delivery
 from umi import competition_settlement_transport as transport
-from umi.competition_evaluator import ContinuousEvaluator, EvaluatorConfig, _read
+from umi.competition_evaluator import ContinuousEvaluator, EvaluatorConfig, EvaluatorJournal, _read
 from umi.competition_package import PreparedCompetitionPackage, load_competition_package
 from umi.competition_publication import PublicationReplayLimits, settlement_publication_digest
 from umi.open_competition import digest, identity, sign_object
@@ -496,8 +496,9 @@ async def test_expiry_during_package_creation_cannot_advertise_delivery(setup, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("loopback_port", [None, 48123])
 async def test_evaluator_config_starts_and_joins_its_settlement_client(
-    setup, tmp_path, monkeypatch
+    setup, tmp_path, monkeypatch, loopback_port
 ):
     s = setup
     key = wallet("Charlie")
@@ -524,6 +525,7 @@ async def test_evaluator_config_starts_and_joins_its_settlement_client(
         round_coordinator_origin="https://rounds.example",
         settlement_review_directory=str(tmp_path / "independent-reviews"),
         settlement_replay_limits=s.limits,
+        settlement_loopback_port=loopback_port,
         **fields,
     )
     for change in (
@@ -536,6 +538,34 @@ async def test_evaluator_config_starts_and_joins_its_settlement_client(
                 canonical_json_bytes(config.model_copy(update=change))
             )
     worker = ContinuousEvaluator(config, s.policy, key, s.provider)
+    assert worker.settlement_client.loopback_port == loopback_port
+    assert worker.round_client.origin == "https://rounds.example"
+    source = {"origin": "https://rounds.example"}
+    if loopback_port is not None:
+        source["settlement_loopback_port"] = loopback_port
+    assert worker.settlement_client.signer.journal.get("source", "origin") == source
+    encoded = config.model_dump(mode="json", by_alias=True)
+    assert ("settlement_loopback_port" in encoded) == (loopback_port is not None)
+    assert EvaluatorConfig.model_validate_json(canonical_json_bytes(encoded)) == config
+    EvaluatorJournal(config)
+    with pytest.raises(ValueError, match="configuration changed"):
+        EvaluatorJournal(config.model_copy(update={"settlement_loopback_port": 48124}))
+    for invalid in (True, 0, 65536, "48123", "http://127.0.0.1:48123"):
+        with pytest.raises(ValueError):
+            EvaluatorConfig.model_validate_json(
+                canonical_json_bytes({**encoded, "settlement_loopback_port": invalid})
+            )
+    with pytest.raises(ValueError, match="requires configured independent"):
+        EvaluatorConfig.model_validate_json(
+            canonical_json_bytes(
+                {
+                    **encoded,
+                    "settlement_loopback_port": 48123,
+                    "settlement_review_directory": None,
+                    "settlement_replay_limits": None,
+                }
+            )
+        )
     assert isinstance(worker.settlement_client, transport.SettlementSigningClient)
     assert worker.settlement_client.signer.reviews is worker.review_store
     assert worker.review_store.directory == Path(config.settlement_review_directory)

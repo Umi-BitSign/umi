@@ -17,7 +17,7 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from . import competition_evaluator_capacity as evaluator_capacity
 from .competition_authorization import (
@@ -202,6 +202,9 @@ class EvaluatorConfig(StrictProtocolModel):
     work_minimum_issue_ms: Annotated[int, Field(ge=1, le=300_000)] | None = None
     settlement_review_directory: Directory | None = None
     settlement_replay_limits: PublicationReplayLimits | None = None
+    # Explicit local-only settlement connection; the public coordinator remains
+    # the logical source for every role. Configure before initializing journals.
+    settlement_loopback_port: Annotated[int, Field(ge=1, le=65535)] | None = None
     assignment_directory: Directory | None = None
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
@@ -212,6 +215,13 @@ class EvaluatorConfig(StrictProtocolModel):
     scheduling_capacity: SchedulingCapacity = Field(default_factory=SchedulingCapacity)
     no_weight: Literal[True] = True
 
+    @model_serializer(mode="wrap")
+    def serialize_legacy_config(self, handler):
+        value = handler(self)
+        if self.settlement_loopback_port is None:
+            value.pop("settlement_loopback_port", None)
+        return value
+
     def journal_limit(
         self, name: Literal["execution", "round_signing", "work_signing", "work_admission"]
     ) -> int:
@@ -220,6 +230,10 @@ class EvaluatorConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def bindings(self):
+        if self.settlement_loopback_port is not None and self.settlement_review_directory is None:
+            raise ValueError(
+                "settlement loopback requires configured independent settlement signing"
+            )
         if (self.settlement_review_directory is None) != (
             self.settlement_replay_limits is None
         ) or (
@@ -782,6 +796,7 @@ class ContinuousEvaluator:
                 self.round_client.journal,
                 self.review_store,
                 limits=config.settlement_replay_limits,
+                loopback_port=config.settlement_loopback_port,
             )
         if config.work_signing_chain is not None:
             from .competition_dispatch import DispatchFinalityProvider

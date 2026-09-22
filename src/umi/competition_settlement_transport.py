@@ -161,11 +161,24 @@ def attach_settlement_route(app, queue):
                 capacity.release()
 
 
-async def request_settlement(origin, signed, *, transport=None, capacity=None):
+def _settlement_connection(origin, loopback_port, transport):
+    origin = validate_intake_origin(origin)
+    if loopback_port is None:
+        return origin
+    if type(loopback_port) is not int or not 1 <= loopback_port <= 65535:
+        raise ValueError("settlement loopback port must be an integer from 1 to 65535")
+    if transport is not None:
+        raise ValueError("settlement loopback cannot use an alternate HTTP transport")
+    # Literal address, no DNS, proxies, redirects, or public-origin fallback.
+    # This option is solely for an explicitly configured co-located evaluator.
+    return f"http://127.0.0.1:{loopback_port}"
+
+
+async def request_settlement(origin, signed, *, transport=None, capacity=None, loopback_port=None):
     maximum_reply_bytes = MAX_REPLY if capacity is None else capacity.reply_bytes
     read_timeout = 30 if capacity is None else capacity.read_timeout_seconds
     request_timeout = 35 if capacity is None else capacity.request_timeout_seconds
-    origin = validate_intake_origin(origin)
+    connection = _settlement_connection(origin, loopback_port, transport)
     signed = SignedSettlementQuery.model_validate_json(canonical_json_bytes(signed))
     raw = canonical_json_bytes(signed)
     if len(raw) > MAX_REQUEST:
@@ -181,7 +194,7 @@ async def request_settlement(origin, signed, *, transport=None, capacity=None):
             ) as client,
             client.stream(
                 "POST",
-                origin + ROUTE,
+                connection + ROUTE,
                 content=raw,
                 headers={"Content-Type": "application/json", "Accept-Encoding": "identity"},
             ) as response,
@@ -232,13 +245,28 @@ async def request_settlement(origin, signed, *, transport=None, capacity=None):
 
 
 class SettlementSigningClient:
-    def __init__(self, worker, origin, cutoff_journal, review_store, *, limits, transport=None):
+    def __init__(
+        self,
+        worker,
+        origin,
+        cutoff_journal,
+        review_store,
+        *,
+        limits,
+        transport=None,
+        loopback_port=None,
+    ):
         self.worker, self.origin = worker, validate_intake_origin(origin)
+        _settlement_connection(self.origin, loopback_port, transport)
+        self.loopback_port = loopback_port
         self.transport = transport
         self.signer = IndependentSettlementSigner(
             worker, cutoff_journal, review_store, limits=limits
         )
-        self.signer.journal.put("source", "origin", {"origin": self.origin})
+        source = {"origin": self.origin}
+        if loopback_port is not None:
+            source["settlement_loopback_port"] = loopback_port
+        self.signer.journal.put("source", "origin", source)
         self.cursor = self.nonce = 0
 
     async def query(self, **fields):
@@ -255,6 +283,7 @@ class SettlementSigningClient:
             SignedSettlementQuery(query=query, signature=sign_object(query, self.worker.wallet)),
             transport=self.transport,
             capacity=self.signer.capacity,
+            loopback_port=self.loopback_port,
         )
 
     async def sync_once(self):

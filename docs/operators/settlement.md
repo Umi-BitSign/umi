@@ -293,6 +293,31 @@ In each `umi-evaluator-config/1`, supply:
 - `settlement_replay_limits`: reviewed `PublicationReplayLimits` for roster,
   evidence and certificates.
 
+For an evaluator on the coordinator host, an operator may explicitly configure
+`settlement_loopback_port` (integer 1–65535) before initializing its journals.
+Only settlement discovery and vote requests then connect to
+`http://127.0.0.1:<port>/v1/competition/settlements`. The listener must be the
+native coordinator service on that host. The public HTTPS origin remains the
+logical coordinator identity and the connection used by cutoff and work signing.
+The local port is retained in both evaluator configuration and settlement source
+bindings; changing, adding or removing it on existing bound journals is rejected.
+Do not rewrite those bindings or remove journals to enable this option.
+
+This connection uses cleartext exclusively on literal IPv4 loopback. It is for
+an explicitly authorized co-located deployment, with no DNS lookup, environment
+proxy, redirect following, or fallback to the public origin. Native signed
+queries, response bindings, independent evidence checks, finality, conflicts and
+expiry still apply. Other hosts must use HTTPS and a route whose proxy deadlines
+have been qualified for the complete query and certification operations.
+
+Profiles with preparation capacity above 64 MiB allow 1,800 seconds for a server
+operation, 1,860 seconds for a client read, and 1,920 seconds for a complete client
+request. Legacy profiles retain 25/30/35 seconds. These budgets do not extend
+protocol signing windows or upstream proxy deadlines. In particular, Cloudflare
+documents a [125-second default proxy read timeout and a 30-second proxy write
+timeout](https://developers.cloudflare.com/fundamentals/reference/connection-limits/);
+increasing this client's budget alone cannot qualify that route.
+
 The worker polls, endorses and returns votes automatically. It uses its existing
 hotkey and owned finality provider. Each endorsement still requires the worker's
 own cutoff reservation, completed local execution for every roster member,
@@ -310,7 +335,8 @@ Independent eligible control groups must meet the policy quorum. The first
 certificate is retained before package creation; later signatures cannot alter
 its bytes. A failed write is retried by the coordinator's next preparation poll.
 
-Discovery pages contain at most four current proposals, bounded at 16 MiB each.
+Discovery page and preparation bounds follow the configured settlement capacity;
+large profiles send one proposal per page.
 The snapshot-age limit and original round expiry apply throughout collection.
 Expired proposals remain historical records; their deadlines are never shifted.
 An expired retry can acknowledge an already retained vote but cannot create a
