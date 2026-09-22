@@ -4,6 +4,7 @@ import asyncio
 import heapq
 import random
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -497,6 +498,8 @@ async def _exercise_poll_loop(jobs, limits, budget, *, extra_inbox=(), restart_a
     The pending-page adapter mirrors the journal's ordering/filtering but does not
     authenticate publications or persist SQLite state. Only a drained restart is
     modeled; interrupted in-flight work is covered by the native lifecycle tests.
+    Synthetic journal calls stay on this virtual clock. Real OS thread handoff
+    timing and SQLite contention belong to the separate lifecycle tests.
     """
     from umi.competition_dispatch import EndpointDispatcher
 
@@ -618,16 +621,20 @@ async def _exercise_poll_loop(jobs, limits, budget, *, extra_inbox=(), restart_a
                 metrics.restarts += 1
             await clock.sleep(limits.poll_seconds * 1000)
 
-    task = asyncio.create_task(run())
-    try:
-        await clock.run(
-            task,
-            maximum_events=max(20_000, len(jobs) * 8 + len(publication_order) * 32),
-        )
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        await driver.aclose()
+    async def synthetic_journal_call(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    with patch("umi.competition_dispatch.run_owned_thread", synthetic_journal_call):
+        task = asyncio.create_task(run())
+        try:
+            await clock.run(
+                task,
+                maximum_events=max(20_000, len(jobs) * 8 + len(publication_order) * 32),
+            )
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await driver.aclose()
     assert not pending and not active_miners and metrics.http == 0
     assert len(completed) == len(starts) == len(finishes) == len(jobs)
     return SimpleNamespace(
