@@ -413,7 +413,11 @@ def _historical_context(path):
         SignedBootstrapEligibilityManifest.model_validate(v) for v in value["manifests"]
     )
     leases = tuple(SignedSimpleBootstrapLease.model_validate(v) for v in value["leases"])
-    if canonical_json_bytes({"manifests": manifests, "leases": leases}) != source.payload:
+    canonical = {
+        "manifests": [item.model_dump(mode="json", by_alias=True) for item in manifests],
+        "leases": [item.model_dump(mode="json", by_alias=True) for item in leases],
+    }
+    if canonical_json_bytes(canonical) != source.payload:
         raise HostUpgradeError("historical recovery context is not canonical")
     # Snapshot/reconciliation verifies the historical authorities and bindings.
     # These records cannot grant a new weight-writing authorization.

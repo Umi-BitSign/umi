@@ -639,3 +639,32 @@ def test_empty_historical_context_is_explicit_and_canonical(tmp_path, monkeypatc
     path.chmod(0o400)
     with pytest.raises(ValueError):
         upgrade._historical_context(path)
+
+
+@pytest.mark.parametrize("noncanonical", [False, True])
+def test_nonempty_historical_context_preserves_signed_objects(tmp_path, monkeypatch, noncanonical):
+    from umi.simple_bootstrap_validator import SignedSimpleBootstrapLease
+
+    from .test_simple_bootstrap_validator import _production_manifest
+
+    monkeypatch.setattr(upgrade.anchors, "_root_owner_uid", os.getuid)
+    manifest = _production_manifest()
+    lease = SignedSimpleBootstrapLease.model_validate_json(
+        (Path(__file__).parent / "fixtures/historical-simple-bootstrap-lease.json").read_bytes()
+    )
+    value = {
+        "manifests": [manifest.model_dump(mode="json", by_alias=True)],
+        "leases": [lease.model_dump(mode="json", by_alias=True)],
+    }
+    payload = canonical_json_bytes(value)
+    path = tmp_path / "context.json"
+    path.write_bytes(payload + (b"\n" if noncanonical else b""))
+    path.chmod(0o400)
+    if noncanonical:
+        with pytest.raises(ValueError, match="not canonical"):
+            upgrade._historical_context(path)
+        return
+    source, manifests, leases = upgrade._historical_context(path)
+    assert source.payload == payload
+    assert canonical_json_bytes(manifests[0]) == canonical_json_bytes(manifest)
+    assert canonical_json_bytes(leases[0]) == canonical_json_bytes(lease)

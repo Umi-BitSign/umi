@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,7 +93,7 @@ def installed(base_installed, signed_policy, fault):
     "fault", [None, "missing_anchor", "wrong_anchor", "missing_context", "lease_signature"]
 )
 async def test_common_receipt_and_bridge_history_require_owned_historical_anchor(
-    observer_case, limits, fault
+    observer_case, limits, fault, tmp_path, monkeypatch
 ):
     item = observer_case
     hotkey = item.stopped.validator_hotkey
@@ -123,6 +124,18 @@ async def test_common_receipt_and_bridge_history_require_owned_historical_anchor
         None if fault == "missing_anchor" else commitment
     )
     manifests, leases = ((), ()) if fault == "missing_context" else ((signed,), (lease,))
+    context_path = tmp_path / "historical-context.json"
+    context_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "manifests": [value.model_dump(mode="json", by_alias=True) for value in manifests],
+                "leases": [value.model_dump(mode="json", by_alias=True) for value in leases],
+            }
+        )
+    )
+    context_path.chmod(0o400)
+    monkeypatch.setattr(upgrade.anchors, "_root_owner_uid", os.getuid)
+    _, manifests, leases = upgrade._historical_context(context_path)
     observer = item.build()
     try:
         if fault == "lease_signature":
