@@ -11,7 +11,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 from typing_extensions import Self
 
 from .competition_public_results_artifact import normalize_public_results
@@ -96,16 +96,12 @@ class PublicResult(StrictProtocolModel):
         return self
 
 
-class PublicRoundResults(StrictProtocolModel):
-    schema_: Literal["umi-competition-public-results/1"] = Field(alias="schema")
+class _PublicScores(StrictProtocolModel):
     round_sha256: Hex32
     policy_sha256: Hex32
     settlement_sha256: Hex32
     observed_block: Block
     scoring_method: Literal["native_replay_evaluation_at_settlement_observed_block"]
-    provisional: Literal[True]
-    certified: Literal[False]
-    rewards_active: Literal[False]
     chain_submission_authorized: Literal[False]
     items: Annotated[tuple[PublicResult, ...], Field(min_length=1, max_length=512)]
 
@@ -133,6 +129,28 @@ class PublicRoundResults(StrictProtocolModel):
             ):
                 raise ValueError("public rank differs from exact candidate quality within track")
         return self
+
+
+class PublicRoundResults(_PublicScores):
+    """Historical version 1 remains byte- and API-compatible."""
+
+    schema_: Literal["umi-competition-public-results/1"] = Field(alias="schema")
+    provisional: Literal[True]
+    certified: Literal[False]
+    rewards_active: Literal[False]
+
+
+class PublicSettlementScores(_PublicScores):
+    """Score replay alone makes no claim about certification or payment."""
+
+    schema_: Literal["umi-competition-public-results/2"] = Field(alias="schema")
+    certification: Literal["not_checked"] = "not_checked"
+    rewards: Literal["not_checked"] = "not_checked"
+
+
+PUBLIC_RESULTS = TypeAdapter(
+    Annotated[PublicRoundResults | PublicSettlementScores, Field(discriminator="schema_")]
+)
 
 
 class PublicResultsSource(StrictProtocolModel):
@@ -171,9 +189,7 @@ def public_results_page(
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("public results must be an object")
-    public = PublicRoundResults.model_validate_json(
-        canonical_json_bytes(normalize_public_results(value))
-    )
+    public = PUBLIC_RESULTS.validate_json(canonical_json_bytes(normalize_public_results(value)))
     if public.round_sha256 != source.round_sha256:
         raise ValueError("public results belong to another round")
     with closing(
@@ -281,7 +297,11 @@ def public_results_page(
         {
             "source": "configured_public_results_artifact",
             "artifact_sha256": source.artifact_sha256,
-            "state": "closed_computed_uncertified",
+            "state": (
+                "closed_computed"
+                if isinstance(public, PublicSettlementScores)
+                else "closed_computed_uncertified"
+            ),
             "conflicted": conflicted,
             "disputed": disputed,
             "items": [

@@ -206,3 +206,102 @@ offline calculation and the pinned artifact. The file path and source selection
 cannot be supplied by a public request. A release-asset copy can serve as the
 immediate static publication; enabling its dynamic API source is a separate
 deployment action.
+
+## Recurring score export and discovery
+
+The native publisher can export each newly retained settlement without changing
+intake configuration for every round. Add one operator-owned directory to intake:
+
+```json
+{
+  "public_results_directory": {"directory": "/srv/umi/public-results"}
+}
+```
+
+Existing `public_results_sources` remain supported, including the historical C3
+artifact. A conflicting dynamic artifact cannot override a configured digest.
+Enabling this feature requires a separately qualified intake release and its
+honest source pin; it does not bypass `public_deployment.umi_source_tree_sha256`.
+After that deployment, new descriptors are discovered on requests without an
+intake restart. Missing directories initially mean no published results.
+
+The publisher configuration has this shape (replace placeholders with exact
+policy digests and private absolute paths):
+
+```json
+{
+  "schema": "umi-public-results-publisher-config/1",
+  "database": "/srv/umi/intake/competition.sqlite3",
+  "policy_path": "/srv/umi/competition-policy.json",
+  "policy_sha256": "<competition policy digest>",
+  "scoring_policy_path": "/srv/umi/transport-policy.json",
+  "scoring_policy_sha256": "<exact scoring/transport policy digest>",
+  "predecessor_policy_paths": [],
+  "public_results_directory": {"directory": "/srv/umi/public-results"},
+  "limits": {
+    "maximum_record_bytes": 67108864,
+    "maximum_evidence_bytes": 536870912,
+    "maximum_roster_bytes": 16777216
+  },
+  "maximum_rounds_per_poll": 8,
+  "poll_seconds": 60
+}
+```
+
+Supply the deal-preserving predecessor chain newest first when retained
+submissions require it. Policy files and scoring runtime pins are checked;
+submissions are replayed under the configured round policy with that explicit
+lineage. Other policies' settlements are skipped, so the old C3 artifact can
+remain pinned separately. A future policy transition needs a reviewed publisher
+configuration; ordinary new rounds under the same policy do not.
+
+Run one bounded scan with the qualified interpreter/source:
+
+```sh
+python -m umi.competition_public_results_cli --config /srv/umi/public-results-publisher.json
+```
+
+For an operator-managed persistent service, append `--watch`. It has no wallet,
+network, inference, signing or weight-submit path. The service should run under
+the intake operator, with read access to intake and policy files, write access
+only to its dedicated publication directory, and an appropriate CPU/memory
+budget. SIGTERM/SIGINT in watch mode finishes the current bounded batch before
+exit; choose service stop grace to allow that work. One-shot mode exits nonzero
+when a round is held. Watch mode reports held rounds and retries them on later
+scans. Logs contain round identifiers and error classes, not validation payloads.
+
+Each export uses a query-only consistent SQLite snapshot and reads one private
+outcome at a time. It validates the settlement digest, full roster, cutoff and
+first-observation bindings, and independently signed scored or void evidence.
+Scores use the retained settlement observation block, without creating a new
+arrival time. This is historical replay, not permission to sign an expired
+round. The intake WAL remains writable while replay holds its read snapshot;
+long replays can retain WAL pages until that snapshot closes. Size limits apply
+to each record and the total evidence/roster bytes per round. No full model or
+media is read. HTTP requests only check public artifacts and ledger metadata.
+
+New artifacts use `umi-competition-public-results/2`. They retain version 1's
+exact fractions, within-track ranks, outcome digests and unranked null-score
+voids. They explicitly report `certification: "not_checked"`,
+`rewards: "not_checked"`, and `chain_submission_authorized: false`; they do not
+emit the version 1 `certified`/`rewards_active` booleans. Their results-page state
+is `closed_computed`. Export verifies score evidence, not settlement certificate
+quorum, projected allocations, current reward activation or on-chain payment.
+The existing round-index state vocabulary is unchanged; its separate
+`certification: "not_checked"` field remains authoritative about inspection scope.
+
+The directory and its `artifacts`/`rounds` children are private and operator-owned.
+Artifacts are installed as `artifacts/<sha256>.json`, then immutable descriptors
+as `rounds/<round_sha256>.json`, with file and directory synchronization. Paths
+cannot be supplied in descriptors or public requests. Symlinks, hardlinked
+artifacts, digest changes and unknown public fields are rejected. Per-request
+ledger checks expose current dispute flags without rewriting historical scores.
+
+A local lease prevents concurrent publishers. A durable cursor bounds each
+scan and wraps to discover late settlements and retry repaired failures. A
+malformed round does not prevent later rounds from exporting. Lost cursor or
+descriptor files can be reconstructed without changing artifact bytes; a
+missing artifact can be regenerated only if it matches the retained descriptor.
+Existing conflicting bytes are held rather than overwritten. Retain the output
+directory across restarts; it contains the cursor, completion descriptors and
+immutable public artifacts. Private evidence remains in the intake ledger.

@@ -20,6 +20,7 @@ from starlette.types import Lifespan
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
 from .competition_public_results import PublicResultsSource, public_results_page
+from .competition_public_results_directory import PublicResultsDirectory, resolve_source
 from .competition_round_discovery import MAXIMUM_ROUND_SEQUENCE, round_index
 from .competition_store import (
     AdmissionCapacityError,
@@ -61,6 +62,7 @@ def create_app(
     public_deployment: PublicIntakeDeployment | None = None,
     historical_archives: tuple[LoadedIntakeArchive, ...] = (),
     public_results_sources: tuple[PublicResultsSource, ...] = (),
+    public_results_directory: PublicResultsDirectory | None = None,
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
@@ -105,6 +107,10 @@ def create_app(
     results_by_round = {source.round_sha256: source for source in public_results_sources}
     if len(results_by_round) != len(public_results_sources):
         raise ValueError("public result sources must name unique rounds")
+    if public_results_directory is not None:
+        public_results_directory = PublicResultsDirectory.model_validate_json(
+            canonical_json_bytes(public_results_directory)
+        )
     capacities = {
         "submission": asyncio.Semaphore(limits.maximum_concurrent_submissions),
         "read": asyncio.Semaphore(limits.maximum_concurrent_reads),
@@ -308,13 +314,23 @@ def create_app(
                 before_sequence=before_sequence,
                 limit=limit,
             )
-            for item in page["items"]:
-                round_id = item["round_sha256"]
-                item["results_url"] = (
-                    f"/v1/competition/rounds/{round_id}/results"
-                    if round_id in results_by_round
-                    else None
-                )
+
+            def attach_results():
+                for item in page["items"]:
+                    round_id = item["round_sha256"]
+                    try:
+                        source = resolve_source(
+                            public_results_directory, results_by_round, round_id
+                        )
+                    except (OSError, ValueError):
+                        # One broken publication must not hide other rounds.
+                        source = None
+                    item["results_url"] = (
+                        f"/v1/competition/rounds/{round_id}/results" if source else None
+                    )
+                return page
+
+            page = await run_in_threadpool(attach_results)
             return page
         except (OSError, ValueError, sqlite3.Error) as error:
             raise HTTPException(503, "round index unavailable") from error
@@ -327,10 +343,12 @@ def create_app(
             default=min(20, limits.maximum_page_size), ge=1, le=limits.maximum_page_size
         ),
     ):
-        source = results_by_round.get(round_sha256)
-        if source is None:
-            raise HTTPException(404, "public results not published")
         try:
+            source = await run_in_threadpool(
+                resolve_source, public_results_directory, results_by_round, round_sha256
+            )
+            if source is None:
+                raise HTTPException(404, "public results not published")
             return await run_in_threadpool(
                 public_results_page, store.path, source, offset=offset, limit=limit
             )
