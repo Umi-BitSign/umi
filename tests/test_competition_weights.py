@@ -478,7 +478,11 @@ async def test_pinned_bittensor_transport_sends_exact_bytes_without_wallet_looku
             return None
 
     def factory(endpoint, **options):
-        assert endpoint == "wss://rpc.example" and options == {"retry_forever": False}
+        assert endpoint == "wss://rpc.example" and options == {
+            "retry_forever": False,
+            "fallback_endpoints": [],
+            "archive_endpoints": [],
+        }
         return Client()
 
     transport = BittensorCompetitionWeightTransport(

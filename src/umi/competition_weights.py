@@ -490,12 +490,20 @@ def build_competition_weight_call(
 class BittensorCompetitionWeightTransport:
     """Encode using the owned runtime, submit exact signed bytes via SDK 11.1.0."""
 
-    def __init__(self, *, endpoint: str, client_factory=None):
+    def __init__(
+        self, *, endpoint: str, fallback_endpoints: tuple[str, ...] = (), client_factory=None
+    ):
         if importlib.metadata.version("bittensor") != "11.1.0":
             raise ValueError("successor weight transport requires pinned Bittensor 11.1.0")
-        if not endpoint.startswith("wss://"):
-            raise ValueError("successor submission endpoint must use wss")
+        endpoints = (endpoint, *fallback_endpoints)
+        if len(endpoints) not in (1, 3) or len(set(endpoints)) != len(endpoints):
+            raise ValueError(
+                "successor submission needs a primary and zero or two explicit backups"
+            )
+        for selected in endpoints:
+            CompetitionChainConfig.read_only_rpc(selected)
         self.endpoint = endpoint
+        self.fallback_endpoints = tuple(fallback_endpoints)
         self.client_factory = client_factory or bt.Subtensor
 
     @staticmethod
@@ -527,8 +535,15 @@ class BittensorCompetitionWeightTransport:
 
     async def submit(self, encoded: bytes, signer):
         extrinsic = exact_signed_extrinsic(encoded)
-        async with self.client_factory(self.endpoint, retry_forever=False) as client:
+        async with self.client_factory(
+            self.endpoint,
+            fallback_endpoints=list(self.fallback_endpoints),
+            archive_endpoints=[],
+            retry_forever=False,
+        ) as client:
             # No submit_call re-composition, nonce lookup, era selection or retry.
+            # The pinned SDK marks both author submission methods non-idempotent:
+            # a frame that may have been sent is never replayed on reconnect.
             return await client._substrate.submit_signed(
                 extrinsic,
                 signer,

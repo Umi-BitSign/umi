@@ -113,9 +113,13 @@ This setting affects `FinalizedRegistrationProvider` and the separate weight
 and runtime-code collectors in `FinalizedCompetitionWeightProvider`. Each keeps
 its original proof/value limits; untrusted prefetched weight values remain bound
 to the exact requested block and must pass native proof verification. It does
-not configure transaction submission, the Rust observer's P2P finality transport,
-unrelated JSON-RPC clients, or existing roles running another frozen source
-release. Keep those deployment scopes explicit.
+not configure the Rust observer's P2P finality transport, unrelated JSON-RPC
+clients, or existing roles running another frozen source release. The weight
+worker also passes this exact endpoint list to its pinned transaction transport,
+with implicit SDK endpoint pools disabled. An unsent request can use another
+connection; a possibly sent transaction is never resent. SDK policy refusals are
+terminal, and uncertain effects still require native reconciliation. Keep those
+deployment scopes explicit.
 
 The owned observer uses `startup_timeout_seconds` for its first verified record
 (600 seconds by default, configurable up to 900). The source implementation now
