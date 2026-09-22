@@ -182,4 +182,3 @@ the chain configuration's `finality_binary`; those paths must agree. Keep the
 policy's verifier digest and use the new C4 state paths described above. This
 download supplies the finality observer; it does not replace a signed validator
 host release or the separate storage-proof verifier.
-
