@@ -287,6 +287,15 @@ contexts can be supplied through `--historical-context`. All artifacts and
 authorization controls must already be reviewed and signed. The command does
 not fetch or create missing launch inputs.
 
+An applied common-bootstrap journal requires its original signed manifest and
+lease in that historical context, even when later bridge writes supersede its
+weight row. The stopped observer requests the manifest commitment identified by
+the authenticated retained effects and includes its proof in the final owned
+chain observation. Missing context, absent or different commitments, and invalid
+historical signatures keep recovery held. A snapshot requiring more than one
+distinct historical manifest anchor is refused; the current observation format
+proves one anchor. Historical authority never becomes current write permission.
+
 Its pre-stop child runs as the installed non-root account, verifies its complete
 signed host tree and stages the signed OCI bundle before exercising the actual
 Podman sandbox. The named wallet directory is inaccessible to that child.

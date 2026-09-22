@@ -448,12 +448,25 @@ async def _observe_stopped_history(
         stopped.worker_state_root,
         **_snapshot_kwargs(stopped, limits, manifests, leases),
     ) as snapshot:
+        # Classification authenticates the retained manifest/lease at its
+        # historical preflight block. Request its commitment in the final owned
+        # read; a later bridge row does not replace proof of the old anchor.
+        anchors = {
+            effect.manifest_sha256
+            for effect in snapshot.manifest.effects
+            if effect.classification in {"retained_anchor_receipt", "retained_weight_receipt"}
+        }
+        if len(anchors) > 1:
+            raise HostUpgradeError("recovery requires multiple historical manifest anchors")
+        manifest_anchor = next(iter(anchors), None)
         if BRIDGE_JOURNAL in snapshot._files:
             audit = audit_bridge_history(snapshot._files, hotkey=stopped.validator_hotkey)
             if any(type(j) is RegistrationBridgeTransactionJournal for _, j in audit.attempts):
-                collected = await observer.observe_bridge(audit, snapshot.sha256)
+                collected = await observer.observe_bridge(
+                    audit, snapshot.sha256, manifest_anchor_sha256=manifest_anchor
+                )
                 return collected.observation, collected
-        return await observer.observe(), None
+        return await observer.observe(manifest_anchor_sha256=manifest_anchor), None
 
 
 async def _switch_stopped(
