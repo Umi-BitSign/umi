@@ -298,6 +298,24 @@ async def _run(item, **changes):
     return await item.worker.run(item.case.path, **options)
 
 
+@pytest.mark.parametrize("behavior", ["apply", "disconnect", "empty"])
+async def test_offline_evidence_copy_preserves_native_weight_history(weight_case, behavior):
+    from .evidence_copy_cases import assert_native_copy
+
+    item = weight_case
+    if behavior != "empty":
+        item.behavior = behavior
+        if behavior == "disconnect":
+            with pytest.raises(ConnectionError):
+                await _run(item)
+        else:
+            await _run(item)
+    else:
+        with item.worker._db() as db:
+            item.worker._check_journal_binding(db, item.hotkey)
+    assert_native_copy(item)
+
+
 async def test_actual_proof_collection_then_durable_exact_sdk_row(weight_case):
     item = weight_case
     # The package fixture includes a preserved, reviewed promotion and two
