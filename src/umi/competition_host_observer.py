@@ -288,20 +288,30 @@ class StoppedUpgradeObserver:
         self._verify_inputs()
         _issued(self)
 
-    async def observe(self) -> OwnedCompetitionChainObservation:
-        return (await self._observe()).observation
+    async def observe(
+        self, *, manifest_anchor_sha256: str | None = None
+    ) -> OwnedCompetitionChainObservation:
+        return (await self._observe(manifest_anchor_sha256=manifest_anchor_sha256)).observation
 
     async def observe_bridge(
         self,
         audit: BridgeHistoryAudit,
         snapshot_sha256: str,
+        *,
+        manifest_anchor_sha256: str | None = None,
     ) -> StoppedBridgeObservation:
         if type(audit) is not BridgeHistoryAudit or len(snapshot_sha256) != 64:
             raise HostUpgradeError("bridge recovery requires an audited snapshot")
-        return await self._observe(audit, snapshot_sha256)
+        return await self._observe(
+            audit, snapshot_sha256, manifest_anchor_sha256=manifest_anchor_sha256
+        )
 
     async def _observe(
-        self, audit: BridgeHistoryAudit | None = None, snapshot_sha256: str = ""
+        self,
+        audit: BridgeHistoryAudit | None = None,
+        snapshot_sha256: str = "",
+        *,
+        manifest_anchor_sha256: str | None = None,
     ) -> StoppedBridgeObservation:
         _issued(self)
         async with self._lock:
@@ -325,7 +335,11 @@ class StoppedUpgradeObserver:
                                     path, journal, await provider.read_bridge_outcome(journal)
                                 )
                             )
-                observation = await provider.wait_weights_ready(self._stopped.validator_hotkey, ())
+                observation = await provider.wait_weights_ready(
+                    self._stopped.validator_hotkey,
+                    (),
+                    manifest_anchor_sha256=manifest_anchor_sha256,
+                )
             finally:
                 await provider.aclose()
             # Slow provider shutdown and root-tree checks precede the final

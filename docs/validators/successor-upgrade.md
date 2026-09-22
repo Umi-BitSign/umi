@@ -105,6 +105,28 @@ has its configured byte and record limits. All 18 repository checks passed for
 
 #### Download history bindings
 
+Hosts co-located with a private delivery service can include
+`artifacts/successor-delivery.json` in their signed host artifact. The canonical
+file uses schema `umi-successor-cohost-delivery/1`, an exact `https://HOST` origin
+matching the installed directive URL, a `loopback_port` from 1024 through 65535,
+and a `timeout_seconds` bound no greater than 300. The operator consent pins
+the host manifest, which pins this root-owned, read-only file. A host without
+this signed file retains public HTTPS delivery. Worker inputs and observer
+configuration schemas remain unchanged.
+
+Only the selected origin connects to `127.0.0.1` over HTTP. Signed logical URLs,
+object sizes, hashes, signatures, continuation checks and redirect rejection
+remain enforced. Other origins still require public-address HTTPS. Bind the
+private feed to loopback, including the exact selected release archive route;
+do not publish protected evidence to a public bucket. This transport choice
+does not extend a reward authorization or a round's validity.
+
+When preparing initial history through the same local service, pass
+`fetch-initial-successor-history --signed-host-artifact PATH`. The signed
+manifest must match the consent, and its optional delivery file must match the
+staged host. Omitting the option keeps public HTTPS. Initial-history collection
+still does not authorize or perform a validator switch.
+
 When the runtime supplies its retained continuation, delivery stores only
 `history-binding.json`, a bounded hash/size/selected-head binding. The full signed
 records remain in the runtime journal and recovery registry. Delivery verifies
@@ -286,6 +308,23 @@ and start. It takes `--config`, `--unit`, `--controls`, `--host-bundle`,
 contexts can be supplied through `--historical-context`. All artifacts and
 authorization controls must already be reviewed and signed. The command does
 not fetch or create missing launch inputs.
+
+An applied common-bootstrap journal requires its original signed manifest and
+lease in that historical context, even when later bridge writes supersede its
+weight row. The stopped observer requests the manifest commitment identified by
+the authenticated retained effects and includes its proof in the final owned
+chain observation. Missing context, absent or different commitments, and invalid
+historical signatures keep recovery held. A snapshot requiring more than one
+distinct historical manifest anchor is refused; the current observation format
+proves one anchor. Historical authority never becomes current write permission.
+
+Historical parsing can exceed the owned chain proof's freshness interval. The
+upgrade therefore parses each locked snapshot before collecting its fresh proof,
+once for archive preparation and again for verification. Within that snapshot
+scope it reuses the authenticated bridge audit, checking original byte hashes,
+file identities and parsed content before reuse. It still checks the current
+installed policy, chain row and proof expiry on every acceptance. No historical
+signature or current chain authority is inferred from a longer service timeout.
 
 Its pre-stop child runs as the installed non-root account, verifies its complete
 signed host tree and stages the signed OCI bundle before exercising the actual
