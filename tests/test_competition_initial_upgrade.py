@@ -313,10 +313,10 @@ def flow(monkeypatch):
     events = []
     lock = {"held": False, "writer": False}
 
-    async def observe_history(_stopped, observer, _limits, _manifests, _leases):
+    async def observe_history(_stopped, observer, _snapshot):
         return await observer.observe(), None
 
-    monkeypatch.setattr(upgrade, "_observe_stopped_history", observe_history)
+    monkeypatch.setattr(upgrade, "_observe_snapshot", observe_history)
 
     def record(name):
         def call(*args, **kwargs):
@@ -419,19 +419,19 @@ def flow(monkeypatch):
     monkeypatch.setattr(upgrade, "hold_stopped_supervisor", stopped)
     monkeypatch.setattr(upgrade, "StoppedUpgradeObserver", Observer)
     monkeypatch.setattr(upgrade, "_retained_anchor", lambda *args: None)
-    monkeypatch.setattr(
-        upgrade,
-        "prepare_recovery_checkpoint",
-        lambda *args, **kwargs: (
-            events.append("archive")
-            or SimpleNamespace(checkpoint_path="/archive/checkpoint", checkpoint_sha256="a" * 64)
-        ),
-    )
-    monkeypatch.setattr(
-        upgrade,
-        "verify_recovery_checkpoint",
-        lambda *args, **kwargs: events.append("verify") or object(),
-    )
+
+    async def prepare(*args, **kwargs):
+        await kwargs["observe"](object())
+        events.append("archive")
+        return SimpleNamespace(checkpoint_path="/archive/checkpoint", checkpoint_sha256="a" * 64)
+
+    async def verify(*args, **kwargs):
+        await kwargs["observe"](object())
+        events.append("verify")
+        return object()
+
+    monkeypatch.setattr(upgrade, "prepare_recovery_checkpoint", prepare)
+    monkeypatch.setattr(upgrade, "verify_recovery_checkpoint", verify)
     monkeypatch.setattr(
         upgrade.anchors,
         "materialize_successor_anchor",
@@ -586,14 +586,14 @@ def test_retained_anchor_is_reconciled_again_before_commit(flow, monkeypatch):
         assert kwargs["owner"] == 1001
         return context
 
-    async def observe_history(_stopped, observer, _limits, manifests, leases):
-        assert (manifests, leases) == context
+    async def observe_history(_stopped, observer, _snapshot):
         return await observer.observe(), None
 
     monkeypatch.setattr(upgrade, "load_recovery_checkpoint_context", load_context)
-    monkeypatch.setattr(upgrade, "_observe_stopped_history", observe_history)
+    monkeypatch.setattr(upgrade, "_observe_snapshot", observe_history)
 
-    def verify(path, **kwargs):
+    async def verify(path, **kwargs):
+        await kwargs["observe"](object())
         verified.append((path, kwargs))
         return object()
 
@@ -639,3 +639,32 @@ def test_empty_historical_context_is_explicit_and_canonical(tmp_path, monkeypatc
     path.chmod(0o400)
     with pytest.raises(ValueError):
         upgrade._historical_context(path)
+
+
+@pytest.mark.parametrize("noncanonical", [False, True])
+def test_nonempty_historical_context_preserves_signed_objects(tmp_path, monkeypatch, noncanonical):
+    from umi.simple_bootstrap_validator import SignedSimpleBootstrapLease
+
+    from .test_simple_bootstrap_validator import _production_manifest
+
+    monkeypatch.setattr(upgrade.anchors, "_root_owner_uid", os.getuid)
+    manifest = _production_manifest()
+    lease = SignedSimpleBootstrapLease.model_validate_json(
+        (Path(__file__).parent / "fixtures/historical-simple-bootstrap-lease.json").read_bytes()
+    )
+    value = {
+        "manifests": [manifest.model_dump(mode="json", by_alias=True)],
+        "leases": [lease.model_dump(mode="json", by_alias=True)],
+    }
+    payload = canonical_json_bytes(value)
+    path = tmp_path / "context.json"
+    path.write_bytes(payload + (b"\n" if noncanonical else b""))
+    path.chmod(0o400)
+    if noncanonical:
+        with pytest.raises(ValueError, match="not canonical"):
+            upgrade._historical_context(path)
+        return
+    source, manifests, leases = upgrade._historical_context(path)
+    assert source.payload == payload
+    assert canonical_json_bytes(manifests[0]) == canonical_json_bytes(manifest)
+    assert canonical_json_bytes(leases[0]) == canonical_json_bytes(lease)

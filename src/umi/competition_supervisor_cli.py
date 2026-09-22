@@ -241,6 +241,25 @@ async def _stop_startup_worker(config, lease: SuccessorStartupLease) -> None:
         raise
 
 
+def _delivery_client(installation):
+    from .competition_delivery_config import successor_delivery_client
+
+    host_payload = _root_control(
+        ACTIVATION_MOUNT_ROOT / ANCHOR_DIRECTORY_NAME / SIGNED_HOST_ARTIFACT_FILENAME,
+        MAX_HOST_MANIFEST_BYTES,
+    )
+    if (
+        hashlib.sha256(host_payload).hexdigest()
+        != installation._receipt.signed_host_artifact_sha256
+    ):
+        raise ValueError("delivery host manifest differs from installed receipt")
+    return successor_delivery_client(
+        installation.config,
+        parse_signed_host_artifact(host_payload),
+        expected_manifest_sha256=installation.host_manifest_sha256,
+    )
+
+
 def _build_runtime(installation, config_path, *, startup_lease):
     # These are fixed host-code imports, not operator-selectable plugins.
     from .competition_delivery import (
@@ -258,6 +277,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
 
     config = installation.config
     observer = OwnedSuccessorHostObserver(installation=installation)
+    client = _delivery_client(installation)
 
     def adapter():
         # Operational ceilings are fixed in the signed host source; directives
@@ -271,6 +291,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
                 maximum_cache_bytes=16 * 1024**3,
                 total_fetch_timeout_seconds=1800,
             ),
+            client=client,
         )
         materializer = AuthenticatedSuccessorArtifactMaterializer(
             installation=installation,
@@ -295,7 +316,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
     runtime = SuccessorSupervisorRuntime(
         installation=installation,
         worker_adapter=_DeferredAdapter(adapter),
-        directive_fetcher=HTTPSSuccessorDirectiveFetcher(config),
+        directive_fetcher=HTTPSSuccessorDirectiveFetcher(config, client=client),
         observation_reader=observer,
         limits=SuccessorRuntimeLimits(
             maximum_history_records=65536, maximum_history_bytes=64 * 1024**2

@@ -30,6 +30,7 @@ from umi.competition_worker_cli import (
     SuccessorWorkerExecutionConfig,
 )
 from umi.protocol import canonical_json_bytes
+from umi.validator_supervisor import ValidatorSupervisorError
 
 from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
@@ -94,7 +95,7 @@ class Container:
 
 @pytest.fixture
 def adapter_case(
-    weight_case, successor_case, worker_capacity, package_limits, tmp_path, monkeypatch
+    weight_case, successor_case, worker_capacity, package_limits, tmp_path, monkeypatch, request
 ):
     item, source = weight_case, successor_case
     config = source.predecessor.config.model_copy(
@@ -197,7 +198,7 @@ def adapter_case(
         materializer=result.materializer,
         observer=result.observer,
         container=container,
-        limits=adapters.SuccessorAdapterLimits(20, 4 * 1024**2),
+        limits=adapters.SuccessorAdapterLimits(*getattr(request, "param", (20, 4 * 1024**2))),
     )
     new_weight_root = Path(config.worker_state_root) / "competition" / "weights"
     new_weight_root.parent.mkdir(parents=True, mode=0o700)
@@ -309,6 +310,136 @@ async def _stopped(case):
     observation = await case.item.provider.collect_weights(case.item.hotkey, case.item.recipients)
     await case.adapter.recover_stopped_transactions(observation)
     return observation
+
+
+def _retain_weight_renewals(case, count=12, *, bad_authorization=False):
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    case.select("competition_weights")
+    anchor = case.selection.signed
+    case.adapter._retain(case.adapter._verify(case.selection, case.files))
+    previous, records = anchor, []
+    for index in range(count):
+        body = case.item.body.model_copy(update={
+            "authorization_id": f"{index + 500:064x}",
+            "predecessor_directive_sha256": previous.directive_sha256,
+        })
+        authorization = sign_competition_weight_authorization(body, authority_wallets()[0])
+        directive = previous.directive.model_copy(update={
+            "sequence": previous.directive.sequence + 1,
+            "predecessor_version": 4,
+            "previous_directive_sha256": previous.directive_sha256,
+            "chain_authorization": _signed_authorization_target(authorization),
+        })
+        signed = _signed(directive)
+        records.append(signed)
+        files = replace(
+            case.files,
+            current_directive_page_bytes=successor_continuation_bytes(anchor, records),
+            authorization_bytes=canonical_json_bytes(
+                case.item.signed if bad_authorization and index == count - 1 else authorization
+            ),
+        )
+        case.adapter._retain(SimpleNamespace(
+            selection=SuccessorWorkerSelection(signed), files=files,
+        ))
+        previous = signed
+
+
+async def test_recovery_replays_unchanged_package_once_but_checks_every_renewal(
+    adapter_case, monkeypatch
+):
+    from umi import competition_recovery_packages as recovery
+
+    case = adapter_case
+    _retain_weight_renewals(case)
+    replay, authorize = recovery.load_bound_successor_replay_package, (
+        adapters.verify_bound_successor_chain_authorization
+    )
+    calls = {"replay": 0, "authorize": 0}
+
+    def replayed(*args, **kwargs):
+        calls["replay"] += 1
+        return replay(*args, **kwargs)
+
+    def authorized(*args, **kwargs):
+        calls["authorize"] += 1
+        return authorize(*args, **kwargs)
+
+    monkeypatch.setattr(recovery, "load_bound_successor_replay_package", replayed)
+    monkeypatch.setattr(adapters, "verify_bound_successor_chain_authorization", authorized)
+    await _stopped(case)
+    assert calls == {"replay": 1, "authorize": 13}
+    assert case.adapter._recovered is not None
+    await _stopped(case)
+    assert calls == {"replay": 2, "authorize": 26}  # No reuse across audits.
+    assert not case.item.encoded
+
+
+async def test_recovery_reused_package_does_not_accept_wrong_renewal_authority(
+    adapter_case,
+):
+    case = adapter_case
+    _retain_weight_renewals(case, count=2, bad_authorization=True)
+    with pytest.raises(
+        ValidatorSupervisorError, match="successor_chain_authorization_digest_mismatch"
+    ):
+        await _stopped(case)
+    assert case.adapter._recovered is None
+    assert not case.item.encoded
+
+
+async def test_recovery_reuse_detects_sealed_package_change_between_authorizations(
+    adapter_case, monkeypatch
+):
+    case = adapter_case
+    _retain_weight_renewals(case, count=2)
+    original = adapters.verify_bound_successor_chain_authorization
+    touched = []
+
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not touched:
+            path = case.files.package_path / "manifest.json"
+            raw = path.read_bytes()
+            path.chmod(0o600)
+            path.write_bytes(raw)  # Even equal bytes cannot hide a new file identity.
+            path.chmod(0o400)
+            touched.append(True)
+        return result
+
+    monkeypatch.setattr(adapters, "verify_bound_successor_chain_authorization", changed)
+    with pytest.raises(ValueError, match="package changed"):
+        await _stopped(case)
+    assert case.adapter._recovered is None
+    assert not case.item.encoded
+
+
+@pytest.mark.parametrize("changed", ["target", "release"])
+def test_recovery_reuse_rechecks_changed_binding_with_the_same_package_path(adapter_case, changed):
+    from umi.competition_recovery_packages import RecoveryPackageReplay
+
+    case = adapter_case
+    cache = RecoveryPackageReplay()
+    directive = case.selection.signed.directive
+    cache.load(case.files.package_path, directive=directive)
+    if changed == "target":
+        directive = directive.model_copy(update={
+            "replay_package": directive.replay_package.model_copy(update={
+                "projection_sha256": "ff" * 32,
+            }),
+        })
+    else:
+        directive = directive.model_copy(update={
+            "release": directive.release.model_copy(update={
+                "umi_git_revision": "f" * 40,
+                "replay_release_identity": directive.release.replay_release_identity.model_copy(
+                    update={"umi_revision": "f" * 40}
+                ),
+            }),
+        })
+    with pytest.raises((ValueError, ValidatorSupervisorError)):
+        cache.load(case.files.package_path, directive=directive)
 
 
 async def test_staging_full_replay_does_not_select_current_or_load_image(adapter_case):

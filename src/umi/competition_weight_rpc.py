@@ -7,23 +7,19 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 from .competition_chain import _BatchConnections
+from .competition_proof_rpc import FailoverProofRpc
 from .validator_chain import BittensorRawJsonRpc, ValidatorChainError
 
 
-class WeightProofRpc:
-    """Keep one exclusive connection per read method until explicit shutdown.
+class _WeightProofTransport:
+    """One endpoint, with exclusive method-specific connections."""
 
-    The normal and runtime-code collectors own separate instances. A socket's
-    method-specific decompressed response ceiling therefore never changes when
-    it is reused. The outer lease includes the raw client's JSON/protocol checks,
-    so cancellation or an invalid response discards the socket without retrying.
-    Trie proofs and owned-finality validation remain in the existing collector.
-    """
+    bulk_storage_reads = False
 
-    def __init__(self, config):
+    def __init__(self, config, endpoint):
         self.config = config
+        self.endpoint = endpoint
         self._closed = False
-        self._batch_values = None
         self._pools = {
             method: _BatchConnections(1)
             for method in (
@@ -41,23 +37,55 @@ class WeightProofRpc:
     async def request(self, method, params):
         if self._closed:
             raise ValueError("weight proof RPC is closed")
+        pool = self._pools.get(method)
+        if pool is None:
+            raise ValidatorChainError("proof_rpc_method_forbidden")
+        async with pool.lease() as lease:
+            rpc = BittensorRawJsonRpc(
+                SimpleNamespace(endpoint=self.endpoint),
+                connect_factory=lease.connect,
+                open_timeout_seconds=min(15, self.config.collection_timeout_seconds),
+                request_timeout_seconds=min(60, self.config.collection_timeout_seconds),
+            )
+            return await rpc.request(method, params)
+
+    async def aclose(self):
+        self._closed = True
+        for pool in self._pools.values():
+            await pool.close()
+
+
+class WeightProofRpc:
+    """Bounded reads with the configured primary and two explicit backups.
+
+    Normal and runtime-code collectors own separate transports. Each endpoint
+    keeps method-specific response ceilings and exclusive connection leases.
+    Only transport failures permit another endpoint for the same request; native
+    proof and finality checks stay in the collector and cannot trigger retries.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self._closed = False
+        self._batch_values = None
+        endpoints = (config.rpc_url, *getattr(config, "proof_rpc_fallback_urls", ()))
+        transports = tuple(_WeightProofTransport(config, endpoint) for endpoint in endpoints)
+        self._rpc = (
+            transports[0]
+            if len(transports) == 1
+            else FailoverProofRpc(transports, timeout_seconds=config.collection_timeout_seconds)
+        )
+
+    async def request(self, method, params):
+        if self._closed:
+            raise ValueError("weight proof RPC is closed")
         if method == "state_getStorageAt" and self._batch_values is not None:
             if not isinstance(params, (list, tuple)) or len(params) != 2:
                 raise ValueError("invalid prefetched weight storage request")
             if tuple(params) not in self._batch_values:
                 raise ValueError("weight storage request differs from prefetched batch")
             return self._batch_values[tuple(params)]
-        pool = self._pools.get(method)
-        if pool is None:
-            raise ValidatorChainError("proof_rpc_method_forbidden")
-        async with pool.lease() as lease:
-            rpc = BittensorRawJsonRpc(
-                SimpleNamespace(endpoint=self.config.rpc_url),
-                connect_factory=lease.connect,
-                open_timeout_seconds=min(15, self.config.collection_timeout_seconds),
-                request_timeout_seconds=min(60, self.config.collection_timeout_seconds),
-            )
-            return await rpc.request(method, params)
+        return await self._rpc.request(method, params)
 
     @asynccontextmanager
     async def read_batch(self, block_hash, keys):
@@ -120,5 +148,4 @@ class WeightProofRpc:
 
     async def aclose(self):
         self._closed = True
-        for pool in self._pools.values():
-            await pool.close()
+        await self._rpc.aclose()

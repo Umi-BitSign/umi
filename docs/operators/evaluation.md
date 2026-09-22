@@ -83,7 +83,7 @@ rehearsal. Returned data remains untrusted until the local verifier checks it
 against an owned finalized state root. Keep the collection timeout and proof
 checks enabled; changing the RPC endpoint does not grant finality authority.
 
-Registration proof providers, including intake, can add
+Registration, weight-state and runtime-code proof providers can add
 `proof_rpc_fallback_urls` with exactly two ordered, credential-free `wss://`
 endpoints. Qualify independently operated providers, their genesis, current
 proofs, and the historical depth each role requires. Different hostnames alone
@@ -109,10 +109,17 @@ Unavailable-state RPC errors may try the next provider with the same capture
 hash; they never move an old request to the latest block. The original overall
 collection timeout and finality freshness checks still apply.
 
-This setting affects registration-proof clients using
-`FinalizedRegistrationProvider` when configured. It does not configure the Rust
-observer's P2P finality transport, unrelated JSON-RPC clients, or existing roles
-running another frozen source release. Keep those deployment scopes explicit.
+This setting affects `FinalizedRegistrationProvider` and the separate weight
+and runtime-code collectors in `FinalizedCompetitionWeightProvider`. Each keeps
+its original proof/value limits; untrusted prefetched weight values remain bound
+to the exact requested block and must pass native proof verification. It does
+not configure the Rust observer's P2P finality transport, unrelated JSON-RPC
+clients, or existing roles running another frozen source release. The weight
+worker also passes this exact endpoint list to its pinned transaction transport,
+with implicit SDK endpoint pools disabled. An unsent request can use another
+connection; a possibly sent transaction is never resent. SDK policy refusals are
+terminal, and uncertain effects still require native reconciliation. Keep those
+deployment scopes explicit.
 
 The owned observer uses `startup_timeout_seconds` for its first verified record
 (600 seconds by default, configurable up to 900). The source implementation now

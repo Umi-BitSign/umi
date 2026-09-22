@@ -82,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         initial_history.add_argument("--" + name, required=True)
     initial_history.add_argument("--current-block", type=int, required=True)
     initial_history.add_argument("--timeout-seconds", type=int, default=300)
+    initial_history.add_argument("--signed-host-artifact")
     for name in ("verify-cutoff-publication", "verify-settlement-publication"):
         certificate = commands.add_parser(name)
         for param in ("certificate", "roster", "replay-limits"):

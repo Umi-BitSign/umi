@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_package import (
@@ -31,6 +31,7 @@ from .competition_package import (
     competition_release_identity_digest,
     load_competition_package,
 )
+from .competition_reward_continuity import UNTIL_SUPERSEDED_BLOCK, verify_reward_continuation
 from .competition_weights import (
     CompetitionWeightAuthorizationBody,
     SignedCompetitionWeightAuthorization,
@@ -262,6 +263,15 @@ class SuccessorSupervisorOperatorConsent(StrictProtocolModel):
     authorized_at_finalized_block: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
     valid_through_block: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
 
+    reward_continuity_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_consent(self, handler):
+        value = handler(self)
+        if self.reward_continuity_sha256 is None:
+            value.pop("reward_continuity_sha256", None)
+        return value
+
     @field_validator("validator_hotkey")
     @classmethod
     def validate_validator_hotkey(cls, value: str) -> str:
@@ -270,6 +280,11 @@ class SuccessorSupervisorOperatorConsent(StrictProtocolModel):
 
     @model_validator(mode="after")
     def validate_consent(self) -> Self:
+        if (
+            self.reward_continuity_sha256 is not None
+            and self.valid_through_block != UNTIL_SUPERSEDED_BLOCK
+        ):
+            raise ValueError("continuity consent requires explicit until-superseded lifetime")
         expected = [mode for mode in _MODE_ORDER if mode in self.allowed_modes]
         if self.allowed_modes != expected:
             raise ValueError("successor consent modes must be unique and canonically ordered")
@@ -313,6 +328,15 @@ class SuccessorSupervisorDirective(StrictProtocolModel):
     replay_package: SuccessorReplayPackageTarget | None
     chain_authorization: SuccessorChainAuthorizationTarget | None
 
+    reward_continuity_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_directive(self, handler):
+        value = handler(self)
+        if self.reward_continuity_sha256 is None:
+            value.pop("reward_continuity_sha256", None)
+        return value
+
     @model_validator(mode="after")
     def validate_directive(self) -> Self:
         if not self.issued_at_block <= self.valid_from_block <= self.valid_through_block:
@@ -339,6 +363,7 @@ class SuccessorSupervisorDirective(StrictProtocolModel):
                     self.release,
                     self.replay_package,
                     self.chain_authorization,
+                    self.reward_continuity_sha256,
                 )
             ):
                 raise ValueError("a successor hold cannot carry worker authority")
@@ -384,11 +409,16 @@ class SuccessorSupervisorDirective(StrictProtocolModel):
             or package.release_identity_sha256
             != competition_release_identity_digest(release.replay_release_identity)
             or self.valid_from_block < package.policy_valid_from_block
-            or self.valid_through_block > package.policy_valid_through_block
+            or (
+                self.reward_continuity_sha256 is None
+                and self.valid_through_block > package.policy_valid_through_block
+            )
         ):
             raise ValueError("successor directive and replay package disagree")
         authorization = self.chain_authorization
         if self.mode == "competition_replay":
+            if self.reward_continuity_sha256 is not None:
+                raise ValueError("continuity applies only to weight authority")
             if authorization is not None:
                 raise ValueError("wallet-free replay cannot carry chain authorization")
         elif authorization is None:
@@ -549,8 +579,42 @@ class SuccessorSupervisorDirectiveState(StrictProtocolModel):
     accepted_package_sha256: Hex32 | None
     accepted_chain_authorization_sha256: Hex32 | None
 
+    continuity_authority_sha256: Hex32 | None = None
+    continuity_round_sequence: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)] | None = None
+    continuity_package_sha256: Hex32 | None = None
+    continuity_stopped: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_state(self, handler):
+        value = handler(self)
+        for key in (
+            "continuity_authority_sha256",
+            "continuity_round_sequence",
+            "continuity_package_sha256",
+            "continuity_stopped",
+        ):
+            if getattr(self, key) is None:
+                value.pop(key, None)
+        return value
+
     @model_validator(mode="after")
     def validate_state(self) -> Self:
+        continuity = (
+            self.continuity_authority_sha256,
+            self.continuity_round_sequence,
+            self.continuity_package_sha256,
+            self.continuity_stopped,
+        )
+        if any(x is not None for x in continuity) and any(x is None for x in continuity):
+            raise ValueError("incomplete continuity high-water state")
+        if self.continuity_stopped is not None and (
+            self.continuity_stopped != (self.accepted_mode == "hold")
+            or (
+                not self.continuity_stopped
+                and self.continuity_package_sha256 != self.accepted_package_sha256
+            )
+        ):
+            raise ValueError("continuity high-water differs from accepted execution")
         if self.accepted_sequence <= self.transition_v3_sequence:
             raise ValueError("successor state does not advance its v3 transition anchor")
         if self.accepted_at_finalized_block < self.transition_v3_accepted_at_finalized_block:
@@ -760,6 +824,11 @@ def _verify_signed_successor_supervisor_directive(
         raise ValidatorSupervisorError("successor_host_manifest_not_consented")
     if directive.required_recovery_profile != consent.required_recovery_profile:
         raise ValidatorSupervisorError("successor_recovery_profile_not_consented")
+    if (
+        directive.mode != "hold"
+        and directive.reward_continuity_sha256 != consent.reward_continuity_sha256
+    ):
+        raise ValidatorSupervisorError("successor_continuity_not_consented")
     if directive.mode != "hold" and directive.mode not in consent.allowed_modes:
         raise ValidatorSupervisorError("successor_mode_not_consented")
     if finalized_block < directive.issued_at_block:
@@ -962,6 +1031,7 @@ def _advance_successor_supervisor_directive_state(
                     prior_state.transition_v3_accepted_at_finalized_block,
                 ),
                 source_config_sha256=config_sha256,
+                prior_state=prior_state,
             ):
                 raise ValidatorSupervisorError("successor_state_execution_binding_mismatch")
             return prior_state
@@ -988,6 +1058,7 @@ def _advance_successor_supervisor_directive_state(
         consent=consent,
         transition=transition,
         source_config_sha256=config_sha256,
+        prior_state=prior_state,
     )
 
 
@@ -998,13 +1069,42 @@ def _state_for(
     consent: SuccessorSupervisorOperatorConsent,
     transition: tuple[int, str, str, int],
     source_config_sha256: str,
+    prior_state=None,
 ) -> SuccessorSupervisorDirectiveState:
     directive = signed.directive
     release = directive.release
     package = directive.replay_package
     authorization = directive.chain_authorization
+    continuity = {}
+    prior_authority = getattr(prior_state, "continuity_authority_sha256", None)
+    if prior_authority is not None:
+        if directive.mode == "hold":
+            continuity = {
+                "continuity_authority_sha256": prior_authority,
+                "continuity_round_sequence": prior_state.continuity_round_sequence,
+                "continuity_package_sha256": prior_state.continuity_package_sha256,
+                "continuity_stopped": True,
+            }
+        elif (
+            prior_state.continuity_stopped
+            or directive.reward_continuity_sha256 != prior_authority
+            or package.round_sequence < prior_state.continuity_round_sequence
+            or (
+                package.round_sequence == prior_state.continuity_round_sequence
+                and package.package_sha256 != prior_state.continuity_package_sha256
+            )
+        ):
+            raise ValidatorSupervisorError("successor_continuity_rollback_or_stopped")
+    if directive.reward_continuity_sha256 is not None:
+        continuity = {
+            "continuity_authority_sha256": directive.reward_continuity_sha256,
+            "continuity_round_sequence": package.round_sequence,
+            "continuity_package_sha256": package.package_sha256,
+            "continuity_stopped": False,
+        }
     return SuccessorSupervisorDirectiveState(
         schema=SUCCESSOR_SUPERVISOR_DIRECTIVE_STATE_SCHEMA,
+        **continuity,
         channel_id=directive.channel_id,
         transition_v3_sequence=transition[0],
         transition_v3_directive_sha256=transition[1],
@@ -1169,6 +1269,20 @@ def verify_bound_successor_chain_authorization(
         )
     except (TypeError, ValueError) as error:
         raise ValidatorSupervisorError("successor_chain_authorization_invalid") from error
+    continuity_digest = None
+    if body.continuation is not None:
+        from .open_competition import digest
+
+        verify_reward_continuation(
+            body.continuation,
+            package,
+            body,
+            tuple(item.hotkey for item in config.trusted_authorities),
+            threshold=config.signature_threshold,
+        )
+        continuity_digest = digest(body.continuation.authority)
+    if continuity_digest != directive.reward_continuity_sha256:
+        raise ValidatorSupervisorError("successor_continuity_authorization_mismatch")
     if verified != body:  # pragma: no cover - verifier returns its exact body
         raise ValidatorSupervisorError("successor_chain_authorization_result_mismatch")
     return body

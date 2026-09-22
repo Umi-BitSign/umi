@@ -515,6 +515,14 @@ async def test_inactive_successor_after_expired_current_never_resumes_legacy(cas
         assert result.status == "holding" and result.accepted_sequence == 2
         assert case.adapter.alive is None
 
+    # The held host keeps following; restart does not roll back to the bridge.
+    async with case.make() as restarted:
+        case.observation.block = 200
+        result = await restarted.reconcile()
+        assert result.status == "started" and result.accepted_sequence == 3
+        assert ("replay", future.directive_sha256) in case.adapter.events
+        assert len(restarted._load_history()[1]) == 2
+
 
 @pytest.mark.asyncio
 async def test_retained_signed_history_tampering_is_rejected_before_restart(case):

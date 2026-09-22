@@ -41,6 +41,7 @@ from .competition_package import (
     competition_release_identity_digest,
     load_competition_package,
 )
+from .competition_reward_continuity import RewardContinuation, verify_reward_continuation
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -129,7 +130,9 @@ def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -
 
 
 class CompetitionWeightAuthorizationBody(StrictProtocolModel):
-    schema_: Literal["umi-competition-weight-authorization/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-competition-weight-authorization/1", "umi-competition-weight-authorization/2"
+    ] = Field(alias="schema")
     authorization_id: Hex32
     validator_scope: Literal["any_permitted_sn78"]
     policy_sha256: Hex32
@@ -164,16 +167,23 @@ class CompetitionWeightAuthorizationBody(StrictProtocolModel):
     required_commit_reveal_enabled: Literal[False]
     mortality_period: Annotated[int, Field(ge=4, le=4096)]
     late_conflict_action: Literal["hold_no_automatic_correction"]
+    continuation: RewardContinuation | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_authorization(self, handler):
         value = handler(self)
         if self.required_runtime_metadata_executor_sha256_by_target is None:
             value.pop("required_runtime_metadata_executor_sha256_by_target", None)
+        if self.continuation is None:
+            value.pop("continuation", None)
         return value
 
     @model_validator(mode="after")
     def validate_bounds(self) -> Self:
+        if (self.schema_ == "umi-competition-weight-authorization/2") != (
+            self.continuation is not None
+        ):
+            raise ValueError("forward continuity requires explicit authorization version 2")
         pins = self.required_runtime_metadata_executor_sha256_by_target
         if pins is not None and (
             set(pins) != set(self.required_finality_verifier_sha256_by_target)
@@ -288,19 +298,22 @@ def verify_competition_weight_authorization(
     ):
         if actual != expected:
             raise ValueError("successor authorization binds different replay inputs")
-    if (
-        not policy.valid_from_block
-        <= body.valid_from_block
-        < body.valid_through_block
-        <= policy.valid_through_block
-    ):
-        raise ValueError("successor authorization exceeds policy validity")
-    if not (
-        package.retained_settlement.observed_block <= body.signed_at_block
-        and body.valid_through_block
-        <= package.settlement_certificate.publication.round.valid_through_block
-    ):
-        raise ValueError("successor authorization exceeds settlement round validity")
+    if body.continuation is not None:
+        verify_reward_continuation(body.continuation, package, body, trusted_authority_hotkeys)
+    else:
+        if (
+            not policy.valid_from_block
+            <= body.valid_from_block
+            < body.valid_through_block
+            <= policy.valid_through_block
+        ):
+            raise ValueError("successor authorization exceeds policy validity")
+        if not (
+            package.retained_settlement.observed_block <= body.signed_at_block
+            and body.valid_through_block
+            <= package.settlement_certificate.publication.round.valid_through_block
+        ):
+            raise ValueError("successor authorization exceeds settlement round validity")
     if (policy.endpoint_reward_bps, policy.model_reward_bps) != (7000, 3000):
         raise ValueError("joint launch requires the approved 70/30 reward policy")
     if package.retained_settlement.promotion_head.contributor_hotkey is None:
@@ -477,12 +490,20 @@ def build_competition_weight_call(
 class BittensorCompetitionWeightTransport:
     """Encode using the owned runtime, submit exact signed bytes via SDK 11.1.0."""
 
-    def __init__(self, *, endpoint: str, client_factory=None):
+    def __init__(
+        self, *, endpoint: str, fallback_endpoints: tuple[str, ...] = (), client_factory=None
+    ):
         if importlib.metadata.version("bittensor") != "11.1.0":
             raise ValueError("successor weight transport requires pinned Bittensor 11.1.0")
-        if not endpoint.startswith("wss://"):
-            raise ValueError("successor submission endpoint must use wss")
+        endpoints = (endpoint, *fallback_endpoints)
+        if len(endpoints) not in (1, 3) or len(set(endpoints)) != len(endpoints):
+            raise ValueError(
+                "successor submission needs a primary and zero or two explicit backups"
+            )
+        for selected in endpoints:
+            CompetitionChainConfig.read_only_rpc(selected)
         self.endpoint = endpoint
+        self.fallback_endpoints = tuple(fallback_endpoints)
         self.client_factory = client_factory or bt.Subtensor
 
     @staticmethod
@@ -514,8 +535,15 @@ class BittensorCompetitionWeightTransport:
 
     async def submit(self, encoded: bytes, signer):
         extrinsic = exact_signed_extrinsic(encoded)
-        async with self.client_factory(self.endpoint, retry_forever=False) as client:
+        async with self.client_factory(
+            self.endpoint,
+            fallback_endpoints=list(self.fallback_endpoints),
+            archive_endpoints=[],
+            retry_forever=False,
+        ) as client:
             # No submit_call re-composition, nonce lookup, era selection or retry.
+            # The pinned SDK marks both author submission methods non-idempotent:
+            # a frame that may have been sent is never replayed on reconnect.
             return await client._substrate.submit_signed(
                 extrinsic,
                 signer,
@@ -580,6 +608,12 @@ class CompetitionWeightWorker:
                 "block INTEGER NOT NULL, hash TEXT NOT NULL)"
             )
             db.execute("CREATE TABLE IF NOT EXISTS held_policies (policy TEXT PRIMARY KEY)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS continuity_highwater "
+                "(policy TEXT PRIMARY KEY, authority TEXT NOT NULL, "
+                "round_sequence INTEGER NOT NULL, "
+                "package TEXT NOT NULL, admission TEXT NOT NULL)"
+            )
 
     @contextmanager
     def _lock(self):
@@ -722,6 +756,41 @@ class CompetitionWeightWorker:
             total += len(raw)
             known.add(identity)
 
+    def _accept_continuity(self, package, body):
+        """Record adoption before a new write; all replay and preflight gates ran."""
+        with self._db() as db:
+            prior = db.execute(
+                "SELECT authority, round_sequence, package, admission "
+                "FROM continuity_highwater WHERE policy=?",
+                (body.policy_sha256,),
+            ).fetchone()
+            continuation = body.continuation
+            if continuation is None:
+                if prior is not None:
+                    raise ValueError(
+                        "cannot return to ordinary authorization after continuity adoption"
+                    )
+                return
+            current = (
+                digest(continuation.authority),
+                package.manifest.round_sequence,
+                package.package_sha256,
+                digest(continuation.admission),
+            )
+            if prior is not None and (
+                prior[0] != current[0]
+                or current[1] < prior[1]
+                or (current[1] == prior[1] and current != prior)
+            ):
+                raise ValueError("continuity allocation rolls back or changes an adopted package")
+            db.execute(
+                "INSERT INTO continuity_highwater VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(policy) DO UPDATE SET "
+                "authority=excluded.authority, round_sequence=excluded.round_sequence, "
+                "package=excluded.package, admission=excluded.admission",
+                (body.policy_sha256, *current),
+            )
+
     async def run(
         self,
         package_path: Path,
@@ -831,6 +900,7 @@ class CompetitionWeightWorker:
             if attempt is not None:
                 return self._recover(attempt, body, hotkey, observation, expected_row)
             validate_weight_preflight(package, body, observation, chain.config, submission=True)
+            self._accept_continuity(package, body)
             validate_authenticated_successor_activation(
                 context,
                 validator_hotkey=hotkey,

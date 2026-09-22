@@ -588,6 +588,8 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         self,
         validator_hotkey: str,
         recipients: tuple[Registration, ...],
+        *,
+        manifest_anchor_sha256: str | None = None,
     ) -> OwnedCompetitionChainObservation:
         """Retry only initial observer warm-up, not proof or transport failures."""
 
@@ -596,7 +598,11 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 if self._owned and self._task is not None and self._task.done():
                     self._task.result()
                 try:
-                    return await self.collect_weights(validator_hotkey, recipients)
+                    return await self.collect_weights(
+                        validator_hotkey,
+                        recipients,
+                        manifest_anchor_sha256=manifest_anchor_sha256,
+                    )
                 except _AwaitingFinality:
                     pass
                 except ValidatorChainError as error:

@@ -244,7 +244,10 @@ async def run_worker(mode: Literal["competition_replay", "competition_weights"])
             activation=activation,
             wallet=signer,
             chain=chain,
-            transport=BittensorCompetitionWeightTransport(endpoint=chain_config.rpc_url),
+            transport=BittensorCompetitionWeightTransport(
+                endpoint=chain_config.rpc_url,
+                fallback_endpoints=chain_config.proof_rpc_fallback_urls,
+            ),
         )
     finally:
         await chain.aclose()

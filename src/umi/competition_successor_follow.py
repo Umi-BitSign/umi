@@ -154,12 +154,63 @@ class AutomaticSuccessorPublisher:
     def _select(self, signed, block):
         builder = self.publisher.builder
         rounds = self.source.scan()
+        verified_sequences = set()
+        if builder.plan.continuity is not None:
+            latest = signed[-1].intent.round_sequence if signed else 0
+            verified_sequences.add(latest)
+            for number in sorted((n for n in rounds if n > latest), reverse=True):
+                try:
+                    # Only candidate replacements need full native validation
+                    # during selection. Existing round replay happens when due.
+                    candidate = builder._load(rounds[number])
+                except ValueError:
+                    with builder._locked():
+                        builder.journal.put(
+                            "rejected_continuity_candidate",
+                            digest(rounds[number]),
+                            {
+                                "package_sha256": rounds[number].package_sha256,
+                                "round_sequence": number,
+                                "reason": "native_package_verification_failed",
+                            },
+                        )
+                    del rounds[number]
+                    continue
+                if signed:
+                    from .competition_reward_continuity import validate_admission_candidate
+
+                    with builder._locked():
+                        admitted = builder.journal.get(
+                            "continuity_admission", candidate.package_sha256
+                        )
+                    if admitted is None:
+                        try:
+                            validate_admission_candidate(builder.plan.continuity, candidate, block)
+                        except ValueError:
+                            # An unusable replacement cannot starve the last
+                            # admitted allocation. Its original admission
+                            # deadline and authority scope remain unchanged.
+                            with builder._locked():
+                                builder.journal.put(
+                                    "unavailable_continuity_admission",
+                                    digest(rounds[number]),
+                                    {
+                                        "package_sha256": rounds[number].package_sha256,
+                                        "round_sequence": number,
+                                        "reason": "native_admission_not_available",
+                                    },
+                                )
+                            del rounds[number]
+                            continue
+                verified_sequences.add(number)
+                break
         with builder._locked():
             builder.journal.observe(block)
             # Retain discovered identities across restarts, including rounds
             # skipped after expiry. A rewritten descriptor cannot change them.
             for sequence, prepared in sorted(rounds.items()):
-                builder.journal.put("completed_round", str(sequence), prepared)
+                if builder.plan.continuity is None or sequence in verified_sequences:
+                    builder.journal.put("completed_round", str(sequence), prepared)
             last_round = signed[-1].intent.round_sequence if signed else 0
             sequence = (
                 signed[-1].intent.sequence if signed else builder.plan.consent.predecessor_sequence
@@ -197,6 +248,8 @@ class AutomaticSuccessorPublisher:
     async def tick(self):
         async with self._serial:
             self.source.check_binding()
+            if await run_owned_thread(self.publisher.builder.revoked):
+                return self._status("continuity_revoked")
             signed, delivered = await run_owned_thread(self._histories)
             if len(delivered) < len(signed):
                 # A crash after signing never causes another signature or a

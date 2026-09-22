@@ -430,6 +430,8 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
         worker_execution_limits=SimpleNamespace(name="sealed-ceilings"),
     )
     config_path = Path("/etc/umi/supervisor.json")
+    delivery_client = object()
+    monkeypatch.setattr(cli, "_delivery_client", lambda value: delivery_client)
 
     class Observer:
         def __init__(self, **kwargs):
@@ -437,8 +439,10 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
             captured["observer"] = kwargs
 
     class Fetcher:
-        def __init__(self, value):
+        def __init__(self, value, *, client):
             assert value is config
+            assert client is delivery_client
+            captured["client"] = client
             events.append("fetcher")
 
     class Delivery:
@@ -490,6 +494,7 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
     assert events == ["observer", "fetcher", "runtime"]
     assert observer is captured["runtime"]["observation_reader"]
     await captured["runtime"]["worker_adapter"].stop_worker()
+    assert captured["delivery"]["client"] is captured["client"]
     assert events == [
         "observer",
         "fetcher",

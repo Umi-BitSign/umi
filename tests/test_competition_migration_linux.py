@@ -328,8 +328,11 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                         async def start(self):
                             pass
 
-                        async def wait_weights_ready(self, hotkey, recipients):
+                        async def wait_weights_ready(
+                            self, hotkey, recipients, *, manifest_anchor_sha256=None
+                        ):
                             assert hotkey == item.config.validator_hotkey and recipients == ()
+                            assert manifest_anchor_sha256 is None
                             return item.owned
 
                         async def aclose(self):

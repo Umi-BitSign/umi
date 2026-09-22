@@ -109,7 +109,7 @@ def test_publication_rejects_incomplete_executor_targets(publication_case, pins)
 
 
 @pytest.fixture
-def next_package(package_case, policy, replay_limits, package_limits, release_identity):
+def next_package(package_case, policy, replay_limits, package_limits, release_identity, request):
     """A later real settlement keeps the first round's promoted beneficiary."""
     previous = package_case.scenario
     store = previous.store
@@ -119,6 +119,9 @@ def next_package(package_case, policy, replay_limits, package_limits, release_id
         snapshot(175),
         175,
     )
+    round_end = getattr(request, "param", 260)
+    # Submission authority covers execution. Later reward renewal uses the
+    # prospectively fixed round end and freshly proven recipient identity.
     endpoint = submission(policy, name="Bob", sequence=2, start=190, end=260)
     store.admit(endpoint, snapshot(190), 190)
     suite = previous.suite.model_copy(
@@ -141,12 +144,12 @@ def next_package(package_case, policy, replay_limits, package_limits, release_id
                 evaluation_close_block=220,
                 protected_reference_reveal_block=230,
                 evidence_cutoff_block=240,
-                round_valid_through_block=260,
+                round_valid_through_block=round_end,
             ),
             "submission_close_block": 200,
             "evaluation_close_block": 220,
             "reveal_block": 230,
-            "valid_through_block": 260,
+            "valid_through_block": round_end,
         }
     )
     schedule = EvidenceCutoffSchedule(

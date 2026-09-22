@@ -430,6 +430,18 @@ async def test_weight_provider_reproves_burn_destination_before_submission(weigh
         await item.provider.collect_weights(item.hotkey, item.recipients)
 
 
+def test_new_signature_cannot_extend_a_certified_round(weight_case):
+    item = weight_case
+    extended = item.body.model_copy(update={"valid_through_block": 201})
+    signed = sign_competition_weight_authorization(extended, wallet("Ferdie"))
+    with pytest.raises(ValueError, match="exceeds settlement round validity"):
+        verify_competition_weight_authorization(
+            signed,
+            trusted_authority_hotkeys=(wallet("Ferdie").hotkey.ss58_address,),
+            package=item.package,
+        )
+
+
 def test_authorization_domain_and_scope_binding(weight_case):
     item = weight_case
     verify_competition_weight_authorization(
@@ -466,7 +478,11 @@ async def test_pinned_bittensor_transport_sends_exact_bytes_without_wallet_looku
             return None
 
     def factory(endpoint, **options):
-        assert endpoint == "wss://rpc.example" and options == {"retry_forever": False}
+        assert endpoint == "wss://rpc.example" and options == {
+            "retry_forever": False,
+            "fallback_endpoints": [],
+            "archive_endpoints": [],
+        }
         return Client()
 
     transport = BittensorCompetitionWeightTransport(
