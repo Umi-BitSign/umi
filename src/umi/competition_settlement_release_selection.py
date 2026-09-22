@@ -30,6 +30,40 @@ class ForwardPackageSelection(StrictProtocolModel):
     publisher_config_sha256: Hex32
 
 
+class ForwardSuitePackageSelection(StrictProtocolModel):
+    """Private prospective selection for one prepared suite, before its round exists."""
+
+    schema_: Literal["umi-forward-suite-package-selection/1"] = Field(alias="schema")
+    suite_sha256: Hex32
+    predecessor_release_identity_sha256: Hex32
+    publisher_config_path: Directory
+    publisher_config_sha256: Hex32
+
+
+def _selection(queue, publication) -> ForwardPackageSelection | None:
+    root = Path(queue.config.state_directory) / "forward-releases"
+    exact = root / (publication.round_sha256 + ".json")
+    suite = root / "suites" / (publication.round.suite_sha256 + ".json")
+    selected = None
+    if exact.exists() or exact.is_symlink():
+        selected = read_private_model(exact, ForwardPackageSelection, maximum_bytes=16384)
+    if suite.exists() or suite.is_symlink():
+        candidate = read_private_model(suite, ForwardSuitePackageSelection, maximum_bytes=16384)
+        if candidate.suite_sha256 != publication.round.suite_sha256:
+            raise ValueError("forward package suite selection changes the prepared suite")
+        derived = ForwardPackageSelection(
+            schema="umi-forward-package-selection/1",
+            round_sha256=publication.round_sha256,
+            predecessor_release_identity_sha256=candidate.predecessor_release_identity_sha256,
+            publisher_config_path=candidate.publisher_config_path,
+            publisher_config_sha256=candidate.publisher_config_sha256,
+        )
+        if selected is not None and selected != derived:
+            raise ValueError("forward package round and suite selections conflict")
+        selected = derived
+    return selected
+
+
 def ordinary_release_identity(queue, prepared, current_block) -> CompetitionReleaseIdentity:
     """Validate explicit selection and freeze it before the first package attempt.
 
@@ -39,17 +73,12 @@ def ordinary_release_identity(queue, prepared, current_block) -> CompetitionRele
     """
     publication = prepared.publication
     slot = str(publication.round.sequence)
-    path = (
-        Path(queue.config.state_directory)
-        / "forward-releases"
-        / (publication.round_sha256 + ".json")
-    )
     prior = queue.journal.get("release-selection", slot)
-    if not path.exists() and not path.is_symlink():
+    selection = _selection(queue, publication)
+    if selection is None:
         if prior is not None and prior["selection"] is not None:
             raise ValueError("retained forward package selection is missing")
         return queue.config.release_identity
-    selection = read_private_model(path, ForwardPackageSelection, maximum_bytes=16384)
     if (
         selection.round_sha256 != publication.round_sha256
         or selection.predecessor_release_identity_sha256
