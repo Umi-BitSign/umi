@@ -133,7 +133,7 @@ def _verify_amendment_body(body, order, policy, current_block):
             raise ValueError("repair claim differs from its original assignment or deadline")
 
 
-def retained_claim(journal, key):
+def retained_claim(journal, key, *, allow_retired=False):
     """Read the immutable claim without expiring work or advancing a clock."""
     with closing(sqlite3.connect(journal.path.as_uri() + "?mode=ro", uri=True)) as db:
         db.execute("PRAGMA query_only=ON")
@@ -143,9 +143,19 @@ def retained_claim(journal, key):
             "WHERE assignment_id=? ORDER BY ordinal LIMIT 4",
             (key,),
         ).fetchall()
-        if [r[0] for r in rows] != ["published", "dispatched"] or rows[-1][4] not in (0, None):
+        kinds = [r[0] for r in rows]
+        if allow_retired and kinds == ["published", "dispatched", "completed"]:
+            # Authenticate the already retained void before accepting subsequent
+            # transcript recovery as additional history. Signing a new repair
+            # never enables this path and still requires an uncertain claim.
+            from .competition_scheduling_retirement import retired_claims
+
+            valid = key in retired_claims(journal, db)
+        else:
+            valid = kinds == ["published", "dispatched"]
+        if not valid or rows[1][4] not in (0, None):
             raise ValueError("repair requires an original uncertain claim without a completion")
-        _, block, ms, raw, _ = rows[-1]
+        _, block, ms, raw, _ = rows[1]
         body = json.loads(raw)
         if canonical_json_bytes(body) != raw or set(body) != {
             "claim_id",
@@ -175,7 +185,7 @@ def validate_local_repair(signed, *, journal, evaluator_hotkey, **context):
             claim.claim_unix_ms,
             claim.request_sha256,
         )
-        if retained_claim(journal, claim.assignment_key) != expected:
+        if retained_claim(journal, claim.assignment_key, allow_retired=True) != expected:
             raise ValueError("repair does not retain the exact original local claim")
     return signed
 

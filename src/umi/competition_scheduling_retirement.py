@@ -45,7 +45,7 @@ class ClaimRetirement(StrictProtocolModel):
     suite: EvaluationSuite
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Claim:
     key: str
     evaluator: str
@@ -110,9 +110,7 @@ def _facts(journal, raw):
 
 
 def _cache(journal, key, value):
-    if len(journal._retirement_validation) >= 64:
-        journal._retirement_validation.pop(next(iter(journal._retirement_validation)), None)
-    journal._retirement_validation[key] = value
+    journal._retirement_validation.put(key, value)
 
 
 def _publication(journal, raw):
@@ -152,9 +150,17 @@ def _local_claims(journal, db, claims):
             "WHERE assignment_id=? ORDER BY ordinal",
             (claim.key,),
         ).fetchall()
-        if [r[0] for r in events] != ["published", "dispatched"] or events[-1][4] != 0:
+        kinds = [r[0] for r in events]
+        if kinds in (["published"], ["published", "expired"]):
+            continue  # A peer assignment copy is not a claim by this journal.
+        if (
+            kinds not in (["published", "dispatched"], ["published", "dispatched", "completed"])
+            or events[1][4] != 0
+        ):
             raise ValueError("retirement requires an original uncertain local claim")
-        _, block, ms, raw, _ = events[-1]
+        # A transcript recovered after certification remains additional history.
+        # It cannot invalidate the original claim or undo its certified void.
+        _, block, ms, raw, _ = events[1]
         body = json.loads(raw)
         if (
             canonical_json_bytes(body) != raw
