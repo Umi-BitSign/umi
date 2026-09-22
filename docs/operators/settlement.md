@@ -7,6 +7,53 @@
 - [Automatic settlement delivery](#open-competition-settlement-delivery)
 - [Per-round successor signing](#open-competition-round-publisher)
 
+## Lost coordinator outcomes
+
+A dispatched claim without a durable response remains uncertain. Never resend it,
+mark it completed, or synthesize a miner failure. The ordinary paired-evidence
+path still requires every original transcript.
+
+A successor verifier can accept an explicit `umi-coordinator-outcome-repair/1`
+amendment signed by **every evaluator assigned to the original order**. This is
+a separate authorization to issue a neutral `coordinator_outcome_unavailable`
+void. It does not establish whether the request reached the miner. The amendment
+binds the unchanged policy, round (including its complete roster), order,
+publication, submission, original claim digest and times, bounded retention-search
+audit, and predecessor/successor release identity digests. It may be signed only
+after each affected request's deadline and no later than the existing evidence
+cutoff, using a fresh owned finalized capture. The normal void and settlement
+signatures and actual local receipt by cutoff remain mandatory.
+
+The affected evaluator retains the signed amendment privately at
+`<evaluator state_directory>/dispatch-repairs/<order digest>.json`. The evaluator
+checks the original uncertain claim, replays every available transcript and the
+actual incumbent execution, and signs an unavailable-evidence observation. Other
+evaluators retain their complete observations. The new void and void-evidence
+schemas use version 2. Unknown responses have no fabricated `CaseOutput` or score.
+The original dispatcher claim remains unchanged, including its reserved proof
+allowance. This path does not reclaim scheduling capacity or enlarge any window.
+
+Build and qualify a compatible worker and host before obtaining the scoped repair
+signatures. Existing workers reject the new evidence. For delivery, retain the
+original queue configuration and journal binding, then place the exact successor
+`CompetitionReleaseIdentity` at
+`<settlement delivery state_directory>/repair-releases/<round digest>.json`.
+The queue requires the amendment's predecessor to match its original configured
+release and its successor to match this file. Package preparation and loading
+also enforce the signed successor identity. No journal reset or ordinary release
+substitution is permitted. Publisher plans and follower consent must separately
+bind the new verified release; none of these files activates weights.
+
+For future dispatch, optional `transcript_spool` in the dispatcher configuration
+contains a separate absolute private `directory`, `maximum_assignments` (default
+4096), and `maximum_bytes` (default 8 GiB). Capacity is reserved before claiming.
+The dispatcher durably retains request intent before sending and the actual
+outcome before completing the scheduling journal. Restart recovery consumes only
+stored outcomes with their original claims and never contacts a miner. An intent
+without an outcome remains uncertain. The spool retains private authentication
+and response bytes, so keep it private and include it in bounded recovery searches.
+Omitting the option preserves historical configuration bytes and behavior.
+
 <a id="open-competition-settlement-preparation"></a>
 
 ## Automatic settlement preparation

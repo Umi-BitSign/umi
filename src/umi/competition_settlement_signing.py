@@ -153,6 +153,17 @@ class IndependentSettlementSigner:
                 cutoff_block=settlement.cutoff_schedule.evidence_cutoff_block,
             )
             if is_void:
+                from .competition_dispatch_repair import validate_local_repair_observation
+
+                validate_local_repair_observation(
+                    own,
+                    journal=worker.dispatch,
+                    signed_order=signed,
+                    policy=worker.policy,
+                    legacy=worker.legacy,
+                    current_block=head,
+                    evaluator_hotkey=hotkey,
+                )
                 validate_own_void(
                     independent.certificate.void,
                     own_observation=own,

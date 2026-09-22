@@ -289,6 +289,8 @@ def prepare_competition_package(
         replay_limits,
     )
 
+    _verify_repair_release(normalized_evidence, release_identity)
+
     objects: dict[str, StrictProtocolModel] = {
         "cutoff-certificate.json": cutoff_certificate,
         "evidence.json": normalized_evidence,
@@ -529,6 +531,7 @@ def load_competition_package(
         retained_settlement,
         replay_limits,
     )
+    _verify_repair_release(evidence, release_identity)
     expected = {
         "policy_sha256": digest(policy),
         "round_sha256": cutoff.round_sha256,
@@ -571,6 +574,21 @@ def load_competition_package(
         replay_limits=replay_limits,
         release_identity=release_identity,
     )
+
+
+def _verify_repair_release(evidence, release_identity):
+    from .competition_dispatch_repair import EndpointUnavailableEvidence
+    from .competition_void import VoidEvaluationEvidence
+
+    target = competition_release_identity_digest(release_identity)
+    for entry in evidence.entries:
+        if isinstance(entry.evidence, VoidEvaluationEvidence):
+            for signed in entry.evidence.certificate.void.observations:
+                obs = signed.announcement.evidence
+                if isinstance(obs, EndpointUnavailableEvidence) and (
+                    obs.repair.amendment.successor_release_identity_sha256 != target
+                ):
+                    raise ValueError("repair package requires its authorized successor release")
 
 
 def _verify_publications(

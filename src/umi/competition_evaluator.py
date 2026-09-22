@@ -1003,14 +1003,41 @@ class ContinuousEvaluator:
                             raise ValueError("wrong reveal pulse")
                         self.journal.put(slot, key, pulse)
                     pulses[number] = pulse
-                retained = assemble_endpoint_observations(
-                    incumbent=retained,
-                    journal=self.dispatch,
-                    publication_sha256=digest(order.publication.publication),
-                    suite=suite,
-                    pulses=pulses,
-                    current_block=head,
+                # An explicit quorum-signed amendment is an additional input;
+                # absent it, the historical complete-transcript rule is unchanged.
+                from .competition_dispatch_repair import (
+                    SignedDispatchRepair,
+                    assemble_unavailable_observations,
                 )
+
+                repair_path = (
+                    Path(self.config.state_directory)
+                    / "dispatch-repairs"
+                    / (digest(order) + ".json")
+                )
+                repair = _read(repair_path, SignedDispatchRepair) if repair_path.exists() else None
+                if repair is not None and any(
+                    identity(c.evaluator_hotkey) == identity(job.evaluator_hotkey)
+                    for c in repair.amendment.unavailable
+                ):
+                    retained = assemble_unavailable_observations(
+                        incumbent=retained,
+                        journal=self.dispatch,
+                        signed_order=signed,
+                        repair=repair,
+                        suite=suite,
+                        pulses=pulses,
+                        current_block=head,
+                    )
+                else:
+                    retained = assemble_endpoint_observations(
+                        incumbent=retained,
+                        journal=self.dispatch,
+                        publication_sha256=digest(order.publication.publication),
+                        suite=suite,
+                        pulses=pulses,
+                        current_block=head,
+                    )
             execution_observations(retained, suite, self.policy, current_block=head)
             announcement = ExecutionAnnouncement(
                 schema="umi-execution-announcement/1",
@@ -1163,6 +1190,17 @@ class ContinuousEvaluator:
             current_block=head,
             **context,
         )
+        from .competition_dispatch_repair import validate_local_repair_observation
+
+        validate_local_repair_observation(
+            own,
+            journal=self.dispatch,
+            signed_order=signed,
+            policy=self.policy,
+            legacy=self.legacy,
+            current_block=head,
+            evaluator_hotkey=self.config.evaluator_hotkey,
+        )
         self.journal.put(slot, "void_intent", proposed)
         vote = self.journal.get(slot, "void_vote", EvaluationVoidVote)
         if vote is None:
@@ -1185,7 +1223,7 @@ class ContinuousEvaluator:
         certificate = AttestedEvaluationVoid(void=proposed, signatures=tuple(votes))
         verify_evaluation_void(certificate, current_block=await self.signing_head(order), **context)
         evidence = VoidEvaluationEvidence(
-            schema="umi-competition-void-evidence/1",
+            schema="umi-competition-void-evidence/" + proposed.schema_.rsplit("/", 1)[1],
             order=signed,
             certificate=certificate,
             legacy_policy=self.legacy,
