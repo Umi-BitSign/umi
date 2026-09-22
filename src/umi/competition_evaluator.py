@@ -485,8 +485,12 @@ class EvaluatorJournal:
                     },
                 )
             )
-            if old and (len(old) != 1 or bytes(old[0][0]) != binding):
+            if old and len(old) != 1:
                 raise ValueError("evaluator journal configuration changed")
+            if old:
+                from .competition_evaluator_rpc_migration import validate_rpc_binding
+
+                validate_rpc_binding(db, bytes(old[0][0]), binding)
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (binding,))
             db.execute(

@@ -177,11 +177,26 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
 
     def _acceptable_cache_bindings(self):
         accepted = {self._cache_binding_hash()}
-        for policy_sha256 in admitted_policy_sha256s(self.policy):
-            legacy = self.config.model_copy(update={"policy_sha256": policy_sha256})
+        configs = [self.config]
+        if self.config.proof_rpc_fallback_urls:
+            previous = self.config.model_copy(update={"proof_rpc_fallback_urls": ()})
+            configs.append(previous)
             accepted.add(
-                digest({"chain": digest(legacy), "transport_policy": self._finality_policy_hash()})
+                digest(
+                    {
+                        "chain": self._config_binding_hash(previous),
+                        "transport_policy": self._finality_policy_hash(),
+                    }
+                )
             )
+        for config in configs:
+            for policy_sha256 in admitted_policy_sha256s(self.policy):
+                legacy = config.model_copy(update={"policy_sha256": policy_sha256})
+                accepted.add(
+                    digest(
+                        {"chain": digest(legacy), "transport_policy": self._finality_policy_hash()}
+                    )
+                )
         return frozenset(accepted)
 
     async def _recover_historical_block(self, height, head):
