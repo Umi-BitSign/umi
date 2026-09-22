@@ -16,6 +16,7 @@ import rfc8785
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from .canonical_reuse import canonical_dumps
 from .canonical_stream import canonical_json_matches
 from .scoring import grapheme_clusters, normalize_text
 
@@ -122,7 +123,7 @@ class StrictProtocolModel(BaseModel):
         """Ensure every accepted protocol model has an RFC 8785 representation."""
 
         try:
-            rfc8785.dumps(self.model_dump(mode="json", by_alias=True))
+            canonical_dumps(self.model_dump(mode="json", by_alias=True))
         except rfc8785.CanonicalizationError as error:
             raise ValueError("protocol model is outside the RFC 8785 JSON domain") from error
         return self
@@ -313,7 +314,7 @@ def canonical_json_bytes(value: BaseModel | Any) -> bytes:
 
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json", by_alias=True)
-    return rfc8785.dumps(value)
+    return canonical_dumps(value)
 
 
 def sha256_hex(data: bytes) -> str:

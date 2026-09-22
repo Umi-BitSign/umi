@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_endpoint_execution import EndpointPairedEvidence
 from .competition_evaluator_orders import SignedEvaluationOrder
 from .competition_observations import SignedExecutionAnnouncement, execution_observations
@@ -206,19 +207,20 @@ def verify_evaluation_void(attested, **context):
 
 
 def replay_void_evidence(evidence, *, suite, policy, current_block):
-    raw = canonical_json_bytes(evidence)
-    if len(raw) > MAX_VOID_BYTES:
-        raise ValueError("void evidence exceeds its byte bound")
-    evidence = VoidEvaluationEvidence.model_validate_json(raw)
-    verify_evaluation_void(
-        evidence.certificate,
-        signed_order=evidence.order,
-        suite=suite,
-        policy=policy,
-        current_block=current_block,
-        legacy=evidence.legacy_policy,
-    )
-    return evidence
+    with canonical_json_reuse():
+        raw = canonical_json_bytes(evidence)
+        if len(raw) > MAX_VOID_BYTES:
+            raise ValueError("void evidence exceeds its byte bound")
+        evidence = VoidEvaluationEvidence.model_validate_json(raw)
+        verify_evaluation_void(
+            evidence.certificate,
+            signed_order=evidence.order,
+            suite=suite,
+            policy=policy,
+            current_block=current_block,
+            legacy=evidence.legacy_policy,
+        )
+        return evidence
 
 
 def authenticate_void_evidence(evidence, *, suite, policy):
