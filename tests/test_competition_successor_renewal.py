@@ -169,6 +169,80 @@ def change_capture(capture, registrations=None, burn=None):
     )
 
 
+async def test_expired_round_resumes_later_certified_round_and_renews_after_restart(
+    automatic, package_case, next_package, tmp_path, monkeypatch
+):
+    """Real retained submissions/replay; synthetic owned heads and signing keys."""
+    c = enable_follow(automatic, tmp_path, fresh_reuse_plan(automatic.publisher.builder.plan))
+    completed(c, package_case)
+    assert (await c.service.tick())["status"] == "published"
+    first = canonical_json_bytes(c.feed.history()[0])
+    signatures = c.publisher.builder.journal.keys("authorization")
+    c.provider.block = 201  # Original round ended at 200, regardless of outer consent.
+    assert (await c.service.tick())["status"] == "waiting_for_current_round"
+    assert c.publisher.builder.journal.keys("authorization") == signatures
+    assert canonical_json_bytes(c.feed.history()[0]) == first
+
+    completed(c, next_package)
+    c.provider.block = 245
+    original_capture = c.provider.collect
+
+    async def removed_recipient():
+        return change_capture(await original_capture(), ())
+
+    monkeypatch.setattr(c.provider, "collect", removed_recipient)
+    with pytest.raises(ValueError, match="recipient registration changed"):
+        await c.service.tick()
+    assert c.publisher.builder.journal.keys("authorization") == signatures
+    assert len(c.feed.history()) == 1
+
+    monkeypatch.setattr(c.provider, "collect", original_capture)
+    c.service = AutomaticSuccessorPublisher(c.publisher, c.feed, c.config, **c.signers)
+    result = await c.service.tick()
+    assert result["status"] == "published" and result["round_sequence"] == 2
+    later = c.feed.history()[1]
+    assert later.intent.authorization.signed_at_block == 245
+    assert later.intent.authorization.valid_through_block == 260
+    assert later.intent.authorization.predecessor_directive_sha256 == (
+        c.feed.history()[0].signed.directive_sha256
+    )
+    assert canonical_json_bytes(c.feed.history()[0]) == first
+
+    c.feed = SuccessorPublicationFeed(c.feed_config)
+    c.service = AutomaticSuccessorPublisher(c.publisher, c.feed, c.config, **c.signers)
+    c.provider.block = 252  # Later settlement's historical snapshot expired at 250.
+    assert (await c.service.tick())["status"] == "published"
+    renewed = c.feed.history()[2]
+    assert renewed.intent.package == later.intent.package
+    assert renewed.intent.authorization.signed_at_block == 252
+    assert renewed.intent.authorization.valid_through_block == 260
+    assert canonical_json_bytes(c.feed.history()[0]) == first
+
+
+@pytest.mark.parametrize("next_package", [340], indirect=True)
+async def test_prospectively_longer_round_renews_after_next_cutoff_with_current_recipients(
+    automatic, next_package, tmp_path
+):
+    """A new certified round may cover a future cutoff; no old bytes are extended."""
+    c = enable_follow(
+        automatic, tmp_path, fresh_reuse_plan(automatic.publisher.builder.plan, maximum=100)
+    )
+    completed(c, next_package)
+    c.provider.block = 245
+    assert (await c.service.tick())["status"] == "published"
+    first = c.feed.history()[0]
+    assert first.intent.authorization.valid_through_block == 295
+    c.provider.block = 325  # Beyond the unextended 260 end and next 320 cutoff.
+    assert (await c.service.tick())["status"] == "published"
+    renewed = c.feed.history()[1]
+    assert renewed.intent.package == first.intent.package
+    assert renewed.intent.authorization.signed_at_block == 325
+    assert renewed.intent.authorization.valid_through_block == 340
+    c.provider.block = 337
+    assert (await c.service.tick())["status"] == "waiting_for_current_round"
+    assert len(c.publisher.builder.history()) == 2
+
+
 @pytest.mark.parametrize("missing", [False, True])
 async def test_fresh_reuse_rechecks_recipient_identity_before_any_signature(
     automatic, package_case, tmp_path, monkeypatch, missing

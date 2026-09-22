@@ -401,6 +401,50 @@ def test_future_extension_requires_a_gap_after_prior_validity_before_next_roster
         verify_launch_amendment(signed, previous, replacement, setup.policy)
 
 
+def test_future_reward_validity_may_overlap_next_cutoff_without_changing_work_times(setup):
+    previous = continuous(setup.options["public_schedule"])
+    original = previous.schedule_for_cycle(1)
+    replacement = previous.model_copy(
+        update={
+            "round_schedule": original.model_copy(
+                update={
+                    "round_valid_through_block": (
+                        original.round_valid_through_block + previous.round_stride_blocks
+                    )
+                }
+            )
+        }
+    )
+    _, _, signed = future_amendment(setup, previous=previous, replacement=replacement)
+    verify_launch_amendment(signed, previous, replacement, setup.policy)
+    migrated = CompetitionStore(
+        setup.store.directory,
+        setup.policy,
+        public_launch=previous,
+    )
+    migrated = CompetitionStore(
+        migrated.directory,
+        setup.policy,
+        public_launch=replacement,
+        launch_amendment=signed,
+        amendment_observed_block=200,
+        migrate_writer_generation=True,
+    )
+    for cycle in range(6):
+        actual = migrated.public_launch.schedule_for_cycle(cycle)
+        unchanged = previous.schedule_for_cycle(cycle + 1)
+        assert actual.model_copy(
+            update={"round_valid_through_block": unchanged.round_valid_through_block}
+        ) == unchanged
+        assert actual.round_valid_through_block > (
+            migrated.public_launch.schedule_for_cycle(cycle + 1).evidence_cutoff_block
+        )
+    restarted = CompetitionStore(
+        migrated.directory, setup.policy, public_launch=replacement
+    )
+    assert restarted.public_launch == replacement
+
+
 @pytest.mark.parametrize(
     "change", ["shorter_phase", "earlier_roster", "shorter_cadence", "opening", "tracks", "quorum"]
 )

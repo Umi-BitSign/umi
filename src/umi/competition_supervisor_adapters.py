@@ -43,6 +43,7 @@ from .competition_host_activation import (
     validate_authenticated_successor_installation,
 )
 from .competition_package import VerifiedCompetitionPackage
+from .competition_recovery_packages import RecoveryPackageReplay
 from .competition_release import VerifiedSuccessorOCI
 from .competition_supervisor import (
     MAX_SUCCESSOR_HISTORY_BYTES,
@@ -451,7 +452,7 @@ class ProductionSuccessorRuntimeAdapter:
                 ),
             )
 
-    def _verify(self, selection, files):
+    def _verify(self, selection, files, *, recovery_packages: RecoveryPackageReplay | None = None):
         validate_authenticated_successor_installation(self.installation)
         if selection.continuation_bytes is not None and (
             selection.continuation_bytes != files.current_directive_page_bytes
@@ -472,10 +473,14 @@ class ProductionSuccessorRuntimeAdapter:
         if page.more or page.head != signed:
             raise SuccessorAdapterError("staged history does not end at the selected directive")
         execution = _canonical(SuccessorWorkerExecutionConfig, files.worker_execution_bytes)
-        package = load_bound_successor_replay_package(
-            files.package_path,
-            directive=directive,
-            observed_release=directive.release.replay_release_identity,
+        package = (
+            load_bound_successor_replay_package(
+                files.package_path,
+                directive=directive,
+                observed_release=directive.release.replay_release_identity,
+            )
+            if recovery_packages is None
+            else recovery_packages.load(files.package_path, directive=directive)
         )
         authorization, body = None, None
         if selection.mode == "competition_weights":
@@ -673,9 +678,10 @@ class ProductionSuccessorRuntimeAdapter:
             raise SuccessorAdapterError("stopped weight journal changed during audit")
         targets = {}
         packages = {}
+        recovery_packages = RecoveryPackageReplay()
         for selection, files in records.values():
             snapshot = _recovery_package_snapshot(files.package_path)
-            prepared = self._verify(selection, files)
+            prepared = self._verify(selection, files, recovery_packages=recovery_packages)
             if _recovery_package_snapshot(files.package_path) != snapshot:
                 raise SuccessorAdapterError("retained recovery package changed during verification")
             packages[files.package_path] = snapshot
@@ -690,6 +696,7 @@ class ProductionSuccessorRuntimeAdapter:
                     competition_weight_authorization_digest(prepared.authorization.authorization),
                     digest(prepared.execution.weights.chain),
                 )
+            del prepared  # Let the one-package cache release a previous round before the next load.
         for identity, attempt in attempts.items():
             binding = targets.get(identity)
             if (
@@ -701,7 +708,9 @@ class ProductionSuccessorRuntimeAdapter:
                 raise SuccessorAdapterError("weight attempt lacks its retained signed authority")
             if attempt.phase in _TERMINAL:
                 continue
-            prepared = self._verify(*records[binding[0]])
+            prepared = self._verify(
+                *records[binding[0]], recovery_packages=recovery_packages
+            )
             execution = prepared.execution.weights
             replay = CompetitionReplayWorker(
                 self.root / "preflight-replay",
