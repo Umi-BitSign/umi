@@ -50,6 +50,7 @@ def build_authorization_fixture(
     incumbent_sha256=None,
     model_bundle=None,
     extra_model_bundle=None,
+    extra_endpoint_count=0,
     window_index=0,
     sequence=1,
     intake_opened_block=None,
@@ -171,9 +172,22 @@ def build_authorization_fixture(
             end=submission_valid_through_block,
         )
     )
+    extra_endpoints = tuple(
+        submission(
+            policy,
+            name=f"Additional{i}",
+            start=submission_start_block,
+            end=submission_valid_through_block,
+        )
+        for i in range(extra_endpoint_count)
+    )
     submissions = tuple(
         sorted(
-            (s for s in (signed_sub, model_sub, extra_model_sub) if s is not None),
+            (
+                s
+                for s in (signed_sub, model_sub, extra_model_sub, *extra_endpoints)
+                if s is not None
+            ),
             key=lambda s: digest(s.submission),
         )
     )

@@ -6,7 +6,11 @@ import asyncio
 from pathlib import Path
 
 from .competition_execution import execution_boundary
-from .competition_package import prepare_competition_package
+from .competition_package import (
+    CompetitionReleaseIdentity,
+    competition_release_identity_digest,
+    prepare_competition_package,
+)
 from .competition_publication import (
     SignedSettlementPublication,
     settlement_publication_digest,
@@ -22,6 +26,7 @@ from .concurrency import run_owned_thread
 from .open_competition import digest, identity
 from .private_files import ensure_private_directory as _private
 from .private_files import publish_private_model as _publish
+from .private_files import read_private_model
 from .protocol import canonical_json_bytes
 
 
@@ -190,6 +195,35 @@ class SettlementQueue:
         self._source(prepared)
         return certificate
 
+    def _release_identity(self, prepared):
+        """Keep the original journal binding; require a signed scoped transition."""
+        from .competition_dispatch_repair import EndpointUnavailableEvidence
+        from .competition_void import VoidEvaluationEvidence
+
+        repairs = []
+        for entry in prepared.evidence.entries:
+            if isinstance(entry.evidence, VoidEvaluationEvidence):
+                repairs.extend(
+                    o.announcement.evidence.repair.amendment
+                    for o in entry.evidence.certificate.void.observations
+                    if isinstance(o.announcement.evidence, EndpointUnavailableEvidence)
+                )
+        if not repairs:
+            return self.config.release_identity
+        prior = competition_release_identity_digest(self.config.release_identity)
+        if any(r.predecessor_release_identity_sha256 != prior for r in repairs):
+            raise ValueError("repair changes the original delivery release binding")
+        path = (
+            Path(self.config.state_directory)
+            / "repair-releases"
+            / (prepared.publication.round_sha256 + ".json")
+        )
+        successor = read_private_model(path, CompetitionReleaseIdentity, maximum_bytes=4096)
+        target = competition_release_identity_digest(successor)
+        if any(r.successor_release_identity_sha256 != target for r in repairs):
+            raise ValueError("repair successor differs from its signed release authorization")
+        return successor
+
     def _package(self, prepared, certificate):
         slot = str(prepared.publication.round.sequence)
         self._source(prepared)
@@ -204,7 +238,7 @@ class SettlementQueue:
             roster=prepared.roster.submissions,
             evidence=tuple((e.submission, e.evidence) for e in prepared.evidence.entries),
             replay_limits=self.limits,
-            release_identity=self.config.release_identity,
+            release_identity=self._release_identity(prepared),
             destination_root=Path(self.config.package_directory),
             limits=self.config.package_limits,
         )

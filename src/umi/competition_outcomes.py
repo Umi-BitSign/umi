@@ -13,6 +13,7 @@ from .competition_settlement import SettlementResultBinding, SettlementVoidBindi
 from .competition_void import (
     VoidEvaluationEvidence,
     replay_void_evidence,
+    validate_void_receipt,
     void_decision_digest,
     void_evidence_digest,
 )
@@ -58,6 +59,7 @@ def binding_ids(binding):
 def outcome_binding(submission_id, evidence, first_observed_block):
     ids = (outcome_decision_digest(evidence), outcome_digest(evidence))
     if isinstance(evidence, VoidEvaluationEvidence):
+        validate_void_receipt(evidence, first_observed_block)
         return SettlementVoidBinding(
             submission_sha256=submission_id,
             void_decision_sha256=ids[0],

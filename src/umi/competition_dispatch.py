@@ -22,7 +22,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_authorization import (
@@ -38,6 +38,7 @@ from .competition_dispatch_capacity import (
     timing_profile_sha256,
 )
 from .competition_dispatch_inbox import publication_names
+from .competition_dispatch_spool import DispatchSpoolConfig, DispatchTranscriptSpool
 from .competition_endpoint import prepare_endpoint_case
 from .competition_origin import (
     EndpointOriginCapture,
@@ -76,7 +77,15 @@ class EndpointDispatchConfig(StrictProtocolModel):
     request_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 180
     scheduling_capacity: SchedulingCapacity = Field(default_factory=SchedulingCapacity)
     timing_budget: DispatchTimingBudget | None = None
+    transcript_spool: DispatchSpoolConfig | None = None
     no_weight: Literal[True] = True
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_config(self, handler):
+        value = handler(self)
+        if self.transcript_spool is None:
+            value.pop("transcript_spool", None)
+        return value
 
     @field_validator("journal_directory", "publication_directory", "wallet_path")
     @classmethod
@@ -96,6 +105,8 @@ class EndpointDispatchConfig(StrictProtocolModel):
             Path(self.chain.state_directory).resolve(),
             Path(self.wallet_path).resolve(),
         ]
+        if self.transcript_spool is not None:
+            paths.append(Path(self.transcript_spool.directory).resolve())
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(paths)
@@ -338,6 +349,15 @@ class EndpointDispatcher:
         # Always check actual runtime limits, including legacy starts with no
         # budget. Omitting the optional field cannot bypass a retained profile.
         self.journal = journal
+        self.spool = (
+            None
+            if self.config.transcript_spool is None
+            else DispatchTranscriptSpool(
+                self.config.transcript_spool,
+                journal,
+                self.config.evaluator_hotkey,
+            )
+        )
         self._configure_timing()
         self.journal, self.provider, self.wallet, self.transport = (
             journal,
@@ -485,6 +505,8 @@ class EndpointDispatcher:
                 raise ValueError("dispatch origin binding mismatch")
             resolver = origin.capture.transport_resolver()
             expected_profile = self._configure_timing()
+            if self.spool is not None:
+                await run_owned_thread(self.spool.reserve, key)
             claim = self.journal.claim(
                 key,
                 observed=origin.observed,
@@ -510,6 +532,16 @@ class EndpointDispatcher:
                 expected_transport_policy_sha256=self.config.legacy_policy_sha256,
                 limits=self.limits,
             )
+            if self.spool is not None:
+                await run_owned_thread(
+                    partial(
+                        self.spool.retain_intent,
+                        claim,
+                        prepared,
+                        origin_sha256=origin.capture.evidence_sha256,
+                        origin_block=origin.capture.block,
+                    ),
+                )
             started = str(time.time_ns())
             # The transport owns its deadline and retains any partial response
             # when it expires. An equal outer deadline races that retention and
@@ -552,7 +584,11 @@ class EndpointDispatcher:
                     "chain_submission_authorized": False,
                 }
             )
-            self.journal.complete(claim, evidence=evidence)
+            if self.spool is not None:
+                await run_owned_thread(self.spool.retain_outcome, key, evidence)
+            await run_owned_thread(partial(self.journal.complete, claim, evidence=evidence))
+            if self.spool is not None:
+                await run_owned_thread(self.spool.acknowledge, key)
             return "completed"
         except Exception:
             # No endpoint, wallet path, auth header or provider exception in public status.
@@ -568,6 +604,8 @@ class EndpointDispatcher:
             # journal's bounded busy timeout. Keep existing HTTP/proof tasks
             # responsive and drain these operations before shutdown releases
             # the service lease. Every retry rechecks the actual timing binding.
+            if self.spool is not None:
+                await run_owned_thread(self.spool.recover, self.journal)
             await run_owned_thread(self._configure_timing)
             try:
                 ingestion = await self.ingest_once()
