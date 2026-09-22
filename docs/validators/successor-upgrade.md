@@ -296,6 +296,14 @@ historical signatures keep recovery held. A snapshot requiring more than one
 distinct historical manifest anchor is refused; the current observation format
 proves one anchor. Historical authority never becomes current write permission.
 
+Historical parsing can exceed the owned chain proof's freshness interval. The
+upgrade therefore parses each locked snapshot before collecting its fresh proof,
+once for archive preparation and again for verification. Within that snapshot
+scope it reuses the authenticated bridge audit, checking original byte hashes,
+file identities and parsed content before reuse. It still checks the current
+installed policy, chain row and proof expiry on every acceptance. No historical
+signature or current chain authority is inferred from a longer service timeout.
+
 Its pre-stop child runs as the installed non-root account, verifies its complete
 signed host tree and stages the signed OCI bundle before exercising the actual
 Podman sandbox. The named wallet directory is inaccessible to that child.

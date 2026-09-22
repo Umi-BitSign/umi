@@ -28,7 +28,6 @@ from . import competition_host_activation as activation
 from . import competition_host_anchor as anchors
 from .bridge.transactions import RegistrationBridgeTransactionJournal
 from .competition_bridge_recovery import JOURNAL as BRIDGE_JOURNAL
-from .competition_bridge_recovery import audit_bridge_history
 from .competition_chain_state import OwnedCompetitionChainObservation
 from .competition_host_artifacts import (
     _STAGE_PARENT,
@@ -58,9 +57,12 @@ from .competition_recovery import (
     SignedBootstrapEligibilityManifest,
     SignedSimpleBootstrapLease,
     _snapshot_kwargs,
+    bridge_history_for_snapshot,
     load_recovery_checkpoint_context,
-    prepare_recovery_checkpoint,
     snapshot_legacy_bootstrap,
+)
+from .competition_recovery_capture import (
+    prepare_recovery_checkpoint,
     verify_recovery_checkpoint,
 )
 from .competition_supervisor import (
@@ -448,25 +450,29 @@ async def _observe_stopped_history(
         stopped.worker_state_root,
         **_snapshot_kwargs(stopped, limits, manifests, leases),
     ) as snapshot:
-        # Classification authenticates the retained manifest/lease at its
-        # historical preflight block. Request its commitment in the final owned
-        # read; a later bridge row does not replace proof of the old anchor.
-        anchors = {
-            effect.manifest_sha256
-            for effect in snapshot.manifest.effects
-            if effect.classification in {"retained_anchor_receipt", "retained_weight_receipt"}
-        }
-        if len(anchors) > 1:
-            raise HostUpgradeError("recovery requires multiple historical manifest anchors")
-        manifest_anchor = next(iter(anchors), None)
-        if BRIDGE_JOURNAL in snapshot._files:
-            audit = audit_bridge_history(snapshot._files, hotkey=stopped.validator_hotkey)
-            if any(type(j) is RegistrationBridgeTransactionJournal for _, j in audit.attempts):
-                collected = await observer.observe_bridge(
-                    audit, snapshot.sha256, manifest_anchor_sha256=manifest_anchor
-                )
-                return collected.observation, collected
-        return await observer.observe(manifest_anchor_sha256=manifest_anchor), None
+        return await _observe_snapshot(stopped, observer, snapshot)
+
+
+async def _observe_snapshot(stopped, observer, snapshot):
+    # Classification authenticates the retained manifest/lease at its
+    # historical preflight block. Request its commitment in the final owned
+    # read; a later bridge row does not replace proof of the old anchor.
+    anchors = {
+        effect.manifest_sha256
+        for effect in snapshot.manifest.effects
+        if effect.classification in {"retained_anchor_receipt", "retained_weight_receipt"}
+    }
+    if len(anchors) > 1:
+        raise HostUpgradeError("recovery requires multiple historical manifest anchors")
+    manifest_anchor = next(iter(anchors), None)
+    if BRIDGE_JOURNAL in snapshot._files:
+        audit = bridge_history_for_snapshot(snapshot)
+        if any(type(j) is RegistrationBridgeTransactionJournal for _, j in audit.attempts):
+            collected = await observer.observe_bridge(
+                audit, snapshot.sha256, manifest_anchor_sha256=manifest_anchor
+            )
+            return collected.observation, collected
+    return await observer.observe(manifest_anchor_sha256=manifest_anchor), None
 
 
 async def _switch_stopped(
@@ -497,20 +503,20 @@ async def _switch_stopped(
             operator_consent_path=controls_path / activation.OPERATOR_CONSENT_FILENAME,
             observer_config_path=controls_path / activation.HOST_OBSERVER_FILENAME,
         )
+
+        async def observe(snapshot):
+            return await _observe_snapshot(stopped, observer, snapshot)
+
         try:
             anchor = _retained_anchor(control, config_path)
             if anchor is None:
-                observation, bridge_observation = await _observe_stopped_history(
-                    stopped, observer, limits, historical_manifests, historical_leases
-                )
-                prepared = prepare_recovery_checkpoint(
+                prepared = await prepare_recovery_checkpoint(
                     stopped,
-                    observation,
+                    observe=observe,
                     destination_root=recovery_root,
                     limits=limits,
                     historical_manifests=historical_manifests,
                     historical_leases=historical_leases,
-                    bridge_observation=bridge_observation,
                 )
                 checkpoint_path = Path(prepared.checkpoint_path)
                 checkpoint_sha = prepared.checkpoint_sha256
@@ -523,16 +529,12 @@ async def _switch_stopped(
                     owner=user.pw_uid,
                     limits=limits,
                 )
-            observation, bridge_observation = await _observe_stopped_history(
-                stopped, observer, limits, historical_manifests, historical_leases
-            )
-            verified = verify_recovery_checkpoint(
+            verified = await verify_recovery_checkpoint(
                 checkpoint_path,
                 expected_checkpoint_sha256=checkpoint_sha,
                 stopped=stopped,
-                observation=observation,
+                observe=observe,
                 limits=limits,
-                bridge_observation=bridge_observation,
             )
         finally:
             await observer.aclose()
