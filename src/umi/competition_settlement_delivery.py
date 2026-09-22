@@ -163,9 +163,10 @@ class SettlementQueue:
         if certificate is None:
             return None
         opens, closes = self._window(prepared)
-        if not opens <= await self._head() <= closes:
+        block = await self._head()
+        if not opens <= block <= closes:
             return None
-        package = await run_owned_thread(self._package, prepared, certificate)
+        package = await run_owned_thread(self._package, prepared, certificate, block)
         if not opens <= await self._head() <= closes:
             return None
         return await run_owned_thread(self._deliver, prepared, certificate, package)
@@ -195,7 +196,7 @@ class SettlementQueue:
         self._source(prepared)
         return certificate
 
-    def _release_identity(self, prepared):
+    def _release_identity(self, prepared, current_block=None):
         """Keep the original journal binding; require a signed scoped transition."""
         from .competition_dispatch_repair import EndpointUnavailableEvidence
         from .competition_void import VoidEvaluationEvidence
@@ -209,7 +210,9 @@ class SettlementQueue:
                     if isinstance(o.announcement.evidence, EndpointUnavailableEvidence)
                 )
         if not repairs:
-            return self.config.release_identity
+            from .competition_settlement_release_selection import ordinary_release_identity
+
+            return ordinary_release_identity(self, prepared, current_block)
         prior = competition_release_identity_digest(self.config.release_identity)
         if any(r.predecessor_release_identity_sha256 != prior for r in repairs):
             raise ValueError("repair changes the original delivery release binding")
@@ -224,9 +227,10 @@ class SettlementQueue:
             raise ValueError("repair successor differs from its signed release authorization")
         return successor
 
-    def _package(self, prepared, certificate):
+    def _package(self, prepared, certificate, current_block):
         slot = str(prepared.publication.round.sequence)
         self._source(prepared)
+        release_identity = self._release_identity(prepared, current_block)
         # Freeze the first quorum before filesystem delivery. Later votes cannot
         # change a package's certificate or its content-addressed identity.
         self.journal.put("certificate", slot, certificate)
@@ -238,7 +242,7 @@ class SettlementQueue:
             roster=prepared.roster.submissions,
             evidence=tuple((e.submission, e.evidence) for e in prepared.evidence.entries),
             replay_limits=self.limits,
-            release_identity=self._release_identity(prepared),
+            release_identity=release_identity,
             destination_root=Path(self.config.package_directory),
             limits=self.config.package_limits,
         )
