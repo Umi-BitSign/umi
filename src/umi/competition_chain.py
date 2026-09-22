@@ -684,6 +684,9 @@ class FinalizedRegistrationProvider:
                     )
                 elif old != (body,):
                     raise ValueError("registration proof RPC transport binding changed")
+            from .competition_chain_capacity import verify_cache_capacity_history
+
+            verify_cache_capacity_history(connection, self.config, expected_binding=expected)
             connection.commit()
         finally:
             connection.close()
