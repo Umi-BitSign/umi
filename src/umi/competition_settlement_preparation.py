@@ -69,6 +69,8 @@ def validate_preparation(prepared, policy, limits):
     if len(raw) > settlement_capacity(limits).preparation_bytes:
         raise ValueError("settlement preparation exceeds the transport byte bound")
     prepared = SettlementPreparation.model_validate_json(raw)
+    # Replay needs the normalized model, not another complete serialized copy.
+    del raw
     calibration = prepared.publication.settlement.dependence_calibration
     if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
         if calibration is None:
@@ -146,6 +148,9 @@ async def prepare_retained_settlement(
             )
         )
     )
+    # The next read rechecks committed evidence. Release its obsolete predecessor
+    # before loading another full cohort; retain the exact settlement separately.
+    del material
     # Re-read conflict status and evidence bindings after the settlement commit.
     # Publishing this proposal still requires independent current review later.
     retained = store.settlement_material(round_, limits=limits)

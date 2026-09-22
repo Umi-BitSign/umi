@@ -16,6 +16,7 @@ from typing import Annotated, TypeVar
 
 from pydantic import AfterValidator, BaseModel, Field
 
+from .canonical_stream import canonical_json_matches
 from .protocol import canonical_json_bytes
 
 MAX_PRIVATE_BYTES = 64 * 1024**2
@@ -75,7 +76,7 @@ def read_private_model(
             raise ValueError("evaluator input exceeds its byte bound")
         raw = stream.read(maximum_bytes + 1)
     value = model.model_validate_json(raw)
-    if len(raw) != info.st_size or raw != canonical_json_bytes(value):
+    if len(raw) != info.st_size or not canonical_json_matches(value, raw):
         raise ValueError("evaluator input must have stable canonical bytes")
     return value
 
@@ -123,9 +124,8 @@ def publish_private_model(
 
 def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: int) -> None:
     if path.exists() or path.is_symlink():
-        if (
-            canonical_json_bytes(read_private_model(path, type(value), maximum_bytes=maximum_bytes))
-            != raw
+        if not canonical_json_matches(
+            read_private_model(path, type(value), maximum_bytes=maximum_bytes), raw
         ):
             raise ValueError("evaluator outbox already contains different bytes")
         return

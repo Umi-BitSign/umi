@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import weakref
 from dataclasses import replace
 
 import pytest
@@ -91,6 +92,28 @@ async def test_restart_retry_preserves_snapshot_evidence_and_exact_output(setup)
     await prepare(s)
     assert canonical_json_bytes(published(s)) == before
     assert published(s).publication.settlement.observed_block == 160
+
+
+@pytest.mark.asyncio
+async def test_first_material_read_is_released_before_loading_committed_evidence(
+    setup, monkeypatch
+):
+    class Material(dict):
+        pass
+
+    original = setup.store.settlement_material
+    references = []
+
+    def material(*args, **kwargs):
+        assert all(reference() is None for reference in references)
+        result = Material(original(*args, **kwargs))
+        references.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(setup.store, "settlement_material", material)
+    assert await prepare(setup) == "prepared"
+    assert len(references) == 2
+    assert all(reference() is None for reference in references)
 
 
 @pytest.mark.asyncio

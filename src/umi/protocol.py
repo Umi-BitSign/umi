@@ -16,6 +16,7 @@ import rfc8785
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from .canonical_stream import canonical_json_matches
 from .scoring import grapheme_clusters, normalize_text
 
 PROTOCOL_VERSION = "umi-asl/0.1"
@@ -343,7 +344,7 @@ def is_canonical_json(raw: bytes) -> bool:
         if key in _CANONICAL_VERIFIED:
             _CANONICAL_VERIFIED.move_to_end(key)
             return True
-    if raw != canonical_json_bytes(json.loads(raw)):
+    if not canonical_json_matches(json.loads(raw), raw):
         return False
     with _CANONICAL_VERIFIED_LOCK:
         _CANONICAL_VERIFIED[key] = None
