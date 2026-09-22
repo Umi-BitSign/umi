@@ -250,6 +250,55 @@ async def test_recipient_reuse_holds_old_row_without_poisoning_later_certificate
     assert (await c.service.tick())["round_sequence"] == 2
 
 
+@pytest.mark.parametrize("change", ["missing", "uid_reused", "hotkey_moved"])
+async def test_exact_row_holds_one_changed_recipient_across_restart_and_recovers_on_return(
+    automatic, package_case, tmp_path, monkeypatch, change
+):
+    from umi.competition_successor_publisher import CurrentSuccessorRoundPublisher
+    from umi.open_competition import Registration
+
+    from .test_open_competition import wallet
+
+    c = setup(automatic, package_case, tmp_path)
+    assert (await c.service.tick())["status"] == "published"
+    first = canonical_json_bytes(c.feed.history()[0])
+    capture = c.provider.collect
+    original = await capture()
+    allocation = c.publisher.builder._load(package_case.prepared).retained_settlement.projection
+    removed = allocation.allocations[0]
+    remaining = [r for r in original.snapshot.registrations if r.uid != removed.uid]
+    if change == "uid_reused":
+        remaining.append(
+            Registration(uid=removed.uid, hotkey=wallet("Charlie").hotkey.ss58_address)
+        )
+    elif change == "hotkey_moved":
+        assert 12 not in {r.uid for r in original.snapshot.registrations}
+        remaining.append(Registration(uid=12, hotkey=removed.hotkey))
+
+    async def changed():
+        return change_capture(await capture(), tuple(sorted(remaining, key=lambda r: r.uid)))
+
+    monkeypatch.setattr(c.provider, "collect", changed)
+    for head in (220, 240):
+        c.provider.block = head
+        with pytest.raises(ValueError, match="recipient registration changed"):
+            await c.service.tick()
+        assert len(c.feed.history()) == 1
+        assert canonical_json_bytes(c.feed.history()[0]) == first
+        assert len(c.publisher.builder.journal.keys("authorization")) == 1
+        old = c.publisher.builder
+        builder = SuccessorRoundPublicationBuilder(old.journal.root, old.plan)
+        c.publisher = CurrentSuccessorRoundPublisher(
+            builder, c.guarded.store, c.guarded.replay, c.provider
+        )
+        c.service = AutomaticSuccessorPublisher(c.publisher, c.feed, c.config, **c.signers)
+    monkeypatch.setattr(c.provider, "collect", capture)
+    c.provider.block = 260
+    assert (await c.service.tick())["status"] == "published"
+    assert len(c.feed.history()) == 2
+    assert c.feed.history()[-1].intent.package == c.feed.history()[0].intent.package
+
+
 async def test_native_host_preserves_round_highwater_and_rejects_old_fallback(
     automatic,
     package_case,
