@@ -977,75 +977,114 @@ class ContinuousEvaluator:
             raise ValueError("revealed suite differs from the committed hash")
         own = self.journal.get(slot, "announcement", SignedExecutionAnnouncement)
         if own is None:
-            retained = self.executions.reserve(job)
-            assert retained is not None
-            if isinstance(job, EndpointIncumbentJob):
-                pulses = {}
-                for number in sorted(
-                    {
-                        a.request.reveal_round
-                        for a in order.publication.publication.assignments
-                        if identity(a.evaluator_hotkey) == identity(job.evaluator_hotkey)
-                        and a.submission_sha256 == digest(job.submission.submission)
-                    }
-                ):
-                    key = "pulse:" + str(number)
-                    pulse = self.journal.get(slot, key, RetainedRevealPulse)
-                    if pulse is None:
-                        fetched = await self.pulses.fetch(number)
-                        pulse = RetainedRevealPulse(
-                            round=fetched.round,
-                            randomness=fetched.randomness,
-                            signature=fetched.signature,
-                        )
-                        pulse.verified()
-                        if pulse.round != number:
-                            raise ValueError("wrong reveal pulse")
-                        self.journal.put(slot, key, pulse)
-                    pulses[number] = pulse
-                # An explicit quorum-signed amendment is an additional input;
-                # absent it, the historical complete-transcript rule is unchanged.
-                from .competition_dispatch_repair import (
-                    SignedDispatchRepair,
-                    assemble_unavailable_observations,
-                )
+            announcement = self.journal.get(slot, "announcement_intent", ExecutionAnnouncement)
+            if announcement is None:
+                retained = self.executions.reserve(job)
+                assert retained is not None
+                if isinstance(job, EndpointIncumbentJob):
+                    pulses = {}
+                    for number in sorted(
+                        {
+                            a.request.reveal_round
+                            for a in order.publication.publication.assignments
+                            if identity(a.evaluator_hotkey) == identity(job.evaluator_hotkey)
+                            and a.submission_sha256 == digest(job.submission.submission)
+                        }
+                    ):
+                        key = "pulse:" + str(number)
+                        pulse = self.journal.get(slot, key, RetainedRevealPulse)
+                        if pulse is None:
+                            fetched = await self.pulses.fetch(number)
+                            pulse = RetainedRevealPulse(
+                                round=fetched.round,
+                                randomness=fetched.randomness,
+                                signature=fetched.signature,
+                            )
+                            pulse.verified()
+                            if pulse.round != number:
+                                raise ValueError("wrong reveal pulse")
+                            self.journal.put(slot, key, pulse)
+                        pulses[number] = pulse
+                    # An explicit quorum-signed amendment is an additional input;
+                    # absent it, the historical complete-transcript rule is unchanged.
+                    from .competition_dispatch_repair import (
+                        SignedDispatchRepair,
+                        assemble_unavailable_observations,
+                    )
 
-                repair_path = (
-                    Path(self.config.state_directory)
-                    / "dispatch-repairs"
-                    / (digest(order) + ".json")
+                    repair_path = (
+                        Path(self.config.state_directory)
+                        / "dispatch-repairs"
+                        / (digest(order) + ".json")
+                    )
+                    repair = (
+                        _read(repair_path, SignedDispatchRepair) if repair_path.exists() else None
+                    )
+                    own_repair_claims = (
+                        ()
+                        if repair is None
+                        else tuple(
+                            c
+                            for c in repair.amendment.unavailable
+                            if identity(c.evaluator_hotkey) == identity(job.evaluator_hotkey)
+                        )
+                    )
+                    recovered = own_repair_claims and all(
+                        (self.dispatch.status(c.assignment_key) or {}).get("state") == "completed"
+                        for c in own_repair_claims
+                    )
+                    if own_repair_claims and not recovered:
+                        retained = assemble_unavailable_observations(
+                            incumbent=retained,
+                            journal=self.dispatch,
+                            signed_order=signed,
+                            repair=repair,
+                            suite=suite,
+                            pulses=pulses,
+                            current_block=head,
+                        )
+                    else:
+                        retained = assemble_endpoint_observations(
+                            incumbent=retained,
+                            journal=self.dispatch,
+                            publication_sha256=digest(order.publication.publication),
+                            suite=suite,
+                            pulses=pulses,
+                            current_block=head,
+                        )
+                execution_observations(retained, suite, self.policy, current_block=head)
+                announcement = ExecutionAnnouncement(
+                    schema="umi-execution-announcement/1",
+                    order_sha256=digest(order),
+                    evaluator_hotkey=job.evaluator_hotkey,
+                    evidence=retained,
                 )
-                repair = _read(repair_path, SignedDispatchRepair) if repair_path.exists() else None
-                if repair is not None and any(
-                    identity(c.evaluator_hotkey) == identity(job.evaluator_hotkey)
-                    for c in repair.amendment.unavailable
-                ):
-                    retained = assemble_unavailable_observations(
-                        incumbent=retained,
-                        journal=self.dispatch,
-                        signed_order=signed,
-                        repair=repair,
-                        suite=suite,
-                        pulses=pulses,
-                        current_block=head,
-                    )
-                else:
-                    retained = assemble_endpoint_observations(
-                        incumbent=retained,
-                        journal=self.dispatch,
-                        publication_sha256=digest(order.publication.publication),
-                        suite=suite,
-                        pulses=pulses,
-                        current_block=head,
-                    )
-            execution_observations(retained, suite, self.policy, current_block=head)
-            announcement = ExecutionAnnouncement(
-                schema="umi-execution-announcement/1",
-                order_sha256=digest(order),
-                evaluator_hotkey=job.evaluator_hotkey,
-                evidence=retained,
+                self.journal.put(slot, "announcement_intent", announcement)
+            if announcement.order_sha256 != digest(order) or identity(
+                announcement.evaluator_hotkey
+            ) != identity(job.evaluator_hotkey):
+                raise ValueError("retained announcement intent differs from its order or evaluator")
+            view = execution_observations(
+                announcement.evidence, suite, self.policy, current_block=head
             )
-            self.journal.put(slot, "announcement_intent", announcement)
+            if view["job"] != job:
+                raise ValueError("retained announcement intent differs from its execution job")
+            from .competition_dispatch_repair import (
+                EndpointUnavailableEvidence,
+                validate_local_repair,
+            )
+
+            if isinstance(announcement.evidence, EndpointUnavailableEvidence):
+                validate_local_repair(
+                    announcement.evidence.repair,
+                    journal=self.dispatch,
+                    evaluator_hotkey=job.evaluator_hotkey,
+                    retained_intent=(self.journal, slot),
+                    signed_order=signed,
+                    policy=self.policy,
+                    legacy=self.legacy,
+                    current_block=head,
+                )
             head = await self.signing_head(order)
             own = SignedExecutionAnnouncement(
                 announcement=announcement, signature=sign_object(announcement, self.wallet)

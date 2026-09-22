@@ -133,7 +133,51 @@ def _verify_amendment_body(body, order, policy, current_block):
             raise ValueError("repair claim differs from its original assignment or deadline")
 
 
-def retained_claim(journal, key, *, allow_retired=False):
+def _historical_announcement(*, signed_observation=None, retained_intent=None):
+    from .competition_observations import ExecutionAnnouncement, SignedExecutionAnnouncement
+
+    if signed_observation is not None and retained_intent is not None:
+        raise ValueError("repair historical observation is ambiguous")
+    if signed_observation is not None:
+        signed = SignedExecutionAnnouncement.model_validate_json(
+            canonical_json_bytes(signed_observation)
+        )
+        verify_signature(signed.announcement, signed.signature)
+        if identity(signed.signature.hotkey) != identity(signed.announcement.evaluator_hotkey):
+            raise ValueError("repair observation differs from its original scope")
+        return signed.announcement
+    if retained_intent is not None:
+        from .competition_evaluator import MAX_BYTES, SignedEvaluationOrder, execution_slot
+
+        evaluator, slot = retained_intent
+        with evaluator.transaction() as db:
+            order = db.execute("SELECT body,conflict FROM orders WHERE slot=?", (slot,)).fetchone()
+            row = db.execute(
+                "SELECT substr(body,1,?),length(body) FROM artifacts "
+                "WHERE slot=? AND kind='announcement_intent'",
+                (MAX_BYTES + 1, slot),
+            ).fetchone()
+        if order is None or order[1] or row is None or not 0 < row[1] <= MAX_BYTES:
+            raise ValueError("repair requires a retained unconflicted announcement intent")
+        observed = ExecutionAnnouncement.model_validate_json(row[0])
+        retained_order = SignedEvaluationOrder.model_validate_json(order[0]).order
+        if (
+            canonical_json_bytes(observed) != row[0]
+            or observed.order_sha256 != digest(retained_order)
+            or identity(observed.evaluator_hotkey) != identity(evaluator.config.evaluator_hotkey)
+            or slot
+            != execution_slot(
+                retained_order.round, retained_order.submission, observed.evaluator_hotkey
+            )
+        ):
+            raise ValueError("repair intent differs from its original scope")
+        return observed
+    return None
+
+
+def retained_claim(
+    journal, key, *, allow_retired=False, signed_observation=None, retained_intent=None
+):
     """Read the immutable claim without expiring work or advancing a clock."""
     with closing(sqlite3.connect(journal.path.as_uri() + "?mode=ro", uri=True)) as db:
         db.execute("PRAGMA query_only=ON")
@@ -144,7 +188,25 @@ def retained_claim(journal, key, *, allow_retired=False):
             (key,),
         ).fetchall()
         kinds = [r[0] for r in rows]
-        if allow_retired and kinds == ["published", "dispatched", "completed"]:
+        if (signed_observation is not None or retained_intent is not None) and kinds == [
+            "published",
+            "dispatched",
+            "completed",
+        ]:
+            # A retained pre-sign intent or signed local observation records
+            # absence when assembled. Later completion remains history and must
+            # not prevent that observation from reaching its quorum. New repair
+            # signing and new unavailable observation assembly never use this.
+            observed = _historical_announcement(
+                signed_observation=signed_observation, retained_intent=retained_intent
+            )
+            evidence = observed.evidence
+            valid = isinstance(evidence, EndpointUnavailableEvidence) and any(
+                c.assignment_key == key
+                and identity(c.evaluator_hotkey) == identity(observed.evaluator_hotkey)
+                for c in evidence.repair.amendment.unavailable
+            )
+        elif allow_retired and kinds == ["published", "dispatched", "completed"]:
             # Authenticate the already retained void before accepting subsequent
             # transcript recovery as additional history. Signing a new repair
             # never enables this path and still requires an uncertain claim.
@@ -166,13 +228,25 @@ def retained_claim(journal, key, *, allow_retired=False):
         return hashlib.sha256(raw).hexdigest(), block, ms, body["request_sha256"]
 
 
-def validate_local_repair(signed, *, journal, evaluator_hotkey, **context):
+def validate_local_repair(
+    signed, *, journal, evaluator_hotkey, signed_observation=None, retained_intent=None, **context
+):
     """Check local absence before signing/using a separately authorized repair.
 
     Operators must also retain the bounded retention-search audit named by the
     amendment. A journal alone cannot establish absence from every other store.
     """
     signed = verify_dispatch_repair(signed, **context)
+    observed = _historical_announcement(
+        signed_observation=signed_observation, retained_intent=retained_intent
+    )
+    if observed is not None and (
+        not isinstance(observed.evidence, EndpointUnavailableEvidence)
+        or observed.evidence.repair.amendment != signed.amendment
+        or observed.order_sha256 != signed.amendment.order_sha256
+        or identity(observed.evaluator_hotkey) != identity(evaluator_hotkey)
+    ):
+        raise ValueError("repair observation differs from its original scope")
     own = [
         c
         for c in signed.amendment.unavailable
@@ -185,7 +259,16 @@ def validate_local_repair(signed, *, journal, evaluator_hotkey, **context):
             claim.claim_unix_ms,
             claim.request_sha256,
         )
-        if retained_claim(journal, claim.assignment_key, allow_retired=True) != expected:
+        if (
+            retained_claim(
+                journal,
+                claim.assignment_key,
+                allow_retired=True,
+                signed_observation=signed_observation,
+                retained_intent=retained_intent,
+            )
+            != expected
+        ):
             raise ValueError("repair does not retain the exact original local claim")
     return signed
 
@@ -345,4 +428,5 @@ def validate_local_repair_observation(
             legacy=legacy,
             current_block=current_block,
             evaluator_hotkey=evaluator_hotkey,
+            signed_observation=observation,
         )
