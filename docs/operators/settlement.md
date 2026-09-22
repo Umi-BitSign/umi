@@ -310,13 +310,23 @@ queries, response bindings, independent evidence checks, finality, conflicts and
 expiry still apply. Other hosts must use HTTPS and a route whose proxy deadlines
 have been qualified for the complete query and certification operations.
 
-Profiles with preparation capacity above 64 MiB allow 1,800 seconds for a server
-operation, 1,860 seconds for a client read, and 1,920 seconds for a complete client
+Profiles with preparation capacity above 64 MiB allow 7,200 seconds for a server
+operation, 7,260 seconds for a client read, and 7,320 seconds for a complete client
 request. Legacy profiles retain 25/30/35 seconds. These budgets do not extend
 protocol signing windows or upstream proxy deadlines. In particular, Cloudflare
 documents a [125-second default proxy read timeout and a 30-second proxy write
 timeout](https://developers.cloudflare.com/fundamentals/reference/connection-limits/);
 increasing this client's budget alone cannot qualify that route.
+
+Blocking settlement formation, journal replay, certificate/package work and
+response serialization run in owned threads. Async finality providers and locks
+stay on the service event loop. Background formation shares the settlement
+queue lock with HTTP replay, so requests can authenticate promptly before
+waiting without allocating a second full cohort. Cancellation or an operation
+timeout drains the active worker before releasing its lock or request slot;
+shutdown may therefore take longer than the requested timeout. Signed nonce
+admission freshness, snapshot age, conflict checks and signing deadlines are
+unchanged. The generous operational budgets do not extend those deadlines.
 
 The worker polls, endorses and returns votes automatically. It uses its existing
 hotkey and owned finality provider. Each endorsement still requires the worker's

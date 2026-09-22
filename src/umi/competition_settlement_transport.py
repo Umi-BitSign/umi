@@ -15,6 +15,7 @@ from starlette.responses import Response
 from .competition_client import validate_intake_origin
 from .competition_settlement_preparation import MAX_PREPARATION_BYTES, SettlementPreparation
 from .competition_settlement_signing import IndependentSettlementSigner, SettlementEndorsement
+from .concurrency import run_owned_thread, wait_for_owned
 from .nonce import SQLiteNonceStore
 from .open_competition import Signature, digest, identity, sign_object, verify_signature
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -120,35 +121,23 @@ def attach_settlement_route(app, queue):
                 or q.policy_sha256 != digest(policy)
                 or identity(q.hotkey) not in {identity(e.hotkey) for e in policy.evaluators}
                 or not now - 30_000_000_000 <= int(q.nonce_unix_ns) <= now + 5_000_000_000
-                or not nonces.check_and_store(q.hotkey, int(q.nonce_unix_ns))
+                or not await run_owned_thread(
+                    nonces.check_and_store, q.hotkey, int(q.nonce_unix_ns)
+                )
             ):
                 raise HTTPException(401, "settlement authentication rejected")
             if q.vote is None:
-                cursor, proposals = await asyncio.wait_for(
+                cursor, proposals = await wait_for_owned(
                     queue.pending(q.hotkey, after=q.after),
                     timeout=queue.capacity.operation_timeout_seconds,
                 )
-                reply = SettlementReply(
-                    query_sha256=digest(q),
-                    policy_sha256=digest(policy),
-                    cursor=cursor,
-                    proposals=proposals,
-                )
+                fields = dict(cursor=cursor, proposals=proposals)
             else:
-                accepted = await asyncio.wait_for(
+                accepted = await wait_for_owned(
                     queue.accept(q.vote), timeout=queue.capacity.operation_timeout_seconds
                 )
-                reply = SettlementReply(
-                    query_sha256=digest(q),
-                    policy_sha256=digest(policy),
-                    accepted_publication_sha256=accepted,
-                )
-            body = canonical_json_bytes(reply)
-            if (
-                len(reply.proposals) > queue.capacity.page_size
-                or len(body) > queue.capacity.reply_bytes
-            ):
-                raise ValueError("settlement reply exceeds its byte bound")
+                fields = dict(accepted_publication_sha256=accepted)
+            body = await run_owned_thread(_reply_bytes, q, policy, queue.capacity, fields)
             response = _CapacityResponse(body, capacity)
             acquired = False  # Response owns the slot, including cancellation during send.
             return response
@@ -159,6 +148,14 @@ def attach_settlement_route(app, queue):
         finally:
             if acquired:
                 capacity.release()
+
+
+def _reply_bytes(query, policy, capacity, fields):
+    reply = SettlementReply(query_sha256=digest(query), policy_sha256=digest(policy), **fields)
+    body = canonical_json_bytes(reply)
+    if len(reply.proposals) > capacity.page_size or len(body) > capacity.reply_bytes:
+        raise ValueError("settlement reply exceeds its byte bound")
+    return body
 
 
 def _settlement_connection(origin, loopback_port, transport):
@@ -212,7 +209,7 @@ async def request_settlement(origin, signed, *, transport=None, capacity=None, l
             return bytes(result)
 
     try:
-        raw = await asyncio.wait_for(fetch(), timeout=request_timeout)
+        raw = await wait_for_owned(fetch(), timeout=request_timeout)
     except (httpx.HTTPError, asyncio.TimeoutError):
         raise ValueError("settlement request failed") from None
     reply = SettlementReply.model_validate_json(raw)

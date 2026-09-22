@@ -18,6 +18,7 @@ from .competition_round_journal import RoundJournal
 from .competition_settlement_capacity import settlement_capacity
 from .competition_settlement_preparation import MAX_BYTES, validate_preparation
 from .competition_settlement_signing import SettlementEndorsement
+from .concurrency import run_owned_thread
 from .open_competition import digest, identity
 from .private_files import ensure_private_directory as _private
 from .private_files import publish_private_model as _publish
@@ -54,7 +55,7 @@ class SettlementQueue:
 
     async def _head(self):
         block = execution_boundary(await self.provider.collect()).block
-        self.journal.observe(block)
+        await run_owned_thread(self.journal.observe, block)
         if not self.policy.valid_from_block <= block <= self.policy.valid_through_block:
             raise ValueError("settlement delivery policy is not current")
         return block
@@ -97,34 +98,47 @@ class SettlementQueue:
 
     async def prepare(self, prepared):
         async with self.serial:
-            prepared = validate_preparation(prepared, self.policy, self.limits)
-            self._source(prepared)
-            block = await self._head()
-            opens, closes = self._window(prepared)
-            if not opens <= block <= closes:
-                raise ValueError("settlement delivery window elapsed")
-            self._source(prepared)
-            publication = prepared.publication
-            sequence, publication_id = (
-                publication.round.sequence,
-                settlement_publication_digest(publication),
+            return await self._prepare_owned(prepared)
+
+    async def _prepare_owned(self, prepared):
+        """Prepare under the caller's existing queue ownership.
+
+        The coordinator holds this same lock across retained settlement formation
+        so background and HTTP replay cannot allocate two full cohorts at once.
+        """
+        prepared = await run_owned_thread(self._prepare_input, prepared)
+        block = await self._head()
+        opens, closes = self._window(prepared)
+        if not opens <= block <= closes:
+            raise ValueError("settlement delivery window elapsed")
+        await run_owned_thread(self._reserve, prepared, opens, closes)
+        return await self._publish(prepared)
+
+    def _prepare_input(self, prepared):
+        prepared = validate_preparation(prepared, self.policy, self.limits)
+        self._source(prepared)
+        return prepared
+
+    def _reserve(self, prepared, opens, closes):
+        self._source(prepared)
+        publication = prepared.publication
+        sequence, publication_id = (
+            publication.round.sequence,
+            settlement_publication_digest(publication),
+        )
+        self.journal.put("intent", str(sequence), prepared)
+        self.journal.put("suite", publication.round.suite_sha256, {"publication": publication_id})
+        metadata = (publication_id, opens, closes)
+        with self.journal.transaction() as db:
+            prior = db.execute(
+                "SELECT publication,opens,closes FROM settlement_index WHERE sequence=?",
+                (sequence,),
+            ).fetchone()
+            if prior is not None and tuple(prior) != metadata:
+                raise ValueError("settlement discovery index differs")
+            db.execute(
+                "INSERT OR IGNORE INTO settlement_index VALUES (?,?,?,?)", (sequence, *metadata)
             )
-            self.journal.put("intent", str(sequence), prepared)
-            self.journal.put(
-                "suite", publication.round.suite_sha256, {"publication": publication_id}
-            )
-            metadata = (publication_id, opens, closes)
-            with self.journal.transaction() as db:
-                prior = db.execute(
-                    "SELECT publication,opens,closes FROM settlement_index WHERE sequence=?",
-                    (sequence,),
-                ).fetchone()
-                if prior is not None and tuple(prior) != metadata:
-                    raise ValueError("settlement discovery index differs")
-                db.execute(
-                    "INSERT OR IGNORE INTO settlement_index VALUES (?,?,?,?)", (sequence, *metadata)
-                )
-            return await self._publish(prepared)
 
     def _verify_certificate(self, certificate, prepared):
         publication = verify_settlement_publication(
@@ -140,6 +154,18 @@ class SettlementQueue:
             raise ValueError("settlement certificate differs from its reserved proposal")
 
     async def _publish(self, prepared):
+        certificate = await run_owned_thread(self._certificate, prepared)
+        if certificate is None:
+            return None
+        opens, closes = self._window(prepared)
+        if not opens <= await self._head() <= closes:
+            return None
+        package = await run_owned_thread(self._package, prepared, certificate)
+        if not opens <= await self._head() <= closes:
+            return None
+        return await run_owned_thread(self._deliver, prepared, certificate, package)
+
+    def _certificate(self, prepared):
         slot = str(prepared.publication.round.sequence)
         raw = self.journal.get("certificate", slot)
         if raw is None:
@@ -162,9 +188,10 @@ class SettlementQueue:
             certificate = SignedSettlementPublication.model_validate_json(canonical_json_bytes(raw))
         self._verify_certificate(certificate, prepared)
         self._source(prepared)
-        opens, closes = self._window(prepared)
-        if not opens <= await self._head() <= closes:
-            return None
+        return certificate
+
+    def _package(self, prepared, certificate):
+        slot = str(prepared.publication.round.sequence)
         self._source(prepared)
         # Freeze the first quorum before filesystem delivery. Later votes cannot
         # change a package's certificate or its content-addressed identity.
@@ -182,8 +209,10 @@ class SettlementQueue:
             limits=self.config.package_limits,
         )
         self._source(prepared)
-        if not opens <= await self._head() <= closes:
-            return None
+        return package
+
+    def _deliver(self, prepared, certificate, package):
+        slot = str(prepared.publication.round.sequence)
         self._source(prepared)
         self.journal.put("package", slot, package)
         base = Path(self.config.certificate_directory)
@@ -201,24 +230,31 @@ class SettlementQueue:
 
     async def accept(self, vote):
         async with self.serial:
-            vote = SettlementEndorsement.model_validate_json(canonical_json_bytes(vote))
-            with self.journal.transaction() as db:
-                row = db.execute(
-                    "SELECT sequence FROM settlement_index WHERE publication=?",
-                    (vote.publication_sha256,),
-                ).fetchone()
-            if row is None:
-                raise ValueError("unknown settlement publication")
-            prepared = self._prepared(row[0])
-            self._verify_vote(vote, prepared)
-            key = str(row[0]) + ":" + identity(vote.signature.hotkey)
+            vote, prepared, key = await run_owned_thread(self._accept_input, vote)
             opens, closes = self._window(prepared)
             block = await self._head()
-            if self.journal.get("vote", key) is None and not opens <= block <= closes:
-                raise ValueError("new settlement endorsement arrived outside its original window")
-            self.journal.put("vote", key, vote)
+            await run_owned_thread(self._retain_vote, vote, key, block, opens, closes)
             await self._publish(prepared)
             return vote.publication_sha256
+
+    def _accept_input(self, vote):
+        vote = SettlementEndorsement.model_validate_json(canonical_json_bytes(vote))
+        with self.journal.transaction() as db:
+            row = db.execute(
+                "SELECT sequence FROM settlement_index WHERE publication=?",
+                (vote.publication_sha256,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("unknown settlement publication")
+        prepared = self._prepared(row[0])
+        self._verify_vote(vote, prepared)
+        key = str(row[0]) + ":" + identity(vote.signature.hotkey)
+        return vote, prepared, key
+
+    def _retain_vote(self, vote, key, block, opens, closes):
+        if self.journal.get("vote", key) is None and not opens <= block <= closes:
+            raise ValueError("new settlement endorsement arrived outside its original window")
+        self.journal.put("vote", key, vote)
 
     async def pending(self, hotkey, *, after=0):
         async with self.serial:
@@ -227,40 +263,47 @@ class SettlementQueue:
             if identity(hotkey) not in {identity(e.hotkey) for e in self.policy.evaluators}:
                 raise ValueError("settlement discovery requires a policy evaluator")
             block = await self._head()
-            with self.journal.transaction() as db:
-                rows = db.execute(
-                    "SELECT sequence,publication,opens,closes FROM settlement_index "
-                    "WHERE sequence>? AND opens<=? AND closes>=? ORDER BY sequence LIMIT ?",
-                    (after, block, block, self.capacity.page_size),
-                ).fetchall()
-            result, cursor = [], after
-            for sequence, publication_id, opens, closes in rows:
-                cursor = sequence
-                try:
-                    prepared = self._prepared(sequence)
-                    if (
-                        settlement_publication_digest(prepared.publication),
-                        *self._window(prepared),
-                    ) != (publication_id, opens, closes):
-                        raise ValueError("settlement discovery index binding mismatch")
-                    if settlement_signer_eligible(
-                        hotkey, prepared.publication, self.policy, prepared.roster.submissions
-                    ) and (
-                        self.journal.get("certificate", str(sequence)) is None
-                        and self.journal.get("vote", str(sequence) + ":" + identity(hotkey)) is None
-                    ):
-                        result.append(prepared)
-                except ValueError:
-                    continue
-            # Replaying a page can take time; do not deliver revealed material
-            # against the head captured before that work.
+            cursor, result = await run_owned_thread(self._pending_page, hotkey, after, block)
+            # Replaying a page can take time; preserve the fresh head and local
+            # source checks after that work, with async ownership on this loop.
             current = await self._head()
-            checked = []
-            for prepared in result:
-                try:
-                    self._source(prepared)
-                    if self._window(prepared)[0] <= current <= self._window(prepared)[1]:
-                        checked.append(prepared)
-                except ValueError:
-                    continue
-            return cursor, tuple(checked)
+            return await run_owned_thread(self._checked_page, cursor, result, current)
+
+    def _pending_page(self, hotkey, after, block):
+        with self.journal.transaction() as db:
+            rows = db.execute(
+                "SELECT sequence,publication,opens,closes FROM settlement_index "
+                "WHERE sequence>? AND opens<=? AND closes>=? ORDER BY sequence LIMIT ?",
+                (after, block, block, self.capacity.page_size),
+            ).fetchall()
+        result, cursor = [], after
+        for sequence, publication_id, opens, closes in rows:
+            cursor = sequence
+            try:
+                prepared = self._prepared(sequence)
+                if (
+                    settlement_publication_digest(prepared.publication),
+                    *self._window(prepared),
+                ) != (publication_id, opens, closes):
+                    raise ValueError("settlement discovery index binding mismatch")
+                if settlement_signer_eligible(
+                    hotkey, prepared.publication, self.policy, prepared.roster.submissions
+                ) and (
+                    self.journal.get("certificate", str(sequence)) is None
+                    and self.journal.get("vote", str(sequence) + ":" + identity(hotkey)) is None
+                ):
+                    result.append(prepared)
+            except ValueError:
+                continue
+        return cursor, result
+
+    def _checked_page(self, cursor, result, current):
+        checked = []
+        for prepared in result:
+            try:
+                self._source(prepared)
+                if self._window(prepared)[0] <= current <= self._window(prepared)[1]:
+                    checked.append(prepared)
+            except ValueError:
+                continue
+        return cursor, tuple(checked)
