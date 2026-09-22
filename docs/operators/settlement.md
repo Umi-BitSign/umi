@@ -386,6 +386,15 @@ rounds with wallet-free feed delivery. Production HTTPS routing and the live
 host handoff still need rehearsal. Do not use this command as a launch
 announcement or a replacement for the signed initial supervisor upgrade.
 
+When the retained store carries submissions from earlier policies, pass each
+canonical private policy file with `--predecessor-policy`, from the immediate
+predecessor to the oldest admitted policy. Both supplied-package and follow
+modes accept the repeated option. The publisher checks the contiguous lineage
+and preserves the existing contribution terms before opening the store or
+loading authority wallets. A package's embedded lineage does not replace these
+operator-selected inputs. Without the option, only the current policy is
+admitted; another publisher invocation cannot supply its lineage implicitly.
+
 <a id="open-competition-round-publisher--inputs"></a>
 
 ### Inputs
