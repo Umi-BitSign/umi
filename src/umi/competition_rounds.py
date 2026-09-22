@@ -12,7 +12,7 @@ import logging
 import os
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -703,9 +703,11 @@ class RoundCoordinator:
         from .competition_settlement_preparation import prepare_retained_settlement
         from .competition_store import SettlementNotReadyError
 
-        proposals = self.journal.settlement_entries(block, self.settlement_cursor)
+        proposals = await run_owned_thread(
+            self.journal.settlement_entries, block, self.settlement_cursor
+        )
         if not proposals:
-            proposals = self.journal.settlement_entries(block)
+            proposals = await run_owned_thread(self.journal.settlement_entries, block)
         counts = dict(settlement_prepared=0, settlement_incomplete=0, settlement_held=0)
         for proposal in proposals:
             self.settlement_cursor = proposal.cutoff.round.sequence
@@ -714,29 +716,27 @@ class RoundCoordinator:
                 if certificate is None:
                     counts["settlement_incomplete"] += 1
                     continue
-                plan = RoundPlan.model_validate_json(
-                    canonical_json_bytes(
-                        self.journal.get("plan", proposal.cutoff.round.suite_sha256)
-                    )
+                plan = await run_owned_thread(self._settlement_plan, proposal)
+                # Authenticate HTTP requests promptly while serializing all
+                # full-cohort formation/delivery replay under queue ownership.
+                ownership = (
+                    self.settlement_queue.serial
+                    if self.settlement_queue is not None
+                    else nullcontext()
                 )
-                result = await prepare_retained_settlement(
-                    store=self.store,
-                    provider=self.provider,
-                    cutoff=certificate,
-                    suite=plan.suite,
-                    dependence_calibration=plan.dependence_calibration,
-                    limits=self.config.replay_limits,
-                    output_directory=self.config.settlement_directory,
-                )
-                if result == "prepared" and self.settlement_queue is not None:
-                    from .competition_settlement_preparation import SettlementPreparation
-
-                    prepared = _read(
-                        Path(self.config.settlement_directory)
-                        / (digest(proposal.cutoff.round) + ".settlement-proposal.json"),
-                        SettlementPreparation,
+                async with ownership:
+                    result = await prepare_retained_settlement(
+                        store=self.store,
+                        provider=self.provider,
+                        cutoff=certificate,
+                        suite=plan.suite,
+                        dependence_calibration=plan.dependence_calibration,
+                        limits=self.config.replay_limits,
+                        output_directory=self.config.settlement_directory,
                     )
-                    await self.settlement_queue.prepare(prepared)
+                    if result == "prepared" and self.settlement_queue is not None:
+                        prepared = await run_owned_thread(self._settlement_prepared, proposal)
+                        await self.settlement_queue._prepare_owned(prepared)
                 counts[
                     "settlement_prepared" if result == "prepared" else "settlement_incomplete"
                 ] += 1
@@ -745,6 +745,22 @@ class RoundCoordinator:
             except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError):
                 counts["settlement_held"] += 1
         return counts
+
+    def _settlement_plan(self, proposal):
+        return RoundPlan.model_validate_json(
+            canonical_json_bytes(self.journal.get("plan", proposal.cutoff.round.suite_sha256))
+        )
+
+    def _settlement_prepared(self, proposal):
+        from .competition_settlement_capacity import settlement_capacity
+        from .competition_settlement_preparation import SettlementPreparation
+
+        return _read(
+            Path(self.config.settlement_directory)
+            / (digest(proposal.cutoff.round) + ".settlement-proposal.json"),
+            SettlementPreparation,
+            maximum_bytes=settlement_capacity(self.config.replay_limits).preparation_bytes,
+        )
 
     def proposals(self, after_sequence=0, proposal_id=None, *, block=None):
         result = []

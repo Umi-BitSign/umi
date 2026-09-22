@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import weakref
 from dataclasses import replace
 
 import pytest
@@ -91,6 +92,28 @@ async def test_restart_retry_preserves_snapshot_evidence_and_exact_output(setup)
     await prepare(s)
     assert canonical_json_bytes(published(s)) == before
     assert published(s).publication.settlement.observed_block == 160
+
+
+@pytest.mark.asyncio
+async def test_first_material_read_is_released_before_loading_committed_evidence(
+    setup, monkeypatch
+):
+    class Material(dict):
+        pass
+
+    original = setup.store.settlement_material
+    references = []
+
+    def material(*args, **kwargs):
+        assert all(reference() is None for reference in references)
+        result = Material(original(*args, **kwargs))
+        references.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(setup.store, "settlement_material", material)
+    assert await prepare(setup) == "prepared"
+    assert len(references) == 2
+    assert all(reference() is None for reference in references)
 
 
 @pytest.mark.asyncio
@@ -254,12 +277,22 @@ def test_material_evidence_digest_matches_publication_contract(setup):
     assert material["retained_settlement"] is None
 
 
-def test_settlement_transport_bound_is_16_mib_before_model_parsing(setup):
-    from umi.competition_settlement_preparation import MAX_BYTES
+def test_settlement_transport_uses_private_artifact_bound_before_model_parsing(setup):
+    from umi.competition_settlement_preparation import MAX_PREPARATION_BYTES
+    from umi.private_files import MAX_PRIVATE_BYTES
 
-    assert MAX_BYTES == 16 * 1024**2
+    assert MAX_PREPARATION_BYTES == MAX_PRIVATE_BYTES
     with pytest.raises(ValueError, match="transport byte bound"):
-        validate_preparation({"oversized": "a" * MAX_BYTES}, setup.policy, setup.limits)
+        validate_preparation({"oversized": "a" * MAX_PREPARATION_BYTES}, setup.policy, setup.limits)
+
+
+def test_large_proposal_reaches_schema_validation_instead_of_stale_transport_cap(setup):
+    from pydantic import ValidationError
+
+    # A complete cohort can exceed 16 MiB; malformed proposals must still be
+    # rejected by their schema, after the transport admits their size.
+    with pytest.raises(ValidationError):
+        validate_preparation({"oversized": "a" * (33 * 1024**2)}, setup.policy, setup.limits)
 
 
 @pytest.mark.asyncio

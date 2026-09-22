@@ -16,9 +16,11 @@ from typing import Annotated, TypeVar
 
 from pydantic import AfterValidator, BaseModel, Field
 
+from .canonical_stream import canonical_json_matches
 from .protocol import canonical_json_bytes
 
 MAX_PRIVATE_BYTES = 64 * 1024**2
+MAX_CONFIGURED_PRIVATE_BYTES = 512 * 1024**2
 _Model = TypeVar("_Model", bound=BaseModel)
 
 
@@ -46,7 +48,18 @@ def ensure_private_directory(path: Path) -> None:
         raise ValueError("evaluator directory must be owned and private")
 
 
-def read_private_model(path: Path, model: type[_Model]) -> _Model:
+def _byte_bound(maximum_bytes: int | None) -> int:
+    if maximum_bytes is None:
+        return MAX_PRIVATE_BYTES
+    if type(maximum_bytes) is not int or not 1 <= maximum_bytes <= MAX_CONFIGURED_PRIVATE_BYTES:
+        raise ValueError("invalid private file byte bound")
+    return maximum_bytes
+
+
+def read_private_model(
+    path: Path, model: type[_Model], *, maximum_bytes: int | None = None
+) -> _Model:
+    maximum_bytes = _byte_bound(maximum_bytes)
     private_path(str(path))
     ensure_private_directory(path.parent)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -59,11 +72,11 @@ def read_private_model(path: Path, model: type[_Model]) -> _Model:
             or info.st_mode & 0o077
         ):
             raise ValueError("evaluator input must be an owned private regular file")
-        if not 1 <= info.st_size <= MAX_PRIVATE_BYTES:
+        if not 1 <= info.st_size <= maximum_bytes:
             raise ValueError("evaluator input exceeds its byte bound")
-        raw = stream.read(MAX_PRIVATE_BYTES + 1)
+        raw = stream.read(maximum_bytes + 1)
     value = model.model_validate_json(raw)
-    if len(raw) != info.st_size or raw != canonical_json_bytes(value):
+    if len(raw) != info.st_size or not canonical_json_matches(value, raw):
         raise ValueError("evaluator input must have stable canonical bytes")
     return value
 
@@ -87,14 +100,17 @@ def lock_private_file(path: Path) -> int:
     return fd
 
 
-def publish_private_model(path: Path, value: BaseModel) -> None:
+def publish_private_model(
+    path: Path, value: BaseModel, *, maximum_bytes: int | None = None
+) -> None:
+    maximum_bytes = _byte_bound(maximum_bytes)
     raw = canonical_json_bytes(value)
-    if len(raw) > MAX_PRIVATE_BYTES:
+    if len(raw) > maximum_bytes:
         raise ValueError("evaluator output exceeds its byte bound")
     ensure_private_directory(path.parent)
     lock = lock_private_file(path.parent / ".publish.lock")
     try:
-        _publish_locked(path, value, raw)
+        _publish_locked(path, value, raw, maximum_bytes=maximum_bytes)
         # An exact retry may follow a successful rename whose directory sync
         # failed. Verify existing bytes, then retry durability before success.
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -106,9 +122,11 @@ def publish_private_model(path: Path, value: BaseModel) -> None:
         os.close(lock)
 
 
-def _publish_locked(path: Path, value: BaseModel, raw: bytes) -> None:
+def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: int) -> None:
     if path.exists() or path.is_symlink():
-        if canonical_json_bytes(read_private_model(path, type(value))) != raw:
+        if not canonical_json_matches(
+            read_private_model(path, type(value), maximum_bytes=maximum_bytes), raw
+        ):
             raise ValueError("evaluator outbox already contains different bytes")
         return
     fd, name = tempfile.mkstemp(prefix=".pending-", dir=path.parent)

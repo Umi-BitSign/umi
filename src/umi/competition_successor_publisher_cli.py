@@ -18,6 +18,7 @@ from pydantic import Field, model_validator
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_launch import PublicLaunchIdentity
 from .competition_package import PreparedCompetitionPackage
+from .competition_policy_lineage import replay_lineage
 from .competition_store import CompetitionStore
 from .competition_successor_feed import SuccessorFeedConfig, SuccessorPublicationFeed
 from .competition_successor_follow import AutomaticSuccessorPublisher, SuccessorFollowConfig
@@ -81,7 +82,16 @@ class SuccessorPublisherConfig(StrictProtocolModel):
 
 
 @asynccontextmanager
-async def _managed_publisher(config, policy, *, feed_config=None):
+async def _managed_publisher(config, policy, *, feed_config=None, predecessor_policies=()):
+    # Scope the operator's admitted lineage to this publisher, including its
+    # owned replay threads. A package's own lineage cannot authorize the store.
+    with replay_lineage(policy, predecessor_policies):
+        async with _managed_publisher_sources(config, policy, feed_config=feed_config) as managed:
+            yield managed
+
+
+@asynccontextmanager
+async def _managed_publisher_sources(config, policy, *, feed_config=None):
     config = SuccessorPublisherConfig.model_validate_json(canonical_json_bytes(config))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if config.plan.policy_sha256 != digest(policy):
@@ -147,8 +157,10 @@ async def _managed_publisher(config, policy, *, feed_config=None):
         await provider.aclose()
 
 
-async def sign_round(config, policy, prepared, *, feed_config=None):
-    async with _managed_publisher(config, policy, feed_config=feed_config) as (
+async def sign_round(config, policy, prepared, *, feed_config=None, predecessor_policies=()):
+    async with _managed_publisher(
+        config, policy, feed_config=feed_config, predecessor_policies=predecessor_policies
+    ) as (
         publisher,
         feed,
         signers,
@@ -159,7 +171,9 @@ async def sign_round(config, policy, prepared, *, feed_config=None):
         return result
 
 
-async def follow_rounds(config, policy, follow_config, *, feed_config, once=False, report=None):
+async def follow_rounds(
+    config, policy, follow_config, *, feed_config, once=False, report=None, predecessor_policies=()
+):
     config = SuccessorPublisherConfig.model_validate_json(canonical_json_bytes(config))
     follow_config = SuccessorFollowConfig.model_validate_json(canonical_json_bytes(follow_config))
     if feed_config is None:
@@ -180,7 +194,9 @@ async def follow_rounds(config, policy, follow_config, *, feed_config, once=Fals
             other = Path(other)
             if source == other or source in other.parents or other in source.parents:
                 raise ValueError("completed-round sources overlap authority or execution state")
-    async with _managed_publisher(config, policy, feed_config=feed_config) as (
+    async with _managed_publisher(
+        config, policy, feed_config=feed_config, predecessor_policies=predecessor_policies
+    ) as (
         publisher,
         feed,
         signers,
@@ -201,6 +217,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("config", "policy"):
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument(
+        "--predecessor-policy",
+        action="append",
+        default=[],
+        type=Path,
+        help="private predecessor policy file; repeat from immediate predecessor to oldest",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--prepared-package", type=Path)
     mode.add_argument("--follow-config", type=Path)
@@ -214,6 +237,7 @@ def main(argv=None):
     try:
         config = _read(args.config, SuccessorPublisherConfig)
         policy = _read(args.policy, CompetitionPolicy)
+        predecessors = tuple(_read(path, CompetitionPolicy) for path in args.predecessor_policy)
         feed_config = (
             None if args.feed_config is None else _read(args.feed_config, SuccessorFeedConfig)
         )
@@ -225,6 +249,7 @@ def main(argv=None):
                     policy,
                     follow_config,
                     feed_config=feed_config,
+                    predecessor_policies=predecessors,
                     once=args.once,
                     report=lambda result: print(
                         canonical_json_bytes(result).decode("utf-8"), flush=True
@@ -233,7 +258,15 @@ def main(argv=None):
             )
             return
         prepared = _read(args.prepared_package, PreparedCompetitionPackage)
-        result = asyncio.run(sign_round(config, policy, prepared, feed_config=feed_config))
+        result = asyncio.run(
+            sign_round(
+                config,
+                policy,
+                prepared,
+                feed_config=feed_config,
+                predecessor_policies=predecessors,
+            )
+        )
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(2, f"successor publication rejected ({type(error).__name__}); check inputs\n")
     print(canonical_json_bytes(result).decode("utf-8"))

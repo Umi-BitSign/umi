@@ -35,6 +35,7 @@ from .competition_rounds import (
     validate_proposal,
     verify_endorsement,
 )
+from .competition_settlement_capacity import settlement_capacity
 from .competition_settlement_preparation import MAX_BYTES, validate_preparation
 from .competition_void import VoidEvaluationEvidence, validate_own_void
 from .open_competition import Signature, digest, identity, verify_signature
@@ -82,6 +83,7 @@ class IndependentSettlementSigner:
             raise ValueError("settlement review store belongs to another policy")
         self.worker, self.cutoffs, self.reviews = worker, cutoff_journal, review_store
         self.limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
+        self.capacity = settlement_capacity(self.limits)
         self.journal = RoundJournal(
             Path(worker.config.state_directory) / "settlement-signing",
             {
@@ -93,6 +95,7 @@ class IndependentSettlementSigner:
             },
             maximum_rounds=worker.config.maximum_orders,
             maximum_bytes=worker.config.maximum_journal_bytes,
+            maximum_record_bytes=self.capacity.preparation_bytes,
         )
         self.serial = asyncio.Lock()
 

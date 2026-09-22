@@ -42,6 +42,29 @@ The existing private round plan supplies the committed suite and original
 windows. The coordinator's owned finality provider supplies the current
 registration snapshot; an HTTP caller cannot choose it.
 
+Settlement capacity follows the coordinator's `replay_limits` and the
+evaluator's matching `settlement_replay_limits`. Profiles with at most 64 MiB
+of evidence keep the existing 64 MiB proposal envelope and four-proposal page.
+For larger profiles, the proposal envelope includes evidence, another roster,
+two certificate allowances and 1 MiB of framing, rounded up to 64 MiB. The
+maximum envelope is 512 MiB; configurations that exceed it are rejected.
+For example, 256 MiB evidence with 4 MiB roster and certificate limits selects
+a 320 MiB proposal envelope, one proposal per reply, and one active settlement
+request through response transmission. The reply allows another 8192 bytes.
+Private proposal files and settlement journals use the same envelope.
+
+Package limits are configured separately: allow framing above the replay
+evidence allowance and increase the aggregate package budget accordingly.
+These changes do not increase native per-order reservations or total journal
+budgets. Replay limits are part of retained configuration bindings; establish
+the larger profile in newly staged state or use a separately reviewed migration.
+Do not overwrite an existing journal's bound configuration or delete its state.
+
+Byte envelopes are not process memory limits. Evidence is parsed, canonicalized
+and replayed repeatedly, and request timeouts still apply. Qualify full-sized
+structured evidence on the intended host, including concurrent model workloads,
+before relying on a larger profile for settlement timing or memory headroom.
+
 <a id="open-competition-settlement-preparation--output-and-retry-behavior"></a>
 
 ### Output and retry behavior
@@ -270,6 +293,41 @@ In each `umi-evaluator-config/1`, supply:
 - `settlement_replay_limits`: reviewed `PublicationReplayLimits` for roster,
   evidence and certificates.
 
+For an evaluator on the coordinator host, an operator may explicitly configure
+`settlement_loopback_port` (integer 1–65535) before initializing its journals.
+Only settlement discovery and vote requests then connect to
+`http://127.0.0.1:<port>/v1/competition/settlements`. The listener must be the
+native coordinator service on that host. The public HTTPS origin remains the
+logical coordinator identity and the connection used by cutoff and work signing.
+The local port is retained in both evaluator configuration and settlement source
+bindings; changing, adding or removing it on existing bound journals is rejected.
+Do not rewrite those bindings or remove journals to enable this option.
+
+This connection uses cleartext exclusively on literal IPv4 loopback. It is for
+an explicitly authorized co-located deployment, with no DNS lookup, environment
+proxy, redirect following, or fallback to the public origin. Native signed
+queries, response bindings, independent evidence checks, finality, conflicts and
+expiry still apply. Other hosts must use HTTPS and a route whose proxy deadlines
+have been qualified for the complete query and certification operations.
+
+Profiles with preparation capacity above 64 MiB allow 7,200 seconds for a server
+operation, 7,260 seconds for a client read, and 7,320 seconds for a complete client
+request. Legacy profiles retain 25/30/35 seconds. These budgets do not extend
+protocol signing windows or upstream proxy deadlines. In particular, Cloudflare
+documents a [125-second default proxy read timeout and a 30-second proxy write
+timeout](https://developers.cloudflare.com/fundamentals/reference/connection-limits/);
+increasing this client's budget alone cannot qualify that route.
+
+Blocking settlement formation, journal replay, certificate/package work and
+response serialization run in owned threads. Async finality providers and locks
+stay on the service event loop. Background formation shares the settlement
+queue lock with HTTP replay, so requests can authenticate promptly before
+waiting without allocating a second full cohort. Cancellation or an operation
+timeout drains the active worker before releasing its lock or request slot;
+shutdown may therefore take longer than the requested timeout. Signed nonce
+admission freshness, snapshot age, conflict checks and signing deadlines are
+unchanged. The generous operational budgets do not extend those deadlines.
+
 The worker polls, endorses and returns votes automatically. It uses its existing
 hotkey and owned finality provider. Each endorsement still requires the worker's
 own cutoff reservation, completed local execution for every roster member,
@@ -287,7 +345,8 @@ Independent eligible control groups must meet the policy quorum. The first
 certificate is retained before package creation; later signatures cannot alter
 its bytes. A failed write is retried by the coordinator's next preparation poll.
 
-Discovery pages contain at most four current proposals, bounded at 16 MiB each.
+Discovery page and preparation bounds follow the configured settlement capacity;
+large profiles send one proposal per page.
 The snapshot-age limit and original round expiry apply throughout collection.
 Expired proposals remain historical records; their deadlines are never shifted.
 An expired retry can acknowledge an already retained vote but cannot create a
@@ -336,6 +395,15 @@ The local command supports one supplied package or polling completed coordinator
 rounds with wallet-free feed delivery. Production HTTPS routing and the live
 host handoff still need rehearsal. Do not use this command as a launch
 announcement or a replacement for the signed initial supervisor upgrade.
+
+When the retained store carries submissions from earlier policies, pass each
+canonical private policy file with `--predecessor-policy`, from the immediate
+predecessor to the oldest admitted policy. Both supplied-package and follow
+modes accept the repeated option. The publisher checks the contiguous lineage
+and preserves the existing contribution terms before opening the store or
+loading authority wallets. A package's embedded lineage does not replace these
+operator-selected inputs. Without the option, only the current policy is
+admitted; another publisher invocation cannot supply its lineage implicitly.
 
 <a id="open-competition-round-publisher--inputs"></a>
 

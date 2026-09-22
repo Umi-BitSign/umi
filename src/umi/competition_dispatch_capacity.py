@@ -18,7 +18,7 @@ from .competition_authorization import (
     EndpointAuthorizationPublication,
     scheduled_assignment_key,
 )
-from .competition_dispatch_inbox import MAXIMUM_INBOX_FILES
+from .competition_dispatch_inbox import MAXIMUM_INBOX_FILES, validate_inbox_capacity
 from .open_competition import digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -164,6 +164,7 @@ def plan_dispatch_capacity(
     now_ms: int,
     observed_block: int,
     additional_inbox_publications: int = 0,
+    maximum_inbox_files: int = MAXIMUM_INBOX_FILES,
 ) -> DispatchCapacityPlan:
     """Reject a whole workload unless its conservative envelope fits every job.
 
@@ -184,12 +185,13 @@ def plan_dispatch_capacity(
     """
     limits = DispatchTimingLimits.model_validate_json(canonical_json_bytes(limits))
     budget = DispatchTimingBudget.model_validate_json(canonical_json_bytes(budget))
+    validate_inbox_capacity(maximum_inbox_files)
     for name, value in (("now_ms", now_ms), ("observed_block", observed_block)):
         if type(value) is not int or not 0 <= value <= 2**53 - 1:
             raise ValueError(f"dispatch {name} must be a bounded nonnegative integer")
     if (
         type(additional_inbox_publications) is not int
-        or not 0 <= additional_inbox_publications <= MAXIMUM_INBOX_FILES
+        or not 0 <= additional_inbox_publications <= maximum_inbox_files
     ):
         raise ValueError("dispatch additional inbox count is invalid")
     work = []
@@ -200,7 +202,7 @@ def plan_dispatch_capacity(
     if len({j.assignment_key for j in work}) != len(work):
         raise ValueError("dispatch workload repeats an assignment identity")
     publications = len({j.publication_sha256 for j in work}) + additional_inbox_publications
-    if publications > MAXIMUM_INBOX_FILES:
+    if publications > maximum_inbox_files:
         raise ValueError("dispatch workload exceeds the publication inbox bound")
     for job in work:
         if job.issued_block > observed_block:

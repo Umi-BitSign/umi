@@ -17,10 +17,10 @@ from pydantic import JsonValue
 
 from .competition_round_plan import RoundPlan, RoundProposal
 from .open_competition import digest
+from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
+from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
 from .private_files import ensure_private_directory as _private
 from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
-
-MAX_BYTES = 16 * 1024**2
 
 # Bound reservation bodies and allowances before transferring them to Python.
 # Accounting validates key types and byte lengths separately. A rejected body
@@ -55,14 +55,20 @@ class RoundJournal:
         *,
         maximum_rounds: int = 1024,
         maximum_bytes: int = 1024**3,
+        maximum_record_bytes: int = MAX_BYTES,
     ) -> None:
         if (
             type(maximum_rounds) is not int
             or not 1 <= maximum_rounds <= 65536
             or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 16 * 1024**3)
+            or type(maximum_record_bytes) is not int
+            or not 1 <= maximum_record_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
         ):
             raise ValueError("round journal requires bounded capacity")
         self.root, self.maximum_rounds, self.maximum_bytes = root, maximum_rounds, maximum_bytes
+        # Read/write envelope only. Existing reservation allowances, manifests,
+        # bindings and total journal capacity are never enlarged by this value.
+        self.maximum_record_bytes = maximum_record_bytes
         _private(root)
         self.path = root / "rounds.sqlite3"
         self.lock_path = root / "rounds.lock"
@@ -675,7 +681,7 @@ class RoundJournal:
                 if offset >= self.maximum_rounds * 80:
                     raise ValueError("round journal batch capacity exhausted")
                 raw = canonical_json_bytes(value)
-                if len(raw) > MAX_BYTES:
+                if len(raw) > self.maximum_record_bytes:
                     raise ValueError("round journal object exceeds its byte bound")
                 record_key = (kind, key)
                 fingerprint = (len(raw), sha256_hex(raw))
@@ -784,14 +790,13 @@ class RoundJournal:
         if conflicts:
             raise ValueError("round journal conflict retained")
 
-    @staticmethod
-    def _record(db, kind, key):
+    def _record(self, db, kind, key):
         size = db.execute(
             "SELECT length(body) FROM records WHERE kind=? AND id=?", (kind, key)
         ).fetchone()
         if size is None:
             return None
-        if type(size[0]) is not int or not 1 <= size[0] <= MAX_BYTES:
+        if type(size[0]) is not int or not 1 <= size[0] <= self.maximum_record_bytes:
             raise ValueError("retained round object exceeds its byte bound")
         row = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
         raw = bytes(row[0])
