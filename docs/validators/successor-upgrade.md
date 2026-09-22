@@ -105,6 +105,28 @@ has its configured byte and record limits. All 18 repository checks passed for
 
 #### Download history bindings
 
+Hosts co-located with a private delivery service can include
+`artifacts/successor-delivery.json` in their signed host artifact. The canonical
+file uses schema `umi-successor-cohost-delivery/1`, an exact `https://HOST` origin
+matching the installed directive URL, a `loopback_port` from 1024 through 65535,
+and a `timeout_seconds` bound no greater than 300. The operator consent pins
+the host manifest, which pins this root-owned, read-only file. A host without
+this signed file retains public HTTPS delivery. Worker inputs and observer
+configuration schemas remain unchanged.
+
+Only the selected origin connects to `127.0.0.1` over HTTP. Signed logical URLs,
+object sizes, hashes, signatures, continuation checks and redirect rejection
+remain enforced. Other origins still require public-address HTTPS. Bind the
+private feed to loopback, including the exact selected release archive route;
+do not publish protected evidence to a public bucket. This transport choice
+does not extend a reward authorization or a round's validity.
+
+When preparing initial history through the same local service, pass
+`fetch-initial-successor-history --signed-host-artifact PATH`. The signed
+manifest must match the consent, and its optional delivery file must match the
+staged host. Omitting the option keeps public HTTPS. Initial-history collection
+still does not authorize or perform a validator switch.
+
 When the runtime supplies its retained continuation, delivery stores only
 `history-binding.json`, a bounded hash/size/selected-head binding. The full signed
 records remain in the runtime journal and recovery registry. Delivery verifies
