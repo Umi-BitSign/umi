@@ -61,7 +61,9 @@ def queue_from_file(path):
         admission_capacity=AdmissionCapacity(maximum_records=4096, maximum_bytes=2 * 1024**3),
     )
     provider = SyntheticProvider(
-        snapshot.registrations, snapshot.burn_destination, snapshot.block + 600
+        snapshot.registrations,
+        snapshot.burn_destination,
+        doc.get("clock_base", snapshot.block + 600),
     )
     provider.started = doc["clock_anchor"]
     return SettlementQueue(
@@ -114,6 +116,13 @@ async def probe(case):
         ),
     )
     config_path = root / "fixture.json"
+    # Reused signer journals retain a monotonic head. All probes of the same
+    # synthetic case share the first clock anchor instead of resetting time.
+    prior_clocks = list(case.glob("wire-*/fixture.json"))
+    assert len(prior_clocks) <= 32
+    clock_anchor = min(
+        [time.monotonic()] + [json.loads(p.read_bytes())["clock_anchor"] for p in prior_clocks]
+    )
     config_path.write_bytes(
         canonical_json_bytes(
             dict(
@@ -124,7 +133,7 @@ async def probe(case):
                 limits=limits.model_dump(mode="json"),
                 config=config.model_dump(mode="json", by_alias=True),
                 intake=str(case / "intake"),
-                clock_anchor=time.monotonic(),
+                clock_anchor=clock_anchor,
             )
         )
     )

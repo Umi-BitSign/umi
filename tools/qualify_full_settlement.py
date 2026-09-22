@@ -14,10 +14,11 @@ import hashlib
 import json
 import os
 import resource
+import socket
 import sys
 import time
 import traceback
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -340,7 +341,7 @@ def endpoint_observation(item, signed, miner, round_, baseline, runtime, healthy
     )
 
 
-def fixture(root, count):
+def fixture(root, count, *, loopback_port=None):
     assert 2 <= count <= 256
     runtime = runtime_fixture.__wrapped__()
     baseline = bundle_at(root / "baseline")
@@ -478,6 +479,10 @@ def fixture(root, count):
         archive_directory=str(archive),
         legacy_policy_sha256=scoring_policy_hash(item.legacy_policy),
         maximum_journal_bytes=2 * 1024**3,
+        round_coordinator_origin="https://rounds.example" if loopback_port else None,
+        settlement_review_directory=str(reviews.directory) if loopback_port else None,
+        settlement_replay_limits=limits if loopback_port else None,
+        settlement_loopback_port=loopback_port,
     )
     journal = EvaluatorJournal(config)
     evidence_bytes = 0
@@ -640,9 +645,98 @@ def fixture(root, count):
     )
 
 
+@asynccontextmanager
+async def delivery_client(s, queue, root, sock):
+    if sock is None:
+        app = FastAPI()
+        attach_settlement_route(app, queue)
+        yield SettlementSigningClient(
+            s.worker,
+            "https://rounds.example",
+            s.cutoffs,
+            s.reviews,
+            limits=s.limits,
+            transport=httpx.ASGITransport(app=app),
+        )
+        return
+    path = root / "socket-fixture.json"
+    path.write_bytes(
+        canonical_json_bytes(
+            dict(
+                policy=s.policy.model_dump(mode="json", by_alias=True),
+                snapshot=s.provider.snapshot(s.provider.base).model_dump(mode="json"),
+                limits=s.limits.model_dump(mode="json"),
+                config=queue.config.model_dump(mode="json", by_alias=True),
+                intake=str(s.store.directory),
+                clock_anchor=s.provider.started,
+                clock_base=s.provider.base,
+            )
+        )
+    )
+    with (root / "socket-server.log").open("x") as log:
+        server = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(Path(__file__).with_name("probe_settlement_wire.py")),
+            "--serve",
+            str(path),
+            str(sock.fileno()),
+            pass_fds=(sock.fileno(),),
+            stdout=log,
+            stderr=log,
+            env={**os.environ, "SETTLEMENT_WIRE_LOCAL": "1"},
+        )
+        port = sock.getsockname()[1]
+        REPORT["transport"] = {
+            "mode": "native configured local connection, separate HTTP process",
+            "server_pid": server.pid,
+            "server_cpu_included_in_phase_cpu": False,
+            "clock": "same advancing provider base and anchor as evaluator",
+        }
+        save()
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=1) as health:
+                for _ in range(100):
+                    if server.returncode is not None:
+                        raise RuntimeError("fixture socket server exited")
+                    try:
+                        await health.get(f"http://127.0.0.1:{port}/fixture-ready")
+                        break
+                    except httpx.HTTPError:
+                        await asyncio.sleep(0.1)
+                else:
+                    raise RuntimeError("fixture socket server did not start")
+            yield SettlementSigningClient(
+                s.worker,
+                s.worker.config.round_coordinator_origin,
+                s.cutoffs,
+                s.reviews,
+                limits=s.limits,
+                loopback_port=s.worker.config.settlement_loopback_port,
+            )
+        finally:
+            if server.returncode is None:
+                server.terminate()
+            try:
+                await asyncio.wait_for(server.wait(), timeout=15)
+            except TimeoutError:
+                server.kill()
+                await asyncio.wait_for(server.wait(), timeout=5)
+                REPORT["transport"]["forced_owned_server_cleanup"] = True
+            REPORT["transport"]["server_exit_code"] = server.returncode
+            save()
+
+
 async def pipeline(root, count):
+    if os.environ.get("SETTLEMENT_PIPELINE_LOCAL") != "1":
+        return await _pipeline(root, count)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return await _pipeline(root, count, sock)
+
+
+async def _pipeline(root, count, sock=None):
     with phase("fixture_generation_and_native_retention"):
-        s = fixture(root, count)
+        s = fixture(root, count, loopback_port=None if sock is None else sock.getsockname()[1])
     gc.collect()
     pipeline_start = time.perf_counter()
     with phase("prepare_retained_settlement"):
@@ -691,26 +785,17 @@ async def pipeline(root, count):
         assert await queue.prepare(prepared) is None
     del prepared
     gc.collect()
-    app = FastAPI()
-    attach_settlement_route(app, queue)
-    client = SettlementSigningClient(
-        s.worker,
-        "https://rounds.example",
-        s.cutoffs,
-        s.reviews,
-        limits=s.limits,
-        transport=httpx.ASGITransport(app=app),
-    )
-    with phase("authenticated_proposal_query"):
-        reply = await client.query(after=0)
-        assert len(reply.proposals) == 1
-    with phase("independent_review_and_signature"):
-        vote = await client.signer.endorse(reply.proposals[0])
-    del reply
-    gc.collect()
-    with phase("vote_delivery_certificate_and_package"):
-        reply = await client.query(vote=vote)
-        assert reply.accepted_publication_sha256 == vote.publication_sha256
+    async with delivery_client(s, queue, root, sock) as client:
+        with phase("authenticated_proposal_query"):
+            reply = await client.query(after=0)
+            assert len(reply.proposals) == 1
+        with phase("independent_review_and_signature"):
+            vote = await client.signer.endorse(reply.proposals[0])
+        del reply
+        gc.collect()
+        with phase("vote_delivery_certificate_and_package"):
+            reply = await client.query(vote=vote)
+            assert reply.accepted_publication_sha256 == vote.publication_sha256
     packages = list((root / "certificates").glob("*.package.json"))
     assert len(packages) == 1
     package = PreparedCompetitionPackage.model_validate_json(packages[0].read_bytes())
