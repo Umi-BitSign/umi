@@ -26,6 +26,18 @@ from typing_extensions import Self
 from .competition_artifacts import verify_preserved_bundle
 from .competition_chain import OwnedFinalityStale, RegistrationCapture
 from .competition_evidence import EvaluatorRunRecord
+from .competition_execution_recovery import (
+    TABLES as RECOVERY_TABLES,
+)
+from .competition_execution_recovery import (
+    LegacyPreflightRecovery,
+)
+from .competition_execution_recovery import (
+    fences as recovery_fences,
+)
+from .competition_execution_recovery import (
+    state_digest as recovery_state_digest,
+)
 from .competition_policy_lineage import submission_policy_admitted
 from .competition_runner import (
     OfflineCaseExecution,
@@ -514,10 +526,12 @@ class ExecutionJournal:
     def _transaction(self):
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         db.create_function("umi_execution_writer_generation", 0, lambda: 2)
+        db.create_function("umi_execution_recovery_writer", 0, lambda: 1)
         try:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
             self._check_generation(db)
+            self._check_recovery_schema(db)
             yield db
             db.commit()
         except BaseException:
@@ -622,6 +636,11 @@ class ExecutionJournal:
                 "FROM reservation_batches"
             ).fetchone()[0]
             count, used = count + pending, used + pending_bytes + metadata + batches
+        if self._recovery_enabled(db):
+            used += db.execute(
+                "SELECT COALESCE(SUM(length(document)),0) FROM recovery_authorizations"
+            ).fetchone()[0]
+            used += db.execute("SELECT COUNT(*)*512 FROM recovery_attempts").fetchone()[0]
         return count, used
 
     def _capacity(self, db, *, jobs=0, reserved=0):
@@ -757,9 +776,176 @@ class ExecutionJournal:
             self._capacity(db)
             return value
 
+    @staticmethod
+    def _recovery_enabled(db):
+        return (
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='recovery_authorizations'"
+            ).fetchone()
+            is not None
+        )
+
+    def _check_recovery_schema(self, db):
+        objects = dict(
+            db.execute("SELECT name,sql FROM sqlite_master WHERE name GLOB 'recovery_*'")
+        )
+        if not objects:
+            return
+        existing_tables = tuple(
+            t
+            for t in _EXECUTION_TABLES
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)
+            ).fetchone()
+        )
+        if objects != {**RECOVERY_TABLES, **recovery_fences(existing_tables)}:
+            raise ValueError("execution recovery schema differs")
+
+    def recovery_state_sha256(self):
+        with self._transaction() as db:
+            return recovery_state_digest(db, (*_EXECUTION_TABLES, *RECOVERY_TABLES))
+
+    def authorize_legacy_preflight_recovery(self, job, authorization):
+        """Record a specific operator audit while all external writers are stopped.
+
+        The caller must establish historical non-invocation, preserve the stopped
+        snapshot, and inspect repaired inputs before calling this explicit method.
+        A generic failure or absence of observations alone is not authorization.
+        """
+        job = validate_incumbent_job(job, self.policy)
+        auth = LegacyPreflightRecovery.model_validate_json(canonical_json_bytes(authorization))
+        key, raw, scope = execution_key(job), canonical_json_bytes(job), _incumbent_scope(job)
+        document = canonical_json_bytes(auth)
+        with self._transaction() as db:
+            if self._recovery_enabled(db):
+                prior = db.execute(
+                    "SELECT document FROM recovery_authorizations WHERE scope=?", (scope,)
+                ).fetchone()
+                if prior is not None:
+                    if bytes(prior[0]) != document:
+                        raise ValueError("recovery scope already has another authorization")
+                    return
+            if (
+                auth.source_execution_key != key
+                or auth.source_job_sha256 != hashlib.sha256(raw).hexdigest()
+                or auth.scope_sha256 != scope
+                or auth.policy_sha256 != digest(self.policy)
+                or auth.round_sha256 != digest(job.round)
+                or not job.round.submission_close_block
+                < auth.observed_block
+                <= job.round.evaluation_close_block
+                or auth.journal_state_sha256
+                != recovery_state_digest(db, (*_EXECUTION_TABLES, *RECOVERY_TABLES))
+            ):
+                raise ValueError("recovery authorization binding mismatch")
+            source = db.execute("SELECT job,status,reason FROM jobs WHERE id=?", (key,)).fetchone()
+            mapping = db.execute(
+                "SELECT source_job FROM endpoint_incumbents WHERE scope=?", (scope,)
+            ).fetchone()
+            if source != (raw, "failed", "infrastructure_or_binding_failure") or mapping != (key,):
+                raise ValueError("recovery requires original failed shared source")
+            # The explicit audit is for an unexecuted scope. No legacy consumer
+            # or source may already carry a result or ambiguous pending output.
+            for other_key, other_raw, status in db.execute("SELECT id,job,status FROM jobs"):
+                if json.loads(other_raw).get("schema") != "umi-endpoint-incumbent-job/1":
+                    continue
+                other = validate_incumbent_job(
+                    EndpointIncumbentJob.model_validate_json(other_raw), self.policy
+                )
+                if _incumbent_scope(other) != scope:
+                    continue
+                if (
+                    status != "failed"
+                    or _incumbent_inputs(other) != _incumbent_inputs(job)
+                    or self._has_observations(db, other_key)
+                ):
+                    raise ValueError("recovery scope contains ambiguous or conflicting execution")
+            if not self._recovery_enabled(db):
+                # Existing reservation generation and all its receipts remain intact.
+                # Activate it first only for old journals without that generation.
+                self._enable_reservations(db)
+                for sql in RECOVERY_TABLES.values():
+                    db.execute(sql)
+                for sql in recovery_fences(_EXECUTION_TABLES).values():
+                    db.execute(sql)
+            db.execute("INSERT INTO recovery_authorizations VALUES (?,?,?)", (scope, key, document))
+            db.execute("INSERT INTO recovery_attempts VALUES (?,?,'authorized',NULL)", (key, key))
+            self._capacity(db)
+
+    @staticmethod
+    def _has_observations(db, key):
+        return bool(
+            db.execute("SELECT 1 FROM steps WHERE job_id=?", (key,)).fetchone()
+            or db.execute("SELECT 1 FROM pending_steps WHERE job_id=?", (key,)).fetchone()
+        )
+
+    def _job_state(self, db, key):
+        row = db.execute("SELECT job,status,reason FROM jobs WHERE id=?", (key,)).fetchone()
+        if row is not None and self._recovery_enabled(db):
+            attempt = db.execute(
+                "SELECT status,reason FROM recovery_attempts WHERE job_id=?", (key,)
+            ).fetchone()
+            if attempt is not None:
+                if row[1] != "failed":
+                    raise ValueError("original recovery failure was altered")
+                return row[0], attempt[0], attempt[1]
+        return row
+
+    def _set_job_state(self, db, key, status, reason=None):
+        if (
+            self._recovery_enabled(db)
+            and db.execute("SELECT 1 FROM recovery_attempts WHERE job_id=?", (key,)).fetchone()
+        ):
+            db.execute(
+                "UPDATE recovery_attempts SET status=?,reason=? WHERE job_id=?",
+                (status, reason, key),
+            )
+        else:
+            db.execute("UPDATE jobs SET status=?,reason=? WHERE id=?", (status, reason, key))
+
+    def _recoverable_consumer(self, db, job):
+        if not isinstance(job, EndpointIncumbentJob) or not self._recovery_enabled(db):
+            return None
+        key, scope = execution_key(job), _incumbent_scope(job)
+        if db.execute("SELECT 1 FROM recovery_attempts WHERE job_id=?", (key,)).fetchone():
+            return None
+        auth = db.execute(
+            "SELECT source_job FROM recovery_authorizations WHERE scope=?", (scope,)
+        ).fetchone()
+        mapping = db.execute(
+            "SELECT source_job FROM endpoint_incumbents WHERE scope=?", (scope,)
+        ).fetchone()
+        if auth is None or mapping != auth or key == auth[0]:
+            return None
+        source = self._job_state(db, auth[0])
+        own = self._job_state(db, key)
+        if (
+            source is None
+            or source[1] != "complete"
+            or own is None
+            or own[1] != "failed"
+            or bytes(own[0]) != canonical_json_bytes(job)
+            or self._has_observations(db, key)
+        ):
+            return None
+        source_job = validate_incumbent_job(
+            EndpointIncumbentJob.model_validate_json(source[0]), self.policy
+        )
+        if _incumbent_inputs(source_job) != _incumbent_inputs(job):
+            return None
+        self._evidence(db, source_job)
+        return auth[0]
+
+    def recovery_ready(self, job):
+        job = _journal_job(job, self.policy)
+        with self._transaction() as db:
+            state = self._job_state(db, execution_key(job))
+            return bool(state and (state[1] == "authorized" or self._recoverable_consumer(db, job)))
+
     def status(self, key: str) -> dict | None:
         with self._transaction() as db:
-            row = db.execute("SELECT status, reason FROM jobs WHERE id=?", (key,)).fetchone()
+            effective = self._job_state(db, key)
+            row = None if effective is None else effective[1:]
             if row is None:
                 return None
             count = db.execute("SELECT COUNT(*) FROM steps WHERE job_id=?", (key,)).fetchone()[0]
@@ -780,10 +966,22 @@ class ExecutionJournal:
         raw, key = canonical_json_bytes(job), execution_key(job)
         reserved = _job_allowance(job, raw)
         with self._transaction() as db:
-            existing = db.execute("SELECT job, status FROM jobs WHERE id=?", (key,)).fetchone()
+            existing = self._job_state(db, key)
             if existing:
                 if bytes(existing[0]) != raw:
                     raise ValueError("execution identity already has a different assignment")
+                if existing[1] == "authorized":
+                    if self._has_observations(db, key):
+                        raise ValueError("authorized recovery already has observations")
+                    self._set_job_state(db, key, "running")
+                    return None
+                source = self._recoverable_consumer(db, job)
+                if source is not None:
+                    db.execute(
+                        "INSERT INTO recovery_attempts VALUES (?,?,'running',NULL)", (key, source)
+                    )
+                    self._capacity(db)
+                    return None
                 if existing[1] != "complete":
                     raise ValueError(
                         "prior execution is incomplete or failed; automatic rerun refused"
@@ -810,7 +1008,7 @@ class ExecutionJournal:
             raise ValueError("execution step exceeds reserved receipt capacity")
         with self._transaction() as db:
             key = execution_key(job)
-            row = db.execute("SELECT job, status FROM jobs WHERE id=?", (key,)).fetchone()
+            row = self._job_state(db, key)
             if row is None or row[1] != "running" or bytes(row[0]) != canonical_json_bytes(job):
                 raise ValueError("execution job is not reserved for these inputs")
             index = db.execute("SELECT COUNT(*) FROM steps WHERE job_id=?", (key,)).fetchone()[0]
@@ -839,7 +1037,7 @@ class ExecutionJournal:
         job = validate_incumbent_job(job, self.policy)
         key, raw, scope = execution_key(job), canonical_json_bytes(job), _incumbent_scope(job)
         with self._transaction() as db:
-            own = db.execute("SELECT job, status FROM jobs WHERE id=?", (key,)).fetchone()
+            own = self._job_state(db, key)
             if own is None or own[1] != "running" or bytes(own[0]) != raw:
                 raise ValueError("incumbent consumer is not reserved for these inputs")
             if (
@@ -864,7 +1062,7 @@ class ExecutionJournal:
                 db.execute("INSERT INTO endpoint_incumbents VALUES (?,?)", (scope, key))
                 return None
             source_key = cached[0]
-            source = db.execute("SELECT job, status FROM jobs WHERE id=?", (source_key,)).fetchone()
+            source = self._job_state(db, source_key)
             if source is None:
                 raise ValueError("shared incumbent source is missing")
             source_job = validate_incumbent_job(
@@ -876,6 +1074,17 @@ class ExecutionJournal:
                 or _incumbent_inputs(source_job) != _incumbent_inputs(job)
             ):
                 raise ValueError("shared incumbent assignment conflicts with the reserved round")
+            if (
+                key == source_key
+                and source[1] == "running"
+                and self._recovery_enabled(db)
+                and db.execute(
+                    "SELECT 1 FROM recovery_attempts WHERE job_id=? "
+                    "AND source_job=? AND status='running'",
+                    (key, key),
+                ).fetchone()
+            ):
+                return None
             if source[1] != "complete":
                 raise ValueError(
                     "shared incumbent is incomplete or failed; automatic rerun refused"
@@ -889,7 +1098,7 @@ class ExecutionJournal:
                     raise ValueError("shared incumbent exceeds reserved receipt capacity")
                 db.execute("INSERT INTO steps VALUES (?,?,?)", (key, index, step_raw))
             retained = self._evidence(db, job)
-            db.execute("UPDATE jobs SET status='complete' WHERE id=?", (key,))
+            self._set_job_state(db, key, "complete")
             return retained
 
     def observe(self, job: ModelEvaluationJob, pending: PendingExecutionStep) -> None:
@@ -901,7 +1110,7 @@ class ExecutionJournal:
             raise ValueError("execution observation exceeds reserved receipt capacity")
         key = execution_key(job)
         with self._transaction() as db:
-            row = db.execute("SELECT job, status FROM jobs WHERE id=?", (key,)).fetchone()
+            row = self._job_state(db, key)
             if row is None or row[1] != "running" or bytes(row[0]) != canonical_json_bytes(job):
                 raise ValueError("execution job is not reserved for these inputs")
             index = db.execute("SELECT COUNT(*) FROM steps WHERE job_id=?", (key,)).fetchone()[0]
@@ -939,23 +1148,24 @@ class ExecutionJournal:
     def complete(self, job: ModelEvaluationJob) -> ModelExecutionEvidence:
         with self._transaction() as db:
             evidence = self._evidence(db, job)
-            changed = db.execute(
-                "UPDATE jobs SET status='complete' WHERE id=? AND status='running' AND job=?",
-                (execution_key(job), canonical_json_bytes(job)),
-            ).rowcount
-            if changed != 1:
+            key = execution_key(job)
+            row = self._job_state(db, key)
+            if row is None or row[1] != "running" or bytes(row[0]) != canonical_json_bytes(job):
                 raise ValueError("execution job is not in the running state")
+            self._set_job_state(db, key, "complete")
         return evidence
 
     def fail(self, job: ModelEvaluationJob, *, cancelled: bool = False) -> None:
         with self._transaction() as db:
-            db.execute(
-                "UPDATE jobs SET status='failed', reason=? WHERE id=? AND status='running'",
-                (
+            key = execution_key(job)
+            row = self._job_state(db, key)
+            if row is not None and row[1] == "running":
+                self._set_job_state(
+                    db,
+                    key,
+                    "failed",
                     "cancelled" if cancelled else "infrastructure_or_binding_failure",
-                    execution_key(job),
-                ),
-            )
+                )
 
 
 def read_case_video(directory: Path, sha256: str, maximum: int) -> bytes:
@@ -1069,6 +1279,8 @@ async def _run_evaluation(
             if isinstance(job, EndpointIncumbentJob)
             else (("candidate", candidate), ("incumbent", job.incumbent))
         )
+        for case in job.cases:
+            read_case_video(videos, case.video_sha256, job.runtime.maximum_video_bytes)
         for case in job.cases:
             video = read_case_video(videos, case.video_sha256, job.runtime.maximum_video_bytes)
             for role, model in runs:

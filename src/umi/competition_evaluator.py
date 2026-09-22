@@ -951,7 +951,9 @@ class ContinuousEvaluator:
         if head > order.round.valid_through_block:
             return "expired"
         state = self.executions.status(execution_key(job))
-        if state is None:
+        if state is None or (
+            state["status"] in {"failed", "authorized"} and self.executions.recovery_ready(job)
+        ):
             if head <= order.round.submission_close_block:
                 return "scheduled"
             if head > order.round.evaluation_close_block:
