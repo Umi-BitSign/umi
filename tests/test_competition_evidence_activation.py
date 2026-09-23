@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +18,10 @@ from umi.protocol import canonical_json_bytes
 from .test_competition_evidence_config import storage_config
 from .test_competition_history_compatibility import digest, sign
 from .test_competition_host_activation import (
+    _install_weight_rollover,
+    _replace_control,
     _restore_writable,
+    _weight_rollover,
 )
 from .test_competition_host_activation import (
     activation_case as activation_case,
@@ -54,11 +59,16 @@ from .test_competition_host_activation import (
 from .test_competition_host_activation import (
     worker_capacity as worker_capacity,
 )
+from .test_competition_weights import _advance
+from .test_competition_weights import chain as chain
+from .test_competition_weights import weight_case as weight_case
 
 
 @pytest.fixture
-def migrated(activation_case, tmp_path):
+def migrated(activation_case, tmp_path, request):
     c = activation_case
+    if getattr(request, "param", None) == "weights":
+        _install_weight_rollover(c, _weight_rollover(c))
     installed = activation.load_successor_worker_inputs()
     prior = installed.accepted_state
     target = c.consent.model_copy(
@@ -86,7 +96,10 @@ def migrated(activation_case, tmp_path):
         target_worker_limits_sha256=digest(limits),
         original_checkpoint_sha256=c.receipt.checkpoint_sha256,
         retained_history_sha256=digest(
-            [item.model_dump(mode="json", by_alias=True) for item in c.initial_page.directives]
+            [
+                item.model_dump(mode="json", by_alias=True)
+                for item in [*installed.initial_page.directives, *installed.current_page.directives]
+            ]
         ),
         predecessor_state_sha256=digest(prior),
         predecessor_sequence=prior.accepted_sequence,
@@ -154,6 +167,245 @@ def migrated(activation_case, tmp_path):
     return SimpleNamespace(
         case=c, consent=consent, limits=limits, receipt=receipt, seal=seal, body=body
     )
+
+
+@pytest.fixture
+def complete_migration(migrated, monkeypatch, tmp_path, policy, replay_limits, package_limits):
+    """Native signed history/package and complete fixed-mount loader.
+
+    Inference and OS mount ownership use the existing fixture ports. This does
+    not execute a host binary, stop a real validator, or submit a transaction.
+    """
+    from umi.competition_history_compatibility import transition_target_consent
+    from umi.competition_host_artifacts import SignedSuccessorHostArtifact
+    from umi.competition_package import (
+        competition_release_identity_digest,
+        prepare_competition_package,
+    )
+    from umi.competition_supervisor import successor_operator_consent_sha256
+
+    from . import test_competition_publication as publication
+    from .test_competition_host_artifacts import sign as sign_host
+    from .test_competition_supervisor import _exact_package_target
+
+    m, c = migrated, migrated.case
+    original = activation.load_successor_worker_inputs()
+    identity = c.release_identity.model_copy(update={"umi_revision": "43" * 20})
+    release = c.release.model_copy(
+        update={"umi_git_revision": identity.umi_revision, "replay_release_identity": identity}
+    )
+    round_for = publication.round_for
+    monkeypatch.setattr(
+        publication,
+        "round_for",
+        lambda *a, **k: round_for(*a, **k).model_copy(
+            update={"sequence": c.target.round_sequence + 1}
+        ),
+    )
+    scenario = publication._scenario(policy, tmp_path / "replacement-scenario", replay_limits)
+    prepared = prepare_competition_package(
+        policy=policy,
+        cutoff_certificate=scenario.cutoff_certificate,
+        settlement_certificate=scenario.settlement_certificate,
+        retained_settlement=scenario.settlement,
+        roster=scenario.submissions,
+        evidence=scenario.evidence,
+        replay_limits=replay_limits,
+        release_identity=identity,
+        destination_root=tmp_path / "replacement-packages",
+        limits=package_limits,
+    )
+    package_path = Path(prepared.package_path)
+    target = _exact_package_target(
+        SimpleNamespace(path=package_path, prepared=prepared), package_limits, policy
+    )
+    old_host = SignedSuccessorHostArtifact.model_validate_json(
+        (c.anchor / activation.SIGNED_HOST_ARTIFACT_FILENAME).read_bytes()
+    )
+    new_host = sign_host(old_host.manifest.model_copy(update={"umi_git_revision": "43" * 20}))
+    target_consent = transition_target_consent(m.consent).model_copy(
+        update={"approved_host_manifest_sha256": new_host.manifest_sha256}
+    )
+    body = m.body.model_copy(
+        update={
+            "target_host_manifest_sha256": new_host.manifest_sha256,
+            "target_consent_sha256": original_consent_digest(target_consent),
+            "target_release_identity_sha256": competition_release_identity_digest(identity),
+            "target_oci_manifest_sha256": release.oci_manifest_sha256,
+            "target_source_tree_sha256": release.umi_source_tree_sha256,
+        }
+    )
+    consent = SuccessorSupervisorOperatorConsent.model_validate(
+        {
+            **target_consent.model_dump(by_alias=True),
+            "schema": "umi-validator-supervisor-operator-consent/2",
+            "historical_consent": c.consent,
+            "history_compatibility": sign(body),
+        }
+    )
+    seal = m.seal.model_copy(update={"compatibility_sha256": digest(consent.history_compatibility)})
+    receipt = m.receipt.model_copy(
+        update={
+            "evidence_migration": seal,
+            "operator_consent_sha256": successor_operator_consent_sha256(consent),
+            "operator_consent_size_bytes": len(canonical_json_bytes(consent)),
+            "signed_host_artifact_sha256": digest(new_host),
+            "signed_host_artifact_size_bytes": len(canonical_json_bytes(new_host)),
+            "host_manifest_sha256": new_host.manifest_sha256,
+            "host_umi_git_revision": new_host.manifest.umi_git_revision,
+        }
+    )
+    selected = SimpleNamespace(
+        **{
+            **vars(c),
+            "target": target,
+            "release_identity": identity,
+            "release": release,
+            "consent": consent,
+            "signed": original.current_page.head,
+        }
+    )
+    rollover = _weight_rollover(selected)
+    signed = rollover.signed
+    page = original.current_page.model_copy(
+        update={"directives": [*original.current_page.directives, signed], "head": signed}
+    )
+    execution = rollover.execution.model_copy(
+        update={
+            "schema_": "umi-successor-worker-execution-config/2",
+            "weights": rollover.execution.weights.model_copy(
+                update={"evidence_storage": m.limits.weight_evidence_storage}
+            ),
+        }
+    )
+    for name, value in (
+        (activation.OPERATOR_CONSENT_FILENAME, consent),
+        (activation.SIGNED_HOST_ARTIFACT_FILENAME, new_host),
+        (activation.WORKER_LIMITS_FILENAME, m.limits),
+        (activation.INSTALLATION_RECEIPT_FILENAME, receipt),
+    ):
+        _replace_control(c.anchor / name, value)
+    _install_weight_rollover(
+        c, SimpleNamespace(page=page, execution=execution, authorization=rollover.authorization)
+    )
+    _replace_control(c.current / activation.RELEASE_IDENTITY_FILENAME, identity)
+    c.current.chmod(0o755)
+    current_package = c.current / activation.PACKAGE_DIRECTORY_NAME
+    _restore_writable(current_package)
+    shutil.rmtree(current_package)
+    shutil.copytree(package_path, current_package)
+    c.current.chmod(0o555)
+    yield SimpleNamespace(
+        original=original, case=c, consent=consent, receipt=receipt, signed=signed, seal=seal
+    )
+    _restore_writable(package_path)
+
+
+@pytest.mark.parametrize("migrated", ["weights"], indirect=True)
+async def test_complete_migrated_host_loads_old_history_and_new_weight_package(
+    complete_migration, weight_case
+):
+    m = complete_migration
+    inputs = activation.load_successor_worker_inputs()
+    activation.validate_authenticated_successor_installation(inputs)
+    _advance(weight_case, 195)
+    weight_case.rpc.values.update(
+        {
+            ("SubtensorModule", "Uids", (78, inputs.validator_hotkey)): 54,
+            ("SubtensorModule", "Keys", (78, 54)): inputs.validator_hotkey,
+            ("System", "Account", (inputs.validator_hotkey,)): {"nonce": 4, "providers": 1},
+            ("Commitments", "CommitmentOf", (78, inputs.validator_hotkey)): None,
+        }
+    )
+    observation = await weight_case.provider.collect_weights(
+        inputs.validator_hotkey, weight_case.recipients
+    )
+    active = activation.activate_successor_worker(inputs, owned_observation=observation)
+    assert active.signed_directive == m.signed
+    assert inputs.profile == "competition_weights"
+    assert inputs.initial_page == m.original.initial_page
+    assert inputs.checkpoint_sha256 == m.original.checkpoint_sha256
+    assert inputs.current_page.directives[:-1] == m.original.current_page.directives
+    assert activation.selected_weight_state_root(inputs) == Path(m.seal.candidate_root)
+    assert (
+        activation.retained_execution_limits(inputs, m.original.signed_directive.directive)
+        == m.original.worker_execution_limits
+    )
+    assert inputs.worker_execution_limits.weight_evidence_storage is not None
+    assert not hasattr(active, "submitted")
+
+
+@pytest.mark.parametrize("migrated", ["weights"], indirect=True)
+def test_migrated_loader_rejects_replaced_retained_signed_history(complete_migration):
+    from umi.competition_weights import sign_competition_weight_authorization
+
+    from .test_competition_supervisor import (
+        _signed,
+        _signed_authorization_target,
+        authority_wallets,
+    )
+
+    m = complete_migration
+    inputs = activation.load_successor_worker_inputs()
+    previous = inputs.current_page.directives[0]
+    replacement = _signed(
+        previous.directive.model_copy(
+            update={"valid_through_block": previous.directive.valid_through_block - 1}
+        )
+    )
+    # Keep the replacement page structurally contiguous and signed. It must
+    # fail the retained-history binding, not merely a malformed-page check.
+    authorization = sign_competition_weight_authorization(
+        inputs.authorization.authorization.model_copy(
+            update={"predecessor_directive_sha256": replacement.directive_sha256}
+        ),
+        authority_wallets()[0],
+    )
+    head = _signed(
+        inputs.signed_directive.directive.model_copy(
+            update={
+                "previous_directive_sha256": replacement.directive_sha256,
+                "chain_authorization": _signed_authorization_target(authorization),
+            }
+        )
+    )
+    page = inputs.current_page.model_copy(update={"directives": [replacement, head], "head": head})
+    _replace_control(m.case.current / activation.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME, page)
+    _replace_control(m.case.current / activation.WEIGHT_AUTHORIZATION_FILENAME, authorization)
+    with pytest.raises(
+        activation.HostActivationError,
+        match="retained signed history differs from migration authorization",
+    ):
+        activation.load_successor_worker_inputs()
+
+
+@pytest.mark.parametrize("migrated", ["weights"], indirect=True)
+def test_migrated_loader_rejects_new_signed_release_outside_grant(complete_migration):
+    from umi.validator_supervisor import ValidatorSupervisorError
+
+    from .test_competition_supervisor import _signed
+
+    m = complete_migration
+    inputs = activation.load_successor_worker_inputs()
+    directive = inputs.signed_directive.directive
+    replacement = _signed(
+        directive.model_copy(
+            update={
+                "release": directive.release.model_copy(update={"oci_manifest_sha256": "8a" * 32})
+            }
+        )
+    )
+    page = inputs.current_page.model_copy(
+        update={
+            "directives": [*inputs.current_page.directives[:-1], replacement],
+            "head": replacement,
+        }
+    )
+    _replace_control(m.case.current / activation.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME, page)
+    with pytest.raises(
+        ValidatorSupervisorError, match="historical_compatibility_forward_scope_mismatch"
+    ):
+        activation.load_successor_worker_inputs()
 
 
 def check(m, receipt=None, consent=None):

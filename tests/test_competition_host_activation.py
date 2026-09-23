@@ -276,7 +276,7 @@ def _weight_rollover(case):
         case.chain,
         case.consent,
         mode="competition_weights",
-        sequence=4,
+        sequence=case.signed.directive.sequence + 1,
         predecessor_version=4,
         previous=case.signed.directive_sha256,
         issued_at_block=190,
@@ -324,6 +324,8 @@ def _install_weight_rollover(case, rollover) -> None:
         rollover.execution,
     )
     case.current.chmod(0o755)
+    if (case.current / activation.WEIGHT_AUTHORIZATION_FILENAME).exists():
+        (case.current / activation.WEIGHT_AUTHORIZATION_FILENAME).chmod(0o600)
     _write_control(
         case.current / activation.WEIGHT_AUTHORIZATION_FILENAME,
         rollover.authorization,
