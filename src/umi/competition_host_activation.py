@@ -31,6 +31,7 @@ from .competition_history_compatibility import (
 from .competition_package import (
     CompetitionReleaseIdentity,
 )
+from .competition_receipt_store import publish_installation_receipt
 from .competition_recovery import (
     RecoveryCheckpointBody,
     RecoveryLimits,
@@ -1689,43 +1690,15 @@ def _write_root_receipt_once(path: Path, payload: bytes) -> None:
         raise HostActivationError("installation receipt has the wrong fixed filename")
     parent = _open_absolute_directory(target.parent)
     try:
-        info = os.fstat(parent)
-        if (
-            info.st_uid != _root_owner_uid()
-            or not stat.S_ISDIR(info.st_mode)
-            or stat.S_IMODE(info.st_mode) & 0o022
-        ):
-            raise HostActivationError("installation receipt parent is not root controlled")
-        try:
-            descriptor = os.open(
-                target.name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o444,
-                dir_fd=parent,
-            )
-        except FileExistsError as error:
-            existing = _read_root_control_at(
-                parent,
-                target.name,
-                MAX_SUCCESSOR_INSTALLATION_RECEIPT_BYTES,
-            )
-            if existing != payload:
-                raise HostActivationError(
-                    "installation receipt already exists with other bytes"
-                ) from error
-            return
-        try:
-            offset = 0
-            while offset < len(payload):
-                count = os.write(descriptor, payload[offset:])
-                if count <= 0:
-                    raise HostActivationError("installation receipt write made no progress")
-                offset += count
-            os.fchmod(descriptor, 0o444)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.fsync(parent)
+        publish_installation_receipt(
+            parent,
+            target.name,
+            payload,
+            owner=_root_owner_uid(),
+            maximum_bytes=MAX_SUCCESSOR_INSTALLATION_RECEIPT_BYTES,
+        )
+    except (ValueError, OSError) as error:
+        raise HostActivationError(str(error)) from error
     finally:
         os.close(parent)
 
