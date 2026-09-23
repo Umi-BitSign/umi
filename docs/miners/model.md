@@ -70,6 +70,16 @@ validated `TranslationRequest`. They return English text. UMI handles fetching,
 hash checks, length checks, timelock sealing, hotkey signing, retry caching, and
 the explicit error response.
 
+The miner retries a truncated download, connection failure or timeout before
+sealing its response, using the remaining signed video-fetch budget. Each attempt
+is recorded in the existing assignment database and reserves its bytes before
+network access. The response deadline still applies. A rejected origin, malformed
+response, digest mismatch or HTTP error does not trigger this transport retry.
+Once a response is sealed, retransmitting the assignment returns those same
+signed bytes; it does not repeat fetching or inference. Keep the assignment
+database across upgrades and restarts so these counters and cached responses
+remain intact.
+
 Use the Unix socket when the model needs a Torch, Core ML, Python, or native
 library stack that cannot share UMI's pinned environment. UMI supports Python
 3.10 through 3.14 and pins its Bittensor packages. The socket keeps the model
