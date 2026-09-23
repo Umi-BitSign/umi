@@ -573,3 +573,19 @@ def test_changed_resume_plan_refused(transaction):
     with pytest.raises(ValueError, match="control changed"):
         switch.publish_stopped_evidence_activation(changed, config=t.m.case.config, lease=t.lease)
     assert len(t.exchanges) == 1
+
+
+def test_anchor_exchange_keeps_runtime_hold_and_selection_records(transaction):
+    t = transaction
+    records = {
+        "HOLD": b"root service hold",
+        "original-supervisor.conf": b"retained original supervisor",
+        "original-cleanup.service": b"retained original cleanup",
+        "service-selection.json": b"retained runtime intent",
+    }
+    for name, raw in records.items():
+        (t.plan.transaction_root / name).write_bytes(raw)
+    publish(t)
+    publish(t)
+    assert len(t.exchanges) == 1
+    assert {name: (t.plan.transaction_root / name).read_bytes() for name in records} == records

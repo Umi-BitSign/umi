@@ -63,13 +63,17 @@ def _root_linux():
         raise ValueError("evidence activation requires root on the stopped Linux host")
 
 
+def _root_owner_uid() -> int:
+    return 0
+
+
 def _root_control(path, *, maximum=1024**2):
     descriptor = _open_without_links(path)
     try:
         info = os.fstat(descriptor)
         if (
             not stat.S_ISREG(info.st_mode)
-            or info.st_uid != 0
+            or info.st_uid != _root_owner_uid()
             or info.st_nlink != 1
             or info.st_mode & 0o777 != 0o444
             or not 0 < info.st_size <= maximum
@@ -113,7 +117,11 @@ def _exchange(parent, left, right):
 def _private_transaction_root(path):
     descriptor = _open_without_links(path)
     info = os.fstat(descriptor)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o777 != 0o700:
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != _root_owner_uid()
+        or info.st_mode & 0o777 != 0o700
+    ):
         os.close(descriptor)
         raise ValueError("migration transaction directory must be private and root-owned")
     return descriptor
@@ -153,6 +161,17 @@ def publish_stopped_evidence_activation(
             ".activation-plan.json.pending",
             "activation-complete.json",
             ".activation-complete.json.pending",
+            # The root service driver holds the validator across anchor and
+            # runtime selection. Its separately validated records survive retry.
+            "HOLD",
+            "original-supervisor.conf",
+            ".original-supervisor.conf.pending",
+            "original-cleanup.service",
+            ".original-cleanup.service.pending",
+            "service-selection.json",
+            ".service-selection.json.pending",
+            "service-publication.json",
+            ".service-publication.json.pending",
         }
         if set(os.listdir(transaction)) - allowed:
             raise ValueError("migration transaction has unexpected files")
