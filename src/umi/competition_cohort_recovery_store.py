@@ -89,6 +89,9 @@ class CohortRecoveryStore:
                 cohort TEXT NOT NULL, sequence INTEGER NOT NULL,
                 decision TEXT NOT NULL, body BLOB NOT NULL, certificate BLOB,
                 PRIMARY KEY(cohort,sequence), UNIQUE(cohort,decision))""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_recovery_sources (
+                cohort TEXT NOT NULL, digest TEXT NOT NULL, body BLOB NOT NULL,
+                PRIMARY KEY(cohort,digest))""")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -195,6 +198,41 @@ class CohortRecoveryStore:
         with self._transaction():
             _, state, pending = self._load(cohort)
             return state, pending
+
+    def retain_source(self, cohort: str, value: StrictProtocolModel) -> str:
+        """Retain decision input before reservation; consumers authenticate its meaning."""
+        raw = canonical_json_bytes(value)
+        if len(raw) > 256 * 1024:
+            raise ValueError("cohort decision source exceeds its byte bound")
+        key = digest(value)
+        with self._transaction():
+            self._load(cohort)
+            prior = self.db.execute(
+                "SELECT substr(body,1,262145) FROM cohort_recovery_sources "
+                "WHERE cohort=? AND digest=?",
+                (cohort, key),
+            ).fetchone()
+            if prior is not None and prior[0] != raw:
+                raise ValueError("cohort decision source changed")
+            self.db.execute(
+                "INSERT OR IGNORE INTO cohort_recovery_sources VALUES (?,?,?)", (cohort, key, raw)
+            )
+        return key
+
+    def source(self, cohort: str, key: str, model: type[_Record]) -> _Record:
+        """Read a content-bound input; it is not itself proof of phase completion."""
+        with self._transaction():
+            row = self.db.execute(
+                "SELECT substr(body,1,262145) FROM cohort_recovery_sources "
+                "WHERE cohort=? AND digest=?",
+                (cohort, key),
+            ).fetchone()
+            if row is None:
+                raise ValueError("cohort decision source is missing")
+            value = _decode(model, row[0], 256 * 1024)
+            if digest(value) != key:
+                raise ValueError("cohort decision source digest changed")
+            return value
 
     def export_history(
         self,
