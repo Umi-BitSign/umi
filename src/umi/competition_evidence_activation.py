@@ -157,6 +157,10 @@ def publish_stopped_evidence_activation(
         # Caller owns the global host-operation lock; never overwrite a different
         # transaction or guess whether an unrelated prepared directory is ours.
         allowed = {
+            "drain-plan.json",
+            ".drain-plan.json.pending",
+            "drain-complete.json",
+            ".drain-complete.json.pending",
             "activation-plan.json",
             ".activation-plan.json.pending",
             "activation-complete.json",
