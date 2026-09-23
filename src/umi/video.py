@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .http_logging import video_fetch_logging
 from .protocol import Video
 from .validator_delivery import normalized_https_origin
 
@@ -21,11 +22,14 @@ from .validator_delivery import normalized_https_origin
 class VideoFetchError(RuntimeError):
     """A challenge video could not be retrieved exactly as declared."""
 
-    def __init__(self, message: str, *, wire_bytes: int = 0) -> None:
+    def __init__(self, message: str, *, wire_bytes: int = 0, retryable: bool = False) -> None:
         super().__init__(message)
         if isinstance(wire_bytes, bool) or not isinstance(wire_bytes, int) or wire_bytes < 0:
             raise ValueError("video fetch wire bytes must be a non-negative integer")
         self.wire_bytes = wire_bytes
+        if not isinstance(retryable, bool):
+            raise TypeError("video fetch retryable must be boolean")
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,10 @@ class HttpVideoFetcher:
         return (await self.fetch_with_receipt(descriptor)).data
 
     async def fetch_with_receipt(self, descriptor: Video) -> VideoFetchResult:
+        with video_fetch_logging():
+            return await self._fetch_with_receipt(descriptor)
+
+    async def _fetch_with_receipt(self, descriptor: Video) -> VideoFetchResult:
         parsed = urlsplit(str(descriptor.url))
         allowed_schemes = {"https"}
         if self.allow_http_for_tests:
@@ -153,6 +161,7 @@ class HttpVideoFetcher:
             raise VideoFetchError(
                 "video fetch exceeded its total deadline",
                 wire_bytes=wire_counter[0],
+                retryable=True,
             ) from error
         return VideoFetchResult(data=data, wire_bytes=wire_counter[0])
 
@@ -252,6 +261,9 @@ class HttpVideoFetcher:
             raise VideoFetchError(
                 f"video fetch failed: {type(error).__name__}",
                 wire_bytes=wire_counter[0],
+                retryable=isinstance(
+                    error, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+                ),
             ) from error
         finally:
             if response is not None:
@@ -261,6 +273,7 @@ class HttpVideoFetcher:
             raise VideoFetchError(
                 "video body is shorter than its declared size",
                 wire_bytes=wire_counter[0],
+                retryable=True,
             )
         if hashlib.sha256(body).hexdigest() != descriptor.sha256:
             raise VideoFetchError(
