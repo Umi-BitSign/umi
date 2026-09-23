@@ -75,6 +75,21 @@ def history_tip(history: CohortRecoveryHistory) -> str:
     return digest(history.transitions[-1].transition if history.transitions else history.genesis)
 
 
+def cohort_intake_bytes(db) -> int:
+    """Count consent and optional admission evidence under one shared allowance."""
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return sum(
+        db.execute(f"SELECT COALESCE(SUM(length(body)),0) FROM {name}").fetchone()[0]
+        for name in (
+            "cohort_consents",
+            "cohort_admission_artifacts",
+            "cohort_admission_votes",
+            "cohort_admission_certificates",
+        )
+        if name in tables
+    )
+
+
 class CohortIntakePublisher:
     """Native publication port; the service owns capture-provider lifecycle."""
 
@@ -286,6 +301,8 @@ class CohortIntake:
                             "intake closure requires a retained seal and decision evidence"
                         )
                     verify_intake_closure(seal, closing, closure_input, self.policy)
+                    # Retain the closure input before publishing its referencing history.
+                    store.retain_source(cohort, closure_input)
             return store.publish_history(history, self.policy, current_block=observation.block)
 
     def history(self, cohort: str) -> CohortRecoveryHistory:
@@ -375,9 +392,8 @@ class CohortIntake:
             raw = canonical_json_bytes(retained)
             if len(raw) > 4 * 1024 * 1024:
                 raise ValueError("cohort participation exceeds its byte bound")
-            records, size = db.execute(
-                "SELECT COUNT(*),COALESCE(SUM(length(body)),0) FROM cohort_consents"
-            ).fetchone()
+            records = db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0]
+            size = cohort_intake_bytes(db)
             if (
                 records >= self.capacity.maximum_records
                 or size + len(raw) > self.capacity.maximum_bytes

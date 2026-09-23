@@ -6,6 +6,7 @@
 - [Round preparation](#open-competition-round-preparation)
 - [Continuous cohorts and schedule amendments](#continuous-cohorts-and-schedule-amendments)
 - [Automatic work proposals and independent signing](#open-competition-work-signing)
+- [Recoverable cohort admission](#recoverable-cohort-admission)
 
 <a id="open-competition-round-coordinator"></a>
 
@@ -572,3 +573,66 @@ owned-provider disagreement, capacity guards and shutdown failure. They do not
 establish public TLS deployment, protected ASL quality or independent production
 operators. Settlement publication and the reviewed simultaneous 70/30 activation
 remain on the [execution plan](../competition/launch.md).
+
+## Recoverable cohort admission
+
+The opt-in recoverable-cohort implementation has a durable admission queue and
+reviewer service. It requires an explicitly authorized cohort and miner consent;
+enabling these components does not change a fixed round's signed deadlines. The
+complete recovery workflow is not deployed or qualified for unattended rewards.
+
+Configure the intake's `recoverable_intake` with its private directory and exact
+cohort/authority bindings. Initialize it with `initialize-cohort-intake` and
+publish the certified history through `CohortIntakePublisher` before accepting
+consent. Production intake retains the original registration proof and metadata
+before acknowledging a participation request. After interrupted storage, retry
+the identical signed request. A receipt remains `pending_attestation`; use the
+admission status route for the subsequent certificate.
+
+Run one reviewer process per policy-approved evaluator hotkey:
+
+```sh
+umi-competition --policy /absolute/path/policy.json \
+  run-cohort-admission-worker --config /absolute/path/admission-worker.json
+```
+
+`CohortAdmissionWorkerConfig` uses schema `umi-cohort-admission-worker-config/1`.
+Its `intake` configuration selects the shared local queue; `signing` selects
+the reviewer hotkey, cohort authorities and private signing journal. `chain`
+selects that reviewer's own finality state and RPC providers. These three state
+directories must not overlap. Configure `wallet_name`, `hotkey_name`,
+`wallet_path` and, if required, a private `hotkey_password_file`; the service
+never prompts for credentials. The intake and reviewers must run under the
+private queue's owning OS account. Separate signer identities do not by
+themselves establish independently administered control groups.
+
+The service holds a process lock, polls all configured cohorts, retries pending
+records and drains in-flight signing before shutdown. `--once` performs one
+bounded pass; omit it under a boot-persistent service manager. A pass is bounded
+by `batch_size` (default 16, maximum 256); `poll_seconds` defaults to 5. Missing
+proofs, capacity exhaustion and unavailable finality leave work pending. Increasing
+`admission_capacity` or the signer's storage limits permits an unchanged retry.
+These byte limits cover logical records; provision separate disk headroom for
+SQLite, finality state, backups and migration. Missing historical owned headers
+still require provider recovery before signing can resume.
+
+Reviewers verify original proof bytes against their own retained historical
+headers and a fresh owned head. Each records its exact signing intent before
+signing. The queue verifies each vote and publishes a certificate only when the
+policy's independent-group quorum is met. After intake closes, it requires the
+original record selected by the certified intake seal. Public access exposes
+the certificate, not the private registration archive.
+
+Miners can inspect their retained request without signing again:
+
+```sh
+umi-competition --policy /absolute/path/policy.json \
+  query-cohort-admission --origin https://intake.example \
+  --request /absolute/path/signed-participation.json
+```
+
+This reads `GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`
+and verifies the returned policy, consent, contribution and signature quorum.
+`admission_certified` certifies participation only. It does not establish current
+registration, assignment delivery, a score or reward activation; downstream
+execution must still use the authoritative cohort history and fresh evidence.

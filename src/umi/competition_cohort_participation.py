@@ -94,6 +94,28 @@ class AttestedCohortParticipantAdmission(StrictProtocolModel):
     signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
 
 
+class CohortAdmissionStatus(StrictProtocolModel):
+    schema_: Literal["umi-cohort-admission-status/1"] = Field(alias="schema")
+    policy_sha256: Hex32
+    cohort_sha256: Hex32
+    consent_sha256: Hex32
+    status: Literal["pending_attestation", "admission_certified"]
+    certificate: AttestedCohortParticipantAdmission | None
+    certification_scope: Literal["cohort_participation"] = "cohort_participation"
+    chain_submission_authorized: Literal[False] = False
+
+    @model_validator(mode="after")
+    def certificate_binding(self) -> Self:
+        if (self.status == "admission_certified") != (self.certificate is not None):
+            raise ValueError("admission status and certificate differ")
+        if self.certificate is not None and (
+            self.certificate.admission.cohort_sha256 != self.cohort_sha256
+            or self.certificate.admission.consent_sha256 != self.consent_sha256
+        ):
+            raise ValueError("admission certificate belongs to another request")
+        return self
+
+
 def admit_recovery_participant(
     signed: SignedSubmission,
     consent: SignedCohortParticipationConsent,

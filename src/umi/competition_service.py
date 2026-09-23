@@ -20,6 +20,7 @@ from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProv
 from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
 from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
+from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
 from .competition_policy_lineage import register_lineage
 from .competition_public_results import PublicResultsSource
@@ -246,10 +247,11 @@ def create_intake_app(
             frozenset() if cohort_intake is None else cohort_intake.retained_registration_blocks()
         )
 
+    provider_type = (
+        FinalizedRegistrationProvider if cohort_intake is None else HistoricalRegistrationProvider
+    )
     provider = (
-        FinalizedRegistrationProvider(
-            config.chain, policy, retained_capture_blocks=retained_registration_blocks
-        )
+        provider_type(config.chain, policy, retained_capture_blocks=retained_registration_blocks)
         if provider_factory is None
         else provider_factory(config.chain, policy)
     )
@@ -292,6 +294,11 @@ def create_intake_app(
         cohort_intake=cohort_intake,
         cohort_capture_provider=(
             finality_cache.collect_for_cohort_recovery if cohort_intake is not None else None
+        ),
+        cohort_archive_provider=(
+            provider.retained_archive
+            if isinstance(provider, HistoricalRegistrationProvider)
+            else None
         ),
     )
     app.state.cohort_intake = cohort_intake

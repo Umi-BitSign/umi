@@ -20,6 +20,7 @@ from starlette.types import Lifespan
 from .competition_chain import RegistrationCapture
 from .competition_cohort_api import cohort_routes
 from .competition_cohort_intake import CohortIntake
+from .competition_execution import ExecutionBoundary
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
 from .competition_public_results import PublicResultsSource, public_results_page
@@ -68,6 +69,8 @@ def create_app(
     public_results_directory: PublicResultsDirectory | None = None,
     cohort_intake: CohortIntake | None = None,
     cohort_capture_provider: Callable[[], Awaitable[RegistrationCapture]] | None = None,
+    cohort_archive_provider: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]]
+    | None = None,
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
@@ -112,7 +115,10 @@ def create_app(
             raise ValueError("recoverable intake and base intake use different policies")
         app.include_router(
             cohort_routes(
-                cohort_intake, cohort_capture_provider, maximum_body_bytes=MAX_SUBMISSION_BYTES
+                cohort_intake,
+                cohort_capture_provider,
+                maximum_body_bytes=MAX_SUBMISSION_BYTES,
+                archive=cohort_archive_provider,
             )
         )
     public_results_sources = tuple(

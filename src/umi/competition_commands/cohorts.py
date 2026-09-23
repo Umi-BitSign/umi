@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from ..competition_cohort_client import submit_cohort_participation
+from ..competition_cohort_client import fetch_cohort_admission, submit_cohort_participation
 from ..competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from ..competition_cohort_intake import CohortIntake
 from ..competition_cohort_participation import (
@@ -14,6 +14,7 @@ from ..competition_cohort_participation import (
     SignedCohortParticipationConsent,
 )
 from ..open_competition import CompetitionPolicy, SignedSubmission, digest, identity, sign_object
+from ..protocol import canonical_json_bytes
 from .common import load_json
 
 
@@ -84,3 +85,30 @@ def submit_consent(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
         )
     )
     return receipt.model_dump(mode="json", by_alias=True)
+
+
+def query_admission(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    status = asyncio.run(
+        fetch_cohort_admission(
+            origin=args.origin,
+            policy=policy,
+            request=load_json(args.request, CohortParticipationRequest),
+        )
+    )
+    return status.model_dump(mode="json", by_alias=True)
+
+
+def run_admission_worker(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    from ..competition_cohort_admission_worker import (
+        CohortAdmissionWorkerConfig,
+        run_admission_worker,
+    )
+
+    return asyncio.run(
+        run_admission_worker(
+            load_json(args.config, CohortAdmissionWorkerConfig),
+            policy,
+            once=args.once,
+            report=lambda value: print(canonical_json_bytes(value).decode(), flush=True),
+        )
+    )
