@@ -43,6 +43,8 @@ class CohortAdmissionWorkerConfig(StrictProtocolModel):
     hotkey_password_file: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     batch_size: Annotated[int, Field(ge=1, le=256)] = 16
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
+    historical_header_maximum_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
+    historical_header_batch_size: Annotated[int, Field(ge=1, le=4096)] = 256
 
     @model_validator(mode="after")
     def bindings(self):
@@ -187,7 +189,11 @@ async def run_admission_worker(
         queue = CohortAdmissionQueue(intake)
         journal = CohortAdmissionJournal(config.signing, policy)
         provider = provider_factory(
-            config.chain, policy, retained_capture_blocks=intake.retained_registration_blocks
+            config.chain,
+            policy,
+            retained_capture_blocks=intake.retained_registration_blocks,
+            historical_header_maximum_bytes=config.historical_header_maximum_bytes,
+            historical_header_batch_size=config.historical_header_batch_size,
         )
 
         async def history(cohort):

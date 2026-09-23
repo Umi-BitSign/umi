@@ -452,20 +452,30 @@ class DurableGrandpaFinalityPort:
         return self._plan_block(stored)
 
     async def verified_block_after(
-        self, height: int, *, maximum_distance: int
+        self, height: int, *, maximum_distance: int | None
     ) -> VerifiedFinalizedBlock | None:
-        """Nearest retained original observer header for bounded ancestry recovery."""
+        """Nearest retained observer header; None permits resumable historical walks.
+
+        The query always returns at most one owned record. Callers using None
+        must bound their own header recovery batches rather than the total age.
+        """
         height = _positive_uint(height, "historical header height")
-        maximum_distance = _positive_uint(maximum_distance, "historical header distance")
-        if maximum_distance > 2048:
-            raise ValueError("historical header distance exceeds bound")
+        if maximum_distance is not None:
+            maximum_distance = _positive_uint(maximum_distance, "historical header distance")
+            if maximum_distance > 2048:
+                raise ValueError("historical header distance exceeds bound")
 
         def nearest():
             with self._connect(read_only=True) as db:
                 row = db.execute(
                     "SELECT height FROM finalized_headers WHERE height>? AND height<=? "
                     "ORDER BY height LIMIT 1",
-                    (height, height + maximum_distance),
+                    (
+                        height,
+                        _MAX_CANONICAL_INTEGER
+                        if maximum_distance is None
+                        else height + maximum_distance,
+                    ),
                 ).fetchone()
             return None if row is None else row[0]
 

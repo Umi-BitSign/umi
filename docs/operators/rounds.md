@@ -613,11 +613,21 @@ by `batch_size` (default 16, maximum 256); `poll_seconds` defaults to 5. Missing
 proofs, capacity exhaustion and unavailable finality leave work pending. Increasing
 `admission_capacity` or the signer's storage limits permits an unchanged retry.
 These byte limits cover logical records; provision separate disk headroom for
-SQLite, finality state, backups and migration. Missing historical owned headers
-still require provider recovery before signing can resume.
+SQLite, finality state, backups and migration.
+
+When the original header was skipped or the reviewer was offline, admission
+review reconstructs it from that reviewer's nearest retained finalized
+descendant. Each RPC header must hash to the committed parent. The walk has no
+total age or distance cutoff; `historical_header_batch_size` bounds a pass
+(default 256, maximum 4,096). Completed downloads are retained and rechecked
+after restart. `historical_header_maximum_bytes` bounds those durable header
+hints separately from the registration cache (default 256 MiB); increase it
+when needed. Recovery continues on later passes after a timeout or storage
+failure. It still requires a fresh owned head, and a reconstructed historical
+header never becomes a new observer record or current execution observation.
 
 Reviewers verify original proof bytes against their own retained historical
-headers and a fresh owned head. Each records its exact signing intent before
+headers or verified ancestry and a fresh owned head. Each records its exact signing intent before
 signing. The queue verifies each vote and publishes a certificate only when the
 policy's independent-group quorum is met. After intake closes, it requires the
 original record selected by the certified intake seal. Public access exposes

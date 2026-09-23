@@ -122,8 +122,11 @@ async def replay_registration_archive(
     pin: FinalizedRuntimePin,
     proofs: FinalizedProofCollector,
     reviewed_codec: bool,
-    timestamp_ms: int,
+    timestamp_ms: int | None = None,
+    maximum_timestamp_ms: int | None = None,
 ) -> RegistrationSnapshot:
+    if timestamp_ms is None and maximum_timestamp_ms is None:
+        raise ValueError("registration replay requires an owned timestamp bound")
     if (
         archive.snapshot.block != snapshot.block_number
         or archive.snapshot.block_hash != snapshot.block_hash
@@ -160,8 +163,10 @@ async def replay_registration_archive(
             *model_burn_storage_reads(policy),
         )
     )
+    actual_timestamp = _uint(values[StorageReadSpec("Timestamp", "Now")], 2**53 - 1)
     if (
-        _uint(values[StorageReadSpec("Timestamp", "Now")], 2**53 - 1) != timestamp_ms
+        (timestamp_ms is not None and actual_timestamp != timestamp_ms)
+        or (maximum_timestamp_ms is not None and not 0 < actual_timestamp <= maximum_timestamp_ms)
         or values[StorageReadSpec("SubtensorModule", "NetworksAdded", (78,))] is not True
     ):
         raise ValueError("registration archive timestamp or subnet differs")
