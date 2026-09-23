@@ -556,6 +556,17 @@ class FinalizedProofCollector:
         self._verifier = verifier
         self._limits = limits or ProofCollectionLimits()
 
+    def with_evidence_rpc(self, rpc: RawJsonRpc) -> FinalizedProofCollector:
+        """Reuse the same verifier and limits for retained untrusted storage bytes.
+
+        The source of bytes grants no finality authority. Replay callers must
+        select the snapshot from their owned finality port before decoding or
+        proving storage. No network fallback is added to the supplied port.
+        """
+        return FinalizedProofCollector(
+            rpc, finality=self._finality, verifier=self._verifier, limits=self._limits
+        )
+
     async def finalized_snapshot(self) -> FinalizedSnapshotRef:
         """Cross-check RPC header data against the owned smoldot-finalized head."""
 
