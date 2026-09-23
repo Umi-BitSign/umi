@@ -274,9 +274,13 @@ async def run():
         if not a.orphan and (list(Path('/home').iterdir()) or {
                 item.name for item in Path('/run/user').iterdir()} != {str(os.geteuid())}):
             raise RuntimeError('service exposes another user home/runtime directory')
-        (root / 'started.json').write_text(json.dumps({'pid': os.getpid(), 'id': cid,
+        # Pollers must never see the empty file created by truncating a prior
+        # process's startup report during restart.
+        pending_status = root / ('started-' + str(os.getpid()) + '.pending')
+        pending_status.write_text(json.dumps({'pid': os.getpid(), 'id': cid,
             'cgroup': _container_cgroup(cid), 'kernel_cgroup': kernel_cgroup,
             'sandbox': True, 'orphan': a.orphan}))
+        pending_status.replace(root / 'started.json')
         if not a.orphan:
             await asyncio.Event().wait()
 asyncio.run(run())

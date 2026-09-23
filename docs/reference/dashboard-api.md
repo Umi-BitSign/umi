@@ -233,7 +233,7 @@ projected as a valid hypothesis.
 Every pilot record says `component_test_no_weight`, carries false translation-
 weight, conformance, activation-evidence, and validator-input flags, and lists every
 canonical stage that the component runner did not reach. See
-[`COMPONENT_PILOT.md`](legacy.md#component-pilot) for the operator and independent-replay
+[`COMPONENT_PILOT.md`](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/COMPONENT_PILOT.md) for the operator and independent-replay
 commands.
 
 `pilot_profile` distinguishes a local in-process run from a request sent to the

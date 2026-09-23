@@ -1,20 +1,16 @@
 # UMI documentation
 
-Start with the guide for your role. Public first-round competition intake is
-live for endpoint submissions only, while the registration bridge remains the
-current reward mechanism. Open-competition rewards have not been activated. The
-public-endpoint pilot and calibration enrollment are closed. The
-[public status](https://api.umi.vision/v1/competition/status) exposes the exact
-live intake policy and next intake schedule. Endpoint
-miners need the [current connection guide](miners/connection.md), including
-miners whose earlier intake receipts remain valid. Model-artifact intake remains
-closed; service readiness does not establish a completed live cohort.
+Start with the guide for your role. Public competition intake is live for endpoint
+submissions. The registration bridge supplies current rewards; competition reward
+activation requires certified settlement and verified native weight effects.
+Model-artifact intake remains closed. Check [public status](https://api.umi.vision/v1/competition/status)
+for the active policy and next intake schedule.
 
 | I want to... | Start here |
 | --- | --- |
 | Register a new SN78 hotkey | [Official Bittensor mining guide](https://www.bittensor.com/docs/guides/mining), using subnet **78** |
 | Run a miner now | [Miner requirements](CURRENT_MINER_OPERATION.md) |
-| Prepare an existing endpoint for cohort 4 | [Policy-8 connection update](miners/connection.md) |
+| Configure or update an endpoint | [Current connection guide](miners/connection.md) |
 | Connect my translation model | [Model integration and HTTPS endpoints](miners/model.md) |
 | Run a miner on Apple Silicon | [Mac miner setup](miners/macos.md) |
 | Install or troubleshoot a validator | [Validator supervisor](PERMANENT_VALIDATOR_SUPERVISOR.md) |
@@ -42,7 +38,6 @@ and optional [funding audit](operators/funding-audit.md).
 - [Competition CLI recipes](reference/commands.md)
 - [Observer API](reference/dashboard-api.md) and [example configurations](examples/)
 - [Whitepaper](../whitepaper/README.md), [PDF](../whitepaper/UMI-Whitepaper.pdf)
-- [Retired workflows and dated deployment evidence](reference/legacy.md)
 
 Keep current instructions here. Put implementation history in commits and PRs,
 not another dated operator guide. The `main` branch may be ahead of production;
@@ -50,8 +45,10 @@ merging code does not activate it. Deployment status needs a checked block,
 signed policy or release, and finalized chain evidence. A running process or an
 old report does not prove current rewards.
 
-Update the existing guide when its setup changes. Keep release downloads,
-policy hashes and runnable connection commands in the connection guide; link to
-it from role pages instead of copying those details. Preserve retired procedures
-through [fixed Git revisions](reference/legacy.md), and keep incident logs and
-community replies outside this public setup documentation.
+Update the authoritative guide in place. Keep release downloads, policy hashes
+and connection commands in the connection guide; link to it from role pages.
+Remove expired instructions and completed deployment narratives. Retain migration
+steps only while deployed consumers need them, with a clear removal condition.
+Exact signed terms and evidence remain available for verification. Implementation
+history belongs in commits and PRs; community replies belong outside public setup
+documentation.

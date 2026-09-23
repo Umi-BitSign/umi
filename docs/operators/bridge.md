@@ -2,15 +2,11 @@
 
 # Temporary live-miner rewards
 
-The registration bridge replaces the closed two-miner pilot. It checks endpoint
-availability, not translation quality. The signed ongoing policy renews until
-an explicit replacement or stop; older finite policies keep their original
-expiry. Editing source does not extend a signed policy.
-
-The temporary registration-snapshot freeze has been lifted. Current and
-re-registered hotkeys can qualify after finalized registration and health checks.
-Historical activation blocks, fee quotes and deployment digests are in the
-[Git records](../reference/legacy.md); they are not current chain status.
+The registration bridge checks endpoint availability, not translation quality.
+The signed ongoing policy renews until an explicit replacement or stop. Current
+and re-registered hotkeys can qualify after finalized registration and health
+checks. The [renewal contract](#renewal-and-compatibility) describes signed policy
+compatibility.
 
 ## Eligibility
 
