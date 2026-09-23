@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .http_logging import video_fetch_logging
 from .protocol import Video
 from .validator_delivery import normalized_https_origin
 
@@ -110,6 +111,10 @@ class HttpVideoFetcher:
         return (await self.fetch_with_receipt(descriptor)).data
 
     async def fetch_with_receipt(self, descriptor: Video) -> VideoFetchResult:
+        with video_fetch_logging():
+            return await self._fetch_with_receipt(descriptor)
+
+    async def _fetch_with_receipt(self, descriptor: Video) -> VideoFetchResult:
         parsed = urlsplit(str(descriptor.url))
         allowed_schemes = {"https"}
         if self.allow_http_for_tests:
