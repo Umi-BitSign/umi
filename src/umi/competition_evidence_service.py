@@ -28,10 +28,22 @@ from .competition_host_anchor import load_materialized_successor_anchor
 from .competition_host_artifacts import SignedSuccessorHostArtifact, VerifiedHostTree
 from .competition_host_service import _path, _plan_from_anchor
 from .competition_host_switch import _root_directory
+from .competition_upgrade import _Reader
 from .file_identity import file_fingerprint
 from .protocol import canonical_json_bytes
 
 _MAX_CONTROL = 16 * 1024
+
+
+def _activation_result(plan: EvidenceActivationPlan) -> dict:
+    return {
+        "schema": "umi-weight-evidence-activation/1",
+        "plan_sha256": hashlib.sha256(plan.encoded()).hexdigest(),
+        "selected_receipt_sha256": plan.candidate_receipt_sha256,
+        "retained_original_receipt_sha256": plan.original_receipt_sha256,
+        "chain_submission_authorized": False,
+        "service_started": False,
+    }
 
 
 def _root_owner_uid() -> int:
@@ -222,14 +234,7 @@ def publish_stopped_evidence_service(
     receipt, receipt_sha = _receipt(activation_plan.live_source)
     if receipt != anchor.receipt or receipt_sha != activation_plan.candidate_receipt_sha256:
         raise ValueError("evidence service anchor has not selected the sealed candidate")
-    expected = {
-        "schema": "umi-weight-evidence-activation/1",
-        "plan_sha256": hashlib.sha256(activation_plan.encoded()).hexdigest(),
-        "selected_receipt_sha256": activation_plan.candidate_receipt_sha256,
-        "retained_original_receipt_sha256": activation_plan.original_receipt_sha256,
-        "chain_submission_authorized": False,
-        "service_started": False,
-    }
+    expected = _activation_result(activation_plan)
     root = activation_plan.transaction_root
     if _private_record(root, "activation-complete.json") != canonical_json_bytes(expected):
         raise ValueError("evidence service needs the completed exact anchor exchange")
@@ -241,6 +246,15 @@ def publish_stopped_evidence_service(
         signed_host=signed_host,
     )
     _held(unit_name, root, runtime.host_manifest_sha256)
+    identity = lease.runtime_identity()
+    reader = _Reader(_root_owner_uid())
+    fragment = reader.file(
+        Path(identity["fragment_path"]),
+        "evidence_service_fragment",
+        128 * 1024,
+        modes={0o400, 0o444, 0o600, 0o644},
+    )
+    identity["fragment_sha256"] = hashlib.sha256(fragment).hexdigest()
     descriptor = _root_directory(root)
     try:
         selections = (
@@ -262,6 +276,7 @@ def publish_stopped_evidence_service(
             "activation_plan_sha256": expected["plan_sha256"],
             "unit_name": unit_name,
             "host_manifest_sha256": runtime.host_manifest_sha256,
+            "original_service": identity,
             "controls": [
                 {
                     "path": str(path),
@@ -283,6 +298,7 @@ def publish_stopped_evidence_service(
         verified_host_tree.recheck()
         lease.validate_scope(activation_plan, anchor.config)
         _held(unit_name, root, runtime.host_manifest_sha256)
+        reader.unchanged()
         result = {
             **intent,
             "schema": "umi-evidence-service-publication/1",

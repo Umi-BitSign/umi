@@ -76,6 +76,20 @@ class StoppedEvidenceMigration:
     _issuer: object = field(repr=False)
     _active: list = field(repr=False)
 
+    def runtime_identity(self) -> dict:
+        """Retain stable service identity across publication and process restart."""
+        self.recheck()
+        path, _, identity = self._files[0]
+        return {
+            "unit_name": self._unit,
+            "service_uid": self._uid,
+            "service_user": self._unit_before["User"],
+            "fragment_path": self._unit_before["FragmentPath"],
+            "lock_path": str(path),
+            "lock_device": str(identity[0]),
+            "lock_inode": str(identity[1]),
+        }
+
     def validate_scope(self, plan, config):
         if (
             type(self) is not StoppedEvidenceMigration

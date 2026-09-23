@@ -36,6 +36,11 @@ def selected(tmp_path, monkeypatch):
     old, new = b"old supervisor\n", b"new supervisor\n"
     old_cleanup, new_cleanup = b"old cleanup\n", b"new cleanup\n"
     host_sha = "ab" * 32
+    fragment = controls / "fixture.service"
+    fragment.write_bytes(b"fixture service fragment\n")
+    fragment.chmod(0o444)
+    process_lock = tmp_path / "process.lock"
+    process_lock.touch(mode=0o600)
     for path, raw in (
         (dropin, old),
         (cleanup, old_cleanup),
@@ -68,6 +73,17 @@ def selected(tmp_path, monkeypatch):
     class Lease:
         _unit = unit
         failure = False
+
+        def runtime_identity(self):
+            return {
+                "unit_name": unit,
+                "service_uid": os.getuid(),
+                "service_user": "fixture",
+                "fragment_path": str(fragment),
+                "lock_path": str(process_lock),
+                "lock_device": str(process_lock.stat().st_dev),
+                "lock_inode": str(process_lock.stat().st_ino),
+            }
 
         def validate_scope(self, requested, config):
             assert requested == plan and config is anchor.config

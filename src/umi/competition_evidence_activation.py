@@ -164,6 +164,7 @@ def publish_stopped_evidence_activation(
             # The root service driver holds the validator across anchor and
             # runtime selection. Its separately validated records survive retry.
             "HOLD",
+            "HOLD.released",
             "original-supervisor.conf",
             ".original-supervisor.conf.pending",
             "original-cleanup.service",
@@ -172,6 +173,10 @@ def publish_stopped_evidence_activation(
             ".service-selection.json.pending",
             "service-publication.json",
             ".service-publication.json.pending",
+            "service-start.json",
+            ".service-start.json.pending",
+            "service-start-complete.json",
+            ".service-start-complete.json.pending",
         }
         if set(os.listdir(transaction)) - allowed:
             raise ValueError("migration transaction has unexpected files")
