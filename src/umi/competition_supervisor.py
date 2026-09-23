@@ -21,9 +21,15 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_serializer, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_history_compatibility import (
+    OriginalSuccessorConsent,
+    SignedHistoryCompatibility,
+    validate_consent_transition,
+    verify_history_compatibility,
+)
 from .competition_package import (
     CompetitionPackageLimits,
     CompetitionReleaseIdentity,
@@ -31,7 +37,7 @@ from .competition_package import (
     competition_release_identity_digest,
     load_competition_package,
 )
-from .competition_reward_continuity import UNTIL_SUPERSEDED_BLOCK, verify_reward_continuation
+from .competition_reward_continuity import verify_reward_continuation
 from .competition_weights import (
     CompetitionWeightAuthorizationBody,
     SignedCompetitionWeightAuthorization,
@@ -238,60 +244,33 @@ class SuccessorChainAuthorizationTarget(StrictProtocolModel):
         return self
 
 
-class SuccessorSupervisorOperatorConsent(StrictProtocolModel):
-    """Root-owned local consent that narrows signed successor authority.
-
-    The host loader must establish file ownership, mode, and exact bytes. This
-    record contains no authority keys and cannot replace the v3 trust policy.
-    """
-
-    schema_: Literal[SUCCESSOR_SUPERVISOR_OPERATOR_CONSENT_SCHEMA] = Field(alias="schema")
-    source_config_sha256: Hex32
-    channel_id: Hex32
-    validator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
-    predecessor_sequence: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
-    predecessor_directive_sha256: Hex32
-    predecessor_signed_directive_sha256: Hex32
-    predecessor_accepted_at_finalized_block: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
-    approved_host_manifest_sha256: Hex32
-    target_platform: Literal["linux/amd64", "linux/arm64"]
-    allowed_modes: Annotated[
-        list[Literal["competition_replay", "competition_weights"]],
-        Field(min_length=1, max_length=2),
-    ]
-    required_recovery_profile: Literal["stopped_bootstrap_recovery/1"]
-    authorized_at_finalized_block: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
-    valid_through_block: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
-
-    reward_continuity_sha256: Hex32 | None = None
+class SuccessorSupervisorOperatorConsent(OriginalSuccessorConsent):
+    schema_: Literal[
+        "umi-validator-supervisor-operator-consent/1",
+        "umi-validator-supervisor-operator-consent/2",
+    ] = Field(alias="schema")
+    historical_consent: OriginalSuccessorConsent | None = None
+    history_compatibility: SignedHistoryCompatibility | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_consent(self, handler):
         value = handler(self)
-        if self.reward_continuity_sha256 is None:
-            value.pop("reward_continuity_sha256", None)
-        return value
-
-    @field_validator("validator_hotkey")
-    @classmethod
-    def validate_validator_hotkey(cls, value: str) -> str:
-        account_id32(value)
+        for field in ("reward_continuity_sha256", "historical_consent", "history_compatibility"):
+            if getattr(self, field) is None:
+                value.pop(field, None)
         return value
 
     @model_validator(mode="after")
-    def validate_consent(self) -> Self:
-        if (
-            self.reward_continuity_sha256 is not None
-            and self.valid_through_block != UNTIL_SUPERSEDED_BLOCK
+    def explicit_history_version(self) -> Self:
+        migrated = self.schema_ == "umi-validator-supervisor-operator-consent/2"
+        if migrated != (self.historical_consent is not None) or migrated != (
+            self.history_compatibility is not None
         ):
-            raise ValueError("continuity consent requires explicit until-superseded lifetime")
-        expected = [mode for mode in _MODE_ORDER if mode in self.allowed_modes]
-        if self.allowed_modes != expected:
-            raise ValueError("successor consent modes must be unique and canonically ordered")
-        if self.valid_through_block < self.authorized_at_finalized_block:
-            raise ValueError("successor operator consent interval is inverted")
-        if self.authorized_at_finalized_block < self.predecessor_accepted_at_finalized_block:
-            raise ValueError("successor consent predates its predecessor observation")
+            raise ValueError("historical compatibility requires version2 consent and both controls")
+        if migrated:
+            validate_consent_transition(
+                self, self.historical_consent, self.history_compatibility.body
+            )
         return self
 
 
@@ -794,6 +773,67 @@ def verify_signed_successor_supervisor_directive_history(
     )
 
 
+def retained_directive_observation_block(consent, directive, prior_state):
+    """Replay the signed migration boundary at its actual retained observation."""
+    compatibility = consent.history_compatibility
+    if compatibility is not None and directive.sequence == compatibility.body.predecessor_sequence:
+        return compatibility.body.predecessor_accepted_at_finalized_block
+    selected = consent
+    if compatibility is not None and directive.sequence < compatibility.body.predecessor_sequence:
+        selected = consent.historical_consent
+    return max(
+        prior_state.accepted_at_finalized_block,
+        selected.authorized_at_finalized_block,
+        directive.issued_at_block,
+        directive.valid_from_block,
+    )
+
+
+def consent_for_retained_directive(consent, directive, *, config, historical: bool):
+    """Select preserved consent only within a quorum-authorized history boundary."""
+    consent = _canonical(SuccessorSupervisorOperatorConsent, consent)
+    if consent.history_compatibility is None:
+        return consent
+    body = verify_history_compatibility(consent.history_compatibility, config=config)
+    validate_consent_transition(consent, consent.historical_consent, body)
+    old = directive.sequence <= body.predecessor_sequence
+    if old:
+        if not historical:
+            raise ValidatorSupervisorError("historical_compatibility_cannot_execute_old_directive")
+        if (
+            directive.sequence == body.predecessor_sequence
+            and successor_supervisor_directive_sha256(directive)
+            != body.predecessor_directive_sha256
+        ):
+            raise ValidatorSupervisorError("historical_compatibility_boundary_mismatch")
+        selected = _canonical(SuccessorSupervisorOperatorConsent, consent.historical_consent)
+    else:
+        selected = consent
+    if directive.release is not None:
+        release = directive.release
+        identity = competition_release_identity_digest(release.replay_release_identity)
+        permitted = (
+            body.original_release_identity_sha256s if old else [body.target_release_identity_sha256]
+        )
+        if identity not in permitted:
+            raise ValidatorSupervisorError("historical_compatibility_release_mismatch")
+        if (
+            hashlib.sha256(canonical_json_bytes(directive.chain.chain_pin)).hexdigest()
+            != body.chain_pin_sha256
+        ):
+            raise ValidatorSupervisorError("historical_compatibility_chain_mismatch")
+        if not old and (
+            release.oci_manifest_sha256 != body.target_oci_manifest_sha256
+            or release.umi_source_tree_sha256 != body.target_source_tree_sha256
+            or directive.replay_package.policy_sha256 not in body.forward_policy_sha256s
+            or not body.first_round_sequence
+            <= directive.replay_package.round_sequence
+            <= body.last_round_sequence
+        ):
+            raise ValidatorSupervisorError("historical_compatibility_forward_scope_mismatch")
+    return selected
+
+
 def _verify_signed_successor_supervisor_directive(
     signed: SignedSuccessorSupervisorDirective,
     *,
@@ -810,7 +850,9 @@ def _verify_signed_successor_supervisor_directive(
         raise TypeError("operator_consent must be a SuccessorSupervisorOperatorConsent")
     _validate_finalized_block(finalized_block)
     directive = signed.directive
-    consent = operator_consent
+    consent = consent_for_retained_directive(
+        operator_consent, directive, config=config, historical=not require_unexpired
+    )
     config_sha256 = successor_source_config_sha256(config)
     if consent.source_config_sha256 != config_sha256:
         raise ValidatorSupervisorError("successor_source_config_mismatch")
@@ -957,7 +999,9 @@ def _advance_successor_supervisor_directive_state(
     require_activation_headroom: bool,
 ) -> SuccessorSupervisorDirectiveState:
     directive = signed.directive
-    consent = operator_consent
+    consent = consent_for_retained_directive(
+        operator_consent, directive, config=config, historical=not require_activation_headroom
+    )
     if finalized_block < directive.valid_from_block:
         raise ValidatorSupervisorError("successor_directive_not_yet_active")
     if require_activation_headroom and (
@@ -1005,9 +1049,26 @@ def _advance_successor_supervisor_directive_state(
             raise ValidatorSupervisorError("successor_v3_predecessor_unexpected")
         if finalized_block < prior_state.accepted_at_finalized_block:
             raise ValidatorSupervisorError("successor_finalized_block_rollback")
+        changed_consent = prior_state.operator_consent_sha256 != consent_sha256
+        if changed_consent:
+            compatibility = consent.history_compatibility
+            if compatibility is None:
+                raise ValidatorSupervisorError("successor_state_transition_binding_mismatch")
+            body = verify_history_compatibility(compatibility, config=config)
+            if (
+                prior_state.operator_consent_sha256 != body.original_consent_sha256
+                or prior_state.accepted_sequence != body.predecessor_sequence
+                or prior_state.accepted_directive_sha256 != body.predecessor_directive_sha256
+                or hashlib.sha256(canonical_json_bytes(prior_state)).hexdigest()
+                != body.predecessor_state_sha256
+                or directive.sequence != body.predecessor_sequence + 1
+                or not body.migration_valid_from_block
+                <= finalized_block
+                <= body.migration_valid_through_block
+            ):
+                raise ValidatorSupervisorError("successor_history_transition_boundary_mismatch")
         if (
             prior_state.channel_id != config.channel_id
-            or prior_state.operator_consent_sha256 != consent_sha256
             or prior_state.source_config_sha256 != config_sha256
             or prior_state.transition_v3_sequence != consent.predecessor_sequence
             or prior_state.transition_v3_directive_sha256 != consent.predecessor_directive_sha256
@@ -1077,6 +1138,19 @@ def _state_for(
     authorization = directive.chain_authorization
     continuity = {}
     prior_authority = getattr(prior_state, "continuity_authority_sha256", None)
+    transitioning_authority = (
+        prior_authority is not None
+        and consent.history_compatibility is not None
+        and prior_state is not None
+        and prior_state.operator_consent_sha256
+        == consent.history_compatibility.body.original_consent_sha256
+        and directive.sequence == consent.history_compatibility.body.predecessor_sequence + 1
+        and prior_authority == consent.historical_consent.reward_continuity_sha256
+        and directive.reward_continuity_sha256 == consent.reward_continuity_sha256
+        and directive.mode != "hold"
+        and not prior_state.continuity_stopped
+        and package.round_sequence > prior_state.continuity_round_sequence
+    )
     if prior_authority is not None:
         if directive.mode == "hold":
             continuity = {
@@ -1087,7 +1161,10 @@ def _state_for(
             }
         elif (
             prior_state.continuity_stopped
-            or directive.reward_continuity_sha256 != prior_authority
+            or (
+                directive.reward_continuity_sha256 != prior_authority
+                and not transitioning_authority
+            )
             or package.round_sequence < prior_state.continuity_round_sequence
             or (
                 package.round_sequence == prior_state.continuity_round_sequence

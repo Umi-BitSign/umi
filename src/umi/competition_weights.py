@@ -87,8 +87,13 @@ def _recovery_package_snapshot(path: Path) -> tuple:
         return before, tuple(result)
 
 
-def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -> tuple:
+def _recovery_journal_snapshot(
+    path: Path, *, allow_absent_root: bool = False, expected_owner: int | None = None
+) -> tuple:
     """Bounded metadata check for an already-audited SQLite family, not authority."""
+    owner = os.getuid() if expected_owner is None else expected_owner
+    if type(owner) is not int or owner < 0:
+        raise ValueError("stopped recovery journal owner must be a nonnegative uid")
     try:
         root = _open_directory_without_links(path.parent)
     except FileNotFoundError:
@@ -97,7 +102,7 @@ def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -
         raise
     try:
         info = os.fstat(root)
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
             raise ValueError("stopped recovery journal parent is not private")
         before = _file_identity(info)
         result = []
@@ -114,7 +119,7 @@ def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -
                 info = os.fstat(descriptor)
                 if (
                     not stat.S_ISREG(info.st_mode)
-                    or info.st_uid != os.getuid()
+                    or info.st_uid != owner
                     or info.st_nlink != 1
                     or stat.S_IMODE(info.st_mode) != 0o600
                 ):
@@ -793,7 +798,12 @@ class CompetitionWeightWorker:
             total += len(raw)
             known.add(identity)
 
-    def _accept_continuity(self, package, body):
+    def _record_continuity_handoff(self, db, *, activation, policy, before, after):
+        raise ValueError(
+            "continuity authority change requires explicitly authorized evidence runtime"
+        )
+
+    def _accept_continuity(self, package, body, *, activation=None):
         """Record adoption before a new write; all replay and preflight gates ran."""
         with self._db() as db:
             prior = db.execute(
@@ -814,12 +824,20 @@ class CompetitionWeightWorker:
                 package.package_sha256,
                 digest(continuation.admission),
             )
-            if prior is not None and (
-                prior[0] != current[0]
-                or current[1] < prior[1]
-                or (current[1] == prior[1] and current != prior)
-            ):
-                raise ValueError("continuity allocation rolls back or changes an adopted package")
+            if prior is not None:
+                if current[1] < prior[1] or (current[1] == prior[1] and current != prior):
+                    raise ValueError(
+                        "continuity allocation rolls back or changes an adopted package"
+                    )
+                if prior[0] != current[0]:
+                    self._record_continuity_handoff(
+                        db,
+                        activation=activation,
+                        policy=body.policy_sha256,
+                        before=prior,
+                        after=current,
+                    )
+
             db.execute(
                 "INSERT INTO continuity_highwater VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(policy) DO UPDATE SET "
@@ -942,7 +960,7 @@ class CompetitionWeightWorker:
             if attempt is not None:
                 return self._recover(attempt, body, hotkey, observation, expected_row)
             validate_weight_preflight(package, body, observation, chain.config, submission=True)
-            self._accept_continuity(package, body)
+            self._accept_continuity(package, body, activation=context)
             validate_authenticated_successor_activation(
                 context,
                 validator_hotkey=hotkey,

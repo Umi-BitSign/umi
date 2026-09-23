@@ -124,6 +124,7 @@ def adapter_case(
         checkpoint_finalized_block=160,
         operator_consent=consent,
         worker_execution_limits=ceiling,
+        _receipt=SimpleNamespace(evidence_migration=None),
         valid=True,
     )
 

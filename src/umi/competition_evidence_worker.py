@@ -13,6 +13,10 @@ import json
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 
+from .competition_evidence_continuity import (
+    audit_continuity_transitions,
+    record_continuity_transition,
+)
 from .competition_evidence_store import EvidenceBudget, EvidenceStore, observation_reservation
 from .competition_weights import CompetitionWeightWorker
 from .protocol import canonical_json_bytes
@@ -96,7 +100,13 @@ class ContentAddressedWeightWorker(CompetitionWeightWorker):
         if binding:
             self._store(db)
 
+    def _record_continuity_handoff(self, db, *, activation, policy, before, after):
+        record_continuity_transition(
+            db, activation=activation, policy=policy, before=before, after=after
+        )
+
     def _store(self, db, *, create=False):
+        audit_continuity_transitions(db)
         binding = db.execute("SELECT * FROM binding").fetchall()
         if len(binding) != 1:
             raise ValueError("content addressed worker lacks its original owner binding")

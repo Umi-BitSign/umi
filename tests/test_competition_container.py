@@ -448,7 +448,13 @@ async def test_exited_container_with_unconfirmed_pid_cannot_be_removed(launch_se
 @pytest.mark.asyncio
 async def test_forged_activation_rejected(setup):
     with pytest.raises(containers.SuccessorContainerError, match="authenticated successor"):
-        await setup.adapter.launch(SimpleNamespace(profile="competition_weights"), setup.release)
+        await setup.adapter.launch(
+            SimpleNamespace(
+                profile="competition_weights",
+                _inputs=SimpleNamespace(_receipt=SimpleNamespace(evidence_migration=None)),
+            ),
+            setup.release,
+        )
 
 
 @pytest.mark.parametrize(
@@ -615,14 +621,24 @@ def test_replay_mounts_never_read_or_mount_any_wallet(mounted_files, monkeypatch
         pytest.fail("wallet-free replay read a key")
 
     monkeypatch.setattr(containers, "_require_wallet_hotkey_identity", forbidden)
-    mounts = mounted_files.adapter._worker_mounts(SimpleNamespace(profile="competition_replay"))
+    mounts = mounted_files.adapter._worker_mounts(
+        SimpleNamespace(
+            profile="competition_replay",
+            _inputs=SimpleNamespace(_receipt=SimpleNamespace(evidence_migration=None)),
+        )
+    )
     assert len(mounts) == 2 and all(
         "wallet" not in item and "hotkey" not in item for item in mounts
     )
 
 
 def test_weight_mounts_only_named_readonly_hotkey(mounted_files):
-    mounts = mounted_files.adapter._worker_mounts(SimpleNamespace(profile="competition_weights"))
+    mounts = mounted_files.adapter._worker_mounts(
+        SimpleNamespace(
+            profile="competition_weights",
+            _inputs=SimpleNamespace(_receipt=SimpleNamespace(evidence_migration=None)),
+        )
+    )
     assert len(mounts) == 3
     assert mounts[-1] == containers._bind_mount(
         mounted_files.key, containers.HOTKEY_PATH, read_only=True
@@ -648,7 +664,12 @@ def test_weight_hotkey_boundary_is_exact(mounted_files, fault, tmp_path):
         )
         key.chmod(0o400)
     with pytest.raises(ValueError):
-        mounted_files.adapter._worker_mounts(SimpleNamespace(profile="competition_weights"))
+        mounted_files.adapter._worker_mounts(
+            SimpleNamespace(
+                profile="competition_weights",
+                _inputs=SimpleNamespace(_receipt=SimpleNamespace(evidence_migration=None)),
+            )
+        )
 
 
 def test_host_anchor_provenance_cannot_be_faked_by_service_ownership(setup, tmp_path, monkeypatch):

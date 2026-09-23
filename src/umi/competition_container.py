@@ -24,6 +24,7 @@ from typing import Literal
 
 from .competition_host_activation import (
     AuthenticatedSuccessorActivation,
+    selected_weight_state_root,
     validate_authenticated_successor_activation,
 )
 from .competition_release import (
@@ -640,6 +641,18 @@ class PodmanSuccessorContainer:
             limits.maximum_tree_depth,
         )
         mounts.append(_bind_mount(state, STATE_PATH, read_only=False))
+        if activation._inputs._receipt.evidence_migration is not None:
+            evidence = selected_weight_state_root(activation._inputs)
+            _private_directory(evidence, os.geteuid())
+            _bounded_tree(
+                evidence,
+                os.geteuid(),
+                limits.maximum_state_entries,
+                limits.maximum_state_bytes,
+                limits.maximum_tree_depth,
+            )
+            mounts.append(_bind_mount(evidence, str(Path(STATE_PATH) / "weights"), read_only=False))
+
         if activation.profile == "competition_weights":
             wallet = self.config.wallet
             key = Path(wallet.path) / wallet.name / "hotkeys" / wallet.hotkey

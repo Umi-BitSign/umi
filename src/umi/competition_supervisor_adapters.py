@@ -41,6 +41,8 @@ from .competition_host_activation import (
     AuthenticatedSuccessorActivation,
     AuthenticatedSuccessorWorkerInputs,
     _validate_worker_execution_bindings,
+    retained_execution_limits,
+    selected_weight_state_root,
     validate_authenticated_successor_activation,
     validate_authenticated_successor_installation,
 )
@@ -499,7 +501,7 @@ class ProductionSuccessorRuntimeAdapter:
             raise SuccessorAdapterError("replay staging contains unexpected weight authority")
         _validate_worker_execution_bindings(
             execution=execution,
-            limits=self.installation.worker_execution_limits,
+            limits=retained_execution_limits(self.installation, directive),
             directive=directive,
             release_identity=directive.release.replay_release_identity,
             authorization_body=body,
@@ -612,7 +614,7 @@ class ProductionSuccessorRuntimeAdapter:
         self._stopped = True
 
     def _attempts(self):
-        root = Path(self.config.worker_state_root) / "competition" / "weights"
+        root = selected_weight_state_root(self.installation)
         path, lock = root / "competition-weights.sqlite3", root / "competition-weights.lock"
         if not os.path.lexists(root):
             if any(
@@ -669,12 +671,7 @@ class ProductionSuccessorRuntimeAdapter:
             raise SuccessorAdapterError("recovery requires confirmed stopped worker")
         validate_authenticated_successor_installation(self.installation)
         registry_snapshot = _recovery_journal_snapshot(self.path)
-        weight_path = (
-            Path(self.config.worker_state_root)
-            / "competition"
-            / "weights"
-            / "competition-weights.sqlite3"
-        )
+        weight_path = selected_weight_state_root(self.installation) / "competition-weights.sqlite3"
         attempts_snapshot = _recovery_journal_snapshot(weight_path, allow_absent_root=True)
         records = self._records()
         attempts = self._attempts()
@@ -719,12 +716,12 @@ class ProductionSuccessorRuntimeAdapter:
                 package_limits=prepared.selection.signed.directive.replay_package.limits,
                 capacity=self.installation.worker_execution_limits.replay_capacity_ceiling,
             )
-            storage = execution.evidence_storage
+            storage = self.installation.worker_execution_limits.weight_evidence_storage
             worker_type = (
                 CompetitionWeightWorker if storage is None else ContentAddressedWeightWorker
             )
             worker = worker_type(
-                Path(self.config.worker_state_root) / "competition" / "weights",
+                selected_weight_state_root(self.installation),
                 package_limits=prepared.selection.signed.directive.replay_package.limits,
                 replay_worker=replay,
                 maximum_attempts=execution.maximum_attempts,
@@ -912,7 +909,7 @@ class ProductionSuccessorRuntimeAdapter:
                 CompetitionWeightWorker if storage is None else ContentAddressedWeightWorker
             )
             worker_type(
-                competition / "weights",
+                selected_weight_state_root(self.installation),
                 package_limits=selection.signed.directive.replay_package.limits,
                 replay_worker=replay,
                 maximum_attempts=execution.maximum_attempts,

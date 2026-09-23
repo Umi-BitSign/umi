@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
+from .competition_evidence_continuity import audit_continuity_transitions
 from .competition_evidence_store import EvidenceStore
 from .competition_evidence_worker import bind_worker_profile
 from .encoding import account_id32
@@ -53,6 +54,7 @@ def evidence_reader(db, *, storage, validator_hotkey, maximum_attempts, maximum_
     ):
         raise ValueError("retained evidence owner or legacy capacity changed")
     if storage is not None:
+        audit_continuity_transitions(db)
         bind_worker_profile(db, storage.profile())
         store = EvidenceStore(
             db,
