@@ -22,9 +22,7 @@ from .validator_delivery import normalized_https_origin
 class VideoFetchError(RuntimeError):
     """A challenge video could not be retrieved exactly as declared."""
 
-    def __init__(
-        self, message: str, *, wire_bytes: int = 0, retryable: bool = False
-    ) -> None:
+    def __init__(self, message: str, *, wire_bytes: int = 0, retryable: bool = False) -> None:
         super().__init__(message)
         if isinstance(wire_bytes, bool) or not isinstance(wire_bytes, int) or wire_bytes < 0:
             raise ValueError("video fetch wire bytes must be a non-negative integer")

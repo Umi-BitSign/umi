@@ -33,6 +33,7 @@ class ClipTransport(httpx.AsyncBaseTransport):
         if mode == "internal":
             raise RuntimeError("backend bug")
         if mode == "reset":
+
             class BrokenBody(httpx.AsyncByteStream):
                 async def __aiter__(self):
                     yield VIDEO_BYTES[:3]
@@ -111,7 +112,8 @@ async def test_retransmission_reuses_sealed_outcome_after_bounded_fetches(failur
     ) as client:
         replies = [
             await client.post(
-                "/v1/translate", content=canonical_json_bytes(request),
+                "/v1/translate",
+                content=canonical_json_bytes(request),
                 auth=HotkeyAuth(validator, selected.hotkey_ss58),
             )
             for _ in range(2)
