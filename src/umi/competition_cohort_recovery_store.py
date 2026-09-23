@@ -346,29 +346,42 @@ class CohortRecoveryStore:
         A local pending signature reservation is never a committed extension.
         """
         with self._transaction():
-            binding, state, _ = self._load(cohort)
-            records = self.db.execute(
-                "SELECT substr(certificate,1,65537) FROM cohort_recovery_decisions "
-                "WHERE cohort=? AND certificate IS NOT NULL ORDER BY sequence",
-                (cohort,),
-            )
-            history = CohortRecoveryHistory(
-                schema="umi-cohort-recovery-history/1",
-                plan=binding.plan,
-                authority=binding.authority,
-                genesis=binding.genesis,
-                genesis_signatures=genesis_signatures,
-                transitions=tuple(
-                    _decode(SignedCohortRecoveryTransition, raw, 64 * 1024) for (raw,) in records
-                ),
-            )
-            verify_cohort_history(
-                history,
-                binding.policy,
-                expected_tip_sha256=state.tip_sha256,
-                current_block=state.observed_at_block,
-            )
-            return history
+            return self.read_history(cohort, genesis_signatures=genesis_signatures)
+
+    def read_history(
+        self, cohort: str, *, genesis_signatures: tuple[Signature, ...]
+    ) -> CohortRecoveryHistory:
+        """Read authenticated history inside the owner's existing transaction.
+
+        This lets native phase observers atomically bind their records to the
+        current history. The caller owns commit/rollback; no nested transaction
+        or uncommitted decision is promoted to certified history.
+        """
+        if not self.db.in_transaction:
+            raise ValueError("cohort history read requires an owned transaction")
+        binding, state, _ = self._load(cohort)
+        records = self.db.execute(
+            "SELECT substr(certificate,1,65537) FROM cohort_recovery_decisions "
+            "WHERE cohort=? AND certificate IS NOT NULL ORDER BY sequence",
+            (cohort,),
+        )
+        history = CohortRecoveryHistory(
+            schema="umi-cohort-recovery-history/1",
+            plan=binding.plan,
+            authority=binding.authority,
+            genesis=binding.genesis,
+            genesis_signatures=genesis_signatures,
+            transitions=tuple(
+                _decode(SignedCohortRecoveryTransition, raw, 64 * 1024) for (raw,) in records
+            ),
+        )
+        verify_cohort_history(
+            history,
+            binding.policy,
+            expected_tip_sha256=state.tip_sha256,
+            current_block=state.observed_at_block,
+        )
+        return history
 
     def reserve(
         self,
