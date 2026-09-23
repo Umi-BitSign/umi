@@ -18,9 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_evidence_config import EvidenceStorageConfig
 from .competition_package import (
     CompetitionReleaseIdentity,
 )
@@ -131,11 +132,29 @@ class HostActivationError(ValueError):
 class SuccessorWorkerExecutionLimits(StrictProtocolModel):
     """Immutable operator ceilings for rolling per-directive worker inputs."""
 
-    schema_: Literal["umi-successor-worker-execution-limits/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-successor-worker-execution-limits/1", "umi-successor-worker-execution-limits/2"
+    ] = Field(alias="schema")
     replay_capacity_ceiling: CompetitionWorkerCapacity
     maximum_weight_attempts: Annotated[int, Field(ge=1, le=65_536)]
     maximum_weight_evidence_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)]
     maximum_submission_timeout_seconds: Annotated[int, Field(ge=1, le=3_600)]
+    weight_evidence_storage: EvidenceStorageConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.weight_evidence_storage is None:
+            value.pop("weight_evidence_storage", None)
+        return value
+
+    @model_validator(mode="after")
+    def storage_version(self) -> Self:
+        if (self.weight_evidence_storage is not None) != (
+            self.schema_ == "umi-successor-worker-execution-limits/2"
+        ):
+            raise ValueError("evidence storage requires versioned installed limits")
+        return self
 
 
 class SuccessorInstallationReceipt(StrictProtocolModel):
@@ -1458,6 +1477,8 @@ def _validate_worker_execution_bindings(
         raise HostActivationError("worker execution config expands the selected profile")
     if weights is None:
         return
+    if weights.evidence_storage != limits.weight_evidence_storage:
+        raise HostActivationError("worker evidence storage differs from sealed installation")
     if (
         weights.maximum_attempts > limits.maximum_weight_attempts
         or weights.maximum_evidence_bytes > limits.maximum_weight_evidence_bytes

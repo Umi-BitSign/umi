@@ -35,6 +35,8 @@ from .competition_chain_state import (
     validate_owned_weight_observation,
 )
 from .competition_container import PodmanSuccessorContainer
+from .competition_evidence_reader import evidence_reader
+from .competition_evidence_worker import ContentAddressedWeightWorker
 from .competition_host_activation import (
     AuthenticatedSuccessorActivation,
     AuthenticatedSuccessorWorkerInputs,
@@ -621,10 +623,15 @@ class ProductionSuccessorRuntimeAdapter:
         if not path.exists() or not lock.exists():
             raise SuccessorAdapterError("successor weight journal is incomplete")
         ceiling = self.installation.worker_execution_limits
+        storage = ceiling.weight_evidence_storage
         with _read_worker_database(
             path,
             lock,
-            ceiling.maximum_weight_evidence_bytes
+            (
+                ceiling.maximum_weight_evidence_bytes
+                if storage is None
+                else storage.maximum_database_bytes
+            )
             + ceiling.maximum_weight_attempts * _MAX_ATTEMPT_BYTES
             + 1024**2,
         ) as db:
@@ -633,6 +640,13 @@ class ProductionSuccessorRuntimeAdapter:
             ).fetchone()
             if count > ceiling.maximum_weight_attempts or maximum > _MAX_ATTEMPT_BYTES:
                 raise SuccessorAdapterError("successor attempt journal exceeds its bounds")
+            read_evidence = evidence_reader(
+                db,
+                storage=storage,
+                validator_hotkey=self.config.validator_hotkey,
+                maximum_attempts=ceiling.maximum_weight_attempts,
+                maximum_evidence_bytes=ceiling.maximum_weight_evidence_bytes,
+            )
             result = {}
             for identity, raw, checksum in db.execute("SELECT id,body,sha256 FROM attempts"):
                 if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != checksum:
@@ -642,17 +656,7 @@ class ProductionSuccessorRuntimeAdapter:
                     attempt.validator_hotkey
                 ) != account_id32(self.config.validator_hotkey):
                     raise SuccessorAdapterError("successor attempt identity changed")
-                size = db.execute(
-                    "SELECT length(body) FROM evidence WHERE sha256=?",
-                    (attempt.chain_evidence_sha256,),
-                ).fetchone()
-                if size is None or not 0 < size[0] <= 32 * 1024**2:
-                    raise SuccessorAdapterError("successor attempt evidence is absent or oversized")
-                evidence = db.execute(
-                    "SELECT body FROM evidence WHERE sha256=?", (attempt.chain_evidence_sha256,)
-                ).fetchone()[0]
-                if hashlib.sha256(evidence).hexdigest() != attempt.chain_evidence_sha256:
-                    raise SuccessorAdapterError("successor attempt evidence is corrupt")
+                read_evidence(attempt.chain_evidence_sha256)
                 result[identity] = attempt
             return result
 
@@ -708,22 +712,25 @@ class ProductionSuccessorRuntimeAdapter:
                 raise SuccessorAdapterError("weight attempt lacks its retained signed authority")
             if attempt.phase in _TERMINAL:
                 continue
-            prepared = self._verify(
-                *records[binding[0]], recovery_packages=recovery_packages
-            )
+            prepared = self._verify(*records[binding[0]], recovery_packages=recovery_packages)
             execution = prepared.execution.weights
             replay = CompetitionReplayWorker(
                 self.root / "preflight-replay",
                 package_limits=prepared.selection.signed.directive.replay_package.limits,
                 capacity=self.installation.worker_execution_limits.replay_capacity_ceiling,
             )
-            worker = CompetitionWeightWorker(
+            storage = execution.evidence_storage
+            worker_type = (
+                CompetitionWeightWorker if storage is None else ContentAddressedWeightWorker
+            )
+            worker = worker_type(
                 Path(self.config.worker_state_root) / "competition" / "weights",
                 package_limits=prepared.selection.signed.directive.replay_package.limits,
                 replay_worker=replay,
                 maximum_attempts=execution.maximum_attempts,
                 maximum_evidence_bytes=execution.maximum_evidence_bytes,
                 submission_timeout_seconds=execution.submission_timeout_seconds,
+                **({} if storage is None else storage.worker_options()),
             )
             outcome, current = await worker.reconcile_stopped(
                 prepared.files.package_path,
@@ -900,13 +907,18 @@ class ProductionSuccessorRuntimeAdapter:
                 package_limits=selection.signed.directive.replay_package.limits,
                 capacity=prepared.execution.replay_capacity,
             )
-            CompetitionWeightWorker(
+            storage = execution.evidence_storage
+            worker_type = (
+                CompetitionWeightWorker if storage is None else ContentAddressedWeightWorker
+            )
+            worker_type(
                 competition / "weights",
                 package_limits=selection.signed.directive.replay_package.limits,
                 replay_worker=replay,
                 maximum_attempts=execution.maximum_attempts,
                 maximum_evidence_bytes=execution.maximum_evidence_bytes,
                 submission_timeout_seconds=execution.submission_timeout_seconds,
+                **({} if storage is None else storage.worker_options()),
             )
         self._retain(prepared)  # Durable source/authority identity before any worker start.
         activation = await self.materializer.activate(

@@ -167,7 +167,10 @@ def test_source_rewrite_or_lock_replacement_blocks_receipt(preparation, monkeypa
 
 
 @pytest.mark.parametrize("stage", ["uncommitted", "committed", "receipt"])
-def test_kill_leaves_original_recoverable_and_never_selects_candidate(preparation, stage):
+@pytest.mark.parametrize("resumable", [False, True])
+def test_kill_leaves_original_recoverable_and_never_selects_candidate(
+    preparation, stage, resumable
+):
     item = preparation
     before = item.path.read_bytes()
     script = """
@@ -210,18 +213,26 @@ module.prepare_legacy_candidate(Path(source),Path(target),expected_source_sha256
     )
     assert result.returncode == -signal.SIGKILL, result.stderr.decode()
     assert item.path.read_bytes() == before
+    if resumable:
+        # Resume immediately, while a killed transaction can still have a hot
+        # rollback journal. No test helper repairs SQLite first.
+        first = prepare(item, resume=True)
     with sqlite3.connect(item.candidate / item.path.name) as db:
         assert db.execute("PRAGMA quick_check").fetchall() == [("ok",)]
         tables = db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        assert bool(tables) is (stage != "uncommitted")
+        assert bool(tables) is (resumable or stage != "uncommitted")
     receipt = item.candidate / "evidence-preparation.json"
-    assert receipt.exists() is (stage == "receipt")
+    assert receipt.exists() is (resumable or stage == "receipt")
     if receipt.exists():
         assert not json.loads(receipt.read_bytes())["activation_authorized"]
     with pytest.raises(FileExistsError):
         prepare(item)
-    item.candidate = item.candidate.with_name("retry-candidate")
-    assert not prepare(item)["activation_authorized"]
+    if resumable:
+        assert first == prepare(item, resume=True)
+        assert not first["activation_authorized"]
+    else:
+        item.candidate = item.candidate.with_name("retry-candidate")
+        assert not prepare(item)["activation_authorized"]
     assert item.path.read_bytes() == before
 
 
@@ -232,3 +243,76 @@ def test_candidate_profile_binds_recovery_allowance(preparation):
         db.execute("BEGIN")
         with pytest.raises(ValueError, match="profile changed"):
             bind_worker_profile(db, replace(item.options["profile"], recovery_observations=15))
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ["profile", "source", "history", "evidence", "plan", "extra", "receipt", "unrecorded"],
+)
+def test_resume_never_adopts_changed_candidate_or_source(preparation, changed):
+    item = preparation
+    prepare(item)
+    original = item.path.read_bytes()
+    options = {}
+    if changed == "profile":
+        options["profile"] = replace(item.options["profile"], recovery_observations=15)
+    elif changed == "source":
+        with sqlite3.connect(item.path) as db:
+            db.execute("UPDATE highwater SET block=124")
+    elif changed in {"history", "evidence"}:
+        with sqlite3.connect(item.candidate / item.path.name) as db:
+            if changed == "history":
+                db.execute("UPDATE highwater SET block=124")
+            else:
+                db.execute("UPDATE weight_proof_objects SET body=?", (b"changed",))
+    elif changed == "extra":
+        (item.candidate / "unexpected").touch(mode=0o600)
+    elif changed == "plan":
+        (item.candidate / "evidence-preparation-plan.json").write_bytes(b"{}")
+    elif changed == "unrecorded":
+        (item.candidate / "evidence-preparation-plan.json").unlink()
+    else:
+        (item.candidate / "evidence-preparation.json").write_bytes(b"{}")
+    with pytest.raises(ValueError):
+        prepare(item, resume=True, **options)
+    if changed != "source":
+        assert item.path.read_bytes() == original
+
+
+@pytest.mark.parametrize("name", ["evidence-preparation-plan.json", "evidence-preparation.json"])
+def test_resume_finishes_only_its_exact_interrupted_control(preparation, name):
+    item = preparation
+    if name == "evidence-preparation.json":
+        result = prepare(item)
+        path = item.candidate / name
+        raw = path.read_bytes()
+        path.unlink()
+        pending = item.candidate / ("." + name + ".pending")
+        pending.touch(mode=0o600)
+        pending.write_bytes(raw[:50])
+        assert prepare(item, resume=True) == result
+    else:
+        # The directory may have been fsynced just before the first plan write.
+        item.candidate.mkdir(mode=0o700)
+        pending = item.candidate / ("." + name + ".pending")
+        pending.touch(mode=0o600)
+        pending.write_bytes(b'{"candidate_root":')
+        assert not prepare(item, resume=True)["activation_authorized"]
+    assert not pending.exists()
+
+
+def test_preparation_cli_can_resume_without_wallet_network_or_selection(preparation):
+    item = preparation
+    receipt = prepare(item)
+    command = [
+        sys.executable,
+        "-m",
+        "umi.competition_evidence_prepare_cli",
+        "--plan",
+        str(item.candidate / "evidence-preparation-plan.json"),
+        "--resume",
+    ]
+    result = subprocess.run(command, capture_output=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr.decode()
+    assert json.loads(result.stdout) == receipt
+    assert not receipt["activation_authorized"] and not receipt["source_selection_changed"]

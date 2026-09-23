@@ -410,6 +410,24 @@ async def test_candidate_exhaustion_holds_before_signing(weight_case, monkeypatc
         assert db.execute("SELECT COUNT(*) FROM attempts").fetchone() == (0,)
 
 
+async def test_candidate_physical_reservation_holds_before_signing(weight_case, monkeypatch):
+    from .evidence_worker_cases import use_candidate
+
+    item = weight_case
+    use_candidate(item)
+    item.worker.maximum_database_bytes = 1024**2
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("physical capacity failure reached signing")
+
+    monkeypatch.setattr(item.transport, "encode", forbidden)
+    with pytest.raises(ValueError, match="physical capacity"):
+        await _run(item)
+    assert not item.encoded
+    with item.worker._db() as db:
+        assert db.execute("SELECT COUNT(*) FROM attempts").fetchone() == (0,)
+
+
 async def test_migrated_unknown_attempt_recovers_without_resending(stopped_weight_case):
     from .evidence_worker_cases import use_candidate
 

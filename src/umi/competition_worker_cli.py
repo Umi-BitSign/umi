@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_chain import CompetitionChainConfig
@@ -24,6 +24,8 @@ from .competition_chain_state import (
     FinalizedCompetitionWeightProvider,
     validate_owned_weight_observation,
 )
+from .competition_evidence_config import EvidenceStorageConfig
+from .competition_evidence_worker import ContentAddressedWeightWorker
 from .competition_package import load_competition_package
 from .competition_weights import (
     BittensorCompetitionWeightTransport,
@@ -55,6 +57,14 @@ class SuccessorWeightExecutionConfig(StrictProtocolModel):
     maximum_evidence_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)]
     submission_timeout_seconds: Annotated[int, Field(ge=1, le=3600)]
     chain: CompetitionChainConfig
+    evidence_storage: EvidenceStorageConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.evidence_storage is None:
+            value.pop("evidence_storage", None)
+        return value
 
     @model_validator(mode="after")
     def fixed_paths_and_target(self) -> Self:
@@ -86,9 +96,22 @@ class SuccessorWeightExecutionConfig(StrictProtocolModel):
 class SuccessorWorkerExecutionConfig(StrictProtocolModel):
     """Per-run settings authenticated by the host within installed quota ceilings."""
 
-    schema_: Literal["umi-successor-worker-execution-config/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-successor-worker-execution-config/1", "umi-successor-worker-execution-config/2"
+    ] = Field(alias="schema")
     replay_capacity: CompetitionWorkerCapacity
     weights: SuccessorWeightExecutionConfig | None
+
+    @model_validator(mode="after")
+    def storage_version(self) -> Self:
+        if self.weights is not None and (
+            (self.weights.evidence_storage is not None)
+            != (self.schema_ == "umi-successor-worker-execution-config/2")
+        ):
+            raise ValueError(
+                "evidence storage requires an explicit execution configuration version"
+            )
+        return self
 
 
 def _load_hotkey(expected_hotkey: str):
@@ -230,13 +253,16 @@ async def run_worker(mode: Literal["competition_replay", "competition_weights"])
             raise ValueError("successor activation changed during observer startup")
         signer = _load_hotkey(inputs.validator_hotkey)
         inputs.recheck()
-        worker = CompetitionWeightWorker(
+        storage = config.weights.evidence_storage
+        worker_type = CompetitionWeightWorker if storage is None else ContentAddressedWeightWorker
+        worker = worker_type(
             WORKER_WEIGHTS_STATE_ROOT,
             package_limits=target.limits,
             replay_worker=replay,
             maximum_attempts=config.weights.maximum_attempts,
             maximum_evidence_bytes=config.weights.maximum_evidence_bytes,
             submission_timeout_seconds=config.weights.submission_timeout_seconds,
+            **({} if storage is None else storage.worker_options()),
         )
         return await worker.run(
             WORKER_PACKAGE_ROOT,

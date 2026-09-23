@@ -1,7 +1,7 @@
-"""Candidate worker backend, with no production entrypoint or authority bypass.
+"""Candidate worker backend selected by explicit authenticated storage profiles.
 
-Selection requires a future authenticated host execution/storage profile. The
-existing CLI and signed release/package equality checks deliberately stay intact.
+Selection requires version 2 host execution/storage inputs. Signed release,
+package and historical-host authorization checks deliberately stay intact.
 This class can operate on a prepared candidate or a fresh empty private journal;
 it never migrates an existing legacy journal in place.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 
 from .competition_evidence_store import EvidenceBudget, EvidenceStore, observation_reservation
@@ -61,9 +62,32 @@ def bind_worker_profile(db, profile: EvidenceWorkerProfile, *, create=False):
 
 
 class ContentAddressedWeightWorker(CompetitionWeightWorker):
-    def __init__(self, *args, evidence_profile: EvidenceWorkerProfile, **kwargs):
+    def __init__(
+        self,
+        *args,
+        evidence_profile: EvidenceWorkerProfile,
+        maximum_database_bytes: int = 16 * 1024**3,
+        **kwargs,
+    ):
+        if (
+            type(maximum_database_bytes) is not int
+            or not 1024**2 <= maximum_database_bytes <= 16 * 1024**3
+        ):
+            raise ValueError("explicit bounded evidence database capacity required")
+        self.maximum_database_bytes = maximum_database_bytes
         self.evidence_profile = evidence_profile
         super().__init__(*args, **kwargs)
+
+    @contextmanager
+    def _db(self):
+        with super()._db() as db:
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            pages = self.maximum_database_bytes // page_size
+            if db.execute("PRAGMA page_count").fetchone()[0] > pages:
+                raise ValueError("evidence database already exceeds its physical ceiling")
+            if db.execute(f"PRAGMA max_page_count={pages}").fetchone()[0] != pages:
+                raise ValueError("evidence database physical ceiling could not be installed")
+            yield db
 
     def _initialize_evidence(self, db):
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='evidence'").fetchone():
@@ -133,6 +157,22 @@ class ContentAddressedWeightWorker(CompetitionWeightWorker):
         # attempts retain their allowance and can replenish one recovery proof
         # only if capacity permits. Neither path can resend existing signed bytes.
         store.ensure_reservation(authorization_id, observation_reservation(count))
+        self._check_physical_reservations(db, store)
+
+    def _check_physical_reservations(self, db, store):
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        occupied = db.execute("PRAGMA page_count").fetchone()[0] * page_size
+        # Conservative allowance for payload/overflow plus table and index
+        # pages for each reserved object/record, without counting free pages or
+        # dedup savings. Host-wide rollback/disk reservation remains separate.
+        allowance = sum(
+            budget.stored_bytes * 2
+            + budget.objects * 2 * page_size
+            + budget.records * 4 * page_size
+            for budget in store._reservations().values()
+        )
+        if occupied + allowance + 1024**2 > self.maximum_database_bytes:
+            raise ValueError("evidence physical capacity cannot retain reserved recovery")
 
     def _save(self, attempt):
         with self._db() as db:
@@ -141,6 +181,7 @@ class ContentAddressedWeightWorker(CompetitionWeightWorker):
                 required = observation_reservation(2 + self.evidence_profile.recovery_observations)
                 if remaining is None or not remaining.contains(required):
                     raise ValueError("post-signing and recovery evidence space is not reserved")
+                self._check_physical_reservations(db, self._store(db))
             self._save_to_db(db, attempt)
 
     def _recover(self, attempt, body, hotkey, observation, row, *, database=None):
