@@ -262,6 +262,8 @@ def _revised_targets(
     elif operation == "close_phase":
         if state.phase in {"intake", "requests"} and observed_at_block < target:
             raise ValueError("cannot shorten an announced participant window")
+        if state.phase == "reference_reveal" and observed_at_block <= state.observed_at_block:
+            raise ValueError("reference reveal must follow the preceding phase observation")
         # Late completion preserves every following phase's existing budget.
         # The target of the closed phase remains historical; completion time is
         # separately recorded, rather than backdating it to the old target.

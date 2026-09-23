@@ -15,6 +15,7 @@ from typing import Literal, TypeVar
 
 from pydantic import Field
 
+from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_recovery import (
     CohortRecoveryGenesis,
     CohortRecoveryState,
@@ -29,7 +30,7 @@ from .competition_cohort_recovery import (
     propose_recovery_transition,
     verify_recovery_quorum,
 )
-from .open_competition import CompetitionPolicy, digest
+from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
@@ -194,6 +195,43 @@ class CohortRecoveryStore:
         with self._transaction():
             _, state, pending = self._load(cohort)
             return state, pending
+
+    def export_history(
+        self,
+        cohort: str,
+        *,
+        genesis_signatures: tuple[Signature, ...],
+    ) -> CohortRecoveryHistory:
+        """Export committed history only, requiring quorum-certified admission.
+
+        The caller must retain the admission signatures separately and publish
+        the returned tip through its authenticated, monotonic publication path.
+        A local pending signature reservation is never a committed extension.
+        """
+        with self._transaction():
+            binding, state, _ = self._load(cohort)
+            records = self.db.execute(
+                "SELECT substr(certificate,1,65537) FROM cohort_recovery_decisions "
+                "WHERE cohort=? AND certificate IS NOT NULL ORDER BY sequence",
+                (cohort,),
+            )
+            history = CohortRecoveryHistory(
+                schema="umi-cohort-recovery-history/1",
+                plan=binding.plan,
+                authority=binding.authority,
+                genesis=binding.genesis,
+                genesis_signatures=genesis_signatures,
+                transitions=tuple(
+                    _decode(SignedCohortRecoveryTransition, raw, 64 * 1024) for (raw,) in records
+                ),
+            )
+            verify_cohort_history(
+                history,
+                binding.policy,
+                expected_tip_sha256=state.tip_sha256,
+                current_block=state.observed_at_block,
+            )
+            return history
 
     def reserve(
         self,

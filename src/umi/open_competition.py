@@ -948,9 +948,18 @@ def replay_evaluation(
     validate_evaluation_suite(attested, round_, suite, policy)
     if not round_.reveal_block <= current_block <= round_.valid_through_block:
         raise ValueError("evaluation is premature or expired")
+    return score_evaluation_outputs(attested.result, suite, policy)
+
+
+def score_evaluation_outputs(
+    result: EvaluationResult,
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+) -> tuple[dict[str, Fraction], dict[str, Fraction]]:
+    """Recompute quality; callers separately authenticate identity and phase authority."""
     return (
-        _quality(attested.result.candidate, suite, policy),
-        _quality(attested.result.incumbent, suite, policy, incumbent=True),
+        _quality(result.candidate, suite, policy),
+        _quality(result.incumbent, suite, policy, incumbent=True),
     )
 
 
