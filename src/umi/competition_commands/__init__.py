@@ -4,7 +4,7 @@ from argparse import Namespace
 from collections.abc import Callable
 
 from ..open_competition import CompetitionPolicy
-from . import evidence, host, models, runtime_port, services, store, submissions
+from . import cohorts, evidence, host, models, runtime_port, services, store, submissions
 
 CommandHandler = Callable[[Namespace, CompetitionPolicy], dict]
 
@@ -21,6 +21,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "fetch-initial-successor-history": host.fetch_initial_successor_history,
     "fix-evidence-cutoff": store.fix_evidence_cutoff,
     "initialize-baseline": store.initialize_baseline,
+    "initialize-cohort-intake": cohorts.initialize_intake,
     "inspect-host-upgrade": host.inspect_host_upgrade,
     "inspect-policy": evidence.inspect_policy,
     "prepare-endpoint-incumbent": models.prepare_endpoint_incumbent,
@@ -52,10 +53,12 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "settle-round": store.settle_round,
     "settlement-status": store.settlement_status,
     "sign-assignment-query": submissions.sign_assignment_query,
+    "sign-cohort-consent": cohorts.sign_consent,
     "sign-dependence-calibration": evidence.sign_dependence_calibration,
     "sign-submission": submissions.sign_submission,
     "status": store.status,
     "submit": submissions.submit,
+    "submit-cohort-consent": cohorts.submit_consent,
     "verify-bundle": models.verify_bundle,
     "verify-cutoff-publication": evidence.verify_cutoff_publication,
     "verify-miner-feed-profile": submissions.verify_miner_feed_profile,

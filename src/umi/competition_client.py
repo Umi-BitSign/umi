@@ -96,6 +96,48 @@ async def submit_signed_submission(
     if len(body) > MAX_SUBMISSION_BYTES:
         raise ValueError("signed submission exceeds intake byte limit")
 
+    raw = await post_intake_document(
+        origin=origin, path="/v1/competition/submissions", body=body, transport=transport
+    )
+    try:
+        receipt = AdmissionReceipt.model_validate_json(raw)
+    except ValueError as error:
+        raise CompetitionSubmissionError("invalid_receipt") from error
+    sub = signed.submission
+    if (
+        receipt.policy_sha256 != digest(policy)
+        or receipt.submission_sha256 != digest(sub)
+        or receipt.observed_uid >= policy.maximum_uids
+        or not sub.valid_from_block <= receipt.accepted_block <= sub.valid_through_block
+        or not policy.valid_from_block <= receipt.accepted_block <= policy.valid_through_block
+        or digest(receipt.registration_snapshot) != receipt.registration_snapshot_sha256
+    ):
+        raise CompetitionSubmissionError("receipt_binding_mismatch")
+    try:
+        observed_uid = validate_admission(
+            signed, policy, receipt.registration_snapshot, receipt.accepted_block
+        )
+    except ValueError as error:
+        raise CompetitionSubmissionError("receipt_registration_mismatch") from error
+    if observed_uid != receipt.observed_uid:
+        raise CompetitionSubmissionError("receipt_registration_mismatch")
+    return receipt
+
+
+async def post_intake_document(
+    *,
+    origin: str,
+    path: str,
+    body: bytes,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> bytes:
+    """Send one bounded document to a fixed intake path; never retry or re-sign."""
+    origin = validate_intake_origin(origin)
+    if not path.startswith("/v1/competition/") or any(c in path for c in "?#\\"):
+        raise ValueError("invalid competition intake path")
+    if len(body) > MAX_SUBMISSION_BYTES:
+        raise ValueError("signed submission exceeds intake byte limit")
+
     async def send() -> bytes:
         async with (
             httpx.AsyncClient(
@@ -106,7 +148,7 @@ async def submit_signed_submission(
             ) as client,
             client.stream(
                 "POST",
-                origin + "/v1/competition/submissions",
+                origin + path,
                 content=body,
                 headers={
                     "Content-Type": "application/json",
@@ -133,29 +175,6 @@ async def submit_signed_submission(
             return bytes(chunks)
 
     try:
-        raw = await asyncio.wait_for(send(), timeout=25)
+        return await asyncio.wait_for(send(), timeout=25)
     except (httpx.HTTPError, asyncio.TimeoutError) as error:
         raise CompetitionSubmissionError("intake_transport_unavailable") from error
-    try:
-        receipt = AdmissionReceipt.model_validate_json(raw)
-    except ValueError as error:
-        raise CompetitionSubmissionError("invalid_receipt") from error
-    sub = signed.submission
-    if (
-        receipt.policy_sha256 != digest(policy)
-        or receipt.submission_sha256 != digest(sub)
-        or receipt.observed_uid >= policy.maximum_uids
-        or not sub.valid_from_block <= receipt.accepted_block <= sub.valid_through_block
-        or not policy.valid_from_block <= receipt.accepted_block <= policy.valid_through_block
-        or digest(receipt.registration_snapshot) != receipt.registration_snapshot_sha256
-    ):
-        raise CompetitionSubmissionError("receipt_binding_mismatch")
-    try:
-        observed_uid = validate_admission(
-            signed, policy, receipt.registration_snapshot, receipt.accepted_block
-        )
-    except ValueError as error:
-        raise CompetitionSubmissionError("receipt_registration_mismatch") from error
-    if observed_uid != receipt.observed_uid:
-        raise CompetitionSubmissionError("receipt_registration_mismatch")
-    return receipt

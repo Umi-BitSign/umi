@@ -17,6 +17,7 @@ from typing_extensions import Self
 
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
 from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
@@ -67,6 +68,7 @@ class CompetitionServiceConfig(StrictProtocolModel):
     historical_archives: Annotated[tuple[IntakeArchiveConfig, ...], Field(max_length=8)] = ()
     public_results_sources: Annotated[tuple[PublicResultsSource, ...], Field(max_length=1024)] = ()
     public_results_directory: PublicResultsDirectory | None = None
+    recoverable_intake: CohortIntakeConfig | None = None
     # Deal-preserving predecessor policy files, newest first. Their signed submissions
     # stay admitted in this same ledger (see competition_policy_lineage). Distinct from
     # historical_archives, which is the terms-change path that archives a predecessor.
@@ -79,6 +81,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
         value = handler(self)
         if self.public_results_directory is None:
             value.pop("public_results_directory", None)
+        if self.recoverable_intake is None:
+            value.pop("recoverable_intake", None)
         return value
 
     @model_validator(mode="after")
@@ -99,6 +103,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
         # Keep SQLite, its independent rollback anchor, and the finality cache in
         # separate operator-managed directory trees and backup failure domains.
         roots = (state.resolve(), checkpoint.resolve(), chain_state.resolve())
+        if self.recoverable_intake is not None:
+            roots += (Path(self.recoverable_intake.directory).resolve(),)
         if any(
             left == right or left in right.parents or right in left.parents
             for index, left in enumerate(roots)
@@ -224,9 +230,25 @@ def create_intake_app(
         baseline_promotion_sha256=config.retained_state.baseline_promotion_sha256,
         required_submission_sha256s=config.retained_state.required_submission_sha256s,
     )
+    cohort_intake = (
+        None
+        if config.recoverable_intake is None
+        else CohortIntake(
+            config.recoverable_intake,
+            policy,
+            eligible_tracks=config.public_deployment.eligible_tracks,
+            capacity=config.admission_capacity,
+        )
+    )
+
+    def retained_registration_blocks():
+        return store.retained_registration_blocks() | (
+            frozenset() if cohort_intake is None else cohort_intake.retained_registration_blocks()
+        )
+
     provider = (
         FinalizedRegistrationProvider(
-            config.chain, policy, retained_capture_blocks=store.retained_registration_blocks
+            config.chain, policy, retained_capture_blocks=retained_registration_blocks
         )
         if provider_factory is None
         else provider_factory(config.chain, policy)
@@ -267,7 +289,12 @@ def create_intake_app(
         historical_archives=historical_archives,
         public_results_sources=config.public_results_sources,
         public_results_directory=config.public_results_directory,
+        cohort_intake=cohort_intake,
+        cohort_capture_provider=(
+            finality_cache.collect_for_cohort_recovery if cohort_intake is not None else None
+        ),
     )
+    app.state.cohort_intake = cohort_intake
     app.state.finality_providers = (provider,)
     app.state.registration_snapshot_cache = finality_cache
     app.state.historical_intake_archives = historical_archives

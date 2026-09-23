@@ -65,6 +65,30 @@ class CohortParticipantAdmission(StrictProtocolModel):
     uid: Annotated[int, Field(ge=0, le=255)]
 
 
+class CohortParticipationRequest(StrictProtocolModel):
+    signed_submission: SignedSubmission
+    consent: SignedCohortParticipationConsent
+
+    @model_validator(mode="after")
+    def exact_contribution(self) -> Self:
+        sub, consent = self.signed_submission.submission, self.consent.consent
+        if consent.submission_sha256 != digest(sub) or identity(consent.hotkey) != identity(
+            sub.hotkey
+        ):
+            raise ValueError("cohort consent belongs to another submission or hotkey")
+        return self
+
+
+class CohortParticipationReceipt(StrictProtocolModel):
+    schema_: Literal["umi-cohort-participation-receipt/1"] = Field(alias="schema")
+    status: Literal["pending_attestation"]
+    proposed_admission: CohortParticipantAdmission
+    record_sha256: Hex32
+    certified: Literal[False]
+    rewards_active: Literal[False]
+    chain_submission_authorized: Literal[False]
+
+
 class AttestedCohortParticipantAdmission(StrictProtocolModel):
     admission: CohortParticipantAdmission
     signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]

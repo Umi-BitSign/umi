@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Literal, TypeVar
+from typing import Annotated, Literal, TypeVar
 
 from pydantic import Field
 
@@ -48,6 +48,11 @@ class _DecisionKey(StrictProtocolModel):
     phase: Phase
     operation: RecoveryOperation
     evidence_sha256: Hex32
+
+
+class _PublishedGenesis(StrictProtocolModel):
+    genesis: CohortRecoveryGenesis
+    signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
 
 
 def _decision_key(cohort: str, phase: Phase, operation: RecoveryOperation, evidence: str) -> str:
@@ -92,6 +97,8 @@ class CohortRecoveryStore:
             self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_recovery_sources (
                 cohort TEXT NOT NULL, digest TEXT NOT NULL, body BLOB NOT NULL,
                 PRIMARY KEY(cohort,digest))""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_published_genesis (
+                cohort TEXT PRIMARY KEY, body BLOB NOT NULL)""")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -198,6 +205,98 @@ class CohortRecoveryStore:
         with self._transaction():
             _, state, pending = self._load(cohort)
             return state, pending
+
+    def publish_history(
+        self, history: CohortRecoveryHistory, policy: CompetitionPolicy, *, current_block: int
+    ) -> CohortRecoveryState:
+        """Atomically adopt a complete certified history in a consumer's ledger.
+
+        The service owner authenticates the configured cohort and supplies owned
+        finality. A signed older prefix or a fork never replaces the retained
+        tip. No intermediate prefix becomes visible during a multi-step import.
+        This consumer path does not replace the coordinator's signing journal.
+        """
+        history = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(history))
+        tip = digest(history.transitions[-1].transition if history.transitions else history.genesis)
+        view = verify_cohort_history(
+            history, policy, expected_tip_sha256=tip, current_block=current_block
+        )
+        cohort = view.state.cohort_sha256
+        binding = _Binding(
+            schema="umi-cohort-recovery-binding/1",
+            plan=history.plan,
+            authority=history.authority,
+            policy=policy,
+            genesis=history.genesis,
+        )
+        raw = canonical_json_bytes(binding)
+        _decode(_Binding, raw, 512 * 1024)
+        genesis = canonical_json_bytes(
+            _PublishedGenesis(genesis=history.genesis, signatures=history.genesis_signatures)
+        )
+        with self._transaction():
+            prior = self.db.execute(
+                "SELECT substr(body,1,524289) FROM cohort_recovery_bindings WHERE cohort=?",
+                (cohort,),
+            ).fetchone()
+            if prior is not None and prior[0] != raw:
+                raise ValueError("published cohort differs from its retained binding")
+            self.db.execute(
+                "INSERT OR IGNORE INTO cohort_recovery_bindings VALUES (?,?)", (cohort, raw)
+            )
+            _, state, pending = self._load(cohort)
+            if pending is not None:
+                raise ValueError("consumer publication cannot replace a pending signing decision")
+            if state.sequence > view.state.sequence:
+                raise ValueError("published cohort history rolls back its retained tip")
+            for signed in history.transitions:
+                transition = signed.transition
+                encoded = canonical_json_bytes(transition)
+                prior = self.db.execute(
+                    "SELECT substr(body,1,16385) FROM cohort_recovery_decisions "
+                    "WHERE cohort=? AND sequence=?",
+                    (cohort, transition.sequence),
+                ).fetchone()
+                if prior is not None:
+                    if prior[0] != encoded:
+                        raise ValueError("published cohort history forks its retained decisions")
+                    continue
+                self.db.execute(
+                    "INSERT INTO cohort_recovery_decisions VALUES (?,?,?,?,?)",
+                    (
+                        cohort,
+                        transition.sequence,
+                        _decision_key(
+                            cohort,
+                            transition.phase,
+                            transition.operation,
+                            transition.evidence_sha256,
+                        ),
+                        encoded,
+                        canonical_json_bytes(signed),
+                    ),
+                )
+            self.db.execute(
+                "INSERT OR IGNORE INTO cohort_published_genesis VALUES (?,?)", (cohort, genesis)
+            )
+            _, state, _ = self._load(cohort)
+            if state != view.state:
+                raise ValueError("published cohort tip differs after import")
+            return state
+
+    def published_history(self, cohort: str) -> CohortRecoveryHistory:
+        with self._transaction():
+            row = self.db.execute(
+                "SELECT substr(body,1,65537) FROM cohort_published_genesis WHERE cohort=?",
+                (cohort,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("cohort has no published admission")
+            genesis = _decode(_PublishedGenesis, row[0], 64 * 1024)
+            binding, _, _ = self._load(cohort)
+            if genesis.genesis != binding.genesis:
+                raise ValueError("published admission differs from the retained cohort")
+        return self.export_history(cohort, genesis_signatures=genesis.signatures)
 
     def retain_source(self, cohort: str, value: StrictProtocolModel) -> str:
         """Retain decision input before reservation; consumers authenticate its meaning."""

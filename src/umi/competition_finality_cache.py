@@ -215,6 +215,22 @@ class VerifiedRegistrationCache:
 
     async def collect_fresh(self) -> RegistrationCapture:
         """Return one newly collected capture, sharing an existing collection."""
+        return self._remember(await self._collect_raw())
+
+    async def collect_for_cohort_recovery(self) -> RegistrationCapture:
+        """Collect owned fresh evidence outside the legacy policy interval.
+
+        The caller must separately verify the admitted recovery authority,
+        current cohort history and explicit miner consent. This method does not
+        admit legacy submissions or relax head freshness and proof validation.
+        """
+        raw = await self._collect_raw()
+        self._require_open()
+        capture = self._validate(raw, require_current_policy=False)
+        self._check_head_age(capture)
+        return capture
+
+    async def _collect_raw(self) -> RegistrationCapture:
         self._require_open()
         async with self._guard:
             self._require_open()
@@ -235,8 +251,7 @@ class VerifiedRegistrationCache:
         # cancels it nor logs its eventual exception; the completion callback
         # consumes that exception without exposing private provider details.
         await asyncio.wait((task,))
-        raw = task.result()
-        return self._remember(raw)
+        return task.result()
 
     def _collection_finished(self, task: asyncio.Task) -> None:
         # The event loop invokes callbacks serially. Clear even when every
@@ -299,17 +314,22 @@ class VerifiedRegistrationCache:
         age = self._monotonic() - cached.verified_monotonic
         if not 0 <= age <= self._maximum_age:
             raise VerifiedCaptureUnavailable("verified registration capture is stale")
-        timestamp_ms = cached.capture.provenance["timestamp_ms"]
+        self._check_head_age(cached.capture)
+        return cached.capture
+
+    def _check_head_age(self, capture: RegistrationCapture) -> None:
+        timestamp_ms = capture.provenance["timestamp_ms"]
         wall_age_ms = self._wall_clock_ms() - timestamp_ms
         if not -self._maximum_future_skew_ms <= wall_age_ms <= self._maximum_head_age_ms:
             raise VerifiedCaptureUnavailable("verified registration head is stale")
-        return cached.capture
 
-    def _validate(self, raw: Any) -> RegistrationCapture:
+    def _validate(self, raw: Any, *, require_current_policy: bool = True) -> RegistrationCapture:
         if not isinstance(raw, RegistrationCapture):
             raise ValueError("registration provider returned another capture type")
         snapshot = RegistrationSnapshot.model_validate_json(canonical_json_bytes(raw.snapshot))
-        if not self._policy.valid_from_block <= snapshot.block <= self._policy.valid_through_block:
+        if require_current_policy and not (
+            self._policy.valid_from_block <= snapshot.block <= self._policy.valid_through_block
+        ):
             raise ValueError("intake policy is not current")
         provenance = {
             key: value for key, value in raw.provenance.items() if key in PROVENANCE_FIELDS

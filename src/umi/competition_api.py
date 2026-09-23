@@ -17,6 +17,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, Response
 from starlette.types import Lifespan
 
+from .competition_chain import RegistrationCapture
+from .competition_cohort_api import cohort_routes
+from .competition_cohort_intake import CohortIntake
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
 from .competition_public_results import PublicResultsSource, public_results_page
@@ -63,6 +66,8 @@ def create_app(
     historical_archives: tuple[LoadedIntakeArchive, ...] = (),
     public_results_sources: tuple[PublicResultsSource, ...] = (),
     public_results_directory: PublicResultsDirectory | None = None,
+    cohort_intake: CohortIntake | None = None,
+    cohort_capture_provider: Callable[[], Awaitable[RegistrationCapture]] | None = None,
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
@@ -100,6 +105,16 @@ def create_app(
     )
     app = FastAPI(title=title, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.competition_store = store
+    if cohort_intake is not None:
+        if registration_source != "verifier_attested_finality" or cohort_capture_provider is None:
+            raise ValueError("recoverable intake requires its owned finality capture provider")
+        if digest(cohort_intake.policy) != digest(store.policy):
+            raise ValueError("recoverable intake and base intake use different policies")
+        app.include_router(
+            cohort_routes(
+                cohort_intake, cohort_capture_provider, maximum_body_bytes=MAX_SUBMISSION_BYTES
+            )
+        )
     public_results_sources = tuple(
         PublicResultsSource.model_validate_json(canonical_json_bytes(source))
         for source in public_results_sources
@@ -121,7 +136,10 @@ def create_app(
     async def bound_public_requests(request: Request, call_next):
         if request.url.path == "/v1/competition/readiness":
             capacity = capacities["readiness"]
-        elif request.method == "POST" and request.url.path == "/v1/competition/submissions":
+        elif request.method == "POST" and (
+            request.url.path == "/v1/competition/submissions"
+            or request.url.path.startswith("/v1/competition/cohorts/")
+        ):
             capacity = capacities["submission"]
         else:
             capacity = capacities["read"]

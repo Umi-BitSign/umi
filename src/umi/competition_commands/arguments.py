@@ -31,6 +31,23 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("inspect-policy")
     intake = commands.add_parser("serve-intake")
     intake.add_argument("--config", required=True)
+    recoverable = commands.add_parser("initialize-cohort-intake")
+    recoverable.add_argument("--config", required=True)
+    consent = commands.add_parser("sign-cohort-consent")
+    for name in (
+        "consent",
+        "submission",
+        "history",
+        "expected-tip-sha256",
+        "wallet-name",
+        "hotkey-name",
+        "wallet-path",
+    ):
+        consent.add_argument("--" + name, required=True)
+    consent.add_argument("--current-block", type=int, required=True)
+    participation = commands.add_parser("submit-cohort-consent")
+    participation.add_argument("--request", required=True)
+    participation.add_argument("--origin", required=True)
     rounds = commands.add_parser("serve-round-coordinator")
     rounds.add_argument("--config", required=True)
     rounds.add_argument("--legacy-policy")
