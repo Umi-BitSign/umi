@@ -4,8 +4,16 @@
   for current miner release, policy and download details, linked from the README
   and role index. Test changed commands and download hashes, and check internal
   links before publishing. Do not add dated incident reports or community replies
-  to the public repository. Link retired instructions at fixed Git revisions from
-  docs/reference/legacy.md rather than leaving competing setup guides.
+  to the public repository. Write from the current operator's perspective. Remove
+  superseded guides, expired block schedules and completed deployment narratives;
+  Git history holds the chronology. Keep migration instructions only while a
+  deployed consumer needs them, and state the condition for removing them.
+- Preserve exact signed terms, artifacts and evidence. Link an older specification
+  at its fixed Git revision only where verification or recovery still needs it;
+  do not maintain a general catalogue of retired workflows.
+- Check each change for unused code and duplicated documentation. Before removing
+  code, check imports, command entry points, deployed services and recovery/replay
+  consumers. An elapsed block boundary alone does not make a decoder unused.
 
 - Keep command entry points separate from policy, pure calculations, and I/O.
   Use explicit imports and typed boundaries; do not add runtime import tricks to

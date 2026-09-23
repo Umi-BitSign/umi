@@ -27,8 +27,7 @@ into successive public baselines.
 ## Network phase
 
 The temporary registration bridge uses live HTTPS health checks and shared
-coldkey/IP/funding groups. It does not score translations. The public-endpoint
-pilot is closed. The ongoing bridge policy has no scheduled calendar sunset;
+coldkey/IP/funding groups. It does not score translations. The ongoing bridge policy has no scheduled calendar sunset;
 historical finite policies retain their original expiry.
 
 Public competition intake is live for endpoint submissions only. Use the
@@ -78,12 +77,7 @@ The public model lives in
 [umi-reference-model](https://github.com/Umi-BitSign/umi-reference-model).
 Product planning lives under [bitsign MVP](roadmap/bitsign-mvp/README.md).
 
-## Historical material and license
-
-[Retired runbooks and dated deployment reports](docs/reference/legacy.md) are
-available at their preserved Git revision. They are not current installation
-instructions. The [version 0.1 specification](whitepaper/LEGACY_V0_1.md) remains
-available for interpreting old signed evidence.
+## License
 
 UMI-authored code is [Apache-2.0](LICENSE). See
 [third-party notices](THIRD_PARTY_NOTICES.md) for inherited terms.

@@ -24,12 +24,3 @@ def test_public_pilot_caddy_proxy_is_bounded_and_exact() -> None:
     assert "encode " not in config
     assert "header_up" not in config
     assert "rewrite" not in config
-
-
-def test_public_pilot_runbook_does_not_invite_new_probes() -> None:
-    runbook = (ROOT / "docs" / "PUBLIC_ENDPOINT_MINER_PILOT.md").read_text()
-
-    assert "Public-endpoint pilot is closed" in runbook
-    assert "CURRENT_MINER_OPERATION.md" in runbook
-    assert "OPEN_COMPETITION.md" in runbook
-    assert "```" not in runbook

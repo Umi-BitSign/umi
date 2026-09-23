@@ -2,9 +2,9 @@
 
 # Current miner connection guide
 
-**Cohort 4 uses policy 8. You can prepare your miner now.** Its roster starts at finalized block **9,120,990**, followed by four hours for work preparation and a **24-hour evaluation-request window on a 48-hour cohort cadence**. Wall-clock times are estimates; finalized blocks control the schedule.
+**Cohort 4 uses policy 8**, with a **24-hour evaluation-request window on a 48-hour cohort cadence**. Finalized blocks control the schedule; use [public status](https://api.umi.vision/v1/competition/status) for the active phase and next intake.
 
-Intake is open. Coordinator service cutover and reward-path verification are still in progress. Check [live readiness](https://api.umi.vision/v1/competition/readiness) for assignment delivery and evaluation status. The downloaded deployment file is a preparation snapshot with both readiness flags false; it is not a live status feed. Competition scores and reward activation are separate.
+Intake, assignment delivery and evaluation run on the coordinator. Check [live readiness](https://api.umi.vision/v1/competition/readiness) before diagnosing assignment delivery. The downloaded deployment file is a preparation snapshot with readiness flags false; it is not a live status feed. Reward certification and native activation remain pending and are separate from scores.
 
 Accepted endpoint submissions under policies 5, 6 or 7 can carry forward while their registration, terms and validity remain eligible. Updating this configuration alone does not require another intake submission. Keep your existing wallet, hotkey, model revision and submitted origin.
 

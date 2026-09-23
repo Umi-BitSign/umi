@@ -43,14 +43,8 @@ for endpoint service, subject to the service deadline and applicable terms.
 A promoted model must run with its archived dependencies and no external
 inference service. Future tasks require their own evaluation and reward policy.
 
-The frozen two-miner pilot bootstrap is retired. Its signed manifest and
-historical evidence remain unchanged; see the
-[bootstrap addendum](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and
-[shared-validator supersession](../docs/reference/legacy.md#shared-validator-bootstrap-supersession).
-It was replaced by the separately signed
-[temporary registration bridge](../docs/operators/bridge.md).
-The [September 13 deployment record](../docs/reference/legacy.md#registration-bridge-funding-cap-2026-09-13)
-records funding-grouped bridge rows finalized by validators UID 0 and UID 54.
+The [temporary registration bridge](../docs/operators/bridge.md) supplies live
+miner rewards until competition weights activate through certified settlement.
 
 The bridge checks registered miners' chain-announced HTTPS health endpoints.
 Prior pilot participation and a running translation model are not required.

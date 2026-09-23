@@ -86,7 +86,7 @@ class DocumentationNavigationTests(unittest.TestCase):
         contributor_guide = (ROOT / "docs/contributors/models.md").read_text()
         self.assertIn("Public competition intake is live", readme)
         self.assertIn("main` branch is reviewed source, not an activation signal", readme)
-        self.assertIn("Public first-round competition intake is", docs_index)
+        self.assertIn("Public competition intake is", docs_index)
         self.assertNotIn(
             "Open-competition intake and rewards are not active yet", contributor_guide
         )
