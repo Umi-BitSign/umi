@@ -8,13 +8,22 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from umi.competition_cohort_coordinator import (
+    AttestedCohortPhaseProgress,
+    CohortDecisionInput,
+    CohortPhaseProgress,
+)
+from umi.competition_cohort_history import verify_cohort_history
 from umi.competition_cohort_intake import (
     CohortIntake,
     CohortIntakeBinding,
     CohortIntakeConfig,
     CohortIntakePublisher,
+    history_tip,
 )
 from umi.competition_cohort_participation import CohortParticipationRequest
+from umi.competition_cohort_recovery import propose_recovery_transition
+from umi.competition_execution import execution_boundary
 from umi.competition_service import create_intake_app
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
@@ -23,6 +32,7 @@ from .test_competition_chain import chain_config as chain_config
 from .test_competition_cohort_consumers import scenario as scenario
 from .test_competition_cohort_consumers import transition
 from .test_competition_cohort_recovery import recovery as recovery
+from .test_competition_cohort_recovery import signatures, signed_transition
 from .test_competition_service import Provider
 from .test_competition_service import config as config
 from .test_competition_service import public_deployment as public_deployment
@@ -75,6 +85,44 @@ def request_for(scenario, *, sequence=1, block=200):
     return CohortParticipationRequest(signed_submission=signed, consent=consent)
 
 
+def seal_and_close(intake, scenario, *, block=300):
+    policy = scenario["policy"]
+    cohort = digest(scenario["intake_history"].plan)
+    history = intake.history(cohort)
+    tip = history_tip(history)
+    seal = intake.seal(cohort, capture_at(block), expected_tip_sha256=tip)
+    progress = CohortPhaseProgress(
+        schema="umi-cohort-phase-progress/1",
+        cohort_sha256=cohort,
+        recovery_tip_sha256=tip,
+        phase="intake",
+        observed_at_block=block,
+        unavailable_blocks=0,
+        completion="complete",
+        phase_result_sha256=digest(seal),
+        evidence_sha256=digest(seal),
+    )
+    evidence = CohortDecisionInput(
+        schema="umi-cohort-decision-input/1",
+        progress=AttestedCohortPhaseProgress(progress=progress, signatures=signatures(progress)),
+        observation=execution_boundary(capture_at(block)),
+    )
+    state = verify_cohort_history(
+        history, policy, expected_tip_sha256=tip, current_block=block
+    ).state
+    closing = propose_recovery_transition(
+        state,
+        history.authority.authority,
+        operation="close_phase",
+        observed_at_block=block,
+        evidence_sha256=digest(evidence),
+    )
+    closed = history.model_copy(
+        update={"transitions": (*history.transitions, signed_transition(closing))}
+    )
+    return closed, evidence, seal
+
+
 def test_extended_intake_retains_explicit_consent_beyond_original_expiry(intake, scenario):
     history = transition(
         scenario["intake_history"], scenario["policy"], "extend", 1600, extension=1200
@@ -95,8 +143,8 @@ def test_extended_intake_retains_explicit_consent_beyond_original_expiry(intake,
 def test_closed_intake_rejects_new_work_but_keeps_exact_receipt(intake, scenario):
     request = request_for(scenario)
     receipt = intake.retain(request, capture_at(210))
-    history = transition(scenario["intake_history"], scenario["policy"], "close_phase", 300)
-    intake.publish(history, capture_at(310))
+    history, evidence, _ = seal_and_close(intake, scenario)
+    intake.publish(history, capture_at(310), closure_input=evidence)
     assert intake.receipt(request) == receipt
     with pytest.raises(ValueError, match="not open"):
         intake.retain(request_for(scenario, sequence=2, block=310), capture_at(310))
@@ -119,17 +167,20 @@ def test_published_history_cannot_roll_back_or_fork(intake, scenario):
 
 def test_failed_multiphase_import_is_atomic(intake, scenario):
     cohort = digest(scenario["intake_history"].plan)
+    intake.retain(request_for(scenario), capture_at(210))
+    closed, evidence, _ = seal_and_close(intake, scenario)
+    complete = transition(closed, scenario["policy"], "close_phase", 400)
     path = Path(intake.config.directory) / "intake.sqlite3"
     with sqlite3.connect(path) as db:
         db.execute("""CREATE TRIGGER stop_import BEFORE INSERT ON cohort_recovery_decisions
             WHEN NEW.sequence=2 BEGIN SELECT RAISE(ABORT,'simulated interruption'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="interruption"):
-        intake.publish(scenario["history"], capture_at(1800))
+        intake.publish(complete, capture_at(1800), closure_input=evidence)
     assert intake.history(cohort) == scenario["intake_history"]
     with sqlite3.connect(path) as db:
         db.execute("DROP TRIGGER stop_import")
-    intake.publish(scenario["history"], capture_at(1800))
-    assert intake.history(cohort) == scenario["history"]
+    intake.publish(complete, capture_at(1800), closure_input=evidence)
+    assert intake.history(cohort) == complete
 
 
 def test_no_silent_state_recreation_or_configuration_rebinding(intake, scenario):
@@ -222,8 +273,8 @@ def test_publication_cannot_retroactively_invalidate_accepted_work(intake, scena
     with pytest.raises(ValueError, match="predates retained"):
         intake.publish(history, capture_at(320))
     assert intake.receipt(request) == receipt
-    current = transition(scenario["intake_history"], scenario["policy"], "close_phase", 320)
-    intake.publish(current, capture_at(320))
+    current, evidence, _ = seal_and_close(intake, scenario, block=320)
+    intake.publish(current, capture_at(320), closure_input=evidence)
     assert intake.receipt(request) == receipt
 
 

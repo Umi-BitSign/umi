@@ -15,24 +15,35 @@ import stat
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import closing, contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
 from .competition_chain import RegistrationCapture
+from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_history import CohortRecoveryHistory
+from .competition_cohort_intake_records import (
+    RetainedCohortParticipation,
+    read_participation,
+    replay_participation,
+)
+from .competition_cohort_intake_seal import (
+    CohortIntakeSeal,
+    build_intake_seal,
+    verify_intake_closure,
+)
 from .competition_cohort_participation import (
-    CohortParticipantAdmission,
     CohortParticipationReceipt,
     CohortParticipationRequest,
     admit_recovery_participant,
 )
 from .competition_cohort_recovery_store import CohortRecoveryStore
-from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacity, AdmissionCapacityError
 from .concurrency import run_owned_thread
-from .open_competition import CompetitionPolicy, RegistrationSnapshot, digest, identity
+from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
@@ -56,12 +67,8 @@ class CohortIntakeConfig(StrictProtocolModel):
         return self
 
 
-class _RetainedParticipation(StrictProtocolModel):
-    schema_: Literal["umi-retained-cohort-participation/1"] = Field(alias="schema")
-    request: CohortParticipationRequest
-    proposed_admission: CohortParticipantAdmission
-    snapshot: RegistrationSnapshot
-    observation: ExecutionBoundary
+class CohortIntakeFenced(OSError):
+    """This generation is frozen while its certified closure is being published."""
 
 
 def history_tip(history: CohortRecoveryHistory) -> str:
@@ -71,12 +78,35 @@ def history_tip(history: CohortRecoveryHistory) -> str:
 class CohortIntakePublisher:
     """Native publication port; the service owns capture-provider lifecycle."""
 
-    def __init__(self, intake: CohortIntake, capture: Callable[[], Awaitable[RegistrationCapture]]):
-        self.intake, self.capture = intake, capture
+    def __init__(
+        self,
+        intake: CohortIntake,
+        capture: Callable[[], Awaitable[RegistrationCapture]],
+        decision_source: Callable[[str, str], Awaitable[CohortDecisionInput]] | None = None,
+    ):
+        self.intake, self.capture, self.decision_source = intake, capture, decision_source
 
     async def __call__(self, history: CohortRecoveryHistory) -> None:
         capture = await self.capture()
-        await run_owned_thread(self.intake.publish, history, capture)
+        closure = next(
+            (
+                s.transition
+                for s in history.transitions
+                if s.transition.phase == "intake" and s.transition.operation == "close_phase"
+            ),
+            None,
+        )
+        if closure is None:
+            await run_owned_thread(self.intake.publish, history, capture)
+        else:
+            if self.decision_source is None:
+                raise ValueError("intake closure publication requires retained decision evidence")
+            # The source owns its connection and execution context. Moving its
+            # callback to our worker thread can violate SQLite thread ownership.
+            evidence = await self.decision_source(digest(history.plan), closure.evidence_sha256)
+            await run_owned_thread(
+                partial(self.intake.publish, history, capture, closure_input=evidence)
+            )
 
 
 class CohortIntake:
@@ -189,6 +219,9 @@ class CohortIntake:
                         track TEXT NOT NULL, sequence INTEGER NOT NULL, observed INTEGER NOT NULL,
                         recovery_tip TEXT NOT NULL,
                         body BLOB NOT NULL, UNIQUE(cohort,hotkey,track,sequence))""")
+                    db.execute("""CREATE TABLE IF NOT EXISTS cohort_intake_seals (
+                        cohort TEXT NOT NULL, tip TEXT NOT NULL, body BLOB NOT NULL,
+                        PRIMARY KEY(cohort,tip))""")
                     store = CohortRecoveryStore(db)
                     parent = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                     try:
@@ -212,7 +245,13 @@ class CohortIntake:
         if cohort not in self.bindings:
             raise ValueError("cohort is not configured for recoverable intake")
 
-    def publish(self, history: CohortRecoveryHistory, capture: RegistrationCapture):
+    def publish(
+        self,
+        history: CohortRecoveryHistory,
+        capture: RegistrationCapture,
+        *,
+        closure_input: CohortDecisionInput | None = None,
+    ):
         cohort = digest(history.plan)
         self._allowed(cohort)
         observation = execution_boundary(capture)
@@ -238,6 +277,15 @@ class CohortIntake:
                         "published history predates retained participation; "
                         "fence intake before closing"
                     )
+            for signed in history.transitions:
+                closing = signed.transition
+                if closing.phase == "intake" and closing.operation == "close_phase":
+                    seal = self._seal(db, history, closing.predecessor_sha256)
+                    if seal is None or closure_input is None:
+                        raise ValueError(
+                            "intake closure requires a retained seal and decision evidence"
+                        )
+                    verify_intake_closure(seal, closing, closure_input, self.policy)
             return store.publish_history(history, self.policy, current_block=observation.block)
 
     def history(self, cohort: str) -> CohortRecoveryHistory:
@@ -246,44 +294,13 @@ class CohortIntake:
             return store.published_history(cohort)
 
     def _receipt(self, raw: bytes, store: CohortRecoveryStore, request: CohortParticipationRequest):
-        if len(raw) > 4 * 1024 * 1024:
-            raise ValueError("retained cohort participation exceeds its byte bound")
-        retained = _RetainedParticipation.model_validate_json(raw)
-        if canonical_json_bytes(retained) != raw:
-            raise ValueError("retained cohort consent is not canonical")
+        retained = read_participation(raw)
         proposed = retained.proposed_admission
         if digest(retained.request.consent.consent) != digest(request.consent.consent) or digest(
             retained.request.signed_submission.submission
         ) != digest(request.signed_submission.submission):
             raise ValueError("retained cohort participation belongs to another request")
-        history = store.published_history(proposed.cohort_sha256)
-        tips = [digest(history.genesis), *(digest(s.transition) for s in history.transitions)]
-        if proposed.recovery_tip_sha256 not in tips:
-            raise ValueError("retained cohort consent is not in the published history")
-        index = tips.index(proposed.recovery_tip_sha256)
-        if (
-            index < len(history.transitions)
-            and proposed.admitted_at_block > history.transitions[index].transition.observed_at_block
-        ):
-            raise ValueError("retained cohort consent used a superseded intake observation")
-        original = history.model_copy(update={"transitions": history.transitions[:index]})
-        expected = admit_recovery_participant(
-            retained.request.signed_submission,
-            retained.request.consent,
-            original,
-            self.policy,
-            retained.snapshot,
-            expected_tip_sha256=proposed.recovery_tip_sha256,
-            current_block=proposed.admitted_at_block,
-        )
-        if (
-            expected != proposed
-            or retained.observation.block != proposed.admitted_at_block
-            or retained.observation.snapshot_sha256 != digest(retained.snapshot)
-            or retained.observation.block != retained.snapshot.block
-            or retained.observation.block_hash != retained.snapshot.block_hash
-        ):
-            raise ValueError("retained cohort consent registration evidence differs")
+        replay_participation(retained, store.published_history(proposed.cohort_sha256), self.policy)
         return CohortParticipationReceipt(
             schema="umi-cohort-participation-receipt/1",
             status="pending_attestation",
@@ -321,6 +338,14 @@ class CohortIntake:
             if prior is not None:
                 return self._receipt(prior[0], store, request)
             history = store.published_history(cohort)
+            if (
+                db.execute(
+                    "SELECT 1 FROM cohort_intake_seals WHERE cohort=? AND tip=?",
+                    (cohort, history_tip(history)),
+                ).fetchone()
+                is not None
+            ):
+                raise CohortIntakeFenced("cohort intake is sealed; retry the same request")
             proposed = admit_recovery_participant(
                 request.signed_submission,
                 request.consent,
@@ -340,7 +365,7 @@ class CohortIntake:
                 or observation.block - previous[1] < self.policy.minimum_submission_interval_blocks
             ):
                 raise ValueError("cohort submission sequence or registration interval regressed")
-            retained = _RetainedParticipation(
+            retained = RetainedCohortParticipation(
                 schema="umi-retained-cohort-participation/1",
                 request=request,
                 proposed_admission=proposed,
@@ -373,8 +398,102 @@ class CohortIntake:
             )
             return self._receipt(raw, store, request)
 
+    def _records(self, db, history):
+        tips = {digest(history.genesis), *(digest(s.transition) for s in history.transitions)}
+        for consent, tip, raw in db.execute(
+            "SELECT consent,recovery_tip,substr(body,1,4194305) FROM cohort_consents "
+            "WHERE cohort=? ORDER BY consent",
+            (digest(history.plan),),
+        ):
+            retained = read_participation(raw)
+            if (
+                retained.proposed_admission.recovery_tip_sha256 != tip
+                or retained.proposed_admission.cohort_sha256 != digest(history.plan)
+            ):
+                raise ValueError("retained consent index differs from its body")
+            if tip in tips:
+                yield consent, raw
+
+    def _seal(self, db, history, tip):
+        row = db.execute(
+            "SELECT substr(body,1,4194305) FROM cohort_intake_seals WHERE cohort=? AND tip=?",
+            (digest(history.plan), tip),
+        ).fetchone()
+        if row is None:
+            return None
+        raw = row[0]
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError("retained intake seal exceeds its byte bound")
+        seal = CohortIntakeSeal.model_validate_json(raw)
+        if canonical_json_bytes(seal) != raw:
+            raise ValueError("retained intake seal is not canonical")
+        tips = [digest(history.genesis), *(digest(s.transition) for s in history.transitions)]
+        if tip not in tips:
+            raise ValueError("sealed intake does not belong to the current history")
+        prefix = history.model_copy(update={"transitions": history.transitions[: tips.index(tip)]})
+        expected = build_intake_seal(
+            prefix,
+            self.policy,
+            seal.observation,
+            seal.snapshot,
+            self._records(db, prefix),
+            expected_tip_sha256=tip,
+        )
+        if seal != expected:
+            raise ValueError("retained intake seal differs from its original records")
+        return seal
+
+    def sealed(self, cohort: str, tip: str | None = None) -> CohortIntakeSeal | None:
+        self._allowed(cohort)
+        with self._connection() as (db, store):
+            history = store.published_history(cohort)
+            return self._seal(db, history, history_tip(history) if tip is None else tip)
+
+    def seal(
+        self,
+        cohort: str,
+        capture: RegistrationCapture,
+        *,
+        expected_tip_sha256: str,
+    ) -> CohortIntakeSeal:
+        """Atomically freeze this generation; completion still requires quorum review.
+
+        Call only after the native availability observer has restored the intake
+        window. A certified extension can admit more work at a new tip; a closed
+        phase cannot reopen. Retry returns the same seal after an outage.
+        """
+        self._allowed(cohort)
+        observation = execution_boundary(capture)
+        with self._connection() as (db, store):
+            history = store.published_history(cohort)
+            prior = self._seal(db, history, expected_tip_sha256)
+            if prior is not None:
+                return prior
+            if history_tip(history) != expected_tip_sha256:
+                raise ValueError("intake history changed before sealing; retry current generation")
+            result = build_intake_seal(
+                history,
+                self.policy,
+                observation,
+                capture.snapshot,
+                self._records(db, history),
+                expected_tip_sha256=expected_tip_sha256,
+            )
+            raw = canonical_json_bytes(result)
+            if len(raw) > 4 * 1024 * 1024:
+                raise AdmissionCapacityError("intake seal needs additional durable capacity")
+            # The process lock serializes this commit with retain() and publish().
+            db.execute(
+                "INSERT INTO cohort_intake_seals VALUES (?,?,?)", (cohort, expected_tip_sha256, raw)
+            )
+            return result
+
     def retained_registration_blocks(self) -> frozenset[int]:
         with self._connection() as (db, _):
             return frozenset(
-                row[0] for row in db.execute("SELECT DISTINCT observed FROM cohort_consents")
+                [row[0] for row in db.execute("SELECT DISTINCT observed FROM cohort_consents")]
+                + [
+                    CohortIntakeSeal.model_validate_json(row[0]).observation.block
+                    for row in db.execute("SELECT substr(body,1,4194305) FROM cohort_intake_seals")
+                ]
             )
