@@ -81,9 +81,13 @@ class HistoricalRegistrationProvider(FinalizedRegistrationProvider):
         finally:
             db.close()
 
-    async def review_retained(self, expected: ExecutionBoundary) -> HistoricalRegistration:
+    async def retained_archive(self, expected: ExecutionBoundary) -> tuple[bytes, bytes]:
+        """Return exact retained bytes; callers must review them before signing."""
         expected = ExecutionBoundary.model_validate_json(canonical_json_bytes(expected))
-        raw, metadata = await run_owned_thread(self._retained_archive, expected)
+        return await run_owned_thread(self._retained_archive, expected)
+
+    async def review_retained(self, expected: ExecutionBoundary) -> HistoricalRegistration:
+        raw, metadata = await self.retained_archive(expected)
         return await self.review_archive(expected, raw, metadata)
 
     async def review_archive(
