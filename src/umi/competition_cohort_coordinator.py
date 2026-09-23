@@ -19,7 +19,7 @@ from pydantic import Field, model_validator
 from typing_extensions import Self
 
 from .competition_chain import RegistrationCapture
-from .competition_cohort_history import CohortRecoveryHistory
+from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_recovery import (
     PHASES,
     Block,
@@ -122,6 +122,64 @@ def _choice(
     ), restored_now
 
 
+def replay_cohort_decisions(
+    history: CohortRecoveryHistory,
+    policy: CompetitionPolicy,
+    decision_source: Callable[[str], CohortDecisionInput],
+) -> tuple[CohortRecoveryState, int, int]:
+    """Authenticate progress and recover exact phase-local outage compensation.
+
+    Signed target differences alone cannot distinguish outage compensation from
+    ordinary scheduling margin. Consumers need the original decision inputs.
+    """
+    history = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(history))
+    last = history.transitions[-1].transition if history.transitions else history.genesis
+    verify_cohort_history(
+        history,
+        policy,
+        expected_tip_sha256=digest(last),
+        current_block=(
+            history.transitions[-1].transition.observed_at_block
+            if history.transitions
+            else history.genesis.admitted_at_block
+        ),
+    )
+    if history.plan.policy_sha256 != digest(policy):
+        raise ValueError("cohort coordinator policy differs from its admitted policy")
+    _, state = admit_recoverable_cohort(
+        history.plan,
+        history.authority,
+        policy,
+        admitted_at_block=history.genesis.admitted_at_block,
+    )
+    restored = prior_unavailable = 0
+    for signed in history.transitions:
+        if signed.transition.operation == "revoke":
+            # Explicit revocation has separate quorum authorization. It is
+            # never inferred from stalled work or an unavailable observer.
+            state = apply_recovery_transition(state, signed, history.authority, policy)
+            restored = prior_unavailable = 0
+            continue
+        evidence = decision_source(signed.transition.evidence_sha256)
+        expected, credit = _choice(
+            state,
+            history.authority.authority,
+            policy,
+            evidence,
+            restored,
+            prior_unavailable,
+        )
+        if signed.transition != expected:
+            raise ValueError("retained phase decision differs from its authenticated progress")
+        updated = apply_recovery_transition(state, signed, history.authority, policy)
+        restored = restored + credit if updated.phase == state.phase else 0
+        prior_unavailable = (
+            evidence.progress.progress.unavailable_blocks if updated.phase == state.phase else 0
+        )
+        state = updated
+    return state, restored, prior_unavailable
+
+
 class RecoveryFinality(Protocol):
     async def collect(self) -> RegistrationCapture: ...
 
@@ -164,41 +222,11 @@ class CohortRecoveryCoordinator:
 
     def _history(self) -> tuple[CohortRecoveryHistory, CohortRecoveryState, int, int]:
         history = self.store.export_history(self.cohort, genesis_signatures=self.genesis_signatures)
-        if history.plan.policy_sha256 != digest(self.policy):
-            raise ValueError("cohort coordinator policy differs from its admitted policy")
-        _, state = admit_recoverable_cohort(
-            history.plan,
-            history.authority,
+        state, restored, prior_unavailable = replay_cohort_decisions(
+            history,
             self.policy,
-            admitted_at_block=history.genesis.admitted_at_block,
+            lambda key: self.store.source(self.cohort, key, CohortDecisionInput),
         )
-        restored = prior_unavailable = 0
-        for signed in history.transitions:
-            if signed.transition.operation == "revoke":
-                # Explicit revocation has separate quorum authorization. It is
-                # never inferred from stalled work or an unavailable observer.
-                state = apply_recovery_transition(state, signed, history.authority, self.policy)
-                restored = prior_unavailable = 0
-                continue
-            evidence = self.store.source(
-                self.cohort, signed.transition.evidence_sha256, CohortDecisionInput
-            )
-            expected, credit = _choice(
-                state,
-                history.authority.authority,
-                self.policy,
-                evidence,
-                restored,
-                prior_unavailable,
-            )
-            if signed.transition != expected:
-                raise ValueError("retained phase decision differs from its authenticated progress")
-            updated = apply_recovery_transition(state, signed, history.authority, self.policy)
-            restored = restored + credit if updated.phase == state.phase else 0
-            prior_unavailable = (
-                evidence.progress.progress.unavailable_blocks if updated.phase == state.phase else 0
-            )
-            state = updated
         return history, state, restored, prior_unavailable
 
     async def tick(self) -> dict:

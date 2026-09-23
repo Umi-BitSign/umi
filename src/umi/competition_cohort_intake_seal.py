@@ -29,6 +29,10 @@ from .open_competition import (
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
+class EmptyCohortIntake(ValueError):
+    """No currently registered participant can be selected; keep intake open."""
+
+
 class CohortIntakeSelection(StrictProtocolModel):
     consent_sha256: Hex32
     submission_sha256: Hex32
@@ -123,6 +127,8 @@ def build_intake_seal(
             selected[slot] = selection
         elif prior.sequence == selection.sequence:
             raise ValueError("sealed intake contains conflicting submission sequences")
+    if not selected:
+        raise EmptyCohortIntake("intake has no eligible selected participants")
     return CohortIntakeSeal(
         schema="umi-cohort-intake-seal/1",
         cohort_sha256=digest(history.plan),

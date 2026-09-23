@@ -13,6 +13,7 @@ lock. Changing capacity may unblock collection without expiring any evidence.
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -69,6 +70,18 @@ def pending_availability_progress(
     )
 
 
+class CohortServiceEpoch:
+    """One service lifetime, shared across its short-lived database connections."""
+
+    def __init__(self):
+        self._pid, self._identity = os.getpid(), uuid.uuid4().hex
+
+    def identity(self) -> str:
+        if self._pid != os.getpid():
+            raise ValueError("service epoch cannot be inherited by another process")
+        return self._identity
+
+
 class CohortServiceAvailability:
     def __init__(
         self,
@@ -77,6 +90,7 @@ class CohortServiceAvailability:
         *,
         maximum_sample_gap_blocks: int = 10,
         maximum_bytes: int = 256 * 1024**2,
+        epoch: CohortServiceEpoch | None = None,
     ):
         if type(maximum_sample_gap_blocks) is not int or not 1 <= maximum_sample_gap_blocks <= 300:
             raise ValueError("service sampling gap must be between 1 and 300 blocks")
@@ -85,8 +99,9 @@ class CohortServiceAvailability:
         self.store, self.db = store, store.db
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.gap, self.maximum_bytes = maximum_sample_gap_blocks, maximum_bytes
-        # Reopening never credits unobserved time to the previous process.
-        self.epoch = uuid.uuid4().hex
+        # Hosts reopening a connection per operation retain one in-memory epoch.
+        # They must not recover it from durable state after a process restart.
+        self._epoch = epoch or CohortServiceEpoch()
         with self._transaction():
             self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_service_binding (
                 id INTEGER PRIMARY KEY CHECK(id=1), sample_gap INTEGER NOT NULL)""")
@@ -107,6 +122,10 @@ class CohortServiceAvailability:
 
     def _version(self) -> tuple[int, int]:
         return self.db.execute("PRAGMA data_version").fetchone()[0], self.db.total_changes
+
+    @property
+    def epoch(self) -> str:
+        return self._epoch.identity()
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:

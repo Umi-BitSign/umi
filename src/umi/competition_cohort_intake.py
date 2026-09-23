@@ -22,7 +22,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from .competition_chain import RegistrationCapture
-from .competition_cohort_coordinator import CohortDecisionInput
+from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_intake_records import (
     RetainedCohortParticipation,
@@ -103,6 +103,18 @@ class CohortIntakePublisher:
 
     async def __call__(self, history: CohortRecoveryHistory) -> None:
         capture = await self.capture()
+        if self.decision_source is not None:
+            inputs = tuple(
+                [
+                    await self.decision_source(digest(history.plan), s.transition.evidence_sha256)
+                    for s in history.transitions
+                    if s.transition.operation != "revoke"
+                ]
+            )
+            await run_owned_thread(
+                partial(self.intake.publish, history, capture, decision_inputs=inputs)
+            )
+            return
         closure = next(
             (
                 s.transition
@@ -111,17 +123,9 @@ class CohortIntakePublisher:
             ),
             None,
         )
-        if closure is None:
-            await run_owned_thread(self.intake.publish, history, capture)
-        else:
-            if self.decision_source is None:
-                raise ValueError("intake closure publication requires retained decision evidence")
-            # The source owns its connection and execution context. Moving its
-            # callback to our worker thread can violate SQLite thread ownership.
-            evidence = await self.decision_source(digest(history.plan), closure.evidence_sha256)
-            await run_owned_thread(
-                partial(self.intake.publish, history, capture, closure_input=evidence)
-            )
+        if closure is not None:
+            raise ValueError("intake closure publication requires retained decision evidence")
+        await run_owned_thread(self.intake.publish, history, capture)
 
 
 class CohortIntake:
@@ -266,12 +270,23 @@ class CohortIntake:
         capture: RegistrationCapture,
         *,
         closure_input: CohortDecisionInput | None = None,
+        decision_inputs: tuple[CohortDecisionInput, ...] | None = None,
     ):
         cohort = digest(history.plan)
         self._allowed(cohort)
         observation = execution_boundary(capture)
         if digest(history.authority.authority) != self.bindings[cohort]:
             raise ValueError("cohort history has another configured authority")
+        if decision_inputs is not None:
+            sources = {digest(e): e for e in decision_inputs}
+            required = {
+                s.transition.evidence_sha256
+                for s in history.transitions
+                if s.transition.operation != "revoke"
+            }
+            if sources.keys() != required or len(sources) != len(decision_inputs):
+                raise ValueError("published decision evidence is incomplete or repeated")
+            replay_cohort_decisions(history, self.policy, sources.__getitem__)
         with self._connection() as (db, store):
             tips = [digest(history.genesis), *(digest(s.transition) for s in history.transitions)]
             for tip, observed in db.execute(
@@ -295,6 +310,8 @@ class CohortIntake:
             for signed in history.transitions:
                 closing = signed.transition
                 if closing.phase == "intake" and closing.operation == "close_phase":
+                    if decision_inputs is not None:
+                        closure_input = sources[closing.evidence_sha256]
                     seal = self._seal(db, history, closing.predecessor_sha256)
                     if seal is None or closure_input is None:
                         raise ValueError(
@@ -303,7 +320,12 @@ class CohortIntake:
                     verify_intake_closure(seal, closing, closure_input, self.policy)
                     # Retain the closure input before publishing its referencing history.
                     store.retain_source(cohort, closure_input)
-            return store.publish_history(history, self.policy, current_block=observation.block)
+            state = store.publish_history(history, self.policy, current_block=observation.block)
+            # Retried publication fills any inputs lost after history adoption.
+            # Native phase observation refuses missing inputs in the meantime.
+            for evidence in decision_inputs or ():
+                store.retain_source(cohort, evidence)
+            return state
 
     def history(self, cohort: str) -> CohortRecoveryHistory:
         self._allowed(cohort)
