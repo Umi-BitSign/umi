@@ -86,3 +86,23 @@ def test_original_approval_does_not_authorize_worker_changes(staged, monkeypatch
         )
         is None
     )
+
+
+def test_overlay_accepts_only_the_two_explicit_amendments(staged, monkeypatch):
+    overlay, activation = prepared(staged, monkeypatch)
+    assert (
+        "successor_recipient_amendment_sha256" not in overlay.approval.worker_overlay.model_dump()
+    )
+    successor = {"fixture": "separately authenticated IP amendment"}
+    scope = overlay.approval.worker_overlay.model_copy(
+        update={"successor_recipient_amendment_sha256": digest(successor)}
+    )
+    updated = maintenance.ApprovedWorkerSourceOverlay(
+        overlay.approval.model_copy(update={"worker_overlay": scope}), overlay.root
+    )
+    assert updated.source_for(activation) == staged.path / "src/umi"
+    activation._inputs.authorization.authorization.continuation.recipient_amendment = successor
+    assert updated.source_for(activation) == staged.path / "src/umi"
+    activation._inputs.authorization.authorization.continuation.recipient_amendment = {"other": 2}
+    with pytest.raises(ValueError, match="approved package or amendment"):
+        updated.source_for(activation)

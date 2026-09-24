@@ -36,7 +36,7 @@ from umi.competition_settlement import (
     competition_settlement_digest,
 )
 from umi.competition_store import CompetitionStore
-from umi.open_competition import Evaluator, digest
+from umi.open_competition import Evaluator, digest, sign_object
 from umi.protocol import canonical_json_bytes
 
 from .test_open_competition import (
@@ -123,6 +123,8 @@ def _scenario(
     suite_factory=suite_for,
     successor_policy=None,
     predecessor_policies=None,
+    additional_endpoints=(),
+    endpoint_origin=None,
 ):
     archive = root / "archive"
     baseline = bundle_at(root / "baseline")
@@ -134,7 +136,14 @@ def _scenario(
 
     model = submission(policy, bundle=candidate)
     endpoint = submission(policy, name="Bob")
-    submissions = tuple(sorted((model, endpoint), key=lambda item: digest(item.submission)))
+    if endpoint_origin is not None:
+        body = endpoint.submission.model_copy(update={"endpoint_url": endpoint_origin})
+        endpoint = endpoint.model_copy(
+            update={"submission": body, "signature": sign_object(body, wallet("Bob"))}
+        )
+    submissions = tuple(
+        sorted((model, endpoint, *additional_endpoints), key=lambda item: digest(item.submission))
+    )
     for signed in submissions:
         store.admit(signed, snapshot_factory(), 110)
 

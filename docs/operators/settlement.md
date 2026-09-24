@@ -891,6 +891,19 @@ authorization. It does not submit weights. All consumers must support the new
 continuation before it is published. A valid newer certified package can still
 replace a held row without changing the original evidence.
 
+An explicit `umi-reward-recipient-amendment/2` can also group an endpoint-only
+allocation by the literal IP addresses in its certified, signed submissions.
+Ports do not create separate groups; IPv4-mapped IPv6 addresses use their IPv4
+identity. Each group's share uses its highest qualifying certified score, and
+the resulting group budget is divided equally among its qualifying UIDs.
+Integer rounding preserves the total endpoint budget and burn allocation.
+Current endpoint changes cannot alter the retained grouping. This amendment
+requires the model allocation to go to the policy's burn destination, preserves
+the preceding burn amendment, and binds its signed digest. The publisher retains
+both amendments and uses the grouping in subsequent renewals. Historical scores,
+certificates and payments are unchanged. Upgrade all consumers before publishing
+the new amendment; older consumers reject its schema.
+
 A threshold-signed continuity revocation durably stops new publisher leases.
 Already issued leases expire within the configured maximum write-authorization
 lifetime, normally 360 blocks. A native signed supervisor hold or local operator

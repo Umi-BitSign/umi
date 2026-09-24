@@ -25,7 +25,8 @@ class ApprovedWorkerSourceOverlay:
             or activation.release_identity.release_bundle_sha256 != scope.release_bundle_sha256
             or continuation is None
             or continuation.recipient_amendment is None
-            or digest(continuation.recipient_amendment) != scope.recipient_amendment_sha256
+            or digest(continuation.recipient_amendment)
+            not in {scope.recipient_amendment_sha256, scope.successor_recipient_amendment_sha256}
         ):
             raise ValueError("worker source maintenance differs from approved package or amendment")
         _read_tree(self.root, self.approval.signed_host.manifest)

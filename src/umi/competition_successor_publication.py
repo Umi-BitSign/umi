@@ -28,6 +28,7 @@ from .competition_reward_continuity import (
     RewardContinuation,
     SignedCertifiedAllocationAdmission,
     SignedRewardContinuityAuthority,
+    SignedRewardRecipientAmendment,
     admit_certified_allocation,
     verify_recipient_amendment,
     verify_reward_continuity_authority,
@@ -551,7 +552,9 @@ class SuccessorRoundPublicationBuilder:
         return package
 
     def recipient_amendment(self, package, *, block):
-        raw = self.journal.get("recipient_amendment", package.package_sha256)
+        raw = self.journal.get("ip_grouping_amendment", package.package_sha256)
+        if raw is None:
+            raw = self.journal.get("recipient_amendment", package.package_sha256)
         if raw is None:
             return None
         if self.plan.continuity is None:
@@ -581,13 +584,29 @@ class SuccessorRoundPublicationBuilder:
                 block=finalized_block,
             )
             old = self.journal.get("recipient_amendment", package.package_sha256)
+            slot = "recipient_amendment"
+            if signed.amendment.ip_groups is not None:
+                if old is None:
+                    raise ValueError("IP grouping requires its retained predecessor amendment")
+                predecessor = SignedRewardRecipientAmendment.model_validate(old["signed"])
+                before, after = predecessor.amendment, signed.amendment
+                if (
+                    after.predecessor_amendment_sha256 != digest(predecessor)
+                    or after.recipients != before.recipients
+                    or after.burn_destination != before.burn_destination
+                    or after.issued_at_block < before.issued_at_block
+                    or before.ip_groups is not None
+                ):
+                    raise ValueError("IP grouping changed its retained burn amendment")
+                slot = "ip_grouping_amendment"
+                old = self.journal.get(slot, package.package_sha256)
             if old is not None:
                 if canonical_json_bytes(old["signed"]) != canonical_json_bytes(signed):
                     raise ValueError("recipient amendment already retained with different bytes")
                 return
             self.journal.observe(finalized_block)
             self.journal.put(
-                "recipient_amendment",
+                slot,
                 package.package_sha256,
                 {
                     "signed": signed.model_dump(mode="json", by_alias=True),

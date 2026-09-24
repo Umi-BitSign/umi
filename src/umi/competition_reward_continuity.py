@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import bittensor as bt
-from pydantic import Field, model_serializer, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .competition_execution import ExecutionBoundary
+from .competition_ip_rewards import certified_ip_groups, endpoint_ip, grouped_endpoint_weights
 from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
 from .open_competition import Registration, Signature, digest
@@ -79,21 +80,72 @@ class SignedCertifiedAllocationAdmission(StrictProtocolModel):
     signature: Signature
 
 
+class RewardIPGroup(StrictProtocolModel):
+    ip: Annotated[str, Field(min_length=1, max_length=45)]
+    uids: Annotated[
+        tuple[Annotated[int, Field(ge=1, le=255)], ...], Field(min_length=1, max_length=255)
+    ]
+
+    @field_validator("uids", mode="before")
+    @classmethod
+    def json_sequence(cls, value):
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def canonical(self):
+        origin = "https://[" + self.ip + "]" if ":" in self.ip else "https://" + self.ip
+        if endpoint_ip(origin) != self.ip or self.uids != tuple(sorted(set(self.uids))):
+            raise ValueError("IP reward group must have a canonical IP and sorted unique UIDs")
+        return self
+
+
 class RewardRecipientAmendment(StrictProtocolModel):
-    schema_: Literal["umi-reward-recipient-amendment/1"] = Field(alias="schema")
+    schema_: Literal["umi-reward-recipient-amendment/1", "umi-reward-recipient-amendment/2"] = (
+        Field(alias="schema")
+    )
     authority_sha256: Hex32
     package_sha256: Hex32
     projection_sha256: Hex32
     issued_at_block: Block
-    action: Literal["burn_listed_recipient_allocations/1"]
+    action: Literal[
+        "burn_listed_recipient_allocations/1", "burn_then_best_score_ip_groups_equal_split/1"
+    ]
     recipients: Annotated[list[Registration], Field(min_length=1, max_length=255)]
     burn_destination: Registration
+    predecessor_amendment_sha256: Hex32 | None = None
+    ip_groups: Annotated[tuple[RewardIPGroup, ...], Field(min_length=1, max_length=255)] | None = (
+        None
+    )
+
+    @field_validator("ip_groups", mode="before")
+    @classmethod
+    def json_sequence(cls, value):
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_serializer(mode="wrap")
+    def original_bytes(self, handler):
+        value = handler(self)
+        if self.schema_ == "umi-reward-recipient-amendment/1":
+            value.pop("predecessor_amendment_sha256", None)
+            value.pop("ip_groups", None)
+        return value
 
     @model_validator(mode="after")
     def unique_recipients(self):
         uids = tuple(item.uid for item in self.recipients)
         if uids != tuple(sorted(set(uids))) or self.burn_destination.uid in uids:
             raise ValueError("recipient amendment has duplicate, unordered or burn recipients")
+        grouped = self.schema_ == "umi-reward-recipient-amendment/2"
+        if (
+            grouped != (self.action == "burn_then_best_score_ip_groups_equal_split/1")
+            or grouped != (self.ip_groups is not None)
+            or grouped != (self.predecessor_amendment_sha256 is not None)
+        ):
+            raise ValueError("IP grouping requires explicit version 2 and its predecessor")
+        if self.ip_groups is not None:
+            ips = tuple(group.ip for group in self.ip_groups)
+            if ips != tuple(sorted(set(ips))):
+                raise ValueError("IP reward groups must be unique and ordered")
         return self
 
 
@@ -342,7 +394,7 @@ class EffectiveRewardRow:
 
 
 def effective_reward_row(package, amendment=None):
-    """Apply an independently authorized burn without rewriting certified evidence."""
+    """Apply explicit forward reward amendments without rewriting certified evidence."""
     projection = package.retained_settlement.projection
     if amendment is None:
         return apply_recipient_amendment(projection)
@@ -357,6 +409,11 @@ def effective_reward_row(package, amendment=None):
         or package.retained_settlement.registration_snapshot.burn_destination != destination
     ):
         raise ValueError("recipient amendment differs from certified package or burn destination")
+    if body.ip_groups is not None:
+        expected = certified_ip_groups(package, {r.uid for r in body.recipients})
+        actual = tuple((group.ip, group.uids) for group in body.ip_groups)
+        if actual != expected:
+            raise ValueError("IP groups differ from the complete certified endpoint roster")
     return apply_recipient_amendment(projection, amendment)
 
 
@@ -386,6 +443,13 @@ def apply_recipient_amendment(projection, amendment=None):
     weights[destination.uid] += redirected
     if weights[destination.uid] > 65535:
         raise ValueError("amended burn weight exceeds the raw weight domain")
+    if body.ip_groups is not None:
+        weights = grouped_endpoint_weights(
+            projection,
+            weights,
+            tuple((group.ip, group.uids) for group in body.ip_groups),
+            destination.uid,
+        )
     retained = tuple(a for a in recipients if a.uid not in removed)
     if destination.uid not in {a.uid for a in retained}:
         retained = tuple(sorted((*retained, body.burn_destination), key=lambda a: a.uid))

@@ -19,6 +19,14 @@ class WorkerSourceOverlayScope(StrictProtocolModel):
     package_sha256: Hex32
     release_bundle_sha256: Hex32
     recipient_amendment_sha256: Hex32
+    successor_recipient_amendment_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def original_bytes(self, handler):
+        value = handler(self)
+        if self.successor_recipient_amendment_sha256 is None:
+            value.pop("successor_recipient_amendment_sha256", None)
+        return value
 
 
 class SupervisorHostMaintenanceApproval(StrictProtocolModel):
