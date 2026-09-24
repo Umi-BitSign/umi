@@ -15,6 +15,7 @@ from umi.chain_evidence import FinalizedSnapshotRef
 from umi.competition_chain import (
     CompetitionChainConfig,
     FinalizedRegistrationProvider,
+    RegistrationProviderTimeout,
     _PrefetchRpc,
     _RegistrationRpc,
 )
@@ -395,7 +396,7 @@ async def test_collection_timeout_is_bounded(chain, monkeypatch):
         proofs=chain.proofs,
         now_ms=lambda: _NOW,
     )
-    with pytest.raises(ValueError, match="timed out"):
+    with pytest.raises(RegistrationProviderTimeout, match="timed out"):
         await provider.collect()
     await provider.aclose()
     with pytest.raises(ValueError, match="closed"):
@@ -772,7 +773,7 @@ async def test_wait_ready_has_total_startup_deadline(chain, monkeypatch):
         raise GrandpaFinalitySupervisorError("no_verified_finalized_head")
 
     monkeypatch.setattr(chain.finality, "verified_finalized_snapshot", absent)
-    with pytest.raises(ValueError, match="startup timed out"):
+    with pytest.raises(RegistrationProviderTimeout, match="startup timed out"):
         await asyncio.wait_for(provider.wait_ready(), 2)
     assert 2 <= calls <= 5
     await provider.aclose()

@@ -606,6 +606,16 @@ images. Both architectures need the same contract and migration tests. UID 0 and
 UID 54 remain separate installations with separate hotkeys, state and service
 lifecycles. Upgrade and verify one without stopping or changing the other.
 
+### Worker mount visibility after host updates
+
+Before launching a worker, the host compares each bind source with the same path
+inside Podman's rootless namespace. A retained pause process can still see the
+previous systemd mount tree. If the namespace differs and Podman owns no containers,
+the host runs native `podman system migrate` and verifies the paths again. Any
+retained container, including a stopped one, prevents this automatic refresh.
+The supervisor must first reconcile and remove its own prior worker. Keep each
+validator on its dedicated service account.
+
 ### Authenticated RPC providers
 
 Successor hosts can select an operational RPC route with the service environment

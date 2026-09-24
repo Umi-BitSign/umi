@@ -22,7 +22,12 @@ from .competition_policy_lineage import replay_lineage
 from .competition_reward_continuity import SignedRewardRecipientAmendment
 from .competition_store import CompetitionStore
 from .competition_successor_feed import SuccessorFeedConfig, SuccessorPublicationFeed
-from .competition_successor_follow import AutomaticSuccessorPublisher, SuccessorFollowConfig
+from .competition_successor_follow import (
+    AutomaticSuccessorPublisher,
+    SuccessorFollowConfig,
+    poll_successor_rounds,
+    wait_publisher_ready,
+)
 from .competition_successor_publication import (
     SuccessorRoundPublicationBuilder,
     SuccessorRoundPublicationPlan,
@@ -83,16 +88,22 @@ class SuccessorPublisherConfig(StrictProtocolModel):
 
 
 @asynccontextmanager
-async def _managed_publisher(config, policy, *, feed_config=None, predecessor_policies=()):
+async def _managed_publisher(
+    config, policy, *, feed_config=None, predecessor_policies=(), retry_seconds=None, report=None
+):
     # Scope the operator's admitted lineage to this publisher, including its
     # owned replay threads. A package's own lineage cannot authorize the store.
     with replay_lineage(policy, predecessor_policies):
-        async with _managed_publisher_sources(config, policy, feed_config=feed_config) as managed:
+        async with _managed_publisher_sources(
+            config, policy, feed_config=feed_config, retry_seconds=retry_seconds, report=report
+        ) as managed:
             yield managed
 
 
 @asynccontextmanager
-async def _managed_publisher_sources(config, policy, *, feed_config=None):
+async def _managed_publisher_sources(
+    config, policy, *, feed_config=None, retry_seconds=None, report=None
+):
     config = SuccessorPublisherConfig.model_validate_json(canonical_json_bytes(config))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if config.plan.policy_sha256 != digest(policy):
@@ -146,7 +157,10 @@ async def _managed_publisher_sources(config, policy, *, feed_config=None):
     try:
         publisher = CurrentSuccessorRoundPublisher(builder, store, replay, provider)
         await provider.start()
-        await provider.wait_ready()
+        if retry_seconds is None:
+            await provider.wait_ready()
+        else:
+            await wait_publisher_ready(provider, retry_seconds=retry_seconds, report=report)
         # Only the explicitly named authority hotkeys are resolved by the
         # signing core. No coldkey or validator wallet is selected implicitly.
         signers = {
@@ -211,22 +225,17 @@ async def follow_rounds(
             if source == other or source in other.parents or other in source.parents:
                 raise ValueError("completed-round sources overlap authority or execution state")
     async with _managed_publisher(
-        config, policy, feed_config=feed_config, predecessor_policies=predecessor_policies
-    ) as (
-        publisher,
-        feed,
-        signers,
-    ):
+        config,
+        policy,
+        feed_config=feed_config,
+        predecessor_policies=predecessor_policies,
+        retry_seconds=None if once else follow_config.poll_interval_seconds,
+        report=report,
+    ) as (publisher, feed, signers):
         automatic = AutomaticSuccessorPublisher(publisher, feed, follow_config, **signers)
-        while True:
-            # Invalid inputs and journal conflicts fail closed. A service
-            # manager may restart this command; durable holds are not cleared.
-            result = await automatic.tick()
-            if report is not None:
-                report(result)
-            if once:
-                return result
-            await asyncio.sleep(follow_config.poll_interval_seconds)
+        return await poll_successor_rounds(
+            automatic, poll_seconds=follow_config.poll_interval_seconds, once=once, report=report
+        )
 
 
 def main(argv=None):

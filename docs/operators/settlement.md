@@ -610,9 +610,14 @@ python -m umi.competition_successor_publisher_cli \
 Add `--once` to perform one tick and exit. Stdout contains bounded status records,
 not package paths or wallet material. The process owns one finalized provider;
 it closes that provider on exit and drains active signing work on cancellation.
-Invalid inputs, journal conflicts and provider failures stop the command. A
-service manager may restart it with a delay; restarting cannot clear a durable
-conflict hold. Reaching capacity stops new work without deleting history.
+Continuous following retries RPC throttling, transport failures, observation
+timeouts and stale finalized heads at the configured poll interval. It retains
+the same provider and completed package verification, reports `waiting_for_chain`
+with a fixed reason code, and rechecks fresh authority before signing. Lost
+publication acknowledgements recover the original signed record. Invalid proofs,
+changed inputs, journal conflicts and a stopped finality observer stop the command;
+the service manager can restart it without clearing durable holds. Reaching
+capacity stops new work without deleting history.
 
 Discovery accepts canonical private `<settlement-digest>.package.json`
 descriptors whose sealed manifests match the descriptor, filename, policy and

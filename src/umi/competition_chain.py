@@ -97,6 +97,10 @@ def verified_model_burn_destination(policy, values, registrations):
     return BurnDestination(uid=destination.uid, hotkey=destination.hotkey, mode="Burn")
 
 
+class RegistrationProviderTimeout(ValueError):
+    """A bounded observation attempt expired; retained evidence remains usable."""
+
+
 class _AwaitingFinality(ValueError):
     """The owned source has not yet reached the configured startup head."""
 
@@ -737,7 +741,7 @@ class FinalizedRegistrationProvider:
                 retry_startup(), timeout=self.config.startup_timeout_seconds
             )
         except asyncio.TimeoutError as error:
-            raise ValueError("registration startup timed out") from error
+            raise RegistrationProviderTimeout("registration startup timed out") from error
 
     async def aclose(self) -> None:
         self._closed = True
@@ -789,7 +793,7 @@ class FinalizedRegistrationProvider:
                 self._collect_locked(height), self.config.collection_timeout_seconds
             )
         except asyncio.TimeoutError as error:
-            raise ValueError("registration collection timed out") from error
+            raise RegistrationProviderTimeout("registration collection timed out") from error
 
     async def _collect_locked(self, height: int | None = None) -> RegistrationCapture:
         async with self._lock:

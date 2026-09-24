@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .competition_chain import OwnedFinalityStale, RegistrationProviderTimeout
 from .competition_package import (
     CompetitionPackageManifest,
     PreparedCompetitionPackage,
@@ -35,8 +36,75 @@ from .private_files import Directory
 from .private_files import ensure_private_directory as _private
 from .private_files import read_private_model as _read
 from .protocol import StrictProtocolModel, canonical_json_bytes
+from .validator_chain import ValidatorChainError
 
 _DESCRIPTOR = re.compile(r"([0-9a-f]{64})\.package\.json")
+
+
+def transient_chain_reason(error):
+    """Only transport availability may wait; invalid proofs still reject."""
+    if isinstance(error, (TimeoutError, RegistrationProviderTimeout)):
+        return "chain_collection_timeout"
+    if isinstance(error, OwnedFinalityStale):
+        return "owned_finality_stale"
+    if isinstance(error, ValidatorChainError) and error.reason_code in {
+        "proof_rpc_failed",
+        "proof_rpc_rate_limited",
+        "proof_rpc_error",
+    }:
+        return error.reason_code
+    return None
+
+
+def chain_retry_report(error, retry_seconds):
+    reason = transient_chain_reason(error)
+    if reason is None:
+        raise error
+    return {
+        "schema": "umi-successor-follow-status/1",
+        "status": "waiting_for_chain",
+        "reason_code": reason,
+        "retry_after_seconds": retry_seconds,
+        "round_sequence": None,
+        "validator_activation_proven": False,
+    }
+
+
+async def wait_publisher_ready(provider, *, retry_seconds, report=None):
+    """Keep the owned provider and its retained progress on transport failure."""
+    while True:
+        try:
+            return await provider.wait_ready()
+        except (
+            ValidatorChainError,
+            TimeoutError,
+            RegistrationProviderTimeout,
+            OwnedFinalityStale,
+        ) as error:
+            result = chain_retry_report(error, retry_seconds)
+            provider.ensure_observer_running()
+            if report is not None:
+                report(result)
+        await asyncio.sleep(retry_seconds)
+
+
+async def poll_successor_rounds(automatic, *, poll_seconds, once=False, report=None):
+    """Retry availability failures without reopening wallets or replay caches."""
+    while True:
+        try:
+            result = await automatic.tick()
+        except (
+            ValidatorChainError,
+            TimeoutError,
+            RegistrationProviderTimeout,
+            OwnedFinalityStale,
+        ) as error:
+            result = chain_retry_report(error, poll_seconds)
+        if report is not None:
+            report(result)
+        if once:
+            return result
+        await asyncio.sleep(poll_seconds)
 
 
 class SuccessorFollowConfig(StrictProtocolModel):

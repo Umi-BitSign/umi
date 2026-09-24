@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -85,6 +86,9 @@ class FakePodman:
         self.extra_rows = False
         self.rehearsal_error = None
         self.rehearsal = {"schema": "umi-successor-sandbox-rehearsal/1", "ok": True}
+        self.namespace_stale = False
+        self.namespace_repair_fails = False
+        self.other_containers = []
 
     async def __call__(self, arguments, **kwargs):
         assert arguments[:2] == ("/usr/bin/podman", "--cgroup-manager=systemd")
@@ -108,6 +112,19 @@ class FakePodman:
                 value = []
             if self.extra_rows:
                 value *= 2
+            if not any(arg.startswith("--filter=") for arg in args):
+                value += self.other_containers
+        elif args[:2] == ("unshare", "/usr/bin/stat"):
+            if self.namespace_stale:
+                raise containers.SuccessorContainerError("mounted source is absent")
+            return b"".join(
+                f"{st.st_dev}:{st.st_ino}\n".encode("ascii")
+                for st in (Path(path).stat() for path in args[4:])
+            )
+        elif args[:2] == ("system", "migrate"):
+            if not self.namespace_repair_fails:
+                self.namespace_stale = False
+            return b""
         elif args[0] == "create":
             labels = self.image["Config"]["Labels"] | dict(
                 args[i + 1].split("=", 1) for i, item in enumerate(args) if item == "--label"
@@ -223,6 +240,8 @@ def launch_setup(setup, monkeypatch, tmp_path):
         _inputs=SimpleNamespace(receipt_sha256="bc" * 32),
     )
     monkeypatch.setattr(setup.adapter, "_validate_activation", lambda *args: None)
+    (tmp_path / "activation").mkdir()
+    (tmp_path / "state").mkdir()
     mounts = (
         containers._bind_mount(tmp_path / "activation", containers.ACTIVATION_PATH, read_only=True),
         containers._bind_mount(tmp_path / "state", containers.STATE_PATH, read_only=False),
@@ -396,6 +415,7 @@ async def test_private_rpc_mount_and_explicit_worker_environment(setup, tmp_path
     (transport / "transport.json").chmod(0o600)
     (transport / "key").chmod(0o600)
     value.adapter.rpc_transport_directory = transport
+    (tmp_path / "activation").mkdir()
     monkeypatch.setattr(
         value.adapter, "_activation_sources", lambda activation: tmp_path / "activation"
     )
@@ -766,6 +786,44 @@ def test_child_environment_drops_credentials_and_remote_overrides(monkeypatch):
         & environment.keys()
     )
     assert environment["PATH"] == "/usr/bin:/bin"
+
+
+@pytest.mark.asyncio
+async def test_launch_recovers_stale_empty_namespace(launch_setup):
+    c = launch_setup
+    await c.adapter.prepare_image(c.release)
+    c.runner.namespace_stale = True
+    await c.adapter.launch(c.cap, c.release)
+    calls = [call[2:] for call in c.runner.calls]
+    migration = calls.index(("system", "migrate"))
+    assert any(call[0] == "create" for call in calls[migration + 1 :])
+    assert c.runner.container["State"]["Running"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_state", ["running", "exited"])
+async def test_stale_namespace_preserves_other_workload(launch_setup, other_state):
+    c = launch_setup
+    await c.adapter.prepare_image(c.release)
+    c.runner.namespace_stale = True
+    c.runner.other_containers = [{"Id": "cd" * 32, "State": other_state}]
+    before = len(c.runner.calls)
+    with pytest.raises(containers.SuccessorContainerError, match="still owns containers"):
+        await c.adapter.launch(c.cap, c.release)
+    calls = [call[2:] for call in c.runner.calls[before:]]
+    assert not any(call[0] in {"create", "start", "stop", "rm", "system"} for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_namespace_repair_must_restore_exact_mounts(launch_setup):
+    c = launch_setup
+    await c.adapter.prepare_image(c.release)
+    c.runner.namespace_stale = True
+    c.runner.namespace_repair_fails = True
+    before = len(c.runner.calls)
+    with pytest.raises(containers.SuccessorContainerError, match="differs from service mounts"):
+        await c.adapter.launch(c.cap, c.release)
+    assert not any(call[2] == "create" for call in c.runner.calls[before:])
 
 
 class FakeProcess:

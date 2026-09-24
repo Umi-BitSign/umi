@@ -46,6 +46,7 @@ from .competition_package import VerifiedCompetitionPackage
 from .competition_progress import log_phase
 from .competition_recovery_packages import RecoveryPackageReplay
 from .competition_release import VerifiedSuccessorOCI
+from .competition_reward_continuity import authorized_reward_row
 from .competition_supervisor import (
     MAX_SUCCESSOR_HISTORY_BYTES,
     MAX_SUCCESSOR_HISTORY_RECORDS,
@@ -78,6 +79,7 @@ from .competition_worker_cli import SuccessorWorkerExecutionConfig
 from .encoding import account_id32
 from .open_competition import digest
 from .protocol import canonical_json_bytes
+from .weight_storage import subtensor_stored_weights
 
 _MAX_EXECUTION_BYTES = 128 * 1024
 _MAX_AUTHORIZATION_BYTES = 128 * 1024
@@ -714,9 +716,7 @@ class ProductionSuccessorRuntimeAdapter:
                 raise SuccessorAdapterError("weight attempt lacks its retained signed authority")
             if attempt.phase in _TERMINAL:
                 continue
-            prepared = self._verify(
-                *records[binding[0]], recovery_packages=recovery_packages
-            )
+            prepared = self._verify(*records[binding[0]], recovery_packages=recovery_packages)
             execution = prepared.execution.weights
             replay = CompetitionReplayWorker(
                 self.root / "preflight-replay",
@@ -851,8 +851,10 @@ class ProductionSuccessorRuntimeAdapter:
                 prepared.execution.weights.chain,
                 submission=False,
             )
-            row = prepared.package.retained_settlement.projection
-            if current.validator_row != tuple(zip(row.uids, row.weights, strict=True)):
+            row = authorized_reward_row(prepared.package, prepared.authorization.authorization)
+            if current.validator_row != tuple(
+                zip(row.uids, subtensor_stored_weights(row.weights), strict=True)
+            ):
                 return False
         return True
 

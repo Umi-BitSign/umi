@@ -708,6 +708,40 @@ class PodmanSuccessorContainer:
             _LABEL + "profile": activation.profile,
         }
 
+    async def _refresh_mount_namespace(self, mounts):
+        """Refresh an empty rootless namespace left behind by a host upgrade.
+
+        A retained pause process can see an older service mount tree. Compare
+        inode identities without reading mounted credentials or evidence.
+        The caller owns the supervisor lock; never migrate another workload.
+        """
+        sources = tuple(
+            dict(part.split("=", 1) for part in mount.split(","))["src"] for mount in mounts
+        )
+        expected = b"".join(
+            f"{value.st_dev}:{value.st_ino}\n".encode("ascii")
+            for value in (os.stat(path, follow_symlinks=False) for path in sources)
+        )
+
+        async def visible():
+            try:
+                return (
+                    await self._command(
+                        "unshare", "/usr/bin/stat", "--format=%d:%i", "--", *sources
+                    )
+                    == expected
+                )
+            except SuccessorContainerError:
+                return False
+
+        if await visible():
+            return
+        if _json(await self._command("ps", "--all", "--format=json")) != []:
+            raise SuccessorContainerError("stale Podman namespace still owns containers")
+        await self._command("system", "migrate")
+        if not await visible():
+            raise SuccessorContainerError("Podman namespace differs from service mounts")
+
     async def launch(
         self, activation: AuthenticatedSuccessorActivation, release: VerifiedSuccessorOCI
     ) -> SuccessorContainerStatus:
@@ -724,6 +758,7 @@ class PodmanSuccessorContainer:
         await self.check_host()
         await self._inspect_image(release)
         mounts = self._worker_mounts(activation)
+        await self._refresh_mount_namespace(mounts)
         labels = self._labels(activation)
         if self.source_overlay is not None:
             labels[_LABEL + "worker-source-host"] = (
