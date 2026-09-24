@@ -61,6 +61,7 @@ from .policy import LiveChainObservationPin
 from .protocol import canonical_json_bytes
 from .runtime_metadata import ExecutedRuntimeContext
 from .signed_extrinsic import encode_mortal_call, exact_signed_extrinsic
+from .weight_storage import subtensor_stored_weights
 
 Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 _AUTH_DOMAIN = b"umi-competition-weight-authorization-v1\0"
@@ -853,7 +854,7 @@ class CompetitionWeightWorker:
         expected_row = tuple(
             zip(
                 effective_row.uids,
-                effective_row.weights,
+                subtensor_stored_weights(effective_row.weights),
                 strict=True,
             )
         )
@@ -1078,7 +1079,7 @@ class CompetitionWeightWorker:
         row = tuple(
             zip(
                 effective_row.uids,
-                effective_row.weights,
+                subtensor_stored_weights(effective_row.weights),
                 strict=True,
             )
         )

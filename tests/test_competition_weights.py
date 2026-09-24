@@ -30,6 +30,7 @@ from umi.competition_worker import CompetitionReplayWorker
 from umi.open_competition import Registration, digest
 from umi.protocol import canonical_json_bytes
 from umi.validator_chain import ValidatorChainError
+from umi.weight_storage import subtensor_stored_weights
 
 from .test_competition_chain import _hash, _Runtime
 from .test_competition_chain import chain as chain
@@ -278,7 +279,7 @@ def _advance(item, height, *, applied=False, nonce=None):
     if applied:
         row = item.package.retained_settlement.projection
         item.rpc.values[("SubtensorModule", "Weights", (78, 54))] = list(
-            zip(row.uids, row.weights, strict=True)
+            zip(row.uids, subtensor_stored_weights(row.weights), strict=True)
         )
         item.rpc.values[("SubtensorModule", "LastUpdate", (78,))][54] = height
         nonce = 5 if nonce is None else nonce
@@ -1012,12 +1013,29 @@ async def test_old_equal_row_is_not_misattributed_to_new_attempt(weight_case):
     item.behavior = "noop"
     row = item.package.retained_settlement.projection
     item.rpc.values[("SubtensorModule", "Weights", (78, 54))] = list(
-        zip(row.uids, row.weights, strict=True)
+        zip(row.uids, subtensor_stored_weights(row.weights), strict=True)
     )
     item.rpc.values[("SubtensorModule", "LastUpdate", (78,))][54] = 100
     await _run(item)
     _advance(item, 171, nonce=5)
     assert (await _run(item)).status == "unknown"
+
+
+async def test_stopped_recovery_recognizes_scaled_stored_row_without_resending(stopped_weight_case):
+    item = stopped_weight_case
+    item.behavior = "noop"
+    assert (await _run(item)).status == "unknown"
+    _advance(item, 171, applied=True)
+    initial = await item.provider.collect_weights(item.hotkey, item.recipients)
+
+    async def observe():
+        return await item.provider.collect_weights(item.hotkey, item.recipients)
+
+    outcome, _ = await _recover_stopped(item, initial, observe)
+    assert outcome.status == "recovered_effect"
+    assert outcome.exact_row_currently_applied
+    assert not outcome.submitted_by_this_attempt
+    assert len(item.encoded) == 1
 
 
 async def test_short_authorization_window_refuses_before_signing(weight_case):

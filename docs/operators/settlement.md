@@ -861,6 +861,13 @@ package across restart. A newer certified allocation replaces it; older rounds
 cannot return. Pending or cryptographically invalid candidate packages confer
 no replacement authority. Corrupt discovery metadata or conflicts remain holds.
 
+The signed call retains the allocation's raw weights. Subtensor scales the
+largest submitted weight to 65,535 before storing the row. Submission checks
+and stopped-worker recovery apply that same fixed-point scaling and rounding
+when comparing finalized storage, together with the nonce, last-update and
+recipient identity checks. This lets recovery recognize an already-applied
+transaction without changing the signed allocation or submitting it again.
+
 If a recipient UID changes hotkey, the original rule holds the row. A separately
 threshold-signed `umi-reward-recipient-amendment/1` can route listed recipients'
 exact raw shares to the policy's existing burn destination. It binds the original

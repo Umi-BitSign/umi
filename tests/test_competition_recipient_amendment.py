@@ -14,6 +14,7 @@ from umi.competition_reward_continuity import (
 from umi.competition_weights import CompetitionWeightWorker, sign_competition_weight_authorization
 from umi.open_competition import Registration, digest
 from umi.protocol import canonical_json_bytes
+from umi.weight_storage import subtensor_stored_weights
 
 from .test_competition_model_burn import burn_policy, burn_snapshot
 from .test_competition_package import package_limits as package_limits
@@ -189,7 +190,7 @@ async def test_changed_recipient_burns_and_restart_does_not_resubmit(amended, mo
         item.encoded.append(encoded)
         _advance(item, 202, nonce=5)
         item.rpc.values[("SubtensorModule", "Weights", (78, 54))] = list(
-            zip(row.uids, row.weights, strict=True)
+            zip(row.uids, subtensor_stored_weights(row.weights), strict=True)
         )
         item.rpc.values[("SubtensorModule", "LastUpdate", (78,))][54] = 202
         return SimpleNamespace(success=True)
