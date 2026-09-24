@@ -40,7 +40,7 @@ def certified_ip_groups(package, removed_uids):
             continue
         if sub.hotkey in origins:
             raise ValueError("IP amendment requires one certified endpoint per hotkey")
-        origins[sub.hotkey] = endpoint_ip(sub.endpoint_url)
+        origins[sub.hotkey] = sub.endpoint_url
     groups = {}
     for allocation in package.retained_settlement.projection.allocations:
         if (
@@ -51,7 +51,8 @@ def certified_ip_groups(package, removed_uids):
             continue
         if allocation.hotkey not in origins:
             raise ValueError("payable recipient lacks its certified endpoint")
-        groups.setdefault(origins[allocation.hotkey], []).append(allocation.uid)
+        ip = endpoint_ip(origins[allocation.hotkey])
+        groups.setdefault(ip, []).append(allocation.uid)
     return tuple((ip, tuple(sorted(uids))) for ip, uids in sorted(groups.items()))
 
 

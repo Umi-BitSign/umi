@@ -321,6 +321,25 @@ async def test_native_grouped_weight_effect_and_restart_recovery(grouped, monkey
     assert len(item.encoded) == 1
 
 
+def test_nonpayable_hostname_does_not_block_certified_ip_groups(grouped):
+    package = grouped.package
+    removed = {grouped.removed.uid}
+    expected = certified_ip_groups(package, removed)
+    unused = SimpleNamespace(
+        submission=SimpleNamespace(
+            track="endpoint",
+            hotkey=wallet("Eve").hotkey.ss58_address,
+            endpoint_url="https://miner.sn78.online",
+        )
+    )
+    view = SimpleNamespace(
+        policy=package.policy,
+        retained_settlement=package.retained_settlement,
+        roster=SimpleNamespace(submissions=(*package.roster.submissions, unused)),
+    )
+    assert certified_ip_groups(view, removed) == expected
+
+
 def test_original_burn_amendment_keeps_historical_signed_bytes(amended):
     signed = amended.body.continuation.recipient_amendment
     value = signed.amendment.model_dump(mode="json", by_alias=True)
