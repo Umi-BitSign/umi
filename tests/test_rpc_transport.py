@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
+from bittensor._transport.errors import SubstrateRequestException
+from bittensor._transport.rpc import RpcSession
+from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
@@ -212,3 +217,106 @@ async def test_sdk_dial_preserves_pinned_limits(route, monkeypatch):
     monkeypatch.setattr(rpc_bittensor, "websocket_connect", connect)
     assert await rpc_bittensor._sdk_connect(PRIMARY) is socket
     assert calls == [(PRIMARY, {"max_size": 2**32, "write_limit": 2**16, "proxy": None})]
+
+
+@pytest.mark.parametrize("consumer", ["native", "sdk_read", "sdk_submission"])
+async def test_sentinel_throttle_fails_over_without_replaying_submissions(
+    route, monkeypatch, consumer
+):
+    paid_calls, backup_calls = [], []
+
+    async def paid(ws):
+        request = json.loads(await ws.recv())
+        paid_calls.append(request)
+        await ws.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "-1",
+                    "result": None,
+                    "error": {"code": 429, "message": TOKEN},
+                }
+            )
+        )
+        await ws.wait_closed()
+
+    async def backup(ws):
+        async for raw in ws:
+            request = json.loads(raw)
+            backup_calls.append(request)
+            await ws.send(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": "0x01"}))
+
+    original_connect = rpc_transport.connect
+    private_connect = rpc_transport._PrivateConnect
+    async with serve(paid, "127.0.0.1", 0) as first, serve(backup, "127.0.0.1", 0) as second:
+        primary_url = f"ws://127.0.0.1:{first.sockets[0].getsockname()[1]}"
+        backup_url = f"ws://127.0.0.1:{second.sockets[0].getsockname()[1]}"
+        monkeypatch.setattr(
+            rpc_transport,
+            "_PrivateConnect",
+            lambda endpoint, **kw: private_connect(primary_url, **kw),
+        )
+        monkeypatch.setattr(
+            rpc_transport, "connect", lambda endpoint, **kw: original_connect(backup_url, **kw)
+        )
+        if consumer == "native":
+            client = WeightProofRpc(
+                SimpleNamespace(
+                    rpc_url=PRIMARY, proof_rpc_fallback_urls=BACKUPS, collection_timeout_seconds=15
+                )
+            )
+            try:
+                assert await client.request("state_getStorageAt", ["key", "block"]) == "0x01"
+            finally:
+                await client.aclose()
+        else:
+            async with RpcSession(
+                PRIMARY, fallback_urls=list(BACKUPS), connect_factory=rpc_bittensor._sdk_connect
+            ) as session:
+                if consumer == "sdk_submission":
+                    with pytest.raises(SubstrateRequestException, match="may already be"):
+                        await asyncio.wait_for(
+                            session.request("author_submitExtrinsic", ["0xsigned"]), 5
+                        )
+                else:
+                    assert (
+                        await asyncio.wait_for(
+                            session.request("state_getStorageAt", ["key", "block"]), 5
+                        )
+                        == "0x01"
+                    )
+        assert len(paid_calls) == 1
+        if consumer == "sdk_submission":
+            assert not backup_calls
+        else:
+            assert len(backup_calls) == 1
+            assert backup_calls[0] == paid_calls[0]
+        with pytest.raises(InvalidStatus) as blocked:
+            rpc_transport.websocket_connect(PRIMARY)
+        assert blocked.value.response.status_code == 429
+        assert TOKEN not in str(blocked.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"jsonrpc":"2.0","id":99,"result":"unchanged"}',
+        '{"jsonrpc":"2.0","id":1,"error":{"code":-32601}}',
+        '{"jsonrpc":"2.0","id":1,"result":"data","error":{"code":429}}',
+        '{"jsonrpc":"2.0","id":1,"error":{"code":"429"}}',
+        "not-json",
+    ],
+)
+async def test_non_throttle_frames_are_not_rewritten(payload):
+    async def handler(ws):
+        await ws.send(payload)
+        await ws.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        async with rpc_transport._PrivateConnect(
+            url,
+            proxy=None,
+            create_connection=partial(rpc_transport._PrivateConnection, rpc_endpoint=PAID),
+        ) as ws:
+            assert await ws.recv() == payload

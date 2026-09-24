@@ -619,7 +619,7 @@ the chain configuration and receive no primary-provider credentials.
 {
   "schema": "umi-rpc-transport/1",
   "routes": [{
-    "source": "wss://archive.chain.opentensor.ai",
+    "source": "wss://archive.chain.opentensor.ai:443",
     "endpoint": "wss://api.taostats.io/api/v1/rpc/ws/finney_archive",
     "authorization_file": "taostats.key"
   }]
@@ -634,9 +634,18 @@ mounts that directory read-only into each worker and passes only the configurati
 path in its environment. Both proof reads and the pinned transaction transport
 use the route; exact signed transaction bytes and recovery semantics are unchanged.
 
+Match the source URL exactly, including an explicit port if the installed
+configuration contains one. Add separate route entries for different source
+spellings when needed. Retain two independent backup providers.
+
 The provider receives an `Authorization` header. Authenticated connections do
 not follow redirects or emit WebSocket debug logs. Route logs identify source,
 destination and whether authentication is enabled, without credential contents.
+Small JSON-RPC error frames with code `429` trigger a 30-second provider cooldown,
+including gateway throttles with a sentinel request ID. Proof reads and SDK reads
+can use the existing backups during that cooldown. A transmitted transaction
+keeps the SDK's unknown-outcome recovery behavior and is never blindly resent.
+Other response frames retain their original validation and request-ID checks.
 An unavailable credential fails that provider's connection and permits the
 existing transport fallback. An invalid route configuration requires correction.
 Verify authenticated reads from the installed host and worker before claiming

@@ -7,17 +7,22 @@ The configuration is a local service control, never a network-supplied artifact.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import os
 import re
 import stat
+import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
@@ -28,6 +33,59 @@ CONFIG_FILENAME = "transport.json"
 _QUIET_LOGGER = logging.Logger("umi.private_rpc_transport")
 _QUIET_LOGGER.disabled = True
 _LOGGER = logging.getLogger(__name__)
+_COOLDOWNS: WeakKeyDictionary = WeakKeyDictionary()
+_REPORTED_ROUTES: set[tuple[str, str]] = set()
+
+
+def _report(record: dict, *, level: int = logging.INFO) -> None:
+    if not _LOGGER.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        _LOGGER.addHandler(handler)
+    _LOGGER.setLevel(logging.INFO)
+    _LOGGER.propagate = False
+    _LOGGER.log(level, json.dumps(record, sort_keys=True))
+
+
+def _throttled(seconds: int) -> InvalidStatus:
+    return InvalidStatus(Response(429, "RPC throttled", Headers({"Retry-After": str(seconds)})))
+
+
+class _PrivateConnection(ClientConnection):
+    def __init__(self, *args, rpc_endpoint: str, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rpc_endpoint = rpc_endpoint
+
+    async def recv(self, decode: bool | None = None):
+        raw = await super().recv(decode)
+        # Gateways can use a sentinel request ID for a connection-wide throttle.
+        # Never turn it into a successful RPC reply or rewrite the request ID.
+        # Classify only a small error frame; ordinary replies retain all checks.
+        if isinstance(raw, (str, bytes)) and len(raw) <= 8192:
+            try:
+                value = json.loads(raw)
+            except (ValueError, UnicodeError):
+                value = None
+            if (
+                isinstance(value, dict)
+                and value.get("jsonrpc") == "2.0"
+                and value.get("result") is None
+                and isinstance(value.get("error"), dict)
+                and type(value["error"].get("code")) is int
+                and value["error"]["code"] == 429
+            ):
+                cooldowns = _COOLDOWNS.setdefault(asyncio.get_running_loop(), {})
+                cooldowns[self.rpc_endpoint] = time.monotonic() + 30
+                _report(
+                    {
+                        "schema": "umi-rpc-transport-throttle/1",
+                        "endpoint": self.rpc_endpoint,
+                        "retry_after_seconds": 30,
+                    },
+                    level=logging.WARNING,
+                )
+                raise _throttled(30)
+        return raw
 
 
 @dataclass(frozen=True)
@@ -142,6 +200,14 @@ def websocket_connect(endpoint: str, **kwargs: Any):
     route = None if path is None else load_routes(path).get(endpoint)
     if route is None:
         return connect(endpoint, **kwargs)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    cooldowns = {} if loop is None else _COOLDOWNS.get(loop, {})
+    remaining = cooldowns.get(route.endpoint, 0) - time.monotonic()
+    if remaining > 0:
+        raise _throttled(math.ceil(remaining))
     headers = {}
     if route.authorization_file is not None:
         try:
@@ -153,16 +219,21 @@ def websocket_connect(endpoint: str, **kwargs: Any):
         headers["Authorization"] = token
     if kwargs.get("additional_headers"):
         raise ValueError("rpc_transport_headers_already_supplied")
-    _LOGGER.info(
-        json.dumps(
+    identity = (endpoint, route.endpoint)
+    if identity not in _REPORTED_ROUTES:
+        _report(
             {
                 "schema": "umi-rpc-transport-route/1",
                 "source": endpoint,
                 "endpoint": route.endpoint,
                 "authenticated": bool(headers),
-            },
-            sort_keys=True,
+            }
         )
+        _REPORTED_ROUTES.add(identity)
+    kwargs.update(
+        additional_headers=headers,
+        proxy=None,
+        logger=_QUIET_LOGGER,
+        create_connection=partial(_PrivateConnection, rpc_endpoint=route.endpoint),
     )
-    kwargs.update(additional_headers=headers, proxy=None, logger=_QUIET_LOGGER)
     return _PrivateConnect(route.endpoint, **kwargs)
