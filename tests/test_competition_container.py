@@ -656,10 +656,40 @@ def test_host_anchor_provenance_cannot_be_faked_by_service_ownership(setup, tmp_
     source.mkdir(mode=0o700)
     (source / "anchor").mkdir(mode=0o700)
     (source / "current").mkdir(mode=0o700)
+    source.chmod(0o555)
     monkeypatch.setattr(containers, "ACTIVATION_PATH", str(source))
     cap = SimpleNamespace(_inputs=SimpleNamespace(mount_root=source))
-    with pytest.raises(containers.SuccessorContainerError, match="root provenance"):
+    with pytest.raises(containers.SuccessorContainerError):
         setup.adapter._activation_sources(cap)
+    source.chmod(0o700)
+
+
+def test_activation_parent_matches_installer_and_keeps_root_anchor_check(setup, tmp_path, monkeypatch):
+    source = tmp_path / "activation"
+    source.mkdir(mode=0o755)
+    (source / "anchor").mkdir()
+    (source / "current").mkdir()
+    source.chmod(0o555)
+    monkeypatch.setattr(containers, "ACTIVATION_PATH", str(source))
+    checked = []
+    monkeypatch.setattr(containers, "_bounded_tree", lambda path, owner, *limits: checked.append((path, owner)))
+    cap = SimpleNamespace(_inputs=SimpleNamespace(mount_root=source))
+    assert setup.adapter._activation_sources(cap) == source
+    assert checked == [(source / "anchor", 0), (source / "current", os.geteuid())]
+    source.chmod(0o755)
+    with pytest.raises(containers.SuccessorContainerError, match="installed service owner"):
+        setup.adapter._activation_sources(cap)
+
+
+def test_activation_parent_rejects_another_service_owner(setup, tmp_path, monkeypatch):
+    source = tmp_path / "activation"
+    source.mkdir(mode=0o555)
+    monkeypatch.setattr(containers, "ACTIVATION_PATH", str(source))
+    monkeypatch.setattr(containers.os, "geteuid", lambda: source.stat().st_uid + 1)
+    cap = SimpleNamespace(_inputs=SimpleNamespace(mount_root=source))
+    with pytest.raises(containers.SuccessorContainerError, match="installed service owner"):
+        setup.adapter._activation_sources(cap)
+    source.chmod(0o700)
 
 
 def test_child_environment_drops_credentials_and_remote_overrides(monkeypatch):

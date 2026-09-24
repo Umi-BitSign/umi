@@ -598,8 +598,11 @@ class PodmanSuccessorContainer:
         descriptor = _open_directory_without_links(root)
         try:
             info = os.fstat(descriptor)
-            if info.st_uid != 0 or info.st_mode & 0o022:
-                raise SuccessorContainerError("activation root lacks host root provenance")
+            # The installer and current-view materializer require a sealed
+            # service-owned parent. Root provenance belongs to the anchor
+            # subtree, which is checked separately below.
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o555:
+                raise SuccessorContainerError("activation root differs from installed service owner")
             names = set()
             with os.scandir(descriptor) as children:
                 for entry in children:
