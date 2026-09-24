@@ -9,18 +9,42 @@ from __future__ import annotations
 import hashlib
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_host_artifacts import SignedSuccessorHostArtifact, verify_host_artifact_authority
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
+class WorkerSourceOverlayScope(StrictProtocolModel):
+    package_sha256: Hex32
+    release_bundle_sha256: Hex32
+    recipient_amendment_sha256: Hex32
+
+
 class SupervisorHostMaintenanceApproval(StrictProtocolModel):
-    schema_: Literal["umi-supervisor-host-maintenance/1"] = Field(alias="schema")
+    schema_: Literal["umi-supervisor-host-maintenance/1", "umi-supervisor-host-maintenance/2"] = (
+        Field(alias="schema")
+    )
     config_sha256: Hex32
     installation_receipt_sha256: Hex32
     original_host_manifest_sha256: Hex32
     signed_host: SignedSuccessorHostArtifact
+    worker_overlay: WorkerSourceOverlayScope | None = None
+
+    @model_serializer(mode="wrap")
+    def original_bytes(self, handler):
+        value = handler(self)
+        if self.worker_overlay is None:
+            value.pop("worker_overlay", None)
+        return value
+
+    @model_validator(mode="after")
+    def explicit_worker_approval(self):
+        if (self.schema_ == "umi-supervisor-host-maintenance/2") != (
+            self.worker_overlay is not None
+        ):
+            raise ValueError("worker source overlay requires explicit maintenance version 2")
+        return self
 
 
 def verify_host_maintenance(payload: bytes, *, config, receipt):

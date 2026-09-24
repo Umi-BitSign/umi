@@ -630,6 +630,14 @@ def test_weight_mounts_only_named_readonly_hotkey(mounted_files):
     assert all("coldkey" not in item for item in mounts)
 
 
+def test_approved_source_overlay_is_mounted_readonly(mounted_files, tmp_path):
+    source = tmp_path / "signed-source"
+    source.mkdir()
+    mounted_files.adapter.source_overlay = SimpleNamespace(source_for=lambda activation: source)
+    mounts = mounted_files.adapter._worker_mounts(SimpleNamespace(profile="competition_weights"))
+    assert mounts[-1] == containers._bind_mount(source, "/opt/umi/src/umi", read_only=True)
+
+
 @pytest.mark.parametrize("fault", ["writable", "hardlink", "symlink", "wrong-key"])
 def test_weight_hotkey_boundary_is_exact(mounted_files, fault, tmp_path):
     key = mounted_files.key
@@ -664,7 +672,9 @@ def test_host_anchor_provenance_cannot_be_faked_by_service_ownership(setup, tmp_
     source.chmod(0o700)
 
 
-def test_activation_parent_matches_installer_and_keeps_root_anchor_check(setup, tmp_path, monkeypatch):
+def test_activation_parent_matches_installer_and_keeps_root_anchor_check(
+    setup, tmp_path, monkeypatch
+):
     source = tmp_path / "activation"
     source.mkdir(mode=0o755)
     (source / "anchor").mkdir()
@@ -672,7 +682,9 @@ def test_activation_parent_matches_installer_and_keeps_root_anchor_check(setup, 
     source.chmod(0o555)
     monkeypatch.setattr(containers, "ACTIVATION_PATH", str(source))
     checked = []
-    monkeypatch.setattr(containers, "_bounded_tree", lambda path, owner, *limits: checked.append((path, owner)))
+    monkeypatch.setattr(
+        containers, "_bounded_tree", lambda path, owner, *limits: checked.append((path, owner))
+    )
     cap = SimpleNamespace(_inputs=SimpleNamespace(mount_root=source))
     assert setup.adapter._activation_sources(cap) == source
     assert checked == [(source / "anchor", 0), (source / "current", os.geteuid())]

@@ -166,13 +166,18 @@ def _verify_running_host_values(config, receipt, host_manifest_sha256):
     if any(_ancestor_identity(path) != identity for path, identity in ancestors.items()):
         raise ValueError("running host parent changed while verifying")
     if maintenance:
-        print(json.dumps({
-            "schema": "umi-supervisor-host-maintenance-status/1",
-            "status": "verified",
-            "host_manifest_sha256": signed.manifest_sha256,
-            "host_revision": signed.manifest.umi_git_revision,
-            "original_host_manifest_sha256": receipt.host_manifest_sha256,
-        }), flush=True)
+        print(
+            json.dumps(
+                {
+                    "schema": "umi-supervisor-host-maintenance-status/1",
+                    "status": "verified",
+                    "host_manifest_sha256": signed.manifest_sha256,
+                    "host_revision": signed.manifest.umi_git_revision,
+                    "original_host_manifest_sha256": receipt.host_manifest_sha256,
+                }
+            ),
+            flush=True,
+        )
 
 
 def _verify_running_host(installation):
@@ -326,6 +331,15 @@ def _build_runtime(installation, config_path, *, startup_lease):
             limits=_materialization_limits(),
         )
         container = _new_container(config)
+        maintenance_path = Path("/etc/umi/validator-supervisor-maintenance.json")
+        if maintenance_path.exists():
+            from .competition_worker_maintenance import approved_worker_source_overlay
+
+            container.source_overlay = approved_worker_source_overlay(
+                _root_control(maintenance_path, MAX_HOST_MANIFEST_BYTES),
+                installation=installation,
+                running_root=Path(__file__).parent.parent.parent,
+            )
         return ProductionSuccessorRuntimeAdapter(
             installation=installation,
             materializer=materializer,

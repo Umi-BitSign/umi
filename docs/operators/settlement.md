@@ -861,10 +861,23 @@ package across restart. A newer certified allocation replaces it; older rounds
 cannot return. Pending or cryptographically invalid candidate packages confer
 no replacement authority. Corrupt discovery metadata or conflicts remain holds.
 
-If a recipient UID changes hotkey, the whole old row holds. The implementation
-neither pays the new hotkey nor drops or redistributes that allocation. A valid
-newer certified package can still replace the held row. This behavior does not
-create a permanent policy-conflict latch by itself.
+If a recipient UID changes hotkey, the original rule holds the row. A separately
+threshold-signed `umi-reward-recipient-amendment/1` can route listed recipients'
+exact raw shares to the policy's existing burn destination. It binds the original
+continuity authority, package and projection. It cannot choose replacement
+miners, change other shares or rewrite scores. Version 2 continuations carry the
+amendment alongside the original timely admission. Current burn registration and
+mode remain mandatory at publication and submission. The publisher retains one
+immutable amendment per package; retry and restart reuse it. Older continuations
+retain their original bytes and whole-row hold behavior.
+
+Apply an approved signed amendment through the publisher's
+`--prepared-package <private-preparation.json> --recipient-amendment
+<private-signed-amendment.json>` mode, with the existing `--config` and `--policy`.
+The command retains the amendment; ordinary publication/renewal produces the new
+authorization. It does not submit weights. All consumers must support the new
+continuation before it is published. A valid newer certified package can still
+replace a held row without changing the original evidence.
 
 A threshold-signed continuity revocation durably stops new publisher leases.
 Already issued leases expire within the configured maximum write-authorization

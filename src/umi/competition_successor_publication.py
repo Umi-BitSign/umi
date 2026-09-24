@@ -29,6 +29,7 @@ from .competition_reward_continuity import (
     SignedCertifiedAllocationAdmission,
     SignedRewardContinuityAuthority,
     admit_certified_allocation,
+    verify_recipient_amendment,
     verify_reward_continuity_authority,
     verify_reward_continuity_revocation,
 )
@@ -549,6 +550,51 @@ class SuccessorRoundPublicationBuilder:
             raise ValueError("publication package manifest differs")
         return package
 
+    def recipient_amendment(self, package, *, block):
+        raw = self.journal.get("recipient_amendment", package.package_sha256)
+        if raw is None:
+            return None
+        if self.plan.continuity is None:
+            raise ValueError("recipient amendment requires continuity authority")
+        return verify_recipient_amendment(
+            raw["signed"],
+            self.plan.continuity,
+            package,
+            tuple(a.hotkey for a in self.plan.supervisor.trusted_authorities),
+            threshold=self.plan.supervisor.signature_threshold,
+            block=block,
+        )
+
+    def amend_recipients(self, prepared, signed, *, finalized_block):
+        with self._locked():
+            if self.plan.continuity is None or self.revoked():
+                raise ValueError("recipient amendment requires active continuity authority")
+            package = self._load(prepared)
+            if self.journal.get("continuity_admission", package.package_sha256) is None:
+                raise ValueError("recipient amendment requires retained timely admission")
+            signed = verify_recipient_amendment(
+                signed,
+                self.plan.continuity,
+                package,
+                tuple(a.hotkey for a in self.plan.supervisor.trusted_authorities),
+                threshold=self.plan.supervisor.signature_threshold,
+                block=finalized_block,
+            )
+            old = self.journal.get("recipient_amendment", package.package_sha256)
+            if old is not None:
+                if canonical_json_bytes(old["signed"]) != canonical_json_bytes(signed):
+                    raise ValueError("recipient amendment already retained with different bytes")
+                return
+            self.journal.observe(finalized_block)
+            self.journal.put(
+                "recipient_amendment",
+                package.package_sha256,
+                {
+                    "signed": signed.model_dump(mode="json", by_alias=True),
+                    "observed_block": finalized_block,
+                },
+            )
+
     def _check_signers(self, authorization_wallet, directive_wallets):
         # Reject wrong identities or an insufficient cohort before reserving an
         # immutable intent. Loading the selected hotkeys never needs a coldkey.
@@ -761,10 +807,14 @@ class SuccessorRoundPublicationBuilder:
                     self.journal.put("continuity_admission", slot, admission)
                 else:
                     admission = SignedCertifiedAllocationAdmission.model_validate(raw_admission)
+                amendment = self.recipient_amendment(package, block=finalized_block)
                 continuation = RewardContinuation(
-                    schema="umi-reward-continuation/1",
+                    schema="umi-reward-continuation/2"
+                    if amendment
+                    else "umi-reward-continuation/1",
                     authority=self.plan.continuity,
                     admission=admission,
+                    recipient_amendment=amendment,
                 )
             prior = history[-1] if history else None
             sequence = (

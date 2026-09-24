@@ -41,7 +41,12 @@ from .competition_package import (
     competition_release_identity_digest,
     load_competition_package,
 )
-from .competition_reward_continuity import RewardContinuation, verify_reward_continuation
+from .competition_reward_continuity import (
+    RewardContinuation,
+    apply_recipient_amendment,
+    authorized_reward_row,
+    verify_reward_continuation,
+)
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -383,7 +388,7 @@ def validate_weight_preflight(
     package, authorization, observation, chain_config, *, submission: bool
 ):
     validate_owned_weight_observation(observation)
-    policy, row = package.policy, package.retained_settlement.projection
+    policy, row = package.policy, authorized_reward_row(package, authorization)
     if observation.chain_config_sha256 != digest(
         chain_config
     ) or chain_config.policy_sha256 != digest(policy):
@@ -463,7 +468,7 @@ def validate_weight_preflight(
 def build_competition_weight_call(
     package: VerifiedCompetitionPackage, body: CompetitionWeightAuthorizationBody
 ):
-    row = package.retained_settlement.projection
+    row = authorized_reward_row(package, body)
     call = bt.calls.SubtensorModule.set_mechanism_weights(
         netuid=78,
         mecid=0,
@@ -510,6 +515,9 @@ class BittensorCompetitionWeightTransport:
     def encode(call, body, observation, signer, *, projection) -> bytes:
         validate_owned_weight_observation(observation)
         _validate_signing_runtime(observation.runtime, body)
+        row = apply_recipient_amendment(
+            projection, body.continuation.recipient_amendment if body.continuation else None
+        )
         if digest(projection) != body.projection_sha256 or (
             call.module != "SubtensorModule"
             or call.function != "set_mechanism_weights"
@@ -517,8 +525,8 @@ class BittensorCompetitionWeightTransport:
             != {
                 "netuid": 78,
                 "mecid": 0,
-                "dests": list(projection.uids),
-                "weights": list(projection.weights),
+                "dests": list(row.uids),
+                "weights": list(row.weights),
                 "version_key": body.weights_version_key,
             }
         ):
@@ -838,14 +846,14 @@ class CompetitionWeightWorker:
         signer = bt.resolve_signer(wallet, role="hotkey")
         if account_id32(signer.ss58_address) != account_id32(hotkey):
             raise ValueError("installed hotkey differs from successor activation")
+        effective_row = authorized_reward_row(package, body)
         recipients = tuple(
-            Registration(uid=item.uid, hotkey=item.hotkey)
-            for item in package.retained_settlement.projection.allocations
+            Registration(uid=item.uid, hotkey=item.hotkey) for item in effective_row.allocations
         )
         expected_row = tuple(
             zip(
-                package.retained_settlement.projection.uids,
-                package.retained_settlement.projection.weights,
+                effective_row.uids,
+                effective_row.weights,
                 strict=True,
             )
         )
@@ -1066,10 +1074,11 @@ class CompetitionWeightWorker:
         checkpoint_block = installation.checkpoint_finalized_block
         configuration_sha256 = digest(chain_config)
         authorization_sha256 = competition_weight_authorization_digest(body)
+        effective_row = authorized_reward_row(package, body)
         row = tuple(
             zip(
-                package.retained_settlement.projection.uids,
-                package.retained_settlement.projection.weights,
+                effective_row.uids,
+                effective_row.weights,
                 strict=True,
             )
         )

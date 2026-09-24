@@ -243,23 +243,35 @@ class CompetitionReplayWorker:
             settlement_retained = False
             rejection: Literal["publication_capacity_exhausted"] | None = None
             try:
-                journal.record_cutoff(
-                    package.cutoff_certificate,
-                    submissions=package.roster.submissions,
-                    limits=package.replay_limits,
-                )
-                cutoff_retained = True
-                journal.record_settlement(
-                    package.settlement_certificate,
-                    cutoff_certificate=package.cutoff_certificate,
-                    submissions=package.roster.submissions,
-                    evidence=tuple(
-                        (item.submission, item.evidence) for item in package.evidence.entries
-                    ),
-                    retained_settlement=package.retained_settlement,
-                    limits=package.replay_limits,
-                )
-                settlement_retained = True
+                if (
+                    retained is not None
+                    and retained.status == "replayed_no_weight"
+                    and retained.cutoff_certificate_retained
+                    and retained.settlement_certificate_retained
+                ):
+                    # The package has been verified and _publication_journal
+                    # has audited current retained state. Resume its completed
+                    # receipt without replaying the same evidence a second time.
+                    self._verify_completed_publications(package)
+                    cutoff_retained = settlement_retained = True
+                else:
+                    journal.record_cutoff(
+                        package.cutoff_certificate,
+                        submissions=package.roster.submissions,
+                        limits=package.replay_limits,
+                    )
+                    cutoff_retained = True
+                    journal.record_settlement(
+                        package.settlement_certificate,
+                        cutoff_certificate=package.cutoff_certificate,
+                        submissions=package.roster.submissions,
+                        evidence=tuple(
+                            (item.submission, item.evidence) for item in package.evidence.entries
+                        ),
+                        retained_settlement=package.retained_settlement,
+                        limits=package.replay_limits,
+                    )
+                    settlement_retained = True
             except PublicationCapacityError:
                 rejection = "publication_capacity_exhausted"
 
@@ -307,6 +319,31 @@ class CompetitionReplayWorker:
                 else None
             )
             return result
+
+    def _verify_completed_publications(self, package: VerifiedCompetitionPackage) -> None:
+        database = (
+            self.publication_root
+            / package.manifest.policy_sha256
+            / "competition-publication.sqlite3"
+        )
+        with _sqlite_connection(database) as connection:
+            for kind, identity, certificate in (
+                ("cutoff", package.manifest.cutoff_certificate_sha256, package.cutoff_certificate),
+                (
+                    "settlement",
+                    package.manifest.settlement_certificate_sha256,
+                    package.settlement_certificate,
+                ),
+            ):
+                row = connection.execute(
+                    "SELECT kind, body FROM certificates WHERE digest=?", (identity,)
+                ).fetchone()
+                if (
+                    row is None
+                    or row[0] != kind
+                    or bytes(row[1]) != canonical_json_bytes(certificate)
+                ):
+                    raise ValueError("completed worker publication differs from verified package")
 
     def verify_publication_unchanged(self, result: CompetitionWorkerResult) -> None:
         """Check a process-local audited journal snapshot, without package replay."""

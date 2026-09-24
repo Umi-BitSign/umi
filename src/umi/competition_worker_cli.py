@@ -25,6 +25,8 @@ from .competition_chain_state import (
     validate_owned_weight_observation,
 )
 from .competition_package import load_competition_package
+from .competition_package_reuse import package_verification_session
+from .competition_reward_continuity import authorized_reward_row
 from .competition_weights import (
     BittensorCompetitionWeightTransport,
     CompetitionWeightWorker,
@@ -212,7 +214,7 @@ async def run_worker(mode: Literal["competition_replay", "competition_weights"])
         await chain.start()
         recipients = tuple(
             Registration(uid=item.uid, hotkey=item.hotkey)
-            for item in package.retained_settlement.projection.allocations
+            for item in authorized_reward_row(package, body).allocations
         )
         observation = await chain.wait_weights_ready(inputs.validator_hotkey, recipients)
         validate_owned_weight_observation(observation)
@@ -263,7 +265,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     os.umask(0o077)
     try:
-        result = asyncio.run(run_worker(args.mode))
+        with package_verification_session():
+            result = asyncio.run(run_worker(args.mode))
         encoded = canonical_json_bytes(result)
         if len(encoded) > _MAX_STDOUT_BYTES:
             raise ValueError("successor worker result exceeds its output bound")

@@ -19,6 +19,7 @@ from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProv
 from .competition_launch import PublicLaunchIdentity
 from .competition_package import PreparedCompetitionPackage
 from .competition_policy_lineage import replay_lineage
+from .competition_reward_continuity import SignedRewardRecipientAmendment
 from .competition_store import CompetitionStore
 from .competition_successor_feed import SuccessorFeedConfig, SuccessorPublicationFeed
 from .competition_successor_follow import AutomaticSuccessorPublisher, SuccessorFollowConfig
@@ -171,6 +172,21 @@ async def sign_round(config, policy, prepared, *, feed_config=None, predecessor_
         return result
 
 
+async def amend_recipients(config, policy, prepared, signed, *, predecessor_policies=()):
+    async with _managed_publisher(config, policy, predecessor_policies=predecessor_policies) as (
+        publisher,
+        _,
+        _signers,
+    ):
+        await publisher.amend_recipients(prepared, signed)
+        return {
+            "status": "recipient_amendment_retained",
+            "package_sha256": prepared.package_sha256,
+            "amendment_sha256": digest(signed),
+            "chain_submission_authorized": False,
+        }
+
+
 async def follow_rounds(
     config, policy, follow_config, *, feed_config, once=False, report=None, predecessor_policies=()
 ):
@@ -229,11 +245,16 @@ def main(argv=None):
     mode.add_argument("--follow-config", type=Path)
     parser.add_argument("--feed-config", type=Path)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--recipient-amendment", type=Path)
     args = parser.parse_args(argv)
     if args.follow_config is not None and args.feed_config is None:
         parser.error("--follow-config requires --feed-config")
     if args.once and args.follow_config is None:
         parser.error("--once requires --follow-config")
+    if args.recipient_amendment is not None and (
+        args.prepared_package is None or args.feed_config is not None
+    ):
+        parser.error("--recipient-amendment requires --prepared-package without --feed-config")
     try:
         config = _read(args.config, SuccessorPublisherConfig)
         policy = _read(args.policy, CompetitionPolicy)
@@ -258,6 +279,15 @@ def main(argv=None):
             )
             return
         prepared = _read(args.prepared_package, PreparedCompetitionPackage)
+        if args.recipient_amendment is not None:
+            signed = _read(args.recipient_amendment, SignedRewardRecipientAmendment)
+            result = asyncio.run(
+                amend_recipients(
+                    config, policy, prepared, signed, predecessor_policies=predecessors
+                )
+            )
+            print(canonical_json_bytes(result).decode("utf-8"))
+            return
         result = asyncio.run(
             sign_round(
                 config,

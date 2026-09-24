@@ -366,6 +366,7 @@ class PodmanSuccessorContainer:
         self._hotkey_sha256 = hashlib.sha256(account_id32(config.validator_hotkey)).hexdigest()
         self.name = f"umi-successor-{self._hotkey_sha256[:32]}"
         self._rehearsed: set[str] = set()
+        self.source_overlay = None
 
     async def _command(self, *arguments):
         # Pin the manager even on the first rootless namespace creation. Host
@@ -602,7 +603,9 @@ class PodmanSuccessorContainer:
             # service-owned parent. Root provenance belongs to the anchor
             # subtree, which is checked separately below.
             if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o555:
-                raise SuccessorContainerError("activation root differs from installed service owner")
+                raise SuccessorContainerError(
+                    "activation root differs from installed service owner"
+                )
             names = set()
             with os.scandir(descriptor) as children:
                 for entry in children:
@@ -667,6 +670,9 @@ class PodmanSuccessorContainer:
             finally:
                 os.close(parent)
             mounts.append(_bind_mount(key, HOTKEY_PATH, read_only=True))
+        if self.source_overlay is not None:
+            source = self.source_overlay.source_for(activation)
+            mounts.append(_bind_mount(source, "/opt/umi/src/umi", read_only=True))
         return tuple(mounts)
 
     def _validate_activation(self, activation, release):
@@ -712,6 +718,10 @@ class PodmanSuccessorContainer:
         await self._inspect_image(release)
         mounts = self._worker_mounts(activation)
         labels = self._labels(activation)
+        if self.source_overlay is not None:
+            labels[_LABEL + "worker-source-host"] = (
+                self.source_overlay.approval.signed_host.manifest_sha256
+            )
         network = (
             "none"
             if activation.profile == "competition_replay"

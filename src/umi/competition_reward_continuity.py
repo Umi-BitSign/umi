@@ -8,15 +8,16 @@ it never supplies an operator-selected allocation or an inference outcome.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import bittensor as bt
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_execution import ExecutionBoundary
 from .crypto import sign_response_digest, verify_response_signature
 from .encoding import account_id32
-from .open_competition import Signature, digest
+from .open_competition import Registration, Signature, digest
 from .policy import LiveChainObservationPin
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -78,10 +79,50 @@ class SignedCertifiedAllocationAdmission(StrictProtocolModel):
     signature: Signature
 
 
+class RewardRecipientAmendment(StrictProtocolModel):
+    schema_: Literal["umi-reward-recipient-amendment/1"] = Field(alias="schema")
+    authority_sha256: Hex32
+    package_sha256: Hex32
+    projection_sha256: Hex32
+    issued_at_block: Block
+    action: Literal["burn_listed_recipient_allocations/1"]
+    recipients: Annotated[list[Registration], Field(min_length=1, max_length=255)]
+    burn_destination: Registration
+
+    @model_validator(mode="after")
+    def unique_recipients(self):
+        uids = tuple(item.uid for item in self.recipients)
+        if uids != tuple(sorted(set(uids))) or self.burn_destination.uid in uids:
+            raise ValueError("recipient amendment has duplicate, unordered or burn recipients")
+        return self
+
+
+class SignedRewardRecipientAmendment(StrictProtocolModel):
+    schema_: Literal["umi-signed-reward-recipient-amendment/1"] = Field(alias="schema")
+    amendment: RewardRecipientAmendment
+    signatures: Annotated[list[Signature], Field(min_length=1, max_length=64)]
+
+
 class RewardContinuation(StrictProtocolModel):
-    schema_: Literal["umi-reward-continuation/1"] = Field(alias="schema")
+    schema_: Literal["umi-reward-continuation/1", "umi-reward-continuation/2"] = Field(
+        alias="schema"
+    )
     authority: SignedRewardContinuityAuthority
     admission: SignedCertifiedAllocationAdmission
+    recipient_amendment: SignedRewardRecipientAmendment | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_bytes(self, handler):
+        value = handler(self)
+        if self.recipient_amendment is None:
+            value.pop("recipient_amendment", None)
+        return value
+
+    @model_validator(mode="after")
+    def explicit_amendment_version(self):
+        if (self.schema_ == "umi-reward-continuation/2") != (self.recipient_amendment is not None):
+            raise ValueError("recipient amendment requires explicit continuation version 2")
+        return self
 
 
 class RewardContinuityRevocation(StrictProtocolModel):
@@ -245,6 +286,15 @@ def verify_reward_continuation(continuation, package, body, trusted_hotkeys, *, 
         raise ValueError("unapproved certificate admission signer")
     _verify(signed.admission, signed.signature)
     validate_admission(continuation.authority, package, signed.admission)
+    if continuation.recipient_amendment is not None:
+        verify_recipient_amendment(
+            continuation.recipient_amendment,
+            continuation.authority,
+            package,
+            trusted_hotkeys,
+            threshold=threshold,
+            block=body.signed_at_block,
+        )
     if (
         body.chain_pin != authority.chain_pin
         or body.signed_at_block < signed.admission.admitted_at_block
@@ -253,3 +303,99 @@ def verify_reward_continuation(continuation, package, body, trusted_hotkeys, *, 
     ):
         raise ValueError("write authorization exceeds forward continuity authority")
     return authority
+
+
+def sign_recipient_amendment(amendment, wallets):
+    amendment = RewardRecipientAmendment.model_validate_json(canonical_json_bytes(amendment))
+    return SignedRewardRecipientAmendment(
+        schema="umi-signed-reward-recipient-amendment/1",
+        amendment=amendment,
+        signatures=sorted(
+            (_sign(amendment, w) for w in wallets), key=lambda s: account_id32(s.hotkey)
+        ),
+    )
+
+
+def verify_recipient_amendment(signed, authority, package, trusted_hotkeys, *, threshold, block):
+    signed = SignedRewardRecipientAmendment.model_validate_json(canonical_json_bytes(signed))
+    amendment = signed.amendment
+    accounts = [account_id32(s.hotkey) for s in signed.signatures]
+    if (
+        amendment.authority_sha256 != digest(authority)
+        or not authority.authority.valid_from_block <= amendment.issued_at_block <= block
+        or accounts != sorted(set(accounts))
+        or not set(accounts) <= {account_id32(k) for k in trusted_hotkeys}
+        or len(accounts) < threshold
+    ):
+        raise ValueError("invalid recipient amendment authority, time or signature set")
+    for signature in signed.signatures:
+        _verify(amendment, signature)
+    effective_reward_row(package, signed)
+    return signed
+
+
+@dataclass(frozen=True)
+class EffectiveRewardRow:
+    uids: tuple[int, ...]
+    weights: tuple[int, ...]
+    allocations: tuple[Registration, ...]
+
+
+def effective_reward_row(package, amendment=None):
+    """Apply an independently authorized burn without rewriting certified evidence."""
+    projection = package.retained_settlement.projection
+    if amendment is None:
+        return apply_recipient_amendment(projection)
+    body = amendment.amendment
+    destination = package.policy.unallocated_model_burn
+    if (
+        body.package_sha256 != package.package_sha256
+        or body.projection_sha256 != package.manifest.projection_sha256
+        or destination is None
+        or body.burn_destination.uid != destination.uid
+        or account_id32(body.burn_destination.hotkey) != account_id32(destination.hotkey)
+        or package.retained_settlement.registration_snapshot.burn_destination != destination
+    ):
+        raise ValueError("recipient amendment differs from certified package or burn destination")
+    return apply_recipient_amendment(projection, amendment)
+
+
+def apply_recipient_amendment(projection, amendment=None):
+    recipients = tuple(Registration(uid=a.uid, hotkey=a.hotkey) for a in projection.allocations)
+    if amendment is None:
+        return EffectiveRewardRow(projection.uids, projection.weights, recipients)
+    body = amendment.amendment
+    if digest(projection) != body.projection_sha256:
+        raise ValueError("recipient amendment differs from original projection")
+    destination = body.burn_destination
+    by_uid = {a.uid: a for a in recipients}
+    weights = dict(zip(projection.uids, projection.weights, strict=True))
+    removed = set()
+    redirected = 0
+    for recipient in body.recipients:
+        original = by_uid.get(recipient.uid)
+        if (
+            original is None
+            or account_id32(original.hotkey) != account_id32(recipient.hotkey)
+            or not weights.get(recipient.uid, 0)
+        ):
+            raise ValueError("recipient amendment does not match a positive certified recipient")
+        redirected += weights[recipient.uid]
+        weights[recipient.uid] = 0
+        removed.add(recipient.uid)
+    weights[destination.uid] += redirected
+    if weights[destination.uid] > 65535:
+        raise ValueError("amended burn weight exceeds the raw weight domain")
+    retained = tuple(a for a in recipients if a.uid not in removed)
+    if destination.uid not in {a.uid for a in retained}:
+        retained = tuple(sorted((*retained, body.burn_destination), key=lambda a: a.uid))
+    return EffectiveRewardRow(
+        projection.uids, tuple(weights[uid] for uid in projection.uids), retained
+    )
+
+
+def authorized_reward_row(package, authorization):
+    continuation = authorization.continuation
+    return effective_reward_row(
+        package, continuation.recipient_amendment if continuation is not None else None
+    )
