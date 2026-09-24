@@ -23,7 +23,6 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
-from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_policy_lineage import admitted_policy_sha256s
@@ -47,6 +46,7 @@ from .open_competition import (
 )
 from .policy import FinalityVerifierPin, LiveChainObservationPin
 from .protocol import canonical_json_bytes
+from .rpc_transport import websocket_connect
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
     BittensorRawJsonRpc,

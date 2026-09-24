@@ -59,6 +59,7 @@ from .encoding import account_id32
 from .open_competition import Hex32, Hotkey, Registration, Signature, StrictProtocolModel, digest
 from .policy import LiveChainObservationPin
 from .protocol import canonical_json_bytes
+from .rpc_bittensor import rpc_client
 from .runtime_metadata import ExecutedRuntimeContext
 from .signed_extrinsic import encode_mortal_call, exact_signed_extrinsic
 from .weight_storage import subtensor_stored_weights
@@ -510,7 +511,7 @@ class BittensorCompetitionWeightTransport:
             CompetitionChainConfig.read_only_rpc(selected)
         self.endpoint = endpoint
         self.fallback_endpoints = tuple(fallback_endpoints)
-        self.client_factory = client_factory or bt.Subtensor
+        self.client_factory = client_factory or rpc_client
 
     @staticmethod
     def encode(call, body, observation, signer, *, projection) -> bytes:

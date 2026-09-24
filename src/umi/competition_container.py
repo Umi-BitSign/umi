@@ -36,6 +36,7 @@ from .competition_worker import _open_directory_without_links
 from .concurrency import kill_and_reap
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
+from .rpc_transport import CONFIG_ENV, CONFIG_FILENAME, WORKER_DIRECTORY, load_routes
 from .validator_supervisor import ValidatorSupervisorConfig
 from .validator_supervisor_adapters import (
     AsyncCommandRunner,
@@ -367,6 +368,7 @@ class PodmanSuccessorContainer:
         self.name = f"umi-successor-{self._hotkey_sha256[:32]}"
         self._rehearsed: set[str] = set()
         self.source_overlay = None
+        self.rpc_transport_directory: Path | None = None
 
     async def _command(self, *arguments):
         # Pin the manager even on the first rootless namespace creation. Host
@@ -673,6 +675,11 @@ class PodmanSuccessorContainer:
         if self.source_overlay is not None:
             source = self.source_overlay.source_for(activation)
             mounts.append(_bind_mount(source, "/opt/umi/src/umi", read_only=True))
+        if self.rpc_transport_directory is not None:
+            load_routes(self.rpc_transport_directory / CONFIG_FILENAME)
+            mounts.append(
+                _bind_mount(self.rpc_transport_directory, WORKER_DIRECTORY, read_only=True)
+            )
         return tuple(mounts)
 
     def _validate_activation(self, activation, release):
@@ -732,6 +739,8 @@ class PodmanSuccessorContainer:
             args.extend(("--label", f"{key}={value}"))
         for mount in mounts:
             args.extend(("--mount", mount))
+        if self.rpc_transport_directory is not None:
+            args.extend(("--env", f"{CONFIG_ENV}={WORKER_DIRECTORY}/{CONFIG_FILENAME}"))
         args.extend(
             ("--entrypoint", ENTRYPOINT, self._image_reference(release), activation.profile)
         )

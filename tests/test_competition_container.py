@@ -368,6 +368,56 @@ async def test_weight_command_uses_finney_clients_without_firewall_claim(launch_
     assert "firewall" not in " ".join(create)
 
 
+async def test_private_rpc_mount_and_explicit_worker_environment(setup, tmp_path, monkeypatch):
+    from tests.test_rpc_transport import PRIMARY
+
+    value = setup
+    state = tmp_path / "worker-state"
+    value.adapter.config = value.adapter.config.model_copy(update={"worker_state_root": str(state)})
+    state.mkdir(parents=True, mode=0o700, exist_ok=True)
+    state.chmod(0o700)
+    transport = tmp_path / "rpc"
+    transport.mkdir(mode=0o700)
+    (transport / "transport.json").write_text(
+        json.dumps(
+            {
+                "schema": "umi-rpc-transport/1",
+                "routes": [
+                    {
+                        "source": PRIMARY,
+                        "endpoint": "wss://paid.example",
+                        "authorization_file": "key",
+                    }
+                ],
+            }
+        )
+    )
+    (transport / "key").write_text("private-test-credential")
+    (transport / "key").chmod(0o600)
+    value.adapter.rpc_transport_directory = transport
+    monkeypatch.setattr(
+        value.adapter, "_activation_sources", lambda activation: tmp_path / "activation"
+    )
+    cap = SimpleNamespace(
+        profile="competition_replay",
+        directive_sha256="de" * 32,
+        package_sha256="ef" * 32,
+        authorization_sha256=None,
+        directive=SimpleNamespace(release=value.release.target),
+        _inputs=SimpleNamespace(receipt_sha256="bc" * 32),
+    )
+    monkeypatch.setattr(value.adapter, "_validate_activation", lambda *args: None)
+    await value.adapter.prepare_image(value.release)
+    await value.adapter.launch(cap, value.release)
+    create = next(call for call in reversed(value.runner.calls) if call[2] == "create")
+    assert "UMI_RPC_TRANSPORT_CONFIG=/run/umi-rpc/transport.json" in create
+    assert "private-test-credential" not in " ".join(create)
+    assert any(
+        m["Destination"] == "/run/umi-rpc" and m["Source"] == str(transport) and m["RW"] is False
+        for m in value.runner.container["Mounts"]
+    )
+
+
 @pytest.mark.asyncio
 async def test_inherited_image_labels_do_not_block_managed_identity(launch_setup):
     value = launch_setup

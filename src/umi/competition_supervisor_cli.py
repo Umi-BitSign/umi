@@ -51,6 +51,7 @@ from .competition_supervisor_runtime import (
 )
 from .competition_upgrade import _fingerprint, _open_without_links
 from .protocol import canonical_json_bytes
+from .rpc_transport import transport_config_path
 from .validator_supervisor import (
     MAX_SUPERVISOR_DOCUMENT_BYTES,
     parse_canonical_validator_supervisor_config,
@@ -331,6 +332,8 @@ def _build_runtime(installation, config_path, *, startup_lease):
             limits=_materialization_limits(),
         )
         container = _new_container(config)
+        rpc_config = transport_config_path()
+        container.rpc_transport_directory = None if rpc_config is None else rpc_config.parent
         maintenance_path = Path("/etc/umi/validator-supervisor-maintenance.json")
         if maintenance_path.exists():
             from .competition_worker_maintenance import approved_worker_source_overlay

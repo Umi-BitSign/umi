@@ -606,6 +606,42 @@ images. Both architectures need the same contract and migration tests. UID 0 and
 UID 54 remain separate installations with separate hotkeys, state and service
 lifecycles. Upgrade and verify one without stopping or changing the other.
 
+### Authenticated RPC providers
+
+Successor hosts can select an operational RPC route with the service environment
+variable `UMI_RPC_TRANSPORT_CONFIG`, pointing to an absolute `transport.json` file.
+This changes the connection destination without rewriting signed chain inputs or
+retained transaction bindings. Native finality and storage proofs still decide
+which returned values are accepted. The existing two backup providers remain in
+the chain configuration and receive no primary-provider credentials.
+
+```json
+{
+  "schema": "umi-rpc-transport/1",
+  "routes": [{
+    "source": "wss://archive.chain.opentensor.ai",
+    "endpoint": "wss://api.taostats.io/api/v1/rpc/ws/finney_archive",
+    "authorization_file": "taostats.key"
+  }]
+}
+```
+
+Store the key in the named file beside the configuration, with mode `0600` and
+ownership by the service account. Use a dedicated directory containing only the
+RPC configuration and its credentials. Neither URLs nor configuration JSON
+contain the key. Keep both files outside Git and signed artifact trees. The host
+mounts that directory read-only into each worker and passes only the configuration
+path in its environment. Both proof reads and the pinned transaction transport
+use the route; exact signed transaction bytes and recovery semantics are unchanged.
+
+The provider receives an `Authorization` header. Authenticated connections do
+not follow redirects or emit WebSocket debug logs. Route logs identify source,
+destination and whether authentication is enabled, without credential contents.
+An unavailable credential fails that provider's connection and permits the
+existing transport fallback. An invalid route configuration requires correction.
+Verify authenticated reads from the installed host and worker before claiming
+the operational switch is complete.
+
 <a id="successor-supervisor-upgrade--acceptance-checks"></a>
 
 ### Acceptance checks

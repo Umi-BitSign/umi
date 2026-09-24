@@ -24,12 +24,12 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import bittensor_core
-from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import InvalidStatus, PayloadTooBig
 
 from .chain_evidence import FinalizedSnapshotRef, StorageEvidence, StorageProofVerifier
 from .concurrency import run_owned_thread
 from .protocol import canonical_json_bytes
+from .rpc_transport import websocket_connect
 
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
