@@ -1050,3 +1050,32 @@ def test_adapter_limits_reject_noninteger_unbounded_values(field, value):
 def test_artifact_controls_require_execution_bytes(adapter_case):
     with pytest.raises(ValueError):
         replace(adapter_case.files, worker_execution_bytes=None)
+
+
+async def test_slow_start_verification_precedes_fresh_weight_proof(adapter_case, monkeypatch):
+    from umi.competition_chain_state import validate_owned_weight_observation
+
+    case = adapter_case
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    initial = await _stopped(case)
+    original_verify = case.adapter._verify
+    monotonic_ns = time.monotonic_ns
+    shift = [0]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: monotonic_ns() + shift[0])
+
+    def slow_verify(*args, **kwargs):
+        result = original_verify(*args, **kwargs)
+        shift[0] += 121_000_000_000
+        return result
+
+    monkeypatch.setattr(case.adapter, "_verify", slow_verify)
+    await case.adapter.start_weights(case.selection)
+    assert case.container.current.phase == "running"
+    assert case.container.events.count("launch") == 1
+    assert case.container.current.directive_sha256 == case.selection.directive_sha256
+    with pytest.raises(ValueError, match="owned proof"):
+        validate_owned_weight_observation(initial)
+    fresh = case.adapter._preflight[case.selection.directive_sha256]
+    validate_owned_weight_observation(fresh)
+    assert fresh.captured_monotonic_ns > initial.expires_monotonic_ns

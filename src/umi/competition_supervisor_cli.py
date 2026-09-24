@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
 import os
 import platform
 import signal
@@ -36,10 +37,13 @@ from .competition_host_artifacts import (
     parse_signed_host_artifact,
     verify_host_artifact_authority,
 )
+from .competition_host_maintenance import verify_host_maintenance
 from .competition_materialization import (
     SuccessorCurrentMaterializationLimits,
     repair_successor_source_permissions,
 )
+from .competition_package_reuse import package_verification_session
+from .competition_progress import configure_progress_logging, log_phase, progress_phase
 from .competition_supervisor_runtime import (
     SuccessorStartupLease,
     SuccessorSupervisorRuntime,
@@ -107,6 +111,17 @@ def _running_executable_identity(expected: Path) -> tuple[int, ...]:
 
 def _verify_running_host_values(config, receipt, host_manifest_sha256):
     root = _HOST_PARENT / receipt.host_umi_git_revision
+    maintenance = Path(__file__).parent.parent.parent != root
+    if maintenance:
+        signed = verify_host_maintenance(
+            _root_control(
+                Path("/etc/umi/validator-supervisor-maintenance.json"),
+                MAX_HOST_MANIFEST_BYTES,
+            ),
+            config=config,
+            receipt=receipt,
+        )
+        root = _HOST_PARENT / signed.manifest.umi_git_revision
     source = root / "src/umi/competition_supervisor_cli.py"
     interpreter = root / ".venv/bin/python"
     if (
@@ -126,17 +141,19 @@ def _verify_running_host_values(config, receipt, host_manifest_sha256):
     )
     if hashlib.sha256(payload).hexdigest() != receipt.signed_host_artifact_sha256:
         raise ValueError("running host manifest differs from root receipt")
-    signed = parse_signed_host_artifact(payload)
+    original_signed = parse_signed_host_artifact(payload)
     verify_host_artifact_authority(
-        signed,
+        original_signed,
         config=config,
         expected_manifest_sha256=host_manifest_sha256,
     )
     if (
-        signed.manifest.umi_git_revision != receipt.host_umi_git_revision
-        or signed.manifest.target_platform != expected_platform
+        original_signed.manifest.umi_git_revision != receipt.host_umi_git_revision
+        or original_signed.manifest.target_platform != expected_platform
     ):
         raise ValueError("running host manifest identity differs")
+    if not maintenance:
+        signed = original_signed
     source_identity = _stable_file_identity(source)
     interpreter_identity = _running_executable_identity(interpreter)
     ancestors = {path: _ancestor_identity(path) for path in _ancestor_paths(root)}
@@ -148,6 +165,14 @@ def _verify_running_host_values(config, receipt, host_manifest_sha256):
         raise ValueError("running source or interpreter is absent from the signed host tree")
     if any(_ancestor_identity(path) != identity for path, identity in ancestors.items()):
         raise ValueError("running host parent changed while verifying")
+    if maintenance:
+        print(json.dumps({
+            "schema": "umi-supervisor-host-maintenance-status/1",
+            "status": "verified",
+            "host_manifest_sha256": signed.manifest_sha256,
+            "host_revision": signed.manifest.umi_git_revision,
+            "original_host_manifest_sha256": receipt.host_manifest_sha256,
+        }), flush=True)
 
 
 def _verify_running_host(installation):
@@ -334,12 +359,14 @@ def _emit(result):
     )
 
 
+@log_phase("host_service")
 async def run_supervisor(config_path: Path, *, stop_event=None):
     if sys.platform != "linux" or os.geteuid() == 0:
         raise ValueError("successor supervisor requires the installed non-root Linux service")
     config_bytes = _root_control(config_path, MAX_SUPERVISOR_DOCUMENT_BYTES)
     config = parse_canonical_validator_supervisor_config(config_bytes)
-    anchor = load_materialized_successor_anchor_for_repair(config_path)
+    with progress_phase("host_anchor"):
+        anchor = load_materialized_successor_anchor_for_repair(config_path)
     if config_bytes != canonical_json_bytes(anchor.config):
         raise ValueError("supervisor config differs from the root-sealed anchor")
     _verify_running_host_anchor(anchor)
@@ -347,7 +374,8 @@ async def run_supervisor(config_path: Path, *, stop_event=None):
         await _stop_startup_worker(config, startup_lease)
         repair_successor_source_permissions(anchor=anchor, limits=_materialization_limits())
         anchor.recheck()
-        installation = load_successor_worker_inputs()
+        with progress_phase("worker_inputs"):
+            installation = load_successor_worker_inputs()
         if config_bytes != canonical_json_bytes(installation.config):
             raise ValueError("supervisor config differs from sealed installation")
         _verify_running_host(installation)
@@ -379,8 +407,10 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         "--config", type=Path, required=True, help="existing root-owned supervisor config"
     )
     args = parser.parse_args(argv)
+    configure_progress_logging()
     try:
-        asyncio.run(run_supervisor(args.config))
+        with package_verification_session():
+            asyncio.run(run_supervisor(args.config))
     except KeyboardInterrupt:
         return 130
     except Exception:

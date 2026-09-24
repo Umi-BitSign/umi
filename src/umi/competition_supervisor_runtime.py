@@ -25,6 +25,7 @@ from .competition_chain_state import (
     OwnedCompetitionChainObservation,
     validate_owned_weight_observation,
 )
+from .competition_progress import log_phase
 from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
     MAX_SUCCESSOR_HISTORY_BYTES,
@@ -680,6 +681,7 @@ class SuccessorSupervisorRuntime:
             raise SuccessorRuntimeError("successor singleton state exceeds its bounds")
         return db.execute(f"SELECT body FROM {table} WHERE id=1").fetchone()
 
+    @log_phase("history_load")
     def _load_history(self):
         with self._db() as db:
             if self._bounded_row(db, "binding", MAX_SUCCESSOR_DOCUMENT_BYTES) != (self._binding,):
@@ -774,6 +776,7 @@ class SuccessorSupervisorRuntime:
             )
         self._observation = observation
 
+    @log_phase("authorization_gates")
     def _current_gates(self, signed, observation, *, starting: bool):
         self._require_lease()
         validate_owned_weight_observation(observation)
@@ -800,12 +803,14 @@ class SuccessorSupervisorRuntime:
         ):
             raise SuccessorRuntimeError("successor activation headroom is insufficient")
 
+    @log_phase("chain_observation")
     async def _refresh_observation(self):
         observation = await self.observer.observe()
         self._require_lease()
         self._observe(observation)
         return observation
 
+    @log_phase("stopped_recovery")
     async def _stop_and_recover(self, observation):
         _, _, worker = self._load_history()
         if worker.phase != "idle":
@@ -883,6 +888,7 @@ class SuccessorSupervisorRuntime:
         ]
         return SuccessorWorkerSelection(signed, successor_continuation_bytes(anchor, continuation))
 
+    @log_phase("reconcile")
     async def _reconcile(self):
         self._state, history, worker = self._load_history()
         observation = await self._refresh_observation()

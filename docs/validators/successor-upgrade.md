@@ -4,6 +4,27 @@
 
 - [Successor supervisor upgrade requirements](#successor-supervisor-upgrade)
 
+## Supervisor maintenance for an installed successor
+
+A supervisor fix can retain the installed worker release, reward package,
+signed directive history and original recovery journals. Stage the replacement
+under its own revision and signed host manifest. A root-owned
+`/etc/umi/validator-supervisor-maintenance.json` selects that host for the exact
+configuration and installation receipt, using `umi-supervisor-host-maintenance/1`.
+It contains their SHA-256 digests, the original host manifest digest and the new
+signed host artifact. The replacement must satisfy the installed release authority.
+
+After native stop/cleanup, select the new executable and read-only host mount in
+the existing service. Startup verifies both the original activation controls and
+the replacement's source/interpreter, and reports the effective host identity.
+Retain the original host and controls while worker or recovery consumers use them.
+Keep the maintenance approval while this executable is selected; remove it after
+a later installed transition no longer depends on the original receipt.
+
+The supervisor reuses immutable package verification within one process, checking
+all file bytes and bounds on each load. Restart verifies the package again. Reward
+authority and current chain state are checked separately for each execution.
+
 <a id="successor-supervisor-upgrade"></a>
 
 ## Successor supervisor upgrade requirements

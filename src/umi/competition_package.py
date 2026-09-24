@@ -21,6 +21,7 @@ from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_outcomes import OutcomeEvidence, parse_outcome
+from .competition_package_reuse import current_package_reuse
 from .competition_policy_lineage import registered_lineage, replay_lineage
 from .competition_publication import (
     CutoffPublication,
@@ -430,6 +431,78 @@ def load_competition_package(
     limits: CompetitionPackageLimits,
 ) -> VerifiedCompetitionPackage:
     """Strictly load and replay a sealed package under caller-supplied bounds."""
+
+    reuse = current_package_reuse()
+    arguments = dict(
+        expected_package_sha256=expected_package_sha256,
+        expected_policy_sha256=expected_policy_sha256,
+        observed_release=observed_release,
+        limits=limits,
+    )
+    if reuse is None:
+        return _load_competition_package(package_path, **arguments)
+    key, input_bytes = _package_reuse_key(package_path, **arguments)
+    cached = reuse.lookup(key)
+    if cached is not None:
+        return cached
+    verified = _load_competition_package(package_path, **arguments)
+    # Verification can be slow. Retain it only if the complete input bytes
+    # still match, independently of pathname or file metadata.
+    if _package_reuse_key(package_path, **arguments) != (key, input_bytes):
+        raise ValueError("package changed during verification")
+    reuse.remember(key, verified, input_bytes)
+    return verified
+
+
+def _package_reuse_key(
+    package_path, *, expected_package_sha256, expected_policy_sha256, observed_release, limits
+):
+    """Hash every byte under the same ownership, type, size and seal checks."""
+    _require_hex32(expected_package_sha256, "expected package digest")
+    _require_hex32(expected_policy_sha256, "expected policy digest")
+    release = _canonical(CompetitionReleaseIdentity, observed_release)
+    limits = _canonical(CompetitionPackageLimits, limits)
+    path = _canonical_absolute_path(package_path, "package")
+    with _opened_sealed_directory(path) as root_fd:
+        before = _directory_identity(root_fd)
+        _check_exact_tree(root_fd)
+        body = _read_sealed_file(
+            root_fd, "manifest.json", maximum_bytes=limits.maximum_manifest_bytes
+        )
+        manifest = _parse_canonical(CompetitionPackageManifest, body, "package manifest")
+        if competition_package_digest(manifest) != expected_package_sha256:
+            raise ValueError("package digest differs from the caller's expected digest")
+        if manifest.policy_sha256 != expected_policy_sha256:
+            raise ValueError("package policy differs from the caller's expected policy")
+        declared = {item.name: item for item in manifest.files}
+        _preflight_declared_sizes(root_fd, declared, limits, len(body))
+        fingerprints = [("manifest.json", len(body), hashlib.sha256(body).hexdigest())]
+        total = len(body)
+        for name in _PAYLOAD_NAMES:
+            item = declared[name]
+            body = _read_sealed_file(
+                root_fd, name, maximum_bytes=_limit_for(name, limits),
+                expected_size=item.size_bytes, expected_sha256=item.sha256,
+            )
+            fingerprints.append((name, len(body), item.sha256))
+            total += len(body)
+        _check_exact_tree(root_fd)
+        if before != _directory_identity(root_fd):
+            raise ValueError("package directory changed while it was read")
+    return (
+        expected_package_sha256, expected_policy_sha256,
+        canonical_json_bytes(release), canonical_json_bytes(limits), tuple(fingerprints),
+    ), total
+
+
+def _load_competition_package(
+    package_path: Path,
+    *,
+    expected_package_sha256: str,
+    expected_policy_sha256: str,
+    observed_release: CompetitionReleaseIdentity,
+    limits: CompetitionPackageLimits,
+) -> VerifiedCompetitionPackage:
 
     _require_hex32(expected_package_sha256, "expected package digest")
     _require_hex32(expected_policy_sha256, "expected policy digest")
