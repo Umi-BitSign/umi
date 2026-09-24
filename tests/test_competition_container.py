@@ -393,6 +393,7 @@ async def test_private_rpc_mount_and_explicit_worker_environment(setup, tmp_path
         )
     )
     (transport / "key").write_text("private-test-credential")
+    (transport / "transport.json").chmod(0o600)
     (transport / "key").chmod(0o600)
     value.adapter.rpc_transport_directory = transport
     monkeypatch.setattr(
