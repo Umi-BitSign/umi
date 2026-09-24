@@ -162,3 +162,21 @@ def test_unrecognized_phase_cannot_be_used_to_log_arbitrary_text(progress_events
     with pytest.raises(ValueError, match="unknown competition diagnostic phase"):
         progress.log_phase("secret capability")
     assert progress_events == []
+
+
+def test_native_reason_and_chained_cause_survive_generic_phase_error(progress_events):
+    from umi.grandpa_finality_supervisor import GrandpaFinalitySupervisorError
+    from umi.validator_chain import ValidatorChainError
+
+    with pytest.raises(ValidatorChainError), progress.progress_phase("chain_observation"):
+        try:
+            raise GrandpaFinalitySupervisorError("no_verified_finalized_head")
+        except GrandpaFinalitySupervisorError as error:
+            raise ValidatorChainError("owned_finality_unavailable") from error
+    failure = progress_events[-1]
+    assert failure["reason_code"] == "owned_finality_unavailable"
+    assert [c["reason_code"] for c in failure["causes"]] == [
+        "owned_finality_unavailable",
+        "no_verified_finalized_head",
+    ]
+    assert failure["causes"][0]["error_type"] == "umi.validator_chain.ValidatorChainError"

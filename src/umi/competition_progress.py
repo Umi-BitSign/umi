@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -66,6 +67,13 @@ def configure_progress_logging():
 
 
 def _reason(error):
+    native = getattr(error, "reason_code", None)
+    if (
+        type(error).__module__.startswith("umi.")
+        and type(native) is str
+        and re.fullmatch(r"[a-z][a-z0-9_]{0,95}", native)
+    ):
+        return native
     # Match exact static native messages without formatting unknown exceptions.
     if len(error.args) == 1 and type(error.args[0]) is str:
         known = _REASONS.get(error.args[0])
@@ -83,6 +91,33 @@ def _reason(error):
         if isinstance(error, kind):
             return code
     return "internal_error"
+
+
+def _failure_details(error):
+    causes, seen = [], set()
+    while error is not None and id(error) not in seen and len(causes) < 8:
+        seen.add(id(error))
+        frames, tb = [], error.__traceback__
+        while tb is not None:
+            module = tb.tb_frame.f_globals.get("__name__", "")
+            if type(module) is str and module.startswith("umi."):
+                frames.append(
+                    {
+                        "module": module[:160],
+                        "function": tb.tb_frame.f_code.co_name[:160],
+                        "line": tb.tb_lineno,
+                    }
+                )
+            tb = tb.tb_next
+        causes.append(
+            {
+                "error_type": (type(error).__module__ + "." + type(error).__qualname__)[:200],
+                "reason_code": _reason(error),
+                "source_frames": frames[-8:],
+            }
+        )
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    return causes
 
 
 def _emit(body, *, failed=False):
@@ -119,6 +154,7 @@ def progress_phase(name):
                 **common,
                 "event": "failed",
                 "reason_code": _reason(error),
+                "causes": _failure_details(error),
                 "elapsed_ms": max(0, (time.monotonic_ns() - started) // 1_000_000),
             },
             failed=True,
