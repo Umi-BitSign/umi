@@ -197,5 +197,18 @@ async def test_pinned_sdk_uses_same_routes_and_retains_both_backups(route):
     assert backend.endpoint == PRIMARY and backend.fallback_endpoints == list(BACKUPS)
     interface = backend._interface(PRIMARY, list(BACKUPS))
     assert interface._session._urls == [PRIMARY, *BACKUPS]
-    assert interface._session._connect is rpc_transport.websocket_connect
+    assert interface._session._connect is rpc_bittensor._sdk_connect
     assert not interface._session._retry_forever
+
+
+async def test_sdk_dial_preserves_pinned_limits(route, monkeypatch):
+    calls = []
+    socket = object()
+
+    async def connect(endpoint, **kwargs):
+        calls.append((endpoint, kwargs))
+        return socket
+
+    monkeypatch.setattr(rpc_bittensor, "websocket_connect", connect)
+    assert await rpc_bittensor._sdk_connect(PRIMARY) is socket
+    assert calls == [(PRIMARY, {"max_size": 2**32, "write_limit": 2**16, "proxy": None})]
