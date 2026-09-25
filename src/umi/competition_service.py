@@ -330,13 +330,22 @@ def create_intake_app(
         }
         if config.public_deployment.round_stride_blocks is not None:
             result["continuous_intake"] = True
-            result["next_intake_schedule"] = (
-                config.public_deployment.launch_identity()
-                .next_intake_schedule(snapshot.block)
-                .model_dump(mode="json", by_alias=True)
+            next_schedule = (
+                config.public_deployment.next_intake_schedule(snapshot.block)
                 if result["admission_accepting_new"]
                 else None
             )
+            result["next_intake_schedule"] = (
+                next_schedule.model_dump(mode="json", by_alias=True)
+                if next_schedule is not None
+                else None
+            )
+            if config.public_deployment.intake_schedule_hold is not None:
+                result["intake_schedule_hold"] = (
+                    config.public_deployment.intake_schedule_hold.model_dump(
+                        mode="json", by_alias=True
+                    )
+                )
         return result
 
     return app

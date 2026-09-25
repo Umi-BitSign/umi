@@ -115,6 +115,19 @@ class PublicLaunchIdentity(StrictProtocolModel):
         return self.schedule_for_cycle(cycle)
 
 
+class IntakeScheduleHold(StrictProtocolModel):
+    """Operator scheduling state; never an admission or reward authorization."""
+
+    schema_: Literal["umi-competition-intake-schedule-hold/1"] = Field(alias="schema")
+    cohort_number: Annotated[int, Field(ge=1, le=2**31 - 1)]
+    state: Literal["preparing"] = "preparing"
+    reason_code: Literal["cohort_setup_in_progress"] = "cohort_setup_in_progress"
+    automatic_advance: Literal[False] = False
+    submission_close_block: None = None
+    evaluation_start_block: None = None
+    cohort_eligibility_confirmed: Literal[False] = False
+
+
 class PublicIntakeDeployment(StrictProtocolModel):
     """Public identity of the deployed intake, separate from repository HEAD."""
 
@@ -136,16 +149,25 @@ class PublicIntakeDeployment(StrictProtocolModel):
     model_intake_ready: bool
     evaluation_ready: bool = False
     round_stride_blocks: Annotated[int, Field(ge=1, le=2**53 - 1)] | None = None
+    intake_schedule_hold: IntakeScheduleHold | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
         value = handler(self)
         if self.round_stride_blocks is None:
             value.pop("round_stride_blocks", None)
+        if self.intake_schedule_hold is None:
+            value.pop("intake_schedule_hold", None)
         return value
 
     @model_validator(mode="after")
     def eligibility(self) -> Self:
+        if self.intake_schedule_hold is not None and (
+            self.round_stride_blocks is None or self.evaluation_ready
+        ):
+            raise ValueError(
+                "schedule hold requires continuous intake without evaluation readiness"
+            )
         if (self.schema_ == "umi-competition-intake-deployment/3") != (
             self.round_stride_blocks is not None
         ):
@@ -161,6 +183,12 @@ class PublicIntakeDeployment(StrictProtocolModel):
         ):
             raise ValueError("evaluation readiness requires every eligible track to be ready")
         return self
+
+    def next_intake_schedule(self, block: int) -> PublicRoundSchedule | None:
+        """A held future cohort has no published cutoff, regardless of elapsed cycles."""
+        if self.intake_schedule_hold is not None:
+            return None
+        return self.launch_identity().next_intake_schedule(block)
 
     def launch_identity(self) -> PublicLaunchIdentity:
         return PublicLaunchIdentity(
