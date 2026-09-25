@@ -102,12 +102,35 @@ across cycles until it expires, is replaced, or its hotkey loses registration.
 The policy interval, admission limits and replacement rate limit still apply.
 
 Public status retains the first schedule and reports `continuous_intake` plus
-`next_intake_schedule`. The latter uses the guaranteed cutoff, not the later
-coordinator polling margin. Admission receipts remain `accepted_no_weight`:
+`next_intake_schedule`. With no scheduling hold, the latter is derived from the
+fixed block cadence; it does not establish that a round was prepared or launched.
+Actual published rounds are discoverable through `/v1/competition/rounds/index`.
+The derived schedule uses the guaranteed cutoff, not the later coordinator
+polling margin. Admission receipts remain `accepted_no_weight`:
 they do not prove scoring or finalized competition rewards. Continuous intake
 also does not create private test cases. Operators must supply each cycle's
 fresh reviewed suite, delivery assets and capacity-qualified plan before its
 window. A missing or failed coordinator cycle is not a miner failure.
+
+When the next cohort is still being prepared, configure
+`public_deployment.intake_schedule_hold` with schema
+`umi-competition-intake-schedule-hold/1` and its `cohort_number`. This requires
+continuous intake and `evaluation_ready=false`. Both status and readiness
+publish that hold and return `next_intake_schedule: null`. The cohort stays
+`preparing`, with no announced submission close or evaluation start, as blocks
+advance and the service restarts. Clients must display the held cohort and
+pending dates instead of deriving another number from the historical schedule.
+`admission_accepting_new` still reports actual policy, capacity and finality
+checks. A hold does not override them or extend a signed submission's lifetime.
+
+The hold is operator scheduling metadata. It leaves the signed launch,
+accepted receipts, frozen rosters and reward authorization unchanged; it neither
+admits a future round nor guarantees selection under a future policy. Stop or
+leave uninstalled any future launch controller before advertising a hold.
+Publish and qualify the real successor policy/schedule before clearing it.
+Updated strict intake monitors understand the hold and require matching
+deployment, status and readiness fields; pin the new deployment identity through
+the monitor's normal transition procedure.
 
 To accelerate an unused version 1 first cohort, publish a
 `umi-competition-launch-amendment/1` signed by the current policy's evaluator

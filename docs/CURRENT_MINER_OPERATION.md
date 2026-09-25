@@ -75,8 +75,13 @@ endpoint participation and an optional reproducible-model contribution track.
 Public endpoint intake has been live since block `9,085,463`. It does not replace
 the bridge or activate competition weights by itself. Check
 [public status](https://api.umi.vision/v1/competition/status) for
-`next_intake_schedule`. Submit a new or replacement endpoint before that
-schedule's earliest cutoff; a later acceptance does not guarantee inclusion.
+`intake_schedule_hold` before interpreting `next_intake_schedule`. A hold names
+the cohort being prepared and means no closing block or evaluation start is
+announced; the next schedule is null. Intake can remain open during that hold,
+but acceptance does not guarantee selection under the future policy. Without
+a hold, submit before the published schedule's earliest cutoff; a later
+acceptance does not guarantee inclusion. Do not infer a launched cohort from
+elapsed block cadence.
 Admitted submissions must remain valid through evaluation close, and the hotkey
 must be registered on SN78 in the finalized roster-close snapshot. The
 [connection guide](miners/cohort3-update.md) identifies accepted predecessor

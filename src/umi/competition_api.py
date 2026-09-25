@@ -214,13 +214,22 @@ def create_app(
             )
             if public_deployment.round_stride_blocks is not None:
                 result["continuous_intake"] = True
-                result["next_intake_schedule"] = (
-                    public_deployment.launch_identity()
-                    .next_intake_schedule(admission_checked_block)
-                    .model_dump(mode="json", by_alias=True)
+                next_schedule = (
+                    public_deployment.next_intake_schedule(admission_checked_block)
                     if admission_checked_block is not None and admission_accepting_new
                     else None
                 )
+                result["next_intake_schedule"] = (
+                    next_schedule.model_dump(mode="json", by_alias=True)
+                    if next_schedule is not None
+                    else None
+                )
+                if public_deployment.intake_schedule_hold is not None:
+                    result["intake_schedule_hold"] = (
+                        public_deployment.intake_schedule_hold.model_dump(
+                            mode="json", by_alias=True
+                        )
+                    )
         return result
 
     @app.get("/v1/competition/submissions")
