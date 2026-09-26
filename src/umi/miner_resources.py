@@ -121,7 +121,14 @@ class SQLiteMinerResourceLedger:
         miner_hotkey: str,
         scoring_policy_sha256: str,
         limits: Limits,
+        maximum_recovery_assignments: int = 0,
     ) -> None:
+        if (
+            type(maximum_recovery_assignments) is not int
+            or not 0 <= maximum_recovery_assignments < 2**53
+        ):
+            raise ValueError("recovery assignment capacity must be a non-negative safe integer")
+        self._maximum_recovery_assignments = maximum_recovery_assignments
         if not isinstance(limits, Limits):
             raise TypeError("limits must be Limits")
         raw_sha256(scoring_policy_sha256, field="scoring policy hash")
@@ -202,6 +209,7 @@ class SQLiteMinerResourceLedger:
                 if binding.response_close_round <= current_round:
                     raise MinerResourceError("response_window_closed")
             row = self._get_or_create_assignment(connection, binding)
+            self._reserve_response_recovery(connection, binding, row)
             sequence = int(row["request_transmissions"]) + 1
             if sequence > self._limits.maximum_request_transmissions_per_assignment:
                 raise MinerResourceError("request_transmission_limit")
@@ -444,7 +452,7 @@ class SQLiteMinerResourceLedger:
         return changed
 
     def prune_closed_windows(self, current_round: int) -> int:
-        """Delete all bounded request state after its authoritative window closes."""
+        """Prune expired transport state, preserving reserved recovery responses."""
 
         self._validate_round(current_round)
         with self._transaction() as connection:
@@ -500,6 +508,98 @@ class SQLiteMinerResourceLedger:
                     binding.assignment_id,
                 ),
             )
+            recovery = connection.execute(
+                "SELECT * FROM response_recovery WHERE assignment_id = ?", (binding.assignment_id,)
+            ).fetchone()
+            if recovery is not None:
+                self._validate_recovery_binding(recovery, binding)
+                retained = self._recovery_response(recovery)
+                if retained is not None and retained != CachedMinerResponse(body, signature):
+                    raise MinerResourceError("response_recovery_conflict")
+                connection.execute(
+                    "UPDATE response_recovery SET body = ?, signature = ?, sha256 = ? "
+                    "WHERE assignment_id = ?",
+                    (body, signature, body_sha256, binding.assignment_id),
+                )
+
+    def recovered_response(
+        self, request: TranslationRequest, *, validator_hotkey: str
+    ) -> CachedMinerResponse | None:
+        """Read original sealed bytes; absence/pending never authorizes new work.
+
+        Callers must authenticate the original validator on the recovery route.
+        This operation does not admit a request, fetch a video, advance counters
+        or extend an inference window. Its returned bytes are signature-checked
+        by the HTTP consumer before transmission.
+        """
+        binding = MinerAssignmentBinding.from_request(request, validator_hotkey=validator_hotkey)
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM response_recovery WHERE assignment_id = ?", (binding.assignment_id,)
+            ).fetchone()
+            if row is None:
+                raise MinerResourceError("response_recovery_not_retained")
+            self._validate_recovery_binding(row, binding)
+            return self._recovery_response(row)
+
+    def _reserve_response_recovery(
+        self,
+        connection: sqlite3.Connection,
+        binding: MinerAssignmentBinding,
+        assignment: sqlite3.Row,
+    ) -> None:
+        row = connection.execute(
+            "SELECT * FROM response_recovery WHERE assignment_id = ?", (binding.assignment_id,)
+        ).fetchone()
+        if row is not None:
+            self._validate_recovery_binding(row, binding)
+            return
+        if not self._maximum_recovery_assignments:
+            return
+        count = connection.execute("SELECT COUNT(*) FROM response_recovery").fetchone()[0]
+        if count >= self._maximum_recovery_assignments:
+            raise MinerResourceError("response_recovery_capacity")
+        # Reservation and request admission share one transaction. Each accepted
+        # row has space in the configured count for a maximum-sized response;
+        # no completion, pruning or clock event evicts it. Disk headroom remains
+        # an operator responsibility. Increasing capacity does not change policy.
+        connection.execute(
+            "INSERT INTO response_recovery "
+            "(assignment_id, request_digest, validator_account_hex, body, signature, sha256) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                binding.assignment_id,
+                binding.request_digest,
+                binding.validator_account_hex,
+                assignment["cached_response_body"],
+                assignment["cached_response_signature"],
+                assignment["cached_response_sha256"],
+            ),
+        )
+
+    @staticmethod
+    def _validate_recovery_binding(row: sqlite3.Row, binding: MinerAssignmentBinding) -> None:
+        if (row["request_digest"], row["validator_account_hex"]) != (
+            binding.request_digest,
+            binding.validator_account_hex,
+        ):
+            raise MinerResourceError("response_recovery_binding_conflict")
+
+    def _recovery_response(self, row: sqlite3.Row) -> CachedMinerResponse | None:
+        body, signature, sha256 = row["body"], row["signature"], row["sha256"]
+        if body is None:
+            if signature is not None or sha256 is not None:
+                raise MinerResourceError("response_recovery_invalid")
+            return None
+        if (
+            not isinstance(body, bytes)
+            or not 0 < len(body) <= self._limits.maximum_response_body_bytes
+            or not isinstance(signature, str)
+            or _SIGNATURE_RE.fullmatch(signature) is None
+            or hashlib.sha256(body).hexdigest() != sha256
+        ):
+            raise MinerResourceError("response_recovery_invalid")
+        return CachedMinerResponse(body, signature)
 
     def snapshot(self, binding: MinerAssignmentBinding) -> MinerAssignmentResourceSnapshot:
         with self._lock:
@@ -576,6 +676,14 @@ class SQLiteMinerResourceLedger:
                 body BLOB NOT NULL,
                 PRIMARY KEY (window_id, video_sha256)
             );
+            CREATE TABLE IF NOT EXISTS response_recovery (
+                assignment_id TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                validator_account_hex TEXT NOT NULL,
+                body BLOB,
+                signature TEXT,
+                sha256 TEXT
+            );
             """
         )
 
@@ -640,6 +748,13 @@ class SQLiteMinerResourceLedger:
         quick = self._connection.execute("PRAGMA quick_check").fetchone()[0]
         if quick != "ok":
             raise MinerResourceError("resource_ledger_quick_check_failed")
+        for row in self._connection.execute("SELECT * FROM response_recovery"):
+            if any(
+                re.fullmatch(r"[0-9a-f]{64}", row[k]) is None
+                for k in ("assignment_id", "request_digest", "validator_account_hex")
+            ):
+                raise MinerResourceError("response_recovery_invalid")
+            self._recovery_response(row)
         rows = self._connection.execute("SELECT * FROM assignments").fetchall()
         for row in rows:
             if row["window_index"] < 0:

@@ -45,7 +45,9 @@ current policy. If that policy carries earlier submissions forward, also pass
 The miner checks every link and rejects changes to contribution terms or reward
 allocations. This preserves the original signed submission; it does not authorize
 an assignment without the current policy's signatures and finality checks.
-Keep the existing nonce, assignment and response databases across the restart.
+Keep the existing nonce database. Preserve prior assignment and response
+databases; a transport-policy change may require a new state namespace, as the
+current connection guide specifies.
 Up to eight predecessor files are supported. With none supplied, only submissions
 under the configured current policy are accepted.
 
@@ -74,10 +76,42 @@ sealing its response, using the remaining signed video-fetch budget. Each attemp
 is recorded in the existing assignment database and reserves its bytes before
 network access. The response deadline still applies. A rejected origin, malformed
 response, digest mismatch or HTTP error does not trigger this transport retry.
-Once a response is sealed, retransmitting the assignment returns those same
-signed bytes; it does not repeat fetching or inference. Keep the assignment
-database across upgrades and restarts so these counters and cached responses
-remain intact.
+During its valid request window, retransmitting a sealed assignment returns the
+same signed bytes without repeating fetching or inference. Keep the assignment
+database across upgrades and restarts. The ordinary transport cache is pruned
+after the window closes.
+
+For durable response retrieval, start the candidate miner with
+`--max-recovery-assignments N`, where `N` reserves space in the admission count
+for that many original assignments. Reservation and request admission commit
+together, as do the sealed response and its recovery record. Each retained
+response remains bounded by the transport policy's response-byte ceiling. Keep
+disk headroom for those bytes, SQLite overhead and the normal video cache.
+Capacity exhaustion rejects new assignments before video fetching or inference;
+it never evicts accepted recovery records. Increase `N` and restart the same
+database to admit more work. The default `0` disables new reservations, while
+existing recovery records remain readable and pending reservations can finish.
+Enabling retention cannot restore responses already pruned by an older process.
+
+The original validator retrieves a retained response with
+`POST /v1/translate/response`: send the original canonical `TranslationRequest`
+body with a fresh `btauth/1` signature over this recovery path and the receiving
+miner hotkey. The TLS proxy must forward this route unchanged. HTTP 200 carries
+the original encrypted body and `X-UMI-Signature`, verified again before sending.
+This includes signed error responses. Retrieval uses bounded authenticated
+ingress and durable nonce checks; it does not spend another inference attempt
+or require the old request window or assignment feed to remain open.
+
+HTTP 202 means the reservation has no sealed response; HTTP 404 means no recovery
+record is available. Neither establishes whether remote work ran or authorizes
+replacement work. HTTP 409 rejects a changed request for the same assignment.
+Clients must preserve recovered bytes and independently verify their signatures;
+recovery does not establish timely original receipt or settlement eligibility.
+The current recovery route requires the original validator to remain in the
+runtime's allowlist and the original policy-bound assignment database to remain
+served. Cross-policy retrieval, replacement-key authorization, durable attempt
+selection and certified archive retirement still require C5 integration. Keep
+the database and its recovery records until that retirement is qualified.
 
 Use the Unix socket when the model needs a Torch, Core ML, Python, or native
 library stack that cannot share UMI's pinned environment. UMI supports Python

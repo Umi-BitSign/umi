@@ -71,6 +71,7 @@ from .video import HttpVideoFetcher, VideoFetcher, VideoFetchError, VideoFetchRe
 
 LOGGER = logging.getLogger("umi.miner")
 TRANSLATE_PATH = "/v1/translate"
+RESPONSE_RECOVERY_PATH = "/v1/translate/response"
 RESPONSE_SIGNATURE_HEADER = "X-UMI-Signature"
 
 
@@ -1009,9 +1010,16 @@ def create_app(
                 result["assignment_discovery"] = runtime.competition_authority.status()
         return result
 
+    @app.post(RESPONSE_RECOVERY_PATH)
+    async def recover_response(request: Request) -> Response:
+        return await serve_request(request, recovering=True)
+
     @app.post(TRANSLATE_PATH)
     async def translate(request: Request) -> Response:
-        if check_background_tasks():
+        return await serve_request(request, recovering=False)
+
+    async def serve_request(request: Request, *, recovering: bool) -> Response:
+        if not recovering and check_background_tasks():
             raise HTTPException(status_code=503, detail="miner_background_service_failed")
         if _header_bytes(request) > runtime.limits.maximum_http_header_bytes:
             raise HTTPException(status_code=431, detail="request headers exceed the ceiling")
@@ -1093,6 +1101,39 @@ def create_app(
                     raise HTTPException(
                         status_code=422,
                         detail="request JSON is not RFC 8785 canonical",
+                    )
+                if recovering:
+                    try:
+                        retained = runtime.resource_ledger.recovered_response(
+                            challenge, validator_hotkey=validator_hotkey
+                        )
+                        if retained is None:
+                            return Response(
+                                content=canonical_json_bytes(
+                                    {"status": "response_recovery_pending"}
+                                ),
+                                status_code=202,
+                                media_type="application/json",
+                                headers={"Cache-Control": "no-store"},
+                            )
+                        _validate_cached_response(runtime, challenge, validator_hotkey, retained)
+                    except MinerResourceError as error:
+                        status = {
+                            "response_recovery_not_retained": 404,
+                            "response_recovery_binding_conflict": 409,
+                        }.get(error.reason_code, 503)
+                        raise HTTPException(
+                            status_code=status,
+                            detail=error.reason_code,
+                            headers={"Cache-Control": "no-store"},
+                        ) from error
+                    return Response(
+                        content=retained.body,
+                        media_type="application/json",
+                        headers={
+                            RESPONSE_SIGNATURE_HEADER: retained.signature,
+                            "Cache-Control": "no-store",
+                        },
                     )
                 if challenge.scoring_policy_hash != runtime.scoring_policy_sha256:
                     raise HTTPException(
@@ -1363,6 +1404,7 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             miner_hotkey=hotkey_ss58,
             scoring_policy_sha256=policy_hash,
             limits=limits,
+            maximum_recovery_assignments=getattr(args, "max_recovery_assignments", 0),
         ),
         window_authority=ProofBackedMinerWindowAuthority(
             policy=policy,
@@ -1639,6 +1681,15 @@ def _parser() -> argparse.ArgumentParser:
         help="durable resource-counter and encrypted-response cache database",
     )
     parser.add_argument("--listen-host", default="127.0.0.1")
+    parser.add_argument(
+        "--max-recovery-assignments",
+        type=int,
+        default=0,
+        help=(
+            "reserve durable sealed-response recovery for this many assignments; "
+            "0 disables new reservations, existing records remain retrievable"
+        ),
+    )
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--log-level", default="INFO")
     return parser
