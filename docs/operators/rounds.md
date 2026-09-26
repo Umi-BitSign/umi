@@ -576,6 +576,26 @@ remain on the [execution plan](../competition/launch.md).
 
 ## Recoverable cohort admission
 
+### Service work admission
+
+The opt-in service-work queue keeps paid work separate from benchmark quotas.
+An explicitly selected, quorum-signed catalog commits unique inputs before any
+recipient is selected. A miner signs a claim; the queue assigns the next item
+and commits the claim, original registration/history and FIFO index before
+acknowledging it. Repeating an accepted claim returns that same admission,
+including after restart or request closure. Changing its inputs is rejected.
+There is no per-hotkey quota and no timer that removes accepted claims.
+
+The queue reuses the round journal and monotonic history checks. A full queue
+rejects new claims; increasing configured capacity preserves existing work.
+For a host transfer, fence the outgoing owner and preserve the original logical
+state path on the destination; the native journal retains its namespace binding.
+Authenticated host transports and dispatch must still be connected. Admission
+does not establish execution or reward credit; completion verification,
+service-credit allocation and installed recovery qualification remain required.
+
+### Participation admission
+
 The opt-in recoverable-cohort implementation has a durable admission queue and
 reviewer service. It requires an explicitly authorized cohort and miner consent;
 enabling these components does not change a fixed round's signed deadlines. The
