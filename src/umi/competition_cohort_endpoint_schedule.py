@@ -6,41 +6,28 @@ The aggregate is not a phase-closure certificate, scoring evidence or a reward.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import Field
 
 from .competition_cohort_attempt_worker import CohortEndpointAttemptWorker
 from .competition_cohort_endpoint import endpoint_obligation_sha256
+from .competition_cohort_endpoint_terminal import EndpointTerminalCase as EndpointTerminalCase
+from .competition_cohort_endpoint_terminal import (
+    EndpointTerminalSelection as EndpointTerminalSelection,
+)
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_order_signer import order_slot
 from .competition_round_journal import RecordReservation
 from .open_competition import digest
 from .policy import ScoringPolicy
-from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .protocol import StrictProtocolModel, canonical_json_bytes
 
 
 class EndpointScheduledAssignment(StrictProtocolModel):
     schema_: Literal["umi-cohort-endpoint-scheduled-assignment/1"] = Field(alias="schema")
     assignment: CohortExecutionAssignment
     transport_policy: ScoringPolicy
-
-
-class EndpointTerminalCase(StrictProtocolModel):
-    case_id: Hex32
-    selection_slot: Hex32
-    selection_sha256: Hex32
-    review_sha256: Hex32
-    decision_sha256: Hex32
-
-
-class EndpointTerminalSelection(StrictProtocolModel):
-    schema_: Literal["umi-cohort-endpoint-terminal-selection/1"] = Field(alias="schema")
-    assignment_sha256: Hex32
-    job_sha256: Hex32
-    cases: Annotated[tuple[EndpointTerminalCase, ...], Field(min_length=1, max_length=2048)]
-    request_closure_authorized: Literal[False] = False
-    chain_submission_authorized: Literal[False] = False
 
 
 class CohortEndpointSchedule:

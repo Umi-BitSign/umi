@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 from .competition_cohort_attempt_worker import CohortEndpointAttemptWorker
+from .competition_cohort_endpoint_archive import export_endpoint_archive
 from .competition_cohort_endpoint_schedule import CohortEndpointSchedule
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_order_inbox import CohortOrderInbox
@@ -72,6 +73,7 @@ class CohortEndpointWorker:
             )
             saved = await run_owned_thread(schedule.register, assignment, policy)
         if await run_owned_thread(schedule.complete, slot) is not None:
+            await run_owned_thread(export_endpoint_archive, schedule, slot)
             return "completed", ""
         raw = await run_owned_thread(schedule.journal.get, "endpoint_recovery_selection", slot)
         if raw is not None:
@@ -137,7 +139,8 @@ class CohortEndpointWorker:
                     result = await self.attempts.advance(slot, case_id)
                     if result["status"] == "completed":
                         await run_owned_thread(schedule.retain_case, slot, case_id)
-                        await run_owned_thread(schedule.complete, slot)
+                        if await run_owned_thread(schedule.complete, slot) is not None:
+                            await run_owned_thread(export_endpoint_archive, schedule, slot)
                     return result["status"], result["reason"]
                 except _RETRY as error:
                     failed("case", obligation, error)

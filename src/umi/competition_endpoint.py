@@ -22,6 +22,7 @@ import re
 from dataclasses import asdict, dataclass
 
 from .anchors import VerifiedAuthEvidence
+from .competition_endpoint_content import decrypt_endpoint_content
 from .competition_policy_lineage import submission_policy_admitted
 from .config import Limits
 from .drand import DrandPulse
@@ -38,15 +39,12 @@ from .protocol import (
     TranslationRequest,
     base64url_encode,
     canonical_json_bytes,
-    normalized_grapheme_count,
-    normalized_token_count,
 )
 from .validator import (
     ComponentResponseError,
     PreparedRequestAttempt,
     QueryOutcome,
     validate_response_envelope,
-    validate_response_plaintext,
 )
 from .window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
@@ -419,51 +417,22 @@ def replay_authenticated_endpoint_outcome(
         else:
             if reveal_pulse is None or received is None:
                 raise ValueError("signed response requires retained receipt time and reveal pulse")
-            import bittensor_core
-
-            decrypt = getattr(bittensor_core, "decrypt_with_signature", None)
-            if not callable(decrypt):
-                raise RuntimeError("offline timelock decryption primitive is unavailable")
-            try:
-                revealed = decrypt(sealed.portable_bytes, reveal_pulse.signature)
-            except Exception as error:
-                if outcome.plaintext_bytes is not None:
-                    raise ValueError(
-                        "retained plaintext belongs to an undecryptable response"
-                    ) from error
-                status, reason = "miner_failure", "undecryptable"
-            else:
-                if not isinstance(revealed, bytes):
-                    raise RuntimeError("offline timelock decryption returned non-bytes")
-                if len(revealed) > item.limits.maximum_response_plaintext_bytes:
-                    raise ValueError("decrypted plaintext exceeds retained evidence byte limit")
-                if outcome.plaintext_bytes is not None and outcome.plaintext_bytes != revealed:
-                    raise ValueError("retained plaintext does not match its timelock")
-                try:
-                    plaintext = validate_response_plaintext(
-                        revealed, envelope=envelope, request=request
-                    )
-                except ComponentResponseError as error:
-                    status, reason = "miner_failure", error.code
-                else:
-                    if plaintext.status != "ok":
-                        status, reason = "miner_failure", "signed_miner_error"
-                    elif plaintext.model_revision != item.signed.submission.model_revision:
-                        status, reason = "miner_failure", "model_revision_mismatch"
-                    elif (
-                        len(plaintext.hypothesis.encode())
-                        > min(
-                            item.policy.maximum_output_bytes,
-                            item.limits.maximum_hypothesis_utf8_bytes,
-                        )
-                        or normalized_token_count(plaintext.hypothesis)
-                        > item.limits.maximum_hypothesis_tokens
-                        or normalized_grapheme_count(plaintext.hypothesis)
-                        > item.limits.maximum_hypothesis_graphemes
-                    ):
-                        status, reason = "miner_failure", "output_limit"
-                    else:
-                        status, hypothesis, reason = "ok", plaintext.hypothesis, None
+            content = decrypt_endpoint_content(
+                request=request,
+                envelope=envelope,
+                sealed_bytes=sealed.portable_bytes,
+                pulse=reveal_pulse,
+                model_revision=item.signed.submission.model_revision,
+                maximum_output_bytes=item.policy.maximum_output_bytes,
+                limits=item.limits,
+                retained_plaintext=outcome.plaintext_bytes,
+            )
+            status, hypothesis, reason, revealed = (
+                content.status,
+                content.hypothesis,
+                content.reason_code,
+                content.plaintext_bytes,
+            )
             close_ns = (
                 QUICKNET_GENESIS_MS + (request.response_close_round - 1) * QUICKNET_PERIOD_MS
             ) * 1_000_000

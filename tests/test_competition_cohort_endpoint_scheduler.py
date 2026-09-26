@@ -13,6 +13,11 @@ import httpx
 import pytest
 
 from umi.competition_cohort_attempt_worker import CohortEndpointAttemptWorker
+from umi.competition_cohort_endpoint_archive import (
+    EndpointReplayArchive,
+    JournalEndpointObjects,
+    endpoint_archive_cases,
+)
 from umi.competition_cohort_endpoint_recovery import CohortEndpointResponseRecovery
 from umi.competition_cohort_endpoint_retirement import CohortEndpointRetirement
 from umi.competition_cohort_endpoint_selection import selected_request, selection_grant
@@ -112,7 +117,7 @@ async def finish(q, *, maximum_polls=12, **kwargs):
         worker = q.worker(**kwargs)
         reports.append(await worker.poll_once())
         terminal = worker.schedule.complete(q.slot)
-        if terminal is not None:
+        if terminal is not None and worker.schedule.journal.get("endpoint_replay_archive", q.slot):
             return terminal, reports
     raise AssertionError(reports)
 
@@ -136,6 +141,17 @@ async def test_inbox_to_complete_terminal_selection_and_offline_restart(schedule
     assert report["assignments_complete"] == 1 and report["cases_considered"] == 0
     assert worker.schedule.complete(q.slot) == terminal
     assert (list(p.paths), len(q.s.calls), p.model.calls) == calls
+    archive = EndpointReplayArchive.model_validate_json(
+        canonical_json_bytes(worker.schedule.journal.get("endpoint_replay_archive", q.slot))
+    )
+    # An independent consumer needs only the immutable content objects.
+    with worker.schedule.journal.transaction() as db:
+        objects = dict(
+            db.execute("SELECT id,body FROM records WHERE kind='endpoint_replay_object'")
+        )
+    reviews = tuple(endpoint_archive_cases(archive, objects.__getitem__, p.c.policy))
+    assert [r.retirement.case_id for r in reviews] == [c.case_id for c in terminal.cases]
+    assert all(r.recovered is not None for r in reviews)
 
 
 async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
@@ -158,6 +174,8 @@ async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
         "endpoint_schedule_assignment",
         "endpoint_terminal_case",
         "endpoint_terminal_selection",
+        "endpoint_replay_object",
+        "endpoint_replay_archive",
     ],
 )
 @pytest.mark.parametrize("after", [False, True])
@@ -395,3 +413,20 @@ async def test_outage_keeps_completed_case_and_refreshes_only_missing_requests(
         else:
             assert chosen.grant.attempt.order.attempt_number == 2
             assert selected_request(chosen, case.case_id).video.url.endswith("?renewed=1")
+    schedule = q.worker().schedule
+    archive = EndpointReplayArchive.model_validate_json(
+        canonical_json_bytes(schedule.journal.get("endpoint_replay_archive", q.slot))
+    )
+    objects = JournalEndpointObjects(schedule.journal)
+    reviews = tuple(endpoint_archive_cases(archive, objects, p.c.policy))
+    assert len(reviews) == len(terminal.cases)
+    missing_review = next(r for r in reviews if r.retirement.case_id != completed[0].case_id)
+    parent_sha = missing_review.selection.order.order.prior_decision.decision.review_sha256
+
+    def missing_parent(sha):
+        if sha == parent_sha:
+            raise FileNotFoundError("parent evidence unavailable")
+        return objects(sha)
+
+    with pytest.raises(FileNotFoundError):
+        tuple(endpoint_archive_cases(archive, missing_parent, p.c.policy))

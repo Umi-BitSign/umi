@@ -817,8 +817,30 @@ cases completed on different attempts, preserves signed miner failures and can
 recover completed work offline. It is a local aggregate, not an independent
 closure certificate, score or reward authorization.
 
+Before reporting the assignment complete, the scheduler retains an
+`umi-cohort-endpoint-replay-archive/1` root and its content-addressed objects.
+These preserve the assignment, terminal manifest, exact response reviews and
+certificates, and every predecessor attempt. Independent replay verifies the
+whole lineage and rejects missing parents, conflicting originals or incomplete
+case coverage. Each object is bounded; retry history is stored as separate
+objects without a cumulative history deadline. A storage failure keeps export
+pending and preserves the original work for retry after capacity is restored.
+
+After certified reference reveal, `replay_endpoint_archive_quality` authenticates
+the selected order, phase history, request intervals, retained responses and
+Quicknet pulses. It returns per-case content metrics in
+`umi-cohort-endpoint-content-quality/1`. Recovery duration does not change those
+metrics. Signed miner errors retain zero quality; missing evidence or pulses
+prevent a report. The output has no invented inference duration: `elapsed_ms`
+is null and original timing remains unverified. These metrics do not apply
+latency or dependence gates, rank miners, authorize service credit or establish
+that this archive was included in full-roster request closure. Keep this
+private replay output separate from certified results. Legacy timed evidence
+and its eligibility rules remain unchanged.
+
 Complete accepted-roster coverage across evaluators, certified request closure,
-mixed-attempt scoring evidence and settlement remain integration work. Host
+service-clock evidence, authorized score aggregation and settlement remain
+integration work. Host
 composition must supply authenticated current history, owned finality, private
 state, the signer, writer fence and service lifecycle; the standard miner CLI
 does not install this authority yet.
