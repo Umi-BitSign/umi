@@ -41,7 +41,7 @@ from .crypto import (
     parse_sealed_response,
     verify_response_signature,
 )
-from .miner import RESPONSE_SIGNATURE_HEADER, TRANSLATE_PATH
+from .endpoint_protocol import RESPONSE_SIGNATURE_HEADER, TRANSLATE_PATH
 from .protocol import (
     GroundTruthPayload,
     ResponseEnvelope,

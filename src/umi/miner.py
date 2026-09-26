@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import re
+import sqlite3
 import stat
 import time
 from collections.abc import Callable
@@ -28,10 +29,21 @@ from .competition_authorization import (
     SignedEndpointAuthorization,
     validate_transport_cohort,
 )
+from .competition_cohort_miner import (
+    MAX_COHORT_GRANT_BYTES,
+    CohortMinerAuthorizationAuthority,
+    CohortMinerGrant,
+)
 from .competition_miner_feed import FeedEndpointAuthorizationAuthority
 from .competition_miner_finality import CompetitionMinerFinality
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
+from .endpoint_protocol import (
+    COHORT_GRANT_PATH,
+    RESPONSE_RECOVERY_PATH,
+    RESPONSE_SIGNATURE_HEADER,
+    TRANSLATE_PATH,
+)
 from .grandpa_finality_supervisor import DurableGrandpaFinalityPort
 from .miner_admission import (
     MinerAdmissionError,
@@ -70,9 +82,6 @@ from .protocol import (
 from .video import HttpVideoFetcher, VideoFetcher, VideoFetchError, VideoFetchResult
 
 LOGGER = logging.getLogger("umi.miner")
-TRANSLATE_PATH = "/v1/translate"
-RESPONSE_RECOVERY_PATH = "/v1/translate/response"
-RESPONSE_SIGNATURE_HEADER = "X-UMI-Signature"
 
 
 class BodyLimitExceeded(ValueError):
@@ -106,7 +115,10 @@ class MinerRuntime:
         "inactive_shadow"
     )
     competition_authority: (
-        EndpointAuthorizationAuthority | FeedEndpointAuthorizationAuthority | None
+        EndpointAuthorizationAuthority
+        | FeedEndpointAuthorizationAuthority
+        | CohortMinerAuthorizationAuthority
+        | None
     ) = field(
         default=None,
         repr=False,
@@ -189,7 +201,11 @@ class MinerRuntime:
         if self.competition_authority is not None:
             if not isinstance(
                 self.competition_authority,
-                (EndpointAuthorizationAuthority, FeedEndpointAuthorizationAuthority),
+                (
+                    EndpointAuthorizationAuthority,
+                    FeedEndpointAuthorizationAuthority,
+                    CohortMinerAuthorizationAuthority,
+                ),
             ):
                 raise TypeError("competition authority must verify signed endpoint assignments")
             self.competition_authority.validate_runtime(
@@ -1018,15 +1034,26 @@ def create_app(
     async def translate(request: Request) -> Response:
         return await serve_request(request, recovering=False)
 
-    async def serve_request(request: Request, *, recovering: bool) -> Response:
-        if not recovering and check_background_tasks():
+    @app.post(COHORT_GRANT_PATH)
+    async def accept_cohort_grant(request: Request) -> Response:
+        if not isinstance(runtime.competition_authority, CohortMinerAuthorizationAuthority):
+            raise HTTPException(status_code=404, detail="cohort admission is not configured")
+        return await serve_request(request, recovering=False, granting=True)
+
+    async def serve_request(
+        request: Request, *, recovering: bool, granting: bool = False
+    ) -> Response:
+        if not recovering and not granting and check_background_tasks():
             raise HTTPException(status_code=503, detail="miner_background_service_failed")
         if _header_bytes(request) > runtime.limits.maximum_http_header_bytes:
             raise HTTPException(status_code=431, detail="request headers exceed the ceiling")
+        body_limit = (
+            MAX_COHORT_GRANT_BYTES if granting else runtime.limits.maximum_request_body_bytes
+        )
         try:
             _validate_declared_content_length(
                 request,
-                runtime.limits.maximum_request_body_bytes,
+                body_limit,
             )
         except BodyLimitExceeded as error:
             raise HTTPException(status_code=413, detail=str(error)) from error
@@ -1061,7 +1088,7 @@ def create_app(
                     body = await asyncio.wait_for(
                         _read_bounded_body(
                             request,
-                            runtime.limits.maximum_request_body_bytes,
+                            body_limit,
                         ),
                         timeout=runtime.limits.request_body_timeout_seconds,
                     )
@@ -1091,6 +1118,28 @@ def create_app(
                     if isinstance(error, bt.http_auth.AuthError):
                         raise HTTPException(status_code=401, detail=str(error)) from error
                     raise
+
+                if granting:
+                    try:
+                        grant = CohortMinerGrant.model_validate_json(body)
+                        if body != canonical_json_bytes(grant):
+                            raise ValueError("noncanonical cohort grant")
+                        receipt = await runtime.competition_authority.accept(
+                            grant, validator_hotkey=validator_hotkey, wallet=runtime.wallet
+                        )
+                    except (OSError, TimeoutError, sqlite3.Error) as error:
+                        raise HTTPException(
+                            status_code=503, detail="cohort_grant_unavailable"
+                        ) from error
+                    except ValueError as error:
+                        raise HTTPException(
+                            status_code=422, detail="cohort_grant_invalid"
+                        ) from error
+                    return Response(
+                        content=canonical_json_bytes(receipt),
+                        media_type="application/json",
+                        headers={"Cache-Control": "no-store"},
+                    )
 
                 try:
                     challenge = TranslationRequest.model_validate_json(body)

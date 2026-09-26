@@ -712,11 +712,31 @@ pending. An uncertain attempt cannot be replaced by another signed attempt.
 Current authority still governs new network reads; already retained evidence
 remains readable after closure. Capacity can grow without replacing selections.
 
-This worker does not yet provide live C5 request grants, remote cancellation or
-certified terminal-attempt selection. Those gates must be integrated before
-automated dispatch, closure and settlement. A production host must also own the
-signer, origin provider, writer fence and service lifecycle. Recovery of an old
-policy's archive under a replacement evaluator key remains unsupported.
+`CohortEndpointGrantDelivery` sends the retained exact assignment and bounded
+attempt order to `POST /v1/competition/cohorts/assignments`. It re-proves the
+current public serving origin, authenticates the route and receiving miner, and
+retains the miner's signed storage receipt before acknowledging delivery. A lost
+HTTP acknowledgement or local receipt write can retry the identical grant; a
+retained receipt is readable offline. Delivery does not invoke inference.
+
+The opt-in `CohortMinerAuthorizationAuthority` verifies the original quorum,
+assigned evaluator, participant, policy, model and serving origin against its
+configured cohort authority. It commits the grant, request lookup and receipt
+intent together before signing. Restart resumes interrupted signing; closure
+does not remove an existing storage acknowledgement. New inference additionally
+requires current authenticated phase history and the miner's own finalized
+transport-window validation. Cohort signatures cannot override issuance hashes,
+window IDs, reveal rounds or request deadlines. Local replay has no overall
+network timeout. Temporary source or storage-capacity failures remain retryable.
+
+Only the first attempt is admitted. Remote invocation reconciliation,
+replacement selection and certified terminal-attempt selection remain required
+before automated retries or closure. Host composition must supply authenticated
+current history, owned finality, private state, the signer, writer fence and
+service lifecycle; the standard miner CLI does not install this authority yet.
+Recovery of an old policy's archive under a replacement evaluator key remains
+unsupported. None of these storage acknowledgements proves publication timing,
+scores or a native reward effect.
 
 `umi-recoverable-roster-evidence/1` binds the entire round to its certified
 intake seal and preparation result. The reviewer replays the original intake
@@ -728,7 +748,7 @@ missing archives remain source failures. Delay alone neither erases a member nor
 creates a zero or void. This review does not certify dispatch/retry selection,
 close scheduler work or calculate service credit.
 
-Live endpoint request authorization and retry selection, complete roster
+Installed endpoint authorization and retry selection, complete roster
 settlement, delayed first reward admission and standing reward continuation
 still require integration. A reviewed void does not itself authorize closing
 an unresolved scheduler obligation. These artifacts do not invoke models, prove host

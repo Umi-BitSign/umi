@@ -113,6 +113,23 @@ served. Cross-policy retrieval, replacement-key authorization, durable attempt
 selection and certified archive retirement still require C5 integration. Keep
 the database and its recovery records until that retirement is qualified.
 
+The candidate also provides an opt-in `CohortMinerAuthorizationAuthority` for
+recoverable cohort grants. Host composition must bind the miner's policy, model,
+serving origin and admitted cohort authorities, and supply authenticated current
+history and owned finality. The standard miner CLI does not configure it yet.
+Its authenticated `POST /v1/competition/cohorts/assignments` route retains an exact
+quorum-signed first-attempt grant and returns a signed storage receipt. Retrying
+that grant returns the same receipt after restart or phase closure. An altered
+grant cannot replace the retained selection.
+
+Storage acknowledgement permits no inference by itself. Each translation still
+requires an open certified request phase and the miner's own transport-window
+checks. A delayed cohort can use a fresh transport window after its original
+target, while an expired individual request requires recovery and certified
+replacement. Replacement attempts and cross-policy/key archive access remain
+integration work. Keep the grant journal, assignment database and nonce database
+together through restart; a fresh empty journal is not recovery.
+
 Use the Unix socket when the model needs a Torch, Core ML, Python, or native
 library stack that cannot share UMI's pinned environment. UMI supports Python
 3.10 through 3.14 and pins its Bittensor packages. The socket keeps the model
