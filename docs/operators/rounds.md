@@ -729,8 +729,24 @@ transport-window validation. Cohort signatures cannot override issuance hashes,
 window IDs, reveal rounds or request deadlines. Local replay has no overall
 network timeout. Temporary source or storage-capacity failures remain retryable.
 
-Only the first attempt is admitted. Remote invocation reconciliation,
-replacement selection and certified terminal-attempt selection remain required
+The evaluator's `CohortEndpointRetirement` authenticates the original request to
+`POST /v1/competition/cohorts/assignments/retire` at its freshly proved origin.
+It verifies the miner's exact request/grant receipt. A positive receipt must
+match a retrieved original response; both records commit together before
+acknowledgement. An absent response requires the evaluator's own expired block
+and round observations. Invalid or unavailable evidence remains pending. Saved
+records replay offline after restart without signing again or invoking inference.
+
+The miner persists an execution fence before draining active protocol work and
+commits its receipt intent before signing. It preserves signed failures and
+prevents admitted-but-queued requests from executing. Its resource ledger moves
+to schema 2 on first retirement so old readers cannot ignore the fence. Preserve
+that database through upgrades and migration. A `no_response_retained` receipt
+does not prove that inference never ran, stop detached sidecars or authorize a
+void. Host fencing and independently authenticated proof replay remain required.
+
+Only the first attempt is admitted. Replacement selection and certified
+terminal-attempt selection remain required
 before automated retries or closure. Host composition must supply authenticated
 current history, owned finality, private state, the signer, writer fence and
 service lifecycle; the standard miner CLI does not install this authority yet.

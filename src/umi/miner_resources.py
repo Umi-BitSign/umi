@@ -16,9 +16,12 @@ from pathlib import Path
 
 from .config import Limits
 from .encoding import account_id32, raw_sha256
-from .protocol import TranslationRequest, base64url_decode, request_digest
+from .endpoint_retirement import EndpointRetirementReceipt, SignedEndpointRetirementReceipt
+from .open_competition import identity, verify_signature
+from .protocol import TranslationRequest, base64url_decode, canonical_json_bytes, request_digest
 
 _SCHEMA = "umi-miner-resource-ledger/1"
+_RETIREMENT_SCHEMA = "umi-miner-resource-ledger/2"
 _SIGNATURE_RE = re.compile(r"^0x[0-9a-f]{128}$")
 
 
@@ -133,6 +136,7 @@ class SQLiteMinerResourceLedger:
             raise TypeError("limits must be Limits")
         raw_sha256(scoring_policy_sha256, field="scoring policy hash")
         miner_account = account_id32(miner_hotkey).hex()
+        self._miner_hotkey = miner_hotkey
         self._limits = limits
         self._lock = threading.RLock()
         self._process_lock_descriptor: int | None = None
@@ -204,6 +208,7 @@ class SQLiteMinerResourceLedger:
         if current_round is not None:
             self._validate_round(current_round)
         with self._transaction() as connection:
+            self._ensure_not_retiring(connection, binding)
             if current_round is not None:
                 self._prune_closed_windows(connection, current_round)
                 if binding.response_close_round <= current_round:
@@ -258,6 +263,9 @@ class SQLiteMinerResourceLedger:
 
         reservation = 2 * self._limits.maximum_http_header_bytes + binding.video_size_bytes
         with self._transaction() as connection:
+            retired = self._retirement(connection, binding)
+            if retired is not None and retired["receipt_intent"] is not None:
+                raise MinerResourceError("request_retired")
             row = self._require_binding(connection, binding)
             in_progress = connection.execute(
                 "SELECT 1 FROM operations AS operation "
@@ -476,6 +484,9 @@ class SQLiteMinerResourceLedger:
         accounted_wire = self._limits.maximum_http_header_bytes + len(body)
         body_sha256 = hashlib.sha256(body).hexdigest()
         with self._transaction() as connection:
+            retired = self._retirement(connection, binding)
+            if retired is not None and retired["receipt_intent"] is not None:
+                raise MinerResourceError("request_retired")
             row = self._require_binding(connection, binding)
             sequence = int(row["response_bodies"]) + 1
             if sequence > self._limits.maximum_response_bodies_per_assignment:
@@ -614,6 +625,164 @@ class SQLiteMinerResourceLedger:
                 cached_response_sha256=row["cached_response_sha256"],
             )
 
+    def _retirement(self, connection, binding):
+        row = connection.execute(
+            "SELECT * FROM request_retirements WHERE assignment_id=?", (binding.assignment_id,)
+        ).fetchone()
+        if row is not None:
+            self._validate_recovery_binding(row, binding)
+        return row
+
+    def _ensure_not_retiring(self, connection, binding) -> None:
+        if self._retirement(connection, binding) is not None:
+            raise MinerResourceError("request_retired")
+
+    def ensure_not_retiring(self, binding: MinerAssignmentBinding) -> None:
+        """Check while holding the protocol assignment lock, before new work."""
+        with self._lock:
+            self._ensure_not_retiring(self._connection, binding)
+
+    def retirement_requested(self, binding: MinerAssignmentBinding, grant_sha256: str) -> bool:
+        with self._lock:
+            row = self._retirement(self._connection, binding)
+            if row is not None and row["grant_sha256"] != grant_sha256:
+                raise MinerResourceError("retirement_grant_conflict")
+            return row is not None
+
+    def request_retirement(self, binding: MinerAssignmentBinding, grant_sha256: str) -> None:
+        """Fence new protocol work and reserve the response archive atomically.
+
+        An already running protocol task can finish before finalization. The
+        caller must hold its assignment lock before preparing the receipt.
+        """
+        raw_sha256(grant_sha256, field="grant digest")
+        with self._transaction() as db:
+            old = self._retirement(db, binding)
+            if old is not None:
+                if old["grant_sha256"] != grant_sha256:
+                    raise MinerResourceError("retirement_grant_conflict")
+                return
+            archived = db.execute(
+                "SELECT * FROM response_recovery WHERE assignment_id=?", (binding.assignment_id,)
+            ).fetchone()
+            if archived is None:
+                if not self._maximum_recovery_assignments:
+                    raise MinerResourceError("response_recovery_disabled")
+                count = db.execute("SELECT COUNT(*) FROM response_recovery").fetchone()[0]
+                if count >= self._maximum_recovery_assignments:
+                    raise MinerResourceError("response_recovery_capacity")
+                assignment = db.execute(
+                    "SELECT * FROM assignments WHERE assignment_id=?", (binding.assignment_id,)
+                ).fetchone()
+                if assignment is not None:
+                    self._validate_binding(assignment, binding)
+                db.execute(
+                    "INSERT INTO response_recovery VALUES (?,?,?,?,?,?)",
+                    (
+                        binding.assignment_id,
+                        binding.request_digest,
+                        binding.validator_account_hex,
+                        None if assignment is None else assignment["cached_response_body"],
+                        None if assignment is None else assignment["cached_response_signature"],
+                        None if assignment is None else assignment["cached_response_sha256"],
+                    ),
+                )
+            else:
+                self._validate_recovery_binding(archived, binding)
+                self._recovery_response(archived)
+            db.execute(
+                "INSERT INTO request_retirements VALUES (?,?,?,?,NULL,NULL)",
+                (
+                    binding.assignment_id,
+                    binding.request_digest,
+                    binding.validator_account_hex,
+                    grant_sha256,
+                ),
+            )
+            # Older miners must fail their schema check rather than ignore a fence.
+            db.execute("UPDATE metadata SET value=? WHERE key='schema'", (_RETIREMENT_SCHEMA,))
+
+    def prepare_retirement(
+        self, binding: MinerAssignmentBinding, grant_sha256: str
+    ) -> EndpointRetirementReceipt:
+        """Freeze the exact response selection under the protocol assignment lock."""
+        with self._transaction() as db:
+            row = self._retirement(db, binding)
+            if row is None or row["grant_sha256"] != grant_sha256:
+                raise MinerResourceError("retirement_not_requested")
+            archived = db.execute(
+                "SELECT * FROM response_recovery WHERE assignment_id=?", (binding.assignment_id,)
+            ).fetchone()
+            if archived is None:
+                raise MinerResourceError("retirement_archive_missing")
+            self._validate_recovery_binding(archived, binding)
+            response = self._recovery_response(archived)
+            body = EndpointRetirementReceipt(
+                schema="umi-endpoint-retirement/1",
+                grant_sha256=grant_sha256,
+                request_digest=binding.request_digest,
+                miner_hotkey=self._miner_hotkey,
+                evaluator_hotkey=binding.validator_hotkey,
+                result="no_response_retained" if response is None else "response_retained",
+                response_sha256=None
+                if response is None
+                else hashlib.sha256(response.body).hexdigest(),
+            )
+            encoded = canonical_json_bytes(body)
+            if row["receipt_intent"] is not None and row["receipt_intent"] != encoded:
+                raise MinerResourceError("retirement_response_conflict")
+            db.execute(
+                "UPDATE request_retirements SET receipt_intent=? WHERE assignment_id=?",
+                (encoded, binding.assignment_id),
+            )
+            return body
+
+    def retirement_receipt(
+        self, binding: MinerAssignmentBinding, grant_sha256: str
+    ) -> SignedEndpointRetirementReceipt | None:
+        with self._lock:
+            row = self._retirement(self._connection, binding)
+            if row is None:
+                return None
+            if row["grant_sha256"] != grant_sha256:
+                raise MinerResourceError("retirement_grant_conflict")
+            if row["receipt"] is None:
+                return None
+            return self._verify_retirement(row)
+
+    def _verify_retirement(self, row) -> SignedEndpointRetirementReceipt:
+        value = SignedEndpointRetirementReceipt.model_validate_json(row["receipt"])
+        if (
+            canonical_json_bytes(value) != row["receipt"]
+            or canonical_json_bytes(value.receipt) != row["receipt_intent"]
+            or value.receipt.grant_sha256 != row["grant_sha256"]
+            or value.receipt.request_digest != row["request_digest"]
+            or identity(value.receipt.evaluator_hotkey) != row["validator_account_hex"]
+            or identity(value.receipt.miner_hotkey) != identity(self._miner_hotkey)
+            or identity(value.signature.hotkey) != identity(self._miner_hotkey)
+        ):
+            raise MinerResourceError("retirement_receipt_invalid")
+        verify_signature(value.receipt, value.signature)
+        return value
+
+    def commit_retirement_receipt(
+        self, binding: MinerAssignmentBinding, value: SignedEndpointRetirementReceipt
+    ) -> None:
+        encoded = canonical_json_bytes(value)
+        with self._transaction() as db:
+            row = self._retirement(db, binding)
+            if row is None or row["receipt_intent"] is None:
+                raise MinerResourceError("retirement_not_prepared")
+            proposed = dict(row)
+            proposed["receipt"] = encoded
+            self._verify_retirement(proposed)
+            if row["receipt"] is not None and row["receipt"] != encoded:
+                raise MinerResourceError("retirement_receipt_conflict")
+            db.execute(
+                "UPDATE request_retirements SET receipt=? WHERE assignment_id=?",
+                (encoded, binding.assignment_id),
+            )
+
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
@@ -684,6 +853,14 @@ class SQLiteMinerResourceLedger:
                 signature TEXT,
                 sha256 TEXT
             );
+            CREATE TABLE IF NOT EXISTS request_retirements (
+                assignment_id TEXT PRIMARY KEY REFERENCES response_recovery(assignment_id),
+                request_digest TEXT NOT NULL,
+                validator_account_hex TEXT NOT NULL,
+                grant_sha256 TEXT NOT NULL,
+                receipt_intent BLOB,
+                receipt BLOB
+            );
             """
         )
 
@@ -734,6 +911,8 @@ class SQLiteMinerResourceLedger:
                         "INSERT INTO metadata (key, value) VALUES (?, ?)",
                         (key, value),
                     )
+                elif key == "schema" and row["value"] in {_SCHEMA, _RETIREMENT_SCHEMA}:
+                    continue
                 elif row["value"] != value:
                     raise MinerResourceError("resource_ledger_identity_conflict")
 
@@ -748,6 +927,41 @@ class SQLiteMinerResourceLedger:
         quick = self._connection.execute("PRAGMA quick_check").fetchone()[0]
         if quick != "ok":
             raise MinerResourceError("resource_ledger_quick_check_failed")
+        retirements = self._connection.execute("SELECT * FROM request_retirements").fetchall()
+        if (
+            retirements
+            and self._connection.execute(
+                "SELECT value FROM metadata WHERE key='schema'"
+            ).fetchone()[0]
+            != _RETIREMENT_SCHEMA
+        ):
+            raise MinerResourceError("retirement_schema_invalid")
+        for row in retirements:
+            for key in ("assignment_id", "request_digest", "validator_account_hex", "grant_sha256"):
+                if re.fullmatch(r"[0-9a-f]{64}", row[key]) is None:
+                    raise MinerResourceError("retirement_binding_invalid")
+            archived = self._connection.execute(
+                "SELECT * FROM response_recovery WHERE assignment_id=?", (row["assignment_id"],)
+            ).fetchone()
+            if archived is None or any(
+                archived[k] != row[k] for k in ("request_digest", "validator_account_hex")
+            ):
+                raise MinerResourceError("retirement_archive_missing")
+            if row["receipt_intent"] is not None:
+                body = EndpointRetirementReceipt.model_validate_json(row["receipt_intent"])
+                response = self._recovery_response(archived)
+                if (
+                    canonical_json_bytes(body) != row["receipt_intent"]
+                    or body.grant_sha256 != row["grant_sha256"]
+                    or body.request_digest != row["request_digest"]
+                    or identity(body.evaluator_hotkey) != row["validator_account_hex"]
+                    or identity(body.miner_hotkey) != identity(self._miner_hotkey)
+                    or body.response_sha256
+                    != (None if response is None else hashlib.sha256(response.body).hexdigest())
+                ):
+                    raise MinerResourceError("retirement_intent_invalid")
+            if row["receipt"] is not None:
+                self._verify_retirement(row)
         for row in self._connection.execute("SELECT * FROM response_recovery"):
             if any(
                 re.fullmatch(r"[0-9a-f]{64}", row[k]) is None

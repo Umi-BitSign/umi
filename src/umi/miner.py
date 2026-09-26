@@ -36,14 +36,17 @@ from .competition_cohort_miner import (
 )
 from .competition_miner_feed import FeedEndpointAuthorizationAuthority
 from .competition_miner_finality import CompetitionMinerFinality
+from .concurrency import run_owned_thread, wait_for_owned
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
 from .endpoint_protocol import (
     COHORT_GRANT_PATH,
+    COHORT_RETIRE_PATH,
     RESPONSE_RECOVERY_PATH,
     RESPONSE_SIGNATURE_HEADER,
     TRANSLATE_PATH,
 )
+from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
 from .grandpa_finality_supervisor import DurableGrandpaFinalityPort
 from .miner_admission import (
     MinerAdmissionError,
@@ -59,7 +62,8 @@ from .miner_resources import (
 )
 from .model_scheduler import WindowCoalescingTranslator
 from .nonce import NonceStoreAuthorizationError, NonceStoreCapacityError, NonceStoreError
-from .open_competition import CompetitionPolicy
+from .open_competition import CompetitionPolicy, sign_object
+from .open_competition import digest as competition_digest
 from .policy import (
     SINGLE_EVALUATOR_TRANSPORT_SCHEMA,
     ScoringPolicy,
@@ -810,6 +814,10 @@ async def _finish_recorded_request(
 ) -> Response:
     import bittensor as bt
 
+    try:
+        runtime.resource_ledger.ensure_not_retiring(binding)
+    except MinerResourceError as error:
+        raise HTTPException(status_code=409, detail=error.reason_code) from error
     current_round = bt.timelock.current_round()
     runtime.resource_ledger.prune_closed_video_cache(current_round)
     if current_round >= challenge.response_close_round:
@@ -906,6 +914,107 @@ async def _finish_recorded_request(
         media_type="application/json",
         headers={RESPONSE_SIGNATURE_HEADER: signature},
     )
+
+
+async def _retire_cohort_request(
+    runtime: MinerRuntime, request: TranslationRequest, validator_hotkey: str
+) -> Response:
+    """Persist a fence, drain protocol work, then retain a signed terminal receipt."""
+    import bittensor as bt
+
+    authority = runtime.competition_authority
+    try:
+        grant = await authority.retirement_grant(request, validator_hotkey=validator_hotkey)
+    except (MinerAdmissionError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="retirement_request_not_authorized") from error
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        raise HTTPException(status_code=503, detail="retirement_unavailable") from error
+    grant_sha256 = competition_digest(grant)
+    ledger = runtime.resource_ledger
+    binding = MinerAssignmentBinding.from_request(
+        request,
+        validator_hotkey=validator_hotkey,
+        window_index=max(
+            0,
+            (request.issued_block - authority.transport.activation_block)
+            // authority.transport.clock.window_stride_blocks,
+        ),
+    )
+
+    def pending():
+        return Response(
+            content=canonical_json_bytes({"status": "retirement_pending"}),
+            status_code=202,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def response(value):
+        value = verify_retirement_receipt(
+            value,
+            request=request,
+            grant_sha256=grant_sha256,
+            miner_hotkey=runtime.hotkey_ss58,
+            evaluator_hotkey=validator_hotkey,
+        )
+        return Response(
+            content=canonical_json_bytes(value),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    try:
+        prior = ledger.retirement_receipt(binding, grant_sha256)
+        if prior is not None:
+            return response(prior)
+        if not ledger.retirement_requested(binding, grant_sha256):
+            try:
+                cached = ledger.recovered_response(request, validator_hotkey=validator_hotkey)
+            except MinerResourceError as error:
+                if error.reason_code != "response_recovery_not_retained":
+                    raise
+                cached = None
+            if cached is None:
+                # Do not let an evaluator cancel an unexpired opportunity.
+                if bt.timelock.current_round() < request.response_close_round:
+                    return pending()
+                head = await wait_for_owned(
+                    authority.finalized_blocks.finalized_head_height(),
+                    timeout=authority.config.read_timeout_seconds,
+                )
+                if type(head) is not int or head < 0:
+                    raise ValueError("invalid finalized head")
+                if head <= request.deadline_block:
+                    return pending()
+            else:
+                _validate_cached_response(runtime, request, validator_hotkey, cached)
+            await run_owned_thread(ledger.request_retirement, binding, grant_sha256)
+        lock = _assignment_lock(runtime, binding.assignment_id)
+        if lock.locked():
+            return pending()
+        async with lock:
+            prior = ledger.retirement_receipt(binding, grant_sha256)
+            if prior is not None:
+                return response(prior)
+            # Holding this lock also stops admitted-but-queued requests from
+            # entering inference. The ledger fence survives process restart.
+            cached = ledger.recovered_response(request, validator_hotkey=validator_hotkey)
+            if cached is not None:
+                _validate_cached_response(runtime, request, validator_hotkey, cached)
+            body = await run_owned_thread(ledger.prepare_retirement, binding, grant_sha256)
+            signature = await run_owned_thread(sign_object, body, runtime.wallet)
+            value = SignedEndpointRetirementReceipt(receipt=body, signature=signature)
+            await run_owned_thread(ledger.commit_retirement_receipt, binding, value)
+            return response(value)
+    except (
+        MinerResourceError,
+        OSError,
+        TimeoutError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        raise HTTPException(status_code=503, detail="retirement_unavailable") from error
 
 
 def create_app(
@@ -1040,10 +1149,16 @@ def create_app(
             raise HTTPException(status_code=404, detail="cohort admission is not configured")
         return await serve_request(request, recovering=False, granting=True)
 
+    @app.post(COHORT_RETIRE_PATH)
+    async def retire_cohort_request(request: Request) -> Response:
+        if not isinstance(runtime.competition_authority, CohortMinerAuthorizationAuthority):
+            raise HTTPException(status_code=404, detail="cohort admission is not configured")
+        return await serve_request(request, recovering=False, retiring=True)
+
     async def serve_request(
-        request: Request, *, recovering: bool, granting: bool = False
+        request: Request, *, recovering: bool, granting: bool = False, retiring: bool = False
     ) -> Response:
-        if not recovering and not granting and check_background_tasks():
+        if not recovering and not granting and not retiring and check_background_tasks():
             raise HTTPException(status_code=503, detail="miner_background_service_failed")
         if _header_bytes(request) > runtime.limits.maximum_http_header_bytes:
             raise HTTPException(status_code=431, detail="request headers exceed the ceiling")
@@ -1151,6 +1266,8 @@ def create_app(
                         status_code=422,
                         detail="request JSON is not RFC 8785 canonical",
                     )
+                if retiring:
+                    return await _retire_cohort_request(runtime, challenge, validator_hotkey)
                 if recovering:
                     try:
                         retained = runtime.resource_ledger.recovered_response(
@@ -1234,7 +1351,8 @@ def create_app(
                         current_round=bt.timelock.current_round(),
                     )
                 except MinerResourceError as error:
-                    raise HTTPException(status_code=429, detail=error.reason_code) from error
+                    status = 409 if error.reason_code == "request_retired" else 429
+                    raise HTTPException(status_code=status, detail=error.reason_code) from error
         except IngressLimitExceeded as error:
             raise HTTPException(status_code=429, detail=str(error)) from error
         async with _assignment_lock(runtime, binding.assignment_id):

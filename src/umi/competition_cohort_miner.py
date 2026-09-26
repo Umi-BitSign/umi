@@ -393,3 +393,9 @@ class CohortMinerAuthorizationAuthority:
             if str(error) in _CAPACITY_ERRORS:
                 raise MinerAdmissionError("cohort_capacity_unavailable", retryable=True) from error
             raise MinerAdmissionError("cohort_authority_invalid") from error
+
+    async def retirement_grant(self, request: TranslationRequest, *, validator_hotkey: str):
+        """Recover exact original authority for fencing only, including after closure."""
+        async with self.serial:
+            with self.journal.locked():
+                return await run_owned_thread(self._lookup, request, validator_hotkey)

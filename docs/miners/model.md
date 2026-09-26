@@ -130,6 +130,22 @@ replacement. Replacement attempts and cross-policy/key archive access remain
 integration work. Keep the grant journal, assignment database and nonce database
 together through restart; a fresh empty journal is not recovery.
 
+The assigned evaluator can retire an old request through authenticated
+`POST /v1/competition/cohorts/assignments/retire`. The miner preserves any sealed
+response, including a signed failure. Without one, it waits until both the
+finalized block deadline and response-close round have passed. It records a
+durable execution fence, lets active protocol work finish, and signs the exact
+retained response hash or a `no_response_retained` receipt. Queued or later
+requests cannot start that assignment. Pending work returns HTTP 202.
+
+The first retirement upgrades the assignment ledger to schema 2. Older miners
+reject that ledger; do not erase it or downgrade its metadata to bypass the
+fence. Retained responses and retirement receipts survive cache pruning and
+restart. Preserve the grant, resource and nonce databases together. A retirement
+receipt fences protocol execution, but does not prove that inference never ran
+or that a detached model process stopped. Host migration must fence the old
+writer and its model processes separately.
+
 Use the Unix socket when the model needs a Torch, Core ML, Python, or native
 library stack that cannot share UMI's pinned environment. UMI supports Python
 3.10 through 3.14 and pins its Bittensor packages. The socket keeps the model
