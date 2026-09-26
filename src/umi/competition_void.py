@@ -19,6 +19,14 @@ from .competition_dispatch_repair import EndpointUnavailableEvidence, verify_dis
 from .competition_endpoint_execution import EndpointPairedEvidence
 from .competition_evaluator_orders import SignedEvaluationOrder
 from .competition_observations import SignedExecutionAnnouncement, execution_observations
+from .competition_outcome_classification import (
+    PairedObservationOutputs,
+    VoidReason,
+    observation_void_reason,
+)
+from .competition_outcome_classification import (
+    ScorableObservations as ScorableObservations,
+)
 from .open_competition import (
     CompetitionPolicy,
     EvaluationSuite,
@@ -31,12 +39,6 @@ from .policy import ScoringPolicy
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_VOID_BYTES = 64 * 1024**2
-VoidReason = Literal[
-    "infrastructure_failure",
-    "incumbent_failure",
-    "observation_disagreement",
-    "coordinator_outcome_unavailable",
-]
 
 
 class EvaluationVoid(StrictProtocolModel):
@@ -88,10 +90,6 @@ class VoidEvaluationEvidence(StrictProtocolModel):
         return self
 
 
-class ScorableObservations(ValueError):
-    """Complete observations agree and must use ordinary scoring."""
-
-
 def void_evidence_digest(evidence):
     evidence = VoidEvaluationEvidence.model_validate_json(canonical_json_bytes(evidence))
     return hashlib.sha256(
@@ -109,36 +107,6 @@ def void_decision_digest(void):
     return hashlib.sha256(
         b"umi-competition-void-decision-v1\0" + canonical_json_bytes(body)
     ).hexdigest()
-
-
-def _eligible(output, policy):
-    return (
-        output.status == "ok"
-        and output.elapsed_ms <= policy.maximum_inference_ms
-        and len(output.hypothesis.encode("utf-8")) <= policy.maximum_output_bytes
-    )
-
-
-def _reason(views, policy):
-    if any(v.get("coordinator_outcome_unavailable") for v in views):
-        return "coordinator_outcome_unavailable"
-    if any(
-        o.status == "infrastructure_failure"
-        for v in views
-        for role in ("candidate", "incumbent")
-        for o in v[role]
-    ):
-        return "infrastructure_failure"
-    if any(not _eligible(o, policy) for v in views for o in v["incumbent"]):
-        return "incumbent_failure"
-    for role in ("candidate", "incumbent"):
-        for outputs in zip(*(v[role] for v in views), strict=True):
-            if (
-                len({(o.case_id, o.status, o.hypothesis, _eligible(o, policy)) for o in outputs})
-                != 1
-            ):
-                return "observation_disagreement"
-    raise ScorableObservations("complete agreeing scored observations cannot be voided")
 
 
 def propose_evaluation_void(
@@ -215,7 +183,17 @@ def propose_evaluation_void(
         order_sha256=digest(order),
         submission_sha256=digest(order.submission.submission),
         suite_sha256=digest(suite),
-        reason=_reason(views, policy),
+        reason=observation_void_reason(
+            tuple(
+                PairedObservationOutputs(
+                    candidate=v["candidate"],
+                    incumbent=v["incumbent"],
+                    coordinator_outcome_unavailable=v.get("coordinator_outcome_unavailable", False),
+                )
+                for v in views
+            ),
+            policy,
+        ),
         observations=observations,
     )
     if len(canonical_json_bytes(proposed)) > MAX_VOID_BYTES:

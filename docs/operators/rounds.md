@@ -615,9 +615,19 @@ infrastructure observations, while authenticated miner errors retain their
 original classification. Neither replay nor an attempt order authorizes live
 requests or proves original publication time.
 
-Live request authorization, durable attempt selection, terminal void
-certification, complete roster settlement, delayed first reward admission and
-standing reward continuation still require integration. These artifacts do not invoke models, prove host
+`umi-recoverable-evaluation-order/1` binds the complete assigned evaluator set
+to the participant, runtime and certified preparation. The ordered outcome
+consumer requires every assigned evaluator's receipt for a score, or every
+assigned evaluator's signed observations and decision signature for a void.
+Independent review preserves each evaluator's exact local observation, and
+repeated signing keeps a stable void decision identity. Missing observations
+remain pending; agreeing scorable observations cannot become voids. These
+benchmark outcomes do not measure serving capacity or create service credit.
+
+Live request authorization, durable attempt selection, complete roster
+settlement, delayed first reward admission and standing reward continuation
+still require integration. A reviewed void does not itself authorize closing
+an unresolved scheduler obligation. These artifacts do not invoke models, prove host
 isolation or independently verify the chain proofs referenced by their timing
 boundaries. Production reviewers must retain and authenticate those sources.
 
