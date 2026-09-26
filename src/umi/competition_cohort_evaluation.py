@@ -20,6 +20,11 @@ from .competition_cohort_participation import (
     verify_participant_admission,
 )
 from .competition_cohort_recovery import Block
+from .competition_evidence import (
+    EvaluationRunScope,
+    IndependentEvaluationEvidence,
+    replay_evaluator_run_agreement,
+)
 from .open_competition import (
     AttestedResult,
     CompetitionPolicy,
@@ -146,3 +151,61 @@ def replay_recoverable_evaluation(
     if any(identity(s.hotkey) == identity(sub.hotkey) for s in attested.signatures):
         raise ValueError("a submitting hotkey cannot attest its own evaluation")
     return score_evaluation_outputs(result, suite, policy)
+
+
+def replay_recoverable_independent_evaluation(
+    evidence: IndependentEvaluationEvidence,
+    signed: SignedSubmission,
+    round_: RecoverableEvaluationRound,
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+    consent: SignedCohortParticipationConsent,
+    admission: AttestedCohortParticipantAdmission,
+    admission_snapshot: RegistrationSnapshot,
+    history: CohortRecoveryHistory,
+    *,
+    expected_tip_sha256: str,
+    current_block: int,
+) -> tuple[dict[str, Fraction], dict[str, Fraction]]:
+    """Replay each evaluator's receipt under authenticated phase closures.
+
+    Receipt signatures and identical outputs do not prove execution. Settlement
+    must additionally retain and replay the referenced execution artifacts,
+    complete roster, terminal failures and its own certified closure evidence.
+    This function neither admits an allocation nor authorizes a transaction.
+    """
+    evidence = IndependentEvaluationEvidence.model_validate_json(canonical_json_bytes(evidence))
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
+    round_ = RecoverableEvaluationRound.model_validate_json(canonical_json_bytes(round_))
+    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    quality = replay_recoverable_evaluation(
+        evidence.attested_result,
+        signed,
+        round_,
+        suite,
+        policy,
+        consent,
+        admission,
+        admission_snapshot,
+        history,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    view = verify_cohort_history(
+        history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
+    )
+    return replay_evaluator_run_agreement(
+        evidence,
+        signed,
+        suite,
+        policy,
+        scope=EvaluationRunScope(
+            round_sha256=digest(round_),
+            incumbent_model_sha256=round_.incumbent_model_sha256,
+            runtime_sha256=round_.runtime_sha256,
+            started_after_block=view.closure("preparation").observed_at_block,
+            finished_by_block=view.closure("requests").observed_at_block,
+        ),
+        common_quality=quality,
+    )

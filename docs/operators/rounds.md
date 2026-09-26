@@ -581,6 +581,22 @@ reviewer service. It requires an explicitly authorized cohort and miner consent;
 enabling these components does not change a fixed round's signed deadlines. The
 complete recovery workflow is not deployed or qualified for unattended rewards.
 
+Phase authority `umi-cohort-recovery-authority/2` keeps a pending phase valid
+until certified completion or revocation. Passing a target does not require an
+extension signature. Closure still requires authenticated completion and the
+full participant opportunity, including compensation for unavailable service.
+Version 1 retains its signed extension rules; existing signatures cannot be
+reinterpreted as version 2 authority.
+
+Recoverable score replay can also verify every common-result signer's separate
+run receipt against the certified preparation/request interval, exact outputs,
+resource eligibility and independent control groups. Delayed replay preserves
+these checks after the original policy or submission window expires. Receipt
+agreement does not establish execution: settlement still needs the referenced
+execution artifacts, complete scored/void roster and certified evidence closure.
+Delayed first reward admission and standing reward continuation are not yet
+implemented by these components.
+
 Configure the intake's `recoverable_intake` with its private directory and exact
 cohort/authority bindings. Initialize it with `initialize-cohort-intake` and
 publish the certified history through `CohortIntakePublisher` before accepting

@@ -10,7 +10,7 @@ from __future__ import annotations
 from itertools import pairwise
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 from typing_extensions import Self
 
 from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
@@ -97,8 +97,40 @@ class CohortRecoveryAuthority(StrictProtocolModel):
         return self
 
 
+class StandingCohortRecoveryAuthority(StrictProtocolModel):
+    """Targets are estimates; only certified closure or revocation ends a phase.
+
+    A distinct signed format prevents reinterpreting an existing extension-based
+    authority. Outage compensation is checked in the retained closure evidence,
+    without signing periodic extensions while a phase is pending.
+    """
+
+    schema_: Literal["umi-cohort-recovery-authority/2"] = Field(alias="schema")
+    policy_sha256: Hex32
+    cohort_sha256s: Annotated[tuple[Hex32, ...], Field(min_length=1, max_length=512)]
+    issued_at_block: Block
+    lifetime: Literal["until_completed_or_revoked"]
+    closure_rule: Literal["quorum_certified_phase_completion"]
+    timing_rule: Literal["targets_without_extension_signatures"]
+    elapsed_target_cancels_cohort: Literal[False] = False
+    historical_request_bytes_mutable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def canonical_cohorts(self) -> Self:
+        if self.cohort_sha256s != tuple(sorted(set(self.cohort_sha256s))):
+            raise ValueError("recovery cohort identities must be unique and sorted")
+        return self
+
+
+RecoveryAuthority = Annotated[
+    CohortRecoveryAuthority | StandingCohortRecoveryAuthority,
+    Field(discriminator="schema_"),
+]
+_AUTHORITY_ADAPTER = TypeAdapter(RecoveryAuthority)
+
+
 class SignedCohortRecoveryAuthority(StrictProtocolModel):
-    authority: CohortRecoveryAuthority
+    authority: RecoveryAuthority
     signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
 
 
@@ -179,7 +211,7 @@ def verify_recovery_quorum(
 def verify_recovery_authority(
     signed: SignedCohortRecoveryAuthority,
     policy: CompetitionPolicy,
-) -> CohortRecoveryAuthority:
+) -> RecoveryAuthority:
     signed = SignedCohortRecoveryAuthority.model_validate_json(canonical_json_bytes(signed))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     body = signed.authority
@@ -240,7 +272,7 @@ def admit_recoverable_cohort(
 
 def _revised_targets(
     state: CohortRecoveryState,
-    authority: CohortRecoveryAuthority,
+    authority: RecoveryAuthority,
     operation: RecoveryOperation,
     observed_at_block: int,
     extension_blocks: int | None,
@@ -250,6 +282,8 @@ def _revised_targets(
     index = PHASES.index(state.phase)
     target = state.targets[index].target_block
     if operation == "extend":
+        if isinstance(authority, StandingCohortRecoveryAuthority):
+            raise ValueError("standing phases require no extension signatures")
         if type(extension_blocks) is not int or not (
             1 <= extension_blocks <= authority.maximum_extension_step_blocks
         ):
@@ -280,7 +314,7 @@ def _revised_targets(
 
 def propose_recovery_transition(
     state: CohortRecoveryState,
-    authority: CohortRecoveryAuthority,
+    authority: RecoveryAuthority,
     *,
     operation: RecoveryOperation,
     observed_at_block: int,
@@ -289,7 +323,7 @@ def propose_recovery_transition(
 ) -> CohortRecoveryTransition:
     """Pure proposal. Reserve exact bytes durably before asking authorities to sign."""
     state = CohortRecoveryState.model_validate_json(canonical_json_bytes(state))
-    authority = CohortRecoveryAuthority.model_validate_json(canonical_json_bytes(authority))
+    authority = _AUTHORITY_ADAPTER.validate_json(canonical_json_bytes(authority))
     if (
         state.authority_sha256 != digest(authority)
         or state.cohort_sha256 not in authority.cohort_sha256s
@@ -299,6 +333,8 @@ def propose_recovery_transition(
         raise ValueError("recovery proposal scope or finalized observation differs")
     if operation != "revoke" and observed_at_block < state.not_before_block:
         raise ValueError("cohort has not reached its announced start")
+    if operation == "extend" and isinstance(authority, StandingCohortRecoveryAuthority):
+        raise ValueError("standing phases require no extension signatures")
     if operation == "extend" and extension_blocks is None:
         if state.phase not in PHASES:
             raise ValueError("completed or revoked cohort cannot acquire new work or extensions")

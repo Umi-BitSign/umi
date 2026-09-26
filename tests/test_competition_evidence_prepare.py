@@ -108,9 +108,12 @@ def test_prepared_copy_has_exact_history_private_files_and_unsigned_receipt(prep
         {"maximum_database_bytes": 4096},
     ],
 )
-def test_preparation_bound_failure_preserves_source(preparation, changed):
+def test_preparation_bound_failure_preserves_source(preparation, changed, monkeypatch):
     item = preparation
     before = item.path.read_bytes()
+    if "minimum_free_bytes" in changed:
+        # Exercise the reserve check even on hosts with more than 1 TiB free.
+        monkeypatch.setattr(os, "fstatvfs", lambda _: SimpleNamespace(f_bavail=1024, f_frsize=4096))
     with pytest.raises((ValueError, sqlite3.DatabaseError)):
         prepare(item, **changed)
     assert item.path.read_bytes() == before

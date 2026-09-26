@@ -13,6 +13,7 @@ independently inspect the referenced execution evidence.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import Annotated, Any, Literal, TypeVar
 
@@ -156,12 +157,23 @@ def _resource_eligible(output: CaseOutput, policy: CompetitionPolicy) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class EvaluationRunScope:
+    """Bindings derived by a round verifier, not an authorization by themselves."""
+
+    round_sha256: str
+    incumbent_model_sha256: str
+    runtime_sha256: str
+    started_after_block: int
+    finished_by_block: int
+
+
 def _validate_run_bindings(
     run: EvaluatorRunRecord,
     *,
     common: AttestedResult,
     signed: SignedSubmission,
-    round_: EvaluationRound,
+    scope: EvaluationRunScope,
     suite: EvaluationSuite,
     policy: CompetitionPolicy,
 ) -> None:
@@ -169,22 +181,22 @@ def _validate_run_bindings(
     submission = signed.submission
     expected = {
         "policy_sha256": digest(policy),
-        "round_sha256": digest(round_),
+        "round_sha256": scope.round_sha256,
         "submission_sha256": digest(submission),
         "common_result_sha256": digest(result),
         "suite_sha256": digest(suite),
         "model_revision": submission.model_revision,
-        "incumbent_model_sha256": round_.incumbent_model_sha256,
-        "runtime_sha256": round_.runtime_sha256,
+        "incumbent_model_sha256": scope.incumbent_model_sha256,
+        "runtime_sha256": scope.runtime_sha256,
     }
     if any(getattr(run, field) != value for field, value in expected.items()):
         raise ValueError("evaluator run identity, model or runtime binding mismatch")
     if not (
-        round_.submission_close_block
+        scope.started_after_block
         < run.started_block
         <= run.finished_block
         <= result.finished_block
-        <= round_.evaluation_close_block
+        <= scope.finished_by_block
     ):
         raise ValueError("evaluator run interval is outside the frozen evaluation window")
 
@@ -235,7 +247,38 @@ def replay_independent_evaluation(
         policy,
         current_block=current_block,
     )
+    return replay_evaluator_run_agreement(
+        evidence,
+        signed,
+        suite,
+        policy,
+        scope=EvaluationRunScope(
+            round_sha256=digest(round_),
+            incumbent_model_sha256=round_.incumbent_model_sha256,
+            runtime_sha256=round_.runtime_sha256,
+            started_after_block=round_.submission_close_block,
+            finished_by_block=round_.evaluation_close_block,
+        ),
+        common_quality=common_quality,
+    )
 
+
+def replay_evaluator_run_agreement(
+    evidence: IndependentEvaluationEvidence,
+    signed: SignedSubmission,
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+    *,
+    scope: EvaluationRunScope,
+    common_quality: tuple[dict[str, Fraction], dict[str, Fraction]],
+) -> tuple[dict[str, Fraction], dict[str, Fraction]]:
+    """Compare receipts after the caller authenticates the round and result.
+
+    Both legacy and recoverable consumers derive the scope from their native
+    authority checks. This agreement check grants no settlement or weight
+    authority and does not inspect the referenced execution artifacts.
+    """
+    common = evidence.attested_result
     policy_groups = {identity(item.hotkey): item.control_group for item in policy.evaluators}
     submitting_key = identity(signed.submission.hotkey)
     common_keys = {identity(signature.hotkey) for signature in common.signatures}
@@ -257,7 +300,7 @@ def replay_independent_evaluation(
             run,
             common=common,
             signed=signed,
-            round_=round_,
+            scope=scope,
             suite=suite,
             policy=policy,
         )

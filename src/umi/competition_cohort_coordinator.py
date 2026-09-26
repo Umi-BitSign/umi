@@ -23,11 +23,12 @@ from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_his
 from .competition_cohort_recovery import (
     PHASES,
     Block,
-    CohortRecoveryAuthority,
     CohortRecoveryState,
     CohortRecoveryTransition,
     Phase,
+    RecoveryAuthority,
     SignedCohortRecoveryTransition,
+    StandingCohortRecoveryAuthority,
     admit_recoverable_cohort,
     apply_recovery_transition,
     propose_recovery_transition,
@@ -73,7 +74,7 @@ class CohortDecisionInput(StrictProtocolModel):
 
 def _choice(
     state: CohortRecoveryState,
-    authority: CohortRecoveryAuthority,
+    authority: RecoveryAuthority,
     policy: CompetitionPolicy,
     evidence: CohortDecisionInput,
     restored: int,
@@ -103,6 +104,12 @@ def _choice(
         if state.phase == "reference_reveal" and block <= state.observed_at_block:
             return None, 0
         operation, extension, restored_now = "close_phase", None, 0
+    elif isinstance(authority, StandingCohortRecoveryAuthority):
+        # Pending work keeps its authority even after arbitrarily long delays.
+        # The native observer retains cumulative unavailable service; the
+        # closure check above requires the full compensated participant window.
+        # No target-only decision or restoration vote is needed in between.
+        return None, 0
     elif missing:
         restored_now = min(missing, authority.maximum_extension_step_blocks)
         operation, extension = "extend", restored_now
