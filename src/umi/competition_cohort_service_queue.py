@@ -21,8 +21,9 @@ from .competition_cohort_order_signer import (
     remember_order_history,
 )
 from .competition_cohort_service_work import (
-    MAX_CATALOG_BYTES,
+    MAX_SERVICE_REQUEST_BYTES,
     ServiceWorkAdmission,
+    ServiceWorkAssignment,
     SignedServiceWorkCatalog,
     SignedServiceWorkClaim,
     review_service_admission,
@@ -67,7 +68,7 @@ class ServiceWorkQueue:
             ),
             maximum_rounds=8192,
             maximum_bytes=self.config.maximum_bytes,
-            maximum_record_bytes=MAX_CATALOG_BYTES,
+            maximum_record_bytes=MAX_SERVICE_REQUEST_BYTES,
         )
         with self.journal.transaction() as db:
             db.execute(
@@ -284,3 +285,29 @@ class ServiceWorkQueue:
                 (after_ordinal, limit),
             ).fetchall()
             return tuple(self._read(row[0], db) for row in rows)
+
+    def assignment(self, signed: SignedServiceWorkClaim) -> ServiceWorkAssignment:
+        """Export the exact accepted record; never invent a benchmark assignment."""
+        signed = verify_service_claim(signed)
+        with self.journal.locked(), self.journal.transaction() as db:
+            row = db.execute(
+                "SELECT ordinal FROM service_claims WHERE claim_key=?",
+                (service_claim_key(signed.claim),),
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError("service claim has not been admitted")
+            value = self._read(row[0], db)
+            if value.claim.claim != signed.claim:
+                raise ValueError("accepted claim nonce was reused with changed inputs")
+            catalog, round_ = self._catalog(db)
+            return ServiceWorkAssignment(
+                catalog=catalog,
+                round=round_,
+                admission=value,
+                previous=None if value.ordinal == 1 else self._raw_admission(value.ordinal - 1, db),
+                source=CohortOrderHistory.model_validate_json(
+                    canonical_json_bytes(
+                        self.journal.get("order_history", value.history_sha256, db=db)
+                    )
+                ),
+            )

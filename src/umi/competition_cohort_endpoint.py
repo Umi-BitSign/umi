@@ -229,6 +229,33 @@ def validate_endpoint_order_body(body, policy, transport):
     return body
 
 
+def validate_endpoint_request(case, request, expected_ids, transport):
+    """Check one authorized work item against the shared transport constraints."""
+    limits = Limits.from_policy(transport)
+    if (
+        (request.batch_id, request.challenge_id) != expected_ids
+        or request.video.sha256 != case.video_sha256
+        or request.task.stratum != case.stratum
+        or request.scoring_policy_hash != scoring_policy_hash(transport)
+        or not request.issued_block < request.deadline_block
+        or request.issued_block < transport.activation_block
+        or request.video.size_bytes > limits.maximum_clip_size_bytes
+        or len(canonical_json_bytes(request)) > limits.maximum_request_body_bytes
+    ):
+        raise ValueError("recoverable endpoint assignment or request interval differs")
+    url = urlsplit(request.video.url)
+    if (
+        url.scheme != "https"
+        or not url.hostname
+        or url.username is not None
+        or url.password is not None
+        or url.fragment
+        or len(request.video.url) > 4096
+        or any(ord(c) < 33 for c in request.video.url)
+    ):
+        raise ValueError("endpoint video URL is not bounded HTTPS")
+
+
 def validate_endpoint_request_pairs(job, pairs, attempt_number, transport):
     """Enforce native request bindings and window quotas for selected cases."""
     limits = Limits.from_policy(transport)
@@ -236,28 +263,7 @@ def validate_endpoint_request_pairs(job, pairs, attempt_number, transport):
     videos: dict[int, set[str]] = defaultdict(set)
     for case, request in pairs:
         expected_ids = endpoint_attempt_wire_ids(job, attempt_number, case.case_id)
-        if (
-            (request.batch_id, request.challenge_id) != expected_ids
-            or request.video.sha256 != case.video_sha256
-            or request.task.stratum != case.stratum
-            or request.scoring_policy_hash != scoring_policy_hash(transport)
-            or not request.issued_block < request.deadline_block
-            or request.issued_block < transport.activation_block
-            or request.video.size_bytes > limits.maximum_clip_size_bytes
-            or len(canonical_json_bytes(request)) > limits.maximum_request_body_bytes
-        ):
-            raise ValueError("recoverable endpoint assignment or request interval differs")
-        url = urlsplit(request.video.url)
-        if (
-            url.scheme != "https"
-            or not url.hostname
-            or url.username is not None
-            or url.password is not None
-            or url.fragment
-            or len(request.video.url) > 4096
-            or any(ord(c) < 33 for c in request.video.url)
-        ):
-            raise ValueError("endpoint video URL is not bounded HTTPS")
+        validate_endpoint_request(case, request, expected_ids, transport)
         window = (
             request.issued_block - transport.activation_block
         ) // transport.clock.window_stride_blocks

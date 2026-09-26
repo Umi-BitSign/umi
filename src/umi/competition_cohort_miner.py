@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from .competition_authorization import validate_runtime_binding
 from .competition_cohort_endpoint import (
@@ -20,6 +20,7 @@ from .competition_cohort_endpoint import (
 from .competition_cohort_intake import CohortIntakeConfig
 from .competition_cohort_miner_case import (
     CohortCaseMinerGrant,
+    grant_requests,
     grant_slot,
     parse_miner_grant,
     validate_case_attempt,
@@ -42,6 +43,12 @@ from .competition_cohort_order_signer import (
 )
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cohort_service_grant import (
+    ServiceMinerGrant,
+    review_service_request_current,
+    verify_service_grant,
+    verify_service_parent,
+)
 from .competition_origin import public_https_origin
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
@@ -85,6 +92,16 @@ class CohortMinerConfig(CohortIntakeConfig):
     read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
 
 
+class CohortServiceMinerConfig(CohortMinerConfig):
+    schema_: Literal["umi-cohort-service-miner-config/1"] = Field(alias="schema")
+    service_terms_sha256: Hex32
+
+
+_MINER_CONFIG = TypeAdapter(
+    Annotated[CohortMinerConfig | CohortServiceMinerConfig, Field(discriminator="schema_")]
+)
+
+
 class CohortMinerAuthorizationAuthority:
     """The host owns the authenticated current history source and finality port."""
 
@@ -96,7 +113,7 @@ class CohortMinerAuthorizationAuthority:
         finalized_blocks: VerifiedFinalizedAnnouncementPort,
         history: Callable[[str], Awaitable[CohortOrderHistory]],
     ):
-        self.config = CohortMinerConfig.model_validate_json(canonical_json_bytes(config))
+        self.config = _MINER_CONFIG.validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.transport = ScoringPolicy.model_validate_json(canonical_json_bytes(transport))
         if self.config.policy_sha256 != digest(
@@ -159,6 +176,24 @@ class CohortMinerAuthorizationAuthority:
         if len(raw) > MAX_COHORT_GRANT_BYTES:
             raise ValueError("cohort miner grant exceeds its byte bound")
         grant = parse_miner_grant(raw)
+        if isinstance(grant, ServiceMinerGrant):
+            if not isinstance(self.config, CohortServiceMinerConfig):
+                raise ValueError("service grants require explicit miner terms configuration")
+            grant = verify_service_grant(grant, self.policy, self.transport)
+            body = grant.body
+            sub = body.assignment.admission.submission.submission
+            if (
+                identity(validator_hotkey) != identity(body.evaluator_hotkey)
+                or identity(sub.hotkey) != identity(self.config.miner_hotkey)
+                or sub.model_revision != self.config.model_revision
+                or sub.endpoint_url != self.config.serving_origin
+                or body.assignment.catalog.catalog.service_terms_sha256
+                != self.config.service_terms_sha256
+                or self.cohorts.get(body.assignment.round.cohort_sha256)
+                != body.assignment.catalog.catalog.authority_sha256
+            ):
+                raise ValueError("service grant differs from miner configuration")
+            return grant
         assignment, attempt = grant.assignment, grant.attempt
         order = assignment.certificate.order
         verify_recovery_quorum(order, assignment.certificate.signatures, self.policy)
@@ -193,6 +228,24 @@ class CohortMinerAuthorizationAuthority:
 
     def _validate(self, grant, validator_hotkey):
         grant = self._validate_one(grant, validator_hotkey)
+        if isinstance(grant, ServiceMinerGrant):
+            current, seen = grant, set()
+            while current.body.attempt_number > 1:
+                slot = current.body.parent_grant_slot
+                if slot in seen:
+                    raise ValueError("service replacement lineage is cyclic")
+                seen.add(slot)
+                raw = self.journal.get("miner_grant", slot)
+                if raw is None:
+                    raise ValueError("service replacement parent grant is not retained")
+                parent = self._validate_one(
+                    parse_miner_grant(canonical_json_bytes(raw)), validator_hotkey
+                )
+                if not isinstance(parent, ServiceMinerGrant) or grant_slot(parent) != slot:
+                    raise ValueError("service replacement parent changed its archive key")
+                verify_service_parent(current, parent)
+                current = parent
+            return grant
         current, seen = grant, set()
         # Parent records remain separate immutable objects. Replay iteratively
         # so repeated outages cannot exhaust Python recursion or grow the wire
@@ -216,7 +269,11 @@ class CohortMinerAuthorizationAuthority:
 
     async def _current(self, grant):
         timeout = self.config.read_timeout_seconds
-        cohort = grant.attempt.order.job.round.cohort_sha256
+        cohort = (
+            grant.body.assignment.round.cohort_sha256
+            if isinstance(grant, ServiceMinerGrant)
+            else grant.attempt.order.job.round.cohort_sha256
+        )
         try:
             source = await wait_for_owned(self.history(cohort), timeout=timeout)
             head = await wait_for_owned(
@@ -229,14 +286,19 @@ class CohortMinerAuthorizationAuthority:
         await run_owned_thread(
             remember_order_history, self.journal, self.cohorts, self.policy, source, head
         )
-        await run_owned_thread(
-            review_order,
-            grant.assignment.certificate.order,
-            grant.assignment.participant,
-            source,
-            self.policy,
-            head,
-        )
+        if isinstance(grant, ServiceMinerGrant):
+            await run_owned_thread(
+                review_service_request_current, grant.body, self.policy, source, head
+            )
+        else:
+            await run_owned_thread(
+                review_order,
+                grant.assignment.certificate.order,
+                grant.assignment.participant,
+                source,
+                self.policy,
+                head,
+            )
         try:
             current = await wait_for_owned(self.history(cohort), timeout=timeout)
         except RuntimeError as error:
@@ -305,7 +367,7 @@ class CohortMinerAuthorizationAuthority:
                             ).fetchone()[0]
                             if count > self.config.maximum_grants:
                                 raise ValueError("cohort miner grant capacity exhausted")
-                            for request in grant.attempt.order.requests:
+                            for request in grant_requests(grant):
                                 request_key = self._request_key(request, validator_hotkey)
                                 old_key = db.execute(
                                     "SELECT grant_id FROM miner_grant_requests WHERE request_key=?",
@@ -365,7 +427,7 @@ class CohortMinerAuthorizationAuthority:
             grant_slot(grant) != row[0]
             or sum(
                 canonical_json_bytes(r) == canonical_json_bytes(request)
-                for r in grant.attempt.order.requests
+                for r in grant_requests(grant)
             )
             != 1
         ):

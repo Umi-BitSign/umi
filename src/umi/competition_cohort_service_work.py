@@ -36,6 +36,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_CATALOG_BYTES = 8 * 1024**2
 MAX_CLAIM_BYTES = 4096
+MAX_SERVICE_REQUEST_BYTES = 16 * 1024**2
 
 
 class ServiceWorkItem(StrictProtocolModel):
@@ -101,6 +102,33 @@ class ServiceWorkAdmission(StrictProtocolModel):
     observation: ExecutionBoundary
     service_credit_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
+
+
+class ServiceWorkAssignment(StrictProtocolModel):
+    """Original accepted work, independently replayable by request reviewers.
+
+    The owner authenticates the original queue record and registration proofs;
+    this unsigned container alone does not certify FIFO ownership.
+    """
+
+    catalog: SignedServiceWorkCatalog
+    round: RecoverableEvaluationRound
+    admission: ServiceWorkAdmission
+    previous: ServiceWorkAdmission | None
+    source: CohortOrderHistory
+
+
+def review_service_assignment(value: ServiceWorkAssignment, policy: CompetitionPolicy):
+    value = ServiceWorkAssignment.model_validate_json(canonical_json_bytes(value))
+    review_service_admission(
+        value.admission,
+        value.catalog,
+        value.round,
+        value.source,
+        policy,
+        previous=value.previous,
+    )
+    return value
 
 
 def service_work_key(catalog: ServiceWorkCatalog, ordinal: int) -> str:

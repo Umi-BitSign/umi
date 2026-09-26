@@ -16,7 +16,7 @@ from .competition_cohort_miner import (
     MAX_COHORT_GRANT_BYTES,
     SignedCohortMinerGrantReceipt,
 )
-from .competition_cohort_miner_case import MinerGrant
+from .competition_cohort_miner_case import MinerGrant, grant_miner_hotkey
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread
 from .endpoint_protocol import COHORT_GRANT_PATH
@@ -39,7 +39,7 @@ class CohortGrantDeliveryOutcome:
 
 def verify_grant_receipt(value, grant: MinerGrant):
     value = SignedCohortMinerGrantReceipt.model_validate_json(canonical_json_bytes(value))
-    miner = grant.attempt.order.job.submission.submission.hotkey
+    miner = grant_miner_hotkey(grant)
     if (
         value.receipt.grant_sha256 != digest(grant)
         or identity(value.receipt.miner_hotkey) != identity(miner)

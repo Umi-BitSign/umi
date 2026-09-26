@@ -19,6 +19,7 @@ from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_miner_contracts import CohortMinerGrant
 from .competition_cohort_order_signer import order_slot
 from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cohort_service_grant import ServiceMinerGrant, service_grant_slot
 from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
 from .open_competition import (
     CompetitionPolicy,
@@ -63,7 +64,12 @@ class CohortCaseMinerGrant(StrictProtocolModel):
     attempt: SignedRecoverableEndpointCaseOrder
 
 
-MinerGrant = Annotated[CohortMinerGrant | CohortCaseMinerGrant, Field(discriminator="schema_")]
+EvaluationMinerGrant = Annotated[
+    CohortMinerGrant | CohortCaseMinerGrant, Field(discriminator="schema_")
+]
+MinerGrant = Annotated[
+    CohortMinerGrant | CohortCaseMinerGrant | ServiceMinerGrant, Field(discriminator="schema_")
+]
 _GRANT = TypeAdapter(MinerGrant)
 
 
@@ -74,6 +80,8 @@ def parse_miner_grant(raw: bytes | str) -> MinerGrant:
 
 
 def grant_slot(grant: MinerGrant) -> str:
+    if isinstance(grant, ServiceMinerGrant):
+        return service_grant_slot(grant.body)
     if isinstance(grant, CohortMinerGrant):
         return digest(
             {
@@ -90,6 +98,18 @@ def grant_slot(grant: MinerGrant) -> str:
             "attempt": body.attempt_number,
         }
     )
+
+
+def grant_requests(grant: MinerGrant):
+    if isinstance(grant, ServiceMinerGrant):
+        return (grant.body.request,)
+    return grant.attempt.order.requests
+
+
+def grant_miner_hotkey(grant: MinerGrant):
+    if isinstance(grant, ServiceMinerGrant):
+        return grant.body.assignment.admission.submission.submission.hotkey
+    return grant.attempt.order.job.submission.submission.hotkey
 
 
 def validate_case_attempt(

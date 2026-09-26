@@ -590,9 +590,28 @@ The queue reuses the round journal and monotonic history checks. A full queue
 rejects new claims; increasing configured capacity preserves existing work.
 For a host transfer, fence the outgoing owner and preserve the original logical
 state path on the destination; the native journal retains its namespace binding.
-Authenticated host transports and dispatch must still be connected. Admission
-does not establish execution or reward credit; completion verification,
-service-credit allocation and installed recovery qualification remain required.
+`ServiceWorkRequests` retains one catalog-bound request and its evaluator before
+collecting quorum votes. Lost acknowledgements recover that exact selection.
+The service request binds one accepted item directly, including inputs outside
+the benchmark suite. It has separate wire IDs for each catalog and attempt.
+Independent reviewers must authenticate the owner's admission and its original
+proof sources before voting; an unsigned queue export is not a FIFO certificate.
+
+The native miner accepts these grants only with
+`umi-cohort-service-miner-config/1` and matching `service_terms_sha256`. It checks
+current cohort authority and its own finalized transport window for inference.
+The existing response cache and retirement endpoint preserve replies and fence
+unfinished attempts. Replacement requests require the retained parent grant,
+a quorum retry decision and the miner's signed retirement receipt. Parent
+records stay separate and are replayed iteratively. Ordinary benchmark miner
+configuration continues to reject service grants.
+
+These library components are not a deployed service scheduler. Connect recurring
+authenticated delivery, independent review and original service measurements;
+qualify evaluator replacement and operational storage growth. Admission,
+grant storage and a signed response do not establish successful paid work.
+Complete terminal verification, service-credit allocation and installed recovery
+qualification remain required before service rewards can activate.
 
 ### Participation admission
 

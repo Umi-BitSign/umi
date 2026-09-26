@@ -26,7 +26,7 @@ from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_miner_case import (
     CohortCaseMinerGrant,
-    MinerGrant,
+    EvaluationMinerGrant,
     RecoverableEndpointCaseOrder,
     SignedRecoverableEndpointCaseOrder,
     validate_case_attempt,
@@ -61,7 +61,7 @@ class EndpointRequestPlan(StrictProtocolModel):
     assignment: CohortExecutionAssignment
     body: RequestBody
     transport: ScoringPolicy
-    parent: MinerGrant | None = None
+    parent: EvaluationMinerGrant | None = None
 
 
 def request_slot(body: RequestBody):

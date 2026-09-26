@@ -100,10 +100,18 @@ class EndpointRequestWindow(StrictProtocolModel):
             raise ValueError("request differs from its retained verified window")
 
     def request(self, job, case, video: Video, attempt: int, transport: ScoringPolicy):
+        return self.request_with_ids(
+            case, video, endpoint_attempt_wire_ids(job, attempt, case.case_id), transport
+        )
+
+    def request_with_ids(
+        self, case, video: Video, wire_ids: tuple[str, str], transport: ScoringPolicy
+    ):
+        """Construct a window-bound request; the caller supplies authorized work IDs."""
         schedule = self.schedule(transport)
         if video.sha256 != case.video_sha256:
             raise ValueError("request video differs from its assigned case")
-        batch, challenge = endpoint_attempt_wire_ids(job, attempt, case.case_id)
+        batch, challenge = wire_ids
         return TranslationRequest(
             protocol=PROTOCOL_VERSION,
             window_id=schedule.window_id,
