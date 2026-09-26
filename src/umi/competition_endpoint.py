@@ -78,28 +78,17 @@ class EndpointReplay:
         return hashlib.sha256(self.evidence_bytes).hexdigest()
 
 
-def prepare_endpoint_case(
+def validate_prepared_endpoint_transport(
     prepared: PreparedRequestAttempt,
     *,
-    policy: CompetitionPolicy,
-    round_: EvaluationRound,
-    signed: SignedSubmission,
     case_id: str,
     expected_transport_policy_sha256: str,
     limits: Limits,
-) -> EndpointPreparedCase:
-    """Validate an already signed legacy request without signing or sending it.
-
-    The explicit transport hash is kept distinct from the competition hash. It
-    identifies the supplied transcript's policy; it does not prove authorization.
-    The case/video mapping is checked against the committed suite during replay.
-    """
+) -> tuple[PreparedRequestAttempt, Limits]:
+    """Authenticate exact request bytes and limits; confer no work authority."""
     if not isinstance(prepared, PreparedRequestAttempt) or not isinstance(limits, Limits):
         raise TypeError("prepared request and explicit transport limits are required")
     # Reparse recursively: model_copy/model_construct must not bypass validation.
-    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
-    signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
     limits = Limits(**asdict(limits))
     for name, maximum in (
         ("maximum_request_body_bytes", 64 * 1024),
@@ -155,6 +144,35 @@ def prepare_endpoint_case(
         or not _HEX32.fullmatch(expected_transport_policy_sha256)
     ):
         raise ValueError("case and transport policy digests must be lowercase SHA-256")
+    return prepared, limits
+
+
+def prepare_endpoint_case(
+    prepared: PreparedRequestAttempt,
+    *,
+    policy: CompetitionPolicy,
+    round_: EvaluationRound,
+    signed: SignedSubmission,
+    case_id: str,
+    expected_transport_policy_sha256: str,
+    limits: Limits,
+) -> EndpointPreparedCase:
+    """Validate an already signed legacy request without signing or sending it.
+
+    The explicit transport hash is kept distinct from the competition hash. It
+    identifies the supplied transcript's policy; it does not prove authorization.
+    The case/video mapping is checked against the committed suite during replay.
+    """
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
+    signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
+    prepared, limits = validate_prepared_endpoint_transport(
+        prepared,
+        case_id=case_id,
+        expected_transport_policy_sha256=expected_transport_policy_sha256,
+        limits=limits,
+    )
+    request = prepared.request
     policy_sha = digest(policy)
     sub = signed.submission
     if (
@@ -232,9 +250,92 @@ def replay_endpoint_outcome(
         expected_transport_policy_sha256=prepared_case.transport_policy_sha256,
         limits=prepared_case.limits,
     )
+    return replay_authenticated_endpoint_outcome(
+        EndpointReplayBinding(
+            prepared=item.prepared,
+            policy=item.policy,
+            signed=item.signed,
+            round_sha256=digest(item.round_),
+            suite_sha256=item.round_.suite_sha256,
+            case_id=item.case_id,
+            transport_policy_sha256=item.transport_policy_sha256,
+            limits=item.limits,
+        ),
+        outcome,
+        suite=suite,
+        reveal_pulse=reveal_pulse,
+        started_at_unix_ns=started_at_unix_ns,
+        finished_at_unix_ns=finished_at_unix_ns,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointReplayBinding:
+    """Replay inputs after the caller verifies its own round authority."""
+
+    prepared: PreparedRequestAttempt
+    policy: CompetitionPolicy
+    signed: SignedSubmission
+    round_sha256: str
+    suite_sha256: str
+    case_id: str
+    transport_policy_sha256: str
+    limits: Limits
+
+
+def replay_authenticated_endpoint_outcome(
+    item: EndpointReplayBinding,
+    outcome: QueryOutcome,
+    *,
+    suite: EvaluationSuite,
+    reveal_pulse: DrandPulse | None,
+    started_at_unix_ns: str,
+    finished_at_unix_ns: str,
+    recoverable: bool = False,
+) -> EndpointReplay:
+    """Replay authentication/decryption, without asserting miner authorization.
+
+    The round consumer must verify consent, assignments and timing separately.
+    Neither this binding nor its returned observation permits a live request.
+    """
+    if not isinstance(item, EndpointReplayBinding) or not isinstance(outcome, QueryOutcome):
+        raise TypeError("endpoint replay binding and query outcome are required")
+    if type(recoverable) is not bool:
+        raise TypeError("recoverable replay selection must be boolean")
+    prepared, limits = validate_prepared_endpoint_transport(
+        item.prepared,
+        case_id=item.case_id,
+        expected_transport_policy_sha256=item.transport_policy_sha256,
+        limits=item.limits,
+    )
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(item.policy))
+    signed = SignedSubmission.model_validate_json(canonical_json_bytes(item.signed))
+    if (
+        not isinstance(item.round_sha256, str)
+        or not _HEX32.fullmatch(item.round_sha256)
+        or not isinstance(item.suite_sha256, str)
+        or not _HEX32.fullmatch(item.suite_sha256)
+        or prepared.request.scoring_policy_hash != item.transport_policy_sha256
+        or item.transport_policy_sha256 == digest(policy)
+        or identity(prepared.miner_hotkey) != identity(signed.submission.hotkey)
+        or identity(prepared.validator_hotkey) == identity(signed.submission.hotkey)
+        or identity(prepared.validator_hotkey)
+        not in {identity(e.hotkey) for e in policy.evaluators}
+    ):
+        raise ValueError("endpoint replay identity or transport binding differs")
+    item = EndpointReplayBinding(
+        prepared,
+        policy,
+        signed,
+        item.round_sha256,
+        item.suite_sha256,
+        item.case_id,
+        item.transport_policy_sha256,
+        limits,
+    )
     request = item.prepared.request
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
-    if suite.policy_sha256 != digest(item.policy) or digest(suite) != item.round_.suite_sha256:
+    if suite.policy_sha256 != digest(item.policy) or digest(suite) != item.suite_sha256:
         raise ValueError("revealed suite does not match the committed round")
     cases = [case for case in suite.cases if case.case_id == item.case_id]
     if (
@@ -375,14 +476,18 @@ def replay_endpoint_outcome(
         case_id=item.case_id, status=status, hypothesis=hypothesis, elapsed_ms=elapsed_ms
     )
     evidence = {
-        "schema": "umi-competition-endpoint-replay/1",
-        "profile": "legacy-transport-rehearsal/1",
+        "schema": "umi-recoverable-endpoint-replay/1"
+        if recoverable
+        else "umi-competition-endpoint-replay/1",
+        "profile": "recoverable-endpoint-observation/1"
+        if recoverable
+        else "legacy-transport-rehearsal/1",
         "no_weight": True,
         "miner_authorization_verified": False,
         "pre_reveal_delivery_proven": False,
         "timing_class": "evaluator_reported_round_trip",
         "policy_sha256": digest(item.policy),
-        "round_sha256": digest(item.round_),
+        "round_sha256": item.round_sha256,
         "submission_sha256": digest(item.signed.submission),
         "suite_sha256": digest(suite),
         "case_id": item.case_id,

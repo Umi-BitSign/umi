@@ -6,14 +6,16 @@ import pytest
 
 from umi.competition_cohort_evaluation import RecoverableRoundParticipant
 from umi.competition_cohort_execution import (
-    RecoverableExecutedEvaluation,
     RecoverableExecutionEvidence,
     RecoverableExecutionJob,
     recoverable_execution_observations,
     recoverable_run_record_from_execution,
-    replay_recoverable_executed_evaluation,
 )
 from umi.competition_cohort_history import verify_cohort_history
+from umi.competition_cohort_outcomes import (
+    RecoverableExecutedEvaluation,
+    replay_recoverable_executed_evaluation,
+)
 from umi.competition_cohort_participation import (
     AttestedCohortParticipantAdmission,
     SignedCohortParticipationConsent,

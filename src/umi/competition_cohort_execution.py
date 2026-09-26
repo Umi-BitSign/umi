@@ -9,7 +9,6 @@ Endpoint transport and infrastructure-void certificates need separate evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -17,7 +16,6 @@ from typing_extensions import Self
 
 from .competition_cohort_evaluation import (
     RecoverableEvaluationRound,
-    replay_recoverable_independent_evaluation,
     verify_recoverable_round_participant,
 )
 from .competition_cohort_history import CohortRecoveryHistory
@@ -25,7 +23,7 @@ from .competition_cohort_participation import (
     AttestedCohortParticipantAdmission,
     SignedCohortParticipationConsent,
 )
-from .competition_evidence import EvaluatorRunRecord, IndependentEvaluationEvidence
+from .competition_evidence import EvaluatorRunRecord
 from .competition_execution import ExecutionBoundary, ExecutionCase, ExecutionStep
 from .competition_runner import OfflineRuntime, validate_case_execution
 from .open_competition import (
@@ -73,17 +71,6 @@ class RecoverableExecutionEvidence(StrictProtocolModel):
     schema_: Literal["umi-recoverable-execution-evidence/1"] = Field(alias="schema")
     job: RecoverableExecutionJob
     steps: Annotated[tuple[ExecutionStep, ...], Field(min_length=3, max_length=4096)]
-    chain_submission_authorized: Literal[False] = False
-
-
-class RecoverableExecutedEvaluation(StrictProtocolModel):
-    """Every signed paired-model run plus its complete referenced artifact."""
-
-    schema_: Literal["umi-recoverable-executed-evaluation/1"] = Field(alias="schema")
-    receipts: IndependentEvaluationEvidence
-    executions: Annotated[
-        tuple[RecoverableExecutionEvidence, ...], Field(min_length=1, max_length=64)
-    ]
     chain_submission_authorized: Literal[False] = False
 
 
@@ -219,7 +206,7 @@ def recoverable_execution_observations(
     )
 
 
-def _run_record(
+def run_record_from_observation(
     view: RecoverableExecutionObservation,
     common: EvaluationResult,
     suite: EvaluationSuite,
@@ -227,7 +214,7 @@ def _run_record(
 ) -> EvaluatorRunRecord:
     job = view.job
     if (
-        job.mode != "paired_model"
+        len(view.candidate) != len(job.cases)
         or common.round_sha256 != digest(job.round)
         or common.submission_sha256 != digest(job.submission.submission)
         or common.model_revision != job.submission.submission.model_revision
@@ -302,69 +289,4 @@ def recoverable_run_record_from_execution(
         expected_tip_sha256=expected_tip_sha256,
         current_block=current_block,
     )
-    return _run_record(view, common, suite, policy)
-
-
-def replay_recoverable_executed_evaluation(
-    evidence: RecoverableExecutedEvaluation,
-    signed: SignedSubmission,
-    round_: RecoverableEvaluationRound,
-    suite: EvaluationSuite,
-    policy: CompetitionPolicy,
-    consent: SignedCohortParticipationConsent,
-    admission: AttestedCohortParticipantAdmission,
-    admission_snapshot: RegistrationSnapshot,
-    history: CohortRecoveryHistory,
-    *,
-    expected_tip_sha256: str,
-    current_block: int,
-) -> tuple[dict[str, Fraction], dict[str, Fraction]]:
-    """Require exact artifact coverage and replay before accepting scored receipts."""
-    evidence = RecoverableExecutedEvaluation.model_validate_json(canonical_json_bytes(evidence))
-    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
-    signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
-    round_ = RecoverableEvaluationRound.model_validate_json(canonical_json_bytes(round_))
-    quality = replay_recoverable_independent_evaluation(
-        evidence.receipts,
-        signed,
-        round_,
-        suite,
-        policy,
-        consent,
-        admission,
-        admission_snapshot,
-        history,
-        expected_tip_sha256=expected_tip_sha256,
-        current_block=current_block,
-    )
-    artifacts = {}
-    for artifact in evidence.executions:
-        evaluator = identity(artifact.job.evaluator_hotkey)
-        if evaluator in artifacts:
-            raise ValueError("duplicate evaluator execution artifact")
-        if artifact.job.round != round_ or artifact.job.submission != signed:
-            raise ValueError("execution artifact belongs to another round or submission")
-        artifacts[evaluator] = artifact
-    runs = evidence.receipts.evaluator_runs
-    if set(artifacts) != {identity(r.run.evaluator_hotkey) for r in runs}:
-        raise ValueError("execution artifacts do not cover exactly the signed evaluators")
-    for signed_run in runs:
-        run = signed_run.run
-        view = recoverable_execution_observations(
-            artifacts[identity(run.evaluator_hotkey)],
-            suite,
-            policy,
-            consent,
-            admission,
-            admission_snapshot,
-            history,
-            expected_tip_sha256=expected_tip_sha256,
-            current_block=current_block,
-        )
-        expected = _run_record(view, evidence.receipts.attested_result.result, suite, policy)
-        # Equivalent address encodings identify the same signer.
-        expected = expected.model_copy(update={"evaluator_hotkey": run.evaluator_hotkey})
-        if run != expected:
-            raise ValueError("signed evaluator receipt differs from its retained execution")
-    return quality
+    return run_record_from_observation(view, common, suite, policy)

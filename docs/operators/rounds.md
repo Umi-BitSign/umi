@@ -599,14 +599,25 @@ job, preparation closure, raw sandbox outputs and original execution boundaries.
 Its consumer replays complete paired-model runs and comparator runs for endpoint
 submissions after certified reveal, without a new deadline. Receipt preparation
 checks the proposed common result against the original artifact. The complete
-paired-model receipt consumer requires exactly one matching artifact per signer;
-changed timing, stdout, model/runtime bindings and missing runs are rejected.
-Comparator observations alone do not supply endpoint responses. Failed
-comparators remain observations requiring review and cannot become scored zeros.
+model and endpoint receipt consumer requires exactly one matching artifact per
+signer; changed timing, stdout, model/runtime bindings and missing runs are
+rejected. Comparator observations alone do not supply endpoint responses.
+Failed comparators remain observations requiring review and cannot become
+scored zeros.
 
-Endpoint transport replay, terminal void certification, complete roster
-settlement, delayed first reward admission and standing reward continuation
-still require integration. These artifacts do not invoke models, prove host
+`umi-recoverable-endpoint-paired-evidence/1` combines a comparator execution
+with a quorum-signed bounded attempt order and exact transport transcripts.
+Replay checks assignment identity, canonical request bytes, evaluator and miner
+signatures, retained response bytes and offline timelock decryption against the
+certified request/reveal closures. The immutable case obligation survives a
+retry; each attempt uses distinct wire identities. Transport failures remain
+infrastructure observations, while authenticated miner errors retain their
+original classification. Neither replay nor an attempt order authorizes live
+requests or proves original publication time.
+
+Live request authorization, durable attempt selection, terminal void
+certification, complete roster settlement, delayed first reward admission and
+standing reward continuation still require integration. These artifacts do not invoke models, prove host
 isolation or independently verify the chain proofs referenced by their timing
 boundaries. Production reviewers must retain and authenticate those sources.
 
