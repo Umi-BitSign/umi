@@ -112,6 +112,8 @@ class ServiceWorkRequests:
                     raise ValueError("service request selection changed its original inputs")
                 self._reserve(slot, body)
                 return body
+            if self.journal.get("service_terminal_intent", assignment.admission.work_sha256):
+                raise ValueError("service work already has a terminal response selected")
             if video is None or window is None or source is None or capture is None:
                 raise ValueError("new service request requires current execution inputs")
             boundary = execution_boundary(capture)
@@ -174,6 +176,16 @@ class ServiceWorkRequests:
             for e in self.policy.evaluators
         )
         self.journal.reserve_records(slot, tuple(reservations))
+        work = body.assignment.admission.work_sha256
+        # A separate batch preserves existing request reservations. One logical
+        # work retains one result allowance across all attempts.
+        self.journal.reserve_records(
+            digest(["umi-service-terminal-reservation/1", work]),
+            (
+                RecordReservation("service_terminal_intent", work, 16384),
+                RecordReservation("service_terminal", work, 32768),
+            ),
+        )
 
     @staticmethod
     def _vote_key(slot, hotkey):

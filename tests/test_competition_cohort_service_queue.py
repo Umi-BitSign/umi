@@ -362,3 +362,90 @@ def test_concurrent_claims_have_one_owner_and_recover_losers(queue_case):
     a, b = admit(c, "Alice"), admit(c, "Bob")
     assert {a.ordinal, b.ordinal} == {1, 2}
     assert len(c.queue.entries()) == 2
+
+
+def seal(c):
+    return c.queue.seal(
+        c.h.source, capture(400), expected_tip_sha256=history_tip(c.h.source.history)
+    )
+
+
+def test_seal_freezes_complete_prefix_and_preserves_duplicate_recovery(queue_case):
+    c = queue_case
+    accepted = [admit(c, nonce=i) for i in (1, 2)]
+    sealed = seal(c)
+    assert [r.work_sha256 for r in sealed.accepted] == [a.work_sha256 for a in accepted]
+    assert len(sealed.accepted) < len(c.catalog.catalog.work)
+    c.queue = ServiceWorkQueue(c.cfg, c.h.batch["policy"])
+    assert c.queue.seal(None, None, expected_tip_sha256="ff" * 32) == sealed
+    assert admit(c) == accepted[0]
+    with pytest.raises(ServiceQueueBackpressure, match="sealed"):
+        admit(c, nonce=3)
+    assert c.queue.entries() == tuple(accepted)
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_seal_crash_and_ack_loss_preserve_whole_accepted_set(queue_case, monkeypatch, after_commit):
+    c = queue_case
+    first = admit(c)
+    original = c.queue.journal.put
+
+    def interrupt(kind, key, value):
+        if kind == "service_work_seal":
+            if after_commit:
+                original(kind, key, value)
+            raise OSError("fixture seal interruption")
+        return original(kind, key, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(c.queue.journal, "put", interrupt)
+        with pytest.raises(OSError):
+            seal(c)
+    c.queue = ServiceWorkQueue(c.cfg, c.h.batch["policy"])
+    if after_commit:
+        with pytest.raises(ServiceQueueBackpressure):
+            admit(c, nonce=2)
+    else:
+        admit(c, nonce=2)
+    result = seal(c)
+    assert result.accepted[0].work_sha256 == first.work_sha256
+    assert len(result.accepted) == (1 if after_commit else 2)
+
+
+def test_seal_admission_race_has_no_lost_accepted_work(queue_case):
+    from umi.private_files import PrivateStateBusyError
+
+    c = queue_case
+    admit(c)
+
+    def claim():
+        try:
+            return admit(c, nonce=2)
+        except ServiceQueueBackpressure:
+            return None
+
+    def attempt(fn):
+        try:
+            return fn()
+        except PrivateStateBusyError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b = pool.submit(attempt, claim), pool.submit(attempt, lambda: seal(c))
+        result, closed = a.result(), b.result()
+    # The owner mutex is nonblocking. The losing operation retries after the
+    # winner completes; it may observe a closed queue, never a partial seal.
+    if isinstance(result, PrivateStateBusyError):
+        result = claim()
+    if isinstance(closed, PrivateStateBusyError):
+        closed = seal(c)
+    assert len(closed.accepted) == (1 if result is None else 2)
+    assert {x.work_sha256 for x in c.queue.entries()} == {x.work_sha256 for x in closed.accepted}
+
+
+def test_empty_seal_cannot_admit_later_or_manufacture_credit(queue_case):
+    c = queue_case
+    result = seal(c)
+    assert result.accepted == () and not result.chain_submission_authorized
+    with pytest.raises(ServiceQueueBackpressure):
+        admit(c)

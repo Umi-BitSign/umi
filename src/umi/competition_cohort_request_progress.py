@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import Literal, Protocol
 
 from pydantic import Field
 
@@ -10,14 +10,23 @@ from .competition_cohort_availability import (
     CohortAvailabilityObservation,
     pending_availability_progress,
 )
-from .competition_cohort_coordinator import CohortPhaseProgress
-from .competition_cohort_endpoint_archive import JournalEndpointObjects
+from .competition_cohort_coordinator import (
+    CohortDecisionInput,
+    CohortPhaseProgress,
+    replay_cohort_decisions,
+)
+from .competition_cohort_endpoint_archive import JournalEndpointObjects, read_endpoint_object
+from .competition_cohort_history import verify_cohort_history
+from .competition_cohort_intake import history_tip
 from .competition_cohort_recovery import CohortRecoveryState
+from .competition_execution import ExecutionBoundary
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
-if TYPE_CHECKING:
-    from .competition_cohort_request_closure import CohortRequestClosure
+
+class RequestCompletion(Protocol):
+    observation: ExecutionBoundary
+    recovery_tip_sha256: str
 
 
 class RequestClosureProgressEvidence(StrictProtocolModel):
@@ -27,7 +36,7 @@ class RequestClosureProgressEvidence(StrictProtocolModel):
 
 
 def request_closure_progress(
-    closure: CohortRequestClosure,
+    closure: RequestCompletion,
     service: CohortAvailabilityObservation,
     state: CohortRecoveryState,
 ) -> tuple[CohortPhaseProgress, RequestClosureProgressEvidence]:
@@ -60,7 +69,7 @@ def request_closure_progress(
 
 
 def retain_request_closure_progress(
-    closure: CohortRequestClosure,
+    closure: RequestCompletion,
     service: CohortAvailabilityObservation,
     state: CohortRecoveryState,
     objects: JournalEndpointObjects,
@@ -74,3 +83,57 @@ def retain_request_closure_progress(
     objects.put(closure)
     objects.put(evidence)
     return progress
+
+
+def certified_request_prefix(
+    closure,
+    objects,
+    policy,
+    history,
+    *,
+    decision_source,
+    expected_tip_sha256,
+    current_block,
+):
+    """Bind either closure version to native phase and availability evidence.
+
+    Callers must then replay that version's complete manifest using this prefix.
+    This shared check never interprets a result digest as sufficient completion.
+    """
+    view = verify_cohort_history(
+        history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
+    )
+    if view.state.phase == "revoked":
+        raise ValueError("request closure authority is revoked")
+    closed = view.closure("requests")
+    decision = CohortDecisionInput.model_validate_json(
+        canonical_json_bytes(decision_source(closed.evidence_sha256))
+    )
+    progress = decision.progress.progress
+    if (
+        digest(decision) != closed.evidence_sha256
+        or progress.completion != "complete"
+        or progress.phase_result_sha256 != digest(closure)
+        or progress.observed_at_block != closure.observation.block
+        or closure.recovery_tip_sha256 != closed.predecessor_sha256
+    ):
+        raise ValueError("certified requests do not bind this exact closure manifest")
+    # Replay the full native decisions, including request-window compensation.
+    replay_cohort_decisions(history, policy, decision_source)
+    index = next(i for i, s in enumerate(history.transitions) if s.transition == closed)
+    prefix = history.model_copy(update={"transitions": history.transitions[:index]})
+    service_evidence = RequestClosureProgressEvidence.model_validate_json(
+        read_endpoint_object(objects, progress.evidence_sha256)
+    )
+    if service_evidence.closure_sha256 != digest(closure):
+        raise ValueError("request progress substituted its completion manifest")
+    state = verify_cohort_history(
+        prefix,
+        policy,
+        expected_tip_sha256=history_tip(prefix),
+        current_block=closure.observation.block,
+    ).state
+    expected, _ = request_closure_progress(closure, service_evidence.service, state)
+    if expected != progress:
+        raise ValueError("certified request progress changed its retained service evidence")
+    return prefix

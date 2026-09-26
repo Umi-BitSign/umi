@@ -606,12 +606,35 @@ a quorum retry decision and the miner's signed retirement receipt. Parent
 records stay separate and are replayed iteratively. Ordinary benchmark miner
 configuration continues to reject service grants.
 
+`ServiceWorkQueue.seal` freezes the complete accepted FIFO prefix and rejects
+new claims. Duplicate accepted claims remain recoverable. A crash during export
+leaves admission open until the immutable seal commits; an acknowledgement loss
+recovers that same seal. Unused catalog items are not accepted obligations.
+
+`ServiceWorkTerminals` binds one selected request to its recovered signed
+response, signed miner retirement and separately retained retry ancestry. It
+commits the terminal intent before requesting the evaluator signature and
+blocks fresh attempts for that work. Missing responses stay pending; retrieval
+time does not establish original inference latency. The round journal reserves
+logical capacity for the seal and terminal intent/certificate. Archive growth
+and physical disk headroom still require host qualification.
+
+`umi-cohort-request-closure/2` binds the existing complete benchmark closure plus
+every authorized service catalog, its independently selected owner seal and one
+terminal per accepted work. Reviewers must authenticate the original queue
+exports and proof sources, including the complete allowed catalog set. They
+reject overlapping catalog inputs and replay every terminal and retry parent
+before reference reveal. Native phase certification binds this full manifest
+and the retained availability evidence. Late replay needs no fresh deadline;
+elapsed time or missing infrastructure evidence creates neither a zero nor a
+void. Version 1 benchmark closures keep their existing schema and checks.
+
 These library components are not a deployed service scheduler. Connect recurring
 authenticated delivery, independent review and original service measurements;
-qualify evaluator replacement and operational storage growth. Admission,
-grant storage and a signed response do not establish successful paid work.
-Complete terminal verification, service-credit allocation and installed recovery
-qualification remain required before service rewards can activate.
+qualify evaluator replacement, abandonment and operational storage growth.
+Admission, grant storage and a signed response do not establish earned credit.
+Typed service terms, reference replay, service-credit allocation and installed
+recovery qualification remain required before service rewards can activate.
 
 ### Participation admission
 

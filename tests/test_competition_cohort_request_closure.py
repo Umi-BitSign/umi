@@ -70,8 +70,10 @@ def review(b, *, certified=False, **changes):
 
 
 def certified_history(b, *, result=None, unavailable=1200):
+    observation = b["closure"].observation
+    block = observation.block
     state = verify_cohort_history(
-        b["history"], b["policy"], expected_tip_sha256=tip(b["history"]), current_block=1680
+        b["history"], b["policy"], expected_tip_sha256=tip(b["history"]), current_block=block
     ).state
     service = CohortAvailabilityObservation(
         schema="umi-cohort-service-observation/1",
@@ -82,7 +84,7 @@ def certified_history(b, *, result=None, unavailable=1200):
         sequence=1,
         predecessor_sha256=None,
         process_epoch="12" * 16,
-        observation=boundary(1680),
+        observation=observation,
         serving=True,
         unavailable_blocks=unavailable,
     )
@@ -93,20 +95,20 @@ def certified_history(b, *, result=None, unavailable=1200):
     decision = CohortDecisionInput(
         schema="umi-cohort-decision-input/1",
         progress=AttestedCohortPhaseProgress(progress=progress, signatures=signatures(progress)),
-        observation=boundary(1680),
+        observation=observation,
     )
     b["decisions"][digest(decision)] = decision
     proposed = propose_recovery_transition(
         state,
         b["history"].authority.authority,
         operation="close_phase",
-        observed_at_block=1680,
+        observed_at_block=block,
         evidence_sha256=digest(decision),
     )
     h = b["history"].model_copy(
         update={"transitions": (*b["history"].transitions, signed_transition(proposed))}
     )
-    return close(h, b["policy"], b["decisions"], 1770, "ab" * 32)
+    return close(h, b["policy"], b["decisions"], block + 90, "ab" * 32)
 
 
 def put(b, value):

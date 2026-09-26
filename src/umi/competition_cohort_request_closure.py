@@ -12,14 +12,13 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
+from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import EndpointObjectSource, read_endpoint_object
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder, verify_recoverable_order
 from .competition_cohort_request_progress import (
-    RequestClosureProgressEvidence,
-    request_closure_progress,
+    certified_request_prefix,
 )
 from .competition_cohort_request_terminal import SignedRequestTerminal, read_request_terminal
 from .competition_cohort_roster import (
@@ -242,42 +241,15 @@ def verify_certified_request_closure(
     current_block: int,
 ) -> CohortRequestClosure:
     """Require the native phase decision to bind this exact complete manifest."""
-    view = verify_cohort_history(
-        history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
-    )
-    if view.state.phase == "revoked":
-        raise ValueError("request closure authority is revoked")
-    closed = view.closure("requests")
-    decision = CohortDecisionInput.model_validate_json(
-        canonical_json_bytes(decision_source(closed.evidence_sha256))
-    )
-    progress = decision.progress.progress
-    if (
-        digest(decision) != closed.evidence_sha256
-        or progress.completion != "complete"
-        or progress.phase_result_sha256 != digest(closure)
-        or progress.observed_at_block != closure.observation.block
-        or closure.recovery_tip_sha256 != closed.predecessor_sha256
-    ):
-        raise ValueError("certified requests do not bind this exact closure manifest")
-    # Replay the full native decisions, including request-window compensation.
-    replay_cohort_decisions(history, policy, decision_source)
-    index = next(i for i, s in enumerate(history.transitions) if s.transition == closed)
-    prefix = history.model_copy(update={"transitions": history.transitions[:index]})
-    service_evidence = RequestClosureProgressEvidence.model_validate_json(
-        read_endpoint_object(objects, progress.evidence_sha256)
-    )
-    if service_evidence.closure_sha256 != digest(closure):
-        raise ValueError("request progress substituted its completion manifest")
-    state = verify_cohort_history(
-        prefix,
+    prefix = certified_request_prefix(
+        closure,
+        objects,
         policy,
-        expected_tip_sha256=history_tip(prefix),
-        current_block=closure.observation.block,
-    ).state
-    expected, _ = request_closure_progress(closure, service_evidence.service, state)
-    if expected != progress:
-        raise ValueError("certified request progress changed its retained service evidence")
+        history,
+        decision_source=decision_source,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
     return review_request_closure(
         closure,
         roster,

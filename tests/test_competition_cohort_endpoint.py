@@ -66,6 +66,10 @@ from .test_open_competition import wallet
 
 @pytest.fixture
 def endpoint(receipt_scenario, tmp_path, runtime, monkeypatch):
+    return endpoint_scenario(receipt_scenario, tmp_path, runtime, monkeypatch)
+
+
+def endpoint_scenario(receipt_scenario, tmp_path, runtime, monkeypatch):
     s = setup_scenario(receipt_scenario, tmp_path, runtime, mode="endpoint_incumbent")
     transport = dispatch_legacy_policy()
     registry = tuple(

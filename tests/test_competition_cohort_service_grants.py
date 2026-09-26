@@ -66,6 +66,7 @@ from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
 from . import test_competition_cohort_miner as miner_fixtures
 from .test_competition_cohort_disposition import order as signed_order
+from .test_competition_cohort_endpoint import endpoint_scenario
 from .test_competition_cohort_miner import base_policy as base_policy
 from .test_competition_cohort_miner import chain as chain
 from .test_competition_cohort_miner import chain_config as chain_config
@@ -1059,3 +1060,381 @@ async def test_service_replacement_rejects_parent_and_retry_evidence_mismatch(
     assert (await accept(c, changed)).status_code == 422
     assert (await request(p, TRANSLATE_PATH, body.request)).status_code == 422
     assert p.model.calls == p.fetcher.calls == 0
+
+
+async def terminal_response(c):
+    from umi.competition_cohort_service_terminal import ServiceWorkTerminals
+    from umi.competition_execution import execution_boundary
+    from umi.endpoint_response_recovery import RecoveredEndpointResponse
+
+    p, req = c.p, c.grant.body.request
+    assert (await accept(c)).status_code == 200
+    reply = await request(p, TRANSLATE_PATH, req)
+    assert reply.status_code == 200
+    retained = RecoveredEndpointResponse(
+        schema="umi-recovered-endpoint-response/1",
+        envelope_hex=reply.content.hex(),
+        signature=reply.headers["x-umi-signature"],
+        retrieval_started_at_unix_ns="1",
+        retrieved_at_unix_ns="2",
+    )
+    retirement_reply = await request(p, COHORT_RETIRE_PATH, req)
+    assert retirement_reply.status_code == 200
+    retirement = SignedEndpointRetirementReceipt.model_validate_json(retirement_reply.content)
+    owner = ServiceWorkTerminals(ServiceWorkRequests(c.queue, p.transport_policy))
+    return (
+        owner,
+        retained,
+        retirement,
+        p.e.r.h.source,
+        execution_boundary(capture(req.deadline_block + 1)),
+    )
+
+
+@pytest.mark.parametrize("replace_attempt", [False, True])
+async def test_service_terminal_replays_native_response_and_all_parents(
+    service,
+    monkeypatch,
+    replace_attempt,
+):
+    from umi.competition_cohort_service_terminal import ServiceWorkTerminals, read_service_terminal
+
+    c, p = service, service.p
+    if replace_attempt:
+        c.grant, _, _ = await replacement(c, monkeypatch)
+    owner, response, retirement, source, observation = await terminal_response(c)
+    slot = service_grant_slot(c.grant.body)
+    intent = owner.prepare(slot, response, retirement, source, observation)
+    terminal = owner.retain(intent, sign_object(intent, p.validator))
+    assert (
+        read_service_terminal(
+            terminal,
+            owner.objects,
+            p.c.policy,
+            p.transport_policy,
+            request_interval=(390, observation.block),
+        )
+        == c.grant
+    )
+    c.queue = ServiceWorkQueue(c.cfg, p.c.policy)
+    owner = ServiceWorkTerminals(ServiceWorkRequests(c.queue, p.transport_policy))
+    assert owner.prepare(slot) == intent
+    # A retained certificate recovers even when the signer is unavailable.
+    assert owner.retain(intent, None) == terminal
+    assert p.model.calls == 1
+    if replace_attempt:
+        parent = c.grant.body.parent_grant_sha256
+        with c.queue.journal.transaction() as db:
+            db.execute(
+                "DELETE FROM records WHERE kind='endpoint_replay_object' AND id=?", (parent,)
+            )
+        with pytest.raises(FileNotFoundError):
+            read_service_terminal(terminal, owner.objects, p.c.policy, p.transport_policy)
+
+
+@pytest.mark.parametrize("stage", ["service_terminal_intent", "service_terminal"])
+@pytest.mark.parametrize("after_commit", [False, True])
+async def test_service_terminal_interruption_replays_exact_committed_intent(
+    service,
+    monkeypatch,
+    stage,
+    after_commit,
+):
+    from umi.competition_cohort_service_terminal import ServiceWorkTerminals
+
+    c, p = service, service.p
+    owner, *args = await terminal_response(c)
+    slot = service_grant_slot(c.grant.body)
+    intent = None if stage.endswith("intent") else owner.prepare(slot, *args)
+    original = c.queue.journal.put
+
+    def interrupted(kind, key, value):
+        if kind == stage:
+            if after_commit:
+                original(kind, key, value)
+            raise OSError("fixture terminal acknowledgement lost")
+        return original(kind, key, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(c.queue.journal, "put", interrupted)
+        with pytest.raises(OSError):
+            if intent is None:
+                owner.prepare(slot, *args)
+            else:
+                owner.retain(intent, sign_object(intent, p.validator))
+    owner = ServiceWorkTerminals(
+        ServiceWorkRequests(ServiceWorkQueue(c.cfg, p.c.policy), p.transport_policy)
+    )
+    intent = owner.prepare(slot, *args)
+    first = owner.retain(intent, sign_object(intent, p.validator))
+    assert owner.prepare(slot) == intent and owner.retain(intent, None) == first
+    assert p.model.calls == 1
+
+
+@pytest.mark.parametrize("damage", ["work", "signer", "retirement", "response", "late", "missing"])
+async def test_service_terminal_rejects_substituted_or_incomplete_evidence(service, damage):
+    from umi.competition_cohort_service_terminal import SignedServiceTerminal, read_service_terminal
+
+    c, p = service, service.p
+    owner, response, retirement, source, observation = await terminal_response(c)
+    intent = owner.prepare(
+        service_grant_slot(c.grant.body), response, retirement, source, observation
+    )
+    if damage == "work":
+        intent = intent.model_copy(update={"work_sha256": "ff" * 32})
+    elif damage == "retirement":
+        bad = retirement.receipt.model_copy(update={"response_sha256": "ff" * 32})
+        intent = intent.model_copy(
+            update={
+                "retirement_sha256": owner.objects.put(
+                    retirement.model_copy(
+                        update={"receipt": bad, "signature": sign_object(bad, p.miner.wallet)}
+                    )
+                )
+            }
+        )
+    elif damage == "response":
+        bad = response.model_copy(update={"signature": "0x" + "00" * 64})
+        intent = intent.model_copy(update={"response_sha256": owner.objects.put(bad)})
+    elif damage == "missing":
+        intent = intent.model_copy(update={"response_sha256": "ff" * 32})
+    signed = SignedServiceTerminal(
+        terminal=intent,
+        signature=sign_object(intent, wallet("Alice") if damage == "signer" else p.validator),
+    )
+    with pytest.raises((ValueError, FileNotFoundError)):
+        read_service_terminal(
+            signed,
+            owner.objects,
+            p.c.policy,
+            p.transport_policy,
+            request_interval=(390, observation.block - (1 if damage == "late" else 0)),
+        )
+
+
+async def test_service_terminal_absence_never_becomes_success_or_zero(service):
+    from umi.competition_cohort_service_terminal import ServiceWorkTerminals
+
+    c = service
+    owner = ServiceWorkTerminals(ServiceWorkRequests(c.queue, c.p.transport_policy))
+    with pytest.raises(FileNotFoundError, match="pending"):
+        owner.prepare(service_grant_slot(c.grant.body))
+    assert (
+        c.queue.journal.get("service_terminal_intent", c.assignment.admission.work_sha256) is None
+    )
+    assert c.p.model.calls == 0
+
+
+@pytest.fixture
+async def service_closed(service, receipt_scenario, runtime, monkeypatch, tmp_path):
+    from umi.competition_cohort_service_closure import (
+        CohortServiceRequestClosure,
+        ServiceCatalogClosure,
+    )
+
+    from .cohort_request_closure_fixture import closure_fixture
+    from .test_competition_cohort_request_closure import put
+
+    c, p = service, service.p
+    owner, response, retirement, source, observation = await terminal_response(c)
+    slot = service_grant_slot(c.grant.body)
+    intent = owner.prepare(slot, response, retirement, source, observation)
+    signed = owner.retain(intent, sign_object(intent, p.validator))
+    seal = c.queue.seal(
+        source, capture(observation.block), expected_tip_sha256=history_tip(source.history)
+    )
+    benchmark_endpoint = endpoint_scenario(
+        receipt_scenario, tmp_path / "benchmark-input", runtime, monkeypatch
+    )
+    b = await closure_fixture(benchmark_endpoint, tmp_path / "benchmark", prepared=p.e.r.h.batch)
+    b["closure"] = b["closure"].model_copy(update={"observation": observation})
+    with c.queue.journal.transaction() as db:
+        keys = tuple(
+            r[0] for r in db.execute("SELECT id FROM records WHERE kind='endpoint_replay_object'")
+        )
+    b["objects"].update({k: owner.objects(k) for k in keys})
+    benchmark = b["closure"]
+    b["closure"] = CohortServiceRequestClosure(
+        schema="umi-cohort-request-closure/2",
+        benchmark_closure_sha256=put(b, benchmark),
+        recovery_tip_sha256=benchmark.recovery_tip_sha256,
+        observation=benchmark.observation,
+        catalogs=(
+            ServiceCatalogClosure(
+                catalog_sha256=digest(c.assignment.catalog.catalog),
+                seal_sha256=put(b, seal),
+                terminals=(digest(signed),),
+            ),
+        ),
+    )
+    b.update(
+        service_case=c, transport=p.transport_policy, service_seal=seal, service_terminal=signed
+    )
+    return b
+
+
+def review_service_closed(b, *, certified=False, **overrides):
+    from umi.competition_cohort_service_closure import (
+        review_service_request_closure,
+        verify_certified_service_request_closure,
+    )
+
+    from .test_competition_cohort_consumers import tip
+
+    args = dict(
+        closure=b["closure"],
+        roster=b["roster"],
+        objects=b["objects"].__getitem__,
+        policy=b["policy"],
+        history=b["history"],
+        transport=b["transport"],
+        expected_catalogs=(b["service_case"].assignment.catalog,),
+        expected_seals=(b["service_seal"],),
+        decision_source=b["decisions"].__getitem__,
+        intake_records=iter(b["records"]),
+        expected_tip_sha256=tip(b["history"]),
+        current_block=b["closure"].observation.block,
+    )
+    args.update(overrides)
+    fn = verify_certified_service_request_closure if certified else review_service_request_closure
+    return fn(**args)
+
+
+def test_complete_service_closure_binds_native_phase_and_survives_long_outage(service_closed):
+    from .test_competition_cohort_consumers import tip
+    from .test_competition_cohort_request_closure import certified_history
+
+    b = service_closed
+    assert review_service_closed(b) == b["closure"]
+    h = certified_history(b)
+    for block in (b["closure"].observation.block + 90, 2**53 - 1):
+        assert (
+            review_service_closed(
+                b,
+                certified=True,
+                history=h,
+                expected_tip_sha256=tip(h),
+                current_block=block,
+            )
+            == b["closure"]
+        )
+    assert not b["closure"].chain_submission_authorized
+    assert all(b'"references"' not in raw for raw in b["objects"].values())
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing",
+        "extra",
+        "work",
+        "catalog",
+        "terminal",
+        "seal",
+        "benchmark",
+        "observation",
+        "truncated",
+    ],
+)
+def test_service_closure_requires_exact_catalog_work_and_benchmark_coverage(service_closed, damage):
+    from .test_competition_cohort_request_closure import put
+
+    b = service_closed
+    closure, item = b["closure"], b["closure"].catalogs[0]
+    if damage in {"missing", "extra", "terminal"}:
+        terminals = (
+            ()
+            if damage == "missing"
+            else ((*item.terminals, *item.terminals) if damage == "extra" else ("ff" * 32,))
+        )
+        item = item.model_copy(update={"terminals": terminals})
+    elif damage in {"seal", "work"}:
+        seal = b["service_seal"]
+        if damage == "work":
+            accepted = (seal.accepted[0].model_copy(update={"work_sha256": "ff" * 32}),)
+            seal = seal.model_copy(update={"accepted": accepted})
+        else:
+            seal = seal.model_copy(update={"source_sha256": "ff" * 32})
+        item = item.model_copy(update={"seal_sha256": put(b, seal)})
+    elif damage == "truncated":
+        shortened = b["service_seal"].model_copy(update={"accepted": ()})
+        item = item.model_copy(update={"seal_sha256": put(b, shortened), "terminals": ()})
+    elif damage == "catalog":
+        item = item.model_copy(update={"catalog_sha256": "ff" * 32})
+    elif damage == "benchmark":
+        closure = closure.model_copy(update={"benchmark_closure_sha256": "ff" * 32})
+    else:
+        closure = closure.model_copy(
+            update={"observation": closure.observation.model_copy(update={"block": 1681})}
+        )
+    closure = closure.model_copy(update={"catalogs": (item,)})
+    with pytest.raises((ValueError, KeyError)):
+        review_service_closed(b, closure=closure)
+
+
+def test_service_manifest_needs_its_own_native_phase_certificate(service_closed):
+    from .test_competition_cohort_consumers import tip
+    from .test_competition_cohort_request_closure import certified_history
+
+    b = service_closed
+    h = certified_history(b, result=b["closure"].benchmark_closure_sha256)
+    with pytest.raises(ValueError, match="exact closure"):
+        review_service_closed(
+            b,
+            certified=True,
+            history=h,
+            expected_tip_sha256=tip(h),
+            current_block=b["closure"].observation.block + 1000,
+        )
+
+
+def test_service_closure_missing_response_remains_pending_until_archive_recovers(service_closed):
+    b = service_closed
+    key = b["service_terminal"].terminal.response_sha256
+    raw = b["objects"].pop(key)
+    with pytest.raises(KeyError):
+        review_service_closed(b, current_block=2**53 - 1)
+    b["objects"][key] = raw
+    assert review_service_closed(b, current_block=2**53 - 1) == b["closure"]
+
+
+async def test_service_terminal_stops_fresh_attempts_and_rejects_changed_selected_grant(
+    service,
+    monkeypatch,
+):
+    c, p = service, service.p
+    owner, response, retirement, source, observation = await terminal_response(c)
+    slot = service_grant_slot(c.grant.body)
+    original = owner.journal.get
+    window = fresh_window(p, c.grant.body.request, monkeypatch)
+    case = c.assignment.catalog.catalog.work[0]
+    alternate = signed_grant(
+        c.grant.body.model_copy(
+            update={
+                "window": window,
+                "request": window.request_with_ids(
+                    case,
+                    p.service_video,
+                    service_wire_ids(c.assignment, p.validator.hotkey.ss58_address, 1),
+                    p.transport_policy,
+                ),
+            }
+        )
+    )
+    verify_service_grant(alternate, p.c.policy, p.transport_policy)
+
+    def conflicting(kind, key, **kwargs):
+        if kind == "service_grant" and key == slot:
+            return alternate.model_dump(mode="json", by_alias=True)
+        return original(kind, key, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner.journal, "get", conflicting)
+        with pytest.raises(ValueError, match="selected request"):
+            owner.prepare(slot, response, retirement, source, observation)
+    intent = owner.prepare(slot, response, retirement, source, observation)
+    assert owner.retain(intent, sign_object(intent, p.validator)).terminal == intent
+    with pytest.raises(ValueError, match="terminal response selected"):
+        owner.requests.prepare(
+            c.claim, p.validator.hotkey.ss58_address, None, None, None, None, parent=c.grant
+        )

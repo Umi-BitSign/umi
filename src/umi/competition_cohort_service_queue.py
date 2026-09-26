@@ -13,12 +13,19 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .competition_chain import RegistrationCapture
+from .competition_cohort_endpoint_archive import JournalEndpointObjects
 from .competition_cohort_evaluation import RecoverableEvaluationRound
 from .competition_cohort_intake import history_tip
 from .competition_cohort_order_signer import (
     CohortOrderHistory,
     CohortOrderParticipant,
     remember_order_history,
+)
+from .competition_cohort_service_seal import (
+    MAX_SERVICE_SEAL_BYTES,
+    ServiceAcceptedWork,
+    ServiceWorkSeal,
+    sealed_service_assignments,
 )
 from .competition_cohort_service_work import (
     MAX_SERVICE_REQUEST_BYTES,
@@ -221,6 +228,8 @@ class ServiceWorkQueue:
                     ):
                         raise ValueError("accepted claim nonce was reused with changed inputs")
                     return value
+                if self.journal.get("service_work_seal", self.config.catalog_sha256, db=db):
+                    raise ServiceQueueBackpressure("service queue is sealed to new claims")
                 count = db.execute("SELECT COUNT(*) FROM service_claims").fetchone()[0]
                 previous = None if count == 0 else self._read(count, db)
             catalog, round_ = self._catalog()
@@ -255,6 +264,7 @@ class ServiceWorkQueue:
             )
             # Reserve by the next work slot, not by an unaccepted nonce. A crash
             # before admission lets the next valid claim reuse the same allowance.
+            self._reserve_seal()
             self.journal.reserve_records(
                 value.work_sha256,
                 (RecordReservation("service_admission", value.work_sha256, MAX_ADMISSION_BYTES),),
@@ -299,15 +309,88 @@ class ServiceWorkQueue:
             value = self._read(row[0], db)
             if value.claim.claim != signed.claim:
                 raise ValueError("accepted claim nonce was reused with changed inputs")
-            catalog, round_ = self._catalog(db)
-            return ServiceWorkAssignment(
-                catalog=catalog,
-                round=round_,
-                admission=value,
-                previous=None if value.ordinal == 1 else self._raw_admission(value.ordinal - 1, db),
-                source=CohortOrderHistory.model_validate_json(
-                    canonical_json_bytes(
-                        self.journal.get("order_history", value.history_sha256, db=db)
-                    )
-                ),
+            return self._assignment(value, db)
+
+    def _assignment(self, value, db):
+        catalog, round_ = self._catalog(db)
+        return ServiceWorkAssignment(
+            catalog=catalog,
+            round=round_,
+            admission=value,
+            previous=None if value.ordinal == 1 else self._raw_admission(value.ordinal - 1, db),
+            source=CohortOrderHistory.model_validate_json(
+                canonical_json_bytes(self.journal.get("order_history", value.history_sha256, db=db))
+            ),
+        )
+
+    def _reserve_seal(self):
+        key = self.config.catalog_sha256
+        self.journal.reserve_records(
+            digest(["umi-service-seal-reservation/1", key]),
+            (RecordReservation("service_work_seal", key, MAX_SERVICE_SEAL_BYTES),),
+        )
+
+    def seal(self, source, capture, *, expected_tip_sha256: str) -> ServiceWorkSeal:
+        """Close new admissions atomically; accepted work and duplicate claims survive.
+
+        The host authenticates the current proof/history and later exports the
+        seal with quorum request closure. Sealing does not finish pending work.
+        """
+        key = self.config.catalog_sha256
+        objects = JournalEndpointObjects(self.journal)
+        with self.journal.locked():
+            catalog, round_ = self._catalog()
+            old = self.journal.get("service_work_seal", key)
+            if old is not None:
+                value = ServiceWorkSeal.model_validate_json(canonical_json_bytes(old))
+                for _ in sealed_service_assignments(
+                    value, objects, self.policy, catalog=catalog, round_=round_
+                ):
+                    pass
+                return value
+            boundary = execution_boundary(capture)
+            review_service_catalog(
+                catalog,
+                round_,
+                self.policy,
+                source,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=boundary.block,
             )
+            self._reserve_seal()
+            remember_order_history(
+                self.journal,
+                {catalog.catalog.cohort_sha256: catalog.catalog.authority_sha256},
+                self.policy,
+                source,
+                boundary.block,
+            )
+            # Hold the lifecycle lock through export and the final immutable
+            # seal. Partial exports are harmless; no acceptance can interleave.
+            with self.journal.transaction() as db:
+                rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
+                if tuple(r[0] for r in rows) != tuple(range(1, len(rows) + 1)):
+                    raise ValueError("service accepted prefix has a missing ordinal")
+            accepted = []
+            for row in rows:
+                with self.journal.transaction() as db:
+                    assignment = self._assignment(self._read(row[0], db), db)
+                accepted.append(
+                    ServiceAcceptedWork(
+                        work_sha256=assignment.admission.work_sha256,
+                        assignment_sha256=objects.put(assignment),
+                    )
+                )
+            value = ServiceWorkSeal(
+                schema="umi-cohort-service-work-seal/1",
+                catalog_sha256=key,
+                source_sha256=objects.put(source),
+                observation=boundary,
+                accepted=tuple(accepted),
+            )
+            for _ in sealed_service_assignments(
+                value, objects, self.policy, catalog=catalog, round_=round_
+            ):
+                pass
+            self.journal.put("service_work_seal", key, value)
+            return value
