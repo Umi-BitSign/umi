@@ -851,8 +851,33 @@ binds it together with the original service observation; replay checks the
 actual request-window compensation before accepting the certified closure.
 `replay_closed_endpoint_quality` requires this full closure and verifies that the
 particular miner/evaluator archive was selected by it. Its metrics still carry
-no service-credit or weight authority. Original service-clock evidence,
-aggregate/dependence checks and reward allocation remain separate requirements.
+no service-credit or weight authority. Original service-clock evidence and
+reward allocation remain separate requirements.
+
+`ClosedQualityReview` consumes that certified closure after reference reveal.
+It replays each selected evaluator's local execution and endpoint archive, then
+computes exact per-stratum and aggregate quality with the policy's dependence
+gates. Endpoint candidates use content quality only; their missing original
+latency is never replaced with zero or the later retrieval duration. Local
+model and incumbent observations keep their measured resource eligibility.
+Different retained predictions, even at equal quality, cannot become one agreed
+result. Incumbent failure or evaluator disagreement has no common score; absent
+evidence remains pending. Legacy timed scoring keeps its existing rules.
+
+An evaluator can sign `umi-cohort-closed-quality/1` only after replay and binding
+its own retained terminal. The owner commits the exact intent before signing
+and the vote before acknowledging it. Archived votes recover without peers or
+another signature. Collection retains partial votes and requires every assigned
+evaluator, including the policy's independent control groups. Its
+`umi-cohort-quality-manifest/1` covers the exact complete roster; a missing
+certificate cannot silently remove a participant. Review caches completed
+calculations within one authenticated history snapshot. A new authority
+selection requires a new review.
+
+These are benchmark certificates. They do not establish paid work units,
+original service timing, promotion rights, settlement or reward authority.
+Service-credit allocation, model attribution and the native reward consumers
+must verify those separate inputs before using the quality evidence.
 
 Host composition must supply authenticated current history, owned finality, private
 state, the signer, writer fence and service lifecycle; the standard miner CLI

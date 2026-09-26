@@ -677,13 +677,8 @@ def _quality(
     *,
     incumbent: bool = False,
 ) -> dict[str, Fraction]:
-    validate_suite_profile(suite, policy)
-    expected_ids = [c.case_id for c in suite.cases]
-    if [o.case_id for o in outputs] != expected_ids:
-        raise ValueError("outputs must cover the complete suite in canonical order")
-    strata: dict[str, list[Fraction]] = defaultdict(list)
-    valid_hypotheses: dict[str, str | None] = {}
-    for case, output in zip(suite.cases, outputs, strict=True):
+    observations = []
+    for output in outputs:
         if output.status == "infrastructure_failure":
             raise ValueError("infrastructure failure voids evaluation")
         valid = (
@@ -691,10 +686,41 @@ def _quality(
             and output.elapsed_ms <= policy.maximum_inference_ms
             and len(output.hypothesis.encode("utf-8")) <= policy.maximum_output_bytes
         )
+        observations.append((output.case_id, output.hypothesis if valid else None))
+    return quality_from_hypotheses(tuple(observations), suite, policy, incumbent=incumbent)
+
+
+def quality_from_hypotheses(
+    observations: tuple[tuple[str, str | None], ...],
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+    *,
+    incumbent: bool = False,
+) -> dict[str, Fraction]:
+    """Apply content scoring and dependence gates to complete selected hypotheses.
+
+    None records an ineligible or failed observation. The caller authenticates
+    its source and eligibility: this function does not infer service timing,
+    certify execution or grant reward authority. Legacy callers supply their
+    original measured resource eligibility; untimed content callers retain that
+    distinction in their versioned result.
+    """
+    validate_suite_profile(suite, policy)
+    if [key for key, _ in observations] != [case.case_id for case in suite.cases]:
+        raise ValueError("outputs must cover the complete suite in canonical order")
+    strata: dict[str, list[Fraction]] = defaultdict(list)
+    valid_hypotheses: dict[str, str | None] = {}
+    for case, (_, hypothesis) in zip(suite.cases, observations, strict=True):
+        valid = hypothesis is not None
+        if valid and (
+            not isinstance(hypothesis, str)
+            or len(hypothesis.encode("utf-8")) > policy.maximum_output_bytes
+        ):
+            raise ValueError("quality hypothesis exceeds its declared content bound")
         if incumbent and not valid:
             raise ValueError("incumbent execution failed; evaluation is void")
         if case.stratum == "continuous" and policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
-            valid_hypotheses[case.case_id] = output.hypothesis if valid else None
+            valid_hypotheses[case.case_id] = hypothesis
         if getattr(case, "role", "scored") == "matched_swap":
             continue
         scorer = score_cer if case.stratum == "fingerspelling" else score_wer
@@ -707,11 +733,11 @@ def _quality(
         }:
             score = score_single_reference(
                 "cer" if case.stratum == "fingerspelling" else "wer",
-                output.hypothesis,
+                hypothesis,
                 case.references[0],
             )
         else:
-            score = scorer(output.hypothesis, case.references)
+            score = scorer(hypothesis, case.references)
         strata[case.stratum].append(score)
     quality = {s: sum(strata[s], Fraction(0)) / len(strata[s]) for s in policy.stratum_weights}
     if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
