@@ -91,7 +91,9 @@ class CohortEndpointAttemptWorker:
             result.certificate,
             review.retirement.retirement,
             selected.transport_policy,
-            video or selected_request(selected, case_id).video,
+            video
+            if video is not None or self.requests.video_source is not None
+            else selected_request(selected, case_id).video,
         )
         outcome = await self.requests.advance(plan)
         if outcome.selection is None:

@@ -803,7 +803,21 @@ latest certified attempt while preserving completed sibling cases. A host may
 supply a fresh clip capability for a new attempt; a retained request keeps its
 original URL and signature inputs.
 
-Full-roster scheduling, complete terminal selection before request closure,
+The endpoint scheduler polls the acknowledged order inbox with persistent scan
+cursors and bounded parallelism. It retains each assignment's complete case
+inventory before execution and selects at most one case per assignment in a
+batch. Unavailable miners, media and reviewers remain pending and are revisited
+after restart. A host-owned video source can refresh clip access for a new
+attempt; recovery of a retained request does not contact that source again.
+
+Each completed case retains references to its selected attempt, original review
+and quorum decision. The terminal manifest requires exactly the original job's
+cases and replays every reference against its retained evidence. It supports
+cases completed on different attempts, preserves signed miner failures and can
+recover completed work offline. It is a local aggregate, not an independent
+closure certificate, score or reward authorization.
+
+Complete accepted-roster coverage across evaluators, certified request closure,
 mixed-attempt scoring evidence and settlement remain integration work. Host
 composition must supply authenticated current history, owned finality, private
 state, the signer, writer fence and service lifecycle; the standard miner CLI

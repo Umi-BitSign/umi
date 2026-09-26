@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from .competition_cohort_endpoint import RecoverableEndpointOrder, endpoint_obligation_sha256
+from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_miner_case import (
     CohortCaseMinerGrant,
     RecoverableEndpointCaseOrder,
@@ -19,9 +21,13 @@ from .competition_cohort_request_signer import (
     validate_request_plan,
 )
 from .competition_cohort_request_window import capture_request_window
+from .competition_execution import ExecutionCase
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .policy import scoring_policy_hash
+from .protocol import Video, canonical_json_bytes
+
+EndpointVideoSource = Callable[[RecoverableExecutionJob, ExecutionCase], Awaitable[Video]]
 
 
 @dataclass(frozen=True)
@@ -32,7 +38,14 @@ class EndpointRequestOutcome:
 
 
 class CohortEndpointRequestWorker:
-    def __init__(self, signer: EndpointRequestSigner, recovery, request_vote):
+    def __init__(
+        self,
+        signer: EndpointRequestSigner,
+        recovery,
+        request_vote,
+        *,
+        video_source: EndpointVideoSource | None = None,
+    ):
         if (
             signer.journal.policy != recovery.journal.policy
             or signer.journal.cohorts != recovery.journal.cohorts
@@ -40,6 +53,19 @@ class CohortEndpointRequestWorker:
         ):
             raise ValueError("request coordinator differs from its evaluator")
         self.signer, self.recovery, self.request_vote = signer, recovery, request_vote
+        self.video_source = video_source
+
+    async def video(self, job: RecoverableExecutionJob, case: ExecutionCase) -> Video:
+        if self.video_source is None:
+            raise ValueError("endpoint video source is not configured")
+        value = await wait_for_owned(
+            self.video_source(job, case),
+            timeout=self.signer.journal.config.read_timeout_seconds,
+        )
+        value = Video.model_validate_json(canonical_json_bytes(value))
+        if value.sha256 != case.video_sha256:
+            raise ValueError("endpoint video source changed the assigned clip")
+        return value
 
     async def _window(self, transport):
         async def capture():
@@ -50,7 +76,7 @@ class CohortEndpointRequestWorker:
             capture(), timeout=self.signer.journal.config.read_timeout_seconds
         )
 
-    async def initial(self, assignment, transport, videos):
+    async def initial(self, assignment, transport, videos=None):
         job = self.recovery.journal.validate_assignment(assignment)
         slot = digest(["umi-cohort-endpoint-request-slot/1", digest(job)])
         old = await run_owned_thread(self.signer.journal.load, slot)
@@ -58,6 +84,8 @@ class CohortEndpointRequestWorker:
             if old.plan.assignment != assignment or old.plan.transport != transport:
                 raise ValueError("initial request selection changed its assignment or transport")
             return old.plan
+        if videos is None:
+            videos = [await self.video(job, case) for case in job.cases]
         if len(videos) != len(job.cases):
             raise ValueError("initial request requires each assigned video")
         window = await self._window(transport)
@@ -81,7 +109,7 @@ class CohortEndpointRequestWorker:
         await self.signer.attest(plan)
         return plan
 
-    async def replacement(self, parent, certificate, retirement, transport, video):
+    async def replacement(self, parent, certificate, retirement, transport, video=None):
         body, decision = parent.attempt.order, certificate.decision
         job = body.job
         number, case_id = body.attempt_number + 1, decision.case_id
@@ -99,8 +127,10 @@ class CohortEndpointRequestWorker:
             ):
                 raise ValueError("replacement request selection changed its retry evidence")
             return plan
-        window = await self._window(transport)
         case = next(c for c in job.cases if c.case_id == case_id)
+        if video is None:
+            video = await self.video(job, case)
+        window = await self._window(transport)
         selected = RecoverableEndpointCaseOrder(
             schema="umi-recoverable-endpoint-case-order/1",
             job=job,
