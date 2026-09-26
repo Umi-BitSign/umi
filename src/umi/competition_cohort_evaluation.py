@@ -13,7 +13,11 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
-from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
+from .competition_cohort_history import (
+    CohortRecoveryHistory,
+    RecoveryHistoryView,
+    verify_cohort_history,
+)
 from .competition_cohort_participation import (
     AttestedCohortParticipantAdmission,
     SignedCohortParticipationConsent,
@@ -72,11 +76,9 @@ class RecoverableEvaluationRound(StrictProtocolModel):
         return self
 
 
-def replay_recoverable_evaluation(
-    attested: AttestedResult,
+def verify_recoverable_round_participant(
     signed: SignedSubmission,
     round_: RecoverableEvaluationRound,
-    suite: EvaluationSuite,
     policy: CompetitionPolicy,
     consent: SignedCohortParticipationConsent,
     admission: AttestedCohortParticipantAdmission,
@@ -85,18 +87,18 @@ def replay_recoverable_evaluation(
     *,
     expected_tip_sha256: str,
     current_block: int,
-) -> tuple[dict[str, Fraction], dict[str, Fraction]]:
-    """Score retained outputs after reveal, even after all original targets passed.
+) -> RecoveryHistoryView:
+    """Bind an admitted participant and round to certified preparation.
 
     The selected tip must come from an authoritative monotonic publication;
     current_block must be the consumer's owned finalized observation. Neither
-    caller argument may be chosen from untrusted result metadata.
+    caller argument may be chosen from untrusted result metadata. This does not
+    authorize an invocation, reveal references or attest execution.
     """
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    attested = AttestedResult.model_validate_json(canonical_json_bytes(attested))
     signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
     round_ = RecoverableEvaluationRound.model_validate_json(canonical_json_bytes(round_))
-    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    history = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(history))
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
     )
@@ -112,9 +114,7 @@ def replay_recoverable_evaluation(
     )
     intake = view.closure("intake")
     preparation = view.closure("preparation")
-    requests = view.closure("requests")
-    reveal = view.closure("reference_reveal")
-    sub, result = signed.submission, attested.result
+    sub = signed.submission
     participant = RecoverableRoundParticipant(
         submission_sha256=digest(sub), admission_sha256=digest(accepted)
     )
@@ -123,12 +123,58 @@ def replay_recoverable_evaluation(
         or round_.policy_sha256 != digest(policy)
         or round_.sequence != history.plan.sequence
         or round_.suite_sha256 != history.plan.suite_sha256
-        or round_.suite_sha256 != digest(suite)
-        or suite.policy_sha256 != digest(policy)
         or round_.intake_closure_sha256 != digest(intake)
         or round_.runtime_sha256 != policy.evaluation_runtime_sha256
         or participant not in round_.participants
         or sub.track not in round_.eligible_tracks
+    ):
+        raise ValueError("recoverable evaluation identity or consent binding differs")
+    if not (
+        accepted.admitted_at_block
+        <= intake.observed_at_block
+        <= round_.prepared_at_block
+        <= preparation.observed_at_block
+        <= current_block
+    ):
+        raise ValueError("evaluation does not belong to the certified phase interval")
+    return view
+
+
+def replay_recoverable_evaluation(
+    attested: AttestedResult,
+    signed: SignedSubmission,
+    round_: RecoverableEvaluationRound,
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+    consent: SignedCohortParticipationConsent,
+    admission: AttestedCohortParticipantAdmission,
+    admission_snapshot: RegistrationSnapshot,
+    history: CohortRecoveryHistory,
+    *,
+    expected_tip_sha256: str,
+    current_block: int,
+) -> tuple[dict[str, Fraction], dict[str, Fraction]]:
+    """Score retained outputs after certified reveal without a target expiry."""
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    attested = AttestedResult.model_validate_json(canonical_json_bytes(attested))
+    signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
+    round_ = RecoverableEvaluationRound.model_validate_json(canonical_json_bytes(round_))
+    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    view = verify_recoverable_round_participant(
+        signed,
+        round_,
+        policy,
+        consent,
+        admission,
+        admission_snapshot,
+        history,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    sub, result = signed.submission, attested.result
+    if (
+        round_.suite_sha256 != digest(suite)
+        or suite.policy_sha256 != digest(policy)
         or result.round_sha256 != digest(round_)
         or result.submission_sha256 != digest(sub)
         or result.model_revision != sub.model_revision
@@ -137,13 +183,10 @@ def replay_recoverable_evaluation(
     ):
         raise ValueError("recoverable evaluation identity or consent binding differs")
     if not (
-        accepted.admitted_at_block
-        <= intake.observed_at_block
-        <= round_.prepared_at_block
-        <= preparation.observed_at_block
+        view.closure("preparation").observed_at_block
         < result.finished_block
-        <= requests.observed_at_block
-        < reveal.observed_at_block
+        <= view.closure("requests").observed_at_block
+        < view.closure("reference_reveal").observed_at_block
         <= current_block
     ):
         raise ValueError("evaluation does not belong to the certified phase interval")

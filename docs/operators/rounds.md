@@ -592,10 +592,23 @@ Recoverable score replay can also verify every common-result signer's separate
 run receipt against the certified preparation/request interval, exact outputs,
 resource eligibility and independent control groups. Delayed replay preserves
 these checks after the original policy or submission window expires. Receipt
-agreement does not establish execution: settlement still needs the referenced
-execution artifacts, complete scored/void roster and certified evidence closure.
-Delayed first reward admission and standing reward continuation are not yet
-implemented by these components.
+agreement does not establish execution.
+
+The explicit `umi-recoverable-execution-evidence/1` artifact retains the immutable
+job, preparation closure, raw sandbox outputs and original execution boundaries.
+Its consumer replays complete paired-model runs and comparator runs for endpoint
+submissions after certified reveal, without a new deadline. Receipt preparation
+checks the proposed common result against the original artifact. The complete
+paired-model receipt consumer requires exactly one matching artifact per signer;
+changed timing, stdout, model/runtime bindings and missing runs are rejected.
+Comparator observations alone do not supply endpoint responses. Failed
+comparators remain observations requiring review and cannot become scored zeros.
+
+Endpoint transport replay, terminal void certification, complete roster
+settlement, delayed first reward admission and standing reward continuation
+still require integration. These artifacts do not invoke models, prove host
+isolation or independently verify the chain proofs referenced by their timing
+boundaries. Production reviewers must retain and authenticate those sources.
 
 Configure the intake's `recoverable_intake` with its private directory and exact
 cohort/authority bindings. Initialize it with `initialize-cohort-intake` and
