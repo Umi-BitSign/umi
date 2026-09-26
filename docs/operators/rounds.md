@@ -745,9 +745,29 @@ that database through upgrades and migration. A `no_response_retained` receipt
 does not prove that inference never ran, stop detached sidecars or authorize a
 void. Host fencing and independently authenticated proof replay remain required.
 
-Only the first attempt is admitted. Replacement selection and certified
-terminal-attempt selection remain required
-before automated retries or closure. Host composition must supply authenticated
+
+`CohortEndpointDecisionSigner` reviews each retired case under its own current
+finality and certified request-phase history. It retains the exact review and
+signing intent before voting. Independent policy groups certify either
+`retain_response` or `retry_required`. A signed miner failure stays selected,
+just like a successful response. An absence requires a valid miner retirement
+receipt and the reviewer's independently observed expired block and round.
+Neither a missing response nor a missing reviewer vote becomes a zero or void.
+
+`CohortEndpointCaseCoordinator` combines retirement, durable review selection
+and quorum collection. It stops requesting votes once quorum is available,
+retains partial votes across outages and archives the certificate before
+acknowledging completion. Reviews are keyed by their exact attempt and case;
+later attempts must preserve those records. Completed votes and certificates
+recover offline. An unfinished signing intent rechecks current authority, and
+its decision has no expiration or coordinator-renewal requirement.
+
+These certificates do not authorize a replacement transport request. Binding a
+fresh window to the certified per-case retry, admitting that request and
+selecting the terminal attempt for full-roster closure remain integration work.
+
+Only the first attempt is admitted. Replacement admission and certified
+terminal-attempt selection remain required before automated retries or closure. Host composition must supply authenticated
 current history, owned finality, private state, the signer, writer fence and
 service lifecycle; the standard miner CLI does not install this authority yet.
 Recovery of an old policy's archive under a replacement evaluator key remains
