@@ -624,6 +624,16 @@ repeated signing keeps a stable void decision identity. Missing observations
 remain pending; agreeing scorable observations cannot become voids. These
 benchmark outcomes do not measure serving capacity or create service credit.
 
+`umi-recoverable-roster-evidence/1` binds the entire round to its certified
+intake seal and preparation result. The reviewer replays the original intake
+inventory, including superseded submissions, every selected admission and all
+retained phase decisions. This checks outage compensation as well as signatures.
+Every selected participant must have one complete ordered outcome. Missing
+outcomes raise `IncompleteRecoverableCohort` with the pending submission hashes;
+missing archives remain source failures. Delay alone neither erases a member nor
+creates a zero or void. This review does not certify dispatch/retry selection,
+close scheduler work or calculate service credit.
+
 Live request authorization, durable attempt selection, complete roster
 settlement, delayed first reward admission and standing reward continuation
 still require integration. A reviewed void does not itself authorize closing
