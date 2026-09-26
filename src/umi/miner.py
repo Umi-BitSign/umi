@@ -32,8 +32,8 @@ from .competition_authorization import (
 from .competition_cohort_miner import (
     MAX_COHORT_GRANT_BYTES,
     CohortMinerAuthorizationAuthority,
-    CohortMinerGrant,
 )
+from .competition_cohort_miner_case import parse_miner_grant
 from .competition_miner_feed import FeedEndpointAuthorizationAuthority
 from .competition_miner_finality import CompetitionMinerFinality
 from .concurrency import run_owned_thread, wait_for_owned
@@ -1236,7 +1236,7 @@ def create_app(
 
                 if granting:
                     try:
-                        grant = CohortMinerGrant.model_validate_json(body)
+                        grant = parse_miner_grant(body)
                         if body != canonical_json_bytes(grant):
                             raise ValueError("noncanonical cohort grant")
                         receipt = await runtime.competition_authority.accept(

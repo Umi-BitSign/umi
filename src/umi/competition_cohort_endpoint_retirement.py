@@ -22,7 +22,7 @@ from .competition_cohort_endpoint_recovery import (
     CohortRecoveredEndpointCase,
     recovery_slot,
 )
-from .competition_cohort_miner import CohortMinerGrant
+from .competition_cohort_miner_contracts import CohortMinerGrant
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread
 from .config import Limits

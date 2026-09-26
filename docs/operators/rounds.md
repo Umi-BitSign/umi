@@ -762,12 +762,25 @@ later attempts must preserve those records. Completed votes and certificates
 recover offline. An unfinished signing intent rechecks current authority, and
 its decision has no expiration or coordinator-renewal requirement.
 
-These certificates do not authorize a replacement transport request. Binding a
-fresh window to the certified per-case retry, admitting that request and
-selecting the terminal attempt for full-roster closure remain integration work.
+Native miner admission accepts `umi-cohort-miner-grant/2` for one certified
+unresolved case. The independently signed replacement binds its original job,
+case, next attempt number, parent grant hash and archive key, prior decision
+and miner retirement receipt. It supplies a fresh bounded transport window
+after its parent's deadline. A signed response, including a miner failure,
+cannot become a retry. Each parent remains an immutable archive record;
+iterative lineage verification avoids embedding all previous attempts in the
+next request. Restart and lost acknowledgements recover the same grant.
+Capacity can grow without changing retained grant identity.
 
-Only the first attempt is admitted. Replacement admission and certified
-terminal-attempt selection remain required before automated retries or closure. Host composition must supply authenticated
+The durable decision signer also reviews replacement cases. An absent response
+requires another signed retirement and independent expiry observation before
+another attempt; a recovered signed response remains selected. Closed phases
+block new grants and inference, while retained acknowledgements and responses
+remain recoverable. A decision certificate alone supplies no transport authority.
+
+Automatic replacement construction, durable order signing, evaluator delivery
+and recovery, and complete terminal selection before request closure remain
+integration work. Host composition must supply authenticated
 current history, owned finality, private state, the signer, writer fence and
 service lifecycle; the standard miner CLI does not install this authority yet.
 Recovery of an old policy's archive under a replacement evaluator key remains

@@ -10,11 +10,17 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from .competition_cohort_endpoint import (
     endpoint_obligation_sha256,
     validate_recoverable_endpoint_transport,
+)
+from .competition_cohort_endpoint_decision_contracts import (
+    CohortEndpointCaseDecision as CohortEndpointCaseDecision,
+)
+from .competition_cohort_endpoint_decision_contracts import (
+    SignedCohortEndpointCaseDecision as SignedCohortEndpointCaseDecision,
 )
 from .competition_cohort_endpoint_recovery import (
     CohortEndpointRecoverySelection,
@@ -22,7 +28,8 @@ from .competition_cohort_endpoint_recovery import (
 )
 from .competition_cohort_endpoint_retirement import CohortRetiredEndpointCase
 from .competition_cohort_execution_journal import CohortExecutionAssignment
-from .competition_cohort_miner import CohortMinerGrant
+from .competition_cohort_miner_case import CohortCaseMinerGrant, validate_case_attempt
+from .competition_cohort_miner_contracts import CohortMinerGrant
 from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_order_signer import CohortOrderHistory, order_slot, review_order
 from .competition_cohort_orders import recoverable_order_job
@@ -31,7 +38,8 @@ from .config import Limits
 from .endpoint_response_recovery import verify_recovered_response
 from .endpoint_retirement import verify_retirement_receipt
 from .open_competition import CompetitionPolicy, Signature, digest, identity
-from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, request_digest
+from .policy import ScoringPolicy
+from .protocol import StrictProtocolModel, canonical_json_bytes, request_digest
 
 MAX_CASE_REVIEW_BYTES = 64 * 1024**2
 
@@ -44,27 +52,40 @@ class CohortEndpointCaseReview(StrictProtocolModel):
     recovered: CohortRecoveredEndpointCase | None
 
 
-class CohortEndpointCaseDecision(StrictProtocolModel):
-    schema_: Literal["umi-cohort-endpoint-case-decision/1"] = Field(alias="schema")
-    policy_sha256: Hex32
-    cohort_sha256: Hex32
-    obligation_sha256: Hex32
-    case_id: Hex32
-    attempt_number: Annotated[int, Field(ge=1, le=2**53 - 1)]
-    review_sha256: Hex32
-    request_sha256: Hex32
-    disposition: Literal["retain_response", "retry_required"]
-    response_sha256: Hex32 | None
-    # A retry decision has no lease. Admission must independently supply a
-    # current transport window and fence any replaced host/model process.
-    transport_authorized: Literal[False] = False
-    original_receipt_timing_proven: Literal[False] = False
-    chain_submission_authorized: Literal[False] = False
+class CohortEndpointReplacementSelection(StrictProtocolModel):
+    schema_: Literal["umi-cohort-endpoint-replacement-selection/1"] = Field(alias="schema")
+    grant: CohortCaseMinerGrant
+    transport_policy: ScoringPolicy
+
+    @property
+    def assignment_slot(self):
+        return order_slot(self.grant.assignment.certificate.order)
+
+    @property
+    def order(self):
+        return self.grant.attempt
 
 
-class SignedCohortEndpointCaseDecision(StrictProtocolModel):
-    decision: CohortEndpointCaseDecision
-    signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
+class CohortEndpointReplacementCaseReview(StrictProtocolModel):
+    schema_: Literal["umi-cohort-endpoint-case-review/2"] = Field(alias="schema")
+    selection: CohortEndpointReplacementSelection
+    retirement: CohortRetiredEndpointCase
+    recovered: CohortRecoveredEndpointCase | None
+
+    @property
+    def assignment(self):
+        return self.selection.grant.assignment
+
+
+EndpointCaseReview = Annotated[
+    CohortEndpointCaseReview | CohortEndpointReplacementCaseReview,
+    Field(discriminator="schema_"),
+]
+_CASE_REVIEW = TypeAdapter(EndpointCaseReview)
+
+
+def parse_case_review(raw):
+    return _CASE_REVIEW.validate_json(raw)
 
 
 def case_decision_slot(decision: CohortEndpointCaseDecision) -> str:
@@ -80,13 +101,13 @@ def case_decision_slot(decision: CohortEndpointCaseDecision) -> str:
 
 
 def validate_case_review(
-    review: CohortEndpointCaseReview, policy: CompetitionPolicy
-) -> tuple[CohortEndpointCaseReview, CohortEndpointCaseDecision]:
+    review: EndpointCaseReview, policy: CompetitionPolicy
+) -> tuple[EndpointCaseReview, CohortEndpointCaseDecision]:
     """Replay signed bindings; callers separately own current authority/finality."""
     raw = canonical_json_bytes(review)
     if len(raw) > MAX_CASE_REVIEW_BYTES:
         raise ValueError("endpoint case review exceeds its byte bound")
-    review = CohortEndpointCaseReview.model_validate_json(raw)
+    review = parse_case_review(raw)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     assignment, selected, retired = review.assignment, review.selection, review.retirement
     order = assignment.certificate.order
@@ -97,9 +118,14 @@ def validate_case_review(
     receipt = check_delivery_receipt(assignment.certificate, assignment.delivery)
     evaluator = receipt.receipt.evaluator_hotkey
     job = recoverable_order_job(order, evaluator)
-    attempt = validate_recoverable_endpoint_transport(
-        selected.order, policy, selected.transport_policy
-    ).order
+    if isinstance(review, CohortEndpointReplacementCaseReview):
+        attempt = validate_case_attempt(selected.order, policy, selected.transport_policy).order
+        if attempt.case_id != retired.case_id:
+            raise ValueError("replacement decision changes its selected case")
+    else:
+        attempt = validate_recoverable_endpoint_transport(
+            selected.order, policy, selected.transport_policy
+        ).order
     if (
         attempt.job != job
         or selected.assignment_slot != order_slot(order)
@@ -109,10 +135,13 @@ def validate_case_review(
     indices = [i for i, case in enumerate(job.cases) if case.case_id == retired.case_id]
     if len(indices) != 1:
         raise ValueError("endpoint decision case is not uniquely assigned")
-    request = attempt.requests[indices[0]]
-    grant = CohortMinerGrant(
-        schema="umi-cohort-miner-grant/1", assignment=assignment, attempt=selected.order
-    )
+    if isinstance(review, CohortEndpointReplacementCaseReview):
+        request, grant = attempt.requests[0], selected.grant
+    else:
+        request = attempt.requests[indices[0]]
+        grant = CohortMinerGrant(
+            schema="umi-cohort-miner-grant/1", assignment=assignment, attempt=selected.order
+        )
     closed = verify_retirement_receipt(
         retired.retirement,
         request=request,
@@ -165,7 +194,7 @@ def validate_case_review(
 
 
 def review_case_decision(
-    review: CohortEndpointCaseReview,
+    review: EndpointCaseReview,
     policy: CompetitionPolicy,
     source: CohortOrderHistory,
     *,
@@ -189,7 +218,7 @@ def review_case_decision(
 
 
 def certify_case_decision(
-    review: CohortEndpointCaseReview,
+    review: EndpointCaseReview,
     signatures: tuple[Signature, ...],
     policy: CompetitionPolicy,
 ) -> SignedCohortEndpointCaseDecision:
@@ -211,7 +240,7 @@ def certify_case_decision(
 
 def verify_case_decision(
     certificate: SignedCohortEndpointCaseDecision,
-    review: CohortEndpointCaseReview,
+    review: EndpointCaseReview,
     policy: CompetitionPolicy,
 ) -> SignedCohortEndpointCaseDecision:
     certificate = SignedCohortEndpointCaseDecision.model_validate_json(

@@ -15,15 +15,28 @@ from pydantic import Field
 
 from .competition_authorization import validate_runtime_binding
 from .competition_cohort_endpoint import (
-    SignedRecoverableEndpointOrder,
     validate_recoverable_endpoint_transport,
 )
-from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_intake import CohortIntakeConfig
+from .competition_cohort_miner_case import (
+    CohortCaseMinerGrant,
+    grant_slot,
+    parse_miner_grant,
+    validate_case_attempt,
+    verify_replacement_parent,
+)
+from .competition_cohort_miner_contracts import (
+    CohortMinerGrant as CohortMinerGrant,
+)
+from .competition_cohort_miner_contracts import (
+    CohortMinerGrantReceipt as CohortMinerGrantReceipt,
+)
+from .competition_cohort_miner_contracts import (
+    SignedCohortMinerGrantReceipt as SignedCohortMinerGrantReceipt,
+)
 from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_order_signer import (
     CohortOrderHistory,
-    order_slot,
     remember_order_history,
     review_order,
 )
@@ -36,7 +49,6 @@ from .miner_admission import MinerAdmissionError, ProofBackedMinerWindowAuthorit
 from .open_competition import (
     CompetitionPolicy,
     Hotkey,
-    Signature,
     digest,
     identity,
     sign_object,
@@ -45,7 +57,6 @@ from .open_competition import (
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import (
     Hex32,
-    StrictProtocolModel,
     TranslationRequest,
     canonical_json_bytes,
     request_digest,
@@ -72,36 +83,6 @@ class CohortMinerConfig(CohortIntakeConfig):
     maximum_grants: Annotated[int, Field(ge=1, le=65536)] = 4096
     maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
-
-
-class CohortMinerGrant(StrictProtocolModel):
-    schema_: Literal["umi-cohort-miner-grant/1"] = Field(alias="schema")
-    assignment: CohortExecutionAssignment
-    attempt: SignedRecoverableEndpointOrder
-
-
-class CohortMinerGrantReceipt(StrictProtocolModel):
-    schema_: Literal["umi-cohort-miner-grant-receipt/1"] = Field(alias="schema")
-    grant_sha256: Hex32
-    miner_hotkey: Hotkey
-    observed_block: Annotated[int, Field(ge=0)]
-    status: Literal["retained"] = "retained"
-    chain_submission_authorized: Literal[False] = False
-
-
-class SignedCohortMinerGrantReceipt(StrictProtocolModel):
-    receipt: CohortMinerGrantReceipt
-    signature: Signature
-
-
-def grant_slot(grant: CohortMinerGrant) -> str:
-    return digest(
-        {
-            "schema": "umi-cohort-miner-grant-slot/1",
-            "assignment_slot": order_slot(grant.assignment.certificate.order),
-            "evaluator": identity(grant.attempt.order.job.evaluator_hotkey),
-        }
-    )
 
 
 class CohortMinerAuthorizationAuthority:
@@ -173,11 +154,11 @@ class CohortMinerAuthorizationAuthority:
             **runtime,
         )
 
-    def _validate(self, grant, validator_hotkey):
+    def _validate_one(self, grant, validator_hotkey):
         raw = canonical_json_bytes(grant)
         if len(raw) > MAX_COHORT_GRANT_BYTES:
             raise ValueError("cohort miner grant exceeds its byte bound")
-        grant = CohortMinerGrant.model_validate_json(raw)
+        grant = parse_miner_grant(raw)
         assignment, attempt = grant.assignment, grant.attempt
         order = assignment.certificate.order
         verify_recovery_quorum(order, assignment.certificate.signatures, self.policy)
@@ -191,7 +172,10 @@ class CohortMinerAuthorizationAuthority:
         if identity(validator_hotkey) != identity(evaluator):
             raise ValueError("cohort grant caller is not its assigned evaluator")
         job = recoverable_order_job(order, evaluator)
-        validate_recoverable_endpoint_transport(attempt, self.policy, self.transport)
+        if isinstance(grant, CohortCaseMinerGrant):
+            validate_case_attempt(attempt, self.policy, self.transport)
+        else:
+            validate_recoverable_endpoint_transport(attempt, self.policy, self.transport)
         sub = job.submission.submission
         if (
             attempt.order.job != job
@@ -201,10 +185,33 @@ class CohortMinerAuthorizationAuthority:
             or sub.endpoint_url != self.config.serving_origin
         ):
             raise ValueError("cohort grant differs from miner assignment or serving configuration")
-        if attempt.order.attempt_number != 1:
+        if isinstance(grant, CohortMinerGrant) and attempt.order.attempt_number != 1:
             raise ValueError("replacement attempt requires certified remote reconciliation")
         if job.round.cohort_sha256 not in self.cohorts:
             raise ValueError("cohort grant has no configured authority")
+        return grant
+
+    def _validate(self, grant, validator_hotkey):
+        grant = self._validate_one(grant, validator_hotkey)
+        current, seen = grant, set()
+        # Parent records remain separate immutable objects. Replay iteratively
+        # so repeated outages cannot exhaust Python recursion or grow the wire
+        # request by embedding its entire history.
+        while isinstance(current, CohortCaseMinerGrant):
+            order = current.attempt.order
+            if order.parent_grant_slot in seen:
+                raise ValueError("cohort replacement lineage is cyclic")
+            seen.add(order.parent_grant_slot)
+            raw = self.journal.get("miner_grant", order.parent_grant_slot)
+            if raw is None:
+                raise ValueError("cohort replacement parent grant is not retained")
+            parent = self._validate_one(
+                parse_miner_grant(canonical_json_bytes(raw)), validator_hotkey
+            )
+            if grant_slot(parent) != order.parent_grant_slot:
+                raise ValueError("cohort replacement parent changed its archive key")
+            verify_replacement_parent(current, parent)
+            current = parent
         return grant
 
     async def _current(self, grant):
@@ -353,9 +360,7 @@ class CohortMinerAuthorizationAuthority:
             if row is None:
                 raise MinerAdmissionError("cohort_request_not_authorized")
             raw = self.journal.get("miner_grant", row[0], db=db)
-        grant = self._validate(
-            CohortMinerGrant.model_validate_json(canonical_json_bytes(raw)), validator_hotkey
-        )
+        grant = self._validate(parse_miner_grant(canonical_json_bytes(raw)), validator_hotkey)
         if (
             grant_slot(grant) != row[0]
             or sum(

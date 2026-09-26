@@ -209,16 +209,24 @@ def validate_recoverable_endpoint_transport(
         or not has_case_coverage(job.cases, policy)
     ):
         raise ValueError("recoverable endpoint order scope or signer differs")
+    validate_endpoint_request_pairs(
+        job, tuple(zip(job.cases, body.requests, strict=True)), body.attempt_number, transport
+    )
+    return signed
+
+
+def validate_endpoint_request_pairs(job, pairs, attempt_number, transport):
+    """Enforce native request bindings and window quotas for selected cases."""
     limits = Limits.from_policy(transport)
     counts: Counter[int] = Counter()
     videos: dict[int, set[str]] = defaultdict(set)
-    for case, request in zip(job.cases, body.requests, strict=True):
-        expected_ids = endpoint_attempt_wire_ids(job, body.attempt_number, case.case_id)
+    for case, request in pairs:
+        expected_ids = endpoint_attempt_wire_ids(job, attempt_number, case.case_id)
         if (
             (request.batch_id, request.challenge_id) != expected_ids
             or request.video.sha256 != case.video_sha256
             or request.task.stratum != case.stratum
-            or request.scoring_policy_hash != body.transport_policy_sha256
+            or request.scoring_policy_hash != scoring_policy_hash(transport)
             or not request.issued_block < request.deadline_block
             or request.issued_block < transport.activation_block
             or request.video.size_bytes > limits.maximum_clip_size_bytes
@@ -247,7 +255,6 @@ def validate_recoverable_endpoint_transport(
         or any(len(v) > limits.maximum_unique_videos_per_validator_window for v in videos.values())
     ):
         raise ValueError("endpoint attempt exceeds transport quotas")
-    return signed
 
 
 def recoverable_endpoint_observations(

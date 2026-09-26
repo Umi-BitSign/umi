@@ -19,7 +19,7 @@ from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_endpoint_decision import (
     MAX_CASE_REVIEW_BYTES,
     CohortEndpointCaseDecision,
-    CohortEndpointCaseReview,
+    EndpointCaseReview,
     SignedCohortEndpointCaseDecision,
     case_decision_slot,
     certify_case_decision,
@@ -46,7 +46,7 @@ class CohortEndpointDecisionConfig(CohortAdmissionSignerConfig):
 
 class CohortEndpointDecisionIntent(StrictProtocolModel):
     schema_: Literal["umi-cohort-endpoint-decision-intent/1"] = Field(alias="schema")
-    review: CohortEndpointCaseReview
+    review: EndpointCaseReview
     decision: CohortEndpointCaseDecision
     source: CohortOrderHistory
     observation: ExecutionBoundary
@@ -240,7 +240,7 @@ class CohortEndpointDecisionSigner:
         self.current_round, self.sign = current_round, sign
         self.serial = asyncio.Lock()
 
-    async def attest(self, review: CohortEndpointCaseReview) -> Signature:
+    async def attest(self, review: EndpointCaseReview) -> Signature:
         review, decision = await run_owned_thread(validate_case_review, review, self.journal.policy)
         if decision.cohort_sha256 not in self.journal.cohorts:
             raise ValueError("endpoint decision cohort has no configured authority")
