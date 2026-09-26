@@ -31,7 +31,7 @@ from .competition_successor_publication import (
 )
 from .concurrency import run_owned_thread
 from .open_competition import digest
-from .private_files import Directory
+from .private_files import Directory, PrivateStateBusyError
 from .private_files import ensure_private_directory as _private
 from .private_files import read_private_model as _read
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -246,6 +246,21 @@ class AutomaticSuccessorPublisher:
             return None
 
     async def tick(self):
+        try:
+            return await self._tick_once()
+        except PrivateStateBusyError as busy:
+            # The mutex protected the unchanged operation. Keep this publisher,
+            # provider and replay cache; the follow loop supplies the backoff.
+            # Retained signatures/delivery are reconciled before any new work.
+            return {
+                **self._status("waiting_for_local_state"),
+                "reason_code": "private_state_busy",
+                "lock_operation": busy.operation,
+                "lock_resource_sha256": busy.resource_sha256,
+                "retry_after_seconds": self.source.config.poll_interval_seconds,
+            }
+
+    async def _tick_once(self):
         async with self._serial:
             self.source.check_binding()
             if await run_owned_thread(self.publisher.builder.revoked):

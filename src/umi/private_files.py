@@ -8,11 +8,12 @@ locking; publication additionally serializes writers in the destination folder.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import stat
 import tempfile
 from pathlib import Path
-from typing import Annotated, TypeVar
+from typing import Annotated, Literal, TypeVar
 
 from pydantic import AfterValidator, BaseModel, Field
 
@@ -22,6 +23,38 @@ from .protocol import canonical_json_bytes
 MAX_PRIVATE_BYTES = 64 * 1024**2
 MAX_CONFIGURED_PRIVATE_BYTES = 512 * 1024**2
 _Model = TypeVar("_Model", bound=BaseModel)
+
+
+class PrivateStateBusyError(BlockingIOError):
+    """A validated private mutex is held by another descriptor."""
+
+    def __init__(self, operation: str, resource_sha256: str, error_number: int | None):
+        super().__init__(error_number, "private state mutex is busy")
+        self.operation = operation
+        self.resource_sha256 = resource_sha256
+
+    def __reduce__(self):
+        return type(self), (self.operation, self.resource_sha256, self.errno)
+
+
+def acquire_private_mutex(
+    descriptor: int,
+    path: Path,
+    *,
+    operation: Literal["private_file_lock", "round_journal_lock"],
+) -> None:
+    """Classify only actual nonblocking flock contention, without disclosing paths.
+
+    The caller owns descriptor validation, identity checks and cleanup. Failures
+    in those steps, or in journal I/O, must not be reported as mutex contention.
+    """
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        resource = hashlib.sha256(
+            b"umi-private-state-lock-v1\0" + os.fsencode(os.path.abspath(path))
+        ).hexdigest()
+        raise PrivateStateBusyError(operation, resource, error.errno) from error
 
 
 def private_path(value: str) -> str:
@@ -93,7 +126,7 @@ def lock_private_file(path: Path) -> int:
             or info.st_mode & 0o077
         ):
             raise ValueError("evaluator lock must be an owned private regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        acquire_private_mutex(fd, path, operation="private_file_lock")
     except BaseException:
         os.close(fd)
         raise

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import secrets
@@ -18,7 +17,7 @@ from pydantic import JsonValue
 from .competition_round_plan import RoundPlan, RoundProposal
 from .competition_round_rpc_migration import has_transport_history, validate_rpc_binding
 from .open_competition import digest
-from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
+from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, acquire_private_mutex
 from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
 from .private_files import ensure_private_directory as _private
 from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
@@ -208,7 +207,7 @@ class RoundJournal:
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
         )
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_private_mutex(descriptor, self.lock_path, operation="round_journal_lock")
             self._check_files()
             opened = os.fstat(descriptor)
             current = self.lock_path.stat()

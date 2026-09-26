@@ -452,6 +452,15 @@ loading authority wallets. A package's embedded lineage does not replace these
 operator-selected inputs. Without the option, only the current policy is
 admitted; another publisher invocation cannot supply its lineage implicitly.
 
+During follow operation, validated private-mutex contention reports
+`waiting_for_local_state` / `private_state_busy` and retries at the configured
+poll interval. The same publisher, finality provider and replay cache stay open.
+The report identifies the lock operation and a stable resource hash, without a
+private path. Retained signing and delivery history are reconciled on retry,
+including contention after signing or after delivery with a lost acknowledgement.
+Signature, journal-integrity, permission and unrelated I/O errors still fail
+validation. Do not delete journal files or remove locking to clear a busy report.
+
 <a id="open-competition-round-publisher--inputs"></a>
 
 ### Inputs
