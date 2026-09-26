@@ -43,22 +43,16 @@ class CohortSandbox(Protocol):
     ) -> OfflineCaseExecution: ...
 
 
-class CohortExecutor:
+class CohortExecutionAuthority:
     def __init__(
         self,
         journal: CohortExecutionJournal,
         provider: OrderFinality,
         history: Callable[[str], Awaitable[CohortOrderHistory]],
-        sandbox: CohortSandbox,
     ):
         if provider.policy != journal.policy:
             raise ValueError("execution finality belongs to another policy")
-        self.journal, self.provider, self.history, self.sandbox = (
-            journal,
-            provider,
-            history,
-            sandbox,
-        )
+        self.journal, self.provider, self.history = journal, provider, history
 
     async def current(
         self, assignment: CohortExecutionAssignment
@@ -102,6 +96,18 @@ class CohortExecutor:
             )
             raise OSError("cohort authority changed before execution progress")
         return source, boundary
+
+
+class CohortExecutor(CohortExecutionAuthority):
+    def __init__(
+        self,
+        journal: CohortExecutionJournal,
+        provider: OrderFinality,
+        history: Callable[[str], Awaitable[CohortOrderHistory]],
+        sandbox: CohortSandbox,
+    ):
+        super().__init__(journal, provider, history)
+        self.sandbox = sandbox
 
     async def advance(
         self, assignment: CohortExecutionAssignment

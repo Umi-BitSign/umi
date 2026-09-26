@@ -679,6 +679,22 @@ history/provider calls; it is adjustable without changing retained assignments.
 Local authenticated replay has no elapsed processing deadline. Endpoint transport
 retries, installed service recovery and reward integration remain required.
 
+Endpoint origin collection consumes the same acknowledged assignment and
+current authenticated phase history. It retains the original authority scope,
+then verifies the miner's current registration, UID inverse mapping, Axon and
+DNS against owned finality. An elapsed policy/submission target does not discard
+accepted work. Closure, revocation, history rollback, invalid proofs and stale
+chain observations still prevent use. This check proves the recorded origin;
+it does not authorize a translation request.
+
+The recoverable provider uses a separate private cache. Operators can increase
+cache capacity and network timeouts without replacing assignments or cached
+proofs; chain identity, verifier pins and freshness limits remain bound. Local
+authority replay, proof verification and persistence have no overall network
+timeout. Individual RPC/finality reads and DNS remain bounded. The worker checks
+current authority and freshness again after collection. Live request/retry
+selection and installation qualification remain required.
+
 `umi-recoverable-roster-evidence/1` binds the entire round to its certified
 intake seal and preparation result. The reviewer replays the original intake
 inventory, including superseded submissions, every selected admission and all

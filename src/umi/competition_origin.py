@@ -22,8 +22,12 @@ from urllib.parse import urlsplit
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import FinalizedRegistrationProvider, _AwaitingFinality, _hotkey, _uint
+from .competition_cohort_origin_scope import (
+    CohortEndpointOriginScope,
+    review_endpoint_origin_scope,
+)
 from .competition_policy_lineage import submission_policy_admitted
-from .concurrency import run_owned_thread
+from .concurrency import run_owned_thread, wait_for_owned
 from .encoding import account_id32
 from .grandpa_finality_supervisor import GrandpaFinalitySupervisorError
 from .open_competition import SignedSubmission, digest
@@ -357,127 +361,174 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         except asyncio.TimeoutError as error:
             raise ValueError("endpoint origin proof collection timed out") from error
 
-    async def _collect_origin_locked(self, signed, origin) -> EndpointOriginCapture:
+    async def _collect_origin_locked(
+        self, signed, origin, *, recovery: CohortEndpointOriginScope | None = None
+    ) -> EndpointOriginCapture:
         async with self._lock:
             if self._closed:
                 raise ValueError("endpoint provider is closed")
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
-            ref = await self._proofs.finalized_snapshot()
+            ref = (
+                await self._proofs.finalized_snapshot()
+                if recovery is None
+                else await wait_for_owned(
+                    self._proofs.finalized_snapshot(),
+                    timeout=self.config.collection_timeout_seconds,
+                )
+            )
             if not isinstance(ref, FinalizedSnapshotRef):
                 raise ValueError("endpoint finalized snapshot is invalid")
             if ref.block_number < self.config.minimum_finalized_block or (
                 self._owned and ref.block_number <= self._startup_floor
             ):
                 raise _AwaitingFinality("awaiting a head verified by this observer process")
-            sub = signed.submission
-            if not sub.valid_from_block <= ref.block_number <= sub.valid_through_block:
-                raise ValueError("endpoint submission is not current")
-            block = await self._finality.verified_block_at(ref.block_number)
-            self._check_finality(ref, block)
-            self._fresh(block.timestamp_ms)
-            await run_owned_thread(self._check_origin_prior, ref)
-            runtime = await self._runtime_context(ref)
-            if (
-                not isinstance(runtime, PinnedRuntimeContext)
-                or runtime.snapshot != ref
-                or runtime.pin != self._runtime_pin
-            ):
-                raise ValueError("endpoint runtime binding mismatch")
-            hotkey = _hotkey(sub.hotkey)
-            specs = (
-                StorageReadSpec("Timestamp", "Now"),
-                StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
-                StorageReadSpec("SubtensorModule", "Uids", (78, hotkey)),
-                StorageReadSpec("SubtensorModule", "Axons", (78, hotkey)),
+            if recovery is None:
+                sub = signed.submission
+                if not sub.valid_from_block <= ref.block_number <= sub.valid_through_block:
+                    raise ValueError("endpoint submission is not current")
+            else:
+                # Authenticate accepted work at the native observation height.
+                # Local authority replay has no overall network timeout.
+                recovery = await run_owned_thread(
+                    review_endpoint_origin_scope, recovery, signed, self.policy, ref.block_number
+                )
+                # A slow but valid local replay must not force another replay
+                # merely because its initial network observation aged out.
+                newer = await wait_for_owned(
+                    self._proofs.finalized_snapshot(),
+                    timeout=self.config.collection_timeout_seconds,
+                )
+                if not isinstance(newer, FinalizedSnapshotRef) or (
+                    newer.block_number < ref.block_number
+                    or (newer.block_number == ref.block_number and newer != ref)
+                ):
+                    raise ValueError("endpoint head changed or regressed during authority review")
+                ref = newer
+                # RPC and owned-finality clients bound their individual reads.
+                # Local proof verification and journal fsync must finish even
+                # when slower than that network allowance. Freshness is checked
+                # again before the retained capture is returned for use.
+                return await self._collect_origin_at(signed, origin, ref, recovery=recovery)
+            return await self._collect_origin_at(signed, origin, ref)
+
+    async def _collect_origin_at(self, signed, origin, ref, *, recovery=None):
+        sub = signed.submission
+        block = await self._finality.verified_block_at(ref.block_number)
+        self._check_finality(ref, block)
+        self._fresh(block.timestamp_ms)
+        await run_owned_thread(self._check_origin_prior, ref)
+        runtime = await self._runtime_context(ref)
+        if (
+            not isinstance(runtime, PinnedRuntimeContext)
+            or runtime.snapshot != ref
+            or runtime.pin != self._runtime_pin
+        ):
+            raise ValueError("endpoint runtime binding mismatch")
+        hotkey = _hotkey(sub.hotkey)
+        specs = (
+            StorageReadSpec("Timestamp", "Now"),
+            StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
+            StorageReadSpec("SubtensorModule", "Uids", (78, hotkey)),
+            StorageReadSpec("SubtensorModule", "Axons", (78, hotkey)),
+        )
+        base = await self._read(runtime, specs)
+        values = {read.spec: read.decoded_value for read in base.reads}
+        if values[specs[0]] != block.timestamp_ms or type(values[specs[0]]) is not int:
+            raise ValueError("endpoint proven timestamp differs from finalized block")
+        if values[specs[1]] is not True:
+            raise ValueError("endpoint subnet is unavailable")
+        uid = _uint(values[specs[2]], self.policy.maximum_uids - 1)
+        announced = _axon_origin(values[specs[3]], block=ref.block_number)
+        inverse_spec = StorageReadSpec("SubtensorModule", "Keys", (78, uid))
+        inverse = await self._read(runtime, (inverse_spec,))
+        if account_id32(_hotkey(inverse.reads[0].decoded_value)) != account_id32(hotkey):
+            raise ValueError("endpoint UID inverse mapping mismatch")
+        dns = (
+            await self._bind_origin(origin, announced)
+            if recovery is None
+            else await wait_for_owned(
+                self._bind_origin(origin, announced),
+                timeout=self.config.collection_timeout_seconds,
             )
-            base = await self._read(runtime, specs)
-            values = {read.spec: read.decoded_value for read in base.reads}
-            if values[specs[0]] != block.timestamp_ms or type(values[specs[0]]) is not int:
-                raise ValueError("endpoint proven timestamp differs from finalized block")
-            if values[specs[1]] is not True:
-                raise ValueError("endpoint subnet is unavailable")
-            uid = _uint(values[specs[2]], self.policy.maximum_uids - 1)
-            announced = _axon_origin(values[specs[3]], block=ref.block_number)
-            inverse_spec = StorageReadSpec("SubtensorModule", "Keys", (78, uid))
-            inverse = await self._read(runtime, (inverse_spec,))
-            if account_id32(_hotkey(inverse.reads[0].decoded_value)) != account_id32(hotkey):
-                raise ValueError("endpoint UID inverse mapping mismatch")
-            dns = await self._bind_origin(origin, announced)
-            newest = await self._finality.verified_finalized_snapshot()
-            if newest.block_number < ref.block_number or (
-                newest.block_number == ref.block_number and newest != ref
-            ):
-                raise ValueError("endpoint finalized head rolled back or changed")
-            if newest.block_number - ref.block_number > self.policy.maximum_snapshot_age_blocks:
-                raise ValueError("endpoint snapshot became stale during proof collection")
-            evidence = canonical_json_bytes(
-                {
-                    "schema": "umi-competition-endpoint-origin-evidence/1"
+        )
+        newest = await self._finality.verified_finalized_snapshot()
+        if newest.block_number < ref.block_number or (
+            newest.block_number == ref.block_number and newest != ref
+        ):
+            raise ValueError("endpoint finalized head rolled back or changed")
+        if newest.block_number - ref.block_number > self.policy.maximum_snapshot_age_blocks:
+            raise ValueError("endpoint snapshot became stale during proof collection")
+        evidence = canonical_json_bytes(
+            {
+                "schema": (
+                    "umi-cohort-endpoint-origin-evidence/1"
+                    if recovery is not None
+                    else "umi-competition-endpoint-origin-evidence/1"
                     if dns is None
-                    else "umi-competition-endpoint-origin-evidence/2",
-                    **({} if dns is None else {"dns": dns, "connection_origin": announced}),
-                    "policy_sha256": digest(self.policy),
-                    "signed_submission": signed.model_dump(mode="json"),
-                    "uid": uid,
-                    "origin": origin,
-                    "block": ref.block_number,
-                    "block_hash": ref.block_hash,
-                    "state_root": ref.state_root,
-                    "timestamp_ms": block.timestamp_ms,
-                    "finality": json.loads(block.finality_evidence),
-                    "finality_verifier_sha256": block.finality_verifier_sha256,
-                    "storage_proof_verifier_sha256": self.config.proof_binary_sha256,
-                    "runtime_metadata_sha256": runtime.metadata_sha256,
-                    "runtime_version": json.loads(runtime.runtime_version_bytes),
-                    **(
-                        {"storage_codec_mode": runtime.storage_codec_mode}
-                        if self._storage_codec is not None
-                        else {}
-                    ),
-                    "storage_batches": [
-                        {
-                            "state_root": batch.evidence.verified_state_root,
-                            "claims": [
-                                {
-                                    "key": "0x" + claim.storage_key.hex(),
-                                    "value": None
-                                    if claim.value is None
-                                    else "0x" + claim.value.hex(),
-                                }
-                                for claim in batch.evidence.claims
-                            ],
-                            "proof": ["0x" + node.hex() for node in batch.evidence.proof],
-                        }
-                        for batch in (base, inverse)
-                    ],
-                    "chain_submission_authorized": False,
-                }
-            )
-            if len(evidence) > _MAX_ORIGIN_EVIDENCE_BYTES:
-                raise ValueError("endpoint origin evidence exceeds its byte limit")
-            capture = EndpointOriginCapture(
-                digest(sub),
-                uid,
-                hotkey,
-                origin,
-                ref.block_number,
-                ref.block_hash,
-                ref.state_root,
-                block.timestamp_ms,
-                evidence,
-                None if dns is None else announced,
-            )
-            cancelled = threading.Event()
-            return await run_owned_thread(
-                partial(
-                    self._save_origin,
-                    capture,
-                    runtime.metadata_bytes,
-                    cancelled=cancelled,
+                    else "umi-competition-endpoint-origin-evidence/2"
                 ),
-                on_cancel=cancelled.set,
-            )
+                **({} if recovery is None else {"recovery_scope_sha256": digest(recovery)}),
+                **({} if dns is None else {"dns": dns, "connection_origin": announced}),
+                "policy_sha256": digest(self.policy),
+                "signed_submission": signed.model_dump(mode="json"),
+                "uid": uid,
+                "origin": origin,
+                "block": ref.block_number,
+                "block_hash": ref.block_hash,
+                "state_root": ref.state_root,
+                "timestamp_ms": block.timestamp_ms,
+                "finality": json.loads(block.finality_evidence),
+                "finality_verifier_sha256": block.finality_verifier_sha256,
+                "storage_proof_verifier_sha256": self.config.proof_binary_sha256,
+                "runtime_metadata_sha256": runtime.metadata_sha256,
+                "runtime_version": json.loads(runtime.runtime_version_bytes),
+                **(
+                    {"storage_codec_mode": runtime.storage_codec_mode}
+                    if self._storage_codec is not None
+                    else {}
+                ),
+                "storage_batches": [
+                    {
+                        "state_root": batch.evidence.verified_state_root,
+                        "claims": [
+                            {
+                                "key": "0x" + claim.storage_key.hex(),
+                                "value": None if claim.value is None else "0x" + claim.value.hex(),
+                            }
+                            for claim in batch.evidence.claims
+                        ],
+                        "proof": ["0x" + node.hex() for node in batch.evidence.proof],
+                    }
+                    for batch in (base, inverse)
+                ],
+                "chain_submission_authorized": False,
+            }
+        )
+        if len(evidence) > _MAX_ORIGIN_EVIDENCE_BYTES:
+            raise ValueError("endpoint origin evidence exceeds its byte limit")
+        capture = EndpointOriginCapture(
+            digest(sub),
+            uid,
+            hotkey,
+            origin,
+            ref.block_number,
+            ref.block_hash,
+            ref.state_root,
+            block.timestamp_ms,
+            evidence,
+            None if dns is None else announced,
+        )
+        cancelled = threading.Event()
+        return await run_owned_thread(
+            partial(
+                self._save_origin,
+                capture,
+                runtime.metadata_bytes,
+                cancelled=cancelled,
+            ),
+            on_cancel=cancelled.set,
+        )
 
     def _check_origin_prior(self, ref):
         connection = self._connect()
@@ -497,6 +548,14 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
     def _save_origin(self, capture, metadata, *, cancelled: threading.Event | None = None):
         if cancelled is not None and cancelled.is_set():
             raise ValueError("endpoint persistence cancelled")
+        # Keep distinct authority observations without changing the public
+        # submission digest or overwriting a legacy origin at the same block.
+        body = json.loads(capture.evidence)
+        record_key = capture.submission_sha256
+        if body["schema"] == "umi-cohort-endpoint-origin-evidence/1":
+            record_key = digest(
+                ["umi-cohort-endpoint-origin-key/1", record_key, body["recovery_scope_sha256"]]
+            )
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -504,7 +563,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             prior = connection.execute(
                 "SELECT length(evidence), evidence_sha256 FROM origins "
                 "WHERE block=? AND submission=?",
-                (capture.block, capture.submission_sha256),
+                (capture.block, record_key),
             ).fetchone()
             metadata_id = hashlib.sha256(metadata).hexdigest()
             retained = connection.execute(
@@ -517,7 +576,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                     raise ValueError("retained endpoint evidence or metadata is incomplete")
                 prior_bytes = connection.execute(
                     "SELECT evidence FROM origins WHERE block=? AND submission=?",
-                    (capture.block, capture.submission_sha256),
+                    (capture.block, record_key),
                 ).fetchone()[0]
                 if hashlib.sha256(prior_bytes).hexdigest() != prior[1]:
                     raise ValueError("retained endpoint evidence is corrupt")
@@ -541,6 +600,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                     any(old[key] != new[key] for key in fields)
                     or old["signed_submission"]["submission"]
                     != new["signed_submission"]["submission"]
+                    or old.get("recovery_scope_sha256") != new.get("recovery_scope_sha256")
                     or old.get("connection_origin") != new.get("connection_origin")
                     or any(
                         old.get("dns", {}).get(key) != new.get("dns", {}).get(key)
@@ -576,7 +636,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                     (
                         capture.block,
                         capture.block_hash,
-                        capture.submission_sha256,
+                        record_key,
                         capture.evidence,
                         capture.evidence_sha256,
                     ),
