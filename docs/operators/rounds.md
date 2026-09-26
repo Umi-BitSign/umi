@@ -838,10 +838,23 @@ that this archive was included in full-roster request closure. Keep this
 private replay output separate from certified results. Legacy timed evidence
 and its eligibility rules remain unchanged.
 
-Complete accepted-roster coverage across evaluators, certified request closure,
-service-clock evidence, authorized score aggregation and settlement remain
-integration work. Host
-composition must supply authenticated current history, owned finality, private
+The request-closure consumer reviews the original intake and preparation without
+reference answers. Every selected participant must have its signed order and a
+terminal seal from every assigned evaluator. Each seal binds complete local
+execution and, for endpoints, every retained response and certified predecessor.
+Missing assignments, peers or objects keep explicit obligations pending. Export
+commits the original objects before signing; restart resumes a retained intent
+from local bytes even when its former endpoint peer is unavailable.
+
+`umi-cohort-request-closure/1` commits that complete manifest. Native progress
+binds it together with the original service observation; replay checks the
+actual request-window compensation before accepting the certified closure.
+`replay_closed_endpoint_quality` requires this full closure and verifies that the
+particular miner/evaluator archive was selected by it. Its metrics still carry
+no service-credit or weight authority. Original service-clock evidence,
+aggregate/dependence checks and reward allocation remain separate requirements.
+
+Host composition must supply authenticated current history, owned finality, private
 state, the signer, writer fence and service lifecycle; the standard miner CLI
 does not install this authority yet.
 Recovery of an old policy's archive under a replacement evaluator key remains
@@ -852,11 +865,14 @@ scores or a native reward effect.
 intake seal and preparation result. The reviewer replays the original intake
 inventory, including superseded submissions, every selected admission and all
 retained phase decisions. This checks outage compensation as well as signatures.
-Every selected participant must have one complete ordered outcome. Missing
+Reference-free membership is also used before request closure. The scored
+consumer additionally checks the revealed suite and requires one complete
+ordered outcome per selected participant. Missing
 outcomes raise `IncompleteRecoverableCohort` with the pending submission hashes;
 missing archives remain source failures. Delay alone neither erases a member nor
-creates a zero or void. This review does not certify dispatch/retry selection,
-close scheduler work or calculate service credit.
+creates a zero or void. Roster membership alone does not close scheduler work or
+calculate service credit; the complete request manifest and its native phase
+decision are required separately.
 
 Installed endpoint authorization and retry selection, complete roster
 settlement, delayed first reward admission and standing reward continuation

@@ -8,6 +8,7 @@ Endpoint transport and infrastructure-void certificates need separate evidence.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
@@ -105,6 +106,51 @@ def _ordered(
         raise ValueError("execution boundary rolled back or changed at the same block")
 
 
+def replay_execution_steps(
+    job: RecoverableExecutionJob,
+    steps: Iterable[ExecutionStep],
+    policy: CompetitionPolicy,
+    *,
+    started_after: int,
+    finished_by: int,
+) -> dict[str, list[CaseOutput]]:
+    """Validate all original outputs and boundaries without reference answers.
+
+    The caller authenticates the assignment and original chain proof sources.
+    This verifies retained observations; it does not attest physical execution.
+    """
+    width = 2 if job.mode == "paired_model" else 1
+    previous = None
+    outputs: dict[str, list[CaseOutput]] = {"candidate": [], "incumbent": []}
+    for index, raw in zip(range(width * len(job.cases)), steps, strict=True):
+        step = ExecutionStep.model_validate_json(canonical_json_bytes(raw))
+        case = job.cases[index // width]
+        role = "candidate" if width == 2 and index % 2 == 0 else "incumbent"
+        model = (
+            job.submission.submission.model_revision
+            if role == "candidate"
+            else digest(job.incumbent)
+        )
+        if (
+            step.role != role
+            or step.execution.output.case_id != case.case_id
+            or step.execution.video_sha256 != case.video_sha256
+            or step.execution.model_sha256 != model
+        ):
+            raise ValueError("recoverable execution step assignment/model binding differs")
+        validate_case_execution(step.execution, policy)
+        for boundary in (step.started, step.finished):
+            _ordered(
+                boundary,
+                previous,
+                started_after=started_after,
+                finished_by=finished_by,
+            )
+            previous = boundary
+        outputs[role].append(step.execution.output)
+    return outputs
+
+
 def recoverable_execution_observations(
     evidence: RecoverableExecutionEvidence,
     suite: EvaluationSuite,
@@ -165,36 +211,13 @@ def recoverable_execution_observations(
     validate_bundle_policy(job.incumbent, policy)
     if job.mode == "paired_model":
         validate_bundle_policy(job.submission.submission.model_bundle, policy)
-    width = 2 if job.mode == "paired_model" else 1
-    if len(evidence.steps) != width * len(job.cases):
-        raise ValueError("recoverable execution omits or repeats assigned runs")
-    previous = None
-    outputs: dict[str, list[CaseOutput]] = {"candidate": [], "incumbent": []}
-    for index, step in enumerate(evidence.steps):
-        case = job.cases[index // width]
-        role = "candidate" if width == 2 and index % 2 == 0 else "incumbent"
-        model = (
-            job.submission.submission.model_revision
-            if role == "candidate"
-            else digest(job.incumbent)
-        )
-        if (
-            step.role != role
-            or step.execution.output.case_id != case.case_id
-            or step.execution.video_sha256 != case.video_sha256
-            or step.execution.model_sha256 != model
-        ):
-            raise ValueError("recoverable execution step assignment/model binding differs")
-        validate_case_execution(step.execution, policy)
-        for boundary in (step.started, step.finished):
-            _ordered(
-                boundary,
-                previous,
-                started_after=preparation.observed_at_block,
-                finished_by=requests.observed_at_block,
-            )
-            previous = boundary
-        outputs[role].append(step.execution.output)
+    outputs = replay_execution_steps(
+        job,
+        evidence.steps,
+        policy,
+        started_after=preparation.observed_at_block,
+        finished_by=requests.observed_at_block,
+    )
     return RecoverableExecutionObservation(
         job=job,
         candidate=tuple(outputs["candidate"]),

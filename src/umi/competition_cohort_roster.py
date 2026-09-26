@@ -64,17 +64,16 @@ class RecoverableRosterEvidence(StrictProtocolModel):
     chain_submission_authorized: Literal[False] = False
 
 
-def verify_recoverable_roster(
+def verify_recoverable_roster_membership(
     roster: RecoverableRosterEvidence,
     policy: CompetitionPolicy,
-    suite: EvaluationSuite,
     history: CohortRecoveryHistory,
     *,
     decision_source: Callable[[str], CohortDecisionInput],
     intake_records: Iterable[tuple[str, bytes]],
     expected_tip_sha256: str,
     current_block: int,
-) -> dict[str, RecoverableReviewContext]:
+) -> dict[str, RecoverableRosterParticipant]:
     """Authenticate exact intake membership, preparation and every admission.
 
     Sources may stream arbitrarily old retained records. Their absence or an
@@ -83,7 +82,6 @@ def verify_recoverable_roster(
     """
     roster = RecoverableRosterEvidence.model_validate_json(canonical_json_bytes(roster))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
     history = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(history))
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
@@ -123,11 +121,8 @@ def verify_recoverable_roster(
     if seal != expected:
         raise ValueError("recoverable roster seal differs from the complete original intake")
     verify_intake_closure(seal, intake, decision(intake.evidence_sha256), policy)
-    if (
-        decision(preparation.evidence_sha256).progress.progress.phase_result_sha256
-        != digest(roster.round)
-        or roster.round.suite_sha256 != digest(suite)
-        or suite.policy_sha256 != digest(policy)
+    if decision(preparation.evidence_sha256).progress.progress.phase_result_sha256 != digest(
+        roster.round
     ):
         raise ValueError("recoverable round differs from certified preparation or suite")
     selected = {s.submission_sha256: s for s in seal.selected}
@@ -149,29 +144,58 @@ def verify_recoverable_roster(
             or admitted != participant.admission.admission
         ):
             raise ValueError("selected participant differs from the retained admission")
-        context = RecoverableReviewContext(
-            policy=policy,
-            suite=suite,
-            consent=record.request.consent,
-            admission=participant.admission,
-            admission_snapshot=record.snapshot,
-            history=history,
-            expected_tip_sha256=expected_tip_sha256,
-            current_block=current_block,
-        )
         verify_recoverable_round_participant(
             record.request.signed_submission,
             roster.round,
             policy,
-            context.consent,
-            context.admission,
-            context.admission_snapshot,
+            record.request.consent,
+            participant.admission,
+            record.snapshot,
             history,
             expected_tip_sha256=expected_tip_sha256,
             current_block=current_block,
         )
-        contexts[key] = context
+        contexts[key] = participant
     return contexts
+
+
+def verify_recoverable_roster(
+    roster: RecoverableRosterEvidence,
+    policy: CompetitionPolicy,
+    suite: EvaluationSuite,
+    history: CohortRecoveryHistory,
+    *,
+    decision_source: Callable[[str], CohortDecisionInput],
+    intake_records: Iterable[tuple[str, bytes]],
+    expected_tip_sha256: str,
+    current_block: int,
+) -> dict[str, RecoverableReviewContext]:
+    """Add the revealed suite to independently verified reference-free membership."""
+    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    members = verify_recoverable_roster_membership(
+        roster,
+        policy,
+        history,
+        decision_source=decision_source,
+        intake_records=intake_records,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    if roster.round.suite_sha256 != digest(suite) or suite.policy_sha256 != digest(policy):
+        raise ValueError("recoverable round differs from certified preparation or suite")
+    return {
+        key: RecoverableReviewContext(
+            policy=policy,
+            suite=suite,
+            consent=p.record.request.consent,
+            admission=p.admission,
+            admission_snapshot=p.record.snapshot,
+            history=history,
+            expected_tip_sha256=expected_tip_sha256,
+            current_block=current_block,
+        )
+        for key, p in members.items()
+    }
 
 
 def replay_recoverable_roster_outcomes(

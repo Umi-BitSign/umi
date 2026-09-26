@@ -51,22 +51,36 @@ from .test_drand import ROUND, pulse_record
 from .test_open_competition import wallet
 
 
-def archive(s, *, delay_hours=10, failure=None, observed_block=1511):
-    a = s["endpoints"][0]
-    certificate = order(s)
-    receipt = delivery_receipt(certificate, a.incumbent.job.evaluator_hotkey)
-    assignment = CohortExecutionAssignment(
-        certificate=certificate,
-        participant=CohortOrderParticipant(
-            **{k: s[k] for k in ("consent", "admission", "admission_snapshot")}
-        ),
-        delivery=SignedOrderDeliveryReceipt(
-            receipt=receipt, signature=sign_object(receipt, wallet("Charlie"))
-        ),
+def archive(
+    s,
+    *,
+    delay_hours=10,
+    failure=None,
+    observed_block=1511,
+    evaluator_name="Charlie",
+    miner_name="Alice",
+    assignment=None,
+):
+    a = next(
+        x
+        for x in s["endpoints"]
+        if x.incumbent.job.evaluator_hotkey == wallet(evaluator_name).hotkey.ss58_address
     )
+    if assignment is None:
+        certificate = order(s)
+        receipt = delivery_receipt(certificate, a.incumbent.job.evaluator_hotkey)
+        assignment = CohortExecutionAssignment(
+            certificate=certificate,
+            participant=CohortOrderParticipant(
+                **{k: s[k] for k in ("consent", "admission", "admission_snapshot")}
+            ),
+            delivery=SignedOrderDeliveryReceipt(
+                receipt=receipt, signature=sign_object(receipt, wallet(evaluator_name))
+            ),
+        )
     selected = CohortEndpointRecoverySelection(
         schema="umi-cohort-endpoint-recovery-selection/1",
-        assignment_slot=order_slot(certificate.order),
+        assignment_slot=order_slot(assignment.certificate.order),
         order=a.order,
         transport_policy=a.transport_policy,
     )
@@ -85,7 +99,7 @@ def archive(s, *, delay_hours=10, failure=None, observed_block=1511):
             plain = response_plaintext(
                 request,
                 validator_hotkey=a.incumbent.job.evaluator_hotkey,
-                miner_hotkey=wallet("Alice").hotkey.ss58_address,
+                miner_hotkey=wallet(miner_name).hotkey.ss58_address,
             ).model_copy(
                 update={
                     "model_revision": a.incumbent.job.submission.submission.model_revision,
@@ -94,8 +108,8 @@ def archive(s, *, delay_hours=10, failure=None, observed_block=1511):
                 }
             )
             miner = SimpleNamespace(
-                wallet=wallet("Alice"),
-                hotkey_ss58=wallet("Alice").hotkey.ss58_address,
+                wallet=wallet(miner_name),
+                hotkey_ss58=wallet(miner_name).hotkey.ss58_address,
                 signature_scheme="sr25519",
                 limits=Limits.from_policy(a.transport_policy),
             )
@@ -121,7 +135,7 @@ def archive(s, *, delay_hours=10, failure=None, observed_block=1511):
             schema="umi-endpoint-retirement/1",
             grant_sha256=digest(grant),
             request_digest=request_digest(request),
-            miner_hotkey=wallet("Alice").hotkey.ss58_address,
+            miner_hotkey=wallet(miner_name).hotkey.ss58_address,
             evaluator_hotkey=a.incumbent.job.evaluator_hotkey,
             result="response_retained",
             response_sha256=hashlib.sha256(raw).hexdigest(),
@@ -139,7 +153,7 @@ def archive(s, *, delay_hours=10, failure=None, observed_block=1511):
                 observed_round=ROUND,
                 retirement=SignedEndpointRetirementReceipt(
                     receipt=retirement,
-                    signature=sign_object(retirement, wallet("Alice")),
+                    signature=sign_object(retirement, wallet(miner_name)),
                 ),
             ),
             recovered=recovered,
