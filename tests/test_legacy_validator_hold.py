@@ -13,7 +13,6 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 HOLD_SCRIPT = REPOSITORY_ROOT / "tools" / "legacy_validator_hold.py"
-HOLD_GUIDE = REPOSITORY_ROOT / "docs" / "reference" / "legacy.md"
 HOTKEY = "5CaRQtMKLXd35MA7E6igoUbKTe5wyrmTp6RkDzZKaTewofRM"
 REVISION = subprocess.check_output(
     ["git", "rev-parse", "HEAD"], cwd=REPOSITORY_ROOT, text=True
@@ -61,15 +60,6 @@ def test_hold_source_has_no_network_wallet_chain_or_process_control_imports() ->
     assert "shell=True" not in source
     assert "os.system" not in source
     assert "Popen" not in source
-
-
-def test_retired_hold_guide_is_archived_and_routes_to_current_installation() -> None:
-    guide = HOLD_GUIDE.read_text()
-    assert "Do not\nfollow their installation or enrollment steps" in guide
-    assert "../PERMANENT_VALIDATOR_SUPERVISOR.md" in guide
-    assert (
-        "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/LEGACY_VALIDATOR_TRANSITION.md" in guide
-    )
 
 
 def test_run_receipt_singleton_and_clean_stop(tmp_path: Path) -> None:

@@ -44,6 +44,20 @@ adversarial tests, and state any stage it does not reach. Run `make check` befor
 requesting review. Changes to a digest formula, schema, normalization behavior,
 runtime pin, or activation parameter need an explicit compatibility note.
 
+## Documentation maintenance
+
+Describe the current system and update one authoritative guide per topic. Remove
+superseded instructions and expired schedules in the same change. Keep migration
+steps only for a deployed consumer that still needs them, with a removal condition.
+Use commits and PRs for implementation history. Preserve exact signed terms and
+verification evidence; link a fixed older specification only at its replay or
+recovery consumer. Check relative links and anchors with
+`pytest tests/test_documentation_navigation.py`.
+
+Include unused-code review with changes. Check imports, CLI entry points, service
+configurations and replay/recovery consumers before deleting code. Keep those
+checks distinct from whether its original campaign has ended.
+
 ## Code organization
 
 | Responsibility | Location |

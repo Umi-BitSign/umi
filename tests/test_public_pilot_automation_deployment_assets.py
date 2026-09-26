@@ -134,13 +134,6 @@ def test_bootstrap_service_drop_in_is_enabled_only_after_evidence_install() -> N
         "/var/lib/umi-observer/bootstrap-service-publications/REPLACE_WITH_PUBLICATION_SHA256"
     ]
 
-    runbook = (ROOT / "docs" / "reference" / "legacy.md").read_text()
-    assert (
-        "blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/"
-        "EMERGENCY_DIRECT_BOOTSTRAP_CUTOVER_V1.md" in runbook
-    )
-    assert "Do not\nfollow their installation or enrollment steps" in runbook
-
 
 def test_install_runbook_matches_the_actual_host_and_pinned_checkout() -> None:
     runbook = (ASSETS / "README.md").read_text()

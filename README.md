@@ -8,7 +8,7 @@ into successive public baselines.
 ## Miners: start here
 
 - **New to SN78?** Follow the official [Bittensor registration guide](https://www.bittensor.com/docs/guides/mining) using subnet **78**, then read [what UMI miners should run now](docs/CURRENT_MINER_OPERATION.md).
-- **Already running an endpoint?** Apply the [cohort 3 / policy-7 update](docs/miners/cohort3-update.md). An accepted receipt can remain valid while your service still needs this update.
+- **Already running an endpoint?** Apply the [current C4 / policy-8 update](docs/miners/connection.md). An accepted receipt can remain valid while your service still needs this update.
 - **Set up and submit an endpoint:** [connect your model](docs/miners/model.md), [Apple Silicon setup](docs/miners/macos.md), and [competition intake instructions](docs/reference/commands.md#live-first-round-intake). On-chain registration and competition intake are separate steps.
 
 ## Validators: start here
@@ -28,12 +28,11 @@ into successive public baselines.
 ## Network phase
 
 The temporary registration bridge uses live HTTPS health checks and shared
-coldkey/IP/funding groups. It does not score translations. The public-endpoint
-pilot is closed. The ongoing bridge policy has no scheduled calendar sunset;
+coldkey/IP/funding groups. It does not score translations. The ongoing bridge policy has no scheduled calendar sunset;
 historical finite policies retain their original expiry.
 
 Public competition intake is live for endpoint submissions only. Use the
-[current connection guide](docs/miners/cohort3-update.md) for the exact miner
+[current connection guide](docs/miners/connection.md) for the exact miner
 release, policy files, binary downloads and service configuration. Check the
 public status for the next intake schedule. Accepted submissions can carry
 forward when their terms, registration and validity interval remain eligible.
@@ -79,12 +78,7 @@ The public model lives in
 [umi-reference-model](https://github.com/Umi-BitSign/umi-reference-model).
 Product planning lives under [bitsign MVP](roadmap/bitsign-mvp/README.md).
 
-## Historical material and license
-
-[Retired runbooks and dated deployment reports](docs/reference/legacy.md) are
-available at their preserved Git revision. They are not current installation
-instructions. The [version 0.1 specification](whitepaper/LEGACY_V0_1.md) remains
-available for interpreting old signed evidence.
+## License
 
 UMI-authored code is [Apache-2.0](LICENSE). See
 [third-party notices](THIRD_PARTY_NOTICES.md) for inherited terms.

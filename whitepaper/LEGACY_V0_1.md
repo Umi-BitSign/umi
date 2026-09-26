@@ -9,9 +9,9 @@ Status: SN78 active on mainnet; UMI translation weights inactive; public endpoin
 This document supersedes earlier UMI mechanism and whitepaper drafts.
 
 Temporary operational addenda: the
-[seven-day bootstrap service-weight profile](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
+[seven-day bootstrap service-weight profile](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/BOOTSTRAP_WEIGHT_ADDENDUM.md)
 and its
-[shared-validator supersession](../docs/reference/legacy.md#shared-validator-bootstrap-supersession)
+[shared-validator supersession](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md)
 may authorize one equal, binary service-eligibility row while translation weights
 remain inactive. It is deliberately centralized, Sybil-prone, and based on a known
 public pilot. It MUST NOT be described as ASL quality, a model ranking, or evidence
@@ -2293,8 +2293,8 @@ runtime safety floor. Section 14 applies the stricter `2 * M_gate` activation te
 ### 10.3 Weight submission
 
 The temporary `bootstrap_service_binary` documents, consisting of the
-[original policy addendum](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and its
-[shared-validator supersession](../docs/reference/legacy.md#shared-validator-bootstrap-supersession),
+[original policy addendum](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and its
+[shared-validator supersession](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md),
 are the
 only exception to this section's prohibition on a weight call while
 `translation_weights_active` is false. They may authorize only the addendum's exact
@@ -2642,8 +2642,8 @@ alpha distributed during this phase is identified as bootstrap emission, not as
 evidence that UMI translation scoring passed its gates.
 
 The sole temporary exception is the separately published
-[`bootstrap_service_binary` policy](../docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and its
-[shared-validator supersession](../docs/reference/legacy.md#shared-validator-bootstrap-supersession), which
+[`bootstrap_service_binary` policy](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/BOOTSTRAP_WEIGHT_ADDENDUM.md) and its
+[shared-validator supersession](https://github.com/Umi-BitSign/umi/blob/9960523a4466194eff1ca5cb656ff78d2b9057d5/docs/SHARED_VALIDATOR_BOOTSTRAP_SUPERSESSION.md), which
 may authorize its exact equal service-eligibility row during its fixed block
 interval. A row under that addendum is not a translation score or ranking, does not
 activate UMI translation weights, and counts toward none of the gates in this

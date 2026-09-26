@@ -115,7 +115,7 @@ def test_latex_references_are_unnumbered_and_remain_in_contents(pandoc_convert):
 def test_current_whitepaper_has_public_repository_links_in_latex(pandoc_convert):
     markdown = (REPOSITORY_ROOT / "whitepaper/README.md").read_text(encoding="utf-8")
     latex = pandoc_convert(markdown)
-    assert "https://github.com/Umi-BitSign/umi/blob/main/docs/BOOTSTRAP_WEIGHT_ADDENDUM.md" in latex
+    assert "https://github.com/Umi-BitSign/umi/blob/main/docs/operators/bridge.md" in latex
     assert "https://github.com/Umi-BitSign/umi/blob/main/docs/OPEN_COMPETITION.md" in latex
     assert "https://github.com/Umi-BitSign/umi/blob/main/whitepaper/LEGACY_V0_1.md" in latex
     assert r"\href{../" not in latex

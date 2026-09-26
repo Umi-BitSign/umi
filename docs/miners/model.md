@@ -19,10 +19,9 @@ translation requests under the corresponding release and policy.
 
 ### Successor assignment discovery rehearsal
 
-Endpoint intake is live. The [cohort 3 update](cohort3-update.md) provides the
-reviewed policy-7 connection inputs and restart instructions. Check the
-[public status](https://api.umi.vision/v1/competition/status) for current readiness
-and the next intake cutoff. The placeholders below are generic rehearsal
+The [current connection guide](connection.md) provides the reviewed policy inputs
+and restart instructions. Check [public status](https://api.umi.vision/v1/competition/status)
+for readiness and intake availability. The placeholders below are generic rehearsal
 examples. A coordinator, feed or evaluator infrastructure delay cannot be scored
 as miner failure.
 
@@ -69,6 +68,16 @@ owner-private Unix socket. Both paths receive the verified MP4 bytes and the
 validated `TranslationRequest`. They return English text. UMI handles fetching,
 hash checks, length checks, timelock sealing, hotkey signing, retry caching, and
 the explicit error response.
+
+The miner retries a truncated download, connection failure or timeout before
+sealing its response, using the remaining signed video-fetch budget. Each attempt
+is recorded in the existing assignment database and reserves its bytes before
+network access. The response deadline still applies. A rejected origin, malformed
+response, digest mismatch or HTTP error does not trigger this transport retry.
+Once a response is sealed, retransmitting the assignment returns those same
+signed bytes; it does not repeat fetching or inference. Keep the assignment
+database across upgrades and restarts so these counters and cached responses
+remain intact.
 
 Use the Unix socket when the model needs a Torch, Core ML, Python, or native
 library stack that cannot share UMI's pinned environment. UMI supports Python

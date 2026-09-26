@@ -147,7 +147,8 @@ def _historical_announcement(*, signed_observation=None, retained_intent=None):
             raise ValueError("repair observation differs from its original scope")
         return signed.announcement
     if retained_intent is not None:
-        from .competition_evaluator import MAX_BYTES, SignedEvaluationOrder, execution_slot
+        from .competition_evaluator import SignedEvaluationOrder, execution_slot
+        from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
 
         evaluator, slot = retained_intent
         with evaluator.transaction() as db:

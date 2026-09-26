@@ -2,355 +2,52 @@
 
 # Apple Silicon miner
 
-- [Run a UMI miner on Apple Silicon](#macos-miner-operator)
-
-<a id="macos-miner-operator"></a>
-
-## Run a UMI miner on Apple Silicon
-
-UMI supports `aarch64-apple-darwin` as a miner-only release target. The native
-artifact is the GRANDPA finality observer used to admit validator requests. Model
-inference for the initial reference model runs through its tested asynchronous
-in-process translator and uses Metal Performance Shaders when available. The public
-validator runtime remains limited to the signed static Linux targets.
-Apple Silicon operators can run that validator inside the bounded Linux container
-described in [MACOS_VALIDATOR_OPERATOR.md](../reference/legacy.md#macos-validator-operator); this does
-not turn Darwin itself into a validator target.
-
-This separation is deliberate. A miner receives already bounded request metadata,
-fetches one policy-sized clip, checks finality, and returns a sealed response. A
-validator must inspect adversarial media and reproduce the complete release
-conformance suite. UMI's enforced FFmpeg address-space boundary and static media
-runtime are Linux-specific. The Darwin miner target does not add a storage-proof
-verifier, FFmpeg package, validator template, or validator capability.
-
-<a id="macos-miner-operator--current-performance-evidence"></a>
-
-### Current performance evidence
-
-The reference pipeline has completed one eligible 14.1-second clip in about 30
-seconds end to end on an M3 Ultra. That run used the Linux AMD64 Docker extractor
-and native MPS inference. It shows that the architecture works on a Mac, but it
-does not establish production concurrency or deadline headroom.
-
-At the 28 delivered assignments per validator in a two-batch launch window, the
-four validators can send 112 requests for 28 distinct videos. UMI's explicit,
-signed scheduling layer can coalesce concurrent requests for the same video after
-the outer miner admits them. The sealed reference-model inference code remains
-unchanged. With a 30-second observed job time, outer concurrency 16 admits only
-about four distinct videos at once and needs about seven waves, or 210 seconds. That
-does not fit the signed validator transport timeout's current 90-second default.
-
-Outer concurrency 64, allocated as 16 slots per validator, plus 16 backend workers
-is the first plausible test configuration: it can admit 16 distinct jobs and then
-the remaining 12. This is arithmetic, not production evidence. The reference-model
-repository contains an opt-in 112-request capacity rehearsal in
-`tests/test_umi_macos_capacity.py`, but no passing run is recorded for the final
-signed release yet. Pass that harness under the final signed policy before
-announcing production capacity. It must verify fair progress for every validator
-and completion inside the shortest signed validator transport timeout. Do not
-extend that timeout to hide insufficient capacity: a non-sealed timeout can be
-retried, and two long attempts can consume the 300-second response interval before
-the request-set freeze.
-
-<a id="macos-miner-operator--1-build-and-seal-the-native-finality-observer"></a>
-
-### 1. Build and seal the native finality observer
-
-Use a clean checkout of the exact UMI revision selected for the release. Building
-under `target/` does not dirty the checkout.
-
-```bash
-cd /absolute/path/to/umi
-rustup toolchain install 1.98.0 --profile minimal
-cargo +1.98.0 build --locked --release \
-  --manifest-path rust/grandpa-finality-observer/Cargo.toml
-
-umi-miner-finality-artifact \
-  --repository-root /absolute/path/to/umi \
-  --binary /absolute/path/to/umi/rust/grandpa-finality-observer/target/release/umi-grandpa-finality-observer \
-  --output-dir /absolute/path/to/umi-darwin-finality
-```
-
-The command requires an ARM64 Darwin host. It checks the thin Mach-O executable
-header, reruns the pinned finality fixture, binds the clean UMI Git revision and
-source pins, and creates a target-resolved Rust license closure. It writes three
-immutable files:
-
-- `umi-grandpa-finality-observer`
-- `miner-finality-build-report.json`
-- `finality-third-party-licenses.zip`
-
-The command also prints the SHA-256 of all three files. Record those digests and
-confirm them with the release builder over a separate trusted channel. Transfer the
-directory without changing the bytes or modes. A path received through the same
-untrusted transfer channel is not provenance.
-
-<a id="macos-miner-operator--2-include-the-target-before-release-signing"></a>
-
-### 2. Include the target before release signing
-
-Add this optional top-level member to the canonical
-`umi-live-shadow-release-input/1` document. Use absolute paths on the Linux release
-builder:
-
-```json
-{
-  "miner_finality_targets": [
-    {
-      "target_triple": "aarch64-apple-darwin",
-      "binary_path": "/absolute/import/umi-darwin-finality/umi-grandpa-finality-observer",
-      "build_report_path": "/absolute/import/umi-darwin-finality/miner-finality-build-report.json",
-      "license_closure_path": "/absolute/import/umi-darwin-finality/finality-third-party-licenses.zip",
-      "expected_binary_sha256": "64-lowercase-hex-from-the-trusted-channel",
-      "expected_build_report_sha256": "64-lowercase-hex-from-the-trusted-channel",
-      "expected_license_closure_sha256": "64-lowercase-hex-from-the-trusted-channel"
-    }
-  ]
-}
-```
-
-Do this before collecting publisher-capacity signatures and the two release
-authority signatures. The normal release construction then:
-
-- adds the Darwin binary digest to
-  `implementation_pins.finality_verifier.release_sha256_by_target`;
-- leaves `storage_proof_verifier.release_sha256_by_target` limited to the primary
-  Linux validator target;
-- includes all three Darwin files in both signed artifact indexes; and
-- emits `miner-templates/aarch64-apple-darwin.json`.
-
-When `miner_finality_targets` is absent, the canonical descriptor and release
-retain the existing single-target behavior. Do not emit an explicit empty member;
-canonical serialization omits it.
-
-<a id="macos-miner-operator--3-verify-and-resolve-the-release-on-the-mac"></a>
-
-### 3. Verify and resolve the release on the Mac
-
-Obtain the expected release-authority hotkey through a trusted channel. Do not
-copy it from the candidate release itself. From a trusted UMI checkout or wheel,
-run:
-
-```bash
-install -d -m 0700 /absolute/private/umi-resolved-releases
-umi-shadow-release-resolve-miner /absolute/path/to/public-release \
-  --expected-authority-hotkey 5ExpectedReleaseAuthorityAddress \
-  --target-triple aarch64-apple-darwin \
-  --output-dir /absolute/private/umi-resolved-releases/release-001
-```
-
-The resolver verifies both release-authority signatures, the complete artifact
-tree, every digest and file mode, policy bindings, the Darwin build report and
-license closure, and the native finality self-test. It then copies the authenticated
-bytes into the previously nonexistent output directory with a mode-0555 root and
-mode-0444 or mode-0555 files. It validates and executes only that private copy. It
-does not execute the Linux validator binaries. The canonical resolved document is
-`/absolute/private/umi-resolved-releases/release-001/resolved-miner-release.json`;
-its paths all remain inside that tree. A missing target, changed byte, unexpected
-file, invalid signature, unsafe output parent, existing output directory, or failed
-native self-test stops resolution.
-
-The resolved document also carries
-`minimum_validator_transport_timeout_seconds` and
-`minimum_validator_transport_concurrency`, recomputed from the complete signed
-validator-template set. Capacity rehearsals use those fields instead of an assumed
-timeout or an operator-supplied value.
-
-<a id="macos-miner-operator--4-install-and-test-the-reference-model-runtime"></a>
-
-### 4. Install and test the reference model runtime
-
-Follow the Apple Silicon procedure in
-[`umi-reference-model/docs/RUN_MINER_MACOS.md`](https://github.com/Umi-BitSign/umi-reference-model/blob/main/docs/RUN_MINER_MACOS.md).
-It checks out the UMI revision named by this signed release, installs the model and
-UMI locks into one Python 3.12 environment, binds the Linux AMD64 extractor image,
-selects MPS or CPU, and runs the request-to-reveal E2E. Use
-`umi-shadow-release-resolve-miner` for the signed UMI release check on Darwin. The
-general validator release verifier executes Linux-only tools and is not the Darwin
-entry point.
-
-Keep the model runbook's environment variables in the same Bash process used to
-start the miner, or store them in its owner-only runtime environment file. Stop if
-the UMI checkout commit differs from `umi_git_revision`, its source-tree digest
-differs from `umi_source_tree_sha256`, either checkout is dirty, or the model probe
-or E2E fails. `umi_revision` is the signed composite display value, not an argument
-to `git checkout`.
-
-<a id="macos-miner-operator--5-prepare-the-public-https-endpoint"></a>
-
-### 5. Prepare the public HTTPS endpoint
-
-The chain Axon and `btcli serve-axon --ip` still use a literal public IPv4 or
-IPv6 address and port. The endpoint profile determines how validators use that
-record:
-
-- The live registration bridge and legacy IP profile connect to
-  `https://<advertised-ip>:<port>` and require a certificate valid for that IP.
-- The open-competition path also accepts a hotkey-signed hostname origin.
-  Follow [miner endpoint IPs and hostnames](model.md#miner-endpoint-hostnames). Its
-  public DNS answers must include the announced Axon IP, and the HTTPS port
-  must match. Validators connect to that verified IP while using the signed
-  hostname for TLS/SNI, certificate verification and the HTTP Host header.
-
-For the hostname profile, a Mac with a changing home IP can use a stable reverse
-proxy or tunnel hostname. Announce a public address returned by that proxy's
-DNS, rather than the home's address. If the announced address disappears from
-the evaluator's DNS answers, update the Axon and wait for finalization. Test
-from the evaluator's network because geographically varying answers can hold
-dispatch.
-
-Hostname support does not activate competition rewards or alter the bridge's
-literal-IP discovery and grouping rules. Public endpoint intake can accept the
-signed hostname while assignment delivery remains unavailable. Do not announce
-model-serving readiness until an external host can validate the chosen profile's
-TLS certificate and complete an authenticated request within the signed limits.
-The proxy must preserve the exact request target, authentication headers and body
-bytes.
-
-<a id="macos-miner-operator--6-create-state-and-start-the-miner"></a>
-
-### 6. Create state and start the miner
-
-The initial reference backend is the tested asynchronous module translator
-`bitsign_motion.umi_reference_backend:translator`. It launches killable worker
-processes for individual jobs. A Unix-socket sidecar remains available to model
-implementations that ship a concrete compatible launcher, but it is not the initial
-reference-model path.
-
-Create private state directories and keep the hotkey on this host. Keep the coldkey
-offline. Run this block in the Bash environment prepared by the reference-model
-runbook:
-
-```bash
-install -d -m 0700 \
-  /absolute/private/umi-miner-state \
-  /absolute/private/umi-finality-state
-
-export RESOLVED_MINER_RELEASE=/absolute/private/umi-resolved-releases/release-001/resolved-miner-release.json
-SCORING_POLICY="$(jq -er .policy_path "$RESOLVED_MINER_RELEASE")"
-TARGET_TRIPLE="$(jq -er .target_triple "$RESOLVED_MINER_RELEASE")"
-FINALITY_VERIFIER="$(jq -er .finality_verifier_binary "$RESOLVED_MINER_RELEASE")"
-FINALITY_CHAIN_SPEC="$(jq -er .finality_chain_spec_path "$RESOLVED_MINER_RELEASE")"
-MIRROR_DISCOVERY="$(jq -er .mirror_discovery_rule_path "$RESOLVED_MINER_RELEASE")"
-test "$TARGET_TRIPLE" = aarch64-apple-darwin
-
-VIDEO_ORIGIN_ARGS=()
-while IFS= read -r ORIGIN; do
-  VIDEO_ORIGIN_ARGS+=(--video-origin "$ORIGIN")
-done < <("$HOME/umi-miner/umi-reference-model/.venv/bin/python" - "$MIRROR_DISCOVERY" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-document = json.loads(Path(sys.argv[1]).read_bytes())
-for origin in document["delivery_origins"]:
-    print(origin)
-PY
-)
-test "${#VIDEO_ORIGIN_ARGS[@]}" -gt 0
-
-export UMI_TESTED_INFERENCE_CONCURRENCY=64
-export UMI_TESTED_BACKEND_WORKERS=16
-test "$UMI_TESTED_INFERENCE_CONCURRENCY" -ge 64
-test "$UMI_TESTED_BACKEND_WORKERS" -ge 16
-
-"$HOME/umi-miner/umi-reference-model/.venv/bin/python" -m umi.miner \
-  --wallet-name miner-wallet \
-  --hotkey umi-miner \
-  --wallet-path /absolute/private/wallets \
-  --policy "$SCORING_POLICY" \
-  --target-triple "$TARGET_TRIPLE" \
-  --finality-verifier-binary "$FINALITY_VERIFIER" \
-  --finality-chain-spec "$FINALITY_CHAIN_SPEC" \
-  --finality-state /absolute/private/umi-finality-state/finality.sqlite3 \
-  --translator bitsign_motion.umi_reference_backend:translator \
-  --model-revision "$UMI_S1_INFERENCE_REVISION" \
-  "${VIDEO_ORIGIN_ARGS[@]}" \
-  --max-inference-concurrency "$UMI_TESTED_INFERENCE_CONCURRENCY" \
-  --coalesce-window-video-inference \
-  --max-backend-workers "$UMI_TESTED_BACKEND_WORKERS" \
-  --inference-timeout 180 \
-  --inference-admission-timeout 10 \
-  --backend-lifecycle-timeout 60 \
-  --nonce-db /absolute/private/umi-miner-state/nonces.sqlite3 \
-  --assignment-db /absolute/private/umi-miner-state/assignments.sqlite3 \
-  --listen-host 127.0.0.1 \
-  --port 8091
-```
-
-The outer value 64 and backend value 16 are the first plausible settings for the
-initial four-validator, 112-request scenario. They are not a readiness claim until
-the reference-model capacity harness passes on this host against the final signed
-release. Replace them with the outer and backend limits that produced that passing
-result within the shortest signed validator transport timeout. The outer value
-remains a positive multiple of the policy validator count. Do not lower it to the
-four-slot E2E setting. The protocol's minimum check is not a throughput claim. Do not pass
-`--allow-unsafe-sync-translator`: the reference translator is asynchronous.
-
-The coalescing flag is an operator assertion about the selected in-process model.
-It is valid for the signed reference backend because that backend depends only on
-the verified video bytes and signed semantic fields. Do not use it with a backend
-that depends on validator, challenge, issuance, deadline, URL, or other omitted
-request metadata. UMI rejects this mode with the request-bound Unix-socket
-transport.
-
-Put TLS and public request filtering in front of the loopback listener. Disable
-system sleep, supervise the miner with a restart delay, and test recovery without
-deleting its SQLite files or lock files. Docker Desktop must be ready before the
-miner starts. Close public ingress whenever `/healthz` is unhealthy.
-
-An unexpected exit of the finality observer or assignment-discovery task makes
-`/healthz` return HTTP503 and rejects new translation requests. The CLI then
-shuts down and exits unsuccessfully so its service manager can restart it.
-Configure a restart delay, for example 120 seconds, to avoid a rapid retry loop.
-Restart retains the SQLite state and repeats normal startup checks; it does not
-substitute RPC observations for verified finality. A running observer alone does
-not prove that its latest finalized record is fresh enough to admit a request.
-
-After the service and TLS proxy pass the external reachability check, publish the
-literal endpoint:
-
-```bash
-btcli tx serve-axon \
-  --netuid 78 \
-  --ip YOUR_PUBLIC_IP \
-  --port 443 \
-  --network finney \
-  --wallet miner-wallet \
-  --wallet-hotkey umi-miner \
-  --no-mev-shield
-```
-
-This serving call is hotkey-signed. The UMI miner process itself makes no chain
-write.
-
-Before public use, exercise valid translation, exact retry, invalid signature,
-late request, failed video fetch, model timeout, model restart, and finality
-restart cases. Confirm that logs contain neither video bytes nor readable
-hypotheses before reveal.
-
-<a id="macos-miner-operator--supported-mac-studio-validator-route"></a>
-
-### Supported Mac Studio validator route
-
-The single supported Apple Silicon validator deployment for the initial public
-cohort is the bounded `linux/amd64` Docker Desktop route in
-[MACOS_VALIDATOR_OPERATOR.md](../reference/legacy.md#macos-validator-operator). It uses the same signed
-target as the x86_64 Linux validators. Do not substitute a native ARM64 Linux VM,
-Rosetta-based Colima profile, or host-native Darwin process unless a later signed
-release and its operator guide explicitly select that target for the whole cohort.
-
-<a id="macos-miner-operator--host-native-validator-boundary"></a>
-
-### Host-native validator boundary
-
-Do not run `umi-validator-live` on macOS for public calibration. Startup now
-rejects Darwin with `live_validator_target_unsupported`, even if a hand-edited
-policy names a Darwin proof binary. A Mac can still run component tests and local
-rehearsals, but those outputs are not a conforming installed validator result.
-
-Adding a public Darwin validator later requires a separately reviewed media
-containment design, target-specific static FFmpeg and FFprobe closure, storage
-proof verifier, complete executable conformance evidence, release templates, and
-load testing. The miner-only target does not imply any of those controls.
+Use the [current connection guide](connection.md) for the miner release, policies,
+feed profile, durable state paths and health checks. Apple Silicon is supported
+as the miner target `aarch64-apple-darwin`. Keep model identity and protocol
+configuration separate: changing the coordinator's platform does not require
+moving your model to Linux.
+
+## Model runtime
+
+For the S1 reference model, the [model repository's macOS build and probe instructions](https://github.com/Umi-BitSign/umi-reference-model/blob/main/docs/RUN_MINER_MACOS.md#3-verify-build-and-bind-the-extractor)
+cover the local extractor and inference identity. Extraction runs in its pinned
+Linux/AMD64 Docker worker; PyTorch runs natively with MPS or CPU. Use those
+instructions for the model artifacts. Use this repository's connection guide
+for the active competition profile, transport allowance and service arguments.
+
+A custom model can use the [in-process or isolated sidecar interface](model.md).
+The sidecar must advertise the same model revision and transport digest as the
+protocol miner, with capacity that fits the signed inference allowance. Verify
+that agreement before restarting the protocol service. Preserve the model assets,
+wallet and durable state specified by the connection guide.
+
+## Finality and service operation
+
+Use the Darwin observer from the
+[competition miner bundle](https://github.com/Umi-BitSign/umi/releases/tag/umi-competition-miner-bundle-v1),
+verified against the active transport policy's `aarch64-apple-darwin` digest and
+published checksums. A locally rebuilt binary is not guaranteed to match that pin.
+Keep the observer path consistent with the miner and chain configuration.
+
+Keep the model runtime and protocol service available after reboot. If the model
+uses Docker Desktop, verify that its required login session and Docker daemon
+are running. Prevent system sleep while serving. Test restart recovery with the
+actual service account and durable state, including a reboot; a successful
+foreground shell run does not establish boot operation.
+
+Check the miner's own `/healthz`, model capacity and finality freshness. A static
+TLS-edge health response cannot show protocol readiness. Serve translation
+requests through the [HTTPS endpoint configuration](model.md#miner-endpoint-ips-and-hostnames).
+
+Measure the selected model under concurrent requests within the active signed
+bounds. Test interrupted fetches, exact request retries, model timeouts and
+restarts without losing durable response or nonce state. Keep capability URLs,
+private video and hypotheses out of shared logs.
+
+## Validators on a Mac
+
+Provision a supported Linux VM and follow the
+[validator supervisor guide](../PERMANENT_VALIDATOR_SUPERVISOR.md). Native Darwin
+is not a validator-supervisor target. Miner support does not qualify a host-native
+validator or an alternative container deployment.

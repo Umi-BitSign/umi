@@ -57,5 +57,6 @@
     "shadow_release.ValidatorCostClass": "32d339bf728f7a6876d22a9475b33eee7229b295703fd27de5bf1f50f243b134",
     "shadow_release.ValidatorCostSchedule": "d4a539f4adb07f9665fba72164b200ec00c7f0f86e83ed51b375534dea1db205"
   },
-  "source_revision": "9960523a4466194eff1ca5cb656ff78d2b9057d5"
+  "source_revision": "9960523a4466194eff1ca5cb656ff78d2b9057d5",
+  "dispatch_repair_definitions_sha256": "332514d87cd0d325f836628226cf668e720ece123e59c7bc86d999401f197a9c"
 }

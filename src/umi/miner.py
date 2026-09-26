@@ -608,6 +608,12 @@ async def _translate_bounded(
                 error_code="video_fetch_failed",
             )
             LOGGER.warning("video fetch failed for challenge %s", request.challenge_id)
+            if error.retryable:
+                # Reserve the next attempt through the durable ledger before I/O.
+                # The enclosing request task still enforces response close and
+                # sealing time. Never retry a sealed response or reset counters.
+                video = runtime.resource_ledger.cached_video(binding)
+                continue
             return _plaintext(
                 request,
                 request_digest_hex=digest,
