@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_order_queue import (
     SignedOrderDeliveryReceipt,
     check_delivery_receipt,
@@ -94,6 +95,37 @@ class CohortOrderInbox:
             intent.order, intent.participant, intent.source, self.policy, intent.observation.block
         )
         return intent, certificate
+
+    def assignment(self, slot: str) -> CohortExecutionAssignment:
+        """Export only a durably acknowledged assignment, without signing."""
+        with self.journal.locked():
+            saved = self._load(slot)
+            if saved is None:
+                raise FileNotFoundError("inbox assignment is unavailable")
+            raw = self.journal.get("receipt", slot)
+            if raw is None:
+                raise FileNotFoundError("inbox assignment acknowledgement is pending")
+            receipt = check_delivery_receipt(
+                saved[1], SignedOrderDeliveryReceipt.model_validate_json(canonical_json_bytes(raw))
+            )
+            if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
+                raise ValueError("inbox acknowledgement belongs to another evaluator")
+            return CohortExecutionAssignment(
+                certificate=saved[1], participant=saved[0].participant, delivery=receipt
+            )
+
+    def assignments(self, *, after: str = "", limit: int = 16) -> tuple[str, ...]:
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("invalid inbox execution page size")
+        with self.journal.transaction() as db:
+            return tuple(
+                row[0]
+                for row in db.execute(
+                    "SELECT i.id FROM records i JOIN records r ON i.id=r.id "
+                    "WHERE i.kind='intent' AND r.kind='receipt' AND i.id>? ORDER BY i.id LIMIT ?",
+                    (after, limit),
+                )
+            )
 
     def _check_certificate(self, certificate):
         delivery_receipt(certificate, self.config.signer)

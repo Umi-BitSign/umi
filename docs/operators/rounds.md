@@ -649,8 +649,35 @@ closure or revocation cannot be rolled back. Historical votes and receipts can
 be recovered offline after closure. A delivery receipt acknowledges storage,
 not execution or completion. The host must supply bounded authenticated reviewer
 and inbox transports, independently verified history/finality, and a migration
-fence. These components are not yet installed as a production cohort service;
-live execution, endpoint retry selection and reward integration remain separate.
+fence. These components are not yet installed as a production cohort service.
+
+The evaluator execution worker consumes acknowledged inbox assignments without
+a signing key. Its private per-case journal reserves output capacity before
+invocation and retains classified stdout before collecting a finish observation.
+A failed finality read therefore retries the observation without rerunning the
+model. Completed case/role steps are immutable and survive process restart;
+complete evidence remains retrievable offline. Missing or interrupted work
+stays pending while the certified request phase remains open. Elapsed targets
+do not expire the job. Closure or revocation stops new execution.
+
+The CPU sandbox port uses the original pinned rootless runtime and isolated
+model/video mounts. Each retained attempt names one exact container and owns
+one private scratch directory. Recovery stops an uncertain prior container
+before selecting a replacement attempt; it never removes other containers or
+retained models, videos and journals. A crash before stdout reaches the journal
+can require repeating that computation. Only the first retained classified
+output is selected, including a valid miner failure.
+
+The process supervisor must stop and reap the previous worker's entire process
+group before recovery; container removal alone cannot fence a still-running
+launcher on another host. Host migration needs an independent writer fence.
+This port does not implement native macOS recovery. Configure journal record,
+byte and attempt capacity for the selected series and recovery reserve; capacity
+can be increased without changing accepted assignments. Logical reservations
+do not reserve physical disk space. `read_timeout_seconds` bounds individual
+history/provider calls; it is adjustable without changing retained assignments.
+Local authenticated replay has no elapsed processing deadline. Endpoint transport
+retries, installed service recovery and reward integration remain required.
 
 `umi-recoverable-roster-evidence/1` binds the entire round to its certified
 intake seal and preparation result. The reviewer replays the original intake
@@ -662,7 +689,7 @@ missing archives remain source failures. Delay alone neither erases a member nor
 creates a zero or void. This review does not certify dispatch/retry selection,
 close scheduler work or calculate service credit.
 
-Live request authorization, durable attempt selection, complete roster
+Live endpoint request authorization and retry selection, complete roster
 settlement, delayed first reward admission and standing reward continuation
 still require integration. A reviewed void does not itself authorize closing
 an unresolved scheduler obligation. These artifacts do not invoke models, prove host

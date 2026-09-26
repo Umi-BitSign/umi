@@ -26,6 +26,7 @@ from .competition_artifacts import verify_preserved_bundle
 from .competition_native import OfflineMpsRuntime
 from .concurrency import kill_and_reap
 from .open_competition import CaseOutput, CompetitionPolicy, ModelBundle, digest
+from .private_files import ensure_private_directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
@@ -281,6 +282,26 @@ async def _drain_cleanup(awaitable):
     return result
 
 
+def invocation_container_name(invocation_sha256: str) -> str:
+    """An owner-retained invocation identity names only its case container."""
+    if (
+        type(invocation_sha256) is not str
+        or len(invocation_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in invocation_sha256)
+    ):
+        raise ValueError("invalid retained invocation identity")
+    return "umi-evaluation-" + invocation_sha256[:32]
+
+
+async def stop_retained_cpu_invocation(invocation_sha256: str) -> None:
+    name = invocation_container_name(invocation_sha256)
+    code, _ = await _small_command(
+        ("/usr/bin/podman", "rm", "--force", "--ignore", "--time=0", name)
+    )
+    if code:
+        raise EvaluationInfrastructureError("retained evaluation container cleanup failed")
+
+
 async def execute_offline_case(
     *,
     bundle: ModelBundle,
@@ -290,6 +311,8 @@ async def execute_offline_case(
     case_id: Hex32,
     video_sha256: Hex32,
     video: bytes,
+    invocation_sha256: Hex32 | None = None,
+    workspace: Path | None = None,
 ) -> OfflineCaseExecution:
     """Run a verified model on one clip, with no reference text passed to it.
 
@@ -298,6 +321,13 @@ async def execute_offline_case(
     reads argv[1] and emits one UTF-8 English hypothesis to stdout.
     """
     runtime = OFFLINE_RUNTIME.validate_json(canonical_json_bytes(runtime))
+    if (invocation_sha256 is None) != (workspace is None):
+        raise ValueError("retained CPU invocation requires its identity and workspace")
+    if invocation_sha256 is not None:
+        invocation_container_name(invocation_sha256)
+        if not isinstance(runtime, OfflineCpuRuntime):
+            raise EvaluationInfrastructureError("retained invocation requires a CPU runtime")
+        ensure_private_directory(workspace)
     if isinstance(runtime, OfflineMpsRuntime):
         from .competition_native import execute_native_case
 
@@ -322,9 +352,13 @@ async def execute_offline_case(
     entrypoints = [f.path for f in bundle.files if f.role == "inference"]
     if len(entrypoints) != 1 or not entrypoints[0].endswith(".py"):
         raise EvaluationInfrastructureError("CPU runtime requires one declared Python entrypoint")
-    name = "umi-evaluation-" + uuid.uuid4().hex
+    name = (
+        "umi-evaluation-" + uuid.uuid4().hex
+        if invocation_sha256 is None
+        else invocation_container_name(invocation_sha256)
+    )
     process = None
-    with tempfile.TemporaryDirectory(prefix="umi-evaluation-input-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="umi-evaluation-input-", dir=workspace) as scratch:
         inputs = Path(scratch)
         path = inputs / "video.mp4"
         path.write_bytes(video)
@@ -387,7 +421,7 @@ async def execute_offline_case(
             raise EvaluationInfrastructureError("container process could not start") from error
         finally:
             # Killing the Podman client alone does not establish container exit.
-            # Remove only this randomly named case container; never --all or a
+            # Remove only this case container; never --all or a
             # validator container name. Failure stops evaluation as infrastructure.
             try:
                 code, _ = await _drain_cleanup(
