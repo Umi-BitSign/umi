@@ -152,13 +152,8 @@ def verify_recoverable_endpoint_order(
     The signatures bind an attempt; they do not prove its original publication
     time or that it was the only attempt. Those are durable-dispatcher gates.
     """
-    raw = canonical_json_bytes(signed)
-    if len(raw) > 16 * 1024**2:
-        raise ValueError("recoverable endpoint order exceeds its byte bound")
-    signed = SignedRecoverableEndpointOrder.model_validate_json(raw)
-    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    transport = ScoringPolicy.model_validate_json(canonical_json_bytes(transport))
-    body, job = signed.order, signed.order.job
+    signed = validate_recoverable_endpoint_transport(signed, policy, transport)
+    job = signed.order.job
     view = verify_recoverable_round_participant(
         job.submission,
         job.round,
@@ -173,6 +168,32 @@ def verify_recoverable_endpoint_order(
     preparation = view.closure("preparation")
     requests = view.closure("requests")
     view.closure("reference_reveal")
+    if job.preparation_closure_sha256 != digest(preparation):
+        raise ValueError("recoverable endpoint order scope or signer differs")
+    for request in signed.order.requests:
+        if (
+            not preparation.observed_at_block
+            < request.issued_block
+            < request.deadline_block
+            <= requests.observed_at_block
+        ):
+            raise ValueError("recoverable endpoint assignment or request interval differs")
+    return signed
+
+
+def validate_recoverable_endpoint_transport(
+    signed: SignedRecoverableEndpointOrder,
+    policy: CompetitionPolicy,
+    transport: ScoringPolicy,
+) -> SignedRecoverableEndpointOrder:
+    """Verify bounded signed request scope; confer no live delivery authority."""
+    raw = canonical_json_bytes(signed)
+    if len(raw) > 16 * 1024**2:
+        raise ValueError("recoverable endpoint order exceeds its byte bound")
+    signed = SignedRecoverableEndpointOrder.model_validate_json(raw)
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    transport = ScoringPolicy.model_validate_json(canonical_json_bytes(transport))
+    body, job = signed.order, signed.order.job
     validate_transport_cohort(policy, transport)
     verify_recovery_quorum(body, signed.signatures, policy)
     evaluator, miner = identity(job.evaluator_hotkey), identity(job.submission.submission.hotkey)
@@ -184,7 +205,6 @@ def verify_recoverable_endpoint_order(
         or any(identity(s.hotkey) == miner for s in signed.signatures)
         or body.transport_policy_sha256 != scoring_policy_hash(transport)
         or body.transport_policy_sha256 == digest(policy)
-        or job.preparation_closure_sha256 != digest(preparation)
         or len(body.requests) != len(job.cases)
         or not has_case_coverage(job.cases, policy)
     ):
@@ -199,10 +219,7 @@ def verify_recoverable_endpoint_order(
             or request.video.sha256 != case.video_sha256
             or request.task.stratum != case.stratum
             or request.scoring_policy_hash != body.transport_policy_sha256
-            or not preparation.observed_at_block
-            < request.issued_block
-            < request.deadline_block
-            <= requests.observed_at_block
+            or not request.issued_block < request.deadline_block
             or request.issued_block < transport.activation_block
             or request.video.size_bytes > limits.maximum_clip_size_bytes
             or len(canonical_json_bytes(request)) > limits.maximum_request_body_bytes

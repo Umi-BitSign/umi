@@ -695,6 +695,29 @@ timeout. Individual RPC/finality reads and DNS remain bounded. The worker checks
 current authority and freshness again after collection. Live request/retry
 selection and installation qualification remain required.
 
+The endpoint response recovery worker retains one quorum-signed bounded attempt
+and reserves all case-response capacity before polling. Its complete request
+intent and queue commit together; interrupted reservations resume from that
+retained intent. A saved cursor survives restart, so an unavailable miner does
+not prevent later cases from being checked. Polling uses the original evaluator
+key, fresh route-specific authentication and a newly proved public serving origin.
+It only calls `POST /v1/translate/response`; it never retransmits inference.
+
+A verified original envelope, including a signed miner failure, is persisted
+before acknowledgement and returned offline on subsequent reads. Recovery
+records the actual retrieval time. It neither certifies original timely receipt
+nor produces a score or closes a scheduler obligation. An absent archive,
+pending response, invalid envelope or transient transport failure leaves work
+pending. An uncertain attempt cannot be replaced by another signed attempt.
+Current authority still governs new network reads; already retained evidence
+remains readable after closure. Capacity can grow without replacing selections.
+
+This worker does not yet provide live C5 request grants, remote cancellation or
+certified terminal-attempt selection. Those gates must be integrated before
+automated dispatch, closure and settlement. A production host must also own the
+signer, origin provider, writer fence and service lifecycle. Recovery of an old
+policy's archive under a replacement evaluator key remains unsupported.
+
 `umi-recoverable-roster-evidence/1` binds the entire round to its certified
 intake seal and preparation result. The reviewer replays the original intake
 inventory, including superseded submissions, every selected admission and all
