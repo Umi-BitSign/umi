@@ -635,6 +635,23 @@ evidence. This signer does not select endpoint retries, authorize delivery or
 establish one active writer across migrated hosts. Those remain dispatcher and
 control-authority requirements.
 
+The coordinator order queue retains that selection before contacting reviewers,
+collects independent-group votes and commits one exact certificate before
+publication. Each evaluator has a private inbox that retains the assignment
+before signing its delivery receipt. Lost votes, receipts and commit replies
+recover from those journals after restart. A saved scan cursor prevents stalled
+entries from repeatedly starving later work after service restarts. Pending work
+has no age limit; capacity and per-operation timeouts are retryable.
+
+New signatures and first delivery require current owned finality and an open
+request phase. Both sender and receiver check authenticated history; learned
+closure or revocation cannot be rolled back. Historical votes and receipts can
+be recovered offline after closure. A delivery receipt acknowledges storage,
+not execution or completion. The host must supply bounded authenticated reviewer
+and inbox transports, independently verified history/finality, and a migration
+fence. These components are not yet installed as a production cohort service;
+live execution, endpoint retry selection and reward integration remain separate.
+
 `umi-recoverable-roster-evidence/1` binds the entire round to its certified
 intake seal and preparation result. The reviewer replays the original intake
 inventory, including superseded submissions, every selected admission and all

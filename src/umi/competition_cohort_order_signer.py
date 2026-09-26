@@ -134,6 +134,45 @@ def review_order(
     )
 
 
+def remember_order_history(
+    journal: RoundJournal,
+    cohorts: dict[str, str],
+    policy: CompetitionPolicy,
+    source: CohortOrderHistory,
+    block: int,
+) -> None:
+    """Retain an authenticated monotonic history under the owning process mutex."""
+    source = CohortOrderHistory.model_validate_json(canonical_json_bytes(source))
+    history = source.history
+    cohort = digest(history.plan)
+    if cohorts.get(cohort) != digest(history.authority.authority):
+        raise ValueError("order signer has no configured cohort authority")
+    verify_cohort_history(
+        history, policy, expected_tip_sha256=history_tip(history), current_block=block
+    )
+    replay_cohort_decisions(history, policy, source.inputs().__getitem__)
+
+    def index(db):
+        row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
+        if row is not None:
+            raw = journal.get("order_history", row[0], db=db)
+            old = CohortOrderHistory.model_validate_json(canonical_json_bytes(raw))
+            if (
+                digest(old) != row[0]
+                or old.history.genesis != history.genesis
+                or (history.transitions[: len(old.history.transitions)] != old.history.transitions)
+            ):
+                raise ValueError("order history rolled back or forked")
+        db.execute(
+            "INSERT INTO order_heads VALUES (?,?) ON CONFLICT(cohort) "
+            "DO UPDATE SET history=excluded.history",
+            (cohort, digest(source)),
+        )
+
+    journal.observe(block)
+    journal.put_many((("order_history", digest(source), source),), index=index)
+
+
 class CohortOrderJournal:
     def __init__(self, config: CohortOrderSignerConfig, policy: CompetitionPolicy):
         self.config = CohortOrderSignerConfig.model_validate_json(canonical_json_bytes(config))
@@ -161,38 +200,7 @@ class CohortOrderJournal:
             )
 
     def remember(self, source: CohortOrderHistory, block: int) -> None:
-        source = CohortOrderHistory.model_validate_json(canonical_json_bytes(source))
-        history = source.history
-        cohort = digest(history.plan)
-        if self.cohorts.get(cohort) != digest(history.authority.authority):
-            raise ValueError("order signer has no configured cohort authority")
-        verify_cohort_history(
-            history, self.policy, expected_tip_sha256=history_tip(history), current_block=block
-        )
-        replay_cohort_decisions(history, self.policy, source.inputs().__getitem__)
-
-        def index(db):
-            row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
-            if row is not None:
-                raw = self.journal.get("order_history", row[0], db=db)
-                old = CohortOrderHistory.model_validate_json(canonical_json_bytes(raw))
-                if (
-                    digest(old) != row[0]
-                    or old.history.genesis != history.genesis
-                    or (
-                        history.transitions[: len(old.history.transitions)]
-                        != old.history.transitions
-                    )
-                ):
-                    raise ValueError("order history rolled back or forked")
-            db.execute(
-                "INSERT INTO order_heads VALUES (?,?) ON CONFLICT(cohort) "
-                "DO UPDATE SET history=excluded.history",
-                (cohort, digest(source)),
-            )
-
-        self.journal.observe(block)
-        self.journal.put_many((("order_history", digest(source), source),), index=index)
+        remember_order_history(self.journal, self.cohorts, self.policy, source, block)
 
     def load(self, slot: str) -> tuple[CohortOrderIntent, CohortOrderVote | None] | None:
         with self.journal.transaction() as db:
@@ -268,6 +276,10 @@ class CohortOrderSigner:
             raise ValueError("order signer finality belongs to another policy")
         self.journal, self.provider, self.history, self.sign = journal, provider, history, sign
         self.serial = asyncio.Lock()
+
+    async def lookup(self, slot: str) -> CohortOrderVote | None:
+        saved = await run_owned_thread(self.journal.load, slot)
+        return None if saved is None else saved[1]
 
     async def recover(self, slot: str) -> CohortOrderVote:
         saved = await run_owned_thread(self.journal.load, slot)
