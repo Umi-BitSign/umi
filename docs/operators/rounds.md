@@ -624,6 +624,17 @@ repeated signing keeps a stable void decision identity. Missing observations
 remain pending; agreeing scorable observations cannot become voids. These
 benchmark outcomes do not measure serving capacity or create service credit.
 
+The order signer retains one exact selection per round and participant before
+signing, including original consent, admission, phase decisions and an owned
+finality observation. It reserves bounded vote storage first. Partial quorum,
+lost acknowledgements and interrupted signing recover that same selection after
+long delays; changed inputs and history/finality rollback are rejected. New
+signatures require the currently open request phase and the exact certified
+preparation result. A committed vote can be returned offline as historical
+evidence. This signer does not select endpoint retries, authorize delivery or
+establish one active writer across migrated hosts. Those remain dispatcher and
+control-authority requirements.
+
 `umi-recoverable-roster-evidence/1` binds the entire round to its certified
 intake seal and preparation result. The reviewer replays the original intake
 inventory, including superseded submissions, every selected admission and all

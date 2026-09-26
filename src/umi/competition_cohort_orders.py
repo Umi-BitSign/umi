@@ -95,8 +95,40 @@ def verify_recoverable_order(
     if len(raw) > MAX_ORDER_BYTES:
         raise ValueError("recoverable evaluation order exceeds its byte bound")
     signed = SignedRecoverableEvaluationOrder.model_validate_json(raw)
+    verify_recoverable_order_body(
+        signed.order,
+        policy,
+        consent,
+        admission,
+        admission_snapshot,
+        history,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    verify_recovery_quorum(signed.order, signed.signatures, policy)
+    miner = identity(signed.order.submission.submission.hotkey)
+    if any(identity(s.hotkey) == miner for s in signed.signatures):
+        raise ValueError("a submitting hotkey cannot authorize its own order")
+    return signed
+
+
+def verify_recoverable_order_body(
+    order: RecoverableEvaluationOrder,
+    policy: CompetitionPolicy,
+    consent: SignedCohortParticipationConsent,
+    admission: AttestedCohortParticipantAdmission,
+    admission_snapshot: RegistrationSnapshot,
+    history: CohortRecoveryHistory,
+    *,
+    expected_tip_sha256: str,
+    current_block: int,
+) -> RecoverableEvaluationOrder:
+    """Validate the reference-free body before reserving a signing decision."""
+    raw = canonical_json_bytes(order)
+    if len(raw) > MAX_ORDER_BYTES:
+        raise ValueError("recoverable evaluation order exceeds its byte bound")
+    order = RecoverableEvaluationOrder.model_validate_json(raw)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    order = signed.order
     view = verify_recoverable_round_participant(
         order.submission,
         order.round,
@@ -108,7 +140,6 @@ def verify_recoverable_order(
         expected_tip_sha256=expected_tip_sha256,
         current_block=current_block,
     )
-    verify_recovery_quorum(order, signed.signatures, policy)
     groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
     keys = tuple(identity(k) for k in order.evaluators)
     if keys != tuple(sorted(set(keys))) or any(k not in groups for k in keys):
@@ -116,7 +147,7 @@ def verify_recoverable_order(
     if len({groups[k] for k in keys}) != len(keys) or len(keys) < policy.required_evaluator_groups:
         raise ValueError("order requires distinct independent evaluator groups")
     miner = identity(order.submission.submission.hotkey)
-    if miner in keys or any(identity(s.hotkey) == miner for s in signed.signatures):
+    if miner in keys:
         raise ValueError("a submitting hotkey cannot authorize or evaluate its own order")
     if (
         order.preparation_closure_sha256 != digest(view.closure("preparation"))
@@ -129,4 +160,4 @@ def verify_recoverable_order(
     validate_bundle_policy(order.incumbent, policy)
     if order.submission.submission.track == "model":
         validate_bundle_policy(order.submission.submission.model_bundle, policy)
-    return signed
+    return order

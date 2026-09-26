@@ -114,7 +114,9 @@ def retained(s, name, sequence):
     )
 
 
-def make_round(s, *, omit_prepared_member=False, unavailable=1200, preparation_hash=None):
+def make_round(
+    s, *, omit_prepared_member=False, unavailable=1200, preparation_hash=None, include_outcomes=True
+):
     # The replaced submission is still in the original inventory. A consumer
     # cannot delete it merely because the seal selects a newer submission.
     prior = retained(s, "Alice", 1)
@@ -199,6 +201,7 @@ def make_round(s, *, omit_prepared_member=False, unavailable=1200, preparation_h
             evidence=bundle_evidence(m),
         )
         for m in scenarios
+        if include_outcomes
     )
     return dict(
         roster=roster,
