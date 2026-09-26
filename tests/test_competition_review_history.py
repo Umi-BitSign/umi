@@ -321,3 +321,25 @@ def test_cli_initializes_review_baseline_without_importing_admissions(setup, tmp
     assert result["contributor_hotkey"] is None
     store = EvaluatorReviewStore(directory, s.policy, limits=s.limits)
     assert store.baseline() == result and not store.submissions()
+
+
+def test_historical_promoted_contributor_is_replayed_from_retained_review(setup):
+    s = setup
+    observe(s)
+    original = s.reviews.reviewed_promotion_head(digest(s.round), maximum_bytes=8_000_000)
+    promote(s, s.reviews, agreed_review(s), 153)
+    head = s.reviews.reviewed_promotion_head(digest(s.round), maximum_bytes=8_000_000)
+    assert head.contributor_hotkey == s.model.submission.hotkey
+    assert (
+        s.reviews.reviewed_promotion_at(
+            digest(s.round), head.promotion_sha256, maximum_bytes=8_000_000
+        )
+        == head
+    )
+    assert (
+        s.reviews.reviewed_promotion_at(
+            digest(s.round), original.promotion_sha256, maximum_bytes=8_000_000
+        )
+        == original
+    )
+    assert s.reviews.reviewed_promotion_head(digest(s.round), maximum_bytes=8_000_000) == head

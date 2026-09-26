@@ -181,7 +181,7 @@ def review_quality_manifest(
     manifest: CohortQualityManifest, review: ClosedQualityReview
 ) -> tuple[ClosedParticipantQuality, ...]:
     manifest = CohortQualityManifest.model_validate_json(canonical_json_bytes(manifest))
-    if manifest.request_closure_sha256 != digest(review.closure) or tuple(
+    if manifest.request_closure_sha256 != review.request_closure_sha256 or tuple(
         p.submission_sha256 for p in manifest.participants
     ) != tuple(p.submission_sha256 for p in review.closure.participants):
         raise ValueError("quality manifest must cover the exact certified roster")
@@ -215,7 +215,7 @@ def build_quality_manifest(
         raise PendingQualityCertificates(tuple(pending))
     manifest = CohortQualityManifest(
         schema="umi-cohort-quality-manifest/1",
-        request_closure_sha256=digest(review.closure),
+        request_closure_sha256=review.request_closure_sha256,
         participants=tuple(refs),
     )
     review_quality_manifest(manifest, review)

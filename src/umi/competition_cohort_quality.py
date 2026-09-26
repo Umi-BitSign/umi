@@ -30,6 +30,12 @@ from .competition_cohort_request_closure import (
 )
 from .competition_cohort_request_terminal import RequestExecutionArchive, SignedRequestTerminal
 from .competition_cohort_roster import RecoverableRosterEvidence
+from .competition_cohort_service_closure import (
+    CohortServiceRequestClosure,
+    verify_certified_service_request_closure,
+)
+from .competition_cohort_service_seal import ServiceWorkSeal
+from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_execution import ExecutionStep
 from .open_competition import (
@@ -44,6 +50,7 @@ from .open_competition import (
     quality_from_hypotheses,
     validate_suite_profile,
 )
+from .policy import ScoringPolicy
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 QualityReason = Literal["infrastructure_failure", "incumbent_failure", "observation_disagreement"]
@@ -172,7 +179,7 @@ class ClosedQualityReview:
 
     def __init__(
         self,
-        closure: CohortRequestClosure,
+        closure: CohortRequestClosure | CohortServiceRequestClosure,
         roster: RecoverableRosterEvidence,
         objects: EndpointObjectSource,
         suite: EvaluationSuite,
@@ -184,22 +191,49 @@ class ClosedQualityReview:
         pulses: Callable[[int], RetainedRevealPulse],
         expected_tip_sha256: str,
         current_block: int,
+        transport: ScoringPolicy | None = None,
+        expected_catalogs: tuple[SignedServiceWorkCatalog, ...] = (),
+        expected_seals: tuple[ServiceWorkSeal, ...] = (),
     ):
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
         self.roster = RecoverableRosterEvidence.model_validate_json(canonical_json_bytes(roster))
         self.history = CohortRecoveryHistory.model_validate_json(canonical_json_bytes(history))
-        self.closure = verify_certified_request_closure(
-            closure,
-            self.roster,
-            objects,
-            self.policy,
-            self.history,
-            decision_source=decision_source,
-            intake_records=intake_records,
-            expected_tip_sha256=expected_tip_sha256,
-            current_block=current_block,
-        )
+        if isinstance(closure, CohortServiceRequestClosure):
+            if transport is None or not expected_catalogs or not expected_seals:
+                raise ValueError("combined quality review requires selected service sources")
+            verified = verify_certified_service_request_closure(
+                closure,
+                self.roster,
+                objects,
+                self.policy,
+                self.history,
+                transport,
+                expected_catalogs=expected_catalogs,
+                expected_seals=expected_seals,
+                decision_source=decision_source,
+                intake_records=intake_records,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+            )
+            self.closure = CohortRequestClosure.model_validate_json(
+                read_endpoint_object(objects, verified.benchmark_closure_sha256)
+            )
+        else:
+            verified = self.closure = verify_certified_request_closure(
+                closure,
+                self.roster,
+                objects,
+                self.policy,
+                self.history,
+                decision_source=decision_source,
+                intake_records=intake_records,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+            )
+        # For version 2 the benchmark is a subset of the certified closure.
+        # Votes bind the complete service-plus-benchmark decision, not its subset.
+        self.request_closure_sha256 = digest(verified)
         validate_suite_profile(self.suite, self.policy)
         if self.roster.round.suite_sha256 != digest(
             self.suite
@@ -335,7 +369,7 @@ class ClosedQualityReview:
             policy_sha256=digest(self.policy),
             round_sha256=digest(self.roster.round),
             suite_sha256=digest(self.suite),
-            request_closure_sha256=digest(self.closure),
+            request_closure_sha256=self.request_closure_sha256,
             submission_sha256=submission_sha256,
             order_sha256=member.order_sha256,
             hotkey=submission.hotkey,

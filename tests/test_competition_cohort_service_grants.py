@@ -134,14 +134,18 @@ def policy(miner_policy, shared_control_group):
     )
 
 
-def admitted_service(p, directory, *, catalog_number=1):
+def admitted_service(p, directory, *, catalog_number=1, terms=None, references=None):
     source, round_ = p.e.r.h.source, p.e.job.round
     work = tuple(
         {
             "case_id": f"{900 + i:064x}",
             "video_sha256": p.service_video.sha256 if i == 0 else case.video_sha256,
-            "reference_sha256": digest({"reference": f"service-reference-{i}"}),
-            "stratum": case.stratum,
+            "reference_sha256": (
+                digest(references[i])
+                if references is not None
+                else digest({"reference": f"service-reference-{i}"})
+            ),
+            "stratum": references[i].stratum if references is not None else case.stratum,
         }
         for i, case in enumerate(p.e.job.cases[:2])
     )
@@ -152,7 +156,7 @@ def admitted_service(p, directory, *, catalog_number=1):
         cohort_sha256=round_.cohort_sha256,
         authority_sha256=digest(source.history.authority.authority),
         round_sha256=digest(round_),
-        service_terms_sha256="a1" * 32,
+        service_terms_sha256=digest(terms) if terms is not None else "a1" * 32,
         issued_at_block=399 + catalog_number,
         work=work,
         selection_rule="global_fifo_no_identity_quota",
@@ -225,7 +229,12 @@ def produce_grant(p, c, window, **parent):
 
 
 @pytest.fixture
-async def service_owner(granted, tmp_path, monkeypatch):
+def service_catalog_inputs(request):
+    return getattr(request, "param", False)
+
+
+@pytest.fixture
+async def service_owner(granted, tmp_path, monkeypatch, service_catalog_inputs):
     p = granted
     service_bytes = b"catalog-only-service-video-outside-benchmark-inventory"
     p.service_video = p.requests[0].video.model_copy(
@@ -245,11 +254,52 @@ async def service_owner(granted, tmp_path, monkeypatch):
         return await fetch(descriptor)
 
     monkeypatch.setattr(p.fetcher, "fetch", service_fetch)
-    c = admitted_service(p, tmp_path / "service-queue")
+    terms, references = None, None
+    if service_catalog_inputs:
+        from umi.competition_cohort_service_quality import ServiceReference, ServiceTerms
+
+        terms = ServiceTerms(
+            schema="umi-cohort-service-terms/1",
+            policy_sha256=digest(p.c.policy),
+            transport_policy_sha256=scoring_policy_hash(p.transport_policy),
+            service_pool_bps=7000,
+            stratum_weights={"fingerspelling": 3, "continuous": 10},
+        )
+        references = tuple(
+            ServiceReference(
+                schema="umi-cohort-service-reference/1",
+                case_id=f"{900 + i:064x}",
+                video_sha256=p.service_video.sha256 if i == 0 else case.video_sha256,
+                stratum="continuous"
+                if service_catalog_inputs == "wer_partial" or i
+                else "fingerspelling",
+                salt="41" * 32,
+                reference={"cer_partial": "hello worle", "wer_partial": "hello there"}.get(
+                    service_catalog_inputs, "hello world"
+                ),
+            )
+            for i, case in enumerate(p.e.job.cases[:2])
+        )
+    c = admitted_service(p, tmp_path / "service-queue", terms=terms, references=references)
+    c.terms, c.references = terms, references
+    if service_catalog_inputs == "miner_failure":
+        p.model.fail = True
     c.p, c.tmp_path = p, tmp_path
+    if service_catalog_inputs:
+        from .test_drand import ROUND
+
+        shift_ms = (p.requests[0].reveal_round - ROUND) * QUICKNET_PERIOD_MS
+        p.finality.blocks = {
+            height: replace(block, timestamp_ms=block.timestamp_ms - shift_ms)
+            for height, block in p.finality.blocks.items()
+        }
     c.window = await capture_request_window(
         p.transport_policy, p.finality, p.requests[0].issued_block
     )
+    if service_catalog_inputs:
+        # This native timelock fixture uses a retained, verifiable Quicknet pulse.
+        # Keep the miner's execution clock inside its original request window.
+        monkeypatch.setattr(time, "time", lambda: c.window.issuance.timestamp_ms / 1000)
     monkeypatch.setattr(
         bt.timelock, "current_round", lambda: c.window.schedule(p.transport_policy).selection_round
     )
@@ -1070,7 +1120,7 @@ async def terminal_response(c):
     p, req = c.p, c.grant.body.request
     assert (await accept(c)).status_code == 200
     reply = await request(p, TRANSLATE_PATH, req)
-    assert reply.status_code == 200
+    assert reply.status_code == 200, reply.text
     retained = RecoveredEndpointResponse(
         schema="umi-recovered-endpoint-response/1",
         envelope_hex=reply.content.hex(),
@@ -1398,6 +1448,154 @@ def test_service_closure_missing_response_remains_pending_until_archive_recovers
     assert review_service_closed(b, current_block=2**53 - 1) == b["closure"]
 
 
+@pytest.fixture
+def service_quality_inputs(service_closed):
+    from umi.competition_cohort_service_quality import CatalogReferences, ServiceReferenceReveal
+
+    from .test_competition_cohort_request_closure import certified_history, put
+
+    b, c = service_closed, service_closed["service_case"]
+    assert c.terms is not None
+    reveal = ServiceReferenceReveal(
+        schema="umi-cohort-service-reference-reveal/1",
+        policy_sha256=digest(b["policy"]),
+        request_closure_sha256=digest(b["closure"]),
+        benchmark_suite_sha256=b["roster"].round.suite_sha256,
+        catalogs=(
+            CatalogReferences(
+                catalog_sha256=digest(c.assignment.catalog.catalog),
+                references=tuple(put(b, r) for r in c.references),
+            ),
+        ),
+    )
+    b["reveal"] = reveal
+    b["history"] = certified_history(b, reveal_result=digest(reveal))
+    return b
+
+
+def service_quality(b, *, allocation=False, review=False, **changes):
+    from umi.competition_cohort_service_quality import replay_closed_service_quality
+    from umi.competition_endpoint_execution import RetainedRevealPulse
+
+    from .test_competition_cohort_consumers import tip
+    from .test_drand import pulse_record
+
+    c = b["service_case"]
+    args = dict(
+        closure=b["closure"],
+        roster=b["roster"],
+        objects=b["objects"].__getitem__,
+        policy=b["policy"],
+        history=b["history"],
+        transport=b["transport"],
+        terms=c.terms,
+        reveal=b["reveal"],
+        expected_catalogs=(c.assignment.catalog,),
+        expected_seals=(b["service_seal"],),
+        expected_terms_sha256=digest(c.terms),
+        decision_source=b["decisions"].__getitem__,
+        intake_records=iter(b["records"]),
+        pulses=lambda _: RetainedRevealPulse(**pulse_record()),
+        expected_tip_sha256=tip(b["history"]),
+        current_block=2**53 - 1,
+    )
+    args.update(changes)
+    if review:
+        from umi.competition_cohort_service_certification import ServiceAllocationReview
+
+        return ServiceAllocationReview(**args)
+    if allocation:
+        from umi.competition_cohort_service_allocation import replay_service_allocation
+
+        return replay_service_allocation(**args)
+    return replay_closed_service_quality(**args)
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+def test_service_quality_replays_encrypted_work_after_unbounded_delay(service_quality_inputs):
+    b = service_quality_inputs
+    observed = service_quality(b)
+    assert len(observed.work) == 1
+    work = observed.work[0]
+    assert work.work_sha256 == b["service_case"].assignment.admission.work_sha256
+    assert work.quality.numerator == work.quality.denominator == "1"
+    assert work.credit == work.quality and work.units == 1
+    assert work.elapsed_ms is None
+    assert work.recipient_hotkey == b["service_case"].assignment.admission.claim.claim.hotkey
+    assert not observed.chain_submission_authorized
+    assert service_quality(b) == observed
+    assert b["service_case"].p.model.calls == 1
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+@pytest.mark.parametrize(
+    "damage", ["terms", "term_selection", "reveal", "reference", "terminal", "pulse"]
+)
+def test_service_quality_rejects_changed_or_missing_evidence(service_quality_inputs, damage):
+    b, changed = service_quality_inputs, {}
+    if damage == "terms":
+        changed["terms"] = b["service_case"].terms.model_copy(update={"service_pool_bps": 5000})
+    elif damage == "term_selection":
+        changed["expected_terms_sha256"] = "fe" * 32
+    elif damage == "reveal":
+        changed["reveal"] = b["reveal"].model_copy(update={"benchmark_suite_sha256": "fe" * 32})
+    elif damage == "reference":
+        b["objects"].pop(b["reveal"].catalogs[0].references[0])
+    elif damage == "terminal":
+        b["objects"].pop(b["closure"].catalogs[0].terminals[0])
+    else:
+
+        def missing(_):
+            raise OSError("fixture pulse unavailable")
+
+        changed["pulses"] = missing
+    with pytest.raises((ValueError, KeyError, OSError)):
+        service_quality(b, **changed)
+
+
+@pytest.mark.parametrize(
+    "service_catalog_inputs", ["cer_partial", "wer_partial", "miner_failure"], indirect=True
+)
+def test_service_quality_uses_exact_metric_and_explicit_miner_failure(
+    service_quality_inputs, service_catalog_inputs
+):
+    b = service_quality_inputs
+    result = service_quality(b).work[0]
+    expected = {"cer_partial": ("9", "10"), "wer_partial": ("1", "2"), "miner_failure": ("0", "1")}
+    assert (result.quality.numerator, result.quality.denominator) == expected[
+        service_catalog_inputs
+    ]
+    assert result.credit == result.quality
+    if service_catalog_inputs == "miner_failure":
+        assert result.status == "miner_failure"
+        assert result.reason_code == "signed_miner_error"
+    else:
+        assert result.status == "ok"
+        assert result.reason_code is None
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+@pytest.mark.parametrize("error", [MemoryError, TimeoutError])
+def test_service_quality_local_failure_recovers_without_zero_or_new_inference(
+    service_quality_inputs, monkeypatch, error
+):
+    import bittensor_core
+
+    b = service_quality_inputs
+    original = bittensor_core.decrypt_with_signature
+
+    def unavailable(*args):
+        raise error("fixture local resource failure")
+
+    monkeypatch.setattr(bittensor_core, "decrypt_with_signature", unavailable)
+    with pytest.raises(error):
+        service_quality(b)
+    monkeypatch.setattr(bittensor_core, "decrypt_with_signature", original)
+    recovered = service_quality(b).work[0]
+    assert recovered.quality.numerator == recovered.quality.denominator == "1"
+    assert b["service_case"].p.model.calls == 1
+
+
 async def test_service_terminal_stops_fresh_attempts_and_rejects_changed_selected_grant(
     service,
     monkeypatch,
@@ -1438,3 +1636,370 @@ async def test_service_terminal_stops_fresh_attempts_and_rejects_changed_selecte
         owner.requests.prepare(
             c.claim, p.validator.hotkey.ss58_address, None, None, None, None, parent=c.grant
         )
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+def test_native_service_allocation_requires_the_complete_replayed_work(service_quality_inputs):
+    b = service_quality_inputs
+    result = service_quality(b, allocation=True)
+    assert result.service_budget == 45874
+    assert result.model_budget == 19661
+    assert result.stratum_budgets == {"continuous": 35288, "fingerspelling": 10586}
+    assert len(result.recipients) == 1
+    assert result.recipients[0].raw_weight == 10586
+    assert result.burn_weight == 35288
+    assert not result.chain_submission_authorized
+    key = b["service_terminal"].terminal.response_sha256
+    raw = b["objects"].pop(key)
+    with pytest.raises(KeyError):
+        service_quality(b, allocation=True)
+    b["objects"][key] = raw
+    assert service_quality(b, allocation=True) == result
+    assert b["service_case"].p.model.calls == 1
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+async def test_benchmark_quality_binds_combined_service_closure(service_quality_inputs, tmp_path):
+    from umi.competition_cohort_quality import ClosedQualityReview
+    from umi.competition_cohort_quality_signing import (
+        PendingQualityCertificates,
+        build_quality_manifest,
+    )
+    from umi.competition_cohort_request_closure import CohortRequestClosure
+    from umi.competition_endpoint_execution import RetainedRevealPulse
+
+    from .test_competition_cohort_consumers import tip
+    from .test_drand import pulse_record
+
+    b = service_quality_inputs
+    args = dict(
+        closure=b["closure"],
+        roster=b["roster"],
+        objects=b["objects"].__getitem__,
+        suite=b["suite"],
+        policy=b["policy"],
+        history=b["history"],
+        decision_source=b["decisions"].__getitem__,
+        pulses=lambda _: RetainedRevealPulse(**pulse_record()),
+        expected_tip_sha256=tip(b["history"]),
+        current_block=2**53 - 1,
+        transport=b["transport"],
+        expected_catalogs=(b["service_case"].assignment.catalog,),
+        expected_seals=(b["service_seal"],),
+    )
+    review = ClosedQualityReview(**args, intake_records=iter(b["records"]))
+    outcome = review.outcome(review.closure.participants[0].submission_sha256)
+    assert outcome.request_closure_sha256 == digest(b["closure"])
+    assert outcome.request_closure_sha256 != digest(review.closure)
+    assert outcome.candidate is not None
+    assert not outcome.service_credit_authorized
+    with pytest.raises(PendingQualityCertificates):
+        build_quality_manifest(review, lambda _: None)
+    from .test_competition_cohort_quality import certificates_for
+
+    certificates = await certificates_for(b, review, tmp_path)
+    manifest = build_quality_manifest(review, certificates.get)
+    assert manifest.request_closure_sha256 == digest(b["closure"])
+    subset = CohortRequestClosure.model_validate_json(
+        b["objects"][b["closure"].benchmark_closure_sha256]
+    )
+    with pytest.raises(ValueError, match="exact closure"):
+        ClosedQualityReview(**{**args, "closure": subset}, intake_records=iter(b["records"]))
+    missing = b["objects"].pop(b["service_terminal"].terminal.response_sha256)
+    with pytest.raises(KeyError):
+        ClosedQualityReview(**args, intake_records=iter(b["records"]))
+    b["objects"][b["service_terminal"].terminal.response_sha256] = missing
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+async def test_service_allocation_votes_recover_partial_quorum_and_lost_reply(
+    service_quality_inputs, tmp_path, monkeypatch
+):
+    from umi.competition_cohort_service_certification import (
+        collect_service_allocation,
+        retained_service_allocation_vote,
+        sign_service_allocation,
+        verify_service_allocation_certificate,
+    )
+    from umi.competition_round_journal import RoundJournal
+
+    b = service_quality_inputs
+    review = service_quality(b, review=True)
+    calls = []
+
+    def journal(name):
+        return RoundJournal(tmp_path / name, {"scope": "service-allocation-test", "owner": name})
+
+    async def sign(body):
+        calls.append("Charlie")
+        return sign_object(body, wallet("Charlie"))
+
+    charlie = wallet("Charlie").hotkey.ss58_address
+    owner = journal("charlie-credit")
+    original = owner.put
+
+    def lost(kind, key, value):
+        original(kind, key, value)
+        if kind == "service_allocation_vote":
+            raise OSError("fixture lost reply after durable commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner, "put", lost)
+        with pytest.raises(OSError, match="lost reply"):
+            await sign_service_allocation(owner, review, charlie, sign)
+    retained = retained_service_allocation_vote(journal("charlie-credit"), review.slot, charlie)
+    assert retained is not None and len(calls) == 1
+    assert (
+        await sign_service_allocation(journal("charlie-credit"), review, charlie, sign) == retained
+    )
+    assert len(calls) == 1
+    assert collect_service_allocation(journal("credit-collector"), review, [retained]) is None
+
+    async def dave_sign(body):
+        return sign_object(body, wallet("Dave"))
+
+    dave = await sign_service_allocation(
+        journal("dave-credit"), review, wallet("Dave").hotkey.ss58_address, dave_sign
+    )
+    certified = collect_service_allocation(journal("credit-collector"), review, [dave])
+    assert certified is not None
+    assert collect_service_allocation(journal("credit-collector"), review, []) == certified
+    assert (
+        collect_service_allocation(journal("credit-collector"), review, [dave, retained])
+        == certified
+    )
+    assert (
+        verify_service_allocation_certificate(certified, service_quality(b, review=True))
+        == review.statement.allocation
+    )
+    changed = certified.model_copy(
+        update={"statement": certified.statement.model_copy(update={"round_sha256": "ff" * 32})}
+    )
+    with pytest.raises(ValueError, match="replayed allocation"):
+        verify_service_allocation_certificate(changed, review)
+    assert b["service_case"].p.model.calls == 1
+
+
+@pytest.mark.parametrize("service_catalog_inputs", ["miner_failure"], indirect=True)
+async def test_service_allocation_signing_failure_capacity_and_self_review(
+    service_quality_inputs, tmp_path
+):
+    from umi.competition_cohort_service_certification import sign_service_allocation
+    from umi.competition_round_journal import RoundJournal
+
+    b = service_quality_inputs
+    review = service_quality(b, review=True)
+    calls = []
+
+    async def unavailable(body):
+        calls.append(1)
+        raise OSError("fixture key unavailable")
+
+    charlie = wallet("Charlie").hotkey.ss58_address
+    owner = RoundJournal(tmp_path / "retry-credit", {"scope": "retry-credit"})
+    with pytest.raises(OSError, match="key unavailable"):
+        await sign_service_allocation(owner, review, charlie, unavailable)
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    recovered = await sign_service_allocation(owner, review, charlie, sign)
+    assert recovered.statement.allocation.recipients == ()
+    saved = review.statement
+    review.statement = saved.model_copy(
+        update={"allocation": saved.allocation.model_copy(update={"model_budget": 1})}
+    )
+    with pytest.raises(ValueError):
+        await sign_service_allocation(owner, review, charlie, sign)
+    review.statement = saved
+    full = RoundJournal(tmp_path / "full-credit", {"scope": "full-credit"}, maximum_bytes=1024)
+    with pytest.raises(ValueError, match="capacity"):
+        await sign_service_allocation(full, review, charlie, unavailable)
+    assert len(calls) == 1
+    miner = b["service_case"].p.miner.wallet.hotkey.ss58_address
+    assert identity(miner) in review.recipients  # Even a scored zero must not certify itself.
+    with pytest.raises(ValueError, match="ineligible"):
+        await sign_service_allocation(owner, review, miner, unavailable)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+async def test_native_reward_allocation_replays_lost_commit_without_new_head(
+    service_quality_inputs, tmp_path, monkeypatch
+):
+    from umi.competition_artifacts import preserve_bundle
+    from umi.competition_cohort_quality import ClosedQualityReview
+    from umi.competition_cohort_quality_signing import build_quality_manifest
+    from umi.competition_cohort_reward_allocation import retain_reward_allocation
+    from umi.competition_cohort_service_certification import (
+        collect_service_allocation,
+        sign_service_allocation,
+    )
+    from umi.competition_endpoint_execution import RetainedRevealPulse
+    from umi.competition_round_journal import RoundJournal
+    from umi.competition_store import CompetitionStore
+
+    from .test_competition_cohort_consumers import tip
+    from .test_competition_cohort_quality import certificates_for
+    from .test_drand import pulse_record
+    from .test_open_competition import bundle_at
+
+    b = service_quality_inputs
+    sr = service_quality(b, review=True)
+    br = ClosedQualityReview(
+        closure=b["closure"],
+        roster=b["roster"],
+        objects=b["objects"].__getitem__,
+        suite=b["suite"],
+        policy=b["policy"],
+        history=b["history"],
+        decision_source=b["decisions"].__getitem__,
+        intake_records=iter(b["records"]),
+        pulses=lambda _: RetainedRevealPulse(**pulse_record()),
+        expected_tip_sha256=tip(b["history"]),
+        current_block=2**53 - 1,
+        transport=b["transport"],
+        expected_catalogs=(b["service_case"].assignment.catalog,),
+        expected_seals=(b["service_seal"],),
+    )
+    certificates = await certificates_for(b, br, tmp_path)
+    benchmark = build_quality_manifest(br, certificates.get)
+
+    def journal(name):
+        return RoundJournal(
+            tmp_path / ("reward-" + name), {"scope": "allocation-integration", "owner": name}
+        )
+
+    votes = []
+    for name in ("Charlie", "Dave"):
+
+        async def sign(body, name=name):
+            return sign_object(body, wallet(name))
+
+        votes.append(
+            await sign_service_allocation(journal(name), sr, wallet(name).hotkey.ss58_address, sign)
+        )
+    service = collect_service_allocation(journal("collector"), sr, votes)
+    assert service is not None
+    store = CompetitionStore(tmp_path / "promotion-state", b["policy"])
+    owner = journal("combined-allocation")
+
+    def retain(store=store, owner=owner, benchmark=benchmark):
+        return retain_reward_allocation(
+            owner, store, service, sr, benchmark, br, maximum_promotion_bytes=1_000_000
+        )
+
+    with pytest.raises(ValueError, match="missing"):
+        retain()
+    assert owner.get("cohort_reward_allocation", sr.slot) is None
+    bundle = bundle_at(tmp_path / "model")
+    preserve_bundle(bundle, tmp_path / "model", tmp_path / "archive", b["policy"])
+    store.initialize_baseline(bundle, tmp_path / "archive")
+    original = owner.put
+
+    def lost(kind, key, value):
+        original(kind, key, value)
+        if kind == "cohort_reward_allocation":
+            raise OSError("lost allocation reply")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner, "put", lost)
+        with pytest.raises(OSError, match="lost allocation reply"):
+            retain()
+    saved = owner.get("cohort_reward_allocation", sr.slot)
+    assert saved is not None
+    reopened = CompetitionStore(store.directory, b["policy"])
+
+    def unavailable(*args, **kwargs):
+        raise AssertionError("recovery tried selecting a new promotion head")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reopened, "reviewed_promotion_head", unavailable)
+        result = retain(store=reopened, owner=journal("combined-allocation"))
+    assert canonical_json_bytes(result) == canonical_json_bytes(saved)
+    assert (
+        result.burn_weight
+        == sr.statement.allocation.burn_weight + sr.statement.allocation.model_budget
+    )
+    assert result.recipients == sr.statement.allocation.recipients
+    assert not result.chain_submission_authorized
+    with pytest.raises(ValueError):
+        retain(benchmark=benchmark.model_copy(update={"request_closure_sha256": "ff" * 32}))
+    assert b["service_case"].p.model.calls == 1
+
+    # Reuse native phase certification; late consumption does not need renewal.
+    from umi.competition_cohort_reward_certification import (
+        reward_certification_progress,
+        verify_certified_reward_allocation,
+    )
+
+    from .test_competition_cohort_consumers import transition
+    from .test_competition_cohort_roster import close
+
+    def verify(h, *, value=result, block=2**53 - 1):
+        return verify_certified_reward_allocation(
+            value,
+            reopened,
+            service,
+            sr,
+            benchmark,
+            br,
+            h,
+            b["decisions"].__getitem__,
+            expected_tip_sha256=tip(h),
+            current_block=block,
+            maximum_promotion_bytes=1_000_000,
+        )
+
+    with pytest.raises(ValueError, match="no certified closure"):
+        verify(b["history"])
+    start = b["history"].transitions[-1].transition.observed_at_block + 100
+    h = close(b["history"], b["policy"], b["decisions"], start, digest(benchmark))
+    h = close(h, b["policy"], b["decisions"], start + 10, digest(service))
+    progress = reward_certification_progress(
+        journal("combined-allocation"),
+        reopened,
+        service,
+        sr,
+        benchmark,
+        br,
+        h,
+        b["decisions"].__getitem__,
+        expected_tip_sha256=tip(h),
+        current_block=start + 20,
+        maximum_promotion_bytes=1_000_000,
+    )
+    certified = close(h, b["policy"], b["decisions"], start + 20, digest(result))
+    actual = b["decisions"][certified.transitions[-1].transition.evidence_sha256].progress.progress
+    assert actual == progress
+    assert verify(certified) == result
+    assert verify(certified, block=start + 20) == result
+    wrong = close(h, b["policy"], b["decisions"], start + 20, "cc" * 32)
+    with pytest.raises(ValueError, match="exact replayed reward allocation"):
+        verify(wrong)
+    with pytest.raises(ValueError, match="revoked"):
+        verify(transition(certified, b["policy"], "revoke", start + 30))
+    changed = result.model_copy(
+        update={
+            "promotion_head": result.promotion_head.model_copy(
+                update={"contributor_hotkey": wallet("Alice").hotkey.ss58_address}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="independently replayed evidence"):
+        verify(certified, value=changed)
+    with pytest.raises(ValueError, match="current cohort phase"):
+        reward_certification_progress(
+            journal("combined-allocation"),
+            reopened,
+            service,
+            sr,
+            benchmark,
+            br,
+            certified,
+            b["decisions"].__getitem__,
+            expected_tip_sha256=tip(certified),
+            current_block=start + 21,
+            maximum_promotion_bytes=1_000_000,
+        )
+    assert b["service_case"].p.model.calls == 1

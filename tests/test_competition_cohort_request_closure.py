@@ -69,7 +69,7 @@ def review(b, *, certified=False, **changes):
     return fn(**args)
 
 
-def certified_history(b, *, result=None, unavailable=1200):
+def certified_history(b, *, result=None, unavailable=1200, reveal_result="ab" * 32):
     observation = b["closure"].observation
     block = observation.block
     state = verify_cohort_history(
@@ -108,7 +108,7 @@ def certified_history(b, *, result=None, unavailable=1200):
     h = b["history"].model_copy(
         update={"transitions": (*b["history"].transitions, signed_transition(proposed))}
     )
-    return close(h, b["policy"], b["decisions"], block + 90, "ab" * 32)
+    return close(h, b["policy"], b["decisions"], block + 90, reveal_result)
 
 
 def put(b, value):

@@ -633,8 +633,62 @@ These library components are not a deployed service scheduler. Connect recurring
 authenticated delivery, independent review and original service measurements;
 qualify evaluator replacement, abandonment and operational storage growth.
 Admission, grant storage and a signed response do not establish earned credit.
-Typed service terms, reference replay, service-credit allocation and installed
-recovery qualification remain required before service rewards can activate.
+Installed scheduling, evidence-source authentication and complete reward
+execution remain required before activation.
+
+`umi-cohort-service-terms/1` selects exact quality-weighted work units and pool
+parameters before catalog admission. References are salted commitments in that
+catalog. After the complete request closure, the native reference-reveal phase
+certifies their full inventory and the benchmark suite. Service-quality replay
+verifies the original response envelope, decrypts with a verified reveal pulse
+and computes exact single-reference CER/WER. Signed miner errors earn zero;
+missing archives, local resource failures and unavailable pulses remain pending.
+Replaying recovered content never invents an inference duration.
+
+Service allocation rounds in this order: pool, stratum, immutable work, hotkey.
+It uses largest remainder with stable work identities for ties. A stratum with
+no positive credit sends its fixed budget to burn. No per-UID average or minimum
+quality gate changes these credits. The model budget remains separate for a
+settlement consumer to bind to independently reviewed promotion history.
+These opt-in terms require explicit future-policy selection; they do not change
+an existing cohort's signed allocation rule.
+
+Independent reviewers replay the full accepted set and reference reveal before
+signing a service allocation. Their existing round journals retain the exact
+intent, partial votes and first complete certificate. Lost acknowledgements and
+key outages recover the same statement; a different allocation for that round
+conflicts. Recipients cannot certify their own work, including scored zeros.
+Original evidence must remain available for independent certificate replay.
+
+Benchmark quality and its complete certificate manifest bind the combined
+service-plus-benchmark closure when version 2 is selected. They continue to
+report benchmark scores separately from paid service credits. Service
+certification does not select model attribution, project current registrations,
+authorize a transaction or establish live reward effects. Those settlement,
+standing-authority and installed-host consumers remain required.
+
+The reward-allocation port combines the independently replayed service certificate
+and complete benchmark-quality manifest with the local accepted promotion head.
+It retains that selection in the round journal before acknowledgement. A retry
+replays the selected historical promotion receipt, so later model promotions
+cannot change an already sealed allocation. Missing promotion history holds the
+operation; the explicit initial reference record leaves the model pool at burn.
+`reward_certification_progress` replays the owner's retained allocation for the
+existing cohort phase signer. `verify_certified_reward_allocation` requires that
+exact allocation in the quorum-certified certification closure and replays the
+native service, benchmark and selected promotion evidence. It accepts late
+consumption of the original certificate, while rejecting changed results,
+missing closure, an unrelated cohort and explicit revocation. The recurring
+host must still integrate these ports with its authenticated source and finality
+owners; current standing control and first reward admission remain separate.
+
+Registration projection preserves fixed integer amounts by hotkey. A departed
+hotkey's share goes to the currently proved burn destination; a returning hotkey
+can recover that share at its new UID in subsequent submissions. Other recipients
+keep their original amounts, and a new occupant of an old UID inherits no credit.
+The projection checks snapshot freshness and shape. Its caller must independently
+verify current registration, burn identity and standing control; neither the
+allocation nor projection grants transaction authority.
 
 ### Participation admission
 

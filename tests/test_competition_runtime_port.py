@@ -682,3 +682,32 @@ def test_operator_command_owns_fresh_observations_and_preserves_history(
             EvaluatorReviewStore(reviews.directory, p.policy, limits=limits).baseline()
             == p.baseline
         )
+
+
+def test_selected_promotion_remains_replayable_after_new_head(port):
+    p = port
+    round_id = "ab" * 32
+    before = p.store.reviewed_promotion_head(round_id, maximum_bytes=1_000_000)
+    apply(p)
+    reopened = CompetitionStore(p.store.directory, p.target, predecessor_policies=(p.policy,))
+    assert reopened.reviewed_promotion_head(round_id, maximum_bytes=1_000_000).sequence == 1
+    assert (
+        reopened.reviewed_promotion_at(round_id, before.promotion_sha256, maximum_bytes=1_000_000)
+        == before
+    )
+    with pytest.raises(ValueError, match="missing"):
+        reopened.reviewed_promotion_at(round_id, "ff" * 32, maximum_bytes=1_000_000)
+    with pytest.raises(ValueError):
+        reopened.reviewed_promotion_at(round_id, before.promotion_sha256, maximum_bytes=1)
+    assert reopened.reviewed_promotion_head(round_id, maximum_bytes=1_000_000).sequence == 1
+
+
+def test_selected_promotion_still_requires_its_authentic_receipt(port):
+    p = port
+    apply(p)
+    round_id = "ab" * 32
+    selected = p.store.reviewed_promotion_head(round_id, maximum_bytes=1_000_000)
+    with p.store._connection() as db:
+        db.execute("DELETE FROM metadata WHERE key='runtime_port_receipt:1'")
+    with pytest.raises(ValueError):
+        p.store.reviewed_promotion_at(round_id, selected.promotion_sha256, maximum_bytes=1_000_000)

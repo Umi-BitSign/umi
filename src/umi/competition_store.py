@@ -3046,16 +3046,40 @@ class CompetitionStore(VoidEvidenceRetention):
 
     def reviewed_promotion_head(self, round_sha256: str, *, maximum_bytes: int):
         """Read the local accepted promotion head; never import a caller's head."""
+        return self._reviewed_promotion(round_sha256, maximum_bytes=maximum_bytes)
+
+    def reviewed_promotion_at(
+        self, round_sha256: str, promotion_sha256: str, *, maximum_bytes: int
+    ):
+        """Replay a previously selected local promotion after its head advances.
+
+        This authenticates retained evidence; it does not permit choosing a stale
+        head for a new allocation. The settlement owner retains that selection.
+        """
+        _require_hex32(promotion_sha256, "promotion")
+        return self._reviewed_promotion(
+            round_sha256, maximum_bytes=maximum_bytes, promotion_sha256=promotion_sha256
+        )
+
+    def _reviewed_promotion(
+        self, round_sha256: str, *, maximum_bytes: int, promotion_sha256: str | None = None
+    ):
         _require_hex32(round_sha256, "round")
         if type(maximum_bytes) is not int or not 1 <= maximum_bytes <= 16 * 1024**2:
             raise ValueError("invalid promotion head byte bound")
         with self._connection() as connection:
             connection.execute("BEGIN")
             self._assert_action_allowed(connection, round_sha256)
-            head = connection.execute(
-                "SELECT sequence,digest,model,contributor FROM promotions "
-                "ORDER BY sequence DESC LIMIT 1"
-            ).fetchone()
+            if promotion_sha256 is None:
+                head = connection.execute(
+                    "SELECT sequence,digest,model,contributor FROM promotions "
+                    "ORDER BY sequence DESC LIMIT 1"
+                ).fetchone()
+            else:
+                head = connection.execute(
+                    "SELECT sequence,digest,model,contributor FROM promotions WHERE digest=?",
+                    (promotion_sha256,),
+                ).fetchone()
             if head is None:
                 raise ValueError("independently reviewed promotion history is missing")
             raw = _bounded_stored_body(connection, "promotions", "sequence", head[0], maximum_bytes)
