@@ -786,10 +786,28 @@ response, retirement and review; a replacement cannot overwrite a completed
 case or another transport window for the same attempt. Missing or conflicting
 parents prevent delivery until the correct archive is restored.
 
-Automatic replacement construction, durable order signing, inference scheduling
-and complete terminal selection before request closure remain integration work. Host composition must supply authenticated
-current history, owned finality, private state, the signer, writer fence and
-service lifecycle; the standard miner CLI does not install this authority yet.
+The endpoint request worker constructs initial and replacement requests from
+verifier-owned announcement and issuance blocks. Each reviewer retains the exact
+request, phase history and transport proof bytes before signing. Partial votes
+and the first independent quorum survive restart. A late signer can complete
+the original expired request; delivery still checks current authority, and
+inference requires a live bounded window. An expired attempt must be retired
+before a separately certified replacement can execute.
+
+The cohort dispatcher commits authenticated request intent before sending and
+retains the complete bounded wire result before any later chain read. Recovery
+uses the original sealed response; it never repeats an uncertain inference
+send. The attempt worker connects dispatch, retirement, decision review and
+replacement signing. Its immutable successor records let restart resume the
+latest certified attempt while preserving completed sibling cases. A host may
+supply a fresh clip capability for a new attempt; a retained request keeps its
+original URL and signature inputs.
+
+Full-roster scheduling, complete terminal selection before request closure,
+mixed-attempt scoring evidence and settlement remain integration work. Host
+composition must supply authenticated current history, owned finality, private
+state, the signer, writer fence and service lifecycle; the standard miner CLI
+does not install this authority yet.
 Recovery of an old policy's archive under a replacement evaluator key remains
 unsupported. None of these storage acknowledgements proves publication timing,
 scores or a native reward effect.

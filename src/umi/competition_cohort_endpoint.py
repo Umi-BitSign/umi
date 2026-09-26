@@ -193,16 +193,30 @@ def validate_recoverable_endpoint_transport(
     signed = SignedRecoverableEndpointOrder.model_validate_json(raw)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     transport = ScoringPolicy.model_validate_json(canonical_json_bytes(transport))
-    body, job = signed.order, signed.order.job
-    validate_transport_cohort(policy, transport)
+    body = validate_endpoint_order_body(signed.order, policy, transport)
     verify_recovery_quorum(body, signed.signatures, policy)
+    if any(
+        identity(s.hotkey) == identity(body.job.submission.submission.hotkey)
+        for s in signed.signatures
+    ):
+        raise ValueError("recoverable endpoint order contains a self-vote")
+    return signed
+
+
+def validate_endpoint_order_body(body, policy, transport):
+    """Validate unsigned scope before durable request signing."""
+    raw = canonical_json_bytes(body)
+    if len(raw) > 16 * 1024**2:
+        raise ValueError("endpoint request body exceeds its byte bound")
+    body = RecoverableEndpointOrder.model_validate_json(raw)
+    job = body.job
+    validate_transport_cohort(policy, transport)
     evaluator, miner = identity(job.evaluator_hotkey), identity(job.submission.submission.hotkey)
     if (
         job.mode != "endpoint_incumbent"
         or evaluator == miner
         or evaluator not in {identity(e.hotkey) for e in policy.evaluators}
         or evaluator not in {identity(v.validator_hotkey) for v in transport.validator_registry}
-        or any(identity(s.hotkey) == miner for s in signed.signatures)
         or body.transport_policy_sha256 != scoring_policy_hash(transport)
         or body.transport_policy_sha256 == digest(policy)
         or len(body.requests) != len(job.cases)
@@ -212,7 +226,7 @@ def validate_recoverable_endpoint_transport(
     validate_endpoint_request_pairs(
         job, tuple(zip(job.cases, body.requests, strict=True)), body.attempt_number, transport
     )
-    return signed
+    return body
 
 
 def validate_endpoint_request_pairs(job, pairs, attempt_number, transport):

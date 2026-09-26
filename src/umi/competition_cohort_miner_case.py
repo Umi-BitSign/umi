@@ -104,15 +104,30 @@ def validate_case_attempt(
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     transport = ScoringPolicy.model_validate_json(canonical_json_bytes(transport))
     validate_transport_cohort(policy, transport)
-    body, job = signed.order, signed.order.job
+    body = validate_case_order_body(signed.order, policy, transport)
     verify_recovery_quorum(body, signed.signatures, policy)
+    if any(
+        identity(s.hotkey) == identity(body.job.submission.submission.hotkey)
+        for s in signed.signatures
+    ):
+        raise ValueError("endpoint replacement contains a self-vote")
+    return signed
+
+
+def validate_case_order_body(body, policy, transport):
+    """Validate unsigned replacement scope and its certified retry evidence."""
+    raw = canonical_json_bytes(body)
+    if len(raw) > 16 * 1024**2:
+        raise ValueError("endpoint request body exceeds its byte bound")
+    body = RecoverableEndpointCaseOrder.model_validate_json(raw)
+    validate_transport_cohort(policy, transport)
+    job = body.job
     miner, evaluator = identity(job.submission.submission.hotkey), identity(job.evaluator_hotkey)
     if (
         job.mode != "endpoint_incumbent"
         or miner == evaluator
         or evaluator not in {identity(e.hotkey) for e in policy.evaluators}
         or evaluator not in {identity(v.validator_hotkey) for v in transport.validator_registry}
-        or any(identity(s.hotkey) == miner for s in signed.signatures)
         or body.transport_policy_sha256 != scoring_policy_hash(transport)
         or not has_case_coverage(job.cases, policy)
     ):
@@ -145,14 +160,19 @@ def validate_case_attempt(
         or retirement.receipt.request_digest != prior.request_sha256
     ):
         raise ValueError("endpoint replacement lacks an exact certified unresolved parent")
-    return signed
+    return body
 
 
 def verify_replacement_parent(grant: CohortCaseMinerGrant, parent: MinerGrant) -> None:
     """Bind the new request to the miner's retained, signed and fenced parent."""
-    body, previous = grant.attempt.order, parent.attempt.order
+    verify_case_order_parent(grant.attempt.order, grant.assignment, parent)
+
+
+def verify_case_order_parent(body, assignment, parent: MinerGrant) -> None:
+    """Check the same parent bindings before the child has signatures."""
+    previous = parent.attempt.order
     if (
-        grant.assignment != parent.assignment
+        assignment != parent.assignment
         or previous.job != body.job
         or grant_slot(parent) != body.parent_grant_slot
         or digest(parent) != body.parent_grant_sha256
