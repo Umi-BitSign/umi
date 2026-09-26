@@ -11,11 +11,12 @@ import httpx
 
 from .auth import REQUEST_BODY_SHA256_HEADER
 from .competition_cohort_endpoint_recovery import CohortEndpointResponseRecovery, recovery_slot
+from .competition_cohort_endpoint_selection import selection_grant
 from .competition_cohort_miner import (
     MAX_COHORT_GRANT_BYTES,
-    CohortMinerGrant,
     SignedCohortMinerGrantReceipt,
 )
+from .competition_cohort_miner_case import MinerGrant
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread
 from .endpoint_protocol import COHORT_GRANT_PATH
@@ -36,7 +37,7 @@ class CohortGrantDeliveryOutcome:
     receipt: SignedCohortMinerGrantReceipt | None = None
 
 
-def verify_grant_receipt(value, grant: CohortMinerGrant):
+def verify_grant_receipt(value, grant: MinerGrant):
     value = SignedCohortMinerGrantReceipt.model_validate_json(canonical_json_bytes(value))
     miner = grant.attempt.order.job.submission.submission.hotkey
     if (
@@ -57,11 +58,7 @@ class CohortEndpointGrantDelivery:
         recovery, journal = self.recovery, self.recovery.journal
         with journal.locked(recovery_slot(slot)):
             selected, assignment, job = recovery.selection(slot)
-            grant = CohortMinerGrant(
-                schema="umi-cohort-miner-grant/1",
-                assignment=assignment,
-                attempt=selected.order,
-            )
+            grant = selection_grant(selected, assignment)
             key = digest(grant)
             old = journal.journal.get("miner_grant_delivery", key)
             if old is not None:

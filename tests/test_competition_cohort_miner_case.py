@@ -114,12 +114,22 @@ def next_grant(d, parent, review, certificate, monkeypatch):
     p = d.p
     transport, job = p.transport_policy, parent.attempt.order.job
     number = parent.attempt.order.attempt_number + 1
-    old = parent.attempt.order.requests[0]
+    parent_body = parent.attempt.order
+    index = (
+        0
+        if isinstance(parent, CohortCaseMinerGrant)
+        else next(i for i, c in enumerate(job.cases) if c.case_id == review.retirement.case_id)
+    )
+    old = parent_body.requests[index]
     index = (
         max(p.finality.head, old.deadline_block) - transport.activation_block
     ) // transport.clock.window_stride_blocks + 2
     height = transport.activation_block + index * transport.clock.window_stride_blocks
-    now_ms = time.time_ns() // 1_000_000 + number * 60_000
+    now_ms = max(
+        time.time_ns() // 1_000_000 + number * 60_000,
+        QUICKNET_GENESIS_MS
+        + (max(bt.timelock.current_round(), old.response_close_round) + 1) * QUICKNET_PERIOD_MS,
+    )
     announcement = _block(
         transport,
         0,

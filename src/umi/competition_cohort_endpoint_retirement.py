@@ -16,13 +16,12 @@ import httpx
 from pydantic import Field
 
 from .auth import REQUEST_BODY_SHA256_HEADER
-from .competition_cohort_endpoint import endpoint_obligation_sha256
 from .competition_cohort_endpoint_recovery import (
     CohortEndpointResponseRecovery,
     CohortRecoveredEndpointCase,
     recovery_slot,
 )
-from .competition_cohort_miner_contracts import CohortMinerGrant
+from .competition_cohort_endpoint_selection import case_record_key, selection_grant
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread
 from .config import Limits
@@ -68,9 +67,7 @@ class CohortEndpointRetirement:
         if value.selection_sha256 != digest(selected) or value.case_id != case_id:
             raise ValueError("retirement differs from selected endpoint case")
         request = self.recovery._case(selected, job, case_id)
-        grant = CohortMinerGrant(
-            schema="umi-cohort-miner-grant/1", assignment=assignment, attempt=selected.order
-        )
+        grant = selection_grant(selected, assignment)
         receipt = verify_retirement_receipt(
             value.retirement,
             request=request,
@@ -100,7 +97,7 @@ class CohortEndpointRetirement:
         selected, assignment, job = recovery.selection(slot)
         recovery._case(selected, job, case_id)
         raw = recovery.journal.journal.get(
-            "endpoint_retired_case", endpoint_obligation_sha256(job, case_id)
+            "endpoint_retired_case", case_record_key(selected, case_id)
         )
         if raw is None:
             return None
@@ -117,7 +114,7 @@ class CohortEndpointRetirement:
             old = self.retained(slot, case_id)
             if old is not None:
                 return CohortRetirementOutcome("retained", "retained_endpoint_retirement", old)
-            key = endpoint_obligation_sha256(job, case_id)
+            key = case_record_key(selected, case_id)
             await run_owned_thread(
                 journal.journal.reserve_records,
                 digest({"schema": "umi-cohort-endpoint-retirement-reservation/1", "case": key}),

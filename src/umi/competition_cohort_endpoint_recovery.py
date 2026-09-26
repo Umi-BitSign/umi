@@ -7,18 +7,37 @@ replace an unknown attempt, close an obligation, or certify receipt timing.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Literal
+from typing import Any
 
 import bittensor as bt
 import httpx
-from pydantic import Field
 
 from .competition_cohort_endpoint import (
     SignedRecoverableEndpointOrder,
-    endpoint_obligation_sha256,
     validate_recoverable_endpoint_transport,
 )
+from .competition_cohort_endpoint_selection import (
+    CohortEndpointRecoverySelection as CohortEndpointRecoverySelection,
+)
+from .competition_cohort_endpoint_selection import (
+    CohortEndpointReplacementSelection,
+    EndpointSelection,
+    case_record_key,
+    parse_endpoint_selection,
+    selected_request,
+    selected_requests,
+    selection_grant,
+    selection_slot,
+)
+from .competition_cohort_endpoint_selection import (
+    CohortRecoveredEndpointCase as CohortRecoveredEndpointCase,
+)
 from .competition_cohort_execution_journal import CohortExecutionAssignment
+from .competition_cohort_miner_case import (
+    CohortCaseMinerGrant,
+    validate_case_attempt,
+    verify_replacement_parent,
+)
 from .competition_cohort_order_signer import order_slot
 from .competition_cohort_origin import CohortEndpointOrigin
 from .competition_round_journal import RecordReservation
@@ -26,31 +45,12 @@ from .concurrency import run_owned_thread
 from .config import Limits
 from .endpoint_response_recovery import (
     EndpointRecoveryOutcome,
-    RecoveredEndpointResponse,
     retrieve_endpoint_response,
     verify_recovered_response,
 )
 from .open_competition import digest, identity
 from .policy import ScoringPolicy
-from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
-
-
-class CohortEndpointRecoverySelection(StrictProtocolModel):
-    schema_: Literal["umi-cohort-endpoint-recovery-selection/1"] = Field(alias="schema")
-    assignment_slot: Hex32
-    order: SignedRecoverableEndpointOrder
-    transport_policy: ScoringPolicy
-
-
-class CohortRecoveredEndpointCase(StrictProtocolModel):
-    schema_: Literal["umi-cohort-recovered-endpoint-case/1"] = Field(alias="schema")
-    selection_sha256: Hex32
-    case_id: Hex32
-    origin_evidence_sha256: Hex32
-    response: RecoveredEndpointResponse
-    # This is deliberately not a RecoverableEndpointTranscript or a score.
-    original_receipt_timing_proven: Literal[False] = False
-    chain_submission_authorized: Literal[False] = False
+from .protocol import canonical_json_bytes
 
 
 def recovery_slot(assignment_slot: str) -> str:
@@ -81,27 +81,57 @@ class CohortEndpointResponseRecovery:
                 "(id INTEGER PRIMARY KEY CHECK(id=1), obligation TEXT NOT NULL)"
             )
 
-    def _validate(self, selected: CohortEndpointRecoverySelection):
-        selected = CohortEndpointRecoverySelection.model_validate_json(
-            canonical_json_bytes(selected)
-        )
-        assignment = self.journal.assignment(selected.assignment_slot)
+    def _validate_one(self, selected: EndpointSelection, assignment=None):
+        selected = parse_endpoint_selection(canonical_json_bytes(selected))
+        if assignment is None:
+            assignment = self.journal.assignment(selected.assignment_slot)
         job = self.journal.validate_assignment(assignment)
-        signed = validate_recoverable_endpoint_transport(
-            selected.order, self.journal.policy, selected.transport_policy
+        validate = (
+            validate_case_attempt
+            if isinstance(selected, CohortEndpointReplacementSelection)
+            else validate_recoverable_endpoint_transport
         )
+        signed = validate(selected.order, self.journal.policy, selected.transport_policy)
+        selection_grant(selected, assignment)
         if job != signed.order.job:
             raise ValueError("response recovery attempt differs from acknowledged assignment")
         return selected, assignment, job
+
+    def _validate(self, selected: EndpointSelection, assignment=None):
+        result = self._validate_one(selected, assignment)
+        current, assignment, _ = result
+        seen = set()
+        while isinstance(current, CohortEndpointReplacementSelection):
+            key = current.order.order.parent_grant_slot
+            if key in seen:
+                raise ValueError("endpoint replacement parent cycle")
+            seen.add(key)
+            # Replacement selection slots are their immutable grant slots.
+            # The original whole-attempt selection keeps its historical key.
+            parent_slot = key
+            raw = self.journal.journal.get("endpoint_recovery_selection", parent_slot)
+            if raw is None:
+                parent_slot = current.assignment_slot
+                raw = self.journal.journal.get("endpoint_recovery_selection", parent_slot)
+            if raw is None:
+                raise FileNotFoundError("endpoint replacement parent is not retained")
+            parent, parent_assignment, _ = self._validate_one(
+                parse_endpoint_selection(canonical_json_bytes(raw))
+            )
+            if selection_slot(parent) != parent_slot:
+                raise ValueError("endpoint parent selection changed its slot")
+            verify_replacement_parent(current.grant, selection_grant(parent, parent_assignment))
+            current, assignment = parent, parent_assignment
+        return result
 
     def selection(self, slot: str):
         raw = self.journal.journal.get("endpoint_recovery_selection", slot)
         if raw is None:
             raise FileNotFoundError("endpoint response selection is not retained")
         selected, assignment, job = self._validate(
-            CohortEndpointRecoverySelection.model_validate_json(canonical_json_bytes(raw))
+            parse_endpoint_selection(canonical_json_bytes(raw))
         )
-        if selected.assignment_slot != slot:
+        if selection_slot(selected) != slot:
             raise ValueError("response recovery selection changed its slot")
         return selected, assignment, job
 
@@ -125,7 +155,21 @@ class CohortEndpointResponseRecovery:
             order=signed,
             transport_policy=transport_policy,
         )
-        slot = selected.assignment_slot
+        return await self._prepare(selected, assignment)
+
+    async def prepare_case(self, grant: CohortCaseMinerGrant, transport_policy: ScoringPolicy):
+        selected = CohortEndpointReplacementSelection(
+            schema="umi-cohort-endpoint-replacement-selection/1",
+            grant=grant,
+            transport_policy=transport_policy,
+        )
+        return await self._prepare(selected, grant.assignment)
+
+    async def _prepare(self, selected: EndpointSelection, assignment):
+        selected, retained_assignment, _ = self._validate(selected, assignment)
+        if assignment != retained_assignment:
+            raise ValueError("endpoint selection assignment changed")
+        slot = selection_slot(selected)
         with self.journal.locked(recovery_slot(slot)):
             if self.journal.journal.get("endpoint_recovery_selection", slot) is not None:
                 previous, old_assignment, _ = self.selection(slot)
@@ -134,7 +178,7 @@ class CohortEndpointResponseRecovery:
                 return previous
             # Use the execution lock only for authority retention. collect() below
             # owns that same lock itself; nesting it would deadlock recovery.
-            with self.journal.locked(slot):
+            with self.journal.locked(selected.assignment_slot):
                 source, boundary = await self.origin.authority.current(assignment)
                 await run_owned_thread(self.journal.retain, assignment, source, boundary.block)
             # Preserve complete bytes, not just a reservation hash. A crash or
@@ -147,17 +191,17 @@ class CohortEndpointResponseRecovery:
 
             def retain_intent():
                 def enqueue(db):
-                    for case in job.cases:
-                        key = endpoint_obligation_sha256(job, case.case_id)
+                    for case_id, _ in selected_requests(selected):
+                        key = case_record_key(selected, case_id)
                         old = db.execute(
                             "SELECT slot,case_id FROM endpoint_recovery_queue WHERE obligation=?",
                             (key,),
                         ).fetchone()
-                        if old is not None and old != (slot, case.case_id):
+                        if old is not None and old != (slot, case_id):
                             raise ValueError("endpoint recovery queue binding conflict")
                         db.execute(
                             "INSERT OR IGNORE INTO endpoint_recovery_queue VALUES (?,?,?)",
-                            (key, slot, case.case_id),
+                            (key, slot, case_id),
                         )
 
                 self.journal.journal.put_many(
@@ -182,10 +226,10 @@ class CohortEndpointResponseRecovery:
                     *(
                         RecordReservation(
                             "endpoint_recovered_case",
-                            endpoint_obligation_sha256(job, c.case_id),
+                            case_record_key(selected, case_id),
                             136 * 1024,
                         )
-                        for c in job.cases
+                        for case_id, _ in selected_requests(selected)
                     ),
                 ),
             )
@@ -196,15 +240,12 @@ class CohortEndpointResponseRecovery:
             return selected
 
     def _case(self, selected, job, case_id):
-        matches = [i for i, case in enumerate(job.cases) if case.case_id == case_id]
-        if len(matches) != 1:
-            raise ValueError("response recovery case is not uniquely assigned")
-        return selected.order.order.requests[matches[0]]
+        return selected_request(selected, case_id)
 
     def _retained(self, selected, job, case_id):
         request = self._case(selected, job, case_id)
         raw = self.journal.journal.get(
-            "endpoint_recovered_case", endpoint_obligation_sha256(job, case_id)
+            "endpoint_recovered_case", case_record_key(selected, case_id)
         )
         if raw is None:
             return None
@@ -230,12 +271,12 @@ class CohortEndpointResponseRecovery:
             if raw is None:
                 raise FileNotFoundError("endpoint response intent is not retained")
             selected, assignment, job = self._validate(
-                CohortEndpointRecoverySelection.model_validate_json(canonical_json_bytes(raw))
+                parse_endpoint_selection(canonical_json_bytes(raw))
             )
-            if selected.assignment_slot != slot:
+            if selection_slot(selected) != slot:
                 raise ValueError("response recovery intent changed its slot")
             self._case(selected, job, case_id)
-            await self.prepare(assignment, selected.order, selected.transport_policy)
+            await self._prepare(selected, assignment)
         with self.journal.locked(recovery_slot(slot)):
             selected, assignment, job = self.selection(slot)
             request = self._case(selected, job, case_id)
@@ -275,7 +316,7 @@ class CohortEndpointResponseRecovery:
                 await run_owned_thread(
                     self.journal.journal.put,
                     "endpoint_recovered_case",
-                    endpoint_obligation_sha256(job, case_id),
+                    case_record_key(selected, case_id),
                     value,
                 )
             return outcome

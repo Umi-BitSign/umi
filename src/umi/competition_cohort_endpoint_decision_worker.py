@@ -7,6 +7,9 @@ from dataclasses import dataclass
 
 from .competition_cohort_endpoint_decision import (
     CohortEndpointCaseReview,
+    CohortEndpointReplacementCaseReview,
+    CohortEndpointReplacementSelection,
+    EndpointCaseReview,
     SignedCohortEndpointCaseDecision,
     case_decision_slot,
     validate_case_review,
@@ -33,7 +36,7 @@ class CohortEndpointCaseCoordinator:
         self,
         retirement: CohortEndpointRetirement,
         signer: CohortEndpointDecisionSigner,
-        request_vote: Callable[[str, CohortEndpointCaseReview], Awaitable[Signature]],
+        request_vote: Callable[[str, EndpointCaseReview], Awaitable[Signature]],
     ):
         journal = retirement.recovery.journal
         if (
@@ -50,6 +53,13 @@ class CohortEndpointCaseCoordinator:
         retired = self.retirement.retained(slot, case_id)
         if retired is None:
             return None
+        if isinstance(selected, CohortEndpointReplacementSelection):
+            return CohortEndpointReplacementCaseReview(
+                schema="umi-cohort-endpoint-case-review/2",
+                selection=selected,
+                retirement=retired,
+                recovered=self.recovery._retained(selected, job, case_id),
+            )
         return CohortEndpointCaseReview(
             schema="umi-cohort-endpoint-case-review/1",
             assignment=assignment,

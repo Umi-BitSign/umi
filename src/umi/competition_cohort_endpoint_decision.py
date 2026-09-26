@@ -22,13 +22,16 @@ from .competition_cohort_endpoint_decision_contracts import (
 from .competition_cohort_endpoint_decision_contracts import (
     SignedCohortEndpointCaseDecision as SignedCohortEndpointCaseDecision,
 )
-from .competition_cohort_endpoint_recovery import (
+from .competition_cohort_endpoint_retirement import CohortRetiredEndpointCase
+from .competition_cohort_endpoint_selection import (
     CohortEndpointRecoverySelection,
     CohortRecoveredEndpointCase,
 )
-from .competition_cohort_endpoint_retirement import CohortRetiredEndpointCase
+from .competition_cohort_endpoint_selection import (
+    CohortEndpointReplacementSelection as CohortEndpointReplacementSelection,
+)
 from .competition_cohort_execution_journal import CohortExecutionAssignment
-from .competition_cohort_miner_case import CohortCaseMinerGrant, validate_case_attempt
+from .competition_cohort_miner_case import validate_case_attempt
 from .competition_cohort_miner_contracts import CohortMinerGrant
 from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_order_signer import CohortOrderHistory, order_slot, review_order
@@ -38,7 +41,6 @@ from .config import Limits
 from .endpoint_response_recovery import verify_recovered_response
 from .endpoint_retirement import verify_retirement_receipt
 from .open_competition import CompetitionPolicy, Signature, digest, identity
-from .policy import ScoringPolicy
 from .protocol import StrictProtocolModel, canonical_json_bytes, request_digest
 
 MAX_CASE_REVIEW_BYTES = 64 * 1024**2
@@ -50,20 +52,6 @@ class CohortEndpointCaseReview(StrictProtocolModel):
     selection: CohortEndpointRecoverySelection
     retirement: CohortRetiredEndpointCase
     recovered: CohortRecoveredEndpointCase | None
-
-
-class CohortEndpointReplacementSelection(StrictProtocolModel):
-    schema_: Literal["umi-cohort-endpoint-replacement-selection/1"] = Field(alias="schema")
-    grant: CohortCaseMinerGrant
-    transport_policy: ScoringPolicy
-
-    @property
-    def assignment_slot(self):
-        return order_slot(self.grant.assignment.certificate.order)
-
-    @property
-    def order(self):
-        return self.grant.attempt
 
 
 class CohortEndpointReplacementCaseReview(StrictProtocolModel):

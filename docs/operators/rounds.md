@@ -695,10 +695,11 @@ timeout. Individual RPC/finality reads and DNS remain bounded. The worker checks
 current authority and freshness again after collection. Live request/retry
 selection and installation qualification remain required.
 
-The endpoint response recovery worker retains one quorum-signed bounded attempt
-and reserves all case-response capacity before polling. Its complete request
-intent and queue commit together; interrupted reservations resume from that
-retained intent. A saved cursor survives restart, so an unavailable miner does
+The endpoint response recovery worker preserves the original whole-attempt
+selection and each certified single-case replacement under its own immutable
+attempt key. `prepare_case` verifies retained parent grants before committing
+new work. Complete request intent and queue entries commit together before
+response reservations; interrupted reservations resume from that saved intent. A saved cursor survives restart, so an unavailable miner does
 not prevent later cases from being checked. Polling uses the original evaluator
 key, fresh route-specific authentication and a newly proved public serving origin.
 It only calls `POST /v1/translate/response`; it never retransmits inference.
@@ -708,8 +709,8 @@ before acknowledgement and returned offline on subsequent reads. Recovery
 records the actual retrieval time. It neither certifies original timely receipt
 nor produces a score or closes a scheduler obligation. An absent archive,
 pending response, invalid envelope or transient transport failure leaves work
-pending. An uncertain attempt cannot be replaced by another signed attempt.
-Current authority still governs new network reads; already retained evidence
+pending. An uncertain attempt requires signed retirement and an independent
+retry certificate before a replacement can be admitted. Current authority still governs new network reads; already retained evidence
 remains readable after closure. Capacity can grow without replacing selections.
 
 `CohortEndpointGrantDelivery` sends the retained exact assignment and bounded
@@ -717,7 +718,8 @@ attempt order to `POST /v1/competition/cohorts/assignments`. It re-proves the
 current public serving origin, authenticates the route and receiving miner, and
 retains the miner's signed storage receipt before acknowledging delivery. A lost
 HTTP acknowledgement or local receipt write can retry the identical grant; a
-retained receipt is readable offline. Delivery does not invoke inference.
+retained receipt is readable offline. The same worker delivers original and
+replacement grants. Delivery does not invoke inference.
 
 The opt-in `CohortMinerAuthorizationAuthority` verifies the original quorum,
 assigned evaluator, participant, policy, model and serving origin against its
@@ -778,9 +780,14 @@ another attempt; a recovered signed response remains selected. Closed phases
 block new grants and inference, while retained acknowledgements and responses
 remain recoverable. A decision certificate alone supplies no transport authority.
 
-Automatic replacement construction, durable order signing, evaluator delivery
-and recovery, and complete terminal selection before request closure remain
-integration work. Host composition must supply authenticated
+Evaluator grant delivery, response polling, retirement and decision collection
+accept both original and replacement selections. Every attempt retains its own
+response, retirement and review; a replacement cannot overwrite a completed
+case or another transport window for the same attempt. Missing or conflicting
+parents prevent delivery until the correct archive is restored.
+
+Automatic replacement construction, durable order signing, inference scheduling
+and complete terminal selection before request closure remain integration work. Host composition must supply authenticated
 current history, owned finality, private state, the signer, writer fence and
 service lifecycle; the standard miner CLI does not install this authority yet.
 Recovery of an old policy's archive under a replacement evaluator key remains
