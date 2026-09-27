@@ -778,6 +778,22 @@ replay the pending package during its drain; projection requires the latest
 selection to be effective. Coverage certification and installed execution remain
 separate requirements.
 
+`collect_reward_eligibility` checks pre-consensus row eligibility at the complete
+weight observation's finalized root. It uses proof-extracted current stake,
+parent and child relations, suspension flags, activity, permit and registration
+state. It reproduces the selected epoch profile's fixed-point rounding and owner
+exceptions. Missing proofs, stale state, unsupported arithmetic and exhausted
+parent-proof capacity hold collection; they do not become ineligibility.
+
+The collector requires an independently qualified runtime code hash selected by
+the installed series. Its arithmetic profile is pinned to Subtensor revision
+`c004cebf360f4088187ee49d851dfb1a1eaaf710`; supplying a matching hash alone does
+not prove that revision produced the deployed runtime. No live runtime profile
+is qualified by these tests. The returned observation binds raw proofs to the
+original weight evidence. It does not establish that the row matches the effective
+allocation, accrue coverage, prove payment or authorize a transaction. Archive
+replay, interval accounting and installed execution still need integration.
+
 The simpler `select` and `select_admitted` methods check signed ancestry and
 original admission but do not exclude overwritten control writes. Installed
 reward execution must consume the complete history check. That execution
