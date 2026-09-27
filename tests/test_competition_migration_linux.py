@@ -190,7 +190,12 @@ def _prepare_legacy(layout, user, target, signer, *, pending=False):
             / config.wallet.hotkey
         )
         _write(hotkey_path, bytes(serialized_keypair_to_keyfile_data(key)), 0o400)
-    evidence = canonical_json_bytes({"schema": "test-owned-chain-observation", "block": 180})
+    # The uncertain case needs nine additional finalized blocks for its marker
+    # and drain, before the successor's existing activation headroom check.
+    observed_block = 170 if pending else 180
+    evidence = canonical_json_bytes(
+        {"schema": "test-owned-chain-observation", "block": observed_block}
+    )
     owned = SimpleNamespace(
         validator_hotkey=config.validator_hotkey,
         validator_uid=instance,
@@ -198,7 +203,7 @@ def _prepare_legacy(layout, user, target, signer, *, pending=False):
         validator_last_update=(
             current.attempt.prior_last_update if pending else current.weight_call.block_number
         ),
-        block=180,
+        block=observed_block,
         block_hash="0x" + "18" * 32,
         genesis_hash=base.genesis_hash,
         chain_config_sha256="29" * 32,
