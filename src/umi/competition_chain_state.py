@@ -647,33 +647,37 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         )
 
     async def collect_registered_weights(
-        self, validator_hotkey: str
+        self, validator_hotkey: str, *, at: FinalizedSnapshotRef | None = None
     ) -> OwnedCompetitionChainObservation:
         """Discover every current registration along with the validator's state.
 
         Prove the bounded UID domain and both mapping directions at one root.
         This permits a consumer to distinguish absence from an omitted recipient;
         it does not authorize weights or select a reward allocation.
+
+        A selected snapshot lets control and recipients share the same root even
+        as finality advances. It must still match this observer's verified chain
+        and satisfy all current freshness checks.
         """
         if self._closed:
             raise ValueError("weight provider is closed")
         _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
         return await wait_for_owned(
             self._collect_weights_locked(
-                _hotkey(validator_hotkey), (), None, complete_registrations=True
+                _hotkey(validator_hotkey), (), None, complete_registrations=True, snapshot=at
             ),
             timeout=self.config.collection_timeout_seconds,
         )
 
     async def _collect_weights_locked(
-        self, hotkey, recipients, anchor, *, complete_registrations=False
+        self, hotkey, recipients, anchor, *, complete_registrations=False, snapshot=None
     ):
         async with self._lock:
             if self._closed:
                 raise ValueError("weight provider is closed")
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
-            ref = await self._proofs.finalized_snapshot()
+            ref = snapshot if snapshot is not None else await self._proofs.finalized_snapshot()
             if not isinstance(ref, FinalizedSnapshotRef):
                 raise ValueError("weight finalized snapshot is invalid")
             if ref.block_number < self.config.minimum_finalized_block or (

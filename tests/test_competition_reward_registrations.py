@@ -136,6 +136,56 @@ async def test_complete_registry_and_validator_state_share_a_proven_root(registe
     assert row(project(item, obs)) == {0: 19661, 1: 20000, 2: 25874}
 
 
+async def test_selected_snapshot_survives_head_advancement(registered_case, monkeypatch):
+    item = registered_case
+    selected = item.finality.ref
+
+    async def latest():
+        return replace(selected, block_number=selected.block_number + 1)
+
+    async def forbidden():
+        raise AssertionError("selected snapshot must not be replaced by the latest head")
+
+    monkeypatch.setattr(item.finality, "verified_finalized_snapshot", latest)
+    monkeypatch.setattr(item.proofs, "finalized_snapshot", forbidden)
+    observed = await item.provider.collect_registered_weights(item.hotkey, at=selected)
+    assert observed.snapshot == selected
+    assert row(project(item, observed)) == {0: 19661, 1: 20000, 2: 25874}
+
+
+@pytest.mark.parametrize("damage", ["type", "hash", "root", "stale", "unknown", "lag"])
+async def test_selected_snapshot_still_requires_current_owned_finality(
+    registered_case, monkeypatch, damage
+):
+    item = registered_case
+    selected = item.finality.ref
+    if damage == "type":
+        selected = {"block_number": selected.block_number}
+    elif damage == "hash":
+        selected = replace(selected, block_hash="0x" + "ff" * 32)
+    elif damage == "root":
+        selected = replace(selected, state_root="0x" + "ff" * 32)
+    elif damage == "stale":
+        item.clock.now += item.config.maximum_head_age_ms + 1
+    elif damage == "unknown":
+
+        async def unknown(height):
+            raise ValueError("owned block is unavailable")
+
+        monkeypatch.setattr(item.finality, "verified_block_at", unknown)
+    else:
+
+        async def latest():
+            return replace(
+                selected,
+                block_number=selected.block_number + item.policy.maximum_snapshot_age_blocks + 1,
+            )
+
+        monkeypatch.setattr(item.finality, "verified_finalized_snapshot", latest)
+    with pytest.raises(ValueError):
+        await item.provider.collect_registered_weights(item.hotkey, at=selected)
+
+
 async def test_complete_discovery_survives_uid_reuse_and_hotkey_return(registered_case):
     item = registered_case
     before = digest(allocation(item.policy))

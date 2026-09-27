@@ -781,6 +781,9 @@ each inverse `Uids` mapping against the same finalized root. Missing entries,
 duplicates, inconsistent mappings and interrupted proofs prevent a result;
 they never become inferred recipient absence. The ordinary `collect_weights`
 path still verifies only the supplied recipients.
+The optional `at` snapshot lets this collection share the control proof's block
+while the chain advances. It still requires that observer's verified block and
+all normal freshness checks; caller-supplied coordinates are not authority.
 
 `project_owned_reward_allocation` requires that complete, fresh observation and
 the host's independently selected chain configuration and policy. It rejects
@@ -788,6 +791,17 @@ partial observations, altered evidence and observations from another proof
 configuration before projecting fixed amounts. Package certification, current
 standing control, prior opportunity and transaction authorization remain
 separate execution requirements.
+
+`StandingRewardPreparation` connects complete-history selection to native package
+replay using independently selected terms and catalogs. Completed replay is
+retained in the process even if its waiter is cancelled or the initial control
+proof expires. Projection then requires fresh control and complete registrations
+at the same finalized snapshot, the designated validator, and completed control
+drain time. A revoked or replaced selection cannot use a cached allocation.
+After restart, replay the retained private package and promotion assets again;
+serialized preparation records grant no authority. Prior reward opportunity,
+legacy handoff, signer fencing and transaction recovery still require execution
+integration and installed qualification. Preparation does not authorize weights.
 
 ### Participation admission
 
