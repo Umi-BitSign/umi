@@ -771,6 +771,14 @@ absent. This reader does not infer a legacy allocation. Unknown control effects
 prevent both selections; they never permit falling back to a cached predecessor.
 Identical allocation amounts still retain distinct cohort activation identities.
 
+`StandingRewardControlReader.review_history` performs the same decision and
+complete-write checks for an owned historical control proof. Its result describes
+the selection at that exact past root. A newer retained prefix must agree with
+the reviewed prefix; replay cannot rewind or advance the current finalized
+checkpoint. The independently selected original chain configuration authenticates
+the historical proof. Restart can reuse retained signed decisions and block
+evidence without a coordinator. This result cannot pass current-selection checks.
+
 An effective selection describes control history only. It does not prove current
 validator eligibility, minimum reward opportunity or payment, and does not permit
 signing an older allocation after a successor has been observed. Preparation can
@@ -803,9 +811,17 @@ The result is explicitly historical and cannot pass current-observation checks.
 Tampered or incomplete archives hold without rewriting their evidence. Cancellation
 drains native proof work before releasing provider ownership.
 
-Coverage still needs durable observation retention, complete control history at
-each interval endpoint, native package/allocation matching, adjacent interval
-accounting and minimum certification. Historical eligibility alone grants no
+`StandingRewardPreparation.prepare_historical` consumes that historical selection
+and replays the effective package against the selected series manifest. During a
+successor's drain it prepares the predecessor's package. Replaying an earlier
+block than a cached review checks the package again; later certification cannot
+be backdated through cache reuse. Preparation holds if no allocation is effective,
+control is revoked or the package identity differs. This returns immutable replay
+work only.
+
+Coverage still needs durable observation retention, joined control/eligibility
+and full-row checks at each interval endpoint, adjacent interval accounting and
+minimum certification. Historical package or eligibility replay alone grants no
 coverage or transaction authority. Installed execution remains unqualified.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and

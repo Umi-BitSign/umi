@@ -161,6 +161,17 @@ class HistoryVerifiedStandingRewardSelection:
     chain_submission_authorized: Literal[False] = False
 
 
+@dataclass(frozen=True)
+class HistoricalStandingRewardSelection:
+    """Control selection at a past finalized root, never current authority."""
+
+    observation: OwnedHistoricalRewardControl
+    selection: StandingRewardSelection
+    history: OwnedRewardControlHistory
+    effective_selection: StandingRewardSelection | None
+    chain_submission_authorized: Literal[False] = False
+
+
 def verify_reward_decisions(
     series: StandingRewardSeries,
     policy: CompetitionPolicy,
@@ -206,7 +217,7 @@ def verify_reward_decisions(
 
 
 class StandingRewardControlReader:
-    """One owner retains decisions; every selection needs a fresh owned proof."""
+    """Retain decisions with distinct current-selection and historical-review paths."""
 
     def __init__(
         self,
@@ -259,6 +270,13 @@ class StandingRewardControlReader:
             expected_chain_config_sha256=self.chain_config_sha256,
         )
 
+    def _historical_proof(self, observation: OwnedHistoricalRewardControl) -> None:
+        validate_historical_reward_control(
+            observation,
+            expected_control_hotkey=self.series.control_hotkey,
+            expected_chain_config_sha256=self.admission_chain_config_sha256,
+        )
+
     def select(
         self, observation: OwnedRewardControlObservation, source: DecisionSource
     ) -> StandingRewardSelection:
@@ -303,10 +321,28 @@ class StandingRewardControlReader:
         selection, effective = self._select(observation, source, admission=None, history=history)
         return HistoryVerifiedStandingRewardSelection(selection, history, effective)
 
+    def review_history(
+        self,
+        observation: OwnedHistoricalRewardControl,
+        source: DecisionSource,
+        history: OwnedRewardControlHistory,
+    ) -> HistoricalStandingRewardSelection:
+        """Recover a past selection without rolling back the current checkpoint.
+
+        Require every control write from authority issuance to the exact archived
+        root. A retained newer signed prefix must agree with the reviewed prefix.
+        Newly recovered decisions may be retained, but historical review never
+        advances or rewinds the current finalized highwater mark.
+        """
+        selection, effective = self._select(
+            observation, source, admission=None, history=history, historical=True
+        )
+        return HistoricalStandingRewardSelection(observation, selection, history, effective)
+
     def _history_committed_blocks(
         self,
         history: OwnedRewardControlHistory,
-        observation: OwnedRewardControlObservation,
+        observation: OwnedRewardControlObservation | OwnedHistoricalRewardControl,
         decisions: tuple[SignedRewardControlDecision, ...],
     ) -> tuple[int, ...]:
         validate_control_history(
@@ -398,13 +434,17 @@ class StandingRewardControlReader:
 
     def _select(
         self,
-        observation: OwnedRewardControlObservation,
+        observation: OwnedRewardControlObservation | OwnedHistoricalRewardControl,
         source: DecisionSource,
         *,
         admission: OwnedHistoricalRewardControl | None,
         history: OwnedRewardControlHistory | None = None,
+        historical: bool = False,
     ) -> tuple[StandingRewardSelection, StandingRewardSelection | None]:
-        self._proof(observation)
+        if historical and (history is None or admission is not None):
+            raise ValueError("historical selection requires complete control history")
+        proof = self._historical_proof if historical else self._proof
+        proof(observation)
         if observation.control_sha256 is None:
             raise ValueError("standing control commitment is absent")
         with self.journal.locked():
@@ -458,8 +498,9 @@ class StandingRewardControlReader:
                     or admission.snapshot.block_number > observation.snapshot.block_number
                 ):
                     raise ValueError("standing series lacks timely original chain admission")
-            if len(decisions) < len(keys) or any(
-                digest(decisions[i].decision) not in retained for i in range(len(keys))
+            if (not historical and len(decisions) < len(keys)) or any(
+                digest(decisions[i].decision) not in retained
+                for i in range(min(len(keys), len(decisions)))
             ):
                 raise ValueError("current reward control conflicts with retained history")
             tip = decisions[-1].decision
@@ -478,7 +519,7 @@ class StandingRewardControlReader:
                 and history is None
             ):
                 raise ValueError("series genesis was committed after its admission window")
-            self._proof(observation)
+            proof(observation)
 
             def record_head(db):
                 old = db.execute("SELECT block FROM highwater LIMIT 2").fetchall()
@@ -511,8 +552,9 @@ class StandingRewardControlReader:
                         },
                     ),
                 )
-            self.journal.put_many(records, index=record_head)
-            self._proof(observation)
+            if not historical or records:
+                self.journal.put_many(records, index=None if historical else record_head)
+            proof(observation)
             selection = self._selection_at(
                 tip,
                 observation.committed_at_block

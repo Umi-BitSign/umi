@@ -30,6 +30,7 @@ from .competition_reward_control import (
     OwnedRewardControlObservation,
     validate_owned_reward_control,
 )
+from .competition_reward_control_archive import OwnedHistoricalRewardControl
 from .competition_reward_decisions import (
     DecisionSource,
     HistoryVerifiedStandingRewardSelection,
@@ -120,12 +121,7 @@ class StandingRewardPreparation:
         self._owner = object()
         self._prepared: dict[str, PreparedStandingReward] = {}
 
-    def _selected(
-        self,
-        control: OwnedRewardControlObservation,
-        history: OwnedRewardControlHistory,
-        source: DecisionSource,
-    ) -> HistoryVerifiedStandingRewardSelection:
+    def _authority(self) -> None:
         if (
             digest(self.reader.series) != self.series_sha256
             or digest(self.reader.policy) != self.policy_sha256
@@ -133,6 +129,14 @@ class StandingRewardPreparation:
             or digest(self.manifest) != self.reader.series.manifest_sha256
         ):
             raise ValueError("reward preparation authority changed")
+
+    def _selected(
+        self,
+        control: OwnedRewardControlObservation,
+        history: OwnedRewardControlHistory,
+        source: DecisionSource,
+    ) -> HistoryVerifiedStandingRewardSelection:
+        self._authority()
         current = self.reader.select_history(control, source, history)
         if current.selection.state not in {"draining", "selected"}:
             raise ValueError("standing control has no active reward package")
@@ -159,6 +163,36 @@ class StandingRewardPreparation:
         selected = self._selected(control, history, source).selection
         activation = selected.activation
         assert activation is not None
+        return self._prepare_allocation(package, activation, control.snapshot.block_number)
+
+    async def prepare_historical(
+        self,
+        package: CohortRewardPackage,
+        *,
+        control: OwnedHistoricalRewardControl,
+        history: OwnedRewardControlHistory,
+        source: DecisionSource,
+    ) -> PreparedStandingReward:
+        """Replay the package effective at a past root for coverage reconstruction.
+
+        This may be the preceding cohort during a successor's drain. It does not
+        project a row, credit an interval or grant authority to submit today.
+        """
+        async with self._lock:
+            return await run_owned_thread(
+                partial(self._prepare_historical, package, control, history, source)
+            )
+
+    def _prepare_historical(self, package, control, history, source):
+        self._authority()
+        selected = self.reader.review_history(control, source, history).effective_selection
+        if selected is None or selected.state != "selected" or selected.activation is None:
+            raise ValueError("historical control has no effective reward package")
+        return self._prepare_allocation(package, selected.activation, control.snapshot.block_number)
+
+    def _prepare_allocation(
+        self, package: CohortRewardPackage, activation: RewardActivation, block: int
+    ) -> PreparedStandingReward:
         requirement = self.manifest.requirement(activation.cohort_sha256)
         raw = canonical_json_bytes(package)
         if len(raw) > self.maximum_package_bytes:
@@ -177,7 +211,11 @@ class StandingRewardPreparation:
             self._check_prepared(retained)
             if retained.activation != activation:
                 raise ValueError("standing activation changed an already prepared cohort")
-            return retained
+            # Replay at an earlier root must recheck that the original cohort
+            # certification and artifacts were valid by that block. A later
+            # successful review cannot backdate their validity.
+            if block >= retained.reviewed_at_block:
+                return retained
         allocation = replay_reward_package(
             package,
             self.reader.policy,
@@ -186,7 +224,7 @@ class StandingRewardPreparation:
             expected_package_sha256=activation.package_sha256,
             expected_cohort_sha256=activation.cohort_sha256,
             expected_tip_sha256=activation.recovery_tip_sha256,
-            current_block=control.snapshot.block_number,
+            current_block=block,
             expected_terms_sha256=requirement.terms_sha256,
             expected_catalog_sha256s=requirement.catalog_sha256s,
             maximum_promotion_bytes=self.maximum_promotion_bytes,
@@ -197,7 +235,7 @@ class StandingRewardPreparation:
             activation,
             digest(requirement),
             allocation,
-            control.snapshot.block_number,
+            block,
             _owner=self._owner,
         )
         object.__setattr__(prepared, "_binding", _binding(prepared))

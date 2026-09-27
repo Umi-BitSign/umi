@@ -27,6 +27,7 @@ from umi.competition_cohort_service_certification import (
 from umi.competition_endpoint_execution import RetainedRevealPulse
 from umi.competition_reward_control import FinalizedRewardControlProvider
 from umi.competition_reward_decisions import (
+    HistoricalStandingRewardSelection,
     HistoryVerifiedStandingRewardSelection,
     RewardActivation,
     RewardControlDecision,
@@ -359,6 +360,111 @@ def replay_args(observations):
     return {k: observations[k] for k in ("control", "history", "source")}
 
 
+@pytest.fixture
+async def historical_preparation_case(preparation_case, monkeypatch):
+    """Package lifecycle tests substitute only historical control selection.
+
+    The complete integration case below uses the actual historical reader.
+    """
+    p = preparation_case
+    observed = await p.observations()
+    current = p.reader.select_history(**replay_args(observed))
+    control = SimpleNamespace(snapshot=observed["control"].snapshot)
+    chosen = SimpleNamespace(current=current)
+
+    def review(actual, source, history):
+        assert actual is control and history is p.history
+        selected = chosen.current
+        return HistoricalStandingRewardSelection(
+            control, selected.selection, history, selected.effective_selection
+        )
+
+    monkeypatch.setattr(p.reader, "review_history", review)
+    return (
+        p,
+        control,
+        chosen,
+        dict(control=control, history=p.history, source=p.objects.__getitem__),
+    )
+
+
+async def test_historical_package_uses_effective_predecessor_during_drain(
+    historical_preparation_case,
+):
+    p, _, chosen, args = historical_preparation_case
+    chosen.current = replace(
+        chosen.current,
+        selection=replace(
+            chosen.current.selection,
+            state="draining",
+            activation=p.active.decision.activation.model_copy(
+                update={"package_sha256": "dd" * 32}
+            ),
+        ),
+    )
+    result = await p.preparation.prepare_historical(p.package, **args)
+    assert result.activation == p.active.decision.activation
+    assert result.allocation == p.allocation and not result.chain_submission_authorized
+
+
+@pytest.mark.parametrize("state", ["admitted", "draining", "revoked"])
+async def test_historical_package_requires_an_effective_allocation(
+    historical_preparation_case,
+    state,
+):
+    p, _, chosen, args = historical_preparation_case
+    chosen.current = replace(
+        chosen.current,
+        selection=replace(chosen.current.selection, state=state),
+        effective_selection=None,
+    )
+    with pytest.raises(ValueError, match="no effective reward package"):
+        await p.preparation.prepare_historical(p.package, **args)
+
+
+async def test_later_cached_package_cannot_backdate_certification(
+    historical_preparation_case,
+    monkeypatch,
+):
+    p, control, _, args = historical_preparation_case
+    replay = preparation.replay_reward_package
+    blocks = []
+
+    def checked(*a, **kw):
+        blocks.append(kw["current_block"])
+        return replay(*a, **kw)
+
+    monkeypatch.setattr(preparation, "replay_reward_package", checked)
+    later = await p.preparation.prepare_historical(p.package, **args)
+    assert await p.preparation.prepare_historical(p.package, **args) is later
+    certification = p.package.inputs.history.transitions[-1].transition.observed_at_block
+    control.snapshot = replace(control.snapshot, block_number=certification - 1)
+    with pytest.raises(ValueError):
+        await p.preparation.prepare_historical(p.package, **args)
+    control.snapshot = replace(control.snapshot, block_number=certification + 1)
+    earlier = await p.preparation.prepare_historical(p.package, **args)
+    assert earlier is not later and earlier.allocation == later.allocation
+    assert earlier.reviewed_at_block == certification + 1
+    assert await p.preparation.prepare_historical(p.package, **args) is earlier
+    assert blocks == [later.reviewed_at_block, certification - 1, certification + 1]
+    control.snapshot = replace(control.snapshot, block_number=later.reviewed_at_block)
+    assert await p.preparation.prepare_historical(p.package, **args) is earlier
+
+
+async def test_historical_preparation_rechecks_manifest_and_package_identity(
+    historical_preparation_case,
+):
+    p, _, _, args = historical_preparation_case
+    await p.preparation.prepare_historical(p.package, **args)
+    with pytest.raises(ValueError, match="differs from current standing activation"):
+        await p.preparation.prepare_historical(
+            p.package.model_copy(update={"policy_sha256": "ee" * 32}), **args
+        )
+    p.preparation.manifest = p.manifest.model_copy(update={"policy_sha256": "ee" * 32})
+    with pytest.raises(ValueError, match="authority changed"):
+        await p.preparation.prepare_historical(p.package, **args)
+
+
 @pytest.mark.parametrize("preparation_case", [4], indirect=True)
 async def test_native_package_projection_retains_original_signing_inputs(
     preparation_case, tmp_path
@@ -673,6 +779,7 @@ async def test_complete_native_history_package_and_projection_restart_without_co
 
     StandingRewardPreparation(c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000)
     captured = await history()
+    archived_control = h.reader._tip.slot
     ready, result = await prepare(owner(), captured)
     assert ready.allocation == p.allocation
     assert result.current.selection.state == "selected"
@@ -690,6 +797,24 @@ async def test_complete_native_history_package_and_projection_restart_without_co
     c.objects.clear()
     h.offline_through = h.end - 1
     replayed = await history()
+    # Recover the exact historical allocation natively before any fresh state
+    # collection. No coordinator, historical body/state RPC or renewed control
+    # publication participates in this review.
+    h.offline_through = h.end
+    h.rpc_calls.clear()
+    reviewed_control = await h.item.provider.review_control(
+        archived_control.evidence, archived_control.metadata
+    )
+    historical_owner = owner()
+    historical_ready = await historical_owner.prepare_historical(
+        p.package, control=reviewed_control, history=replayed, source=c.source
+    )
+    assert historical_ready.allocation == p.allocation
+    assert historical_ready.activation == c.active.decision.activation
+    assert historical_ready.reviewed_at_block == h.end
+    assert not historical_ready.chain_submission_authorized
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+    h.offline_through = h.end - 1
     restored, again = await prepare(owner(), replayed)
     assert restored is not ready and restored.allocation == ready.allocation
     assert again.projection == result.projection
