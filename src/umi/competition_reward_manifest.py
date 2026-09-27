@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from .competition_reward_decisions import StandingRewardControlReader, StandingRewardSeries
 from .open_competition import CompetitionPolicy, digest
@@ -54,9 +54,26 @@ class StandingRewardManifest(StrictProtocolModel):
         raise ValueError("cohort is absent from the approved reward manifest")
 
 
+class RewardOpportunityTerms(StrictProtocolModel):
+    """Literal policy selections; no production minimum or cap is inferred."""
+
+    runtime_profile_sha256: Hex32
+    maximum_interval_ms: Annotated[int, Field(ge=1, le=2**53 - 1)]
+    minimum_validator_ms: Annotated[int, Field(ge=1, le=2**53 - 1)]
+
+
+class StandingRewardOpportunityManifest(StandingRewardManifest):
+    schema_: Literal["umi-standing-reward-manifest/2"] = Field(alias="schema")
+    opportunity: RewardOpportunityTerms
+
+
+RewardManifest = StandingRewardManifest | StandingRewardOpportunityManifest
+_MANIFEST = TypeAdapter(Annotated[RewardManifest, Field(discriminator="schema_")])
+
+
 def verify_reward_manifest(
     raw: bytes, series: StandingRewardSeries, policy: CompetitionPolicy
-) -> StandingRewardManifest:
+) -> RewardManifest:
     """Check bounded bytes against independently selected standing authority.
 
     No field is inferred from an offered package. Quorum and chain admission are
@@ -64,7 +81,7 @@ def verify_reward_manifest(
     """
     if type(raw) is not bytes or not 0 < len(raw) <= MAX_REWARD_MANIFEST_BYTES:
         raise ValueError("reward manifest exceeds its byte bound or has invalid bytes")
-    manifest = StandingRewardManifest.model_validate_json(raw)
+    manifest = _MANIFEST.validate_json(raw)
     series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if digest(manifest) != series.manifest_sha256:
@@ -77,8 +94,8 @@ def verify_reward_manifest(
 
 
 def retain_reward_manifest(
-    reader: StandingRewardControlReader, manifest: StandingRewardManifest | None
-) -> StandingRewardManifest:
+    reader: StandingRewardControlReader, manifest: RewardManifest | None
+) -> RewardManifest:
     """Persist before replay; restart may use the original retained bytes.
 
     Missing or invalid data remains an error. Neither a new package nor elapsed

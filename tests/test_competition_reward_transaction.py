@@ -86,8 +86,12 @@ def transaction(native_encoding):
     )
 
 
-async def test_checked_projection_binds_full_encoded_call_and_receipt_search(transaction):
+@pytest.mark.parametrize("opportunity", [None, object()], ids=["legacy", "standing"])
+async def test_checked_projection_binds_full_encoded_call_and_receipt_search(
+    transaction, opportunity
+):
     t = transaction
+    t.options["prior_opportunity"] = opportunity
     query = await t.owner.verify_transaction_bytes(t.prepared, t.encoded, **t.options)
     assert query.birth_block == t.chain.block and query.birth_hash == t.chain.block_hash
     assert query.mortality_period == 128 and bytes.fromhex(query.signed_extrinsic) == t.encoded
@@ -101,6 +105,7 @@ async def test_checked_projection_binds_full_encoded_call_and_receipt_search(tra
                 t.options["source"],
                 t.chain,
                 t.options["chain_config"],
+                opportunity,
             )
         ]
         * 2

@@ -7,24 +7,12 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .competition_reward_coverage import OwnedRewardCoverageEndpoint, validate_reward_coverage
+from .competition_reward_opportunity import RewardCoverageRule as RewardCoverageRule
 from .open_competition import digest, identity
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 
 Count = Annotated[int, Field(ge=0, le=2**53 - 1)]
 Positive = Annotated[int, Field(ge=1, le=2**53 - 1)]
-
-
-class RewardCoverageRule(StrictProtocolModel):
-    """Explicit host selections; installing these bytes does not approve policy.
-
-    There is no default interval cap or minimum. Series admission and minimum
-    certification must independently bind the approved parameters before use.
-    """
-
-    schema_: Literal["umi-reward-coverage-rule/1"] = Field(alias="schema")
-    series_sha256: Hex32
-    runtime_profile_sha256: Hex32
-    maximum_interval_ms: Positive
 
 
 class CoveragePoint(StrictProtocolModel):

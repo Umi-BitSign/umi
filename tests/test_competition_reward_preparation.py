@@ -673,6 +673,27 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     await p.provider.aclose()
     await configure_eligibility(item, monkeypatch, tmp_path)
     await item.provider.aclose()
+    variant = getattr(request, "param", "matching")
+    if variant == "opportunity":
+        from umi.competition_reward_manifest import (
+            RewardOpportunityTerms,
+            StandingRewardOpportunityManifest,
+        )
+
+        p.manifest = StandingRewardOpportunityManifest(
+            **(
+                p.manifest.model_dump(by_alias=True)
+                | {
+                    "schema": "umi-standing-reward-manifest/2",
+                    "opportunity": RewardOpportunityTerms(
+                        runtime_profile_sha256=digest(item.profile),
+                        maximum_interval_ms=12000,
+                        minimum_validator_ms=12000,
+                    ),
+                }
+            )
+        )
+        series = series.model_copy(update={"manifest_sha256": digest(p.manifest)})
     original_verify = type(item.verifier).__call__
 
     def verify_code(self, **kw):
@@ -691,7 +712,7 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         + series.maximum_transaction_lifetime_blocks
     )
     variant = getattr(request, "param", "matching")
-    if variant == "journal":
+    if variant in {"journal", "opportunity"}:
         # Both adjacent endpoints are after the activation fence. This adds
         # one block only to the retention/recovery case, not selection tests.
         end += 1
@@ -762,6 +783,7 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     active = signed(
         p.active.decision.model_copy(
             update={
+                "series_sha256": digest(series),
                 "predecessor_sha256": digest(genesis.decision),
                 "observed_at_block": activation_block,
             }
@@ -964,7 +986,7 @@ async def test_complete_native_history_package_and_projection_restart_without_co
     assert h.body_requests == list(range(h.old.height, h.end + 1))
 
 
-@pytest.mark.parametrize("complete_preparation_case", ["journal"], indirect=True)
+@pytest.mark.parametrize("complete_preparation_case", ["journal", "opportunity"], indirect=True)
 async def test_native_coverage_retention_retries_and_offline_restart(
     complete_preparation_case, tmp_path, monkeypatch
 ):
@@ -1172,3 +1194,86 @@ async def test_native_coverage_retention_retries_and_offline_restart(
         db.execute("INSERT INTO records VALUES ('coverage_object',?,?)", (sha, raw))
     assert counts(restarted) == committed
     assert await restarted.credit(*restored) == result
+
+    if h.variant == "opportunity":
+        from umi.competition_reward_opportunity_review import (
+            prepare_opportunity_certificate,
+            review_opportunity_certificate,
+        )
+
+        terms = dict(
+            manifest=p.manifest,
+            series=c.series,
+            policy=h.item.policy,
+            activation=c.active.decision.activation,
+        )
+        certificate = await prepare_opportunity_certificate(restarted, **terms)
+        certificate_bytes = canonical_json_bytes(certificate)
+        assert certificate.contributions[0].credited_ms == 12000
+        assert certificate.contributions[0].through_block == h.end
+        # A retained claim is not enough after a crash, even when its digest
+        # is right. The original proofs must be reviewed again.
+        fresh = RewardCoverageJournal(tmp_path / "coverage", rule, **selected)
+        with pytest.raises(ValueError, match="no natively verified coverage"):
+            await prepare_opportunity_certificate(fresh, **terms)
+        by_key = dict(zip((hint.left, hint.right), histories, strict=True))
+
+        async def restore(key):
+            return await fresh.review_endpoint(
+                key,
+                provider=h.item.provider,
+                preparation=owner(),
+                package=p.package,
+                history=by_key[key],
+                source=c.source,
+                profile=h.item.profile,
+            )
+
+        def witness_source(sha):
+            return canonical_json_bytes(fresh.journal.get("opportunity_witness", sha))
+
+        async def unavailable(key):
+            raise ConnectionError("proof store offline")
+
+        with pytest.raises(ConnectionError, match="proof store offline"):
+            await review_opportunity_certificate(
+                certificate_bytes,
+                expected_sha256=digest(certificate),
+                journal=fresh,
+                witness_source=witness_source,
+                review_endpoint=unavailable,
+                **terms,
+            )
+        assert await fresh.verified_ms(**query) == 0
+        checked = await review_opportunity_certificate(
+            certificate_bytes,
+            expected_sha256=digest(certificate),
+            journal=fresh,
+            witness_source=witness_source,
+            review_endpoint=restore,
+            **terms,
+        )
+        assert checked.certificate == certificate
+        assert not checked.chain_submission_authorized
+        assert await fresh.verified_ms(**query) == 12000
+        assert await prepare_opportunity_certificate(fresh, **terms) == certificate
+        # A validly encoded exaggerated total is rejected by native interval
+        # replay, not merely by its outer content digest.
+        exaggerated = certificate.model_copy(
+            update={
+                "contributions": (
+                    certificate.contributions[0].model_copy(update={"credited_ms": 24000}),
+                )
+            }
+        )
+        with pytest.raises(ValueError, match="differs from native replay"):
+            await review_opportunity_certificate(
+                canonical_json_bytes(exaggerated),
+                expected_sha256=digest(exaggerated),
+                journal=fresh,
+                witness_source=witness_source,
+                review_endpoint=restore,
+                **terms,
+            )
+        assert await fresh.verified_ms(**query) == 12000
+        assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}

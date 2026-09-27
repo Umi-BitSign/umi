@@ -2,8 +2,8 @@
 
 Slow replay produces immutable evidence, not a live transaction permission.
 Current control, complete registration and the handoff fence are checked again
-when projecting it. Prior opportunity, legacy handoff and transaction recovery
-still belong to the execution consumer.
+when projecting it. The opportunity manifest gates successor handoff on native prior coverage.
+Legacy handoff and transaction recovery still belong to the execution consumer.
 """
 
 from __future__ import annotations
@@ -38,7 +38,15 @@ from .competition_reward_decisions import (
     StandingRewardControlReader,
 )
 from .competition_reward_history import OwnedRewardControlHistory
-from .competition_reward_manifest import StandingRewardManifest, retain_reward_manifest
+from .competition_reward_manifest import (
+    RewardManifest,
+    StandingRewardOpportunityManifest,
+    retain_reward_manifest,
+)
+from .competition_reward_opportunity import (
+    VerifiedRewardOpportunity,
+    require_previous_opportunity,
+)
 from .competition_reward_transactions import (
     PendingStandingWeight,
     StandingTransactionEnd,
@@ -102,7 +110,7 @@ class StandingRewardPreparation:
         self,
         reader: StandingRewardControlReader,
         promotion_store: CompetitionStore,
-        manifest: StandingRewardManifest | None = None,
+        manifest: RewardManifest | None = None,
         *,
         maximum_promotion_bytes: int,
         maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
@@ -264,10 +272,20 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
+        prior_opportunity: VerifiedRewardOpportunity | None = None,
     ) -> PreparedStandingProjection:
         async with self._lock:
             return await run_owned_thread(
-                partial(self._project, prepared, control, history, source, chain, chain_config)
+                partial(
+                    self._project,
+                    prepared,
+                    control,
+                    history,
+                    source,
+                    chain,
+                    chain_config,
+                    prior_opportunity,
+                )
             )
 
     def _project(
@@ -278,6 +296,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
+        prior_opportunity: VerifiedRewardOpportunity | None = None,
     ) -> PreparedStandingProjection:
         self._check_prepared(prepared)
         current = self._selected(control, history, source)
@@ -292,6 +311,13 @@ class StandingRewardPreparation:
             not in {identity(k) for k in self.reader.series.validators}
         ):
             raise ValueError("prepared rewards lack current standing selection and validator state")
+        if isinstance(self.manifest, StandingRewardOpportunityManifest):
+            require_previous_opportunity(
+                prior_opportunity,
+                reader=self.reader,
+                manifest=self.manifest,
+                selection=current.selection,
+            )
         projection = project_owned_reward_allocation(
             prepared.allocation, chain, self.reader.policy, chain_config=chain_config
         )
@@ -315,11 +341,12 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
+        prior_opportunity: VerifiedRewardOpportunity | None = None,
     ) -> MortalReceiptQuery:
         """Bind encoded bytes to a freshly checked allocation and signing context.
 
-        The returned receipt query supplies checked search bounds only. Prior
-        opportunity, legacy handoff, exclusive writer ownership and durable
+        The returned receipt query supplies checked search bounds only. Legacy
+        handoff, exclusive writer ownership and durable
         transaction reconciliation still gate submission. This method never
         signs, sends or treats matching bytes as reward authority.
         """
@@ -335,13 +362,25 @@ class StandingRewardPreparation:
                     source,
                     chain,
                     chain_config,
+                    prior_opportunity,
                 )
             )
 
     def _verify_transaction_bytes(
-        self, prepared, encoded, period, control, history, source, chain, chain_config
+        self,
+        prepared,
+        encoded,
+        period,
+        control,
+        history,
+        source,
+        chain,
+        chain_config,
+        prior_opportunity,
     ):
-        current = self._project(prepared, control, history, source, chain, chain_config)
+        current = self._project(
+            prepared, control, history, source, chain, chain_config, prior_opportunity
+        )
         if (
             type(period) is not int
             or not 4 <= period <= self.reader.series.maximum_transaction_lifetime_blocks
@@ -360,7 +399,9 @@ class StandingRewardPreparation:
         )
         # Native decode/crypto may itself be slow. Recheck both proof lifetimes
         # and current selection after it, without changing the retained bytes.
-        refreshed = self._project(prepared, control, history, source, chain, chain_config)
+        refreshed = self._project(
+            prepared, control, history, source, chain, chain_config, prior_opportunity
+        )
         if refreshed.projection != row or refreshed.current != current.current:
             raise ValueError("standing selection changed while checking transaction bytes")
         return MortalReceiptQuery(
@@ -410,17 +451,20 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
+        prior_opportunity: VerifiedRewardOpportunity | None = None,
         previous: StandingTransactionEnd | None = None,
     ) -> PendingStandingWeight:
         """Retain an unsigned intent and recovery inputs before any signing.
 
         This method does not grant signing authority. The future execution owner
-        must also verify opportunity, migration fencing and the selected manifest.
+        must also verify legacy migration fencing and exclusive writer ownership.
         """
         async with self._lock:
 
             def retain():
-                current = self._project(prepared, control, history, source, chain, chain_config)
+                current = self._project(
+                    prepared, control, history, source, chain, chain_config, prior_opportunity
+                )
                 intent = self._transaction_intent(current, control, chain, mortality_period)
                 result = journal.reserve(
                     intent,
@@ -431,7 +475,9 @@ class StandingRewardPreparation:
                 )
                 # A slow commit may expire the preflight. Its durable intent
                 # remains available for recovery; never start another attempt.
-                self._project(prepared, control, history, source, chain, chain_config)
+                self._project(
+                    prepared, control, history, source, chain, chain_config, prior_opportunity
+                )
                 return result
 
             return await run_owned_thread(retain)
@@ -448,6 +494,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
+        prior_opportunity: VerifiedRewardOpportunity | None = None,
     ) -> PendingStandingWeight:
         """Verify actual bytes and commit them against their original reservation.
 
@@ -457,7 +504,9 @@ class StandingRewardPreparation:
         async with self._lock:
 
             def retain():
-                current = self._project(prepared, control, history, source, chain, chain_config)
+                current = self._project(
+                    prepared, control, history, source, chain, chain_config, prior_opportunity
+                )
                 intent = self._transaction_intent(current, control, chain, mortality_period)
                 self._verify_transaction_bytes(
                     prepared,
@@ -468,6 +517,7 @@ class StandingRewardPreparation:
                     source,
                     chain,
                     chain_config,
+                    prior_opportunity,
                 )
                 return journal.retain_signed(intent, encoded)
 

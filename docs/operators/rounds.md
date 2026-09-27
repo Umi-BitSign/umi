@@ -852,9 +852,29 @@ with `review_endpoint`, then call `credit` to rebuild the verified set. Reading 
 stored total or interval cannot substitute for native replay. The selected rule
 digest must match on reopening, and damaged evidence holds without replacement.
 
-Minimum-opportunity certification, approved runtime and timing parameters,
-automatic replay scheduling and installed execution remain unqualified. These
-local interval totals establish neither emission payments nor submission authority.
+A `StandingRewardOpportunityManifest` (`umi-standing-reward-manifest/2`)
+binds the runtime profile, interval cap and required time for each designated
+validator before series admission. These parameters are explicit; examples and
+tests do not approve production values. The version 1 replay manifest remains
+readable but carries no minimum-opportunity terms.
+
+`prepare_opportunity_certificate` retains a completion candidate and ordered
+interval references for every designated validator. Missing or insufficient
+coverage holds completion. The certificate digest is bound by the successor's
+signed `prior_opportunity_sha256`; a later candidate cannot replace those bytes.
+`review_opportunity_certificate` replays the original native endpoint proofs,
+checks the interval order and recomputes each contribution. Stored totals,
+signatures and content hashes alone cannot establish completed opportunity.
+Restart requires replay, and unavailable evidence remains retryable without an
+age deadline. Retries cannot increase credited time.
+
+For a version 2 manifest, reward projection and transaction preparation require
+that reviewed certificate for the exact preceding activation. Evidence must end
+no later than the successor decision's observed block. The first activation
+requires a separately qualified legacy handoff and currently holds at this gate.
+Approved runtime and timing parameters, automatic replay scheduling, first
+legacy handoff and installed execution remain incomplete. Coverage establishes
+reward opportunity, not a particular emission amount or submission authority.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and
 original admission but do not exclude overwritten control writes. Installed
@@ -926,9 +946,10 @@ proof expires. Projection then requires fresh control and complete registrations
 at the same finalized snapshot, the designated validator, and completed control
 drain time. A revoked or replaced selection cannot use a cached allocation.
 After restart, replay the retained private package and promotion assets again;
-serialized preparation records grant no authority. Prior reward opportunity,
-legacy handoff, signer fencing and transaction recovery still require execution
-integration and installed qualification. Preparation does not authorize weights.
+serialized preparation records grant no authority. Version 2 projection requires
+native predecessor-opportunity replay as described above. Legacy handoff, signer
+fencing and transaction recovery still require execution integration and installed
+qualification. Preparation does not authorize weights.
 
 `FinalizedCompetitionWeightProvider.read_mortal_receipt` searches retained signed
 transaction bytes within an independently checked mortal era of 4–4,096 blocks.
@@ -948,8 +969,9 @@ snapshot and the series lifetime bound. Exact reassembly rejects altered calls,
 tips, extensions and framing. Verification reconstructs the original signing
 payload, including the genesis, checkpoint and runtime versions; an old signature
 cannot be rebound to a later era. The resulting receipt query contains checked
-search bounds only. Prior reward opportunity,
-legacy handoff, writer fencing and submission authorization remain required.
+search bounds only. The version 2 predecessor-opportunity gate runs before and
+after byte verification. Legacy handoff, writer fencing and submission
+authorization remain required.
 
 `reserve_transaction` records the selected allocation, original signing snapshot,
 nonce, mortality and complete registered UID row before signing. It retains the

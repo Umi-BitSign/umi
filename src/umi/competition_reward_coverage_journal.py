@@ -32,6 +32,10 @@ from .competition_reward_decisions import DecisionSource
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_eligibility_archive import review_reward_eligibility
 from .competition_reward_history import OwnedRewardControlHistory
+from .competition_reward_opportunity import (
+    RewardOpportunityContribution,
+    RewardOpportunityWitness,
+)
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
@@ -69,6 +73,7 @@ class RewardCoverageJournal:
         )
         self._lock = asyncio.Lock()
         self._verified: dict[str, RewardCoverageInterval] = {}
+        self._verified_through: dict[str, int] = {}
 
     def _check_rule(self):
         if digest(self.rule) != self.rule_sha256:
@@ -210,7 +215,45 @@ class RewardCoverageJournal:
             self.journal.put_many(records)
             if interval is not None:
                 self._verified[interval.key()] = interval
+                self._verified_through[interval.key()] = coverage_point(right, self.rule).block
             return interval
+
+    async def verified_witness(
+        self, *, activation_sha256: str, validator_hotkey: str
+    ) -> tuple[RewardOpportunityWitness, RewardOpportunityContribution]:
+        """Export already reviewed intervals; exported bytes still require replay.
+
+        Reopening starts empty. Reading retained hints cannot populate this set.
+        One interval identity appears once, regardless of capture/retry count.
+        """
+        async with self._lock:
+            self._check_rule()
+            checked_digest(activation_sha256)
+            account = identity(validator_hotkey)
+            values = sorted(
+                (
+                    v
+                    for v in self._verified.values()
+                    if v.activation_sha256 == activation_sha256
+                    and v.validator_account_id == account
+                ),
+                key=lambda v: (self._verified_through[v.key()], v.key()),
+            )
+            if not values:
+                raise ValueError("designated validator has no natively verified coverage")
+            witness = RewardOpportunityWitness(
+                schema="umi-reward-opportunity-witness/1",
+                rule_sha256=self.rule_sha256,
+                activation_sha256=activation_sha256,
+                validator_account_id=account,
+                interval_keys=tuple(v.key() for v in values),
+            )
+            return witness, RewardOpportunityContribution(
+                validator_account_id=account,
+                witness_sha256=digest(witness),
+                credited_ms=sum(v.credited_ms for v in values),
+                through_block=max(self._verified_through[v.key()] for v in values),
+            )
 
     async def verified_ms(self, *, activation_sha256: str, validator_hotkey: str) -> int:
         async with self._lock:
