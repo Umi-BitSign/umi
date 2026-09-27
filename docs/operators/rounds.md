@@ -828,8 +828,25 @@ snapshot and the series lifetime bound. Exact reassembly rejects altered calls,
 tips, extensions and framing. Verification reconstructs the original signing
 payload, including the genesis, checkpoint and runtime versions; an old signature
 cannot be rebound to a later era. The resulting receipt query contains checked
-search bounds only. Durable intent/signature retention, prior opportunity,
+search bounds only. Historical transaction reconciliation, prior opportunity,
 legacy handoff, writer fencing and submission authorization remain required.
+
+`reserve_transaction` records the selected allocation, original signing snapshot,
+nonce, mortality and complete registered UID row before signing. It retains the
+exact chain/control evidence and metadata, and reserves space for the signature
+in the common private journal. Permit, direct-weight mode, rate and weight limits
+must permit the call. `retain_signed_transaction` verifies the native encoded
+bytes and commits them against that reservation. Restart and lost replies reuse
+the same record; a different attempt or signature cannot replace it. A slow
+commit or cancelled waiter preserves completed writes. Journal capacity can be
+increased without changing the selected series or writer.
+
+These APIs are local preparation/storage components. Neither signs nor submits.
+Unresolved intents remain pending, including unsigned intents after proof expiry.
+Historical signing-context replay and native outcome/expiry reconciliation must
+be connected before an execution service can retire them or create a new attempt.
+The service must also enforce migration fencing and the remaining reward-authority
+checks before signing or transmission.
 
 ### Participation admission
 

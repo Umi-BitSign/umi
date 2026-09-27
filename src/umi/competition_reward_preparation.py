@@ -9,11 +9,11 @@ still belong to the execution consumer.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Annotated, Literal
 
-import bittensor as bt
 from pydantic import Field
 
 from .competition_chain import CompetitionChainConfig
@@ -39,6 +39,12 @@ from .competition_reward_decisions import (
     StandingRewardControlReader,
 )
 from .competition_reward_history import OwnedRewardControlHistory
+from .competition_reward_transactions import (
+    PendingStandingWeight,
+    StandingWeightIntent,
+    StandingWeightJournal,
+    standing_weight_call,
+)
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
 from .mortal_receipts import MortalReceiptQuery
@@ -317,13 +323,7 @@ class StandingRewardPreparation:
         ):
             raise ValueError("transaction mortality exceeds the standing series bound")
         row = current.projection
-        call = bt.calls.SubtensorModule.set_mechanism_weights(
-            netuid=78,
-            mecid=0,
-            dests=list(row.uids),
-            weights=list(row.weights),
-            version_key=chain.weights_version_key,
-        )
+        call = standing_weight_call(row, chain)
         envelope = verify_mortal_call(
             encoded,
             call,
@@ -345,3 +345,103 @@ class StandingRewardPreparation:
             mortality_period=period,
             signed_extrinsic=envelope.data.hex(),
         )
+
+    def _transaction_intent(self, current, control, chain, period):
+        if (
+            type(period) is not int
+            or not 4 <= period <= self.reader.series.maximum_transaction_lifetime_blocks
+        ):
+            raise ValueError("transaction mortality exceeds the standing series bound")
+        call = standing_weight_call(current.projection, chain)
+        return StandingWeightIntent(
+            schema="umi-standing-weight-intent/1",
+            series_sha256=self.series_sha256,
+            decision_sha256=current.current.selection.decision_sha256,
+            activation_sha256=digest(current.prepared.activation),
+            chain_config_sha256=chain.chain_config_sha256,
+            validator_hotkey=chain.validator_hotkey,
+            block=chain.block,
+            block_hash=chain.block_hash,
+            prior_last_update=chain.validator_last_update,
+            nonce=chain.validator_nonce,
+            mortality_period=period,
+            weights_version_key=chain.weights_version_key,
+            projection=current.projection,
+            destinations=tuple(call.params["dests"]),
+            weights=tuple(call.params["weights"]),
+            chain_evidence_sha256=chain.evidence_sha256,
+            control_evidence_sha256=hashlib.sha256(control.evidence).hexdigest(),
+            metadata_sha256=chain.runtime.metadata_sha256,
+        )
+
+    async def reserve_transaction(
+        self,
+        prepared: PreparedStandingReward,
+        journal: StandingWeightJournal,
+        *,
+        mortality_period: int,
+        control: OwnedRewardControlObservation,
+        history: OwnedRewardControlHistory,
+        source: DecisionSource,
+        chain: OwnedCompetitionChainObservation,
+        chain_config: CompetitionChainConfig,
+    ) -> PendingStandingWeight:
+        """Retain an unsigned intent and recovery inputs before any signing.
+
+        This method does not grant signing authority. The future execution owner
+        must also verify opportunity, migration fencing and the selected manifest.
+        """
+        async with self._lock:
+
+            def retain():
+                current = self._project(prepared, control, history, source, chain, chain_config)
+                intent = self._transaction_intent(current, control, chain, mortality_period)
+                result = journal.reserve(
+                    intent,
+                    chain=chain.evidence,
+                    control=control.evidence,
+                    metadata=chain.runtime.metadata_bytes,
+                )
+                # A slow commit may expire the preflight. Its durable intent
+                # remains available for recovery; never start another attempt.
+                self._project(prepared, control, history, source, chain, chain_config)
+                return result
+
+            return await run_owned_thread(retain)
+
+    async def retain_signed_transaction(
+        self,
+        prepared: PreparedStandingReward,
+        journal: StandingWeightJournal,
+        encoded: bytes,
+        *,
+        mortality_period: int,
+        control: OwnedRewardControlObservation,
+        history: OwnedRewardControlHistory,
+        source: DecisionSource,
+        chain: OwnedCompetitionChainObservation,
+        chain_config: CompetitionChainConfig,
+    ) -> PendingStandingWeight:
+        """Verify actual bytes and commit them against their original reservation.
+
+        A successful return is a recoverable local record, never a broadcast or
+        permission to submit. Every transmission still needs fresh native gates.
+        """
+        async with self._lock:
+
+            def retain():
+                current = self._project(prepared, control, history, source, chain, chain_config)
+                intent = self._transaction_intent(current, control, chain, mortality_period)
+                self._verify_transaction_bytes(
+                    prepared,
+                    encoded,
+                    mortality_period,
+                    control,
+                    history,
+                    source,
+                    chain,
+                    chain_config,
+                )
+                return journal.retain_signed(intent, encoded)
+
+            return await run_owned_thread(retain)

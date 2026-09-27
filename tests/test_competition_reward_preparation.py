@@ -232,7 +232,7 @@ async def native_package(service_quality_inputs, tmp_path):
 
 
 @pytest.fixture
-async def preparation_case(native_package, registered_case, tmp_path, monkeypatch):
+async def preparation_case(native_package, registered_case, tmp_path, monkeypatch, request):
     p, item = native_package, registered_case
     h = p.package.inputs.history
     item.finality.ref = replace(
@@ -262,7 +262,7 @@ async def preparation_case(native_package, registered_case, tmp_path, monkeypatc
         cohorts=(h.plan,),
         validators=(item.hotkey,),
         maximum_proof_lag_blocks=2,
-        maximum_transaction_lifetime_blocks=2,
+        maximum_transaction_lifetime_blocks=getattr(request, "param", 2),
         lifetime="until_superseded_or_revoked",
     )
     reader = StandingRewardControlReader(
@@ -348,6 +348,39 @@ async def preparation_case(native_package, registered_case, tmp_path, monkeypatc
 
 def replay_args(observations):
     return {k: observations[k] for k in ("control", "history", "source")}
+
+
+@pytest.mark.parametrize("preparation_case", [4], indirect=True)
+async def test_native_package_projection_retains_original_signing_inputs(
+    preparation_case, tmp_path
+):
+    from umi.competition_reward_transactions import StandingWeightJournal
+
+    t = preparation_case
+    observations = await t.observations()
+    prepared = await t.preparation.prepare(t.package, **replay_args(observations))
+    observations = await t.observations()
+    chain = observations["chain"]
+    options = dict(
+        series_sha256=digest(t.reader.series),
+        validator_hotkey=chain.validator_hotkey,
+        chain_config_sha256=chain.chain_config_sha256,
+        maximum_bytes=32 * 1024**2,
+    )
+    journal = StandingWeightJournal(tmp_path / "native-transactions", **options)
+    pending = await t.preparation.reserve_transaction(
+        prepared, journal, mortality_period=4, **observations
+    )
+    assert pending.intent.activation_sha256 == digest(prepared.activation)
+    assert pending.intent.projection.allocation_sha256 == digest(prepared.allocation)
+    assert pending.intent.destinations == tuple(range(chain.registered_uid_count))
+    assert sum(pending.intent.weights) == 65535
+    assert journal._object(pending.intent.chain_evidence_sha256) == chain.evidence
+    assert (
+        journal._object(pending.intent.control_evidence_sha256) == observations["control"].evidence
+    )
+    assert pending.signed is None and pending.chain_submission_authorized is False
+    assert StandingWeightJournal(journal.journal.root, **options).pending() == pending
 
 
 async def test_native_package_replay_is_reused_but_projection_needs_fresh_control(

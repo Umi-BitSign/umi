@@ -5,10 +5,12 @@ history/package/proof path has separate tests; this fixture is not that proof.
 """
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 
 import pytest
 
+from umi.competition_cohort_reward_allocation import CohortRewardProjection
 from umi.competition_reward_preparation import StandingRewardPreparation
 from umi.signed_extrinsic import encode_verified_mortal_call
 
@@ -20,8 +22,16 @@ def transaction(native_encoding):
     item = native_encoding
     context = item.context
     current = SimpleNamespace(
-        projection=SimpleNamespace(uids=(0, 1, 2), weights=(0, 20000, 45535)),
-        current=object(),
+        projection=CohortRewardProjection(
+            schema="umi-cohort-reward-projection/1",
+            allocation_sha256="aa" * 32,
+            snapshot_sha256="ab" * 32,
+            recipients=(),
+            uids=(1, 2),
+            weights=(20000, 45535),
+        ),
+        current=SimpleNamespace(selection=SimpleNamespace(decision_sha256="ac" * 32)),
+        prepared=SimpleNamespace(activation={"test_activation": True}),
     )
     chain = SimpleNamespace(
         runtime=context["runtime"],
@@ -31,9 +41,22 @@ def transaction(native_encoding):
         weights_version_key=1,
         block=123,
         block_hash=context["runtime"].snapshot.block_hash,
+        validator_last_update=100,
+        weights_rate_limit=10,
+        validator_permit=True,
+        mechanism_count=1,
+        commit_reveal_enabled=False,
+        registered_uid_count=3,
+        max_allowed_uids=256,
+        min_allowed_weights=1,
+        max_weights_limit=65535,
+        chain_config_sha256="ad" * 32,
+        evidence=b'{"synthetic_chain":true}',
+        evidence_sha256=hashlib.sha256(b'{"synthetic_chain":true}').hexdigest(),
     )
     owner = object.__new__(StandingRewardPreparation)
     owner._lock = asyncio.Lock()
+    owner.series_sha256 = "ae" * 32
     owner.reader = SimpleNamespace(series=SimpleNamespace(maximum_transaction_lifetime_blocks=128))
     checks = []
 
@@ -44,7 +67,7 @@ def transaction(native_encoding):
     owner._project = project
     options = dict(
         mortality_period=128,
-        control=object(),
+        control=SimpleNamespace(evidence=b'{"synthetic_control":true}'),
         history=object(),
         source=lambda _: b"",
         chain=chain,
@@ -92,7 +115,7 @@ async def test_changed_preflight_cannot_supply_receipt_bounds(transaction, fault
     elif fault == "version":
         t.chain.weights_version_key += 1
     elif fault == "row":
-        t.current.projection.weights = (0, 20001, 45534)
+        t.current.projection = t.current.projection.model_copy(update={"weights": (20001, 45534)})
     elif fault == "limit":
         t.owner.reader.series.maximum_transaction_lifetime_blocks = 64
     else:
