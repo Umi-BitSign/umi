@@ -276,7 +276,7 @@ def _weight_rollover(case):
         case.chain,
         case.consent,
         mode="competition_weights",
-        sequence=4,
+        sequence=case.signed.directive.sequence + 1,
         predecessor_version=4,
         previous=case.signed.directive_sha256,
         issued_at_block=190,

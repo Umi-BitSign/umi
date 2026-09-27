@@ -41,8 +41,9 @@ def test_fixture_podman_uses_successor_store_and_selected_user_bus(monkeypatch):
 
 
 @pytest.mark.parametrize("instance", ["0", "54"])
+@pytest.mark.parametrize("pending", [False, True])
 def test_signed_migration_bridge_fixture_has_valid_preservable_history(
-    tmp_path, signed_policy, instance, limits
+    tmp_path, signed_policy, instance, limits, pending
 ):
     from .test_competition_migration_linux import _prepare_legacy
 
@@ -59,7 +60,7 @@ def test_signed_migration_bridge_fixture_has_valid_preservable_history(
     for name in ("umi-validator-worker-state", "umi-validator-operator-inputs"):
         layout.physical(Path("/var/lib") / name).mkdir(parents=True, mode=0o700)
     user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
-    item = _prepare_legacy(layout, user, "linux/amd64", signed_policy)
+    item = _prepare_legacy(layout, user, "linux/amd64", signed_policy, pending=pending)
     reader = _Reader(user.pw_uid)
     for root in (
         item.config.state_root,
@@ -86,11 +87,22 @@ def test_signed_migration_bridge_fixture_has_valid_preservable_history(
         limits=limits,
     ) as snapshot:
         assert snapshot._files == item.files
-        assert not snapshot.manifest.holds
+        if pending:
+            assert snapshot.manifest.holds == ["registration_bridge_attempt_mortality_unknown"]
+        else:
+            assert not snapshot.manifest.holds
         effects, holds = _reconcile_snapshot(snapshot, item.owned, ())
-        assert not holds
-        assert [effect.classification for effect in effects] == ["proven_current_weight"]
+        if pending:
+            assert "registration_bridge_attempt_mortality_unknown" in holds
+            assert [effect.classification for effect in effects] == ["unresolved"]
+        else:
+            assert not holds
+            assert [effect.classification for effect in effects] == ["proven_current_weight"]
     audit = audit_bridge_history(item.files, hotkey=item.config.validator_hotkey)
-    assert not audit.holds
-    assert audit.attempts[-1][1].weight_call.block_number == 161
+    if pending:
+        assert audit.holds == ("registration_bridge_attempt_mortality_unknown",)
+        assert audit.attempts[-1][1].weight_call is None
+    else:
+        assert not audit.holds
+        assert audit.attempts[-1][1].weight_call.block_number == 161
     assert item.owned.validator_uid == int(instance)

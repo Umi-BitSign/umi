@@ -426,7 +426,7 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
     config = SimpleNamespace(name="sealed-config")
     installation = SimpleNamespace(
         config=config,
-        operator_consent=SimpleNamespace(name="sealed-consent"),
+        operator_consent=SimpleNamespace(name="sealed-consent", worker_source_overlay=None),
         worker_execution_limits=SimpleNamespace(name="sealed-ceilings"),
     )
     config_path = Path("/etc/umi/supervisor.json")
@@ -517,6 +517,7 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
     assert captured["adapter"]["installation"] is installation
     assert captured["adapter"]["observer"] is observer
     assert captured["adapter"]["container"] is captured["container_instance"]
+    assert captured["container_instance"].source_overlay is None
     assert captured["runtime"]["directive_fetcher"].__class__ is Fetcher
     assert captured["runtime"]["startup_lease"] is startup_lease
     assert captured["runtime"]["limits"].model_dump() == {

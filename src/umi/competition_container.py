@@ -761,9 +761,7 @@ class PodmanSuccessorContainer:
         await self._refresh_mount_namespace(mounts)
         labels = self._labels(activation)
         if self.source_overlay is not None:
-            labels[_LABEL + "worker-source-host"] = (
-                self.source_overlay.approval.signed_host.manifest_sha256
-            )
+            labels[_LABEL + "worker-source-host"] = self.source_overlay.host_manifest_sha256
         network = (
             "none"
             if activation.profile == "competition_replay"

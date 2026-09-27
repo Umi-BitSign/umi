@@ -61,8 +61,8 @@ async def test_real_writer_lock_preserves_inference_and_completes_once(setup, mo
     try:
         status = await asyncio.wait_for(driver.poll_once(), timeout=2)
         assert status["status"] == "waiting_database"
-        assert heartbeat.done(), "SQLite waiting blocked inference/finality on the event loop"
         assert status["in_flight"] == 1
+        assert heartbeat.done(), "SQLite waiting blocked inference/finality on the event loop"
         assert not owned.done() and driver._tasks[slot] is owned
         assert (driver._cursor, driver._order_cursor) == cursors
         assert len(invocations) == 1
@@ -93,7 +93,7 @@ async def test_real_writer_lock_preserves_inference_and_completes_once(setup, mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["settlement", "work", "round", "exchange"])
-@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED | (1 << 8)])
+@pytest.mark.parametrize("code", [5, 6 | (1 << 8)])
 async def test_busy_background_completion_is_consumed_and_retried(setup, name, code):
     driver = setup.drivers[0]
     error = sqlite3.OperationalError("contended")
@@ -125,11 +125,17 @@ async def test_busy_background_completion_is_consumed_and_retried(setup, name, c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", [None, sqlite3.SQLITE_IOERR])
+@pytest.mark.parametrize("code", [None, 10])
 async def test_busy_message_without_code_and_nonbusy_database_errors_still_raise(
     setup, monkeypatch, code
 ):
     driver = setup.drivers[0]
+    if code is None:
+        # Newer CPython must still require a native code. The 3.10 fallback is
+        # covered by real contention and the shared classifier tests.
+        from umi import sqlite_contention
+
+        monkeypatch.setattr(sqlite_contention, "_ERROR_CODES_AVAILABLE", True)
     error = sqlite3.OperationalError("database is locked")
     if code is not None:
         error.sqlite_errorcode = code
@@ -182,7 +188,7 @@ async def test_service_keeps_running_after_contention_until_explicit_stop(setup,
     driver = setup.drivers[0]
     handlers, reports = {}, []
     error = sqlite3.OperationalError("contended")
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error.sqlite_errorcode = 5
     calls = 0
 
     async def poll():

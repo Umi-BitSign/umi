@@ -115,6 +115,18 @@ is not a recovery procedure. Preserve state and obtain the bounded attempt
 details from the
 [validator troubleshooting guide](../PERMANENT_VALIDATOR_SUPERVISOR.md#troubleshooting).
 
+Version-1 journals do not retain the signed transaction, nonce or signing
+anchor. The SDK obtains that anchor separately from the recorded preflight, so
+preflight plus eight blocks does not establish expiry. For an audited legacy
+release, the [stopped host upgrade](../validators/successor-upgrade.md#legacy-version-1-drain)
+can publish a fresh marker under both original process locks, prove its inclusion
+and eight subsequent finalized blocks, and check current nonce, LastUpdate and
+weights. This requires separate consent for the marker transaction fee and a
+reviewed signed host release. The resulting archive retires the uncertain attempt
+without claiming it succeeded or never landed. The original journals and
+high-water records remain intact. Preserve this decoder and recovery guidance
+while version-1 installations still need migration.
+
 `receipt_returned` is different: a retained finalized receipt can be verified
 against the chain and reconciled without another send. Neither state permits a
 second writer for the same hotkey. Supervisor `durable_hold:false` describes only

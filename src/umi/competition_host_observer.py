@@ -14,6 +14,7 @@ import hashlib
 import os
 import stat
 import weakref
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .bridge.transactions import RegistrationBridgeTransactionJournal
@@ -292,6 +293,25 @@ class StoppedUpgradeObserver:
         self, *, manifest_anchor_sha256: str | None = None
     ) -> OwnedCompetitionChainObservation:
         return (await self._observe(manifest_anchor_sha256=manifest_anchor_sha256)).observation
+
+    @asynccontextmanager
+    async def owned_provider(self):
+        """Keep the authenticated observer alive across a consented recovery.
+
+        This context remains read-only. The separately consented publisher
+        owns any marker transaction, its fee budget and retained bytes.
+        """
+        _issued(self)
+        async with self._lock:
+            self._recheck()
+            selected = parse_successor_host_observer_config(self._observer.payload)
+            provider = FinalizedCompetitionWeightProvider(selected.chain, selected.policy)
+            try:
+                await provider.start()
+                yield provider
+                self._recheck()
+            finally:
+                await provider.aclose()
 
     async def observe_bridge(
         self,

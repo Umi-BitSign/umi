@@ -320,17 +320,21 @@ def _retain_weight_renewals(case, count=12, *, bad_authorization=False):
     case.adapter._retain(case.adapter._verify(case.selection, case.files))
     previous, records = anchor, []
     for index in range(count):
-        body = case.item.body.model_copy(update={
-            "authorization_id": f"{index + 500:064x}",
-            "predecessor_directive_sha256": previous.directive_sha256,
-        })
+        body = case.item.body.model_copy(
+            update={
+                "authorization_id": f"{index + 500:064x}",
+                "predecessor_directive_sha256": previous.directive_sha256,
+            }
+        )
         authorization = sign_competition_weight_authorization(body, authority_wallets()[0])
-        directive = previous.directive.model_copy(update={
-            "sequence": previous.directive.sequence + 1,
-            "predecessor_version": 4,
-            "previous_directive_sha256": previous.directive_sha256,
-            "chain_authorization": _signed_authorization_target(authorization),
-        })
+        directive = previous.directive.model_copy(
+            update={
+                "sequence": previous.directive.sequence + 1,
+                "predecessor_version": 4,
+                "previous_directive_sha256": previous.directive_sha256,
+                "chain_authorization": _signed_authorization_target(authorization),
+            }
+        )
         signed = _signed(directive)
         records.append(signed)
         files = replace(
@@ -340,9 +344,12 @@ def _retain_weight_renewals(case, count=12, *, bad_authorization=False):
                 case.item.signed if bad_authorization and index == count - 1 else authorization
             ),
         )
-        case.adapter._retain(SimpleNamespace(
-            selection=SuccessorWorkerSelection(signed), files=files,
-        ))
+        case.adapter._retain(
+            SimpleNamespace(
+                selection=SuccessorWorkerSelection(signed),
+                files=files,
+            )
+        )
         previous = signed
 
 
@@ -353,8 +360,9 @@ async def test_recovery_replays_unchanged_package_once_but_checks_every_renewal(
 
     case = adapter_case
     _retain_weight_renewals(case)
-    replay, authorize = recovery.load_bound_successor_replay_package, (
-        adapters.verify_bound_successor_chain_authorization
+    replay, authorize = (
+        recovery.load_bound_successor_replay_package,
+        (adapters.verify_bound_successor_chain_authorization),
     )
     calls = {"replay": 0, "authorize": 0}
 
@@ -424,20 +432,29 @@ def test_recovery_reuse_rechecks_changed_binding_with_the_same_package_path(adap
     directive = case.selection.signed.directive
     cache.load(case.files.package_path, directive=directive)
     if changed == "target":
-        directive = directive.model_copy(update={
-            "replay_package": directive.replay_package.model_copy(update={
-                "projection_sha256": "ff" * 32,
-            }),
-        })
-    else:
-        directive = directive.model_copy(update={
-            "release": directive.release.model_copy(update={
-                "umi_git_revision": "f" * 40,
-                "replay_release_identity": directive.release.replay_release_identity.model_copy(
-                    update={"umi_revision": "f" * 40}
+        directive = directive.model_copy(
+            update={
+                "replay_package": directive.replay_package.model_copy(
+                    update={
+                        "projection_sha256": "ff" * 32,
+                    }
                 ),
-            }),
-        })
+            }
+        )
+    else:
+        identity = directive.release.replay_release_identity.model_copy(
+            update={"umi_revision": "f" * 40}
+        )
+        directive = directive.model_copy(
+            update={
+                "release": directive.release.model_copy(
+                    update={
+                        "umi_git_revision": "f" * 40,
+                        "replay_release_identity": identity,
+                    }
+                ),
+            }
+        )
     with pytest.raises((ValueError, ValidatorSupervisorError)):
         cache.load(case.files.package_path, directive=directive)
 

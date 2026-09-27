@@ -191,9 +191,12 @@ async def test_live_socket_authenticates_during_recurring_coordinator_cycle(setu
             paused.release.set()
             reply = await asyncio.wait_for(request, timeout=5)
             assert len(reply.proposals) == 1
-            async with asyncio.timeout(5):
+
+            async def wait_for_cycles():
                 while len(completed) < 2:
                     await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_cycles(), timeout=5)
             assert all(result["settlement_prepared"] == 1 for result in completed)
             # Admission still rejects an expired newly arriving signed request.
             with pytest.raises(ValueError, match="request rejected"):

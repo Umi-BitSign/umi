@@ -242,10 +242,75 @@ class TransactionRecoveryCheckpointBody(RecoveryCheckpointBody):
         return self
 
 
+class LegacyDrainReport(StrictProtocolModel):
+    """Retirement evidence; it does not assert the old transaction's outcome."""
+
+    attempt_id: Hex32
+    journal_sha256: Hex32
+    marker_sha256: Hex32
+    included_block: Annotated[int, Field(gt=0, le=2**53 - 9)]
+    included_block_hash: BlockHash
+    verified_head_block: Annotated[int, Field(gt=0, le=2**53 - 1)]
+    verified_head_hash: BlockHash
+    historical_submission_outcome_known: Literal[False] = False
+
+    @model_validator(mode="after")
+    def drained(self) -> Self:
+        if self.verified_head_block < self.included_block + 8:
+            raise ValueError("legacy marker lacks the audited mortality interval")
+        return self
+
+
+class LegacyDrainRecoveryEffect(LegacyEffect):
+    classification: Literal[
+        "prepared_without_effect_intent",
+        "retained_anchor_receipt",
+        "retained_weight_receipt",
+        "retained_bridge_receipt",
+        "retained_recovered_effect",
+        "proven_current_anchor",
+        "proven_current_weight",
+        "proven_superseded_weight",
+        "unresolved",
+        "retired_legacy_attempt_outcome_unknown",
+    ]
+
+
+class LegacyDrainRecoveryCheckpointBody(RecoveryCheckpointBody):
+    schema_: Literal["umi-successor-recovery-checkpoint/3"] = Field(alias="schema")
+    reconciled_effects: Annotated[list[LegacyDrainRecoveryEffect], Field(max_length=65536)]
+    legacy_drain: LegacyDrainReport
+
+    @model_validator(mode="after")
+    def drain_coverage(self) -> Self:
+        journal = next(
+            (f for f in self.legacy_snapshot.files if f.path == "registration-bridge-journal.json"),
+            None,
+        )
+        if journal is None or journal.sha256 != self.legacy_drain.journal_sha256:
+            raise ValueError("legacy drain does not bind the original journal")
+        if self.legacy_drain.verified_head_block > self.finalized_block or (
+            self.legacy_drain.verified_head_block == self.finalized_block
+            and self.legacy_drain.verified_head_hash != self.finalized_block_hash
+        ):
+            raise ValueError("checkpoint observation predates legacy drain")
+        retired = [
+            e
+            for e in self.reconciled_effects
+            if e.classification == "retired_legacy_attempt_outcome_unknown"
+        ]
+        if self.prior_effects_reconciled and [e.path for e in retired] != [
+            "registration-bridge-journal.json"
+        ]:
+            raise ValueError("checkpoint must retire exactly its uncertain current attempt")
+        return self
+
+
 def recovery_checkpoint_digest(body: RecoveryCheckpointBody) -> str:
     domains = {
         RecoveryCheckpointBody: b"umi-successor-recovery-checkpoint-v1\0",
         TransactionRecoveryCheckpointBody: b"umi-successor-recovery-checkpoint-v2\0",
+        LegacyDrainRecoveryCheckpointBody: b"umi-successor-recovery-checkpoint-v3\0",
     }
     if type(body) not in domains:
         raise CompetitionRecoveryError("unsupported recovery checkpoint type")
