@@ -33,7 +33,8 @@ from umi.competition_reward_decisions import (
     StandingRewardControlReader,
     StandingRewardSeries,
 )
-from umi.competition_reward_preparation import RewardReplayRequirement, StandingRewardPreparation
+from umi.competition_reward_manifest import RewardReplayRequirement, StandingRewardManifest
+from umi.competition_reward_preparation import StandingRewardPreparation
 from umi.competition_round_journal import RoundJournal
 from umi.competition_store import CompetitionStore
 from umi.grandpa_finality import FINNEY_GENESIS_HASH
@@ -250,13 +251,18 @@ async def preparation_case(native_package, registered_case, tmp_path, monkeypatc
         now_ms=lambda: item.clock.now,
     )
     control_hotkey = wallet("Ferdie").hotkey.ss58_address
+    p.manifest = StandingRewardManifest(
+        schema="umi-standing-reward-manifest/1",
+        policy_sha256=digest(item.policy),
+        cohorts=(p.requirement,),
+    )
     series = StandingRewardSeries(
         schema="umi-standing-reward-series/1",
         genesis_hash=FINNEY_GENESIS_HASH,
         netuid=78,
         policy_sha256=digest(item.policy),
         policy_epoch=1,
-        manifest_sha256="ab" * 32,
+        manifest_sha256=digest(p.manifest),
         control_hotkey=control_hotkey,
         recovery=h.authority,
         cohorts=(h.plan,),
@@ -323,7 +329,7 @@ async def preparation_case(native_package, registered_case, tmp_path, monkeypatc
     def reopen(**changes):
         options = dict(maximum_promotion_bytes=1_000_000)
         options.update(changes)
-        return StandingRewardPreparation(reader, p.store, (p.requirement,), **options)
+        return StandingRewardPreparation(reader, p.store, p.manifest, **options)
 
     async def observations():
         observed = await control()
@@ -494,14 +500,11 @@ async def test_failed_replay_retries_and_independent_bindings_are_enforced(
     ready = await p.preparation.prepare(p.package, **replay_args(await p.observations()))
     assert ready.allocation == p.allocation and calls == [1, 1]
     for field, value in (("terms_sha256", "ff" * 32), ("catalog_sha256s", ("ff" * 32,))):
-        other = StandingRewardPreparation(
-            p.reader,
-            p.store,
-            (p.requirement.model_copy(update={field: value}),),
-            maximum_promotion_bytes=1_000_000,
+        changed = p.manifest.model_copy(
+            update={"cohorts": (p.requirement.model_copy(update={field: value}),)}
         )
-        with pytest.raises(ValueError):
-            await other.prepare(p.package, **replay_args(await p.observations()))
+        with pytest.raises(ValueError, match="manifest differs"):
+            StandingRewardPreparation(p.reader, p.store, changed, maximum_promotion_bytes=1_000_000)
     with pytest.raises(ValueError, match="differs from current standing activation"):
         await p.preparation.prepare(
             p.package.model_copy(update={"policy_sha256": "ff" * 32}),
@@ -623,10 +626,11 @@ async def test_complete_native_history_package_and_projection_restart_without_co
         return ready, result
 
     def owner():
-        return StandingRewardPreparation(
-            c.reader, p.store, (p.requirement,), maximum_promotion_bytes=1_000_000
-        )
+        # Cold recovery reads the approved manifest from the reader's retained
+        # journal. Neither the coordinator nor a package chooses replay inputs.
+        return StandingRewardPreparation(c.reader, p.store, maximum_promotion_bytes=1_000_000)
 
+    StandingRewardPreparation(c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000)
     captured = await history()
     ready, result = await prepare(owner(), captured)
     assert ready.allocation == p.allocation

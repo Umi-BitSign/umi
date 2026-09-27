@@ -12,9 +12,7 @@ import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Annotated, Literal
-
-from pydantic import Field
+from typing import Literal
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_state import OwnedCompetitionChainObservation
@@ -39,6 +37,7 @@ from .competition_reward_decisions import (
     StandingRewardControlReader,
 )
 from .competition_reward_history import OwnedRewardControlHistory
+from .competition_reward_manifest import StandingRewardManifest, retain_reward_manifest
 from .competition_reward_transactions import (
     PendingStandingWeight,
     StandingTransactionEnd,
@@ -51,16 +50,8 @@ from .concurrency import run_owned_thread
 from .mortal_receipts import MortalReceiptQuery
 from .open_competition import digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
-from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .protocol import canonical_json_bytes
 from .signed_extrinsic import verify_mortal_call
-
-
-class RewardReplayRequirement(StrictProtocolModel):
-    """Independent host selections; never inferred from the package itself."""
-
-    cohort_sha256: Hex32
-    terms_sha256: Hex32
-    catalog_sha256s: Annotated[tuple[Hex32, ...], Field(min_length=1, max_length=64)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,25 +101,18 @@ class StandingRewardPreparation:
         self,
         reader: StandingRewardControlReader,
         promotion_store: CompetitionStore,
-        requirements: tuple[RewardReplayRequirement, ...],
+        manifest: StandingRewardManifest | None = None,
         *,
         maximum_promotion_bytes: int,
         maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
     ):
-        requirements = tuple(
-            RewardReplayRequirement.model_validate_json(canonical_json_bytes(r))
-            for r in requirements
-        )
-        keys = [r.cohort_sha256 for r in requirements]
-        if len(set(keys)) != len(keys) or set(keys) != {digest(p) for p in reader.series.cohorts}:
-            raise ValueError("reward replay requirements must cover exactly the selected series")
         for bound in (maximum_promotion_bytes, maximum_package_bytes):
             if type(bound) is not int or not 1024 <= bound <= MAX_CONFIGURED_PRIVATE_BYTES:
                 raise ValueError("reward preparation byte bound is invalid")
         if digest(promotion_store.policy) != digest(reader.policy):
             raise ValueError("reward preparation promotion store belongs to another policy")
         self.reader, self.promotion_store = reader, promotion_store
-        self.requirements = {r.cohort_sha256: r for r in requirements}
+        self.manifest = retain_reward_manifest(reader, manifest)
         self.series_sha256, self.policy_sha256 = digest(reader.series), digest(reader.policy)
         self.maximum_promotion_bytes = maximum_promotion_bytes
         self.maximum_package_bytes = maximum_package_bytes
@@ -146,6 +130,7 @@ class StandingRewardPreparation:
             digest(self.reader.series) != self.series_sha256
             or digest(self.reader.policy) != self.policy_sha256
             or digest(self.promotion_store.policy) != self.policy_sha256
+            or digest(self.manifest) != self.reader.series.manifest_sha256
         ):
             raise ValueError("reward preparation authority changed")
         current = self.reader.select_history(control, source, history)
@@ -174,7 +159,7 @@ class StandingRewardPreparation:
         selected = self._selected(control, history, source).selection
         activation = selected.activation
         assert activation is not None
-        requirement = self.requirements[activation.cohort_sha256]
+        requirement = self.manifest.requirement(activation.cohort_sha256)
         raw = canonical_json_bytes(package)
         if len(raw) > self.maximum_package_bytes:
             raise ValueError("reward package exceeds its byte bound")
@@ -228,7 +213,7 @@ class StandingRewardPreparation:
             or prepared._binding != _binding(prepared)
             or prepared.series_sha256 != self.series_sha256
             or prepared.requirement_sha256
-            != digest(self.requirements[prepared.activation.cohort_sha256])
+            != digest(self.manifest.requirement(prepared.activation.cohort_sha256))
         ):
             raise ValueError("reward preparation was not issued by this native replay owner")
 

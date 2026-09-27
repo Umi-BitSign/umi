@@ -800,8 +800,20 @@ standing control, prior opportunity and transaction authorization remain
 separate execution requirements.
 
 `StandingRewardPreparation` connects complete-history selection to native package
-replay using independently selected terms and catalogs. Completed replay is
-retained in the process even if its waiter is cancelled or the initial control
+replay. Supply a `StandingRewardManifest` whose digest matches the independently
+selected series. It binds the policy and one terms/catalog selection for every
+cohort, in series order. The policy selects reward rules and evaluation runtime;
+each cohort plan selects its suite. Missing, extra, reordered or changed selections
+are rejected before replay. Package contents cannot supply these approvals.
+
+The manifest is retained in the standing reader's journal before use. Restart can
+omit the manifest argument and recover those original bytes without coordinator
+access. Missing or damaged retained data holds preparation; it never falls back
+to package-provided selections. Local storage and replay ceilings can be increased
+without changing the approved inputs. This input manifest does not certify host
+capacity, reward opportunity, legacy handoff or permission to submit.
+
+Completed replay is retained in the process even if its waiter is cancelled or the initial control
 proof expires. Projection then requires fresh control and complete registrations
 at the same finalized snapshot, the designated validator, and completed control
 drain time. A revoked or replaced selection cannot use a cached allocation.
@@ -866,9 +878,9 @@ signed bytes remain intact; interrupted writes and lost replies cannot leave a
 half-linked successor. Stored lineage selects the current attempt but grants no
 transaction authority. The journal exposes no reset or deletion operation.
 
-These APIs neither sign nor submit. The execution service must still enforce the
-series manifest, prior reward opportunity, migration fencing and single-writer
-ownership before any signing or transmission. Actual reward coverage must be
+These APIs neither sign nor submit. The execution service must still enforce
+installed-series qualification, prior reward opportunity, migration fencing and
+single-writer ownership before any signing or transmission. Actual reward coverage must be
 proved separately; an expired attempt never supplies coverage credit.
 
 ### Participation admission
