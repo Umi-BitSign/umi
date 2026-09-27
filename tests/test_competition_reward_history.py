@@ -61,13 +61,16 @@ async def history_case(historical, monkeypatch, tmp_path):
     h.fail_block = None
     h.body_requests = []
     h.rpc_calls = []
-    histories = {
+    histories = getattr(h.c, "control_writes", None) or {
         first: ("aa" * 32, "bb" * 32),
         first + 1: ("cc" * 32, "bb" * 32),  # An overwritten decision must remain visible.
         first + 2: (),
         first + 3: (),  # Slot was cleared by an effect this call decoder cannot attribute.
         first + 4: ("bb" * 32,),
     }
+    cleared = getattr(
+        h.c, "cleared_blocks", set() if hasattr(h.c, "control_writes") else {first + 3}
+    )
     raws, decoded, events, values, roots = {}, {}, {}, {}, {}
     last = None
     for height, writes in histories.items():
@@ -85,7 +88,7 @@ async def history_case(historical, monkeypatch, tmp_path):
         events[height] = [success(i) for i in range(len(writes))]
         if writes:
             last = commitment(writes[-1], height)
-        elif height == first + 3:
+        elif height in cleared:
             last = None
         at = dict(h.source.archive.values)
         for key in at:

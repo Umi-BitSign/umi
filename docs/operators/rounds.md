@@ -744,10 +744,21 @@ service must provision disk and RPC capacity for the complete interval. Slow
 proof verification and decoding drain in owned threads, keeping the event loop
 responsive without abandoning work during shutdown.
 
-The history reader is not yet connected to standing reward selection or installed
-reward execution. Its host must independently choose the admission boundary,
-interpret every write and bind the completed interval to a fresh control proof.
-Component tests do not establish installed outage recovery or a reward handoff.
+`StandingRewardControlReader.select_history` binds that complete interval to a
+fresh control proof at the same finalized snapshot. The interval starts at the
+approved recovery authority's issuance block, including that block. The reserved
+control key must publish only this series' ordered decisions during the interval.
+The first write must be a timely genesis; subsequent writes must repeat the
+current decision or advance exactly one decision. Unknown writes, hidden
+revocations, rollback, missing transitions and unresolved effects prevent
+selection. Repeating a decision preserves its original activation block and
+drain time. Admission remains provable when another write replaced the genesis
+in the same block, or when the same genesis was published again later.
+
+The simpler `select` and `select_admitted` methods check signed ancestry and
+original admission but do not exclude overwritten control writes. Installed
+reward execution must consume the complete history check. That execution
+integration and installed outage/reward-handoff qualification remain pending.
 
 This selection still requires native replay of the referenced package, original
 series admission, prior reward opportunity and any legacy handoff before weight

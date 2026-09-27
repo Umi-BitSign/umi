@@ -35,6 +35,7 @@ from .competition_reward_control_archive import (
     OwnedHistoricalRewardControl,
     validate_historical_reward_control,
 )
+from .competition_reward_history import OwnedRewardControlHistory, validate_control_history
 from .competition_round_journal import RoundJournal
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
@@ -140,6 +141,19 @@ class AdmittedStandingRewardSelection:
 
     selection: StandingRewardSelection
     admission: OwnedHistoricalRewardControl
+    chain_submission_authorized: Literal[False] = False
+
+
+@dataclass(frozen=True)
+class HistoryVerifiedStandingRewardSelection:
+    """Selection checked against every control write since authority issuance.
+
+    This includes admission and overwritten decisions. Execution still needs
+    native package, opportunity, recipient and transaction verification.
+    """
+
+    selection: StandingRewardSelection
+    history: OwnedRewardControlHistory
     chain_submission_authorized: Literal[False] = False
 
 
@@ -268,6 +282,61 @@ class StandingRewardControlReader:
         selection = self._select(observation, source, admission=admission)
         return AdmittedStandingRewardSelection(selection, admission)
 
+    def select_history(
+        self,
+        observation: OwnedRewardControlObservation,
+        source: DecisionSource,
+        history: OwnedRewardControlHistory,
+    ) -> HistoryVerifiedStandingRewardSelection:
+        """Recover from an outage without skipping overwritten control writes.
+
+        Scan from the approved authority's issuance block, including that block,
+        through the fresh observation's exact snapshot. A later slot timestamp
+        cannot choose a shorter history. The reserved control key must publish
+        only this series' ordered decisions throughout that interval.
+        """
+        selection = self._select(observation, source, admission=None, history=history)
+        return HistoryVerifiedStandingRewardSelection(selection, history)
+
+    def _history_activation_block(
+        self,
+        history: OwnedRewardControlHistory,
+        observation: OwnedRewardControlObservation,
+        decisions: tuple[SignedRewardControlDecision, ...],
+    ) -> int:
+        validate_control_history(
+            history,
+            first_block=self.series.recovery.authority.issued_at_block,
+            tip=observation.snapshot,
+            control_hotkey=self.series.control_hotkey,
+            chain_config_sha256=self.admission_chain_config_sha256,
+        )
+        if history.unresolved_blocks or not history.writes:
+            raise ValueError("standing history has unresolved effects or lacks chain admission")
+        sequence = -1
+        first_write = None
+        for write in history.writes:
+            if sequence >= 0 and write.decision_sha256 == digest(decisions[sequence].decision):
+                # Retransmitting the same decision does not restart its drain.
+                continue
+            sequence += 1
+            if sequence >= len(decisions):
+                raise ValueError("standing history conflicts with the selected decision prefix")
+            body = decisions[sequence].decision
+            if write.decision_sha256 != digest(body) or write.block_number < body.observed_at_block:
+                raise ValueError("standing history changed, skipped or backdated a decision")
+            if sequence == 0 and write.block_number > self.policy.valid_through_block:
+                raise ValueError("standing series lacks timely original chain admission")
+            first_write = write.block_number
+        last = history.writes[-1]
+        if sequence != len(decisions) - 1 or (
+            last.decision_sha256,
+            last.block_number,
+        ) != (observation.control_sha256, observation.committed_at_block):
+            raise ValueError("standing history does not reach the current control commitment")
+        assert first_write is not None
+        return first_write
+
     async def replay_admission(
         self, provider: HistoricalRewardControlProvider
     ) -> OwnedHistoricalRewardControl:
@@ -300,6 +369,7 @@ class StandingRewardControlReader:
         source: DecisionSource,
         *,
         admission: OwnedHistoricalRewardControl | None,
+        history: OwnedRewardControlHistory | None = None,
     ) -> StandingRewardSelection:
         self._proof(observation)
         if observation.control_sha256 is None:
@@ -339,6 +409,11 @@ class StandingRewardControlReader:
             decisions = verify_reward_decisions(
                 self.series, self.policy, tuple(reversed(reversed_chain))
             )
+            committed_at_block = (
+                observation.committed_at_block
+                if history is None
+                else self._history_activation_block(history, observation, decisions)
+            )
             if admission is not None:
                 genesis = decisions[0].decision
                 if (
@@ -367,6 +442,7 @@ class StandingRewardControlReader:
                 tip.kind == "admit_series"
                 and observation.committed_at_block > self.policy.valid_through_block
                 and admission is None
+                and history is None
             ):
                 raise ValueError("series genesis was committed after its admission window")
             self._proof(observation)
@@ -405,7 +481,7 @@ class StandingRewardControlReader:
             self.journal.put_many(records, index=record_head)
             self._proof(observation)
             effective = (
-                observation.committed_at_block
+                committed_at_block
                 + self.series.maximum_proof_lag_blocks
                 + self.series.maximum_transaction_lifetime_blocks
                 if tip.kind == "activate"
@@ -425,7 +501,7 @@ class StandingRewardControlReader:
                 digest(tip),
                 tip.sequence,
                 state,
-                observation.committed_at_block,
+                committed_at_block,
                 effective,
                 tip.activation,
             )
