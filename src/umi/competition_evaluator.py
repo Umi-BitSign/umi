@@ -1309,7 +1309,8 @@ class ContinuousEvaluator:
             return await self._poll_once()
         except sqlite3.OperationalError as error:
             code = getattr(error, "sqlite_errorcode", None)
-            if code is None or code & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            # SQLite BUSY/LOCKED codes; Python 3.10 lacks their named constants.
+            if code is None or code & 0xFF not in {5, 6}:
                 raise
             # A contended control journal must not shut down this worker and
             # cancel its one-use inference tasks. Revisit the same page at the

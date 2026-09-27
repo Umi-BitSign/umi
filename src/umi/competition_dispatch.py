@@ -636,7 +636,8 @@ class EndpointDispatcher:
             )
         except sqlite3.OperationalError as error:
             code = getattr(error, "sqlite_errorcode", None)
-            if code is None or code & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            # SQLite BUSY/LOCKED codes; Python 3.10 lacks their named constants.
+            if code is None or code & 0xFF not in {5, 6}:
                 raise
             # No new task or cursor advance; the normal poll interval retries.
             # In-flight claims stay owned and are never cancelled or resent.
