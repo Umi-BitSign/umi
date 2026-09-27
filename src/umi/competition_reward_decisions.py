@@ -8,6 +8,7 @@ remain mandatory at the execution boundary.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,12 +28,20 @@ from .competition_reward_control import (
     OwnedRewardControlObservation,
     validate_owned_reward_control,
 )
+from .competition_reward_control_archive import (
+    MAX_CONTROL_ARCHIVE_BYTES,
+    MAX_CONTROL_METADATA_BYTES,
+    HistoricalRewardControlProvider,
+    OwnedHistoricalRewardControl,
+    validate_historical_reward_control,
+)
 from .competition_round_journal import RoundJournal
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_DECISION_BYTES = 128 * 1024
+MAX_ADMISSION_BYTES = MAX_CONTROL_ARCHIVE_BYTES + 2 * MAX_CONTROL_METADATA_BYTES + 1024
 MAX_DECISIONS = 514
 DecisionSource = Callable[[str], bytes]
 
@@ -121,6 +130,19 @@ class StandingRewardSelection:
     chain_submission_authorized: Literal[False] = False
 
 
+@dataclass(frozen=True)
+class AdmittedStandingRewardSelection:
+    """Current selection plus independently proved original series admission.
+
+    Reward-package, opportunity, registration and transaction checks still
+    belong to execution. A historical proof never substitutes for current control.
+    """
+
+    selection: StandingRewardSelection
+    admission: OwnedHistoricalRewardControl
+    chain_submission_authorized: Literal[False] = False
+
+
 def verify_reward_decisions(
     series: StandingRewardSeries,
     policy: CompetitionPolicy,
@@ -177,6 +199,7 @@ class StandingRewardControlReader:
         expected_series_sha256: str,
         expected_chain_config_sha256: str,
         maximum_bytes: int,
+        expected_admission_chain_config_sha256: str | None = None,
     ):
         self.series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -185,12 +208,18 @@ class StandingRewardControlReader:
         self.series_sha256 = expected_series_sha256
         # Strict digest validation also rejects accidental configuration paths.
         self.chain_config_sha256 = expected_chain_config_sha256
-        if (
-            type(expected_chain_config_sha256) is not str
-            or len(expected_chain_config_sha256) != 64
-            or any(c not in "0123456789abcdef" for c in expected_chain_config_sha256)
-        ):
-            raise ValueError("standing reader chain configuration digest is invalid")
+        self.admission_chain_config_sha256 = (
+            expected_chain_config_sha256
+            if expected_admission_chain_config_sha256 is None
+            else expected_admission_chain_config_sha256
+        )
+        for config_sha256 in (self.chain_config_sha256, self.admission_chain_config_sha256):
+            if (
+                type(config_sha256) is not str
+                or len(config_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in config_sha256)
+            ):
+                raise ValueError("standing reader chain configuration digest is invalid")
         if self.series.policy_sha256 != digest(self.policy):
             raise ValueError("standing reader policy differs from its series")
         verify_recovery_authority(self.series.recovery, self.policy)
@@ -200,9 +229,9 @@ class StandingRewardControlReader:
                 "schema": "umi-standing-reward-reader/1",
                 "series_sha256": self.series_sha256,
             },
-            maximum_rounds=MAX_DECISIONS,
+            maximum_rounds=MAX_DECISIONS + 1,
             maximum_bytes=maximum_bytes,
-            maximum_record_bytes=MAX_DECISION_BYTES,
+            maximum_record_bytes=MAX_ADMISSION_BYTES,
         )
 
     def _proof(self, observation: OwnedRewardControlObservation) -> None:
@@ -215,6 +244,63 @@ class StandingRewardControlReader:
     def select(
         self, observation: OwnedRewardControlObservation, source: DecisionSource
     ) -> StandingRewardSelection:
+        return self._select(observation, source, admission=None)
+
+    def select_admitted(
+        self,
+        observation: OwnedRewardControlObservation,
+        source: DecisionSource,
+        admission: OwnedHistoricalRewardControl,
+    ) -> AdmittedStandingRewardSelection:
+        """Accept late recovery only with native evidence of timely chain admission.
+
+        Replay the historical archive before collecting the current observation.
+        The immutable admission can be reused in-process; restart replays its
+        retained bytes. No coordinator renewal or certificate-age bound applies.
+        A migration may independently select the original decoder configuration
+        for admission replay while current control uses the new configuration.
+        """
+        validate_historical_reward_control(
+            admission,
+            expected_control_hotkey=self.series.control_hotkey,
+            expected_chain_config_sha256=self.admission_chain_config_sha256,
+        )
+        selection = self._select(observation, source, admission=admission)
+        return AdmittedStandingRewardSelection(selection, admission)
+
+    async def replay_admission(
+        self, provider: HistoricalRewardControlProvider
+    ) -> OwnedHistoricalRewardControl:
+        """Recover the original proof from this reader's private durable journal.
+
+        The caller supplies the independently approved historical provider.
+        Retained bytes must pass native replay on every process restart.
+        """
+        record = self.journal.get("reward_series_admission", "original")
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"evidence", "metadata_hex"}
+            or type(record["metadata_hex"]) is not str
+            or not 0 < len(record["metadata_hex"]) <= 2 * MAX_CONTROL_METADATA_BYTES
+        ):
+            raise ValueError("retained reward admission has an invalid envelope")
+        proof = await provider.review_control(
+            canonical_json_bytes(record["evidence"]), bytes.fromhex(record["metadata_hex"])
+        )
+        validate_historical_reward_control(
+            proof,
+            expected_control_hotkey=self.series.control_hotkey,
+            expected_chain_config_sha256=self.admission_chain_config_sha256,
+        )
+        return proof
+
+    def _select(
+        self,
+        observation: OwnedRewardControlObservation,
+        source: DecisionSource,
+        *,
+        admission: OwnedHistoricalRewardControl | None,
+    ) -> StandingRewardSelection:
         self._proof(observation)
         if observation.control_sha256 is None:
             raise ValueError("standing control commitment is absent")
@@ -226,9 +312,10 @@ class StandingRewardControlReader:
             for index, key in enumerate(keys):
                 if key != f"{index:04d}":
                     raise ValueError("retained reward history is not a contiguous prefix")
-                item = SignedRewardControlDecision.model_validate_json(
-                    canonical_json_bytes(self.journal.get("reward_control_decision", key))
-                )
+                raw = canonical_json_bytes(self.journal.get("reward_control_decision", key))
+                if not 0 < len(raw) <= MAX_DECISION_BYTES:
+                    raise ValueError("retained reward decision exceeds its byte bound")
+                item = SignedRewardControlDecision.model_validate_json(raw)
                 if item.decision.sequence != index:
                     raise ValueError("retained reward decision is in a different sequence slot")
                 retained[digest(item.decision)] = item
@@ -252,6 +339,17 @@ class StandingRewardControlReader:
             decisions = verify_reward_decisions(
                 self.series, self.policy, tuple(reversed(reversed_chain))
             )
+            if admission is not None:
+                genesis = decisions[0].decision
+                if (
+                    admission.control_sha256 != digest(genesis)
+                    or admission.committed_at_block is None
+                    or not genesis.observed_at_block
+                    <= admission.committed_at_block
+                    <= self.policy.valid_through_block
+                    or admission.snapshot.block_number > observation.snapshot.block_number
+                ):
+                    raise ValueError("standing series lacks timely original chain admission")
             if len(decisions) < len(keys) or any(
                 digest(decisions[i].decision) not in retained for i in range(len(keys))
             ):
@@ -268,6 +366,7 @@ class StandingRewardControlReader:
             if (
                 tip.kind == "admit_series"
                 and observation.committed_at_block > self.policy.valid_through_block
+                and admission is None
             ):
                 raise ValueError("series genesis was committed after its admission window")
             self._proof(observation)
@@ -281,14 +380,29 @@ class StandingRewardControlReader:
 
             # Persist a complete authenticated prefix before returning a selection.
             # A failed acknowledgement retries the same immutable records.
-            self.journal.put_many(
-                tuple(
-                    ("reward_control_decision", f"{i:04d}", item)
-                    for i, item in enumerate(decisions)
-                    if i >= len(keys)
-                ),
-                index=record_head,
+            records = tuple(
+                ("reward_control_decision", f"{i:04d}", item)
+                for i, item in enumerate(decisions)
+                if i >= len(keys)
             )
+            # A later finalized header/proof can prove the same timely genesis.
+            # Preserve the first archive instead of conflict-holding it merely
+            # because that equivalent proof has different bytes.
+            if (
+                admission is not None
+                and self.journal.get("reward_series_admission", "original") is None
+            ):
+                records += (
+                    (
+                        "reward_series_admission",
+                        "original",
+                        {
+                            "evidence": json.loads(admission.evidence),
+                            "metadata_hex": admission.metadata.hex(),
+                        },
+                    ),
+                )
+            self.journal.put_many(records, index=record_head)
             self._proof(observation)
             effective = (
                 observation.committed_at_block
