@@ -520,8 +520,26 @@ class FinalizedBlockScanner:
     async def decode_block(self, identity: VerifiedFinalizedBlockIdentity) -> FinalizedBlockRecord:
         """Fetch, authenticate and completely decode one finalized block."""
 
-        block, _wire_bytes, _evidence = await self._decode_block_with_wire_bytes(identity)
+        block, _wire_bytes, _evidence, _commitments = await self._decode_block_with_wire_bytes(
+            identity
+        )
         return block
+
+    async def decode_block_commitments(
+        self, identity: VerifiedFinalizedBlockIdentity
+    ) -> tuple[FinalizedBlockRecord, tuple[FinalizedCommitmentCallBinding, ...]]:
+        """Decode the complete block and its direct commitment arguments.
+
+        As with ``decode_block``, the caller must independently authenticate the
+        supplied header and parent. No original observer attestation is invented
+        when a caller authenticates historical headers through ancestry.
+        Commitment bindings alone do not establish success or effective origin;
+        consumers must inspect the matching call in the returned block.
+        """
+        block, _wire_bytes, _evidence, commitments = await self._decode_block_with_wire_bytes(
+            identity
+        )
+        return block, commitments
 
     async def _decode_block_with_wire_bytes(
         self,
@@ -529,7 +547,12 @@ class FinalizedBlockScanner:
         *,
         finality_attestation: bytes | None = None,
         finality_replay_binding: FinalityAttestationReplayBinding | None = None,
-    ) -> tuple[FinalizedBlockRecord, int, FinalizedBlockScanEvidence | None]:
+    ) -> tuple[
+        FinalizedBlockRecord,
+        int,
+        FinalizedBlockScanEvidence | None,
+        tuple[FinalizedCommitmentCallBinding, ...],
+    ]:
         if not isinstance(identity, VerifiedFinalizedBlockIdentity):
             raise TypeError("identity must be a VerifiedFinalizedBlockIdentity")
         runtime = await self._required_runtime(identity)
@@ -597,7 +620,7 @@ class FinalizedBlockScanner:
                 decoded_block=block,
                 commitment_calls=commitment_calls,
             )
-        return block, wire_bytes, evidence
+        return block, wire_bytes, evidence, commitment_calls
 
     async def decode_blocks(
         self,
@@ -612,7 +635,9 @@ class FinalizedBlockScanner:
         blocks: list[FinalizedBlockRecord] = []
         total_bytes = 0
         for identity in ordered:
-            block, wire_bytes, _evidence = await self._decode_block_with_wire_bytes(identity)
+            block, wire_bytes, _evidence, _commitments = await self._decode_block_with_wire_bytes(
+                identity
+            )
             total_bytes += wire_bytes
             if total_bytes > self._limits.maximum_total_wire_bytes:
                 raise ValidatorChainScanError("scan_wire_bytes_limit")
@@ -747,7 +772,12 @@ class FinalizedBlockScanner:
         total_bytes = 0
         for identity, attestation, binding in zip(ordered, attestations, bindings, strict=True):
             try:
-                block, wire_bytes, captured = await self._decode_block_with_wire_bytes(
+                (
+                    block,
+                    wire_bytes,
+                    captured,
+                    _commitments,
+                ) = await self._decode_block_with_wire_bytes(
                     identity,
                     finality_attestation=attestation,
                     finality_replay_binding=binding,
