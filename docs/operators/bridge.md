@@ -111,6 +111,16 @@ is not a recovery procedure. Preserve state and obtain the bounded attempt
 details from the
 [validator troubleshooting guide](../PERMANENT_VALIDATOR_SUPERVISOR.md#troubleshooting).
 
+Version-1 journals do not retain the signed transaction, nonce or signing
+anchor. The SDK obtains that anchor separately from the recorded preflight, so
+preflight plus eight blocks does not establish expiry. The internal stopped-host
+drain reader can verify a fresh marker's inclusion and eight subsequent finalized
+blocks for an audited legacy release. Its challenge must be generated while both
+original process locks are held. This read-only component does not publish the
+marker, clear the hold or perform an upgrade; there is no new operator recovery
+command for this case yet. Preserve these instructions while version-1
+installations still need recovery.
+
 `receipt_returned` is different: a retained finalized receipt can be verified
 against the chain and reconciled without another send. Neither state permits a
 second writer for the same hotkey. Supervisor `durable_hold:false` describes only
