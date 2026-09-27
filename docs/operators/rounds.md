@@ -810,6 +810,18 @@ serialized preparation records grant no authority. Prior reward opportunity,
 legacy handoff, signer fencing and transaction recovery still require execution
 integration and installed qualification. Preparation does not authorize weights.
 
+`FinalizedCompetitionWeightProvider.read_mortal_receipt` searches retained signed
+transaction bytes within an independently checked mortal era of 4–4,096 blocks.
+The shared native reader authenticates ancestry from owned finality, verifies
+block bodies and decodes proved dispatch events with the parent execution
+runtime. Interrupted polls resume in process; restart verifies ancestry again.
+Only one era is cached, regardless of outage length, and shutdown waits for
+active proof work. The bridge adapter retains its original eight-block rules
+and journal checks. A receipt proves inclusion and dispatch status; no match
+remains uncertainty. Neither result proves current weights, unused nonce or
+permission to retry. Standing transaction encoding, journal reconciliation and
+submission still need integration.
+
 ### Participation admission
 
 The opt-in recoverable-cohort implementation has a durable admission queue and

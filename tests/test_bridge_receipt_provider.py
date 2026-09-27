@@ -19,6 +19,7 @@ from umi import competition_chain_state as chain_state
 from umi.bridge.receipts import BridgeReceiptReader, VerifiedBridgeExpiry, VerifiedBridgeReceipt
 from umi.bridge.transactions import evolve_journal
 from umi.chain_evidence import FinalizedSnapshotRef
+from umi.mortal_receipts import MortalReceiptQuery
 from umi.protocol import canonical_json_bytes
 
 
@@ -140,12 +141,14 @@ async def test_provider_does_not_apply_exact_byte_recovery_to_legacy_journals(pr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["receipt", "expiry", "outcome_receipt", "outcome_expiry"])
+@pytest.mark.parametrize(
+    "operation", ["receipt", "expiry", "outcome_receipt", "outcome_expiry", "mortal"]
+)
 async def test_provider_close_waits_for_cancelled_receipt_native_work(
     provider, history, tx, monkeypatch, operation
 ):
     entered, release = threading.Event(), threading.Event()
-    if operation in {"receipt", "outcome_receipt"}:
+    if operation in {"receipt", "outcome_receipt", "mortal"}:
         verify = history.verifier.verify_extrinsics_root
 
         def blocked(**kwargs):
@@ -156,6 +159,15 @@ async def test_provider_close_waits_for_cancelled_receipt_native_work(
         monkeypatch.setattr(history.verifier, "verify_extrinsics_root", blocked)
         journal = history.journal
         capture = provider.read_bridge_receipt
+        if operation == "mortal":
+            journal = MortalReceiptQuery(
+                schema="umi-mortal-receipt-query/1",
+                birth_block=history.birth,
+                birth_hash=history.hashes[history.birth],
+                mortality_period=128,
+                signed_extrinsic=history.journal.signed_extrinsic,
+            )
+            capture = provider.read_mortal_receipt
     else:
         verifier = type(history.verifier)
         verify = verifier.__call__

@@ -46,6 +46,7 @@ from .grandpa_finality_supervisor import (
     GrandpaFinalitySupervisorError,
     GrandpaFinalitySupervisorLimits,
 )
+from .mortal_receipts import MortalReceiptQuery, MortalReceiptReader, VerifiedMortalReceipt
 from .open_competition import BurnDestination, Registration, digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import (
@@ -521,6 +522,16 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             raise ValueError("bridge receipt collection requires a version-2 transaction")
         async with self._lock:
             return await self._bridge_reader().find(journal)
+
+    async def read_mortal_receipt(self, query: MortalReceiptQuery) -> VerifiedMortalReceipt | None:
+        """Read exact bytes under owned finality without interpreting a bridge journal.
+
+        Search bounds must come from the caller's checked transaction encoding.
+        A receipt proves dispatch status, not current weights or retry authority.
+        The shared reader's work drains under the provider's shutdown lock.
+        """
+        async with self._lock:
+            return await MortalReceiptReader.find(self._bridge_reader(), query)
 
     async def read_bridge_expiry(
         self, journal: RegistrationBridgeTransactionJournal
