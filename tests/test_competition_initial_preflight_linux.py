@@ -235,6 +235,7 @@ def _signed_preflight_case(
     *,
     predecessor=None,
     startup_probe=None,
+    weight_overlay=False,
 ):
     host, tree, helpers = _host_bundle(run, config, startup_probe=startup_probe)
     old = (
@@ -320,6 +321,27 @@ def _signed_preflight_case(
         maximum_weight_evidence_bytes=50_000_000,
         maximum_submission_timeout_seconds=30,
     )
+    worker_controls = None
+    if weight_overlay:
+        from .test_competition_initial_worker_overlay import overlay_controls
+
+        worker_controls = overlay_controls(
+            SimpleNamespace(
+                package=package_case,
+                target=signed.directive.replay_package,
+                release_identity=oci_release.identity,
+                release=oci_release.target,
+                chain=chain,
+                chain_config=observer.chain,
+                observer_config=observer,
+                predecessor=predecessor,
+                signed=signed,
+                consent=consent,
+                execution=SimpleNamespace(replay_capacity=worker_capacity),
+            ),
+            package_limits,
+        )
+        consent, page = worker_controls.consent, worker_controls.initial
     controls = run / "controls"
     controls.mkdir(mode=0o700)
     for name, value in (
@@ -336,7 +358,13 @@ def _signed_preflight_case(
     upgrade._prestop_host_requirements(control, tree)
     bundle = run / "release.bundle"
     _write(bundle, oci_release.bundle, 0o400)
-    return SimpleNamespace(control=control, tree=tree, bundle=bundle, controls=controls)
+    return SimpleNamespace(
+        control=control,
+        tree=tree,
+        bundle=bundle,
+        controls=controls,
+        worker_controls=worker_controls,
+    )
 
 
 def test_signed_host_child_stages_oci_and_rehearses_without_wallet_or_service_stop(

@@ -69,10 +69,8 @@ def _file_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
-@pytest.fixture
-def overlay_case(anchor_case, package_limits, monkeypatch, request):
-    case = anchor_case
-    base = case.base
+def overlay_controls(base, package_limits, *, changed_scope_field=None):
+    """Signed C4-style controls shared by portable and installed rehearsals."""
     package = load_competition_package(
         base.package.path,
         expected_package_sha256=base.target.package_sha256,
@@ -126,6 +124,22 @@ def overlay_case(anchor_case, package_limits, monkeypatch, request):
         recipient_amendment=amendment,
     )
     rollover = _weight_rollover(base)
+    chain = base.observer_config.chain
+    rollover.body = rollover.body.model_copy(
+        update={
+            "required_finality_verifier_sha256_by_target": (
+                chain.finality_pin.release_sha256_by_target
+            ),
+            "required_storage_proof_verifier_sha256_by_target": {
+                chain.target_triple: chain.proof_binary_sha256,
+            },
+        }
+    )
+    rollover.execution = rollover.execution.model_copy(
+        update={
+            "weights": rollover.execution.weights.model_copy(update={"chain": chain}),
+        }
+    )
     authorization = sign_competition_weight_authorization(
         rollover.body.model_copy(
             update={
@@ -143,7 +157,7 @@ def overlay_case(anchor_case, package_limits, monkeypatch, request):
         release_bundle_sha256=base.release_identity.release_bundle_sha256,
         recipient_amendment_sha256=digest(amendment),
     )
-    if field := getattr(request, "param", None):
+    if field := changed_scope_field:
         scope = scope.model_copy(update={field: "ff" * 32})
     consent = SuccessorSupervisorOperatorConsent.model_validate(
         {
@@ -160,7 +174,7 @@ def overlay_case(anchor_case, package_limits, monkeypatch, request):
         base.chain,
         consent,
         mode="competition_weights",
-        sequence=3,
+        sequence=base.predecessor.state.accepted_sequence + 1,
         issued_at_block=170,
         valid_from_block=175,
         valid_through_block=198,
@@ -174,12 +188,29 @@ def overlay_case(anchor_case, package_limits, monkeypatch, request):
     current = SuccessorSupervisorDirectivePage(
         schema=SUCCESSOR_SUPERVISOR_DIRECTIVE_PAGE_SCHEMA,
         after_version=4,
-        after_sequence=3,
+        after_sequence=signed.directive.sequence,
         after_directive_sha256=signed.directive_sha256,
         directives=[],
         more=False,
         head=signed,
     )
+    return SimpleNamespace(
+        consent=consent,
+        scope=scope,
+        initial=initial,
+        current=current,
+        authorization=authorization,
+        execution=rollover.execution,
+    )
+
+
+@pytest.fixture
+def overlay_case(anchor_case, package_limits, monkeypatch, request):
+    case = anchor_case
+    controls = overlay_controls(
+        case.base, package_limits, changed_scope_field=getattr(request, "param", None)
+    )
+    consent, initial = controls.consent, controls.initial
     _replace_control(case.paths.consent, consent)
     _replace_control(case.paths.initial, initial)
     case.controls.chmod(0o700)
@@ -188,10 +219,10 @@ def overlay_case(anchor_case, package_limits, monkeypatch, request):
     return SimpleNamespace(
         anchor=case,
         consent=consent,
-        scope=scope,
-        current=current,
-        authorization=authorization,
-        execution=rollover.execution,
+        scope=controls.scope,
+        current=controls.current,
+        authorization=controls.authorization,
+        execution=controls.execution,
     )
 
 
