@@ -712,6 +712,28 @@ history and admission consumer must authenticate the discovered digest and
 apply its decision before authorizing a transaction. This reader performs no
 chain writes and has no coordinator renewal dependency.
 
+`StandingRewardControlReader` authenticates the quorum-signed decision chain
+selected by that current proof. The host independently selects the series,
+policy epoch, ordered cohort plans, control hotkey and proof configuration.
+The reader retains each decision once in the existing private round journal;
+restart can resolve an unchanged commitment entirely from retained history.
+An unknown successor must be fetched by digest and authenticated. Missing
+artifacts, capacity exhaustion and a busy journal remain retryable holds.
+
+Decision replay rejects forks, rollback, skipped cohorts and continuation after
+revocation. Activation records name the exact reward package, allocation,
+certification history and prior reward-opportunity evidence. The reader derives
+the transition fence from the actual commitment block and the series bounds.
+Elapsed time does not renew a decision. Journal identity binds the series;
+a host migration can select a new proof configuration while preserving its
+history, and proofs from the former configuration are rejected.
+
+This selection still requires native replay of the referenced package, original
+series admission, prior reward opportunity and any legacy handoff before weight
+submission. The returned selection grants no transaction authority. Signer
+fencing, encoded mortality, nonce recovery and installed continuation belong
+to the execution consumer. Preserve C4's existing admission and renewal checks.
+
 Registration projection preserves fixed integer amounts by hotkey. A departed
 hotkey's share goes to the currently proved burn destination; a returning hotkey
 can recover that share at its new UID in subsequent submissions. Other recipients
