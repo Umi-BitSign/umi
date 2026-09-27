@@ -24,7 +24,7 @@ from .competition_reward_eligibility_math import U64_MAX, EpochEligibilityInputs
 from .concurrency import wait_for_owned
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
-from .open_competition import digest
+from .open_competition import Registration, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .runtime_metadata import ExecutedRuntimeContext
 from .validator_chain import StorageReadSpec
@@ -132,6 +132,19 @@ async def collect_reward_eligibility(
     )
 
 
+@dataclass(frozen=True)
+class _EligibilitySubject:
+    """Untrusted facts; only native proof consumers may issue observations."""
+
+    block: int
+    validator_uid: int
+    validator_permit: bool
+    validator_last_update: int
+    registered_uid_count: int
+    registrations: tuple[Registration, ...]
+    validator_row: tuple[tuple[int, int], ...]
+
+
 async def _collect(provider, chain, profile, maximum_parent_hotkeys):
     async with provider._lock:
         if provider._closed or (
@@ -157,133 +170,17 @@ async def _collect(provider, chain, profile, maximum_parent_hotkeys):
         block = await provider._finality.verified_block_at(chain.block)
         provider._check_finality(chain.snapshot, block)
         provider._fresh(chain.timestamp_ms)
-        batches = []
-        reads = {}
-        present = {}
-
-        async def read(specs):
-            for start in range(0, len(specs), 512):
-                batch = await provider._weight_read(runtime, specs[start : start + 512])
-                batches.append(batch)
-                reads.update((r.spec, r.decoded_value) for r in batch.reads)
-                claims = {c.storage_key: c.value for c in batch.evidence.claims}
-                present.update(
-                    (
-                        r.spec,
-                        claims[runtime.storage_key(r.spec.pallet, r.spec.item, r.spec.params)]
-                        is not None,
-                    )
-                    for r in batch.reads
-                )
-
-        members = chain.registrations
-        if tuple(r.uid for r in members) != tuple(range(chain.registered_uid_count)):
-            raise ValueError("reward eligibility registry is incomplete")
-        owner_spec = _spec("SubnetOwnerHotkey", 78)
-        globals_ = (
-            owner_spec,
-            _spec("TaoWeight"),
-            _spec("StakeThreshold"),
-            _spec("Tempo", 78),
-            _spec("ActivityCutoffFactorMilli", 78),
-            _spec("ValidatorPermit", 78),
-            _spec("LastUpdate", 78),
+        subject = _EligibilitySubject(
+            chain.block,
+            chain.validator_uid,
+            chain.validator_permit,
+            chain.validator_last_update,
+            chain.registered_uid_count,
+            chain.registrations,
+            chain.validator_row,
         )
-        await read(
-            globals_
-            + tuple(
-                spec
-                for r in members
-                for spec in (
-                    _spec("BlockAtRegistration", 78, r.uid),
-                    _spec("ParentKeys", r.hotkey, 78),
-                    _spec("ChildKeys", r.hotkey, 78),
-                    _spec("TotalHotkeyAlpha", r.hotkey, 78),
-                    _spec("TotalHotkeyAlpha", r.hotkey, 0),
-                    _spec("ChildkeyThresholdSuspended", r.hotkey),
-                )
-            )
-        )
-        parents = tuple(_links(reads[_spec("ParentKeys", r.hotkey, 78)]) for r in members)
-        children = tuple(_links(reads[_spec("ChildKeys", r.hotkey, 78)]) for r in members)
-        known = {account_id32(r.hotkey): r.hotkey for r in members}
-        extra = {}
-        for links in parents:
-            for _, hotkey in links:
-                identity = account_id32(hotkey)
-                if identity not in known:
-                    extra[identity] = hotkey
-        if len(extra) > maximum_parent_hotkeys:
-            raise ValueError("reward eligibility parent proof capacity exceeded")
-        await read(
-            tuple(
-                spec
-                for _, hotkey in sorted(extra.items())
-                for spec in (
-                    _spec("TotalHotkeyAlpha", hotkey, 78),
-                    _spec("TotalHotkeyAlpha", hotkey, 0),
-                    _spec("ChildkeyThresholdSuspended", hotkey),
-                )
-            )
-        )
-        # try_get in the reviewed epoch distinguishes absence from a decoded
-        # ValueQuery default. Preserve that distinction for the owner exception.
-        owner_present = present[owner_spec]
-        owner = None
-        owner_uid = None
-        if owner_present:
-            owner = _hotkey(reads[owner_spec])
-            owner_uid_spec = _spec("Uids", 78, owner)
-            await read((owner_uid_spec,))
-            if reads[owner_uid_spec] is not None:
-                owner_uid = _uint(reads[owner_uid_spec], len(members) - 1)
-                if account_id32(members[owner_uid].hotkey) != account_id32(owner):
-                    raise ValueError("reward eligibility owner mapping is inconsistent")
-
-        def balance(hotkey, netuid):
-            # Account encodings are normalized by identity, including parents
-            # whose SS58 spelling differs from their registered hotkey.
-            name = known.get(account_id32(hotkey), extra.get(account_id32(hotkey), hotkey))
-            return _uint(reads[_spec("TotalHotkeyAlpha", name, netuid)], U64_MAX)
-
-        def suspended(hotkey):
-            identity = account_id32(hotkey)
-            name = known.get(identity, extra.get(identity, hotkey))
-            return present[_spec("ChildkeyThresholdSuspended", name)] and (
-                owner is None or identity != account_id32(owner)
-            )
-
-        updates = _vector(reads[_spec("LastUpdate", 78)], len(members))
-        permits = _vector(reads[_spec("ValidatorPermit", 78)], len(members))
-        if (
-            updates[chain.validator_uid] != chain.validator_last_update
-            or permits[chain.validator_uid] is not chain.validator_permit
-        ):
-            raise ValueError("reward eligibility differs from the weight observation")
-        state = EpochEligibilityInputs(
-            block=chain.block,
-            validator_uid=chain.validator_uid,
-            owner_uid=owner_uid,
-            last_updates=updates,
-            registration_blocks=tuple(
-                reads[_spec("BlockAtRegistration", 78, r.uid)] for r in members
-            ),
-            permits=permits,
-            alpha=tuple(balance(r.hotkey, 78) for r in members),
-            tao=tuple(balance(r.hotkey, 0) for r in members),
-            parents=tuple(
-                tuple((p, balance(k, 78), balance(k, 0)) for p, k in links if not suspended(k))
-                for links in parents
-            ),
-            children=tuple(
-                () if suspended(r.hotkey) else tuple(p for p, _ in links)
-                for r, links in zip(members, children, strict=True)
-            ),
-            tao_weight=reads[_spec("TaoWeight")],
-            stake_threshold=reads[_spec("StakeThreshold")],
-            tempo=reads[_spec("Tempo", 78)],
-            activity_factor_milli=reads[_spec("ActivityCutoffFactorMilli", 78)],
-            row=chain.validator_row,
+        state, batches = await _eligibility_inputs(
+            subject, runtime, provider._weight_read, maximum_parent_hotkeys
         )
         reason = epoch_eligibility(state)
         raw = canonical_json_bytes(
@@ -325,3 +222,138 @@ async def _collect(provider, chain, profile, maximum_parent_hotkeys):
             expected_chain_config_sha256=digest(provider.config),
         )
         return result
+
+
+async def _eligibility_inputs(
+    chain: _EligibilitySubject,
+    runtime: ExecutedRuntimeContext,
+    read_batch,
+    maximum_parent_hotkeys: int,
+):
+    batches = []
+    reads = {}
+    present = {}
+
+    async def read(specs):
+        for start in range(0, len(specs), 512):
+            batch = await read_batch(runtime, specs[start : start + 512])
+            batches.append(batch)
+            reads.update((r.spec, r.decoded_value) for r in batch.reads)
+            claims = {c.storage_key: c.value for c in batch.evidence.claims}
+            present.update(
+                (
+                    r.spec,
+                    claims[runtime.storage_key(r.spec.pallet, r.spec.item, r.spec.params)]
+                    is not None,
+                )
+                for r in batch.reads
+            )
+
+    members = chain.registrations
+    if tuple(r.uid for r in members) != tuple(range(chain.registered_uid_count)):
+        raise ValueError("reward eligibility registry is incomplete")
+    owner_spec = _spec("SubnetOwnerHotkey", 78)
+    globals_ = (
+        owner_spec,
+        _spec("TaoWeight"),
+        _spec("StakeThreshold"),
+        _spec("Tempo", 78),
+        _spec("ActivityCutoffFactorMilli", 78),
+        _spec("ValidatorPermit", 78),
+        _spec("LastUpdate", 78),
+    )
+    await read(
+        globals_
+        + tuple(
+            spec
+            for r in members
+            for spec in (
+                _spec("BlockAtRegistration", 78, r.uid),
+                _spec("ParentKeys", r.hotkey, 78),
+                _spec("ChildKeys", r.hotkey, 78),
+                _spec("TotalHotkeyAlpha", r.hotkey, 78),
+                _spec("TotalHotkeyAlpha", r.hotkey, 0),
+                _spec("ChildkeyThresholdSuspended", r.hotkey),
+            )
+        )
+    )
+    parents = tuple(_links(reads[_spec("ParentKeys", r.hotkey, 78)]) for r in members)
+    children = tuple(_links(reads[_spec("ChildKeys", r.hotkey, 78)]) for r in members)
+    known = {account_id32(r.hotkey): r.hotkey for r in members}
+    extra = {}
+    for links in parents:
+        for _, hotkey in links:
+            identity = account_id32(hotkey)
+            if identity not in known:
+                extra[identity] = hotkey
+    if len(extra) > maximum_parent_hotkeys:
+        raise ValueError("reward eligibility parent proof capacity exceeded")
+    await read(
+        tuple(
+            spec
+            for _, hotkey in sorted(extra.items())
+            for spec in (
+                _spec("TotalHotkeyAlpha", hotkey, 78),
+                _spec("TotalHotkeyAlpha", hotkey, 0),
+                _spec("ChildkeyThresholdSuspended", hotkey),
+            )
+        )
+    )
+    # try_get in the reviewed epoch distinguishes absence from a decoded
+    # ValueQuery default. Preserve that distinction for the owner exception.
+    owner_present = present[owner_spec]
+    owner = None
+    owner_uid = None
+    if owner_present:
+        owner = _hotkey(reads[owner_spec])
+        owner_uid_spec = _spec("Uids", 78, owner)
+        await read((owner_uid_spec,))
+        if reads[owner_uid_spec] is not None:
+            owner_uid = _uint(reads[owner_uid_spec], len(members) - 1)
+            if account_id32(members[owner_uid].hotkey) != account_id32(owner):
+                raise ValueError("reward eligibility owner mapping is inconsistent")
+
+    def balance(hotkey, netuid):
+        # Account encodings are normalized by identity, including parents
+        # whose SS58 spelling differs from their registered hotkey.
+        name = known.get(account_id32(hotkey), extra.get(account_id32(hotkey), hotkey))
+        return _uint(reads[_spec("TotalHotkeyAlpha", name, netuid)], U64_MAX)
+
+    def suspended(hotkey):
+        identity = account_id32(hotkey)
+        name = known.get(identity, extra.get(identity, hotkey))
+        return present[_spec("ChildkeyThresholdSuspended", name)] and (
+            owner is None or identity != account_id32(owner)
+        )
+
+    updates = _vector(reads[_spec("LastUpdate", 78)], len(members))
+    permits = _vector(reads[_spec("ValidatorPermit", 78)], len(members))
+    if (
+        updates[chain.validator_uid] != chain.validator_last_update
+        or permits[chain.validator_uid] is not chain.validator_permit
+    ):
+        raise ValueError("reward eligibility differs from the weight observation")
+    state = EpochEligibilityInputs(
+        block=chain.block,
+        validator_uid=chain.validator_uid,
+        owner_uid=owner_uid,
+        last_updates=updates,
+        registration_blocks=tuple(reads[_spec("BlockAtRegistration", 78, r.uid)] for r in members),
+        permits=permits,
+        alpha=tuple(balance(r.hotkey, 78) for r in members),
+        tao=tuple(balance(r.hotkey, 0) for r in members),
+        parents=tuple(
+            tuple((p, balance(k, 78), balance(k, 0)) for p, k in links if not suspended(k))
+            for links in parents
+        ),
+        children=tuple(
+            () if suspended(r.hotkey) else tuple(p for p, _ in links)
+            for r, links in zip(members, children, strict=True)
+        ),
+        tao_weight=reads[_spec("TaoWeight")],
+        stake_threshold=reads[_spec("StakeThreshold")],
+        tempo=reads[_spec("Tempo", 78)],
+        activity_factor_milli=reads[_spec("ActivityCutoffFactorMilli", 78)],
+        row=chain.validator_row,
+    )
+    return state, batches

@@ -791,8 +791,22 @@ the installed series. Its arithmetic profile is pinned to Subtensor revision
 not prove that revision produced the deployed runtime. No live runtime profile
 is qualified by these tests. The returned observation binds raw proofs to the
 original weight evidence. It does not establish that the row matches the effective
-allocation, accrue coverage, prove payment or authorize a transaction. Archive
-replay, interval accounting and installed execution still need integration.
+allocation, accrue coverage, prove payment or authorize a transaction.
+
+`review_reward_eligibility` replays retained control, complete weight, eligibility
+and metadata bytes against owned historical finality. It re-executes the proved
+original runtime, checks the complete registration mapping and reuses the current
+eligibility predicates. Historical state RPCs are not needed when the finalized
+headers and proof bytes are retained. Missing ancestry remains recoverable through
+the historical provider; elapsed wall time does not expire the original evidence.
+The result is explicitly historical and cannot pass current-observation checks.
+Tampered or incomplete archives hold without rewriting their evidence. Cancellation
+drains native proof work before releasing provider ownership.
+
+Coverage still needs durable observation retention, complete control history at
+each interval endpoint, native package/allocation matching, adjacent interval
+accounting and minimum certification. Historical eligibility alone grants no
+coverage or transaction authority. Installed execution remains unqualified.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and
 original admission but do not exclude overwritten control writes. Installed

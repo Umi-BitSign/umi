@@ -145,6 +145,7 @@ class _WeightArchive:
             self.proofs[(execution["key"],)] = execution["proof"]
         elif execution is not None:
             raise ValueError("standing recovery has unexpected runtime execution evidence")
+        self.body = body
 
     async def request(self, method, params):
         if len(params) != 2 or params[-1] != self.snapshot.block_hash:
