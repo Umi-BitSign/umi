@@ -438,6 +438,17 @@ async def tick(driver):
     ], results
 
 
+async def deliver_completed_outputs(drivers):
+    # Completed inference may leave more than one page in the outbox.
+    # Deliver every page before advancing the coordinator to its cutoff.
+    for driver in drivers:
+        for _ in range(10):
+            if (await driver.exchange.sync_once())["uploaded"] == 0:
+                break
+        else:
+            pytest.fail("completed evaluator output did not finish delivery")
+
+
 def completed_voids(driver):
     return [
         _read(path, AttestedEvaluationVoid)
@@ -522,8 +533,7 @@ async def complete_first_round(lifecycle):
                 len(completed(d)) == 2 and len(completed_voids(d)) == void_count for d in s.drivers
             ):
                 break
-        for driver in s.drivers:
-            await driver.exchange.sync_once()
+        await deliver_completed_outputs(s.drivers)
         results = [
             {e.attested_result.result.submission_sha256: e for e in completed(d)} for d in s.drivers
         ]
@@ -860,8 +870,7 @@ async def test_next_round_survives_restart_and_executes_the_promoted_incumbent(
             if all(len(completed(d)) == 4 for d in s.drivers):
                 break
         assert all(len(completed(d)) == 4 for d in s.drivers)
-        for driver in s.drivers:
-            await driver.exchange.sync_once()
+        await deliver_completed_outputs(s.drivers)
         material = s.store.settlement_material(item.round, limits=s.config.replay_limits)
         assert len(material["evidence"]) == 2
         s.provider.block = plan.evidence_cutoff_block

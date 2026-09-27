@@ -67,6 +67,23 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
     # The runtime-port command exercises the real parser and owned-provider
     # handler separately, while existing argument contracts remain unchanged.
     commands.pop("apply-runtime-port")
+    # The optional signed host artifact selects an authenticated delivery client;
+    # omission preserves the original client=None path and argument contract.
+    actions = commands["fetch-initial-successor-history"]["actions"]
+    host = next(action for action in actions if action["dest"] == "signed_host_artifact")
+    assert host == {
+        "option_strings": ["--signed-host-artifact"],
+        "dest": "signed_host_artifact",
+        "nargs": None,
+        "const": None,
+        "default": None,
+        "required": False,
+        "help": None,
+        "metavar": None,
+        "type": None,
+        "choices": None,
+    }
+    actions.remove(host)
     # Capacity is an optional operational addition, not a signed protocol field.
     # Check its defaults explicitly, then preserve the historical argument hash.
     for command in ("serve-assignment-feed", "assemble-endpoint-execution"):
@@ -116,6 +133,45 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
             extension = pins["properties"].pop("scoring_by_target")
             assert extension["default"] is None
             assert "scoring_by_target" not in pins["required"]
+        if reference in {
+            "competition_cli.IndependentReplayEntry",
+            "competition_cli.PublicationEvidenceInputs",
+            "competition_cli.SettlementInput",
+        }:
+            # C4 (3f8e1bb) adds signed unavailable-outcome evidence and /2 voids.
+            # Ordinary voids retain /1. Pin the complete repair definitions before
+            # normalizing only these additions for the unchanged historical hash.
+            definitions = schema["$defs"]
+            additions = {
+                name: definitions[name]
+                for name in (
+                    "DispatchRepairAmendment",
+                    "EndpointUnavailableEvidence",
+                    "SignedDispatchRepair",
+                    "UnavailableDispatchClaim",
+                )
+            }
+            assert (
+                json_sha256(additions)
+                == "332514d87cd0d325f836628226cf668e720ece123e59c7bc86d999401f197a9c"
+            )
+            for name in additions:
+                del definitions[name]
+            for name, legacy in (
+                ("EvaluationVoid", "umi-competition-evaluation-void/1"),
+                ("VoidEvaluationEvidence", "umi-competition-void-evidence/1"),
+            ):
+                tag = definitions[name]["properties"]["schema"]
+                assert tag["enum"] == [legacy, legacy[:-1] + "2"]
+                assert "const" not in tag
+                del tag["enum"]
+                tag["const"] = legacy
+            reasons = definitions["EvaluationVoid"]["properties"]["reason"]["enum"]
+            assert reasons[-1] == "coordinator_outcome_unavailable"
+            reasons.pop()
+            variants = definitions["ExecutionAnnouncement"]["properties"]["evidence"]["anyOf"]
+            assert variants[-1] == {"$ref": "#/$defs/EndpointUnavailableEvidence"}
+            variants.pop()
         assert json_sha256(schema) == expected, reference
 
 
