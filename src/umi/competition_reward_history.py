@@ -158,6 +158,37 @@ class RewardControlHistoryReader:
         self._writes: list[HistoricalControlWrite] = []
         self._unresolved: list[int] = []
         self._evidence_sha256 = digest(binding)
+        # Only entries verified in this process enter this index. Keep a tip,
+        # proof digest and list lengths, not a copy of the growing write list.
+        self._prefixes: dict[int, tuple[FinalizedSnapshotRef, str, int, int]] = {}
+
+    def _prefix(self, height: int) -> OwnedRewardControlHistory:
+        saved = self._prefixes.get(height)
+        if saved is None:
+            raise ValueError("control history prefix has not been natively verified")
+        tip, evidence, writes, unresolved = saved
+        history = OwnedRewardControlHistory(
+            self.first_block,
+            tip,
+            self.hotkey,
+            self.config_sha256,
+            tuple(self._writes[:writes]),
+            tuple(self._unresolved[:unresolved]),
+            evidence,
+            _issuer=_ISSUER,
+        )
+        object.__setattr__(history, "_binding", _binding(history))
+        return history
+
+    async def verified_prefix(self, height: int) -> OwnedRewardControlHistory:
+        """Reuse an already replayed prefix for an older coverage endpoint.
+
+        Reopening clears this index. Retained records do not issue history until
+        advance() has natively replayed every intervening block again.
+        """
+        _uint(height, 2**53 - 1)
+        async with self._lock:
+            return self._prefix(height)
 
     def _save(self, observation: OwnedRewardControlWrites) -> None:
         records = []
@@ -317,18 +348,14 @@ class RewardControlHistoryReader:
                         }
                     )
                     self._tip = observation
+                    self._prefixes[self._next] = (
+                        slot.snapshot,
+                        self._evidence_sha256,
+                        len(self._writes),
+                        len(self._unresolved),
+                    )
                     self._next += 1
                 history = None
                 if self._next == through_block + 1:
-                    history = OwnedRewardControlHistory(
-                        self.first_block,
-                        self._tip.slot.snapshot,
-                        self.hotkey,
-                        self.config_sha256,
-                        tuple(self._writes),
-                        tuple(self._unresolved),
-                        self._evidence_sha256,
-                        _issuer=_ISSUER,
-                    )
-                    object.__setattr__(history, "_binding", _binding(history))
+                    history = self._prefix(through_block)
                 return ControlHistoryProgress(self._next, through_block, history)

@@ -852,6 +852,25 @@ with `review_endpoint`, then call `credit` to rebuild the verified set. Reading 
 stored total or interval cannot substitute for native replay. The selected rule
 digest must match on reopening, and damaged evidence holds without replacement.
 
+`RewardCoverageCollector` drives bounded pages of retained-interval replay and
+new capture for each designated validator. `NativeRewardCoverageSource` captures
+complete registration, stored weight and eligibility proofs at the same owned
+historical root, then passes them through the existing native consumers. Its
+control-history reader reuses only prefixes verified in the current process;
+restart replays the original blocks before those prefixes become available.
+RPC/proof operations retain their individual bounds. There is no aggregate timer
+around historical capture or immutable package replay that could repeatedly
+discard slow work. Failed attempts preserve progress and the capture cursor. The service retries
+without a cumulative deadline and logs verified totals plus error types.
+
+Unavailable retained proofs are retried on later pages while fresh capture can
+continue. A bounded catch-up window limits new historical queries; it neither
+deletes earned intervals nor credits the elapsed outage. Only adjacent proved
+endpoints contribute time. Every validator must meet the selected minimum before
+the collector retains a completion certificate and its witnesses. Successful
+retries cannot double-count an interval. Installing this collector and qualifying
+its production resource use remain part of the host integration.
+
 A `StandingRewardOpportunityManifest` (`umi-standing-reward-manifest/2`)
 binds the runtime profile, interval cap and required time for each designated
 validator before series admission. These parameters are explicit; examples and
@@ -872,8 +891,8 @@ For a version 2 manifest, reward projection and transaction preparation require
 that reviewed certificate for the exact preceding activation. Evidence must end
 no later than the successor decision's observed block. The first activation
 requires a separately qualified legacy handoff and currently holds at this gate.
-Approved runtime and timing parameters, automatic replay scheduling, first
-legacy handoff and installed execution remain incomplete. Coverage establishes
+Approved runtime and timing parameters, first legacy handoff and installed
+execution remain incomplete. Coverage establishes
 reward opportunity, not a particular emission amount or submission authority.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and

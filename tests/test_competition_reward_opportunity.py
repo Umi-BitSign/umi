@@ -247,3 +247,84 @@ def test_minimum_certificate_cannot_replace_legacy_first_handoff(opportunity_cas
             manifest=c.manifest,
             selection=selection,
         )
+
+
+async def test_coverage_scheduler_retries_each_validator_without_expiry(opportunity_case, tmp_path):
+    from umi.competition_reward_coverage_collector import RewardCoverageCollector
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import CoverageHistoryPending
+
+    c = opportunity_case
+    rule = opportunity_rule(c.manifest, c.series, c.policy)
+    journal = RewardCoverageJournal(tmp_path / "collector", rule, expected_rule_sha256=digest(rule))
+    calls = []
+    head = 100
+
+    class Source:
+        async def finalized_height(self):
+            return head
+
+        async def capture(self, hotkey, height):
+            calls.append((hotkey, height))
+            if hotkey == c.series.validators[0]:
+                raise TimeoutError("sensitive endpoint detail")
+            raise CoverageHistoryPending
+
+        async def replay(self, key):
+            pytest.fail("empty journal has no replay obligations")
+
+    assert len(c.series.validators) >= 2
+    collector = RewardCoverageCollector(
+        journal, Source(), **c.terms, first_block=99, capture_window_blocks=2
+    )
+    for _ in range(4):
+        result = await collector.step()
+        assert all(total == 0 for _, total in result.credited_ms)
+        assert result.certificate is None
+    for hotkey in c.series.validators:
+        assert calls.count((hotkey, 99)) == 4
+    head += 3000  # A ten-hour gap supplies no coverage and does not expire work.
+    result = await collector.step()
+    assert result.certificate is None
+    assert calls[-len(c.series.validators) :] == [(k, head - 1) for k in c.series.validators]
+    assert not await journal.interval_keys()
+
+
+async def test_coverage_service_retries_head_and_stops_without_leaking_errors(
+    opportunity_case, tmp_path, caplog
+):
+    import asyncio
+
+    from umi.competition_reward_coverage_collector import RewardCoverageCollector
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+
+    c = opportunity_case
+    rule = opportunity_rule(c.manifest, c.series, c.policy)
+    journal = RewardCoverageJournal(tmp_path / "collector", rule, expected_rule_sha256=digest(rule))
+    stop = asyncio.Event()
+    calls = 0
+
+    class Source:
+        async def finalized_height(self):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                stop.set()
+            raise TimeoutError("https://private-provider/token")
+
+        async def capture(self, *_):
+            pytest.fail("unavailable head cannot schedule capture")
+
+        async def replay(self, *_):
+            pytest.fail("empty journal cannot schedule replay")
+
+    collector = RewardCoverageCollector(journal, Source(), **c.terms, first_block=99)
+    with caplog.at_level("INFO"):
+        assert await collector.run(stop, poll_seconds=0.001) is None
+    assert calls == 3
+    assert "coverage_pending" in caplog.text
+    assert "TimeoutError" in caplog.text
+    assert "private-provider" not in caplog.text
+    for invalid in (0, float("nan"), float("inf"), 3601):
+        with pytest.raises(ValueError, match="poll interval"):
+            await collector.run(stop, poll_seconds=invalid)

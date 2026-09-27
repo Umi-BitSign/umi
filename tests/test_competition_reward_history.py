@@ -268,13 +268,22 @@ async def test_history_replays_saved_prefix_after_restart_then_finishes_missing_
     first = h.old.height
     partial = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
     assert partial.history is None and partial.next_block == first + 2
+    prefix = await h.reader.verified_prefix(first)
+    assert all(w.block_number == first for w in prefix.writes)
+    with pytest.raises(ValueError, match="not been natively verified"):
+        await h.reader.verified_prefix(first + 2)
     assert h.body_requests == [first, first + 1]
     h.offline_through = first + 1
     h.reader = await h.restart()
+    with pytest.raises(ValueError, match="not been natively verified"):
+        await h.reader.verified_prefix(first)
     replay = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
     assert replay.history is None and replay.next_block == first + 2
+    assert await h.reader.verified_prefix(first) == prefix
     assert h.body_requests == [first, first + 1]
     result = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    assert await h.reader.verified_prefix(first) == prefix
+    assert await h.reader.verified_prefix(h.end) == result
     validate_control_history(
         result,
         first_block=first,

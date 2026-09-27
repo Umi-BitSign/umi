@@ -1277,3 +1277,170 @@ async def test_native_coverage_retention_retries_and_offline_restart(
             )
         assert await fresh.verified_ms(**query) == 12000
         assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_native_historical_coverage_capture(complete_preparation_case):
+    from umi.competition_reward_coverage import review_reward_coverage
+    from umi.competition_reward_coverage_capture import capture_reward_eligibility
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    for _ in range(100):
+        try:
+            progress = await h.reader.advance(
+                h.item.provider, through_block=h.end, maximum_blocks=4096
+            )
+        except HistoricalHeaderRecoveryPending:
+            continue
+        if progress.history is not None:
+            break
+    else:
+        pytest.fail("native history failed to converge")
+    owner = StandingRewardPreparation(
+        c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+    )
+    for height in (h.end - 1, h.end):
+        control = await h.item.provider.capture_control_at(c.series.control_hotkey, height)
+        captured = await capture_reward_eligibility(
+            h.item.provider,
+            control,
+            validator_hotkey=h.validator_hotkey,
+            control_hotkey=c.series.control_hotkey,
+            profile=h.item.profile,
+            expected_runtime_profile_sha256=digest(h.item.profile),
+        )
+        assert captured.eligible
+        endpoint = await review_reward_coverage(
+            owner,
+            p.package,
+            eligibility=captured,
+            history=await h.reader.verified_prefix(height),
+            source=c.source,
+            expected_runtime_profile_sha256=digest(h.item.profile),
+        )
+        assert endpoint.covered
+        assert not captured.chain_submission_authorized
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_automatic_coverage_capture_lost_ack_and_offline_restart(
+    complete_preparation_case, tmp_path, monkeypatch, caplog
+):
+    from umi.competition_reward_coverage_collector import RewardCoverageCollector
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import NativeRewardCoverageSource
+    from umi.competition_reward_opportunity import opportunity_rule
+    from umi.competition_reward_opportunity_review import review_opportunity_certificate
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    rule = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    terms = dict(
+        manifest=p.manifest,
+        series=c.series,
+        policy=c.reader.policy,
+        activation=c.active.decision.activation,
+    )
+    root = tmp_path / "automatic-coverage"
+
+    def setup():
+        journal = RewardCoverageJournal(root, rule, expected_rule_sha256=digest(rule))
+        owner = StandingRewardPreparation(
+            c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+        )
+        source = NativeRewardCoverageSource(
+            provider=h.item.provider,
+            journal=journal,
+            history=h.reader,
+            preparation=owner,
+            package=p.package,
+            decisions=c.source,
+            profile=h.item.profile,
+            maximum_history_blocks=4096,
+        )
+        collector = RewardCoverageCollector(
+            journal, source, **terms, first_block=h.end - 1, maximum_endpoints_per_validator=1
+        )
+        return journal, source, collector
+
+    async def head():
+        return h.end
+
+    journal, source, collector = setup()
+    monkeypatch.setattr(source, "finalized_height", head)
+    replay_package = source.preparation.prepare_historical
+    preparations = 0
+
+    async def slow_package(*args, **kwargs):
+        nonlocal preparations
+        preparations += 1
+        if preparations == 1:
+            # Immutable work may outlast an individual RPC's configured timer.
+            # It must finish once, without being cancelled and restarted.
+            await asyncio.sleep(h.item.config.collection_timeout_seconds + 0.05)
+        return await replay_package(*args, **kwargs)
+
+    monkeypatch.setattr(source.preparation, "prepare_historical", slow_package)
+    # Capture the left endpoint in one bounded pass. No interval exists yet.
+    for _ in range(100):
+        progress = await collector.step()
+        if collector._left:
+            break
+    else:
+        pytest.fail("automatic native capture failed to converge")
+    assert progress.credited_ms == ((h.validator_hotkey, 0),)
+    assert progress.certificate is None
+    assert preparations == 1
+    original_put = journal.journal.put_many
+
+    def lose_ack(records, **kw):
+        original_put(records, **kw)
+        if any(kind == "coverage_interval" for kind, _, _ in records):
+            raise OSError("private RPC URL must not appear in logs")
+
+    monkeypatch.setattr(journal.journal, "put_many", lose_ack)
+    lost = await collector.step()
+    assert (h.validator_hotkey, "OSError") in lost.errors
+    assert lost.certificate is None
+    assert lost.credited_ms == ((h.validator_hotkey, 0),)
+    assert len(await journal.interval_keys()) == 1
+
+    # A fresh process trusts neither summaries nor totals. All historical state
+    # and block body RPCs are unavailable; only owned ancestry is still served.
+    h.reader = await h.restart()
+    h.offline_through = h.end
+    c.reader = c.reopen()
+    journal, source, collector = setup()
+    assert (
+        await journal.verified_ms(
+            activation_sha256=digest(terms["activation"]), validator_hotkey=h.validator_hotkey
+        )
+        == 0
+    )
+
+    async def no_current_head():
+        raise TimeoutError("private provider token must not appear in logs")
+
+    monkeypatch.setattr(source, "finalized_height", no_current_head)
+    with caplog.at_level("INFO"):
+        certificate = await asyncio.wait_for(collector.run(asyncio.Event(), poll_seconds=0.001), 90)
+    assert certificate is not None
+    assert len(certificate.contributions) == 1
+    assert certificate.contributions[0].credited_ms == 12000
+    assert "coverage_complete" in caplog.text
+    assert "private provider" not in caplog.text
+    before = await journal.interval_keys()
+    assert (await collector.step()).certificate == certificate
+    assert await journal.interval_keys() == before
+    reviewed = await review_opportunity_certificate(
+        canonical_json_bytes(certificate),
+        expected_sha256=digest(certificate),
+        journal=journal,
+        witness_source=lambda sha: canonical_json_bytes(
+            journal.journal.get("opportunity_witness", sha)
+        ),
+        review_endpoint=source.replay,
+        **terms,
+    )
+    assert reviewed.certificate == certificate

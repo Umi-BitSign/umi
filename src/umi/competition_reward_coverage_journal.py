@@ -299,6 +299,19 @@ class RewardCoverageJournal:
                 raise ValueError("retained coverage interval has changed identity")
             return value
 
+    async def retained_point(self, key: str) -> CoveragePoint:
+        """A bounded discovery hint; callers still replay the original proofs."""
+        checked_digest(key)
+        async with self._lock:
+            self._check_rule()
+            frame = await run_owned_thread(self.journal.get, "coverage_endpoint", key)
+            if frame is None:
+                raise FileNotFoundError("coverage endpoint is not retained")
+            point = CoveragePoint.model_validate_json(canonical_json_bytes(frame["point"]))
+            if point.key() != key or point.series_sha256 != self.rule.series_sha256:
+                raise ValueError("coverage endpoint hint has changed identity")
+            return point
+
     async def review_endpoint(
         self,
         key: str,
