@@ -288,7 +288,7 @@ def _fork(run, label, action, *, exit_code=0):
 
 def _probe(item, successor=False):
     unit = _show_unit(item.layout.unit_name)
-    if unit["ActiveState"] == "failed":
+    if unit["ActiveState"] == "failed" or unit.get("Result", "success") != "success":
         logs = _command(
             "/usr/bin/journalctl",
             "-u",
@@ -323,7 +323,10 @@ def _stage_worker_current(item, case, package_case, oci_release):
     shutil.copytree(package_case.path, current / activation.PACKAGE_DIRECTORY_NAME)
     for path in (current, *current.rglob("*")):
         assert not path.is_symlink()
-        path.chmod(0o555 if path.is_dir() else 0o444)
+        # Keep the package's private 0500/0400 modes, as native delivery does.
+        # Only the current directory and its public control files use 0555/0444.
+        if path == current:
+            path.chmod(0o555)
         os.chown(path, item.user.pw_uid, item.user.pw_gid)
 
 

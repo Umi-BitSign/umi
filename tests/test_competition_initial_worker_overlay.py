@@ -289,6 +289,39 @@ def test_sealed_initial_overlay_survives_anchor_and_worker_restart(overlay_case)
     assert _file_bytes(retained) == recovery_before
 
 
+def test_installed_rehearsal_delivery_loads_with_private_package_modes(overlay_case, tmp_path):
+    from .test_competition_migration_linux import _publish_worker_current, _stage_worker_current
+
+    case = overlay_case
+    item = case.anchor
+    sealed = anchor.materialize_successor_anchor(**item.kwargs)
+    run = tmp_path / "installed-delivery"
+    run.mkdir()
+    fixture = SimpleNamespace(
+        run=run,
+        state_root=item.state_root,
+        user=SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid()),
+    )
+    _stage_worker_current(
+        fixture,
+        SimpleNamespace(worker_controls=case),
+        item.base.package,
+        SimpleNamespace(identity=item.base.release_identity),
+    )
+    # Portable ownership substitute; the installed test performs this as root.
+    item.source_root.chmod(0o755)
+    (run / "worker-current").chmod(0o755)
+    try:
+        _publish_worker_current(fixture)
+    finally:
+        item.source_root.chmod(0o555)
+    (item.source_root / "current").chmod(0o555)
+    inputs = activation.load_successor_worker_inputs()
+    assert inputs.checkpoint_sha256 == sealed.receipt.checkpoint_sha256
+    assert inputs.profile == "competition_weights"
+    assert _overlay(case, inputs).source_for(_activation_view(inputs)) == item.host.path / "src/umi"
+
+
 @pytest.mark.parametrize(
     "overlay_case",
     [
