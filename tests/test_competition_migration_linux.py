@@ -454,6 +454,7 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     assert retired["classification"] == "retired_legacy_attempt_outcome_unknown"
                     outbox = item.run / "controls/legacy-marker-outbox"
                     assert sorted(p.name for p in outbox.iterdir()) == [
+                        ".publish.lock",
                         "attempt-1.json",
                         "attempt-1.send.json",
                         "consent.json",
