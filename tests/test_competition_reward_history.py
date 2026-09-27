@@ -99,6 +99,8 @@ async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
             key = "0x" + canonical_json_bytes(spec).hex()
             at[key] = None if value is None else "0x" + canonical_json_bytes(value).hex()
         for key in at:
+            if key == "0x3a636f6465":
+                continue
             path = json.loads(bytes.fromhex(key[2:]))
             if path[:2] == ["Commitments", "CommitmentOf"]:
                 at[key] = None if last is None else "0x" + canonical_json_bytes(last).hex()
@@ -108,6 +110,13 @@ async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
                     + canonical_json_bytes(w.original.timestamp_ms + (height - first) * 12000).hex()
                 )
         values[height] = at
+
+    if "0x3a636f6465" in values[first]:
+        # Block-call decoding executes the parent's runtime, including the
+        # first block in the retained interval.
+        parent = w.headers[w.heights[first - 1]]
+        roots[bytes.fromhex(parent["stateRoot"][2:])] = first - 1
+        values[first - 1] = {"0x3a636f6465": values[first]["0x3a636f6465"]}
 
     event_key = b"system-events-key"
 
@@ -211,6 +220,10 @@ async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
 
     def verify_events(self, **kw):
         height = roots[kw["state_root"]]
+        if kw["storage_key"] == b":code" and "0x3a636f6465" in values[height]:
+            return kw["expected_value"] == bytes.fromhex(values[height]["0x3a636f6465"][2:]) and kw[
+                "proof"
+            ] == (b"proof",)
         return (
             kw["storage_key"] == event_key
             and kw["expected_value"] == str(height).encode()

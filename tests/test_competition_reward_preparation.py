@@ -73,6 +73,7 @@ from .test_competition_model_burn import burn_policy
 from .test_competition_reward_control import commitment
 from .test_competition_reward_control_archive import make_historical
 from .test_competition_reward_decisions import signed
+from .test_competition_reward_eligibility import configure_eligibility
 from .test_competition_reward_history import make_history_case
 from .test_competition_reward_history_selection import current as current_state
 from .test_competition_reward_registrations import registered_case as registered_case
@@ -664,12 +665,22 @@ async def test_failed_replay_retries_and_independent_bindings_are_enforced(
 
 
 @pytest.fixture
-async def complete_preparation_case(preparation_case, tmp_path, monkeypatch):
+async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, request):
     p = preparation_case
     item = p.item
     validator_hotkey = item.hotkey
     series = p.reader.series
     await p.provider.aclose()
+    await configure_eligibility(item, monkeypatch, tmp_path)
+    await item.provider.aclose()
+    original_verify = type(item.verifier).__call__
+
+    def verify_code(self, **kw):
+        if kw["storage_key"] == b":code":
+            return kw["expected_value"] == item.code and kw["proof"] == (b"proof",)
+        return original_verify(self, **kw)
+
+    monkeypatch.setattr(type(item.verifier), "__call__", verify_code)
     item.hotkey = series.control_hotkey
     item.spec = ("Commitments", "CommitmentOf", (78, item.hotkey))
     first = series.recovery.authority.issued_at_block
@@ -679,6 +690,48 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch):
         + series.maximum_proof_lag_blocks
         + series.maximum_transaction_lifetime_blocks
     )
+    # Seed the proved chain row from the native package using the same public
+    # projection as a writer, then the pinned pallet's storage conversion.
+    from umi.competition_cohort_reward_allocation import project_reward_allocation
+    from umi.open_competition import BurnDestination, Registration, RegistrationSnapshot
+    from umi.weight_storage import subtensor_stored_weights
+
+    members = tuple(Registration(uid=i, hotkey=k) for i, k in enumerate(item.members))
+    projection = project_reward_allocation(
+        p.allocation,
+        RegistrationSnapshot(
+            network="finney",
+            netuid=78,
+            block=end,
+            block_hash=item.finality.ref.block_hash,
+            registrations=members,
+            burn_destination=BurnDestination(uid=0, hotkey=item.members[0], mode="Burn"),
+        ),
+        item.policy,
+        current_block=end,
+    )
+    weights = dict(zip(projection.uids, projection.weights, strict=True))
+    stored = subtensor_stored_weights(tuple(weights.get(i, 0) for i in range(len(members))))
+    variant = getattr(request, "param", "matching")
+    row = list(enumerate(stored))
+    if variant == "raw_row":
+        row = [(i, weights.get(i, 0)) for i in range(len(members))]
+        assert tuple(v for _, v in row) != stored
+    elif variant == "missing_recipient":
+        dropped = next(i for i, value in row if value > 0)
+        row = [(i, v) for i, v in row if i != dropped]
+    elif variant == "extra_recipient":
+        zero = next(i for i, value in row if value == 0)
+        row[zero] = (zero, 1)
+    elif variant == "sparse_zeros":
+        assert any(v == 0 for _, v in row)
+        row = [(i, v) for i, v in row if v]
+    elif variant == "permit_missing":
+        item.rpc.values[("SubtensorModule", "ValidatorPermit", (78,))] = [False] * len(members)
+    item.rpc.values[("SubtensorModule", "Weights", (78, 3))] = row
+    item.rpc.values[("SubtensorModule", "LastUpdate", (78,))] = [0, 0, 0, first]
+    # The synthetic window spans more than the default activity cutoff.
+    item.rpc.values[("SubtensorModule", "ActivityCutoffFactorMilli", (78,))] = 100_000
     item.finality.ref = replace(item.finality.ref, block_number=first)
 
     def reader():
@@ -731,13 +784,25 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch):
     h = await make_historical(c, "exact_runtime", monkeypatch, tmp_path)
     h = await make_history_case(h, monkeypatch, tmp_path, distance=end - first + 1)
     h.reader = h.new_reader(maximum_bytes=64 * 1024**2)
-    h.package_case, h.validator_hotkey = p, validator_hotkey
+    h.package_case, h.validator_hotkey, h.variant = p, validator_hotkey, variant
     try:
         yield h
     finally:
         await item.provider.aclose()
 
 
+@pytest.mark.parametrize(
+    "complete_preparation_case",
+    [
+        "matching",
+        "sparse_zeros",
+        "raw_row",
+        "missing_recipient",
+        "extra_recipient",
+        "permit_missing",
+    ],
+    indirect=True,
+)
 async def test_complete_native_history_package_and_projection_restart_without_coordinator(
     complete_preparation_case,
 ):
@@ -781,6 +846,9 @@ async def test_complete_native_history_package_and_projection_restart_without_co
     captured = await history()
     archived_control = h.reader._tip.slot
     ready, result = await prepare(owner(), captured)
+    eligibility_control, captured_eligibility = await current_state(
+        h, captured.tip, validator_hotkey=h.validator_hotkey, eligibility_profile=h.item.profile
+    )
     assert ready.allocation == p.allocation
     assert result.current.selection.state == "selected"
     assert result.current.selection.committed_at_block == c.active.decision.observed_at_block
@@ -813,6 +881,76 @@ async def test_complete_native_history_package_and_projection_restart_without_co
     assert historical_ready.activation == c.active.decision.activation
     assert historical_ready.reviewed_at_block == h.end
     assert not historical_ready.chain_submission_authorized
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+    from umi.competition_reward_coverage import review_reward_coverage, validate_reward_coverage
+    from umi.competition_reward_eligibility_archive import review_reward_eligibility
+
+    eligibility = await review_reward_eligibility(
+        h.item.provider,
+        control=eligibility_control.evidence,
+        chain=captured_eligibility.chain.evidence,
+        eligibility=captured_eligibility.evidence,
+        metadata=captured_eligibility.chain.runtime.metadata_bytes,
+        validator_hotkey=h.validator_hotkey,
+        control_hotkey=c.series.control_hotkey,
+        profile=h.item.profile,
+        expected_runtime_profile_sha256=digest(h.item.profile),
+    )
+    endpoint = await review_reward_coverage(
+        historical_owner,
+        p.package,
+        eligibility=eligibility,
+        history=replayed,
+        source=c.source,
+        expected_runtime_profile_sha256=digest(h.item.profile),
+    )
+    assert endpoint.covered is (h.variant in {"matching", "sparse_zeros"})
+    assert endpoint.row_matches is (h.variant in {"matching", "sparse_zeros", "permit_missing"})
+    if h.variant == "permit_missing":
+        assert eligibility.reason == "permit_missing"
+    elif h.variant != "extra_recipient":
+        assert eligibility.eligible
+    assert endpoint.projection == result.projection
+    assert not endpoint.chain_submission_authorized
+    validate_reward_coverage(
+        endpoint,
+        expected_series_sha256=digest(c.series),
+        expected_runtime_profile_sha256=digest(h.item.profile),
+    )
+    for altered in (
+        replace(endpoint, _issuer=None),
+        replace(endpoint, row_matches=not endpoint.row_matches),
+        replace(endpoint, chain_submission_authorized=True),
+        replace(endpoint, eligibility=replace(eligibility, timestamp_ms=1)),
+        replace(endpoint, eligibility=replace(eligibility, burn_destination=None)),
+        replace(endpoint, prepared=replace(endpoint.prepared, reviewed_at_block=1)),
+        replace(endpoint, projection=endpoint.projection.model_copy(update={"weights": (65535,)})),
+    ):
+        with pytest.raises(ValueError):
+            validate_reward_coverage(
+                altered,
+                expected_series_sha256=digest(c.series),
+                expected_runtime_profile_sha256=digest(h.item.profile),
+            )
+    for series_sha, runtime_sha in [
+        ("ef" * 32, digest(h.item.profile)),
+        (digest(c.series), "ef" * 32),
+    ]:
+        with pytest.raises(ValueError):
+            validate_reward_coverage(
+                endpoint,
+                expected_series_sha256=series_sha,
+                expected_runtime_profile_sha256=runtime_sha,
+            )
+    with pytest.raises(ValueError):
+        await review_reward_coverage(
+            historical_owner,
+            p.package,
+            eligibility=captured_eligibility,
+            history=replayed,
+            source=c.source,
+            expected_runtime_profile_sha256=digest(h.item.profile),
+        )
     assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
     h.offline_through = h.end - 1
     restored, again = await prepare(owner(), replayed)

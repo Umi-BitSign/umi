@@ -11,7 +11,12 @@ import json
 from dataclasses import dataclass, field
 from typing import Literal
 
-from .competition_chain import _hotkey, _uint
+from .competition_chain import (
+    _hotkey,
+    _uint,
+    model_burn_storage_reads,
+    verified_model_burn_destination,
+)
 from .competition_reward_control_archive import (
     HistoricalRewardControlProvider,
     OwnedHistoricalRewardControl,
@@ -28,7 +33,7 @@ from .competition_reward_eligibility_math import epoch_eligibility
 from .competition_reward_transaction_recovery import _hex, _WeightArchive
 from .concurrency import run_owned_thread
 from .encoding import account_id32
-from .open_competition import Registration, digest
+from .open_competition import BurnDestination, Registration, digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import ExecutedRuntimeContext
 
@@ -42,6 +47,8 @@ class OwnedHistoricalRewardEligibility:
     timestamp_ms: int
     runtime_profile_sha256: str
     reason: str
+    policy_sha256: str
+    burn_destination: BurnDestination | None
     chain_evidence: bytes = field(repr=False)
     eligibility_evidence: bytes = field(repr=False)
     chain_submission_authorized: Literal[False] = False
@@ -68,6 +75,8 @@ def _binding(value: OwnedHistoricalRewardEligibility) -> str:
             "timestamp_ms": value.timestamp_ms,
             "runtime_profile": value.runtime_profile_sha256,
             "reason": value.reason,
+            "policy": value.policy_sha256,
+            "burn": None if value.burn_destination is None else digest(value.burn_destination),
             "chain": hashlib.sha256(value.chain_evidence).hexdigest(),
             "eligibility": hashlib.sha256(value.eligibility_evidence).hexdigest(),
         }
@@ -80,6 +89,7 @@ def validate_historical_reward_eligibility(
     expected_control_hotkey: str,
     expected_chain_config_sha256: str,
     expected_runtime_profile_sha256: str,
+    expected_policy_sha256: str,
 ) -> None:
     if (
         type(value) is not OwnedHistoricalRewardEligibility
@@ -90,6 +100,7 @@ def validate_historical_reward_eligibility(
         or type(value.eligibility_evidence) is not bytes
         or value.chain_submission_authorized is not False
         or value.runtime_profile_sha256 != expected_runtime_profile_sha256
+        or value.policy_sha256 != expected_policy_sha256
         or value._binding != _binding(value)
     ):
         raise ValueError("historical eligibility lacks selected native provenance")
@@ -239,6 +250,7 @@ async def review_reward_eligibility(
     if (
         not isinstance(provider, HistoricalRewardControlProvider)
         or digest(profile) != expected_runtime_profile_sha256
+        or digest(provider.policy) != provider.config.policy_sha256
         or _uint(maximum_parent_hotkeys, 65536) == 0
     ):
         raise ValueError("historical eligibility requires selected native inputs")
@@ -270,6 +282,15 @@ async def review_reward_eligibility(
         if code.value != runtime.code_evidence.value:
             raise ValueError("historical weight runtime proof differs")
         subject, timestamp = await run_owned_thread(_subject, runtime, values, hotkey)
+        # These claims were verified with the complete weight evidence at the
+        # same root. Do not replace them with today's owner or burn setting.
+        burn_values = {}
+        for spec in model_burn_storage_reads(provider.policy):
+            key = runtime.storage_key(spec.pallet, spec.item, spec.params)
+            if key not in values:
+                raise ValueError("historical eligibility lacks proved burn state")
+            burn_values[spec] = runtime.decode_storage(spec.pallet, spec.item, values[key])
+        burn = verified_model_burn_destination(provider.policy, burn_values, subject.registrations)
         archive = await run_owned_thread(_EligibilityArchive, eligibility, chain, profile, runtime)
         collector = provider._proofs.with_evidence_rpc(archive)
         state, _ = await _eligibility_inputs(
@@ -282,6 +303,8 @@ async def review_reward_eligibility(
             timestamp,
             digest(profile),
             epoch_eligibility(state),
+            digest(provider.policy),
+            burn,
             chain,
             eligibility,
             _issuer=_ISSUER,
@@ -292,5 +315,6 @@ async def review_reward_eligibility(
             expected_control_hotkey=control_hotkey,
             expected_chain_config_sha256=digest(provider.config),
             expected_runtime_profile_sha256=digest(profile),
+            expected_policy_sha256=digest(provider.policy),
         )
         return result

@@ -167,7 +167,7 @@ async def handoff_case(historical, monkeypatch, tmp_path):
     return await make_history_case(historical, monkeypatch, tmp_path, distance=7)
 
 
-async def current(h, tip, *, validator_hotkey=None):
+async def current(h, tip, *, validator_hotkey=None, eligibility_profile=None):
     """Collect through the real current-control adapter at the history's tip."""
     item, w = h.item, h.source.w
     header = w.headers[tip.block_hash]
@@ -204,6 +204,15 @@ async def current(h, tip, *, validator_hotkey=None):
         if validator_hotkey is None:
             return control
         weights = await provider.collect_registered_weights(validator_hotkey, at=control.snapshot)
+        if eligibility_profile is not None:
+            from umi.competition_reward_eligibility import collect_reward_eligibility
+
+            return control, await collect_reward_eligibility(
+                provider,
+                weights,
+                eligibility_profile,
+                expected_runtime_profile_sha256=digest(eligibility_profile),
+            )
         return control, weights
     finally:
         await provider.aclose()

@@ -116,7 +116,15 @@ def test_malformed_or_unsupported_state_is_not_credited(changes):
 
 @pytest.fixture
 async def eligibility_case(registered_case, monkeypatch, tmp_path):
-    t = registered_case
+    t = await configure_eligibility(registered_case, monkeypatch, tmp_path)
+    try:
+        yield t
+    finally:
+        await t.provider.aclose()
+
+
+async def configure_eligibility(t, monkeypatch, tmp_path):
+    """Configure synthetic execution/eligibility ports around a native provider."""
     await t.provider.aclose()
     t.config = t.config.model_copy(
         update={
@@ -220,10 +228,7 @@ async def eligibility_case(registered_case, monkeypatch, tmp_path):
         )
 
     t.capture = capture
-    try:
-        yield t
-    finally:
-        await t.provider.aclose()
+    return t
 
 
 async def test_full_native_state_and_runtime_are_bound_at_one_root(eligibility_case):

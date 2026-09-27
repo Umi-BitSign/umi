@@ -804,7 +804,9 @@ allocation, accrue coverage, prove payment or authorize a transaction.
 `review_reward_eligibility` replays retained control, complete weight, eligibility
 and metadata bytes against owned historical finality. It re-executes the proved
 original runtime, checks the complete registration mapping and reuses the current
-eligibility predicates. Historical state RPCs are not needed when the finalized
+eligibility predicates. The result also binds the original policy and proved burn
+destination; today's owner or burn mode cannot replace that evidence.
+Historical state RPCs are not needed when the finalized
 headers and proof bytes are retained. Missing ancestry remains recoverable through
 the historical provider; elapsed wall time does not expire the original evidence.
 The result is explicitly historical and cannot pass current-observation checks.
@@ -819,10 +821,20 @@ be backdated through cache reuse. Preparation holds if no allocation is effectiv
 control is revoked or the package identity differs. This returns immutable replay
 work only.
 
-Coverage still needs durable observation retention, joined control/eligibility
-and full-row checks at each interval endpoint, adjacent interval accounting and
-minimum certification. Historical package or eligibility replay alone grants no
-coverage or transaction authority. Installed execution remains unqualified.
+`review_reward_coverage` joins native historical eligibility with complete control
+selection and package replay. It requires a designated validator, projects the
+fixed allocation against that root's registrations and burn destination, and
+compares every stored weight with the projected row after the pinned Subtensor
+conversion. Omitted zero entries are equivalent; missing positive recipients,
+extra weights and raw call values that differ from storage are mismatches. A
+matching row still needs eligibility. The returned endpoint binds the series,
+activation, manifest requirement, allocation, runtime profile and original proofs.
+Altered or serialized success records cannot replace native review.
+
+An endpoint describes one finalized block. Durable observation retention,
+adjacent interval accounting, deduplication and minimum certification remain
+unfinished. No elapsed time or payment is credited by this API. Installed
+execution remains unqualified.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and
 original admission but do not exclude overwritten control writes. Installed

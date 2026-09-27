@@ -21,13 +21,21 @@ from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.validator_chain import ValidatorChainError
 
+from . import test_open_competition as competition_tests
 from .test_competition_historical_registration import change_block
+from .test_competition_model_burn import burn_policy
 from .test_competition_reward_control import commitment
 from .test_competition_reward_eligibility import chain as chain
 from .test_competition_reward_eligibility import chain_config as chain_config
 from .test_competition_reward_eligibility import eligibility_case as eligibility_case
-from .test_competition_reward_eligibility import policy as policy
 from .test_competition_reward_eligibility import registered_case as registered_case
+
+base_policy = competition_tests.policy
+
+
+@pytest.fixture
+def policy(base_policy):
+    return burn_policy(base_policy, owner="Burn")
 
 
 @pytest.fixture
@@ -164,12 +172,16 @@ async def test_replay_survives_outage_restart_and_missing_historical_rpc(retaine
         expected_control_hotkey=h.t.hotkey,
         expected_chain_config_sha256=digest(h.t.config),
         expected_runtime_profile_sha256=digest(h.t.profile),
+        expected_policy_sha256=digest(h.t.policy),
     )
     assert result.eligible == h.current.eligible
     assert result.timestamp_ms == h.current.chain.timestamp_ms
     assert result.subject.registrations == h.current.chain.registrations
     assert result.subject.validator_row == h.current.chain.validator_row
     assert result.subject.block == h.old.height
+    assert result.policy_sha256 == digest(h.t.policy)
+    assert result.burn_destination == h.current.chain.burn_destination
+    assert result.burn_destination is not None
     assert not result.chain_submission_authorized
     with pytest.raises(ValueError):
         validate_reward_eligibility(
@@ -268,6 +280,8 @@ async def test_returned_history_cannot_be_mutated_or_rebound(retained):
     original = await h.review()
     for altered in (
         replace(original, reason="inactive"),
+        replace(original, policy_sha256="ef" * 32),
+        replace(original, burn_destination=None),
         replace(original, timestamp_ms=1),
         replace(original, chain_evidence=b"{}"),
         replace(original, eligibility_evidence=b"{}"),
@@ -281,7 +295,24 @@ async def test_returned_history_cannot_be_mutated_or_rebound(retained):
                 expected_control_hotkey=h.t.hotkey,
                 expected_chain_config_sha256=digest(h.t.config),
                 expected_runtime_profile_sha256=digest(h.t.profile),
+                expected_policy_sha256=digest(h.t.policy),
             )
+
+
+async def test_historical_burn_state_is_required_and_policy_cannot_drift(retained):
+    h = retained
+    chain = json.loads(h.before["chain"])
+    for batch in chain["storage_batches"]:
+        batch["claims"] = [
+            claim
+            for claim in batch["claims"]
+            if json.loads(bytes.fromhex(claim["key"][2:]))[1] != "RecycleOrBurn"
+        ]
+    with pytest.raises(ValueError, match="burn state"):
+        await h.review(chain=canonical_json_bytes(chain))
+    h.t.provider.policy = h.t.policy.model_copy(update={"unallocated_model_burn": None})
+    with pytest.raises(ValueError, match="selected native inputs"):
+        await h.review()
 
 
 async def test_native_replay_cancellation_drains_before_close(retained, monkeypatch):
