@@ -2003,3 +2003,189 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
             maximum_promotion_bytes=1_000_000,
         )
     assert b["service_case"].p.model.calls == 1
+
+    # A validator reconstructs the native reviews from a copied private package,
+    # long after the original target, without the evaluator's object callbacks.
+    from umi.competition_cohort_reward_package import (
+        RewardPackageObject,
+        RewardPulseRef,
+        RewardReplayInputs,
+        load_reward_package,
+        prepare_reward_package,
+        publish_reward_package,
+        replay_reward_package,
+    )
+
+    c = b["service_case"]
+    inputs = RewardReplayInputs(
+        closure=b["closure"],
+        roster=b["roster"],
+        suite=b["suite"],
+        transport=b["transport"],
+        terms=c.terms,
+        reveal=b["reveal"],
+        catalogs=(c.assignment.catalog,),
+        seals=(b["service_seal"],),
+        history=certified,
+    )
+    selection = dict(
+        expected_tip_sha256=tip(certified),
+        current_block=2**53 - 1,
+        expected_terms_sha256=digest(c.terms),
+        expected_catalog_sha256s=(digest(c.assignment.catalog.catalog),),
+        maximum_promotion_bytes=1_000_000,
+    )
+    package = prepare_reward_package(
+        inputs,
+        result,
+        service,
+        benchmark,
+        b["policy"],
+        reopened,
+        b["objects"].__getitem__,
+        b["decisions"].__getitem__,
+        iter(b["records"]),
+        lambda _: RetainedRevealPulse(**pulse_record()),
+        **selection,
+    )
+    selection.update(
+        expected_package_sha256=digest(package), expected_cohort_sha256=digest(certified.plan)
+    )
+    path = tmp_path / "private-replica" / "rewards.json"
+    publish_reward_package(path, package)
+    original_bytes = path.read_bytes()
+    publish_reward_package(path, package)  # Lost acknowledgement, same immutable bytes.
+    assert path.read_bytes() == original_bytes
+    assert load_reward_package(path, b["policy"], reopened, certified, **selection) == result
+    assert not package.chain_submission_authorized
+
+    # A portable package cannot replace independently retained model provenance.
+    missing_promotion = CompetitionStore(tmp_path / "missing-promotion", b["policy"])
+    with pytest.raises(ValueError, match="missing"):
+        load_reward_package(path, b["policy"], missing_promotion, certified, **selection)
+    path.chmod(0o644)
+    with pytest.raises(ValueError, match="private regular file"):
+        load_reward_package(path, b["policy"], reopened, certified, **selection)
+    path.chmod(0o600)
+
+    for field, value in (
+        ("expected_cohort_sha256", "aa" * 32),
+        ("expected_terms_sha256", "bb" * 32),
+        ("expected_catalog_sha256s", ("cc" * 32,)),
+        ("expected_package_sha256", "dd" * 32),
+    ):
+        with pytest.raises(ValueError):
+            load_reward_package(
+                path, b["policy"], reopened, certified, **{**selection, field: value}
+            )
+
+    with pytest.raises(ValueError, match="byte bound"):
+        load_reward_package(path, b["policy"], reopened, certified, maximum_bytes=1024, **selection)
+    for limit in (True, 0, 2**31):
+        with pytest.raises(ValueError, match="byte bound"):
+            replay_reward_package(
+                package, b["policy"], reopened, certified, maximum_bytes=limit, **selection
+            )
+
+    # Original decision inputs must travel with the archive; the callback only
+    # supplies transitions made after this package was prepared.
+    original_decision = certified.transitions[0].transition.evidence_sha256
+    changed = package.model_copy(
+        update={"objects": tuple(o for o in package.objects if o.sha256 != original_decision)}
+    )
+    with pytest.raises(ValueError, match="lacks original cohort decisions"):
+        replay_reward_package(
+            changed,
+            b["policy"],
+            reopened,
+            certified,
+            **{**selection, "expected_package_sha256": digest(changed)},
+            current_decision_source=b["decisions"].__getitem__,
+        )
+    unrelated = RewardPackageObject(sha256=digest({"unrelated": 1}), value={"unrelated": 1})
+    changed = package.model_copy(
+        update={"objects": tuple(sorted((*package.objects, unrelated), key=lambda o: o.sha256))}
+    )
+    with pytest.raises(ValueError, match="unreferenced evidence"):
+        replay_reward_package(
+            changed,
+            b["policy"],
+            reopened,
+            certified,
+            **{**selection, "expected_package_sha256": digest(changed)},
+        )
+    unused_round = package.pulses[-1].round + 1
+    changed = package.model_copy(
+        update={
+            "pulses": (
+                *package.pulses,
+                RewardPulseRef(round=unused_round, pulse_sha256=package.pulses[-1].pulse_sha256),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="unreferenced evidence"):
+        replay_reward_package(
+            changed,
+            b["policy"],
+            reopened,
+            certified,
+            **{**selection, "expected_package_sha256": digest(changed)},
+        )
+    changed = package.model_copy(update={"objects": package.objects[:-1]})
+    with pytest.raises((KeyError, ValueError, FileNotFoundError)):
+        replay_reward_package(
+            changed,
+            b["policy"],
+            reopened,
+            certified,
+            **{**selection, "expected_package_sha256": digest(changed)},
+        )
+    obj = package.objects[0].model_copy(update={"value": {"tampered": True}})
+    changed = package.model_copy(update={"objects": (obj, *package.objects[1:])})
+    with pytest.raises(ValueError, match="bounded identity"):
+        replay_reward_package(
+            changed,
+            b["policy"],
+            reopened,
+            certified,
+            **{**selection, "expected_package_sha256": digest(changed)},
+        )
+    with pytest.raises(ValueError, match="different bytes"):
+        publish_reward_package(path, changed)
+    revoked = transition(certified, b["policy"], "revoke", start + 30)
+    with pytest.raises(ValueError, match="revoked"):
+        load_reward_package(
+            path,
+            b["policy"],
+            reopened,
+            revoked,
+            **{**selection, "expected_tip_sha256": tip(revoked)},
+        )
+    # Later certified history is supplied independently. It never edits the
+    # package or changes its original scoring/promotion selection.
+    completed = close(certified, b["policy"], b["decisions"], start + 30, "ef" * 32)
+    advanced_selection = {**selection, "expected_tip_sha256": tip(completed)}
+    with pytest.raises(FileNotFoundError, match="current cohort decision"):
+        load_reward_package(path, b["policy"], reopened, completed, **advanced_selection)
+    with pytest.raises(ValueError, match="current cohort decision evidence changed"):
+        load_reward_package(
+            path,
+            b["policy"],
+            reopened,
+            completed,
+            **advanced_selection,
+            current_decision_source=lambda _: b["decisions"][original_decision],
+        )
+    assert (
+        load_reward_package(
+            path,
+            b["policy"],
+            reopened,
+            completed,
+            **{**selection, "expected_tip_sha256": tip(completed)},
+            current_decision_source=b["decisions"].__getitem__,
+        )
+        == result
+    )
+    assert path.read_bytes() == original_bytes
+    assert b["service_case"].p.model.calls == 1

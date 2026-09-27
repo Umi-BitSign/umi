@@ -682,6 +682,21 @@ missing closure, an unrelated cohort and explicit revocation. The recurring
 host must still integrate these ports with its authenticated source and finality
 owners; current standing control and first reward admission remain separate.
 
+`prepare_reward_package` retains the original intake, phase decisions, endpoint
+archives, reveal pulses and score certificates in a private immutable package.
+`load_reward_package` reconstructs the native reviews from that replica after an
+outage, without querying the coordinator. The validator supplies its selected
+policy, cohort, terms, catalogs and current certified history independently.
+Later history may extend the retained prefix; changed evidence and revocation
+are rejected. Exact publication retries preserve the original bytes.
+
+Replicate the selected model assets and authenticated promotion store alongside
+the package. They remain required for replay and are not embedded in it. Keep
+packages private because they contain protected references and miner responses.
+Configure sufficient bounded storage before accepting work. These files do not
+authorize transactions or complete delayed first reward admission; the host
+must integrate fresh chain proofs and standing control separately.
+
 Registration projection preserves fixed integer amounts by hotkey. A departed
 hotkey's share goes to the currently proved burn destination; a returning hotkey
 can recover that share at its new UID in subsequent submissions. Other recipients
