@@ -1,0 +1,10 @@
+{
+  "source": "subtensor/sdk/python/tests/fixtures/golden.json",
+  "source_file_sha256": "2c0073e1b55784d4cf5d74a8c17166162ba395da26c60a70dda3eef96f8b7181",
+  "metadata_block_hash": "0x7fd473224fcf966b24d16321fb508be127ff75b11acd2a22812549525d87d620",
+  "metadata_sha256": "f4ac0a82b07e179381e8235932d9ea21a1bcd82a88c3dad6a7d324638085a930",
+  "spec_version": 446,
+  "transaction_version": 1,
+  "genesis_hash": "0x908a4c9232fd5a2fd06c8206d013a7c175b1020c9371b152c3c3e9c03d8a1c2b",
+  "purpose": "Recorded public metadata for native SCALE and signature tests; not a current Finney runtime authorization or finality proof."
+}

@@ -819,8 +819,17 @@ Only one era is cached, regardless of outage length, and shutdown waits for
 active proof work. The bridge adapter retains its original eight-block rules
 and journal checks. A receipt proves inclusion and dispatch status; no match
 remains uncertainty. Neither result proves current weights, unused nonce or
-permission to retry. Standing transaction encoding, journal reconciliation and
-submission still need integration.
+permission to retry.
+
+`StandingRewardPreparation.verify_transaction_bytes` checks the selected reward
+projection again before and after native decoding and signature verification.
+The encoded full row, version, signer, nonce and mortal era must match that
+snapshot and the series lifetime bound. Exact reassembly rejects altered calls,
+tips, extensions and framing. Verification reconstructs the original signing
+payload, including the genesis, checkpoint and runtime versions; an old signature
+cannot be rebound to a later era. The resulting receipt query contains checked
+search bounds only. Durable intent/signature retention, prior opportunity,
+legacy handoff, writer fencing and submission authorization remain required.
 
 ### Participation admission
 

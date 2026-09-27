@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Annotated, Literal
 
+import bittensor as bt
 from pydantic import Field
 
 from .competition_chain import CompetitionChainConfig
@@ -40,9 +41,11 @@ from .competition_reward_decisions import (
 from .competition_reward_history import OwnedRewardControlHistory
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .mortal_receipts import MortalReceiptQuery
 from .open_competition import digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .signed_extrinsic import verify_mortal_call
 
 
 class RewardReplayRequirement(StrictProtocolModel):
@@ -269,3 +272,76 @@ class StandingRewardPreparation:
             expected_chain_config_sha256=self.reader.chain_config_sha256,
         )
         return PreparedStandingProjection(prepared, current, chain, projection)
+
+    async def verify_transaction_bytes(
+        self,
+        prepared: PreparedStandingReward,
+        encoded: bytes,
+        *,
+        mortality_period: int,
+        control: OwnedRewardControlObservation,
+        history: OwnedRewardControlHistory,
+        source: DecisionSource,
+        chain: OwnedCompetitionChainObservation,
+        chain_config: CompetitionChainConfig,
+    ) -> MortalReceiptQuery:
+        """Bind encoded bytes to a freshly checked allocation and signing context.
+
+        The returned receipt query supplies checked search bounds only. Prior
+        opportunity, legacy handoff, exclusive writer ownership and durable
+        transaction reconciliation still gate submission. This method never
+        signs, sends or treats matching bytes as reward authority.
+        """
+        async with self._lock:
+            return await run_owned_thread(
+                partial(
+                    self._verify_transaction_bytes,
+                    prepared,
+                    encoded,
+                    mortality_period,
+                    control,
+                    history,
+                    source,
+                    chain,
+                    chain_config,
+                )
+            )
+
+    def _verify_transaction_bytes(
+        self, prepared, encoded, period, control, history, source, chain, chain_config
+    ):
+        current = self._project(prepared, control, history, source, chain, chain_config)
+        if (
+            type(period) is not int
+            or not 4 <= period <= self.reader.series.maximum_transaction_lifetime_blocks
+        ):
+            raise ValueError("transaction mortality exceeds the standing series bound")
+        row = current.projection
+        call = bt.calls.SubtensorModule.set_mechanism_weights(
+            netuid=78,
+            mecid=0,
+            dests=list(row.uids),
+            weights=list(row.weights),
+            version_key=chain.weights_version_key,
+        )
+        envelope = verify_mortal_call(
+            encoded,
+            call,
+            runtime=chain.runtime,
+            validator_hotkey=chain.validator_hotkey,
+            nonce=chain.validator_nonce,
+            mortality_period=period,
+            genesis_hash=chain.genesis_hash,
+        )
+        # Native decode/crypto may itself be slow. Recheck both proof lifetimes
+        # and current selection after it, without changing the retained bytes.
+        refreshed = self._project(prepared, control, history, source, chain, chain_config)
+        if refreshed.projection != row or refreshed.current != current.current:
+            raise ValueError("standing selection changed while checking transaction bytes")
+        return MortalReceiptQuery(
+            schema="umi-mortal-receipt-query/1",
+            birth_block=chain.block,
+            birth_hash=chain.block_hash,
+            mortality_period=period,
+            signed_extrinsic=envelope.data.hex(),
+        )
