@@ -39,6 +39,7 @@ async def provider(history, tx, monkeypatch):
     item._runtime_rpc = None
     item._cache_lease = None
     item._bridge_receipts = None
+    item._legacy_drain = None
     item._weight_rpc = history.rpc
     item._runtime_executor = tx.case.executor
     item.config = SimpleNamespace(

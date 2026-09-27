@@ -2,8 +2,10 @@
 
 Real boundaries: signed controls/host/OCI, rooted systemd units, old process
 locks, journal reconciliation/archive, sealed anchor, publication and restart.
-The finalized observation and long-running host are synthetic, so this test
-cannot attest to GRANDPA, model inference or permission to submit weights.
+The finalized observation and long-running host are synthetic. The pending-v1
+scenario also substitutes transaction encoding and delivery and uses only public
+development keys. These tests cannot attest to GRANDPA, real transactions,
+model inference or permission to submit weights.
 """
 
 from __future__ import annotations
@@ -103,7 +105,7 @@ def _owned_tree(root, user, *, private_directories=False):
         os.chown(path, user.pw_uid, user.pw_gid)
 
 
-def _prepare_legacy(layout, user, target, signer):
+def _prepare_legacy(layout, user, target, signer, *, pending=False):
     config = _config(
         validator_hotkey=fixture_validator_hotkey(layout.instance),
         target_platform=target,
@@ -151,7 +153,7 @@ def _prepare_legacy(layout, user, target, signer):
         ).model_dump(mode="python")
     )
     files = {"service.lock": b""}
-    current = add_attempt(files, signed, base)
+    current = add_attempt(files, signed, base, phase="submitting" if pending else "applied")
     for name, raw in files.items():
         _write(worker / name, raw, 0o600)
     _owned_tree(worker, user, private_directories=True)
@@ -175,13 +177,33 @@ def _prepare_legacy(layout, user, target, signer):
     _write(
         layout.physical(Path("/opt/umi-validator-supervisor/legacy-probe")), _LEGACY_PROBE, 0o555
     )
-    evidence = canonical_json_bytes({"schema": "test-owned-chain-observation", "block": 180})
+    if pending:
+        from bittensor.keyfiles import serialized_keypair_to_keyfile_data
+
+        # This publicly derivable fixture key is never used by a network port.
+        key = dev_wallet("//CoordinatorRehearsalValidator" + layout.instance).hotkey
+        assert key.ss58_address == config.validator_hotkey
+        hotkey_path = (
+            layout.physical(Path(config.wallet.path))
+            / config.wallet.name
+            / "hotkeys"
+            / config.wallet.hotkey
+        )
+        _write(hotkey_path, bytes(serialized_keypair_to_keyfile_data(key)), 0o400)
+    # The uncertain case needs nine additional finalized blocks for its marker
+    # and drain, before the successor's existing activation headroom check.
+    observed_block = 170 if pending else 180
+    evidence = canonical_json_bytes(
+        {"schema": "test-owned-chain-observation", "block": observed_block}
+    )
     owned = SimpleNamespace(
         validator_hotkey=config.validator_hotkey,
         validator_uid=instance,
         validator_row=tuple(tuple(pair) for pair in current.attempt.expected_row),
-        validator_last_update=current.weight_call.block_number,
-        block=180,
+        validator_last_update=(
+            current.attempt.prior_last_update if pending else current.weight_call.block_number
+        ),
+        block=observed_block,
         block_hash="0x" + "18" * 32,
         genesis_hash=base.genesis_hash,
         chain_config_sha256="29" * 32,
@@ -202,6 +224,7 @@ def _prepare_legacy(layout, user, target, signer):
         state_root=state,
         layout=layout,
         user=user,
+        pending=pending,
     )
 
 
@@ -266,7 +289,11 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
         try:
             for layout, user in accounts:
                 item = _prepare_legacy(
-                    layout, user, oci_release.target.target_platform, signed_policy
+                    layout,
+                    user,
+                    oci_release.target.target_platform,
+                    signed_policy,
+                    pending=layout.instance == "0",
                 )
                 records.append(item)
                 item.run = run / ("uid" + layout.instance)
@@ -324,6 +351,7 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     class FinalityPort:
                         def __init__(self, chain, policy):
                             assert digest(chain) == item.owned.chain_config_sha256
+                            self.config = chain
 
                         async def start(self):
                             pass
@@ -341,7 +369,14 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     host_observer.FinalizedCompetitionWeightProvider = FinalityPort
                     host_observer.validate_owned_weight_observation = check_owned
                     chain_state.validate_owned_weight_observation = check_owned
-                    if index == 1:
+                    marker_consent = None
+                    if item.pending:
+                        from .legacy_drain_rehearsal import install_legacy_marker_ports
+
+                        marker_consent = install_legacy_marker_ports(
+                            item, case, FinalityPort, check_owned
+                        )
+                    if item.pending:
                         original = restart.publish_switch_intent
 
                         def die_after_intent(*args):
@@ -358,17 +393,18 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                         oci_bundle=case.bundle,
                         recovery_root=item.archives,
                         recovery_limits_path=item.run / "recovery-limits.json",
+                        legacy_marker_consent_path=marker_consent,
                     )
                     _write(item.run / "result.json", canonical_json_bytes(result))
 
-                _fork(item.run, "migration", migrate, exit_code=0 if index == 0 else 73)
-                if index == 1:
+                _fork(item.run, "migration", migrate, exit_code=73 if item.pending else 0)
+                if item.pending:
                     unit = _show_unit(item.layout.unit_name)
                     assert unit["ActiveState"] == "inactive" and unit["MainPID"] == "0"
                     marker = Path("/etc/systemd/system") / (item.layout.unit_name + ".d")
                     assert (marker / restart.INTENT_FILENAME).is_file()
                     assert not (marker / "50-umi-successor.conf").exists()
-                    assert _probe(other, successor=True) == before_other
+                    assert _probe(other, successor=index == 1) == before_other
 
                     def resume(item=item):
                         result = restart.resume_and_start_successor_service(
@@ -398,8 +434,32 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     if p.is_file()
                 } == item.files
                 wallet = item.layout.physical(Path(item.config.wallet.path))
-                assert sorted(p.name for p in wallet.iterdir()) == ["inert-marker"]
+                expected = (
+                    ["inert-marker", item.config.wallet.name] if item.pending else ["inert-marker"]
+                )
+                assert sorted(p.name for p in wallet.iterdir()) == sorted(expected)
                 assert (wallet / "inert-marker").read_bytes() == b"not a key\n"
+                if item.pending:
+                    checkpoint = json.loads(
+                        (
+                            item.archives / result["checkpoint_sha256"] / "checkpoint.json"
+                        ).read_bytes()
+                    )
+                    assert checkpoint["schema"] == "umi-successor-recovery-checkpoint/3"
+                    assert checkpoint["prior_effects_reconciled"] and not checkpoint["holds"]
+                    assert (
+                        checkpoint["legacy_drain"]["historical_submission_outcome_known"] is False
+                    )
+                    (retired,) = checkpoint["reconciled_effects"]
+                    assert retired["classification"] == "retired_legacy_attempt_outcome_unknown"
+                    outbox = item.run / "controls/legacy-marker-outbox"
+                    assert sorted(p.name for p in outbox.iterdir()) == [
+                        ".publish.lock",
+                        "attempt-1.json",
+                        "attempt-1.send.json",
+                        "consent.json",
+                        "marker.lock",
+                    ]
         finally:
             # Stop only units whose names were admitted by the fixture guards.
             for item in records:

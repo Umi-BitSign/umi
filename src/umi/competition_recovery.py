@@ -35,6 +35,7 @@ from .bootstrap_weights import (
 from .bridge.transactions import RegistrationBridgeTransactionJournal
 from .competition_bridge_reconciliation import (
     bridge_outcomes_match_current_state,
+    legacy_drain_matches_current_state,
     retained_outcomes_agree,
 )
 from .competition_bridge_recovery import (
@@ -49,6 +50,9 @@ from .competition_bridge_recovery import (
 from .competition_recovery_models import (
     _SNAPSHOT_DOMAIN,
     CompetitionRecoveryError,
+    LegacyDrainRecoveryCheckpointBody,
+    LegacyDrainRecoveryEffect,
+    LegacyDrainReport,
     LegacyEffect,
     LegacyFileReference,
     LegacySnapshotManifest,
@@ -61,7 +65,11 @@ from .competition_recovery_models import (
     _parts,
     recovery_checkpoint_digest,
 )
-from .competition_recovery_observation import validate_stopped_bridge_observation
+from .competition_recovery_observation import (
+    StoppedLegacyDrainProof,
+    validate_stopped_bridge_observation,
+    validate_stopped_legacy_drain,
+)
 from .encoding import account_id32
 from .file_identity import file_fingerprint as _fingerprint
 from .protocol import canonical_json_bytes
@@ -761,6 +769,7 @@ def _reconcile_snapshot(
     observation: Any,
     manifests: tuple[SignedBootstrapEligibilityManifest, ...],
     bridge_outcomes=(),
+    legacy_drain: LegacyDrainReport | None = None,
 ):
     manifests_by_digest = {item.manifest_sha256: item for item in manifests}
     for path, content in snapshot._files.items():
@@ -775,7 +784,13 @@ def _reconcile_snapshot(
     if BRIDGE_JOURNAL in snapshot._files:
         bridge = audit_bridge_history(snapshot._files, hotkey=snapshot.manifest.validator_hotkey)
         current = bridge.current
-        if bridge_outcomes:
+        if legacy_drain is not None:
+            bridge_proven = legacy_drain_matches_current_state(bridge, legacy_drain, observation)
+            if bridge_proven:
+                holds.discard("registration_bridge_attempt_mortality_unknown")
+            else:
+                holds.add("registration_bridge_latest_effect_not_proven")
+        elif bridge_outcomes:
             bridge_proven = bridge_outcomes_match_current_state(
                 bridge, bridge_outcomes, observation
             )
@@ -808,6 +823,16 @@ def _reconcile_snapshot(
             effects.append(update)
             continue
         outcome = outcomes_by_path.get(effect.path)
+        if legacy_drain is not None and effect.path == BRIDGE_JOURNAL and bridge_proven:
+            update = LegacyDrainRecoveryEffect.model_validate(
+                {
+                    **effect.model_dump(mode="python"),
+                    "classification": "retired_legacy_attempt_outcome_unknown",
+                    "reason": "stopped_writer_marker_drained_legacy_mortality",
+                }
+            )
+            effects.append(update)
+            continue
         if outcome is not None:
             if bridge_proven:
                 category = {
@@ -830,7 +855,7 @@ def _reconcile_snapshot(
             if bridge_proven:
                 current_effect = (
                     effect.minimum_effect_block == observation.validator_last_update
-                    if bridge_outcomes
+                    if bridge_outcomes or legacy_drain is not None
                     else effect.path == BRIDGE_JOURNAL
                 )
                 update = effect.model_copy(
@@ -929,6 +954,44 @@ def _verified_bridge_outcomes(value, *, snapshot, stopped, observation):
         return ()
     return validate_stopped_bridge_observation(
         value, stopped=stopped, observation=observation, snapshot_sha256=snapshot.sha256
+    )
+
+
+@contextmanager
+def _recovery_snapshot(stopped, limits, manifests, leases, observation, legacy_drain):
+    if legacy_drain is None:
+        with snapshot_legacy_bootstrap(
+            stopped.worker_state_root, **_snapshot_kwargs(stopped, limits, manifests, leases)
+        ) as snapshot:
+            yield snapshot
+        return
+    if type(legacy_drain) is not StoppedLegacyDrainProof:
+        raise CompetitionRecoveryError("legacy retirement requires the live stopped drain proof")
+    snapshot = legacy_drain.session.snapshot
+    validate_stopped_legacy_drain(
+        legacy_drain, stopped=stopped, observation=observation, snapshot_sha256=snapshot.sha256
+    )
+    # The drain session already owns the original worker lock inodes. Reuse
+    # that exact snapshot instead of trying to lock the same files twice.
+    yield snapshot
+    legacy_drain.recheck()
+
+
+def _legacy_drain_report(proof, *, snapshot, stopped, observation):
+    if proof is None:
+        return None
+    result = validate_stopped_legacy_drain(
+        proof, stopped=stopped, observation=observation, snapshot_sha256=snapshot.sha256
+    )
+    audit = audit_bridge_history(snapshot._files, hotkey=stopped.validator_hotkey)
+    return LegacyDrainReport(
+        attempt_id=audit.current.attempt.attempt_id,
+        journal_sha256=hashlib.sha256(snapshot._files[BRIDGE_JOURNAL]).hexdigest(),
+        marker_sha256=result.marker_sha256,
+        included_block=result.included.block_number,
+        included_block_hash=result.included.block_hash,
+        verified_head_block=result.owned_head.block_number,
+        verified_head_hash=result.owned_head.block_hash,
     )
 
 
@@ -1161,14 +1224,13 @@ def _load_archive(
         if not 0 < len(payload) <= limits.maximum_checkpoint_bytes:
             raise CompetitionRecoveryError("checkpoint manifest is missing or oversized")
         value = json.loads(payload)
-        model = (
-            TransactionRecoveryCheckpointBody
-            if (
-                isinstance(value, dict)
-                and value.get("schema") == "umi-successor-recovery-checkpoint/2"
-            )
-            else RecoveryCheckpointBody
-        )
+        model = {
+            "umi-successor-recovery-checkpoint/1": RecoveryCheckpointBody,
+            "umi-successor-recovery-checkpoint/2": TransactionRecoveryCheckpointBody,
+            "umi-successor-recovery-checkpoint/3": LegacyDrainRecoveryCheckpointBody,
+        }.get(value.get("schema") if isinstance(value, dict) else None)
+        if model is None:
+            raise CompetitionRecoveryError("unsupported recovery checkpoint schema")
         body = _model(payload, model)
         if recovery_checkpoint_digest(body) != expected_sha256:
             raise CompetitionRecoveryError("checkpoint body digest mismatch")
@@ -1206,6 +1268,7 @@ def prepare_recovery_checkpoint(
     historical_manifests: tuple[SignedBootstrapEligibilityManifest, ...] = (),
     historical_leases: tuple[SignedSimpleBootstrapLease, ...] = (),
     bridge_observation=None,
+    legacy_drain=None,
 ) -> PreparedRecoveryCheckpoint:
     """Archive stopped historical state; unresolved effects produce a held checkpoint."""
     _check_stopped(stopped)
@@ -1217,26 +1280,40 @@ def prepare_recovery_checkpoint(
             or destination_root in root.parents
         ):
             raise CompetitionRecoveryError("checkpoint destination overlaps live state")
-    with snapshot_legacy_bootstrap(
-        stopped.worker_state_root,
-        **_snapshot_kwargs(stopped, limits, historical_manifests, historical_leases),
+    if bridge_observation is not None and legacy_drain is not None:
+        raise CompetitionRecoveryError("legacy drain cannot replace version-2 outcome proofs")
+    with _recovery_snapshot(
+        stopped,
+        limits,
+        historical_manifests,
+        historical_leases,
+        observation,
+        legacy_drain,
     ) as snapshot:
         _check_stopped(stopped)
         _check_current_manifest(snapshot, stopped)
         outcomes = _verified_bridge_outcomes(
             bridge_observation, snapshot=snapshot, stopped=stopped, observation=observation
         )
-        effects, holds = _reconcile_snapshot(snapshot, observation, historical_manifests, outcomes)
+        drain_report = _legacy_drain_report(
+            legacy_drain, snapshot=snapshot, stopped=stopped, observation=observation
+        )
+        effects, holds = _reconcile_snapshot(
+            snapshot, observation, historical_manifests, outcomes, drain_report
+        )
         refs, objects = _context_payloads(
             historical_manifests, historical_leases, observation, limits
         )
         for content in snapshot._files.values():
             objects[hashlib.sha256(content).hexdigest()] = content
-        model = TransactionRecoveryCheckpointBody if outcomes else RecoveryCheckpointBody
+        if drain_report is not None:
+            model, schema = LegacyDrainRecoveryCheckpointBody, "umi-successor-recovery-checkpoint/3"
+        elif outcomes:
+            model, schema = TransactionRecoveryCheckpointBody, "umi-successor-recovery-checkpoint/2"
+        else:
+            model, schema = RecoveryCheckpointBody, "umi-successor-recovery-checkpoint/1"
         body = model(
-            schema="umi-successor-recovery-checkpoint/2"
-            if outcomes
-            else "umi-successor-recovery-checkpoint/1",
+            schema=schema,
             legacy_snapshot_sha256=snapshot.sha256,
             legacy_snapshot=snapshot.manifest,
             context=refs,
@@ -1246,11 +1323,12 @@ def prepare_recovery_checkpoint(
             chain_config_sha256=observation.chain_config_sha256,
             owned_observation_sha256=observation.evidence_sha256,
             reconciled_effects=[item.model_dump(mode="python") for item in effects]
-            if outcomes
+            if outcomes or drain_report is not None
             else effects,
             holds=holds,
             prior_effects_reconciled=not holds,
             **({"bridge_outcomes": list(outcomes)} if outcomes else {}),
+            **({"legacy_drain": drain_report} if drain_report is not None else {}),
         )
         _check_owned(observation, stopped)
         _check_stopped(stopped)
@@ -1376,6 +1454,7 @@ def verify_recovery_checkpoint(
     observation: Any,
     limits: RecoveryLimits,
     bridge_observation=None,
+    legacy_drain=None,
 ) -> VerifiedRecoveryCheckpoint:
     """Recheck archive, original files, stopped host and fresh owned chain state."""
     _check_stopped(stopped)
@@ -1399,8 +1478,13 @@ def verify_recovery_checkpoint(
     ):
         raise CompetitionRecoveryError("recovery chain observation configuration changed")
     manifests, leases = _checkpoint_context(body, objects)
-    with snapshot_legacy_bootstrap(
-        stopped.worker_state_root, **_snapshot_kwargs(stopped, limits, manifests, leases)
+    with _recovery_snapshot(
+        stopped,
+        limits,
+        manifests,
+        leases,
+        observation,
+        legacy_drain,
     ) as snapshot:
         _check_current_manifest(snapshot, stopped)
         if (
@@ -1411,6 +1495,22 @@ def verify_recovery_checkpoint(
                 "current historical snapshot differs from the checkpoint"
             )
         outcomes = ()
+        drain_report = None
+        if type(body) is LegacyDrainRecoveryCheckpointBody:
+            if legacy_drain is None or bridge_observation is not None:
+                raise CompetitionRecoveryError("version-3 checkpoint requires a live legacy drain")
+            fresh = _legacy_drain_report(
+                legacy_drain, snapshot=snapshot, stopped=stopped, observation=observation
+            )
+            drain_report = body.legacy_drain
+            if (
+                fresh.attempt_id != drain_report.attempt_id
+                or fresh.journal_sha256 != drain_report.journal_sha256
+                or fresh.verified_head_block < drain_report.verified_head_block
+            ):
+                raise CompetitionRecoveryError("recollected legacy drain changed or rolled back")
+        elif legacy_drain is not None:
+            raise CompetitionRecoveryError("legacy drain requires a version-3 checkpoint")
         if type(body) is TransactionRecoveryCheckpointBody:
             if bridge_observation is None:
                 raise CompetitionRecoveryError(
@@ -1422,12 +1522,17 @@ def verify_recovery_checkpoint(
             retained_outcomes_agree(body.bridge_outcomes, outcomes)
         elif bridge_observation is not None:
             raise CompetitionRecoveryError("version-1 checkpoint cannot accept version-2 outcomes")
-        effects, holds = _reconcile_snapshot(snapshot, observation, manifests, outcomes)
+        effects, holds = _reconcile_snapshot(
+            snapshot, observation, manifests, outcomes, drain_report
+        )
         if holds:
             raise CompetitionRecoveryError(
                 "fresh chain observation does not reconcile historical effects"
             )
-        if type(body) is TransactionRecoveryCheckpointBody and (
+        if type(body) in {
+            TransactionRecoveryCheckpointBody,
+            LegacyDrainRecoveryCheckpointBody,
+        } and (
             [item.model_dump(mode="json") for item in effects]
             != [item.model_dump(mode="json") for item in body.reconciled_effects]
         ):

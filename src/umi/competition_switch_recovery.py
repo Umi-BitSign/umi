@@ -664,6 +664,11 @@ def main(argv: list[str] | None = None) -> int:
     initial.add_argument("--recovery-root", type=Path, required=True)
     initial.add_argument("--recovery-limits", type=Path, required=True)
     initial.add_argument("--historical-context", type=Path)
+    initial.add_argument(
+        "--legacy-marker-consent",
+        type=Path,
+        help="root-sealed consent for a bounded paid marker when draining an audited v1 journal",
+    )
     for command, help_text in (
         ("resume-publication", "recover verified files; keep service stopped"),
         ("resume-start", "recover and start only the exact retained successor switch"),
@@ -685,6 +690,7 @@ def main(argv: list[str] | None = None) -> int:
                 recovery_root=args.recovery_root,
                 recovery_limits_path=args.recovery_limits,
                 historical_context_path=args.historical_context,
+                legacy_marker_consent_path=args.legacy_marker_consent,
             )
         else:
             operation = (

@@ -287,7 +287,63 @@ contexts can be supplied through `--historical-context`. All artifacts and
 authorization controls must already be reviewed and signed. The command does
 not fetch or create missing launch inputs.
 
-Its pre-stop child runs as the installed non-root account, verifies its complete
+<a id="legacy-version-1-drain"></a>
+
+#### Uncertain version-1 bridge submissions
+
+For the audited directive `48c31a89e51944a2e66b0dcc94eea7594f8484e37c81c2c4ea2f5987128a1748`,
+an upgrade with `--legacy-marker-consent /ABSOLUTE/PRIVATE/legacy-marker-consent.json`
+can retire an uncertain v1 attempt while preserving its original journal. Other
+releases require a separate source/dependency audit. This path requires a signed
+host bundle containing the drain implementation and the usual signed successor
+controls; an image update cannot upgrade the old host by itself.
+
+The additional canonical JSON file must be root-owned, sealed (`0400`, `0440`
+or `0444`) and inside a root-private control directory. Its fields are:
+
+```json
+{
+  "schema": "umi-legacy-marker-consent/1",
+  "validator_hotkey": "PUBLIC_VALIDATOR_HOTKEY",
+  "source_config_sha256": "SHA256_OF_EXACT_INSTALLED_CONFIG_BYTES",
+  "accepted_directive_sha256": "48c31a89e51944a2e66b0dcc94eea7594f8484e37c81c2c4ea2f5987128a1748",
+  "accept_marker_transaction_fees": true,
+  "all_other_hotkey_writers_stopped": true,
+  "maximum_marker_transactions": 1
+}
+```
+
+This is a field example; replace placeholders and serialize with the project's
+canonical JSON encoder before sealing it. The operator must fence any copies on
+other hosts. The local command cannot discover them. The named validator hotkey
+needs spendable TAO for a `System.remark` fee. Consent caps the number of marker
+transactions (1-4), not the chain's fee amount. No coldkey is opened or copied.
+
+After stopping and locking the original installation, the command generates a
+random marker, captures owned runtime/nonce evidence, signs one 64-block mortal
+remark with zero tip, and saves its exact bytes and send intent before broadcast.
+A lost reply does not cause another send. The observer searches the authenticated
+era and verifies eight further finalized blocks before accepting the drain.
+It then reconciles current weights and archives a version-3 checkpoint with
+`retired_legacy_attempt_outcome_unknown`. This classification does not assert the
+old transaction's nonce or whether it was included. Unrelated recovery holds and
+unexpected current rows still prevent activation.
+
+Recovery records live under `legacy-marker-outbox` in the private controls
+directory. Keep them with the upgrade archive. A process restart invalidates its
+old challenge authority: another attempt waits for the retained marker's exact
+era to end and consumes another consented transaction slot. The command waits up
+to 30 minutes; timeout preserves uncertainty and leaves the service stopped.
+Do not delete the outbox to reset its fee budget. After source publication begins,
+use the existing `resume-publication` or `resume-start` command for the retained
+switch instead of paying for another drain. Service startup must still be followed
+by a verified finalized weight update.
+
+Keep this migration path while deployed v1 journals require it. Once those
+consumers are gone, retain only the archive decoder needed by installed recovery
+receipts.
+
+The upgrade command's pre-stop child runs as the installed non-root account, verifies its complete
 signed host tree and stages the signed OCI bundle before exercising the actual
 Podman sandbox. The named wallet directory is inaccessible to that child.
 Bounded progress records identify control, host, release and sandbox stages.
