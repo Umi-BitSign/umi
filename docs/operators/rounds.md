@@ -762,6 +762,22 @@ selection. Repeating a decision preserves its original activation block and
 drain time. Admission remains provable when another write replaced the genesis
 in the same block, or when the same genesis was published again later.
 
+The complete-history result distinguishes `selection`, the latest decision being
+prepared, from `effective_selection`, the most recent activation whose drain has
+finished. During a successor's drain the preceding activation remains effective;
+at the boundary the successor replaces it without a renewal. Before the first
+activation becomes effective, or after revocation, `effective_selection` is
+absent. This reader does not infer a legacy allocation. Unknown control effects
+prevent both selections; they never permit falling back to a cached predecessor.
+Identical allocation amounts still retain distinct cohort activation identities.
+
+An effective selection describes control history only. It does not prove current
+validator eligibility, minimum reward opportunity or payment, and does not permit
+signing an older allocation after a successor has been observed. Preparation can
+replay the pending package during its drain; projection requires the latest
+selection to be effective. Coverage certification and installed execution remain
+separate requirements.
+
 The simpler `select` and `select_admitted` methods check signed ancestry and
 original admission but do not exclude overwritten control writes. Installed
 reward execution must consume the complete history check. That execution

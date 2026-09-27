@@ -245,6 +245,7 @@ class StandingRewardPreparation:
         current = self._selected(control, history, source)
         if (
             current.selection.state != "selected"
+            or current.effective_selection != current.selection
             or current.selection.activation != prepared.activation
             or chain.snapshot != control.snapshot
             or chain.block < prepared.reviewed_at_block

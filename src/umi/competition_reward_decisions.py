@@ -154,6 +154,10 @@ class HistoryVerifiedStandingRewardSelection:
 
     selection: StandingRewardSelection
     history: OwnedRewardControlHistory
+    # The preceding activation remains effective during a successor's drain.
+    # This is a control-history fact, not permission to sign the old allocation
+    # or proof of validator eligibility, elapsed opportunity or reward credits.
+    effective_selection: StandingRewardSelection | None
     chain_submission_authorized: Literal[False] = False
 
 
@@ -258,7 +262,8 @@ class StandingRewardControlReader:
     def select(
         self, observation: OwnedRewardControlObservation, source: DecisionSource
     ) -> StandingRewardSelection:
-        return self._select(observation, source, admission=None)
+        selection, _ = self._select(observation, source, admission=None)
+        return selection
 
     def select_admitted(
         self,
@@ -279,7 +284,7 @@ class StandingRewardControlReader:
             expected_control_hotkey=self.series.control_hotkey,
             expected_chain_config_sha256=self.admission_chain_config_sha256,
         )
-        selection = self._select(observation, source, admission=admission)
+        selection, _ = self._select(observation, source, admission=admission)
         return AdmittedStandingRewardSelection(selection, admission)
 
     def select_history(
@@ -295,15 +300,15 @@ class StandingRewardControlReader:
         cannot choose a shorter history. The reserved control key must publish
         only this series' ordered decisions throughout that interval.
         """
-        selection = self._select(observation, source, admission=None, history=history)
-        return HistoryVerifiedStandingRewardSelection(selection, history)
+        selection, effective = self._select(observation, source, admission=None, history=history)
+        return HistoryVerifiedStandingRewardSelection(selection, history, effective)
 
-    def _history_activation_block(
+    def _history_committed_blocks(
         self,
         history: OwnedRewardControlHistory,
         observation: OwnedRewardControlObservation,
         decisions: tuple[SignedRewardControlDecision, ...],
-    ) -> int:
+    ) -> tuple[int, ...]:
         validate_control_history(
             history,
             first_block=self.series.recovery.authority.issued_at_block,
@@ -314,7 +319,7 @@ class StandingRewardControlReader:
         if history.unresolved_blocks or not history.writes:
             raise ValueError("standing history has unresolved effects or lacks chain admission")
         sequence = -1
-        first_write = None
+        committed_blocks = []
         for write in history.writes:
             if sequence >= 0 and write.decision_sha256 == digest(decisions[sequence].decision):
                 # Retransmitting the same decision does not restart its drain.
@@ -327,15 +332,43 @@ class StandingRewardControlReader:
                 raise ValueError("standing history changed, skipped or backdated a decision")
             if sequence == 0 and write.block_number > self.policy.valid_through_block:
                 raise ValueError("standing series lacks timely original chain admission")
-            first_write = write.block_number
+            committed_blocks.append(write.block_number)
         last = history.writes[-1]
         if sequence != len(decisions) - 1 or (
             last.decision_sha256,
             last.block_number,
         ) != (observation.control_sha256, observation.committed_at_block):
             raise ValueError("standing history does not reach the current control commitment")
-        assert first_write is not None
-        return first_write
+        return tuple(committed_blocks)
+
+    def _selection_at(
+        self, decision: RewardControlDecision, committed_at_block: int, current_block: int
+    ) -> StandingRewardSelection:
+        effective = (
+            committed_at_block
+            + self.series.maximum_proof_lag_blocks
+            + self.series.maximum_transaction_lifetime_blocks
+            if decision.kind == "activate"
+            else None
+        )
+        state = (
+            "admitted"
+            if decision.kind == "admit_series"
+            else "revoked"
+            if decision.kind == "revoke"
+            else "draining"
+            if current_block < effective
+            else "selected"
+        )
+        return StandingRewardSelection(
+            self.series_sha256,
+            digest(decision),
+            decision.sequence,
+            state,
+            committed_at_block,
+            effective,
+            decision.activation,
+        )
 
     async def replay_admission(
         self, provider: HistoricalRewardControlProvider
@@ -370,7 +403,7 @@ class StandingRewardControlReader:
         *,
         admission: OwnedHistoricalRewardControl | None,
         history: OwnedRewardControlHistory | None = None,
-    ) -> StandingRewardSelection:
+    ) -> tuple[StandingRewardSelection, StandingRewardSelection | None]:
         self._proof(observation)
         if observation.control_sha256 is None:
             raise ValueError("standing control commitment is absent")
@@ -409,10 +442,10 @@ class StandingRewardControlReader:
             decisions = verify_reward_decisions(
                 self.series, self.policy, tuple(reversed(reversed_chain))
             )
-            committed_at_block = (
-                observation.committed_at_block
+            committed_blocks = (
+                None
                 if history is None
-                else self._history_activation_block(history, observation, decisions)
+                else self._history_committed_blocks(history, observation, decisions)
             )
             if admission is not None:
                 genesis = decisions[0].decision
@@ -480,28 +513,19 @@ class StandingRewardControlReader:
                 )
             self.journal.put_many(records, index=record_head)
             self._proof(observation)
-            effective = (
-                committed_at_block
-                + self.series.maximum_proof_lag_blocks
-                + self.series.maximum_transaction_lifetime_blocks
-                if tip.kind == "activate"
-                else None
+            selection = self._selection_at(
+                tip,
+                observation.committed_at_block
+                if committed_blocks is None
+                else committed_blocks[-1],
+                observation.snapshot.block_number,
             )
-            state = (
-                "admitted"
-                if tip.kind == "admit_series"
-                else "revoked"
-                if tip.kind == "revoke"
-                else "draining"
-                if observation.snapshot.block_number < effective
-                else "selected"
-            )
-            return StandingRewardSelection(
-                self.series_sha256,
-                digest(tip),
-                tip.sequence,
-                state,
-                committed_at_block,
-                effective,
-                tip.activation,
-            )
+            effective = None
+            if committed_blocks is not None and tip.kind != "revoke":
+                for item, block in zip(decisions, committed_blocks, strict=True):
+                    prior = self._selection_at(
+                        item.decision, block, observation.snapshot.block_number
+                    )
+                    if prior.state == "selected":
+                        effective = prior
+            return selection, effective

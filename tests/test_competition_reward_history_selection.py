@@ -25,6 +25,7 @@ from .test_competition_reward_history import chain_config as chain_config
 from .test_competition_reward_history import control as control
 from .test_competition_reward_history import historical as historical
 from .test_competition_reward_history import history_case as history_case
+from .test_competition_reward_history import make_history_case
 
 base_series_case = decision_tests.series_case
 base_policy = competition_tests.policy
@@ -40,6 +41,7 @@ def policy(base_policy):
 @pytest.fixture
 def series_case(base_series_case, request, tmp_path):
     c = base_series_case
+    mode = getattr(request, "param", "normal")
     policy = c.control.policy
     plans = tuple(p.model_copy(update={"policy_sha256": digest(policy)}) for p in c.series.cohorts)
     authority = c.series.recovery.authority.model_copy(
@@ -60,6 +62,12 @@ def series_case(base_series_case, request, tmp_path):
         )
     )
     c.control.policy = c.control.finality.policy = policy
+    if mode.startswith("handoff"):
+        # Small fixture fences exercise exact boundaries without prescribing
+        # production timing or simulating a certified minimum opportunity.
+        c.series = c.series.model_copy(
+            update={"maximum_proof_lag_blocks": 1, "maximum_transaction_lifetime_blocks": 1}
+        )
     old_decision = c.decision
 
     def decision(parent=None, cohort=None, *, observed=_HEIGHT, **changes):
@@ -125,12 +133,38 @@ def series_case(base_series_case, request, tmp_path):
             (),
         ],
     }
-    c.control_writes = {
-        _HEIGHT + i: writes for i, writes in enumerate(cases[getattr(request, "param", "normal")])
-    }
+    if mode.startswith("handoff"):
+        c.successor = decision(c.active, 6, observed=_HEIGHT + 3)
+        if mode == "handoff_same_allocation":
+            c.successor = signed(
+                c.successor.decision.model_copy(
+                    update={
+                        "activation": c.successor.decision.activation.model_copy(
+                            update={
+                                "allocation_sha256": c.active.decision.activation.allocation_sha256
+                            }
+                        )
+                    }
+                )
+            )
+            c.objects[digest(c.successor.decision)] = canonical_json_bytes(c.successor)
+        b = digest(c.successor.decision)
+        writes = [(g,), (a,), (), (b,), (), (b,), ()]
+        if mode == "handoff_revoke":
+            revocation = decision(c.successor, kind="revoke", observed=_HEIGHT + 4)
+            writes[4:] = [(digest(revocation.decision),), (), ()]
+        if mode == "handoff_unknown_write":
+            writes[3] = ("dd" * 32, b)
+        cases[mode] = writes
+    c.control_writes = {_HEIGHT + i: writes for i, writes in enumerate(cases[mode])}
     c.cleared_blocks = {_HEIGHT + 3} if getattr(request, "param", None) == "cleared" else set()
     c.reader = reopen()
     return c
+
+
+@pytest.fixture
+async def handoff_case(historical, monkeypatch, tmp_path):
+    return await make_history_case(historical, monkeypatch, tmp_path, distance=7)
 
 
 async def current(h, tip, *, validator_hotkey=None):
@@ -181,6 +215,7 @@ async def test_restart_replays_every_write_and_duplicate_does_not_reset_activati
     history = (await h.reader.advance(h.item.provider, through_block=h.end)).history
     value = c.reader.select_history(await current(h, history.tip), c.source, history)
     assert value.selection.state == "draining"
+    assert value.effective_selection is None
     assert value.selection.committed_at_block == h.old.height + 1
     assert value.selection.effective_at_block == h.old.height + 161
     assert not value.chain_submission_authorized and not value.selection.chain_submission_authorized
@@ -199,6 +234,74 @@ async def test_native_history_selects_revocation(history_case):
     history = (await h.reader.advance(h.item.provider, through_block=h.end)).history
     result = h.c.reader.select_history(await current(h, history.tip), h.c.source, history)
     assert result.selection.state == "revoked" and result.selection.activation is None
+    assert result.effective_selection is None
+
+
+@pytest.mark.parametrize("series_case", ["handoff"], indirect=True)
+@pytest.mark.parametrize("offset", [1, 2, 3, 4, 5, 6])
+async def test_effective_allocation_crosses_each_fence_and_recovers_offline(handoff_case, offset):
+    h, c = handoff_case, handoff_case.c
+    height = h.old.height + offset
+    history = (await h.reader.advance(h.item.provider, through_block=height)).history
+    result = c.reader.select_history(await current(h, history.tip), c.source, history)
+    tip = c.active if offset < 3 else c.successor
+    assert result.selection.decision_sha256 == digest(tip.decision)
+    assert result.selection.activation == tip.decision.activation
+    effective = c.active if 3 <= offset < 5 else c.successor if offset >= 5 else None
+    if effective is None:
+        assert result.effective_selection is None
+    else:
+        assert result.effective_selection.decision_sha256 == digest(effective.decision)
+        assert result.effective_selection.activation == effective.decision.activation
+        assert result.effective_selection.state == "selected"
+        assert result.effective_selection.effective_at_block == h.old.height + (
+            3 if effective is c.active else 5
+        )
+        assert not result.effective_selection.chain_submission_authorized
+    assert result.selection.state == ("selected" if offset >= 5 else "draining")
+    assert not result.chain_submission_authorized
+
+    # Reconstruct from retained native block proofs and signed decisions. The
+    # duplicate at +5 cannot move the successor fence from +5 to +7.
+    c.reader, h.reader = c.reopen(), await h.restart()
+    h.offline_through = height - 1
+    c.objects.clear()
+    replay = (await h.reader.advance(h.item.provider, through_block=height)).history
+    recovered = c.reader.select_history(await current(h, replay.tip), c.source, replay)
+    assert recovered == result
+    assert h.body_requests == list(range(h.old.height, height + 1))
+
+
+@pytest.mark.parametrize("series_case", ["handoff_same_allocation"], indirect=True)
+@pytest.mark.parametrize("offset", [4, 5])
+async def test_same_reward_amounts_do_not_merge_cohort_activation_identity(handoff_case, offset):
+    h, c = handoff_case, handoff_case.c
+    history = (await h.reader.advance(h.item.provider, through_block=h.old.height + offset)).history
+    result = c.reader.select_history(await current(h, history.tip), c.source, history)
+    old, new = c.active.decision.activation, c.successor.decision.activation
+    assert old.allocation_sha256 == new.allocation_sha256
+    assert digest(old) != digest(new)
+    assert result.selection.activation == new
+    assert result.effective_selection.activation == (old if offset == 4 else new)
+
+
+@pytest.mark.parametrize("series_case", ["handoff_revoke"], indirect=True)
+@pytest.mark.parametrize("offset", [4, 6])
+async def test_revocation_removes_preceding_allocation_during_and_after_drain(handoff_case, offset):
+    h, c = handoff_case, handoff_case.c
+    history = (await h.reader.advance(h.item.provider, through_block=h.old.height + offset)).history
+    result = c.reader.select_history(await current(h, history.tip), c.source, history)
+    assert result.selection.state == "revoked"
+    assert result.effective_selection is None
+
+
+@pytest.mark.parametrize("series_case", ["handoff_unknown_write"], indirect=True)
+async def test_unknown_intervening_write_cannot_fall_back_to_preceding_allocation(handoff_case):
+    h, c = handoff_case, handoff_case.c
+    history = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    with pytest.raises(ValueError, match="changed, skipped or backdated"):
+        c.reader.select_history(await current(h, history.tip), c.source, history)
+    assert c.reader.journal.keys("reward_control_decision") == []
 
 
 @pytest.mark.parametrize(

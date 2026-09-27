@@ -284,7 +284,10 @@ async def preparation_case(native_package, registered_case, tmp_path, monkeypatc
 
     def history_selection(control, source, history):
         assert history is history_boundary
-        return HistoryVerifiedStandingRewardSelection(reader.select(control, source), history)
+        selection = reader.select(control, source)
+        return HistoryVerifiedStandingRewardSelection(
+            selection, history, selection if selection.state == "selected" else None
+        )
 
     monkeypatch.setattr(reader, "select_history", history_selection)
     genesis = signed(
@@ -479,6 +482,44 @@ async def test_cancellation_retains_completed_native_replay(preparation_case, mo
         await task
     ready = await p.preparation.prepare(p.package, **replay_args(await p.observations()))
     assert ready.allocation == p.allocation and calls == [1]
+
+
+async def test_pending_activation_can_prepare_but_cannot_project(preparation_case):
+    p = preparation_case
+    observations = await p.observations()
+    observations["control"] = await p.control(
+        committed=observations["control"].snapshot.block_number
+    )
+    ready = await p.preparation.prepare(p.package, **replay_args(observations))
+    assert ready.allocation == p.allocation
+    with pytest.raises(ValueError, match="current standing selection"):
+        await p.preparation.project(ready, **observations)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "different_activation"])
+async def test_projection_requires_selected_and_effective_allocation_to_agree(
+    preparation_case, monkeypatch, mutation
+):
+    p = preparation_case
+    observations = await p.observations()
+    ready = await p.preparation.prepare(p.package, **replay_args(observations))
+    select = p.reader.select_history
+
+    def inconsistent(*args):
+        value = select(*args)
+        effective = None
+        if mutation == "different_activation":
+            effective = replace(
+                value.effective_selection,
+                activation=value.effective_selection.activation.model_copy(
+                    update={"cohort_sha256": "dd" * 32}
+                ),
+            )
+        return replace(value, effective_selection=effective)
+
+    monkeypatch.setattr(p.reader, "select_history", inconsistent)
+    with pytest.raises(ValueError, match="current standing selection"):
+        await p.preparation.project(ready, **observations)
 
 
 async def test_failed_replay_retries_and_independent_bindings_are_enforced(
