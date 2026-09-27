@@ -30,6 +30,8 @@ from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
     MAX_CONTROL_METADATA_BYTES,
     HistoricalRewardControlProvider,
+    OwnedHistoricalRewardControl,
+    validate_historical_reward_control,
 )
 from .competition_reward_control_writes import (
     MAX_WRITE_EVIDENCE_BYTES,
@@ -189,6 +191,37 @@ class RewardControlHistoryReader:
         _uint(height, 2**53 - 1)
         async with self._lock:
             return self._prefix(height)
+
+    async def review_control(
+        self, provider: HistoricalRewardControlProvider, height: int
+    ) -> OwnedHistoricalRewardControl:
+        """Replay the retained slot at an already verified history boundary.
+
+        This uses the original proof bytes, including after a restart where
+        historical state RPC is unavailable. It cannot skip history replay.
+        """
+        if (
+            not isinstance(provider, HistoricalRewardControlProvider)
+            or digest(provider.config) != self.config_sha256
+        ):
+            raise ValueError("control history provider differs from selected chain")
+        async with self._lock:
+            prefix = self._prefix(height)
+            with self.journal.locked():
+                saved = await run_owned_thread(self._load, height)
+                if saved is None:
+                    raise ValueError("verified control history lost its retained frame")
+                control = await provider.review_control(
+                    saved["slot_evidence"], saved["slot_metadata"]
+                )
+                validate_historical_reward_control(
+                    control,
+                    expected_control_hotkey=self.hotkey,
+                    expected_chain_config_sha256=self.config_sha256,
+                )
+                if control.snapshot != prefix.tip:
+                    raise ValueError("retained control differs from verified history boundary")
+                return control
 
     def _save(self, observation: OwnedRewardControlWrites) -> None:
         records = []

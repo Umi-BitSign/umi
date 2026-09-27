@@ -20,7 +20,7 @@ from pydantic import Field, model_validator
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_decisions import DecisionSource, RewardActivation
-from .competition_reward_executor import StandingRewardExecutor
+from .competition_reward_executor import StandingHistoryPending, StandingRewardExecutor
 from .competition_reward_handoff import hold_legacy_reward_handoff
 from .competition_reward_handoff_models import LegacyRewardHandoffPlan
 from .competition_reward_history import RewardControlHistoryReader
@@ -59,12 +59,42 @@ async def _close_provider(provider):
     await await_owned_task(asyncio.create_task(provider.aclose()))
 
 
+async def _prepare_first(preparation, provider, history, packages, decisions, height, maximum):
+    if height < history.first_block:
+        return None
+    try:
+        prefix = await history.verified_prefix(height)
+    except ValueError:
+        progress = await history.advance(provider, through_block=height, maximum_blocks=maximum)
+        if progress.history is None:
+            logger.info(
+                "standing_boot_history_pending next_block=%s target_block=%s",
+                progress.next_block,
+                height,
+            )
+            raise StandingHistoryPending from None
+        prefix = progress.history
+    control = await history.review_control(provider, height)
+    if control.control_sha256 is None:
+        return None
+    reviewed = await run_owned_thread(preparation.reader.review_history, control, decisions, prefix)
+    initial = reviewed.initial_selection
+    if initial is None:
+        return None
+    package = await run_owned_thread(packages, initial.activation.package_sha256)
+    first = await preparation.prepare_initial(
+        package, control=control, history=prefix, source=decisions
+    )
+    logger.info("standing_boot_prepared cohort_sha256=%s", first.activation.cohort_sha256)
+    return first
+
+
 async def run_standing_reward_service(
     runtime: SuccessorSupervisorRuntime,
     *,
     approval_path: Path,
     preparation: StandingRewardPreparation,
-    first: PreparedStandingReward,
+    first: PreparedStandingReward | None = None,
     plan: LegacyRewardHandoffPlan,
     provider: HistoricalRewardControlProvider,
     legacy_providers: Mapping[str, HistoricalRewardControlProvider],
@@ -79,8 +109,8 @@ async def run_standing_reward_service(
     """Own the passed providers until stopped; preserve journals on every retry.
 
     Call inside the installed runtime's async context, with its native adapter.
-    The bootstrap must load the first native preparation again on restart and
-    retain its original historical authority even when a successor is current.
+    Without a supplied first preparation, replay the retained complete history
+    and initial package before handoff, even when a successor is current.
     Content callbacks cannot grant submission authority. No production timing
     policy is inferred from the per-operation retry interval.
     """
@@ -103,17 +133,52 @@ async def run_standing_reward_service(
             providers[key] = value
         if (
             digest(provider.config) != preparation.reader.chain_config_sha256
+            or digest(provider.config) != preparation.reader.admission_chain_config_sha256
+            or digest(provider.policy) != preparation.policy_sha256
             or len(provider.config.proof_rpc_fallback_urls) != 2
             or limits.mortality_period
             > preparation.reader.series.maximum_transaction_lifetime_blocks
+            or type(history) is not RewardControlHistoryReader
+            or history.config_sha256 != digest(provider.config)
+            or history.hotkey != preparation.reader.series.control_hotkey
+            or history.first_block != preparation.reader.series.recovery.authority.issued_at_block
         ):
             raise ValueError("standing service differs from approved chain execution")
         for value in owners.values():
             await value.start()
+        bootstrap_height = None
         while not stop.is_set():
             for value in owners.values():
                 value.ensure_observer_running()
             try:
+                if first is None:
+                    check_standing_reward_host_selection(
+                        runtime,
+                        approval_path=approval_path,
+                        preparation=preparation,
+                        first=None,
+                        plan=plan,
+                    )
+                    # Keep a fixed finalized target while replay catches up.
+                    # Chasing a moving head can starve slow recovery forever.
+                    if bootstrap_height is None:
+                        control = await provider.collect_control(history.hotkey)
+                        bootstrap_height = control.snapshot.block_number
+                    first = await _prepare_first(
+                        preparation,
+                        provider,
+                        history,
+                        packages,
+                        decisions,
+                        bootstrap_height,
+                        limits.maximum_history_blocks,
+                    )
+                    if first is None:
+                        bootstrap_height = None
+                        logger.info("standing_boot_waiting_for_initial_activation")
+                        raise StandingHistoryPending
+                    if stop.is_set():
+                        break
                 check_standing_reward_host_selection(
                     runtime,
                     approval_path=approval_path,
@@ -159,6 +224,12 @@ async def run_standing_reward_service(
                         "standing_service_running series_sha256=%s", preparation.series_sha256
                     )
                     await executor.run(stop, poll_seconds=limits.poll_seconds)
+            except StandingHistoryPending:
+                if bootstrap_height is not None:
+                    # A completed chunk made durable progress. Keep catching
+                    # up without a poll delay per chunk, yielding for shutdown.
+                    await asyncio.sleep(0)
+                    continue
             except Exception as error:
                 logger.warning("standing_service_retry reason=%s", type(error).__name__)
             if not stop.is_set():

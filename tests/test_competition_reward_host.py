@@ -13,6 +13,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from umi import competition_reward_host as host
 from umi import competition_reward_service as service
 from umi.competition_reward_control_archive import HistoricalRewardControlProvider
 from umi.competition_reward_handoff import hold_legacy_reward_handoff
+from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_host import StandingRewardHostApproval, bind_standing_reward_host
 from umi.competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
 from umi.competition_reward_transactions import StandingWeightJournal
@@ -349,7 +351,7 @@ async def test_capacity_increase_preserves_bound_journal(installed):
 
 
 @pytest.fixture
-def service_case(installed, monkeypatch):
+def service_case(installed, monkeypatch, tmp_path):
     """Native runtime/handoff/binding; provider lifecycle and executor are ports."""
     c = installed
     c.provider = object.__new__(HistoricalRewardControlProvider)
@@ -357,6 +359,8 @@ def service_case(installed, monkeypatch):
         update={"proof_rpc_fallback_urls": ("wss://backup-one.example", "wss://backup-two.example")}
     )
     c.preparation.reader.chain_config_sha256 = digest(c.provider.config)
+    c.preparation.reader.admission_chain_config_sha256 = digest(c.provider.config)
+    c.provider.policy = c.item.policy
     c.approval = c.approval.model_copy(update={"chain_config_sha256": digest(c.provider.config)})
     c.publish(canonical_json_bytes(c.approval))
     c.events, c.executors = [], []
@@ -416,7 +420,12 @@ def service_case(installed, monkeypatch):
         plan=c.plan,
         provider=c.provider,
         legacy_providers=c.providers,
-        history=object(),
+        history=RewardControlHistoryReader(
+            tmp_path / "service-history",
+            control_hotkey=c.series.control_hotkey,
+            chain_config_sha256=digest(c.provider.config),
+            first_block=c.series.recovery.authority.issued_at_block,
+        ),
         packages=object(),
         decisions=object(),
         opportunity=object(),
@@ -565,4 +574,60 @@ async def test_service_cancellation_drains_signer_before_unlocking(service_case)
                 await task
         assert not runtime._mutex.locked()
     assert not c.executors
+    assert c.events[-2:] == ["close-legacy", "close-current"]
+
+
+@pytest.mark.parametrize("failure", ["history_pending", "package_unavailable", "not_activated"])
+async def test_service_boot_retries_before_handoff_and_keeps_replay_target(
+    service_case, monkeypatch, failure
+):
+    c = service_case
+    c.service_options.pop("first")
+    targets, captures = [], []
+
+    async def collect(hotkey):
+        assert hotkey == c.series.control_hotkey
+        captures.append(1000 + len(captures))
+        return SimpleNamespace(snapshot=SimpleNamespace(block_number=captures[-1]))
+
+    async def prepare(*args):
+        assert c.current_runtime._standing_handoff_intent() is None
+        assert not c.executors and "signer" not in c.events
+        targets.append(args[-2])
+        if len(targets) == 1:
+            if failure == "history_pending":
+                raise service.StandingHistoryPending
+            if failure == "package_unavailable":
+                raise OSError("private delivery error")
+            return None
+        return c.prepared
+
+    c.provider.collect_control = collect
+    monkeypatch.setattr(service, "_prepare_first", prepare)
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        await run_standing_reward_service(runtime, **c.service_options)
+    assert targets == ([1000, 1001] if failure == "not_activated" else [1000, 1000])
+    assert captures == ([1000, 1001] if failure == "not_activated" else [1000])
+    assert len(c.executors) == 1 and c.executors[0]["first"] is c.prepared
+
+
+async def test_service_stop_during_boot_preserves_old_handoff_state(service_case, monkeypatch):
+    c = service_case
+    c.service_options.pop("first")
+
+    async def collect(hotkey):
+        return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
+
+    async def prepare(*args):
+        c.stop.set()
+        return c.prepared
+
+    c.provider.collect_control = collect
+    monkeypatch.setattr(service, "_prepare_first", prepare)
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        await run_standing_reward_service(runtime, **c.service_options)
+        assert runtime._standing_handoff_intent() is None
+    assert not c.executors and "signer" not in c.events
     assert c.events[-2:] == ["close-legacy", "close-current"]

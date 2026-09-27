@@ -32,6 +32,23 @@ from .test_validator_chain_scan import Entry, extrinsic, success
 pytestmark = pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
 
 
+async def test_retained_control_requires_replayed_prefix_and_survives_offline_restart(history_case):
+    h = history_case
+    with pytest.raises(ValueError, match="not been natively verified"):
+        await h.reader.review_control(h.item.provider, h.end)
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    before = await h.reader.review_control(h.item.provider, h.end)
+    h.reader = await h.restart()
+    with pytest.raises(ValueError, match="not been natively verified"):
+        await h.reader.review_control(h.item.provider, h.end)
+    h.offline_through = h.end
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    h.rpc_calls.clear()
+    after = await h.reader.review_control(h.item.provider, h.end)
+    assert after == before
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+
+
 @pytest.fixture
 async def history_case(historical, monkeypatch, tmp_path):
     return await make_history_case(historical, monkeypatch, tmp_path)

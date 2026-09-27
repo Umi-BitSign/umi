@@ -199,6 +199,37 @@ class StandingRewardPreparation:
             raise ValueError("historical control has no effective reward package")
         return self._prepare_allocation(package, selected.activation, control.snapshot.block_number)
 
+    async def prepare_initial(
+        self,
+        package: CohortRewardPackage,
+        *,
+        control: OwnedHistoricalRewardControl,
+        history: OwnedRewardControlHistory,
+        source: DecisionSource,
+    ) -> PreparedStandingReward:
+        """Recover the first activation for the original installation handoff.
+
+        A later cohort or revocation may be current. This replays the initial
+        package from complete native history without selecting it for weights.
+        Projection still requires fresh control and the current activation.
+        """
+        async with self._lock:
+            return await run_owned_thread(
+                partial(self._prepare_initial, package, control, history, source)
+            )
+
+    def _prepare_initial(self, package, control, history, source):
+        self._authority()
+        initial = self.reader.review_history(control, source, history).initial_selection
+        if (
+            initial is None
+            or initial.sequence != 1
+            or initial.activation is None
+            or initial.activation.cohort_sha256 != digest(self.reader.series.cohorts[0])
+        ):
+            raise ValueError("standing history has no initial activation")
+        return self._prepare_allocation(package, initial.activation, control.snapshot.block_number)
+
     def _prepare_allocation(
         self, package: CohortRewardPackage, activation: RewardActivation, block: int
     ) -> PreparedStandingReward:

@@ -377,7 +377,11 @@ async def historical_preparation_case(preparation_case, monkeypatch):
         assert actual is control and history is p.history
         selected = chosen.current
         return HistoricalStandingRewardSelection(
-            control, selected.selection, history, selected.effective_selection
+            control,
+            selected.selection,
+            history,
+            selected.effective_selection,
+            initial_selection=selected.initial_selection,
         )
 
     monkeypatch.setattr(p.reader, "review_history", review)
@@ -387,6 +391,34 @@ async def historical_preparation_case(preparation_case, monkeypatch):
         chosen,
         dict(control=control, history=p.history, source=p.objects.__getitem__),
     )
+
+
+@pytest.mark.parametrize("later", ["draining", "selected", "revoked"])
+async def test_initial_package_is_recoverable_after_successor_or_revocation(
+    historical_preparation_case, later
+):
+    p, _, chosen, args = historical_preparation_case
+    original = chosen.current.selection
+    successor = replace(
+        original,
+        sequence=2,
+        state=later,
+        activation=None
+        if later == "revoked"
+        else original.activation.model_copy(update={"cohort_sha256": "ff" * 32}),
+    )
+    chosen.current = replace(
+        chosen.current,
+        selection=successor,
+        effective_selection=successor if later == "selected" else None,
+        initial_selection=original,
+    )
+    ready = await p.preparation.prepare_initial(p.package, **args)
+    assert ready.activation == original.activation
+    assert ready.allocation == p.allocation
+    assert not ready.chain_submission_authorized
+    with pytest.raises(ValueError):
+        await p.preparation.prepare_historical(p.package, **args)
 
 
 async def test_historical_package_uses_effective_predecessor_during_drain(
@@ -815,6 +847,47 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         yield h
     finally:
         await item.provider.aclose()
+
+
+async def test_boot_reconstructs_initial_package_from_native_retained_history(
+    complete_preparation_case,
+):
+    from umi.competition_reward_executor import StandingHistoryPending
+    from umi.competition_reward_service import _prepare_first
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+
+    def owner():
+        return StandingRewardPreparation(
+            c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+        )
+
+    def package(sha):
+        assert sha == digest(p.package)
+        return p.package
+
+    async def boot(preparation):
+        for _ in range(100):
+            try:
+                return await _prepare_first(
+                    preparation, h.item.provider, h.reader, package, c.source, h.end, 64
+                )
+            except (HistoricalHeaderRecoveryPending, StandingHistoryPending):
+                continue
+        pytest.fail("native boot replay did not converge")
+
+    before = await boot(owner())
+    assert before.activation == c.active.decision.activation
+    assert before.allocation == p.allocation
+    assert not before.chain_submission_authorized
+    c.reader, h.reader = c.reopen(), await h.restart()
+    c.objects.clear()  # Original coordinator decisions are now unavailable.
+    h.offline_through = h.end
+    h.rpc_calls.clear()
+    after = await boot(owner())
+    assert after.activation == before.activation and after.allocation == before.allocation
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
 
 
 @pytest.mark.parametrize(

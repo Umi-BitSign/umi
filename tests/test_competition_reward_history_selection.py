@@ -244,6 +244,29 @@ async def test_native_history_selects_revocation(history_case):
     result = h.c.reader.select_history(await current(h, history.tip), h.c.source, history)
     assert result.selection.state == "revoked" and result.selection.activation is None
     assert result.effective_selection is None
+    assert result.initial_selection.activation == h.c.active.decision.activation
+
+
+@pytest.mark.parametrize("series_case", ["handoff", "handoff_revoke"], indirect=True)
+async def test_initial_activation_survives_newer_control_and_offline_restart(handoff_case):
+    h, c = handoff_case, handoff_case.c
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    control = await h.reader.review_control(h.item.provider, h.end)
+    reviewed = c.reader.review_history(control, c.source, await h.reader.verified_prefix(h.end))
+    assert reviewed.initial_selection.activation == c.active.decision.activation
+    assert reviewed.selection.sequence > reviewed.initial_selection.sequence
+    c.reader, h.reader = c.reopen(), await h.restart()
+    c.objects.clear()
+    h.offline_through = h.end
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    replay = c.reader.review_history(
+        await h.reader.review_control(h.item.provider, h.end),
+        c.source,
+        await h.reader.verified_prefix(h.end),
+    )
+    assert replay.initial_selection == reviewed.initial_selection
+    assert replay.selection == reviewed.selection
+    assert not replay.chain_submission_authorized
 
 
 @pytest.mark.parametrize("series_case", ["handoff"], indirect=True)
@@ -256,6 +279,9 @@ async def test_effective_allocation_crosses_each_fence_and_recovers_offline(hand
     tip = c.active if offset < 3 else c.successor
     assert result.selection.decision_sha256 == digest(tip.decision)
     assert result.selection.activation == tip.decision.activation
+    assert result.initial_selection.activation == c.active.decision.activation
+    assert result.initial_selection.committed_at_block == h.old.height + 1
+    assert not result.initial_selection.chain_submission_authorized
     effective = c.active if 3 <= offset < 5 else c.successor if offset >= 5 else None
     if effective is None:
         assert result.effective_selection is None

@@ -157,7 +157,8 @@ class BoundStandingRewardHost:
 def _check_selection(runtime, preparation, first, plan, approval):
     runtime._require_lease()
     preparation._authority()
-    preparation._check_prepared(first)
+    if first is not None:
+        preparation._check_prepared(first)
     expected = StandingRewardHostApproval(
         schema="umi-standing-reward-host-approval/1",
         source_config_sha256=digest(runtime.config),
@@ -179,10 +180,14 @@ def check_standing_reward_host_selection(
     *,
     approval_path: Path,
     preparation: StandingRewardPreparation,
-    first: PreparedStandingReward,
+    first: PreparedStandingReward | None,
     plan: LegacyRewardHandoffPlan,
 ) -> None:
-    """Reject a wrong local selection before retaining a stop intent for C4."""
+    """Check approved inputs before bootstrap or retaining a C4 stop intent.
+
+    During bootstrap the first package is not prepared yet. The same approval
+    is checked again with native preparation before the handoff can stop C4.
+    """
     if (
         type(runtime) is not SuccessorSupervisorRuntime
         or type(preparation) is not StandingRewardPreparation

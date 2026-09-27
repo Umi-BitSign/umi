@@ -224,10 +224,16 @@ cannot become an empty replacement. Capacity increases preserve its identity.
 `competition_reward_service` owns proof providers and holds the original C4
 handoff through executor shutdown. Transient failures retry with retained state;
 an exited finality observer ends the service invocation so boot supervision can
-construct a new provider. Cancellation drains owned signing work before releasing
-the writer locks. This library is not selected by the installed supervisor CLI.
-The approved boot/configuration assembly, artifact and opportunity delivery, and
-installed restart qualification are still required before enabling it.
+construct a new provider. Startup reconstructs the first activation from complete
+retained control history and replays its original reward package. A successor or
+revocation in that history does not erase the initial handoff. Historical replay
+uses the retained proofs and a fixed target block while catching up; it grants no
+current submission authority. The executor checks fresh control before signing.
+Cancellation drains owned signing work before releasing the writer locks.
+
+This library is not selected by the installed supervisor CLI. Approved native
+configuration assembly, artifact and opportunity delivery, and installed restart
+qualification are still required before enabling it.
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;
