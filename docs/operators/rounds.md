@@ -697,6 +697,21 @@ Configure sufficient bounded storage before accepting work. These files do not
 authorize transactions or complete delayed first reward admission; the host
 must integrate fresh chain proofs and standing control separately.
 
+`FinalizedRewardControlProvider` reads the reserved control hotkey from an owned
+finalized snapshot and a storage multiproof for the timestamp, SN78 existence
+and commitment. It discovers the actual current digest, including a changed
+head the validator has not cached. The host selects the control account from
+its approved authority; a reward package cannot select that account.
+
+An old commitment may remain selected after a long outage. Its current proof
+must still be fresh and bound to the verified runtime and state root. Proven
+absence, malformed commitments and unavailable proofs grant no authority to
+reuse a cached allocation. The observation contains replay evidence but is a
+process-local capability; serialized records cannot recreate it. The standing
+history and admission consumer must authenticate the discovered digest and
+apply its decision before authorizing a transaction. This reader performs no
+chain writes and has no coordinator renewal dependency.
+
 Registration projection preserves fixed integer amounts by hotkey. A departed
 hotkey's share goes to the currently proved burn destination; a returning hotkey
 can recover that share at its new UID in subsequent submissions. Other recipients
