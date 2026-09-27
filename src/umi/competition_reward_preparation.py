@@ -37,6 +37,7 @@ from .competition_reward_decisions import (
     RewardActivation,
     StandingRewardControlReader,
 )
+from .competition_reward_handoff_models import VerifiedLegacyRewardHandoff
 from .competition_reward_history import OwnedRewardControlHistory
 from .competition_reward_manifest import (
     RewardManifest,
@@ -272,7 +273,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
-        prior_opportunity: VerifiedRewardOpportunity | None = None,
+        prior_opportunity: VerifiedRewardOpportunity | VerifiedLegacyRewardHandoff | None = None,
     ) -> PreparedStandingProjection:
         async with self._lock:
             return await run_owned_thread(
@@ -296,7 +297,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
-        prior_opportunity: VerifiedRewardOpportunity | None = None,
+        prior_opportunity: VerifiedRewardOpportunity | VerifiedLegacyRewardHandoff | None = None,
     ) -> PreparedStandingProjection:
         self._check_prepared(prepared)
         current = self._selected(control, history, source)
@@ -317,6 +318,8 @@ class StandingRewardPreparation:
                 reader=self.reader,
                 manifest=self.manifest,
                 selection=current.selection,
+                validator_hotkey=chain.validator_hotkey,
+                current_block=chain.block,
             )
         projection = project_owned_reward_allocation(
             prepared.allocation, chain, self.reader.policy, chain_config=chain_config
@@ -341,7 +344,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
-        prior_opportunity: VerifiedRewardOpportunity | None = None,
+        prior_opportunity: VerifiedRewardOpportunity | VerifiedLegacyRewardHandoff | None = None,
     ) -> MortalReceiptQuery:
         """Bind encoded bytes to a freshly checked allocation and signing context.
 
@@ -451,7 +454,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
-        prior_opportunity: VerifiedRewardOpportunity | None = None,
+        prior_opportunity: VerifiedRewardOpportunity | VerifiedLegacyRewardHandoff | None = None,
         previous: StandingTransactionEnd | None = None,
     ) -> PendingStandingWeight:
         """Retain an unsigned intent and recovery inputs before any signing.
@@ -494,7 +497,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
-        prior_opportunity: VerifiedRewardOpportunity | None = None,
+        prior_opportunity: VerifiedRewardOpportunity | VerifiedLegacyRewardHandoff | None = None,
     ) -> PendingStandingWeight:
         """Verify actual bytes and commit them against their original reservation.
 

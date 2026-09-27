@@ -890,9 +890,8 @@ age deadline. Retries cannot increase credited time.
 For a version 2 manifest, reward projection and transaction preparation require
 that reviewed certificate for the exact preceding activation. Evidence must end
 no later than the successor decision's observed block. The first activation
-requires a separately qualified legacy handoff and currently holds at this gate.
-Approved runtime and timing parameters, first legacy handoff and installed
-execution remain incomplete. Coverage establishes
+instead requires the native legacy handoff described below. Approved runtime and
+timing parameters, installed migration and execution remain incomplete. Coverage establishes
 reward opportunity, not a particular emission amount or submission authority.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and
@@ -1043,13 +1042,35 @@ landed. `validate_legacy_weight_expiry` binds it to the inventory entry, chain a
 validator. Restart replays the original evidence; a serialized result is not a
 capability.
 
-The first activation remains held until the installed migration consumer fences
-the old writer, accounts for its complete transaction inventory and binds that
-handoff to the approved series. Reviewing one attempt does not establish any of
-those conditions, and unsigned intentions still require the original stopped
-writer's recovery protocol. This consumer remains necessary while any C4 writer
-or retained C4 attempt can enter the standing series; remove it only after those
-migration and recovery consumers have retired.
+The first activation names a `LegacyRewardHandoffPlan` through
+`prior_opportunity_sha256`. The plan binds the series, first cohort and accepted
+C4 policy, round and package. Each designated validator reviews its own retained
+installation independently. The plan does not assert a C4 opportunity minimum
+or certify that another validator has stopped.
+
+`hold_legacy_reward_handoff` owns the original supervisor process lock, runtime
+mutex and complete weight-journal lock throughout migration and the caller's
+execution lifetime. It saves an installation-bound intent before stopping the
+C4 worker. Updated supervisor code honors that intent before contacting the
+feed or RPC, including after restart. A retry must retain the same first
+activation. There is no automatic reset to C4 startup.
+
+The consumer audits either selected journal format and replays the retained
+package authorities. Every signed attempt needs its exact native expiry result;
+a local terminal flag cannot skip review. An empty journal or unsigned intention
+can be handed over under the original worker's write-before-broadcast contract
+and continuously held locks. Missing journals, inconsistent authorities and
+unavailable proofs leave the intent pending. Original attempts and evidence are
+preserved. Phase logs report inventory progress without transaction bytes.
+
+The scoped result is required on every first-cohort projection and transaction
+preparation. It checks the exact activation, designated validator, proof height
+and unchanged writer ownership. Leaving the context invalidates it. Restart
+replays the inventory from retained bytes. The installed host must still select
+the approved new executable at boot and prevent an older binary from ignoring
+the new intent; this library does not install that transition. Installed signing,
+submission and outage qualification remain pending. Retain these C4 consumers
+until no deployed migration or recovery path needs them.
 
 These APIs neither sign nor submit. The execution service must still enforce
 installed-series qualification, prior reward opportunity, migration fencing and

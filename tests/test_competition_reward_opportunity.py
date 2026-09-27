@@ -11,6 +11,12 @@ from umi.competition_reward_decisions import (
     StandingRewardControlReader,
     StandingRewardSelection,
 )
+from umi.competition_reward_handoff_models import (
+    LegacyRewardHandoffIntent,
+    LegacyRewardHandoffPlan,
+    VerifiedLegacyRewardHandoff,
+    _issue_legacy_handoff,
+)
 from umi.competition_reward_manifest import (
     RewardOpportunityTerms,
     StandingRewardOpportunityManifest,
@@ -247,6 +253,76 @@ def test_minimum_certificate_cannot_replace_legacy_first_handoff(opportunity_cas
             manifest=c.manifest,
             selection=selection,
         )
+
+
+@pytest.mark.parametrize(
+    "change", [None, "copy", "other_validator", "old_block", "ended_lease", "other_decision"]
+)
+def test_first_activation_rechecks_exact_local_handoff(opportunity_case, change):
+    c = opportunity_case
+    plan = LegacyRewardHandoffPlan(
+        schema="umi-legacy-reward-handoff-plan/1",
+        series_sha256=digest(c.series),
+        cohort_sha256=digest(c.series.cohorts[0]),
+        legacy_policy_sha256="11" * 32,
+        legacy_round_sha256="12" * 32,
+        legacy_package_sha256="13" * 32,
+    )
+    activation = c.activation.model_copy(update={"prior_opportunity_sha256": digest(plan)})
+    first = RewardControlDecision(
+        schema="umi-reward-control-decision/1",
+        series_sha256=digest(c.series),
+        sequence=1,
+        predecessor_sha256="ee" * 32,
+        kind="activate",
+        observed_at_block=200,
+        activation=activation,
+    )
+    c.reader.journal.put("reward_control_decision", "0001", signed(first))
+    intent = LegacyRewardHandoffIntent(
+        schema="umi-legacy-reward-handoff-intent/1",
+        plan=plan,
+        activation_sha256=digest(activation),
+        installation_receipt_sha256="14" * 32,
+        validator_hotkey=c.series.validators[0],
+    )
+    active = True
+    calls = []
+
+    def fence():
+        calls.append(True)
+        if not active:
+            raise ValueError("writer lease ended")
+
+    # Test-only native issuance. Full inventory/lock handling has its own suite.
+    value = _issue_legacy_handoff(intent, "15" * 32, 10000, fence)
+    selection = StandingRewardSelection(
+        digest(c.series), digest(first), 1, "selected", 200, 360, activation
+    )
+    args = dict(
+        reader=c.reader,
+        manifest=c.manifest,
+        selection=selection,
+        validator_hotkey=c.series.validators[0],
+        current_block=10001,
+    )
+    if change == "copy":
+        value = VerifiedLegacyRewardHandoff(intent, value.inventory_sha256, 10000)
+    elif change == "other_validator":
+        args["validator_hotkey"] = c.series.validators[1]
+    elif change == "old_block":
+        args["current_block"] = 9999
+    elif change == "ended_lease":
+        active = False
+    elif change == "other_decision":
+        args["selection"] = replace(selection, decision_sha256="ff" * 32)
+    if change:
+        with pytest.raises(ValueError):
+            require_previous_opportunity(value, **args)
+    else:
+        require_previous_opportunity(value, **args)
+        require_previous_opportunity(value, **(args | {"current_block": 10_000_000}))
+        assert len(calls) == 3  # Rechecked on every projection, with no age expiry.
 
 
 async def test_coverage_scheduler_retries_each_validator_without_expiry(opportunity_case, tmp_path):

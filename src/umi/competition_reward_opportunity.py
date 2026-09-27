@@ -18,6 +18,7 @@ from .competition_reward_decisions import (
     StandingRewardSelection,
     StandingRewardSeries,
 )
+from .competition_reward_handoff_models import VerifiedLegacyRewardHandoff, validate_legacy_handoff
 from .competition_reward_manifest import (
     RewardManifest,
     StandingRewardOpportunityManifest,
@@ -138,11 +139,13 @@ def check_opportunity_claim(
 
 
 def require_previous_opportunity(
-    value: VerifiedRewardOpportunity | None,
+    value: VerifiedRewardOpportunity | VerifiedLegacyRewardHandoff | None,
     *,
     reader: StandingRewardControlReader,
     manifest: RewardManifest,
     selection: StandingRewardSelection,
+    validator_hotkey: str | None = None,
+    current_block: int | None = None,
 ) -> None:
     """Require the exact predecessor's completed opportunity before handoff.
 
@@ -158,7 +161,26 @@ def require_previous_opportunity(
         selection.activation.cohort_sha256
     )
     if index == 0:
-        raise ValueError("first standing activation requires qualified legacy handoff evidence")
+        if type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None:
+            raise ValueError("first standing activation requires qualified legacy handoff evidence")
+        first = SignedRewardControlDecision.model_validate_json(
+            canonical_json_bytes(reader.journal.get("reward_control_decision", "0001"))
+        ).decision
+        if (
+            first.kind != "activate"
+            or first.sequence != 1
+            or digest(first) != selection.decision_sha256
+            or first.activation != selection.activation
+        ):
+            raise ValueError("legacy handoff changes the selected first activation")
+        validate_legacy_handoff(
+            value,
+            series=reader.series,
+            activation=selection.activation,
+            validator_hotkey=validator_hotkey,
+            block=current_block,
+        )
+        return
     if (
         type(value) is not VerifiedRewardOpportunity
         or value._issuer is not _ISSUER
