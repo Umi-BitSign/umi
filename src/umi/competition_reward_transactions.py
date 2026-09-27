@@ -154,6 +154,14 @@ class PendingStandingWeight:
     chain_submission_authorized: Literal[False] = False
 
 
+@dataclass(frozen=True)
+class StandingRecoveryInputs:
+    pending: PendingStandingWeight
+    chain: bytes
+    control: bytes
+    metadata: bytes
+
+
 class StandingWeightJournal:
     """Reuse the common journal's locking, atomic writes and capacity reservations.
 
@@ -233,6 +241,20 @@ class StandingWeightJournal:
     def pending(self) -> PendingStandingWeight | None:
         with self.journal.locked():
             return self._pending()
+
+    def recovery_inputs(self) -> StandingRecoveryInputs | None:
+        """Read one consistent attempt and its original evidence under the lock."""
+        with self.journal.locked():
+            pending = self._pending()
+            if pending is None:
+                return None
+            intent = pending.intent
+            return StandingRecoveryInputs(
+                pending,
+                self._object(intent.chain_evidence_sha256),
+                self._object(intent.control_evidence_sha256),
+                self._object(intent.metadata_sha256),
+            )
 
     def _object(self, key) -> bytes:
         value = self.journal.get("standing_weight_object", key)

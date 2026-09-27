@@ -35,7 +35,7 @@ from .test_open_competition import policy as policy
 
 
 @pytest.fixture
-async def runtime_archive(executed_weight_case, chain_config, monkeypatch, tmp_path):
+async def runtime_archive(executed_weight_case, chain_config, monkeypatch, tmp_path, request):
     item = executed_weight_case
     config = item.config.model_copy(
         update={
@@ -122,6 +122,12 @@ async def runtime_archive(executed_weight_case, chain_config, monkeypatch, tmp_p
         assert executions == [item.code]
         assert len(code_checks) == 1
 
+        weights = (
+            await provider.collect_weights(item.hotkey, ())
+            if getattr(request, "param", False)
+            else None
+        )
+
         item.clock.now += 10 * 60 * 60 * 1000
         fresh = await finalized(old.height + 3000, "runtime-control-review")
         blocks[fresh.height] = fresh
@@ -148,6 +154,7 @@ async def runtime_archive(executed_weight_case, chain_config, monkeypatch, tmp_p
             provider=provider,
             reopen=reopen,
             captured=captured,
+            weights=weights,
             raw=captured.evidence,
             metadata=captured.runtime.metadata_bytes,
             old=old,

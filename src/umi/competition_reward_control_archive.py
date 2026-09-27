@@ -356,6 +356,11 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             return await self._review_control_locked(raw, metadata)
 
     async def _review_control_locked(self, raw, metadata):
+        result, _ = await self._review_control_runtime_locked(raw, metadata)
+        return result
+
+    async def _review_control_runtime_locked(self, raw, metadata):
+        """Retain the independently checked historical codec for recovery callers."""
         if self._closed:
             raise ValueError("historical reward control provider is closed")
         archive = await run_owned_thread(_Archive, raw, metadata)
@@ -431,7 +436,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             _issuer=_ISSUER,
         )
         object.__setattr__(result, "_binding", _binding(result))
-        return result
+        return result, runtime
 
     async def _resolve_control_header(self, ref, encoded):
         head = await self._proofs.finalized_snapshot()

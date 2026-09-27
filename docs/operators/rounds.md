@@ -841,12 +841,21 @@ the same record; a different attempt or signature cannot replace it. A slow
 commit or cancelled waiter preserves completed writes. Journal capacity can be
 increased without changing the selected series or writer.
 
-These APIs are local preparation/storage components. Neither signs nor submits.
-Unresolved intents remain pending, including unsigned intents after proof expiry.
-Historical signing-context replay and native outcome/expiry reconciliation must
-be connected before an execution service can retire them or create a new attempt.
-The service must also enforce migration fencing and the remaining reward-authority
-checks before signing or transmission.
+`review_standing_transaction` reopens the journal and rechecks its original control
+and signing snapshot against owned finalized history. It verifies retained storage
+proofs, runtime metadata, nonce, LastUpdate and weight version before checking the
+actual signed bytes. Executed runtimes use proved original Wasm. Historical state
+RPC data is unnecessary when the evidence and owned ancestry are available.
+Elapsed time does not invalidate this historical check; current authorization is
+still required independently. A concurrent journal change requires another review.
+
+These APIs prepare and review local records; none signs or submits. A signed
+attempt yields a checked query for the native receipt reader. An unsigned intent
+yields no query. Unresolved intents remain pending, including after proof expiry.
+Native outcome/expiry reconciliation must be connected before an execution
+service can retire them or create a new attempt. The service must also enforce
+migration fencing and the remaining reward-authority checks before signing or
+transmission.
 
 ### Participation admission
 
