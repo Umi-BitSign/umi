@@ -3,7 +3,7 @@
 Slow replay produces immutable evidence, not a live transaction permission.
 Current control, complete registration and the handoff fence are checked again
 when projecting it. The opportunity manifest gates successor handoff on native prior coverage.
-Legacy handoff and transaction recovery still belong to the execution consumer.
+Legacy handoff and transaction recovery belong to the execution consumer.
 """
 
 from __future__ import annotations
@@ -459,7 +459,7 @@ class StandingRewardPreparation:
     ) -> PendingStandingWeight:
         """Retain an unsigned intent and recovery inputs before any signing.
 
-        This method does not grant signing authority. The future execution owner
+        This method does not grant signing authority. The execution owner
         must also verify legacy migration fencing and exclusive writer ownership.
         """
         async with self._lock:

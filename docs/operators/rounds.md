@@ -1072,10 +1072,36 @@ the new intent; this library does not install that transition. Installed signing
 submission and outage qualification remain pending. Retain these C4 consumers
 until no deployed migration or recovery path needs them.
 
-These APIs neither sign nor submit. The execution service must still enforce
-installed-series qualification, prior reward opportunity, migration fencing and
-single-writer ownership before any signing or transmission. Actual reward coverage must be
-proved separately; an expired attempt never supplies coverage credit.
+`StandingRewardExecutor` connects these consumers to recurring signing and exact
+byte submission. Its installed caller supplies the approved version 2 manifest,
+native preparation/provider/history owners, retained transaction journal, first
+prepared activation and scoped legacy handoff. Package and decision callbacks
+supply content; the native readers verify it. A later activation also requires
+the native predecessor-opportunity result. Submission uses the configured primary
+RPC and two explicit backups.
+
+`run` holds a separate private writer lock and serializes iterations. Each
+iteration reconciles an existing transaction before reserving another. It never
+re-signs or retransmits a recovered attempt, including an unsigned intent or a
+lost commit acknowledgement. Missing inclusion evidence leaves it pending until
+native receipt or expiry review permits a successor. No cumulative timer or
+coordinator renewal limits those retries.
+
+Package replay is cached before refreshing proofs. The executor checks current
+selection and recipient state, retains the original intent, signs once and
+verifies/stores the exact bytes. Before transmission it collects fresh proofs
+and checks selection, call, nonce, LastUpdate, runtime and mortality again.
+Changed or expired context leaves the recoverable attempt intact. Individual
+submission attempts time out; cancellation drains signing and transport cleanup
+before releasing writer ownership. Status logs contain hashes and error classes,
+without raw transactions, exception details or endpoint credentials. SDK success
+is reported as `submitted_unconfirmed` until independent recovery verification.
+
+The installed host must bind the journal location, qualify series inputs and
+retain the original writer handoff throughout this loop. Boot/source switching,
+automatic coverage integration and installed outage qualification remain open.
+Actual reward coverage must be proved separately; an expired attempt never
+supplies coverage credit.
 
 ### Participation admission
 
