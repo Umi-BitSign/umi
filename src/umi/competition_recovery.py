@@ -820,6 +820,18 @@ def bridge_history_for_snapshot(snapshot: LegacySnapshot) -> BridgeHistoryAudit:
     return retained[1]
 
 
+def manifest_anchor_for_snapshot(snapshot: LegacySnapshot) -> str | None:
+    """Select the authenticated historical commitment needed by the final read."""
+    anchors = {
+        effect.manifest_sha256
+        for effect in snapshot.manifest.effects
+        if effect.classification in {"retained_anchor_receipt", "retained_weight_receipt"}
+    }
+    if len(anchors) > 1:
+        raise CompetitionRecoveryError("recovery requires multiple historical manifest anchors")
+    return next(iter(anchors), None)
+
+
 def _reconcile_snapshot(
     snapshot: LegacySnapshot,
     observation: Any,

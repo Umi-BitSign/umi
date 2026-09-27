@@ -60,6 +60,7 @@ from .competition_recovery import (
     _snapshot_kwargs,
     bridge_history_for_snapshot,
     load_recovery_checkpoint_context,
+    manifest_anchor_for_snapshot,
     snapshot_legacy_bootstrap,
 )
 from .competition_recovery_capture import (
@@ -462,14 +463,7 @@ async def _observe_snapshot(stopped, observer, snapshot):
     # Classification authenticates the retained manifest/lease at its
     # historical preflight block. Request its commitment in the final owned
     # read; a later bridge row does not replace proof of the old anchor.
-    anchors = {
-        effect.manifest_sha256
-        for effect in snapshot.manifest.effects
-        if effect.classification in {"retained_anchor_receipt", "retained_weight_receipt"}
-    }
-    if len(anchors) > 1:
-        raise HostUpgradeError("recovery requires multiple historical manifest anchors")
-    manifest_anchor = next(iter(anchors), None)
+    manifest_anchor = manifest_anchor_for_snapshot(snapshot)
     if BRIDGE_JOURNAL in snapshot._files:
         audit = bridge_history_for_snapshot(snapshot)
         if any(type(j) is RegistrationBridgeTransactionJournal for _, j in audit.attempts):

@@ -322,7 +322,8 @@ async def test_initial_observation_holds_snapshot_locks_and_rechecks_bytes(check
     assert lock_paths
 
     class Observer:
-        async def observe_bridge(self, audit, snapshot_sha256):
+        async def observe_bridge(self, audit, snapshot_sha256, *, manifest_anchor_sha256=None):
+            assert manifest_anchor_sha256 is None
             assert audit.current == item.journal
             assert snapshot_sha256 == item.collected.snapshot_sha256
             for path in lock_paths:
