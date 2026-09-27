@@ -21,6 +21,7 @@ from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_decisions import DecisionSource, RewardActivation
 from .competition_reward_handoff_models import VerifiedLegacyRewardHandoff, validate_legacy_handoff
 from .competition_reward_history import RewardControlHistoryReader
+from .competition_reward_host import BoundStandingRewardHost
 from .competition_reward_manifest import StandingRewardOpportunityManifest
 from .competition_reward_opportunity import VerifiedRewardOpportunity
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
@@ -61,6 +62,7 @@ class StandingRewardExecutor:
         journal: StandingWeightJournal,
         first: PreparedStandingReward,
         handoff: VerifiedLegacyRewardHandoff,
+        host: BoundStandingRewardHost,
         packages: Callable[[str], CohortRewardPackage],
         decisions: DecisionSource,
         opportunity: Callable[[RewardActivation], Awaitable[VerifiedRewardOpportunity]],
@@ -74,6 +76,7 @@ class StandingRewardExecutor:
             or not isinstance(provider, HistoricalRewardControlProvider)
             or type(history) is not RewardControlHistoryReader
             or type(journal) is not StandingWeightJournal
+            or type(host) is not BoundStandingRewardHost
             or not isinstance(preparation.manifest, StandingRewardOpportunityManifest)
         ):
             raise TypeError("standing execution requires native preparation and proof owners")
@@ -104,6 +107,7 @@ class StandingRewardExecutor:
             raise ValueError("standing execution operation bounds are invalid")
         self.preparation, self.provider, self.history = preparation, provider, history
         self.journal, self.first, self.handoff = journal, first, handoff
+        self.host = host
         self.packages, self.decisions, self.opportunity = packages, decisions, opportunity
         self.hotkey, self.signer = handoff.intent.validator_hotkey, signer
         self.period, self.maximum_history_blocks = mortality_period, maximum_history_blocks
@@ -119,6 +123,12 @@ class StandingRewardExecutor:
         self._fence(handoff.through_block, require_writer=False)
 
     def _fence(self, block: int, *, require_writer: bool = True) -> None:
+        self.host.recheck(
+            journal=self.journal,
+            preparation=self.preparation,
+            first=self.first,
+            handoff=self.handoff,
+        )
         self.preparation._authority()
         self.preparation._check_prepared(self.first)
         validate_legacy_handoff(
@@ -244,11 +254,11 @@ class StandingRewardExecutor:
         _check_transmission(pending, original=chain, fresh=fresh["chain"], projection=projection)
         if await run_owned_thread(self.journal.pending) != pending:
             raise ValueError("standing attempt changed before transmission")
-        # Recheck monotonic proof freshness after the journal read. No signing,
-        # storage or unbounded replay follows this last authorization check.
+        # Finish host/journal I/O before the final monotonic freshness check.
+        # Slow local inspection must not leave an expired proof ready to send.
+        self._fence(fresh["chain"].block)
         projection = await self.preparation.project(prepared, **fresh)
         _check_transmission(pending, original=chain, fresh=fresh["chain"], projection=projection)
-        self._fence(fresh["chain"].block)
         logger.info("standing_transmission intent_sha256=%s", digest(pending.intent))
         await wait_for_owned(self.transport.submit(encoded, self.signer), timeout=self.timeout)
         # SDK success is not independently proved inclusion, weights or credit.
@@ -262,6 +272,9 @@ class StandingRewardExecutor:
             raise ValueError("standing poll interval is outside its host bound")
         with self.hold_writer():
             while not stop.is_set():
+                # A dead observer needs a new owner from service startup. A
+                # stale but running observer remains an ordinary retry below.
+                self.provider.ensure_observer_running()
                 try:
                     result = await self.step()
                     logger.info(

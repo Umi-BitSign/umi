@@ -51,6 +51,7 @@ def executing(retained, monkeypatch):
             raise ValueError("original writer ownership ended")
 
     monkeypatch.setattr(execution, "validate_legacy_handoff", fence)
+    e.host = SimpleNamespace(recheck=fence)
 
     async def control(_):
         return SimpleNamespace(
@@ -78,6 +79,7 @@ def executing(retained, monkeypatch):
         config=t.options["chain_config"],
         collect_control=control,
         collect_registered_weights=weights,
+        ensure_observer_running=lambda: None,
     )
     e.history = SimpleNamespace(hotkey=e.hotkey, verified_prefix=prefix)
     t.current.selection = SimpleNamespace(state="selected", activation=e.first.activation)
@@ -103,6 +105,18 @@ def executing(retained, monkeypatch):
     e.transport = SimpleNamespace(submit=submit)
     t.executor = e
     return t
+
+
+async def test_terminal_observer_exits_loop_for_service_restart(executing):
+    t, e = executing, executing.executor
+
+    def stopped():
+        raise RuntimeError("owned_finality_observer_stopped")
+
+    e.provider.ensure_observer_running = stopped
+    with pytest.raises(RuntimeError, match="observer_stopped"):
+        await e.run(asyncio.Event(), poll_seconds=0.001)
+    assert e._descriptor is None and not t.signed and not t.sent
 
 
 async def test_send_once_then_recover_even_after_restart(executing):
@@ -421,3 +435,39 @@ async def test_changed_decision_after_signing_cannot_submit(executing):
     with e.hold_writer(), pytest.raises(ValueError, match="current selection"):
         await e.step()
     assert t.journal.pending().signed is not None and not t.sent
+
+
+async def test_final_freshness_check_follows_host_and_journal_io(executing):
+    t, e = executing, executing.executor
+    events = []
+    recheck, project, submit = e.host.recheck, t.owner.project, e.transport.submit
+
+    def inspect(**kwargs):
+        recheck(**kwargs)
+        events.append("host-io")
+
+    async def fresh(*args, **kwargs):
+        result = await project(*args, **kwargs)
+        events.append("proof-freshness")
+        return result
+
+    async def send(*args):
+        assert events[-1] == "proof-freshness"
+        return await submit(*args)
+
+    e.host.recheck, t.owner.project, e.transport.submit = inspect, fresh, send
+    with e.hold_writer():
+        assert (await e.step()).status == "submitted_unconfirmed"
+    assert len(t.sent) == 1
+
+
+async def test_lost_host_approval_cannot_sign_or_submit(executing):
+    t, e = executing, executing.executor
+
+    def unavailable(**kwargs):
+        raise ValueError("host approval missing")
+
+    e.host.recheck = unavailable
+    with pytest.raises(ValueError, match="approval missing"), e.hold_writer():
+        await e.step()
+    assert not t.signed and not t.sent and t.journal.pending() is None

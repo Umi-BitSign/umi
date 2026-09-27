@@ -10,10 +10,9 @@
 
 Status: implemented upgrade command with synthetic native Linux migration
 coverage. This document does not approve production artifacts or a transition.
-Keep UID 0 and UID 54 on their existing bridge policy until an authorized
-transition, explicit replacement or revocation. The current ongoing bridge has
-no scheduled sunset; historical finite bridge policies keep their original
-cutoffs.
+Keep the installed validator on its current authorized policy until a verified
+transition, explicit replacement or revocation. Existing bridge and competition
+policies keep their original validity rules during recovery.
 
 <a id="successor-supervisor-upgrade--available-read-only-inspection"></a>
 
@@ -214,6 +213,21 @@ remains unperformed.
 <a id="successor-supervisor-upgrade--worker-and-host-components"></a>
 
 #### Worker and host components
+
+Standing reward execution requires a separate local approval binding the exact
+installation receipt, host manifest, validator, series, policy, replay manifest,
+chain configuration and C4 handoff plan. `competition_reward_host` reads this
+root-owned approval before stopping C4 and binds the transaction journal to the
+original supervisor database. Startup must reopen that journal; missing state
+cannot become an empty replacement. Capacity increases preserve its identity.
+
+`competition_reward_service` owns proof providers and holds the original C4
+handoff through executor shutdown. Transient failures retry with retained state;
+an exited finality observer ends the service invocation so boot supervision can
+construct a new provider. Cancellation drains owned signing work before releasing
+the writer locks. This library is not selected by the installed supervisor CLI.
+The approved boot/configuration assembly, artifact and opportunity delivery, and
+installed restart qualification are still required before enabling it.
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;

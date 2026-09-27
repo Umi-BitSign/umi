@@ -1,0 +1,568 @@
+"""Durable installed selection joined to the native legacy writer handoff.
+
+The host seal/container, root approval ownership and completed C5 proof/replay
+ports are fixture substitutions inherited from the handoff tests. SQL storage,
+old writer locks, journal identity, crash ordering and restart are real.
+"""
+
+import asyncio
+import logging
+import os
+import shutil
+import threading
+from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from umi import competition_host_activation as activation
+from umi import competition_reward_host as host
+from umi import competition_reward_service as service
+from umi.competition_reward_control_archive import HistoricalRewardControlProvider
+from umi.competition_reward_handoff import hold_legacy_reward_handoff
+from umi.competition_reward_host import StandingRewardHostApproval, bind_standing_reward_host
+from umi.competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
+from umi.competition_reward_transactions import StandingWeightJournal
+from umi.competition_round_journal import RoundJournal
+from umi.open_competition import digest
+from umi.private_files import lock_private_file
+from umi.protocol import canonical_json_bytes
+
+from .test_competition_reward_handoff import (
+    adapter_case as adapter_case,
+)
+from .test_competition_reward_handoff import assert_locked, signed_attempt
+from .test_competition_reward_handoff import (
+    chain as chain,
+)
+from .test_competition_reward_handoff import (
+    chain_config as chain_config,
+)
+from .test_competition_reward_handoff import (
+    control as control,
+)
+from .test_competition_reward_handoff import (
+    migration as migration,
+)
+from .test_competition_reward_handoff import (
+    package_case as package_case,
+)
+from .test_competition_reward_handoff import (
+    package_limits as package_limits,
+)
+from .test_competition_reward_handoff import (
+    policy as policy,
+)
+from .test_competition_reward_handoff import (
+    release_identity as release_identity,
+)
+from .test_competition_reward_handoff import (
+    replay_limits as replay_limits,
+)
+from .test_competition_reward_handoff import (
+    series_case as series_case,
+)
+from .test_competition_reward_handoff import (
+    successor_case as successor_case,
+)
+from .test_competition_reward_handoff import (
+    successor_chain as successor_chain,
+)
+from .test_competition_reward_handoff import (
+    successor_release as successor_release,
+)
+from .test_competition_reward_handoff import (
+    v3_predecessor as v3_predecessor,
+)
+from .test_competition_reward_handoff import (
+    weight_case as weight_case,
+)
+from .test_competition_reward_handoff import (
+    worker_capacity as worker_capacity,
+)
+
+
+@pytest.fixture
+async def installed(migration, monkeypatch, tmp_path):
+    c = migration
+    c.installation.host_manifest_sha256 = "55" * 32
+    c.preparation.policy_sha256 = c.series.policy_sha256
+    c.preparation.manifest = {"fixture": "completed replay selection"}
+    c.preparation.reader.chain_config_sha256 = digest(c.item.config)
+    c.preparation._authority = lambda: None
+    c.approval = StandingRewardHostApproval(
+        schema="umi-standing-reward-host-approval/1",
+        source_config_sha256=digest(c.config),
+        installation_receipt_sha256=c.installation.receipt_sha256,
+        host_manifest_sha256=c.installation.host_manifest_sha256,
+        validator_hotkey=c.config.validator_hotkey,
+        series_sha256=c.preparation.series_sha256,
+        policy_sha256=c.preparation.policy_sha256,
+        manifest_sha256=digest(c.preparation.manifest),
+        chain_config_sha256=c.preparation.reader.chain_config_sha256,
+        legacy_handoff_plan_sha256=digest(c.plan),
+    )
+    c.approval_path = tmp_path / "standing-approval.json"
+
+    def publish(raw):
+        if c.approval_path.exists():
+            c.approval_path.chmod(0o600)
+        c.approval_path.write_bytes(raw)
+        c.approval_path.chmod(0o444)
+
+    c.publish = publish
+    c.publish(canonical_json_bytes(c.approval))
+    monkeypatch.setattr(activation, "_root_owner_uid", os.getuid)
+    c.bind = lambda runtime, handoff: bind_standing_reward_host(
+        runtime,
+        approval_path=c.approval_path,
+        preparation=c.preparation,
+        first=c.prepared,
+        handoff=handoff,
+        maximum_journal_bytes=128 * 1024**2,
+    )
+    c.check = lambda bound: bound.recheck(
+        journal=bound.journal,
+        preparation=c.preparation,
+        first=c.prepared,
+        handoff=bound._handoff,
+    )
+    return c
+
+
+async def test_binding_reopens_original_journal_after_restart(installed):
+    c = installed
+    identities = []
+    for _ in range(2):
+        async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+            bound = c.bind(runtime, handoff)
+            c.check(bound)
+            identities.append(bound._retained)
+            assert (
+                bound.journal.journal.root
+                == Path(c.config.state_root) / "standing-rewards" / digest(c.series) / "weights"
+            )
+            bound.journal.journal.put("test-preserved", "one", {"retained": True})
+            assert bound.journal.journal.get("test-preserved", "one") == {"retained": True}
+        with pytest.raises(ValueError):
+            c.check(bound)
+    assert identities[0] == identities[1]
+
+
+@pytest.mark.parametrize("name", ["rounds.sqlite3", "rounds.lock", "standing-writer.lock"])
+async def test_missing_retained_file_is_not_reinitialized(installed, name):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        bound = c.bind(runtime, handoff)
+        path = bound.journal.journal.root / name
+    path.rename(path.with_suffix(path.suffix + ".preserved"))
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        with pytest.raises(ValueError, match="retained journal is missing"):
+            c.bind(runtime, handoff)
+        assert not path.exists()
+
+
+async def test_copied_original_state_survives_inode_change_only_after_restart(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        bound = c.bind(runtime, handoff)
+        root = bound.journal.journal.root
+        original = bound._retained
+        root.rename(root.with_name("preserved-weights"))
+        shutil.copytree(root.with_name("preserved-weights"), root)
+        with pytest.raises(ValueError, match="journal changed"):
+            c.check(bound)
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        reopened = c.bind(runtime, handoff)
+        c.check(reopened)
+        assert reopened._retained == original
+
+
+async def test_empty_replacement_database_cannot_claim_original_identity(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        bound = c.bind(runtime, handoff)
+        path = bound.journal.journal.path
+        options = dict(bound.journal.binding)
+    path.rename(path.with_suffix(".preserved"))
+    StandingWeightJournal(
+        path.parent,
+        series_sha256=options["series_sha256"],
+        validator_hotkey=c.item.hotkey,
+        chain_config_sha256=options["chain_config_sha256"],
+        maximum_bytes=128 * 1024**2,
+    )
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        with pytest.raises(ValueError, match="identity differs"):
+            c.bind(runtime, handoff)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_config_sha256",
+        "installation_receipt_sha256",
+        "host_manifest_sha256",
+        "series_sha256",
+        "policy_sha256",
+        "manifest_sha256",
+        "chain_config_sha256",
+        "legacy_handoff_plan_sha256",
+    ],
+)
+async def test_approval_cannot_select_another_context(installed, field):
+    c = installed
+    c.publish(canonical_json_bytes(c.approval.model_copy(update={field: "ab" * 32})))
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        with pytest.raises(ValueError, match="approved installation"):
+            c.bind(runtime, handoff)
+        assert host._retained_binding(runtime) is None
+
+
+async def test_changed_approval_after_binding_stops_execution(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        bound = c.bind(runtime, handoff)
+        c.publish(b"{}")
+        with pytest.raises(ValueError, match="journal changed"):
+            c.check(bound)
+        with pytest.raises(ValueError, match="host binding"):
+            c.check(replace(bound, _approval_path=c.approval_path.with_name("other.json")))
+
+
+async def test_new_valid_selection_cannot_reset_existing_binding(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        c.bind(runtime, handoff)
+    c.preparation.manifest = {"fixture": "another replay selection"}
+    c.publish(
+        canonical_json_bytes(
+            c.approval.model_copy(update={"manifest_sha256": digest(c.preparation.manifest)})
+        )
+    )
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        with pytest.raises(ValueError, match="cannot replace"):
+            c.bind(runtime, handoff)
+
+
+@pytest.mark.parametrize("point", ["journal_identity", "runtime_binding"])
+async def test_lost_commit_reply_reuses_original_identity(installed, monkeypatch, point):
+    c = installed
+    lost = False
+    original_put = RoundJournal.put
+
+    def lose_put(self, kind, key, value):
+        nonlocal lost
+        original_put(self, kind, key, value)
+        if point == "journal_identity" and kind == "standing_host_identity" and not lost:
+            lost = True
+            raise OSError("lost journal acknowledgement")
+
+    monkeypatch.setattr(RoundJournal, "put", lose_put)
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        original_db = runtime._db
+
+        @contextmanager
+        def lose_db():
+            nonlocal lost
+            with original_db() as db:
+                before = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='standing_execution'"
+                ).fetchone()
+                yield db
+                after = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='standing_execution'"
+                ).fetchone()
+            if point == "runtime_binding" and not before and after and not lost:
+                lost = True
+                raise OSError("lost runtime acknowledgement")
+
+        monkeypatch.setattr(runtime, "_db", lose_db)
+        with pytest.raises(OSError, match="acknowledgement"):
+            c.bind(runtime, handoff)
+        root = Path(c.config.state_root) / "standing-rewards" / digest(c.series) / "weights"
+        journal = StandingWeightJournal(
+            root,
+            series_sha256=digest(c.series),
+            validator_hotkey=c.item.hotkey,
+            chain_config_sha256=digest(c.item.config),
+            maximum_bytes=128 * 1024**2,
+        )
+        original = journal.journal.get("standing_host_identity", "original")
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        bound = c.bind(runtime, handoff)
+        assert bound._retained.journal_id == original
+        c.check(bound)
+    assert lost
+
+
+async def test_runtime_binding_cannot_disappear_as_empty_table(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        c.bind(runtime, handoff)
+        with runtime._db() as db:
+            db.execute("DELETE FROM standing_execution")
+        with pytest.raises(ValueError, match="incomplete"):
+            c.bind(runtime, handoff)
+
+
+@pytest.mark.parametrize("kind", ["mode", "owner", "symlink", "hardlink", "missing", "oversized"])
+async def test_host_approval_uses_native_bounded_sealed_file_reader(installed, monkeypatch, kind):
+    c = installed
+    if kind == "mode":
+        c.approval_path.chmod(0o600)
+    elif kind == "owner":
+        monkeypatch.setattr(activation, "_root_owner_uid", lambda: os.getuid() + 1)
+    elif kind == "symlink":
+        original = c.approval_path.with_name("preserved-approval.json")
+        c.approval_path.rename(original)
+        c.approval_path.symlink_to(original)
+    elif kind == "hardlink":
+        os.link(c.approval_path, c.approval_path.with_name("hardlink"))
+    elif kind == "missing":
+        c.approval_path.unlink()
+    else:
+        c.publish(b"x" * 8193)
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        with pytest.raises((ValueError, OSError)):
+            c.bind(runtime, handoff)
+        assert host._retained_binding(runtime) is None
+
+
+async def test_capacity_increase_preserves_bound_journal(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        original = c.bind(runtime, handoff)._retained
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        larger = bind_standing_reward_host(
+            runtime,
+            approval_path=c.approval_path,
+            preparation=c.preparation,
+            first=c.prepared,
+            handoff=handoff,
+            maximum_journal_bytes=256 * 1024**2,
+        )
+        assert larger._retained == original
+        assert larger.journal.journal.maximum_bytes == 256 * 1024**2
+        c.check(larger)
+
+
+@pytest.fixture
+def service_case(installed, monkeypatch):
+    """Native runtime/handoff/binding; provider lifecycle and executor are ports."""
+    c = installed
+    c.provider = object.__new__(HistoricalRewardControlProvider)
+    c.provider.config = c.item.config.model_copy(
+        update={"proof_rpc_fallback_urls": ("wss://backup-one.example", "wss://backup-two.example")}
+    )
+    c.preparation.reader.chain_config_sha256 = digest(c.provider.config)
+    c.approval = c.approval.model_copy(update={"chain_config_sha256": digest(c.provider.config)})
+    c.publish(canonical_json_bytes(c.approval))
+    c.events, c.executors = [], []
+    c.stop = asyncio.Event()
+    for label, value in (("current", c.provider), ("legacy", next(iter(c.providers.values())))):
+
+        async def start(label=label):
+            c.events.append("start-" + label)
+
+        async def close(label=label):
+            c.events.append("close-" + label)
+
+        value.start, value.aclose = start, close
+        value.ensure_observer_running = lambda: None
+
+    def signer():
+        assert_locked(Path(c.config.state_root) / "supervisor-process.lock")
+        assert_locked(c.item.worker.lock_path)
+        assert host._retained_binding(c.current_runtime) is not None
+        c.events.append("signer")
+        return object()
+
+    async def execute(inputs):
+        c.stop.set()
+
+    c.execute = execute
+
+    class Executor:
+        def __init__(self, **inputs):
+            self.inputs = inputs
+            c.executors.append(inputs)
+            c.events.append("executor")
+
+        async def run(self, stop, *, poll_seconds):
+            assert stop is c.stop and poll_seconds == 0.001
+            inputs = self.inputs
+            bound = inputs["host"]
+            bound.recheck(
+                journal=inputs["journal"],
+                preparation=inputs["preparation"],
+                first=inputs["first"],
+                handoff=inputs["handoff"],
+            )
+            assert_locked(c.item.worker.lock_path)
+            fd = lock_private_file(inputs["journal"].journal.root / "standing-writer.lock")
+            try:
+                await c.execute(inputs)
+            finally:
+                os.close(fd)
+                c.events.append("executor-stopped")
+
+    monkeypatch.setattr(service, "StandingRewardExecutor", Executor)
+    c.service_options = dict(
+        approval_path=c.approval_path,
+        preparation=c.preparation,
+        first=c.prepared,
+        plan=c.plan,
+        provider=c.provider,
+        legacy_providers=c.providers,
+        history=object(),
+        packages=object(),
+        decisions=object(),
+        opportunity=object(),
+        load_signer=signer,
+        stop=c.stop,
+        limits=StandingRewardServiceLimits(
+            maximum_journal_bytes=128 * 1024**2, mortality_period=4, poll_seconds=0.001
+        ),
+    )
+    return c
+
+
+async def test_service_restarts_with_original_binding_and_orders_shutdown(service_case):
+    c = service_case
+    original = None
+    for _ in range(2):
+        c.stop.clear()
+        async with c.reopen() as runtime:
+            c.current_runtime = runtime
+            await run_standing_reward_service(runtime, **c.service_options)
+            binding = host._retained_binding(runtime)
+            assert original is None or original == binding
+            original = binding
+        assert c.events[-7:] == [
+            "start-current",
+            "start-legacy",
+            "signer",
+            "executor",
+            "executor-stopped",
+            "close-legacy",
+            "close-current",
+        ]
+    assert len(c.executors) == 2
+
+
+async def test_service_rejects_approval_before_stop_and_closes_unstarted_providers(service_case):
+    c = service_case
+    c.publish(canonical_json_bytes(c.approval.model_copy(update={"series_sha256": "ff" * 32})))
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        with pytest.raises(ValueError, match="approved installation"):
+            await run_standing_reward_service(runtime, **c.service_options)
+        assert runtime._standing_handoff_intent() is None
+    assert c.events == ["close-legacy", "close-current"]
+
+
+async def test_service_closes_all_owners_when_provider_start_fails(service_case):
+    c = service_case
+
+    async def fail():
+        raise ConnectionError("private provider credential")
+
+    c.provider.start = fail
+    async with c.reopen() as runtime:
+        with pytest.raises(ConnectionError):
+            await run_standing_reward_service(runtime, **c.service_options)
+        assert runtime._standing_handoff_intent() is None
+    assert c.events == ["close-legacy", "close-current"]
+
+
+async def test_service_terminal_observer_exits_for_restart(service_case):
+    c = service_case
+
+    def stopped():
+        raise RuntimeError("owned_finality_observer_stopped")
+
+    c.provider.ensure_observer_running = stopped
+    async with c.reopen() as runtime:
+        with pytest.raises(RuntimeError, match="observer_stopped"):
+            await run_standing_reward_service(runtime, **c.service_options)
+        assert runtime._standing_handoff_intent() is None
+    assert c.events == ["start-current", "start-legacy", "close-legacy", "close-current"]
+
+
+async def test_service_retries_retained_handoff_without_loading_signer_early(
+    service_case, monkeypatch
+):
+    c = service_case
+    await signed_attempt(c)
+    original = service.hold_legacy_reward_handoff
+    calls = 0
+
+    def recovering(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        c.expired = calls > 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "hold_legacy_reward_handoff", recovering)
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        await run_standing_reward_service(runtime, **c.service_options)
+    assert calls == 2 and c.events.count("signer") == 1
+    assert len(c.reviews) == 2
+
+
+async def test_service_executor_failure_reuses_journal_and_redacts_errors(service_case, caplog):
+    c = service_case
+    attempts = []
+
+    async def execute(inputs):
+        attempts.append(inputs["host"]._retained)
+        if len(attempts) == 1:
+            raise OSError("private bearer or RPC credential")
+        c.stop.set()
+
+    c.execute = execute
+    with caplog.at_level(logging.INFO):
+        async with c.reopen() as runtime:
+            c.current_runtime = runtime
+            await run_standing_reward_service(runtime, **c.service_options)
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert "standing_service_retry reason=OSError" in caplog.text
+    assert "private bearer" not in caplog.text
+
+
+async def test_service_cancellation_drains_signer_before_unlocking(service_case):
+    c = service_case
+    entered, release = threading.Event(), threading.Event()
+    original = c.service_options["load_signer"]
+
+    def slow_signer():
+        value = original()
+        entered.set()
+        assert release.wait(10)
+        assert_locked(c.item.worker.lock_path)
+        return value
+
+    c.service_options["load_signer"] = slow_signer
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        task = asyncio.create_task(run_standing_reward_service(runtime, **c.service_options))
+        try:
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+            task.cancel()
+            await asyncio.sleep(0.01)
+            task.cancel()
+            await asyncio.sleep(0.01)
+            assert not task.done() and runtime._mutex.locked()
+            assert_locked(c.item.worker.lock_path)
+            assert not any(e.startswith("close-") for e in c.events)
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not runtime._mutex.locked()
+    assert not c.executors
+    assert c.events[-2:] == ["close-legacy", "close-current"]
