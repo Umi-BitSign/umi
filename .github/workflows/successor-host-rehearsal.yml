@@ -156,7 +156,7 @@ jobs:
         if: matrix.scenario == 'migration' && matrix.architecture == 'amd64'
         run: |
           bundle_sha=8fdd65be14cbd290d1b6ec7ce10d36b4842b0993b781daaafeb61cca1b2553ff
-          url="https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/validator-supervisor/successor-releases/baf4285271c1f076edb89a096fd04f254a9477cb/linux-amd64/weight/$bundle_sha/release.bundle"
+          url="https://github.com/Umi-BitSign/umi/releases/download/cohort4-validator-runtime-baf4285/c4-weight-release.bundle"
           curl --fail --location --retry 3 --max-time 300 "$url" -o "$RUNNER_TEMP/c4.bundle"
           printf '%s  %s\n' "$bundle_sha" "$RUNNER_TEMP/c4.bundle" | sha256sum --check
           python - <<'PYCODE'
