@@ -52,6 +52,7 @@ from .competition_host_upgrade import (
     hold_stopped_supervisor,
     inspect_legacy_service,
 )
+from .competition_legacy_upgrade import load_marker_consent, recover_legacy_checkpoint
 from .competition_recovery import (
     RecoveryLimits,
     SignedBootstrapEligibilityManifest,
@@ -490,6 +491,7 @@ async def _switch_stopped(
     limits,
     historical_manifests=(),
     historical_leases=(),
+    legacy_marker_controls=None,
 ):
     with hold_stopped_supervisor(
         config_path=config_path,
@@ -513,7 +515,34 @@ async def _switch_stopped(
 
         try:
             anchor = _retained_anchor(control, config_path)
-            if anchor is None:
+            if legacy_marker_controls is not None:
+                retained_checkpoint = None
+                if anchor is not None:
+                    retained_checkpoint = (
+                        recovery_root / anchor.receipt.checkpoint_sha256,
+                        anchor.receipt.checkpoint_sha256,
+                    )
+                    historical_manifests, historical_leases = load_recovery_checkpoint_context(
+                        retained_checkpoint[0],
+                        expected_sha256=retained_checkpoint[1],
+                        owner=user.pw_uid,
+                        limits=limits,
+                    )
+                source, consent = legacy_marker_controls
+                checkpoint_path, checkpoint_sha, verified = await recover_legacy_checkpoint(
+                    stopped=stopped,
+                    observer=observer,
+                    config=control.config,
+                    consent_source=source,
+                    consent=consent,
+                    outbox=controls_path / "legacy-marker-outbox",
+                    recovery_root=recovery_root,
+                    limits=limits,
+                    historical_manifests=historical_manifests,
+                    historical_leases=historical_leases,
+                    retained_checkpoint=retained_checkpoint,
+                )
+            elif anchor is None:
                 prepared = await prepare_recovery_checkpoint(
                     stopped,
                     observe=observe,
@@ -533,13 +562,14 @@ async def _switch_stopped(
                     owner=user.pw_uid,
                     limits=limits,
                 )
-            verified = await verify_recovery_checkpoint(
-                checkpoint_path,
-                expected_checkpoint_sha256=checkpoint_sha,
-                stopped=stopped,
-                observe=observe,
-                limits=limits,
-            )
+            if legacy_marker_controls is None:
+                verified = await verify_recovery_checkpoint(
+                    checkpoint_path,
+                    expected_checkpoint_sha256=checkpoint_sha,
+                    stopped=stopped,
+                    observe=observe,
+                    limits=limits,
+                )
         finally:
             await observer.aclose()
         control.recheck()
@@ -584,6 +614,7 @@ def upgrade_successor_service(
     recovery_root: Path,
     recovery_limits_path: Path,
     historical_context_path: Path | None = None,
+    legacy_marker_consent_path: Path | None = None,
 ) -> dict:
     """Preflight, stop, archive, switch and start one exact legacy installation."""
     from .competition_coordinator_namespace import ensure_coordinator_host_view
@@ -592,6 +623,13 @@ def upgrade_successor_service(
     ensure_coordinator_host_view(unit_name=unit_name, config_path=config_path)
     with exclusive_upgrade_operation(unit_name):
         control = _controls(config_path, controls_path)
+        marker_controls = None
+        if legacy_marker_consent_path is not None:
+            marker_controls = load_marker_consent(
+                legacy_marker_consent_path, control.config, control.legacy.directive_sha256
+            )
+            if marker_controls[1].source_config_sha256 != control.consent.source_config_sha256:
+                raise HostUpgradeError("marker consent names another source configuration")
         limit_source = anchors._read_source(
             recovery_limits_path, maximum_bytes=16384, modes=_SEALED
         )
@@ -609,6 +647,16 @@ def upgrade_successor_service(
             expected_manifest_sha256=control.consent.approved_host_manifest_sha256,
         )
         _prestop_host_requirements(control, tree)
+        if marker_controls is not None:
+            records = {record.path: record for record in control.signed_host.manifest.files}
+            for name in (
+                "competition_legacy_upgrade.py",
+                "competition_legacy_marker.py",
+                "competition_legacy_drain.py",
+            ):
+                record = records.get("src/umi/" + name)
+                if record is None or record.mode != 0o444:
+                    raise HostUpgradeError("signed host lacks the legacy drain implementation")
         _rehearse_service(control, user, unit, tree, oci_bundle)
         # Set up the process-private mounts before asyncio can create threads.
         prepare_upgrade_observer_namespace(
@@ -618,6 +666,8 @@ def upgrade_successor_service(
         anchors._recheck_source(limit_source)
         if context_source is not None:
             anchors._recheck_source(context_source)
+        if marker_controls is not None:
+            anchors._recheck_source(marker_controls[0])
         tree.recheck()
         current_user, current_unit = _service_identity(control, unit_name)
         stable = (
@@ -646,6 +696,7 @@ def upgrade_successor_service(
                 limits,
                 manifests,
                 leases,
+                marker_controls,
             )
         )
         # The stopped context has released the old lock; the operator mutex is

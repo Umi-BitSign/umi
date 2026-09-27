@@ -117,13 +117,15 @@ details from the
 
 Version-1 journals do not retain the signed transaction, nonce or signing
 anchor. The SDK obtains that anchor separately from the recorded preflight, so
-preflight plus eight blocks does not establish expiry. The internal stopped-host
-drain reader can verify a fresh marker's inclusion and eight subsequent finalized
-blocks for an audited legacy release. Its challenge must be generated while both
-original process locks are held. This read-only component does not publish the
-marker, clear the hold or perform an upgrade; there is no new operator recovery
-command for this case yet. Preserve these instructions while version-1
-installations still need recovery.
+preflight plus eight blocks does not establish expiry. For an audited legacy
+release, the [stopped host upgrade](../validators/successor-upgrade.md#legacy-version-1-drain)
+can publish a fresh marker under both original process locks, prove its inclusion
+and eight subsequent finalized blocks, and check current nonce, LastUpdate and
+weights. This requires separate consent for the marker transaction fee and a
+reviewed signed host release. The resulting archive retires the uncertain attempt
+without claiming it succeeded or never landed. The original journals and
+high-water records remain intact. Preserve this decoder and recovery guidance
+while version-1 installations still need migration.
 
 `receipt_returned` is different: a retained finalized receipt can be verified
 against the chain and reconciled without another send. Neither state permits a

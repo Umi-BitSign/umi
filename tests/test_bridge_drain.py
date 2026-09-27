@@ -54,6 +54,63 @@ async def read(drain):
     return await drain.drain.read(**drain.locator)
 
 
+async def find(drain):
+    return await drain.drain.find(
+        marker=MARKER, birth_block=drain.birth, birth_hash=drain.hashes[drain.birth], period=64
+    )
+
+
+async def test_search_finds_marker_without_a_submission_receipt(drain):
+    result = await find(drain)
+    assert result.included.block_number == drain.birth + 2
+    assert result.owned_head.block_number == drain.birth + 10
+    assert result.extrinsic_indices == (1,)
+    assert await find(drain) is result
+    assert all(method in {"chain_getHeader", "chain_getBlock"} for method, _ in drain.calls)
+
+
+async def test_search_waits_for_eight_blocks_then_keeps_completed_body_work(drain):
+    drain.head = drain.birth + 9
+    assert await find(drain) is None
+    first_bodies = [params for method, params in drain.calls if method == "chain_getBlock"]
+    assert first_bodies == [(drain.hashes[drain.birth + 1],)]
+    drain.head += 1
+    assert (await find(drain)).included.block_number == drain.birth + 2
+    assert [params for method, params in drain.calls if method == "chain_getBlock"].count(
+        first_bodies[0]
+    ) == 1
+
+
+async def test_search_checks_signing_ancestry_even_after_finding_marker(drain):
+    with pytest.raises(RegistrationBridgeError, match="signing_ancestry_mismatch"):
+        await drain.drain.find(
+            marker=MARKER, birth_block=drain.birth, birth_hash="0x" + "ff" * 32, period=64
+        )
+    assert drain.drain._search_result is None
+
+
+async def test_search_never_extends_past_the_signed_era(drain):
+    install_body(drain, drain.birth + 2, (b"empty",))
+    install_body(drain, drain.birth + 64, (MARKER,))
+    drain.head = drain.birth + 75
+    assert await find(drain) is None
+    bodies = [params for method, params in drain.calls if method == "chain_getBlock"]
+    assert len(bodies) == 63
+    count = len(drain.calls)
+    assert await find(drain) is None and len(drain.calls) == count
+
+
+async def test_provider_search_uses_owned_finality_and_rejects_after_close(provider, drain):
+    args = dict(
+        marker=MARKER, birth_block=drain.birth, birth_hash=drain.hashes[drain.birth], period=64
+    )
+    assert (await provider.find_legacy_drain(**args)).included.block_number == drain.birth + 2
+    assert provider.proof_captures == 1 and drain.heads == 0
+    await provider.aclose()
+    with pytest.raises(ValueError, match="closed"):
+        await provider.find_legacy_drain(**args)
+
+
 async def test_proves_marker_inclusion_and_eight_blocks_without_changing_journal(drain):
     journal = canonical_json_bytes(drain.journal)
     result = await read(drain)
