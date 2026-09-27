@@ -48,10 +48,100 @@ class LegacyDrainReader:
         self._anchor: _Header | None = None
         self._cursor: _Header | None = None
         self._result: VerifiedLegacyDrain | None = None
+        self._search_identity: tuple | None = None
+        self._search_anchor: _Header | None = None
+        self._search_cursor: _Header | None = None
+        self._search_upper = 0
+        self._search_checked = 0
+        self._search_found: VerifiedLegacyDrain | None = None
+        self._search_result: VerifiedLegacyDrain | None = None
 
     @property
     def progress(self) -> tuple:
-        return self._identity, self._anchor, self._cursor, self._result is not None
+        return (
+            self._identity,
+            self._anchor,
+            self._cursor,
+            self._result is not None,
+            self._search_identity,
+            self._search_anchor,
+            self._search_cursor,
+            self._search_checked,
+            self._search_result is not None,
+        )
+
+    async def find(
+        self, *, marker: bytes, birth_block: int, birth_hash: str, period: int
+    ) -> VerifiedLegacyDrain | None:
+        """Find a marker despite a lost submission reply, without trusting RPC locators.
+
+        Only a bounded signing era is searched. A missing result is not an
+        expiry or non-inclusion proof. Completed body checks survive retries;
+        the birth hash is authenticated before returning any found marker.
+        """
+        _require(
+            type(marker) is bytes
+            and len(marker) == len(MARKER_DOMAIN) + 32
+            and marker.startswith(MARKER_DOMAIN),
+            "legacy_drain_marker_invalid",
+        )
+        _require(
+            type(birth_block) is int
+            and 0 < birth_block <= 2**53 - 73
+            and type(birth_hash) is str
+            and _BLOCK_HASH.fullmatch(birth_hash) is not None
+            and type(period) is int
+            and period in {8, 16, 32, 64},
+            "legacy_drain_search_invalid",
+        )
+        task = asyncio.create_task(
+            asyncio.wait_for(
+                self._find(marker, birth_block, birth_hash, period), self._receipts._timeout
+            )
+        )
+        return await await_owned_task(task, on_cancel=task.cancel)
+
+    async def _find(self, marker, birth_block, birth_hash, period):
+        async with self._lock:
+            identity = marker, birth_block, birth_hash, period
+            if identity != self._search_identity:
+                self._search_identity = identity
+                self._search_anchor = self._search_cursor = None
+                self._search_found = self._search_result = None
+                self._search_checked = birth_block
+            if self._search_result is not None:
+                return self._search_result
+            if self._search_cursor is None:
+                owned = await self._receipts._finality.read_finalized_identity()
+                _require(type(owned.number) is int, "legacy_drain_not_finalized")
+                upper = min(birth_block + period - 1, owned.number - LEGACY_MORTALITY_BLOCKS)
+                if upper <= self._search_checked:
+                    return None
+                anchor = await self._receipts._header(owned.block_hash, owned.number)
+                self._search_anchor = self._search_cursor = anchor
+                self._search_upper = upper
+            while self._search_cursor.snapshot.block_number > birth_block:
+                current = self._search_cursor.snapshot
+                if self._search_checked < current.block_number <= self._search_upper:
+                    body = await self._receipts._body(self._search_cursor)
+                    indices = tuple(i for i, raw in enumerate(body) if marker in raw)
+                    if indices:
+                        self._search_found = VerifiedLegacyDrain(
+                            hashlib.sha256(marker).hexdigest(),
+                            current,
+                            indices,
+                            self._search_anchor.snapshot,
+                        )
+                parent = await self._receipts._header(current.parent_hash, current.block_number - 1)
+                self._search_cursor = parent
+            _require(
+                self._search_cursor.snapshot.block_hash == birth_hash,
+                "legacy_drain_signing_ancestry_mismatch",
+            )
+            self._search_checked = self._search_upper
+            self._search_result = self._search_found
+            self._search_cursor = None
+            return self._search_result
 
     async def read(
         self, *, marker: bytes, block_number: int, block_hash: str

@@ -500,6 +500,41 @@ def test_initial_command_connects_rehearsal_two_proofs_commit_unlock_and_start(f
     assert flow.lock == {"held": False, "writer": False}
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_legacy_drain_checkpoint_is_required_before_host_switch(flow, monkeypatch, failed):
+    async def recover(**kwargs):
+        assert flow.lock == {"held": True, "writer": True}
+        assert kwargs["consent"] == "fixture-consent"
+        flow.events.append("legacy-drain")
+        if failed:
+            raise ValueError("injected unproven marker")
+        return Path("/archive/checkpoint"), "a" * 64, object()
+
+    monkeypatch.setattr(upgrade, "recover_legacy_checkpoint", recover)
+    with upgrade.exclusive_upgrade_operation(flow.args["unit_name"]):
+        control = upgrade._controls(Path("/config"), Path("/controls"))
+        call = upgrade._switch_stopped(
+            control,
+            Path("/config"),
+            Path("/controls"),
+            flow.args["unit_name"],
+            SimpleNamespace(pw_uid=1001),
+            object(),
+            Path("/archive"),
+            object(),
+            legacy_marker_controls=("fixture-source", "fixture-consent"),
+        )
+        if failed:
+            with pytest.raises(ValueError, match="unproven marker"):
+                asyncio.run(call)
+        else:
+            asyncio.run(call)
+    assert "legacy-drain" in flow.events and "observe" not in flow.events
+    assert ("commit" in flow.events) is not failed
+    assert ("anchor" in flow.events) is not failed
+    assert "observer-close" in flow.events and "writer-exit" in flow.events
+
+
 @pytest.mark.parametrize(
     "port,forbidden",
     [
@@ -553,6 +588,10 @@ def test_cli_routes_initial_command_and_bounds_errors(monkeypatch, capsys):
     assert recovery.main(args) == 0
     assert json.loads(capsys.readouterr().out) == {"status": "fixture"}
     assert seen[0]["oci_bundle"] == Path("/oci")
+    assert seen[0]["legacy_marker_consent_path"] is None
+    assert recovery.main([*args, "--legacy-marker-consent", "/marker-consent"]) == 0
+    capsys.readouterr()
+    assert seen[-1]["legacy_marker_consent_path"] == Path("/marker-consent")
     for error in (OSError("private-detail"), subprocess.TimeoutExpired("private-command", 12)):
 
         def fail(error=error, **kwargs):

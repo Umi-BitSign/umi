@@ -12,9 +12,9 @@ import secrets
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
-from .bridge.drain import MARKER_DOMAIN, VerifiedLegacyDrain
+from .bridge.drain import MARKER_DOMAIN
 from .bridge.journal import RegistrationBridgeJournal
 from .competition_bridge_recovery import JOURNAL, audit_bridge_history
 from .competition_chain_state import FinalizedCompetitionWeightProvider
@@ -28,7 +28,11 @@ from .competition_recovery import (
     snapshot_legacy_bootstrap,
 )
 from .competition_recovery_models import RecoveryLimits
-from .protocol import canonical_json_bytes
+from .competition_recovery_observation import (
+    _DRAIN_PROOFS,
+    StoppedLegacyDrainProof,
+    _drain_binding,
+)
 
 # This exact signed directive pins worker 695cd09, source tree 8ef3e13a and
 # OCI fe83e57e. Its audited bittensor 11.1.0 transport signs once with period 8.
@@ -40,7 +44,6 @@ _AUDITED_DIRECTIVES = frozenset(
     }
 )
 _SESSIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-_PROOFS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True, eq=False)
@@ -70,25 +73,31 @@ class StoppedLegacyDrain:
         if result.included.block_number <= self.snapshot.manifest.accepted_at_finalized_block:
             raise HostUpgradeError("legacy drain marker predates the stopped installation")
         proof = StoppedLegacyDrainProof(self, result)
-        _PROOFS[proof] = _proof_binding(proof)
+        _DRAIN_PROOFS[proof] = _drain_binding(proof)
         return proof
 
-
-@dataclass(frozen=True, eq=False)
-class StoppedLegacyDrainProof:
-    """Live stopped-writer and drain evidence, not permission to resume weights."""
-
-    session: StoppedLegacyDrain
-    result: VerifiedLegacyDrain
-
-    def recheck(self) -> None:
-        if type(self) is not StoppedLegacyDrainProof or _PROOFS.get(self) != _proof_binding(self):
-            raise HostUpgradeError("stopped legacy drain proof is absent or altered")
-        self.session.recheck()
-
-
-def _proof_binding(proof: StoppedLegacyDrainProof) -> tuple:
-    return id(proof.session), canonical_json_bytes(asdict(proof.result))
+    async def find(
+        self,
+        provider: FinalizedCompetitionWeightProvider,
+        *,
+        birth_block: int,
+        birth_hash: str,
+        period: int,
+    ) -> StoppedLegacyDrainProof | None:
+        self.recheck()
+        if type(provider) is not FinalizedCompetitionWeightProvider:
+            raise HostUpgradeError("legacy drain requires the owned weight provider")
+        result = await provider.find_legacy_drain(
+            marker=self.marker, birth_block=birth_block, birth_hash=birth_hash, period=period
+        )
+        self.recheck()
+        if result is None:
+            return None
+        if result.included.block_number <= self.snapshot.manifest.accepted_at_finalized_block:
+            raise HostUpgradeError("legacy drain marker predates the stopped installation")
+        proof = StoppedLegacyDrainProof(self, result)
+        _DRAIN_PROOFS[proof] = _drain_binding(proof)
+        return proof
 
 
 def _binding(session: StoppedLegacyDrain) -> tuple:

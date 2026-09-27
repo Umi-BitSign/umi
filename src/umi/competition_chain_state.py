@@ -547,6 +547,24 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     if self._legacy_drain.progress == before:
                         raise
 
+    async def find_legacy_drain(
+        self, *, marker: bytes, birth_block: int, birth_hash: str, period: int
+    ):
+        """Authenticate marker inclusion even when its submit reply was lost."""
+        async with self._lock:
+            receipts = self._bridge_reader()
+            if self._legacy_drain is None:
+                self._legacy_drain = LegacyDrainReader(receipts)
+            while True:
+                before = self._legacy_drain.progress
+                try:
+                    return await self._legacy_drain.find(
+                        marker=marker, birth_block=birth_block, birth_hash=birth_hash, period=period
+                    )
+                except asyncio.TimeoutError:
+                    if self._legacy_drain.progress == before:
+                        raise
+
     async def read_bridge_expiry(
         self, journal: RegistrationBridgeTransactionJournal
     ) -> VerifiedBridgeExpiry:
