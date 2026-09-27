@@ -349,3 +349,47 @@ async def test_executed_archive_requires_retained_owned_header(runtime_archive):
     with pytest.raises(FileNotFoundError, match="owned reward admission header is unavailable"):
         await h.provider.review_control(h.raw, h.metadata)
     assert h.code_checks == h.executions == []
+
+
+async def test_historical_capture_uses_owned_executed_runtime(runtime_archive, monkeypatch):
+    from umi.competition_reward_control_archive import _Archive
+    from umi.grandpa_finality import _decode_header
+
+    h = runtime_archive
+    archive = _Archive(h.raw, h.metadata)
+    header = _decode_header(archive.encoded, maximum_bytes=1024 * 1024)
+    original_request = h.item.rpc.request
+
+    async def request(method, params):
+        if method == "chain_getBlockHash" and params == (h.old.height,):
+            return h.old.block_hash
+        if method == "chain_getHeader" and params == (h.old.block_hash,):
+            return {
+                "number": hex(h.old.height),
+                "parentHash": header["parent_hash"],
+                "stateRoot": header["state_root"],
+                "extrinsicsRoot": header["extrinsics_root"],
+                "digest": {"logs": []},
+            }
+        if params[-1] == h.old.block_hash:
+            return await archive.request(method, params)
+        return await original_request(method, params)
+
+    async def close():
+        pass
+
+    monkeypatch.setattr(h.item.rpc, "request", request)
+    h.provider._owned = True
+    h.provider._registration_rpc = SimpleNamespace(request=request, aclose=close)
+    captured = await h.provider.capture_control_at(h.item.hotkey, h.old.height)
+    validate_historical_reward_control(
+        captured,
+        expected_control_hotkey=h.item.hotkey,
+        expected_chain_config_sha256=digest(h.provider.config),
+    )
+    assert captured.control_sha256 == json.loads(h.raw)["control_sha256"]
+    body = json.loads(captured.evidence)
+    assert body["runtime_execution"] == json.loads(h.raw)["runtime_execution"]
+    assert body["finality"]["evidence_class"] == "owned_finalized_ancestry"
+    assert h.executions and all(code == h.item.code for code in h.executions)
+    assert h.code_checks

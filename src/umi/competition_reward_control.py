@@ -125,6 +125,54 @@ def _control_value(value: object, block: int) -> tuple[str | None, int | None]:
     return _digest_bytes(fields[0]["Sha256"], "reward control digest").hex(), committed
 
 
+def _control_evidence(
+    *,
+    config,
+    ref,
+    hotkey,
+    control,
+    committed,
+    runtime,
+    batch,
+    finality,
+    schema="umi-reward-control-observation/1",
+) -> bytes:
+    """Encode bounded proof bytes without granting current or historical authority."""
+    evidence = canonical_json_bytes(
+        {
+            "schema": schema,
+            "config_sha256": digest(config),
+            "block": ref.block_number,
+            "block_hash": ref.block_hash,
+            "state_root": ref.state_root,
+            "control_hotkey": hotkey,
+            "control_sha256": control,
+            "committed_at_block": committed,
+            "finality": finality,
+            "runtime_metadata_sha256": runtime.metadata_sha256,
+            "runtime_version": json.loads(runtime.runtime_version_bytes),
+            "storage_codec_mode": runtime.storage_codec_mode,
+            "runtime_execution": (
+                _runtime_execution_evidence(runtime)
+                if isinstance(runtime, ExecutedRuntimeContext)
+                else None
+            ),
+            "claims": [
+                {
+                    "key": "0x" + c.storage_key.hex(),
+                    "value": None if c.value is None else "0x" + c.value.hex(),
+                }
+                for c in batch.evidence.claims
+            ],
+            "proof": ["0x" + n.hex() for n in batch.evidence.proof],
+            "chain_submission_authorized": False,
+        }
+    )
+    if len(evidence) > _MAX_EVIDENCE_BYTES:
+        raise ValueError("reward control evidence exceeds its byte bound")
+    return evidence
+
+
 class FinalizedRewardControlProvider(FinalizedCompetitionWeightProvider):
     """Use the same owned observer, exact runtime and proof collector as weights.
 
@@ -181,38 +229,16 @@ class FinalizedRewardControlProvider(FinalizedCompetitionWeightProvider):
                 or newest.block_number - ref.block_number > self.policy.maximum_snapshot_age_blocks
             ):
                 raise ValueError("reward control finality rolled back, changed or became stale")
-            evidence = canonical_json_bytes(
-                {
-                    "schema": "umi-reward-control-observation/1",
-                    "config_sha256": digest(self.config),
-                    "block": ref.block_number,
-                    "block_hash": ref.block_hash,
-                    "state_root": ref.state_root,
-                    "control_hotkey": hotkey,
-                    "control_sha256": control,
-                    "committed_at_block": committed,
-                    "finality": json.loads(block.finality_evidence),
-                    "runtime_metadata_sha256": runtime.metadata_sha256,
-                    "runtime_version": json.loads(runtime.runtime_version_bytes),
-                    "storage_codec_mode": runtime.storage_codec_mode,
-                    "runtime_execution": (
-                        _runtime_execution_evidence(runtime)
-                        if isinstance(runtime, ExecutedRuntimeContext)
-                        else None
-                    ),
-                    "claims": [
-                        {
-                            "key": "0x" + c.storage_key.hex(),
-                            "value": None if c.value is None else "0x" + c.value.hex(),
-                        }
-                        for c in batch.evidence.claims
-                    ],
-                    "proof": ["0x" + n.hex() for n in batch.evidence.proof],
-                    "chain_submission_authorized": False,
-                }
+            evidence = _control_evidence(
+                config=self.config,
+                ref=ref,
+                hotkey=hotkey,
+                control=control,
+                committed=committed,
+                runtime=runtime,
+                batch=batch,
+                finality=json.loads(block.finality_evidence),
             )
-            if len(evidence) > _MAX_EVIDENCE_BYTES:
-                raise ValueError("reward control evidence exceeds its byte bound")
             _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
             self._fresh(block.timestamp_ms)
             observed = time.monotonic_ns()

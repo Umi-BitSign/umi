@@ -18,7 +18,11 @@ from typing import Any
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import CompetitionChainConfig, _hotkey, _uint
 from .competition_chain_state import _cache_usage
-from .competition_reward_control import FinalizedRewardControlProvider, _control_value
+from .competition_reward_control import (
+    FinalizedRewardControlProvider,
+    _control_evidence,
+    _control_value,
+)
 from .competition_worker import (
     CompetitionReplayWorker,
     _canonical_absolute_path,
@@ -30,7 +34,7 @@ from .competition_worker import (
 )
 from .concurrency import run_owned_thread
 from .encoding import account_id32
-from .finalized_ancestry import MAXIMUM_HEADER_BYTES
+from .finalized_ancestry import MAXIMUM_HEADER_BYTES, encode_rpc_header
 from .grandpa_finality import _decode_header
 from .historical_header_recovery import HistoricalHeaderRecovery, HistoricalHeaderRecoveryPending
 from .open_competition import digest
@@ -128,7 +132,12 @@ class _Archive:
         if (
             not isinstance(body, dict)
             or set(body) != required
-            or body["schema"] != "umi-reward-control-observation/1"
+            or type(body["schema"]) is not str
+            or body["schema"]
+            not in {
+                "umi-reward-control-observation/1",
+                "umi-historical-reward-control-observation/1",
+            }
             or body["chain_submission_authorized"] is not False
             or canonical_json_bytes(body) != raw
             or hashlib.sha256(metadata).hexdigest() != body["runtime_metadata_sha256"]
@@ -137,7 +146,12 @@ class _Archive:
         finality = body["finality"]
         if (
             not isinstance(finality, dict)
-            or finality.get("evidence_class") != "verifier_attested_finality"
+            or finality.get("evidence_class")
+            != (
+                "verifier_attested_finality"
+                if body["schema"] == "umi-reward-control-observation/1"
+                else "owned_finalized_ancestry"
+            )
             or finality.get("offline_finality_proof") is not False
             or not isinstance(finality.get("block"), dict)
         ):
@@ -339,94 +353,169 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         a separate requirement after this potentially slow historical work.
         """
         async with self._lock:
-            if self._closed:
-                raise ValueError("historical reward control provider is closed")
-            archive = await run_owned_thread(_Archive, raw, metadata)
+            return await self._review_control_locked(raw, metadata)
+
+    async def _review_control_locked(self, raw, metadata):
+        if self._closed:
+            raise ValueError("historical reward control provider is closed")
+        archive = await run_owned_thread(_Archive, raw, metadata)
+        _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+        ref = archive.snapshot
+        if archive.body["finality"].get("genesis_hash") != (
+            "0x" + self.config.chain_pin.genesis_block_hash
+        ):
+            raise ValueError("reward control archive names another chain")
+        timestamp, ceiling = await self._resolve_control_header(ref, archive.encoded)
+        collector = self._proofs.with_evidence_rpc(archive)
+        if self._runtime_executor is not None:
+            execution = archive.body["runtime_execution"]
+            if not isinstance(execution, dict) or execution["executor_sha256"] != (
+                self.config.runtime_metadata_binary_sha256
+            ):
+                raise ValueError("reward archive runtime executor differs from selection")
+            runtime = await collect_executed_runtime(
+                self._runtime_proofs.with_evidence_rpc(archive), self._runtime_executor, ref
+            )
+        else:
+            runtime = (
+                await collector.storage_codec_runtime(ref, self._runtime_pin, metadata)
+                if self._storage_codec is not None
+                else await collector.pinned_runtime(ref, self._runtime_pin)
+            )
+        self._validate_runtime_context(runtime, ref)
+        if (
+            runtime.storage_codec_mode != archive.body["storage_codec_mode"]
+            or runtime.metadata_sha256 != archive.body["runtime_metadata_sha256"]
+            or json.loads(runtime.runtime_version_bytes) != archive.body["runtime_version"]
+        ):
+            raise ValueError("replayed runtime differs from archived control evidence")
+        specs = (
+            StorageReadSpec("Timestamp", "Now"),
+            StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
+            StorageReadSpec("Commitments", "CommitmentOf", (78, archive.hotkey)),
+        )
+        batch = await collector.storage_reads(runtime, specs)
+        if (
+            not isinstance(batch, VerifiedStorageBatch)
+            or batch.runtime != runtime
+            or len(batch.reads) != len(specs)
+            or {read.spec for read in batch.reads} != set(specs)
+        ):
+            raise ValueError("historical control proof binding or coverage differs")
+        values = {r.spec: r.decoded_value for r in batch.reads}
+        actual_time = _uint(values[specs[0]], 2**53 - 1)
+        if (
+            not 0 < actual_time <= ceiling
+            or (timestamp is not None and actual_time != timestamp)
+            or values[specs[1]] is not True
+        ):
+            raise ValueError("historical control timestamp or subnet differs")
+        control, committed = _control_value(values[specs[2]], ref.block_number)
+        if (control, committed) != (
+            archive.body["control_sha256"],
+            archive.body["committed_at_block"],
+        ):
+            raise ValueError("historical control digest differs from proved storage")
+        archive.consumed()
+        _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+        result = OwnedHistoricalRewardControl(
+            ref,
+            archive.hotkey,
+            control,
+            committed,
+            archive.evidence_sha256,
+            runtime.metadata_sha256,
+            digest(self.config),
+            raw,
+            metadata,
+            _issuer=_ISSUER,
+        )
+        object.__setattr__(result, "_binding", _binding(result))
+        return result
+
+    async def _resolve_control_header(self, ref, encoded):
+        head = await self._proofs.finalized_snapshot()
+        head_block = await self._finality.verified_block_at(head.block_number)
+        self._check_finality(head, head_block)
+        if ref.block_number > head.block_number:
+            raise ValueError("historical reward control is ahead of owned finality")
+        original = await self._finality.verified_block_at(ref.block_number)
+        timestamp = None
+        if original is not None:
+            self._check_finality(ref, original)
+            if json.loads(original.finality_evidence)["block"]["scale_header"] != encoded:
+                raise ValueError("reward control header differs from owned history")
+            timestamp = original.timestamp_ms
+            ceiling = head_block.timestamp_ms
+        else:
+            if not self._owned or self._registration_rpc is None:
+                raise FileNotFoundError("owned reward admission header is unavailable")
+            anchor = await self._finality.verified_block_after(
+                ref.block_number, maximum_distance=None
+            )
+            if not isinstance(anchor, VerifiedFinalizedBlock):
+                raise FileNotFoundError("owned reward admission anchor is unavailable")
+            self._check_finality_context(anchor)
+            if anchor.height > head.block_number or anchor.timestamp_ms > head_block.timestamp_ms:
+                raise ValueError("reward admission anchor exceeds owned head")
+            try:
+                recovered = await self._historical_headers.recover(
+                    anchor, ref, self._registration_rpc.request
+                )
+            except sqlite3.Error as error:
+                if getattr(error, "sqlite_errorcode", None) != sqlite3.SQLITE_FULL:
+                    raise
+                raise HistoricalHeaderRecoveryPending(
+                    "historical header database needs capacity"
+                ) from error
+            if recovered.encoded != encoded:
+                raise ValueError("reward admission header differs from owned ancestry")
+            ceiling = anchor.timestamp_ms
+        return timestamp, ceiling
+
+    async def capture_control_at(
+        self, control_hotkey: str, height: int
+    ) -> OwnedHistoricalRewardControl:
+        """Capture a past slot from chain proofs, even without an original archive.
+
+        RPC supplies only header hints. The owned finalized descendant and
+        durable ancestry walk authenticate the target before any state is read.
+        Each pass can remain pending; elapsed time never expires the request.
+        The result records ancestry provenance, never an invented observer event.
+        """
+        hotkey = _hotkey(control_hotkey)
+        height = _uint(height, 2**53 - 1)
+        if height < 1:
+            raise ValueError("historical reward control height must be positive")
+        async with self._lock:
+            if self._closed or not self._owned or self._registration_rpc is None:
+                raise ValueError("historical capture requires the owned chain provider")
             _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
-            ref = archive.snapshot
-            if archive.body["finality"].get("genesis_hash") != (
-                "0x" + self.config.chain_pin.genesis_block_hash
-            ):
-                raise ValueError("reward control archive names another chain")
-            head = await self._proofs.finalized_snapshot()
-            head_block = await self._finality.verified_block_at(head.block_number)
-            self._check_finality(head, head_block)
-            if ref.block_number > head.block_number:
-                raise ValueError("historical reward control is ahead of owned finality")
-            original = await self._finality.verified_block_at(ref.block_number)
-            timestamp = None
-            if original is not None:
-                self._check_finality(ref, original)
-                if (
-                    json.loads(original.finality_evidence)["block"]["scale_header"]
-                    != archive.encoded
-                ):
-                    raise ValueError("reward control header differs from owned history")
-                timestamp = original.timestamp_ms
-                ceiling = head_block.timestamp_ms
-            else:
-                if not self._owned or self._registration_rpc is None:
-                    raise FileNotFoundError("owned reward admission header is unavailable")
-                anchor = await self._finality.verified_block_after(
-                    ref.block_number, maximum_distance=None
-                )
-                if not isinstance(anchor, VerifiedFinalizedBlock):
-                    raise FileNotFoundError("owned reward admission anchor is unavailable")
-                self._check_finality_context(anchor)
-                if (
-                    anchor.height > head.block_number
-                    or anchor.timestamp_ms > head_block.timestamp_ms
-                ):
-                    raise ValueError("reward admission anchor exceeds owned head")
-                try:
-                    recovered = await self._historical_headers.recover(
-                        anchor, ref, self._registration_rpc.request
-                    )
-                except sqlite3.Error as error:
-                    if getattr(error, "sqlite_errorcode", None) != sqlite3.SQLITE_FULL:
-                        raise
-                    raise HistoricalHeaderRecoveryPending(
-                        "historical header database needs capacity"
-                    ) from error
-                if recovered.encoded != archive.encoded:
-                    raise ValueError("reward admission header differs from owned ancestry")
-                ceiling = anchor.timestamp_ms
-            collector = self._proofs.with_evidence_rpc(archive)
-            if self._runtime_executor is not None:
-                execution = archive.body["runtime_execution"]
-                if not isinstance(execution, dict) or execution["executor_sha256"] != (
-                    self.config.runtime_metadata_binary_sha256
-                ):
-                    raise ValueError("reward archive runtime executor differs from selection")
-                runtime = await collect_executed_runtime(
-                    self._runtime_proofs.with_evidence_rpc(archive), self._runtime_executor, ref
-                )
-            else:
-                runtime = (
-                    await collector.storage_codec_runtime(ref, self._runtime_pin, metadata)
-                    if self._storage_codec is not None
-                    else await collector.pinned_runtime(ref, self._runtime_pin)
-                )
-            self._validate_runtime_context(runtime, ref)
+            request = self._registration_rpc.request
+            block_hash = await request("chain_getBlockHash", (height,))
             if (
-                runtime.storage_codec_mode != archive.body["storage_codec_mode"]
-                or runtime.metadata_sha256 != archive.body["runtime_metadata_sha256"]
-                or json.loads(runtime.runtime_version_bytes) != archive.body["runtime_version"]
+                type(block_hash) is not str
+                or len(block_hash) != 66
+                or not block_hash.startswith("0x")
+                or any(c not in "0123456789abcdef" for c in block_hash[2:])
             ):
-                raise ValueError("replayed runtime differs from archived control evidence")
+                raise ValueError("historical control header hint is invalid")
+            encoded = encode_rpc_header(await request("chain_getHeader", (block_hash,)))
+            header = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+            if (header["number"], header["hash"]) != (height, block_hash):
+                raise ValueError("historical control header differs from the requested identity")
+            ref = FinalizedSnapshotRef(
+                height, block_hash, header["parent_hash"], header["state_root"]
+            )
+            timestamp, ceiling = await self._resolve_control_header(ref, encoded)
+            runtime = await self._runtime_context(ref)
+            self._validate_runtime_context(runtime, ref)
             specs = (
                 StorageReadSpec("Timestamp", "Now"),
                 StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
-                StorageReadSpec("Commitments", "CommitmentOf", (78, archive.hotkey)),
+                StorageReadSpec("Commitments", "CommitmentOf", (78, hotkey)),
             )
-            batch = await collector.storage_reads(runtime, specs)
-            if (
-                not isinstance(batch, VerifiedStorageBatch)
-                or batch.runtime != runtime
-                or len(batch.reads) != len(specs)
-                or {read.spec for read in batch.reads} != set(specs)
-            ):
-                raise ValueError("historical control proof binding or coverage differs")
+            batch = await self._weight_read(runtime, specs)
             values = {r.spec: r.decoded_value for r in batch.reads}
             actual_time = _uint(values[specs[0]], 2**53 - 1)
             if (
@@ -435,25 +524,23 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 or values[specs[1]] is not True
             ):
                 raise ValueError("historical control timestamp or subnet differs")
-            control, committed = _control_value(values[specs[2]], ref.block_number)
-            if (control, committed) != (
-                archive.body["control_sha256"],
-                archive.body["committed_at_block"],
-            ):
-                raise ValueError("historical control digest differs from proved storage")
-            archive.consumed()
-            _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
-            result = OwnedHistoricalRewardControl(
-                ref,
-                archive.hotkey,
-                control,
-                committed,
-                archive.evidence_sha256,
-                runtime.metadata_sha256,
-                digest(self.config),
-                raw,
-                metadata,
-                _issuer=_ISSUER,
+            control, committed = _control_value(values[specs[2]], height)
+            raw = _control_evidence(
+                config=self.config,
+                ref=ref,
+                hotkey=hotkey,
+                control=control,
+                committed=committed,
+                runtime=runtime,
+                batch=batch,
+                schema="umi-historical-reward-control-observation/1",
+                finality={
+                    "evidence_class": "owned_finalized_ancestry",
+                    "genesis_hash": "0x" + self.config.chain_pin.genesis_block_hash,
+                    "offline_finality_proof": False,
+                    "block": {"scale_header": encoded},
+                },
             )
-            object.__setattr__(result, "_binding", _binding(result))
-            return result
+            # Reuse the bounded replay consumer and its process-local issuer.
+            # This replay consumes the captured bytes without remote state fallback.
+            return await self._review_control_locked(raw, runtime.metadata_bytes)
