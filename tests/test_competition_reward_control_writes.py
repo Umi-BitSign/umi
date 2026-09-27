@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import threading
+from contextlib import suppress
 from dataclasses import replace
 
 import pytest
@@ -14,6 +16,7 @@ from umi.grandpa_finality import _decode_header
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.validator_chain import PinnedRuntimeContext
+from umi.validator_chain_scan import FinalizedBlockScanner, ScanLimits
 
 from . import test_competition_reward_control_archive as archive_tests
 from .test_competition_reward_control import commitment
@@ -71,6 +74,7 @@ async def block_case(historical, monkeypatch):
     events = [success(0), success(1)]
     h.body_calls = calls
     h.events = events
+    h.event_bytes = b"events"
     h.raw = raw
     h.fault = None
     h.parent_ref = parent_ref
@@ -89,7 +93,7 @@ async def block_case(historical, monkeypatch):
                 encoded: extrinsic(encoded, c, signer)
                 for encoded, c, signer in zip(raw, calls, h.signers, strict=True)
             },
-            {b"events": events},
+            {h.event_bytes: events},
             pin=h.item.provider._runtime_pin,
             metadata=h.metadata,
         )
@@ -121,7 +125,7 @@ async def block_case(historical, monkeypatch):
             return {"block": {"header": header, "extrinsics": ["0x" + v.hex() for v in raw]}}
         if method == "state_getStorageAt" and params[0] == "0x" + b"system-events-key".hex():
             assert params[1] == source.w.original.block_hash
-            return "0x" + b"events".hex()
+            return "0x" + h.event_bytes.hex()
         if method == "state_getReadProof" and tuple(params[0]) == (
             "0x" + b"system-events-key".hex(),
         ):
@@ -146,7 +150,7 @@ async def block_case(historical, monkeypatch):
             return (
                 h.fault != "events"
                 and kw["state_root"] == bytes.fromhex(block_header["stateRoot"][2:])
-                and kw["expected_value"] == b"events"
+                and kw["expected_value"] == h.event_bytes
                 and kw["proof"] == (b"event-proof",)
             )
         return old_verify(self, **kw)
@@ -290,4 +294,89 @@ async def test_close_waits_for_owned_capture_and_cancellation_releases_lock(bloc
     with pytest.raises(asyncio.CancelledError):
         await capture
     await asyncio.wait_for(closing, 5)
+    assert not h.item.provider._lock.locked()
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+async def test_large_events_do_not_enlarge_ordinary_weight_proof_limits(block_case):
+    h = block_case
+    h.item.proofs._limits = replace(h.item.proofs._limits, maximum_storage_value_bytes=65536)
+    original_limits = h.item.proofs._limits
+    h.event_bytes = b"e" * (65536 + 1)
+    result = await capture_control_writes(h.item.provider, h.item.hotkey, h.old.height)
+    assert len(result.writes) == 2
+    assert bytes.fromhex(json.loads(result.evidence)["events"]["value"]) == h.event_bytes
+    assert h.item.proofs._limits == original_limits
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+async def test_event_collection_still_enforces_its_own_limit(block_case, monkeypatch):
+    import umi.competition_reward_control_writes as module
+
+    h = block_case
+    monkeypatch.setattr(module, "ScanLimits", lambda: ScanLimits(maximum_event_storage_bytes=5))
+    with pytest.raises(RuntimeError, match="event_storage_fetch_failed"):
+        await capture_control_writes(h.item.provider, h.item.hotkey, h.old.height)
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+@pytest.mark.parametrize("stage", ["body", "events", "decode"])
+async def test_slow_block_work_keeps_loop_responsive_and_drains_on_close(
+    block_case, monkeypatch, stage
+):
+    h = block_case
+    started, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def wait():
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "proof thread was abandoned or blocked the event loop"
+
+    if stage == "body":
+        original = h.item.verifier.verify_extrinsics_root
+
+        def verify(**kw):
+            wait()
+            return original(**kw)
+
+        monkeypatch.setattr(h.item.verifier, "verify_extrinsics_root", verify)
+    elif stage == "events":
+        original = type(h.item.verifier).__call__
+        calls = 0
+
+        def verify(self, **kw):
+            nonlocal calls
+            if kw["storage_key"] == b"system-events-key":
+                calls += 1
+                if calls == 2:  # The scanner re-verifies the collected event proof.
+                    wait()
+            return original(self, **kw)
+
+        monkeypatch.setattr(type(h.item.verifier), "__call__", verify)
+    else:
+        original = FinalizedBlockScanner._decode_verified_block
+
+        def decode(self, *args):
+            wait()
+            return original(self, *args)
+
+        monkeypatch.setattr(FinalizedBlockScanner, "_decode_verified_block", decode)
+
+    task = asyncio.create_task(capture_control_writes(h.item.provider, h.item.hotkey, h.old.height))
+    closing = None
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        task.cancel()
+        closing = asyncio.create_task(h.item.provider.aclose())
+        for _ in range(3):
+            await asyncio.sleep(0)
+            task.cancel()
+        assert not task.done() and not closing.done()
+        assert h.item.provider._lock.locked()
+    finally:
+        release.set()
+        with suppress(asyncio.CancelledError):
+            await task
+        if closing is not None:
+            await asyncio.wait_for(closing, 3)
     assert not h.item.provider._lock.locked()

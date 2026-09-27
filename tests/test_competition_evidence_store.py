@@ -52,6 +52,24 @@ def open_store(path, *, create=False, limits=LIMITS, owner=OWNER):
     return db, EvidenceStore(db, owner_binding_sha256=owner, limits=limits, create=create)
 
 
+def test_codec_deduplicates_plain_hex_without_changing_original_bytes():
+    shared = b"large repeated runtime metadata" * 1000
+    raw = canonical_json_bytes({"parent": shared.hex(), "child": "0x" + shared.hex()})
+    encoded = encode_evidence(raw, kind="proof")
+    assert encoded.objects[hashlib.sha256(shared).hexdigest()] == shared
+    assert sum(map(len, encoded.objects.values())) < len(raw) // 2
+    assert (
+        decode_evidence(
+            encoded.recipe,
+            sha256=encoded.sha256,
+            expanded_bytes=len(raw),
+            kind="proof",
+            resolve=lambda key, size: encoded.objects[key],
+        )
+        == raw
+    )
+
+
 @pytest.fixture
 def store(tmp_path):
     db, result = open_store(tmp_path / "evidence.sqlite3", create=True)

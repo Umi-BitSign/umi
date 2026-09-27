@@ -17,6 +17,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from functools import partial
 from itertools import pairwise
 from typing import Any, Protocol, runtime_checkable
 
@@ -34,6 +35,7 @@ from .chain_evidence import (
     StorageProofVerifier,
     assert_shadow_no_weight_interval,
 )
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .validator_chain import FinalizedRuntimePin, PinnedRuntimeContext
 
@@ -559,6 +561,34 @@ class FinalizedBlockScanner:
         body = await self._required_body(identity, state_version=runtime.pin.state_version)
         events_raw = await self._required_events(identity, runtime)
 
+        # Runtime decoding and proof tools can take seconds. Keep the loop
+        # responsive, but drain each owned thread before releasing its caller's
+        # provider lock on cancellation or shutdown.
+        return await run_owned_thread(
+            self._decode_verified_block,
+            identity,
+            runtime,
+            body,
+            events_raw,
+            finality_attestation,
+            finality_replay_binding,
+        )
+
+    def _decode_verified_block(
+        self,
+        identity: VerifiedFinalizedBlockIdentity,
+        runtime: PinnedRuntimeContext,
+        body: RawFinalizedBlockBody,
+        events_raw: RawFinalizedEventStorage,
+        finality_attestation: bytes | None,
+        finality_replay_binding: FinalityAttestationReplayBinding | None,
+    ) -> tuple[
+        FinalizedBlockRecord,
+        int,
+        FinalizedBlockScanEvidence | None,
+        tuple[FinalizedCommitmentCallBinding, ...],
+    ]:
+
         decoded_extrinsics = tuple(
             self._decode_extrinsic(runtime, raw, index) for index, raw in enumerate(body.extrinsics)
         )
@@ -854,10 +884,13 @@ class FinalizedBlockScanner:
             if total > self._limits.maximum_block_body_bytes:
                 raise ValidatorChainScanError("block_body_size_limit")
         try:
-            verified = self._extrinsics_root_verifier(
-                expected_root=bytes.fromhex(identity.extrinsics_root[2:]),
-                extrinsics=body.extrinsics,
-                state_version=state_version,
+            verified = await run_owned_thread(
+                partial(
+                    self._extrinsics_root_verifier,
+                    expected_root=bytes.fromhex(identity.extrinsics_root[2:]),
+                    extrinsics=body.extrinsics,
+                    state_version=state_version,
+                )
             )
         except ValidatorChainScanError:
             raise
@@ -914,12 +947,15 @@ class FinalizedBlockScanner:
         if len(set(raw.proof)) != len(raw.proof):
             raise ValidatorChainScanError("event_proof_duplicate_node")
         try:
-            StorageEvidence(
-                snapshot=identity.snapshot,
-                storage_key=storage_key,
-                value=raw.value,
-                proof=raw.proof,
-                verifier=self._event_proof_verifier,
+            await run_owned_thread(
+                partial(
+                    StorageEvidence,
+                    snapshot=identity.snapshot,
+                    storage_key=storage_key,
+                    value=raw.value,
+                    proof=raw.proof,
+                    verifier=self._event_proof_verifier,
+                )
             )
         except (TypeError, ValueError) as error:
             raise ValidatorChainScanError("event_proof_verification_failed") from error

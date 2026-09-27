@@ -728,6 +728,27 @@ Elapsed time does not renew a decision. Journal identity binds the series;
 a host migration can select a new proof configuration while preserving its
 history, and proofs from the former configuration are rejected.
 
+`RewardControlHistoryReader` captures or replays every block in an explicitly
+selected interval. It verifies complete block bodies, child-state events, the
+parent execution runtime and the resulting control slot. Ordered writes remain
+visible when another transaction overwrites them in the same block. Wrapped
+effects and unattributed slot changes remain unresolved. Consumers must not
+interpret an unresolved interval as permission to continue rewards.
+
+Each block's exact proof bytes commit before progress advances. Restart replays
+saved proofs against owned finality before fetching missing blocks. Interrupted
+reads, cancellation and capacity exhaustion preserve the prefix. Bounded work
+per call limits resource use without expiring the interval. Storage deduplicates
+shared runtime bytes using the existing lossless evidence recipe; the owning
+service must provision disk and RPC capacity for the complete interval. Slow
+proof verification and decoding drain in owned threads, keeping the event loop
+responsive without abandoning work during shutdown.
+
+The history reader is not yet connected to standing reward selection or installed
+reward execution. Its host must independently choose the admission boundary,
+interpret every write and bind the completed interval to a fresh control proof.
+Component tests do not establish installed outage recovery or a reward handoff.
+
 This selection still requires native replay of the referenced package, original
 series admission, prior reward opportunity and any legacy handoff before weight
 submission. The returned selection grants no transaction authority. Signer

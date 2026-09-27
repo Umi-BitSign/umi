@@ -19,7 +19,7 @@ MAX_EVIDENCE_BYTES = 32 * 1024**2
 MAX_METADATA_BYTES = 16 * 1024**2
 MAX_RECIPE_BYTES = 4 * 1024**2
 MAX_SEGMENTS = 32768
-_HEX = re.compile(rb'"0x([0-9a-f]{64,})"')
+_HEX = re.compile(rb'"(?:0x)?([0-9a-f]{64,})"')
 _SHA = re.compile(r"[0-9a-f]{64}")
 _SCHEMA = "umi-weight-evidence-recipe/1"
 

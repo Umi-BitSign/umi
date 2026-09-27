@@ -26,9 +26,11 @@ from .grandpa_finality import _decode_header
 from .open_competition import digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import ExecutedRuntimeContext
+from .validator_chain import FinalizedProofCollector, ProofCollectionLimits
 from .validator_chain_scan import (
     FinalizedBlockScanner,
     FinalizedCommitmentCallBinding,
+    ScanLimits,
     VerifiedFinalizedBlockIdentity,
 )
 from .validator_chain_scan_port import LiveFinalizedBlockScanPort
@@ -118,10 +120,27 @@ def _select_writes(
 
 class _BlockPort(LiveFinalizedBlockScanPort):
     def __init__(self, provider, runtime):
+        # Block events are much larger than account/weight values. Keep their
+        # collector separate, sharing the owned RPC lifecycle and verifier.
+        limits = ScanLimits()
+        proofs = FinalizedProofCollector(
+            provider._proofs._rpc,
+            finality=provider._proofs._finality,
+            verifier=provider._proofs._verifier,
+            limits=ProofCollectionLimits(
+                maximum_storage_keys=1,
+                maximum_storage_value_bytes=limits.maximum_event_storage_bytes,
+                maximum_storage_values_bytes=limits.maximum_event_storage_bytes,
+                maximum_proof_nodes=limits.maximum_event_proof_nodes,
+                maximum_proof_node_bytes=limits.maximum_event_proof_node_bytes,
+                maximum_proof_bytes=limits.maximum_event_proof_bytes,
+            ),
+        )
         super().__init__(
             rpc=provider._registration_rpc,
-            proofs=provider._proofs,
+            proofs=proofs,
             runtime_pin=runtime.pin,
+            limits=limits,
         )
         self.runtime = runtime
         self.body = self.events = None
