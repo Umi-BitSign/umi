@@ -133,7 +133,7 @@ def series_case(base_series_case, request, tmp_path):
     return c
 
 
-async def current(h, tip):
+async def current(h, tip, *, validator_hotkey=None):
     """Collect through the real current-control adapter at the history's tip."""
     item, w = h.item, h.source.w
     header = w.headers[tip.block_hash]
@@ -166,7 +166,11 @@ async def current(h, tip):
         now_ms=lambda: item.clock.now,
     )
     try:
-        return await provider.collect_control(item.hotkey)
+        control = await provider.collect_control(item.hotkey)
+        if validator_hotkey is None:
+            return control
+        weights = await provider.collect_registered_weights(validator_hotkey, at=control.snapshot)
+        return control, weights
     finally:
         await provider.aclose()
         item.finality.ref, item.finality.timestamp, item.clock.now = previous

@@ -7,7 +7,9 @@ Neither hints nor progress cursors manufacture observer records or timestamps.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections import OrderedDict
 from contextlib import closing
 from dataclasses import dataclass
 
@@ -16,6 +18,8 @@ from .concurrency import run_owned_thread
 from .finalized_ancestry import MAXIMUM_HEADER_BYTES, MAXIMUM_PATH_BYTES, encode_rpc_header
 from .grandpa_finality import EVIDENCE_CLASS, _decode_header
 from .validator_plans import VerifiedFinalizedBlock
+
+MAXIMUM_VERIFIED_HEADER_BYTES = 8 * 1024**2
 
 
 class HistoricalHeaderRecoveryPending(FileNotFoundError):
@@ -36,6 +40,21 @@ class HistoricalHeaderRecovery:
             raise ValueError("historical header batch must be bounded")
         self.connect, self.maximum_bytes, self.batch_size = connect, maximum_bytes, batch_size
         self.progress = {}
+        self._lock = asyncio.Lock()
+        self._anchor = None
+        self._verified = OrderedDict()
+        self._verified_bytes = 0
+
+    def _remember(self, block_hash, encoded):
+        old = self._verified.pop(block_hash, None)
+        if old is not None:
+            self._verified_bytes -= len(old)
+        self._verified[block_hash] = encoded
+        self._verified_bytes += len(encoded)
+        limit = min(self.maximum_bytes, MAXIMUM_VERIFIED_HEADER_BYTES)
+        while self._verified_bytes > limit:
+            _, old = self._verified.popitem(last=False)
+            self._verified_bytes -= len(old)
 
     def _open(self):
         db = self.connect()
@@ -85,6 +104,10 @@ class HistoricalHeaderRecovery:
                 raise
 
     async def recover(self, anchor, target: FinalizedSnapshotRef, request):
+        async with self._lock:
+            return await self._recover(anchor, target, request)
+
+    async def _recover(self, anchor, target, request):
         if not isinstance(anchor, VerifiedFinalizedBlock) or not isinstance(
             target, FinalizedSnapshotRef
         ):
@@ -102,9 +125,22 @@ class HistoricalHeaderRecovery:
             anchor.state_root,
         ):
             raise ValueError("historical recovery anchor identity differs")
+        identity = (anchor.finality_evidence_sha256, encoded)
+        if identity != self._anchor:
+            self._anchor = identity
+            self._verified.clear()
+            self._verified_bytes = 0
+            self.progress.clear()
         key = (anchor.finality_evidence_sha256, target)
-        encoded = self.progress.get(key, encoded)
+        # Only this process's completed ancestry checks are reusable. Durable
+        # hints are still rehashed from the owned anchor after every restart.
+        cached = self._verified.get(target.block_hash)
+        if cached is not None:
+            self._verified.move_to_end(target.block_hash)
+        encoded = cached or self.progress.get(key, encoded)
         current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+        if cached is not None and current["number"] != target.block_number:
+            raise ValueError("historical registration differs from finalized ancestry")
         used = 0
         for _ in range(self.batch_size):
             if current["number"] == target.block_number:
@@ -121,6 +157,8 @@ class HistoricalHeaderRecovery:
                 await run_owned_thread(self._save, block_hash, next_encoded)
             # Advance only after the exact hint is durable. Cancellation during
             # persistence leaves the old cursor; retry rechecks the stored hint.
+            self._remember(block_hash, next_encoded)
+            self.progress.clear()
             self.progress[key] = encoded = next_encoded
             current = next_header
             used += (len(encoded) - 2) // 2
@@ -133,4 +171,5 @@ class HistoricalHeaderRecovery:
         )
         if recovered != target:
             raise ValueError("historical registration differs from finalized ancestry")
+        self.progress.pop(key, None)
         return RecoveredHistoricalHeader(recovered, encoded)

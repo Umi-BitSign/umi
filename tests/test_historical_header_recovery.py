@@ -206,3 +206,75 @@ async def test_cancelled_header_persistence_drains_before_releasing_owner(walk, 
         await task
     assert (await finish(HistoricalHeaderRecovery(w.connect), w)).snapshot == w.target
     assert len(w.calls) == len(set(w.calls)) == w.anchor.height - w.target.block_number
+
+
+async def test_complete_interval_reuses_links_only_within_the_owned_anchor(walk, monkeypatch):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+    loaded, load = [], service._load
+
+    def counted(block_hash):
+        loaded.append(block_hash)
+        return load(block_hash)
+
+    monkeypatch.setattr(service, "_load", counted)
+    assert (await finish(service, w)).snapshot == w.target
+    expected = len(w.headers) - 1
+    assert len(loaded) == len(w.calls) == expected
+    for height in range(w.target.block_number, w.anchor.height):
+        block_hash = w.by_height[height]
+        header = w.headers[block_hash]
+        target = FinalizedSnapshotRef(height, block_hash, header["parentHash"], header["stateRoot"])
+        assert (await service.recover(w.anchor, target, w.request)).snapshot == target
+    assert len(loaded) == len(w.calls) == expected
+    assert service.progress == {}
+
+    # Process-local verified links do not become durable trust on restart.
+    restarted = HistoricalHeaderRecovery(w.connect)
+    monkeypatch.setattr(restarted, "_load", counted)
+    assert (await finish(restarted, w)).snapshot == w.target
+    assert len(loaded) == 2 * expected and len(w.calls) == expected
+
+
+@pytest.mark.parametrize("field", ["block_number", "parent_hash", "state_root"])
+async def test_verified_link_reuse_requires_the_exact_target(walk, field):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+    await finish(service, w)
+    value = w.target.block_number + 1 if field == "block_number" else "0x" + "ff" * 32
+    with pytest.raises(ValueError, match="differs from finalized ancestry"):
+        await service.recover(w.anchor, replace(w.target, **{field: value}), w.request)
+
+
+async def test_new_anchor_rechecks_durable_links(walk, monkeypatch, chain_config, policy):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+    await finish(service, w)
+    lower = {n: h for n, h in w.by_height.items() if n < w.anchor.height - 10}
+    w.anchor = make_anchor(chain_config, policy, w.headers, lower)
+    loaded, load = [], service._load
+
+    def counted(block_hash):
+        loaded.append(block_hash)
+        return load(block_hash)
+
+    monkeypatch.setattr(service, "_load", counted)
+    assert (await finish(service, w)).snapshot == w.target
+    assert len(loaded) == w.anchor.height - w.target.block_number
+
+
+async def test_verified_memory_eviction_preserves_recoverability(walk, monkeypatch):
+    w = walk
+    monkeypatch.setattr("umi.historical_header_recovery.MAXIMUM_VERIFIED_HEADER_BYTES", 600)
+    service = HistoricalHeaderRecovery(w.connect)
+    await finish(service, w)
+    assert 0 < service._verified_bytes <= 600
+    height = w.anchor.height - 1
+    block_hash = w.by_height[height]
+    header = w.headers[block_hash]
+    target = FinalizedSnapshotRef(height, block_hash, header["parentHash"], header["stateRoot"])
+    assert target.block_hash not in service._verified
+    assert (await service.recover(w.anchor, target, w.request)).snapshot == target
+    assert service._verified_bytes <= 600
+    assert (await finish(service, w)).snapshot == w.target
+    assert len(w.calls) == len(set(w.calls)) == len(w.headers) - 1

@@ -744,6 +744,13 @@ service must provision disk and RPC capacity for the complete interval. Slow
 proof verification and decoding drain in owned threads, keeping the event loop
 responsive without abandoning work during shutdown.
 
+Historical recovery reuses header links already checked against the same owned
+anchor within the process, avoiding repeated disk walks for each block in an
+interval. This cache retains at most 8 MiB of encoded headers, or the configured
+header-storage capacity if smaller. Changing the anchor or restarting requires
+checking durable hints again. Eviction repeats verification without expiring the
+requested history; cached links never replace an exact target identity check.
+
 `StandingRewardControlReader.select_history` binds that complete interval to a
 fresh control proof at the same finalized snapshot. The interval starts at the
 approved recovery authority's issuance block, including that block. The reserved

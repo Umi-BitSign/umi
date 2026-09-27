@@ -1,9 +1,9 @@
 """Replay/projection lifecycle with native packages, signatures and state readers.
 
-The complete control-history selector is an explicit boundary here: it delegates
-to native signed selection, while separate history-selection tests check every
-write. RPC/finality/trie/SCALE and miner video/inference are synthetic ports.
-These tests do not qualify the combined installed execution path.
+Lifecycle fault tests substitute the complete-history selection boundary. The
+combined test uses native history, package replay and registration projection.
+RPC/finality/trie/SCALE and miner video/inference are synthetic ports; installed
+signing and chain submission are not qualified here.
 """
 
 import asyncio
@@ -37,6 +37,7 @@ from umi.competition_reward_preparation import RewardReplayRequirement, Standing
 from umi.competition_round_journal import RoundJournal
 from umi.competition_store import CompetitionStore
 from umi.grandpa_finality import FINNEY_GENESIS_HASH
+from umi.historical_header_recovery import HistoricalHeaderRecoveryPending
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
@@ -45,7 +46,6 @@ from . import test_open_competition as competition_tests
 from .test_competition_cohort_consumers import tip
 from .test_competition_cohort_quality import certificates_for
 from .test_competition_cohort_roster import close
-from .test_competition_cohort_service_grants import chain_config as chain_config
 from .test_competition_cohort_service_grants import endpoint as endpoint
 from .test_competition_cohort_service_grants import execution as execution
 from .test_competition_cohort_service_grants import granted as granted
@@ -69,7 +69,10 @@ from .test_competition_cohort_service_grants import service_quality_inputs as se
 from .test_competition_cohort_service_grants import shared_control_group as shared_control_group
 from .test_competition_model_burn import burn_policy
 from .test_competition_reward_control import commitment
+from .test_competition_reward_control_archive import make_historical
 from .test_competition_reward_decisions import signed
+from .test_competition_reward_history import make_history_case
+from .test_competition_reward_history_selection import current as current_state
 from .test_competition_reward_registrations import registered_case as registered_case
 from .test_competition_reward_registrations import set_members
 from .test_competition_two_task_profile import launch_suite
@@ -78,6 +81,7 @@ from .test_open_competition import bundle_at, wallet
 
 original_policy = competition_tests.policy
 original_chain = grant_fixtures.chain
+original_chain_config = grant_fixtures.chain_config
 pytestmark = [
     pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True),
     pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True),
@@ -90,8 +94,25 @@ def base_policy(original_policy):
 
 
 @pytest.fixture
+def chain_config(original_chain_config):
+    # Synthetic early bootstrap keeps complete control-history tests bounded.
+    # Production pins and verified-finality checks are unchanged.
+    return original_chain_config.model_copy(
+        update={
+            "minimum_finalized_block": 150,
+            "finality_pin": original_chain_config.finality_pin.model_copy(
+                update={
+                    "bootstrap_block_number": 149,
+                }
+            ),
+        }
+    )
+
+
+@pytest.fixture
 def chain(original_chain):
     item = original_chain
+    item.finality.ref = replace(item.finality.ref, block_number=2000)
     set_members(item, [wallet(n).hotkey.ss58_address for n in ("Burn", "Alice", "Bob")])
     item.rpc.values[("SubtensorModule", "SubnetOwnerHotkey", (78,))] = wallet(
         "Burn"
@@ -102,6 +123,8 @@ def chain(original_chain):
 
 @pytest.fixture(autouse=True)
 def known_video_bytes(monkeypatch):
+    monkeypatch.setattr("tests.test_competition_cohort_origin._HEIGHT", 2000)
+
     def suite(policy):
         value = launch_suite(policy)
         return value.model_copy(
@@ -455,3 +478,142 @@ async def test_failed_replay_retries_and_independent_bindings_are_enforced(
         await p.reopen(maximum_package_bytes=1024).prepare(
             p.package, **replay_args(await p.observations())
         )
+
+
+@pytest.fixture
+async def complete_preparation_case(preparation_case, tmp_path, monkeypatch):
+    p = preparation_case
+    item = p.item
+    validator_hotkey = item.hotkey
+    series = p.reader.series
+    await p.provider.aclose()
+    item.hotkey = series.control_hotkey
+    item.spec = ("Commitments", "CommitmentOf", (78, item.hotkey))
+    first = series.recovery.authority.issued_at_block
+    activation_block = p.package.inputs.history.transitions[-1].transition.observed_at_block + 1
+    end = (
+        activation_block
+        + series.maximum_proof_lag_blocks
+        + series.maximum_transaction_lifetime_blocks
+    )
+    item.finality.ref = replace(item.finality.ref, block_number=first)
+
+    def reader():
+        return StandingRewardControlReader(
+            tmp_path / "complete-standing-reader",
+            series,
+            item.policy,
+            expected_series_sha256=digest(series),
+            expected_chain_config_sha256=digest(item.config),
+            maximum_bytes=8 * 1024**2,
+        )
+
+    genesis = signed(
+        RewardControlDecision(
+            schema="umi-reward-control-decision/1",
+            series_sha256=digest(series),
+            sequence=0,
+            predecessor_sha256=None,
+            kind="admit_series",
+            observed_at_block=first,
+            activation=None,
+        )
+    )
+    active = signed(
+        p.active.decision.model_copy(
+            update={
+                "predecessor_sha256": digest(genesis.decision),
+                "observed_at_block": activation_block,
+            }
+        )
+    )
+    objects = {digest(v.decision): canonical_json_bytes(v) for v in (genesis, active)}
+    writes = {n: () for n in range(first, end + 1)}
+    writes[first], writes[activation_block] = (
+        (digest(genesis.decision),),
+        (digest(active.decision),),
+    )
+    c = SimpleNamespace(
+        control=item,
+        series=series,
+        reopen=reader,
+        reader=reader(),
+        genesis=genesis,
+        active=active,
+        objects=objects,
+        source=objects.__getitem__,
+        control_writes=writes,
+        additional_state=dict(item.rpc.values),
+    )
+    h = await make_historical(c, "exact_runtime", monkeypatch, tmp_path)
+    h = await make_history_case(h, monkeypatch, tmp_path, distance=end - first + 1)
+    h.reader = h.new_reader(maximum_bytes=64 * 1024**2)
+    h.package_case, h.validator_hotkey = p, validator_hotkey
+    try:
+        yield h
+    finally:
+        await item.provider.aclose()
+
+
+async def test_complete_native_history_package_and_projection_restart_without_coordinator(
+    complete_preparation_case,
+):
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+
+    async def history():
+        for _ in range(100):
+            try:
+                part = await h.reader.advance(
+                    h.item.provider, through_block=h.end, maximum_blocks=4096
+                )
+            except HistoricalHeaderRecoveryPending:
+                continue
+            if part.history is not None:
+                return part.history
+        pytest.fail("complete history did not converge")
+
+    async def prepare(owner, retained):
+        control, chain = await current_state(h, retained.tip, validator_hotkey=h.validator_hotkey)
+        args = dict(control=control, history=retained, source=c.source)
+        ready = await owner.prepare(p.package, **args)
+        # Verification can outlive its initial observation: project with new proofs.
+        control, chain = await current_state(h, retained.tip, validator_hotkey=h.validator_hotkey)
+        result = await owner.project(
+            ready,
+            control=control,
+            history=retained,
+            source=c.source,
+            chain=chain,
+            chain_config=h.item.config,
+        )
+        return ready, result
+
+    def owner():
+        return StandingRewardPreparation(
+            c.reader, p.store, (p.requirement,), maximum_promotion_bytes=1_000_000
+        )
+
+    captured = await history()
+    ready, result = await prepare(owner(), captured)
+    assert ready.allocation == p.allocation
+    assert result.current.selection.state == "selected"
+    assert result.current.selection.committed_at_block == c.active.decision.observed_at_block
+    assert result.current.selection.effective_at_block == h.end
+    assert len(h.body_requests) == h.end - h.old.height + 1
+    assert sum(result.projection.weights) == 65535
+    assert not result.chain_submission_authorized
+
+    # Reopen every reader/preparation owner. Historical network inputs and the
+    # coordinator decision source are unavailable; only the current state is live.
+    h.reader = await h.restart()
+    h.reader = h.new_reader(maximum_bytes=64 * 1024**2)
+    c.reader = c.reopen()
+    c.objects.clear()
+    h.offline_through = h.end - 1
+    replayed = await history()
+    restored, again = await prepare(owner(), replayed)
+    assert restored is not ready and restored.allocation == ready.allocation
+    assert again.projection == result.projection
+    assert again.current.selection == result.current.selection
+    assert h.body_requests == list(range(h.old.height, h.end + 1))

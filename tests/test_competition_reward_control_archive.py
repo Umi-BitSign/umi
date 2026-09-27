@@ -40,10 +40,14 @@ from .test_finalized_ancestry import make_headers
 
 @pytest.fixture(params=["exact_runtime", "reviewed_codec"])
 async def historical(series_case, request, monkeypatch, tmp_path):
+    return await make_historical(series_case, request.param, monkeypatch, tmp_path)
+
+
+async def make_historical(series_case, mode, monkeypatch, tmp_path):
     c = series_case
     item = c.control
     await item.provider.aclose()
-    if request.param == "reviewed_codec":
+    if mode == "reviewed_codec":
         item.config = configured(item, tmp_path)
         version_bump(monkeypatch, item.rpc)
 
@@ -79,7 +83,9 @@ async def historical(series_case, request, monkeypatch, tmp_path):
         return blocks.get(height)
 
     item.finality.verified_block_at = at
-    item.rpc.values[item.spec] = commitment(digest(c.genesis.decision), 160)
+    item.rpc.values[item.spec] = commitment(
+        digest(c.genesis.decision), c.genesis.decision.observed_at_block
+    )
     captured = await item.provider.collect_control(item.hotkey)
 
     def advance(distance=3000):

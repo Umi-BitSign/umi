@@ -34,6 +34,10 @@ pytestmark = pytest.mark.parametrize("historical", ["exact_runtime"], indirect=T
 
 @pytest.fixture
 async def history_case(historical, monkeypatch, tmp_path):
+    return await make_history_case(historical, monkeypatch, tmp_path)
+
+
+async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
     h = historical
 
     def headers(first, last):
@@ -53,10 +57,10 @@ async def history_case(historical, monkeypatch, tmp_path):
 
     monkeypatch.setattr(archive_tests, "make_headers", headers)
     h.item.rpc.values[h.item.spec] = commitment("bb" * 32, h.old.height)
-    h.source = await capture_source(h, monkeypatch)
+    h.source = await capture_source(h, monkeypatch, distance=distance)
     w = h.source.w
     first = h.old.height
-    h.end = first + 4
+    h.end = first + distance - 1
     h.offline_through = -1
     h.fail_block = None
     h.body_requests = []
@@ -91,6 +95,9 @@ async def history_case(historical, monkeypatch, tmp_path):
         elif height in cleared:
             last = None
         at = dict(h.source.archive.values)
+        for spec, value in getattr(h.c, "additional_state", {}).items():
+            key = "0x" + canonical_json_bytes(spec).hex()
+            at[key] = None if value is None else "0x" + canonical_json_bytes(value).hex()
         for key in at:
             path = json.loads(bytes.fromhex(key[2:]))
             if path[:2] == ["Commitments", "CommitmentOf"]:
@@ -174,11 +181,15 @@ async def history_case(historical, monkeypatch, tmp_path):
 
     def verify_many(**kw):
         height = roots[kw["state_root"]]
-        expected = tuple(
-            (bytes.fromhex(k[2:]), None if v is None else bytes.fromhex(v[2:]))
-            for k, v in sorted(values[height].items())
+        expected = {
+            bytes.fromhex(k[2:]): None if v is None else bytes.fromhex(v[2:])
+            for k, v in values[height].items()
+        }
+        return (
+            bool(kw["items"])
+            and all(k in expected and expected[k] == v for k, v in kw["items"])
+            and kw["proof"] == (b"proof",)
         )
-        return kw["items"] == expected and kw["proof"] == (b"proof",)
 
     monkeypatch.setattr(h.item.verifier, "verify_many", verify_many)
 
