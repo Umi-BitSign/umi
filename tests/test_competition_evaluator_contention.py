@@ -59,15 +59,9 @@ async def test_real_writer_lock_preserves_inference_and_completes_once(setup, mo
         monkeypatch.setattr(driver, "boundary", lock_after_boundary)
     heartbeat = asyncio.create_task(asyncio.sleep(0.005))
     try:
-        if hasattr(sqlite3, "SQLITE_BUSY"):
-            status = await asyncio.wait_for(driver.poll_once(), timeout=2)
-            assert status["status"] == "waiting_database"
-            assert status["in_flight"] == 1
-        else:
-            # Python 3.10 supplies no code: preserve the existing fail-closed path.
-            with pytest.raises(sqlite3.OperationalError) as caught:
-                await asyncio.wait_for(driver.poll_once(), timeout=2)
-            assert getattr(caught.value, "sqlite_errorcode", None) is None
+        status = await asyncio.wait_for(driver.poll_once(), timeout=2)
+        assert status["status"] == "waiting_database"
+        assert status["in_flight"] == 1
         assert heartbeat.done(), "SQLite waiting blocked inference/finality on the event loop"
         assert not owned.done() and driver._tasks[slot] is owned
         assert (driver._cursor, driver._order_cursor) == cursors
@@ -136,6 +130,12 @@ async def test_busy_message_without_code_and_nonbusy_database_errors_still_raise
     setup, monkeypatch, code
 ):
     driver = setup.drivers[0]
+    if code is None:
+        # Newer CPython must still require a native code. The 3.10 fallback is
+        # covered by real contention and the shared classifier tests.
+        from umi import sqlite_contention
+
+        monkeypatch.setattr(sqlite_contention, "_ERROR_CODES_AVAILABLE", True)
     error = sqlite3.OperationalError("database is locked")
     if code is not None:
         error.sqlite_errorcode = code

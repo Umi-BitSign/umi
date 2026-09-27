@@ -709,6 +709,17 @@ def test_approved_source_overlay_is_mounted_readonly(mounted_files, tmp_path):
     assert mounts[-1] == containers._bind_mount(source, "/opt/umi/src/umi", read_only=True)
 
 
+async def test_worker_source_label_does_not_require_later_maintenance(launch_setup):
+    case = launch_setup
+    case.adapter.source_overlay = SimpleNamespace(host_manifest_sha256="ab" * 32)
+    await case.adapter.prepare_image(case.release)
+    await case.adapter.launch(case.cap, case.release)
+    assert (
+        case.runner.container["Config"]["Labels"]["vision.umi.successor.worker-source-host"]
+        == "ab" * 32
+    )
+
+
 @pytest.mark.parametrize("fault", ["writable", "hardlink", "symlink", "wrong-key"])
 def test_weight_hotkey_boundary_is_exact(mounted_files, fault, tmp_path):
     key = mounted_files.key

@@ -98,6 +98,7 @@ from .private_files import private_path as _path
 from .private_files import publish_private_model as _publish
 from .private_files import read_private_model as _read
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .sqlite_contention import is_sqlite_contention
 
 if TYPE_CHECKING:
     from .competition_work_plans import WorkPlan
@@ -1308,9 +1309,7 @@ class ContinuousEvaluator:
         try:
             return await self._poll_once()
         except sqlite3.OperationalError as error:
-            code = getattr(error, "sqlite_errorcode", None)
-            # SQLite BUSY/LOCKED codes; Python 3.10 lacks their named constants.
-            if code is None or code & 0xFF not in {5, 6}:
+            if not is_sqlite_contention(error):
                 raise
             # A contended control journal must not shut down this worker and
             # cancel its one-use inference tasks. Revisit the same page at the

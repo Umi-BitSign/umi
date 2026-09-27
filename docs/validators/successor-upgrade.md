@@ -25,16 +25,40 @@ The supervisor reuses immutable package verification within one process, checkin
 all file bytes and bounds on each load. Restart verifies the package again. Reward
 authority and current chain state are checked separately for each execution.
 
+### Worker source fixes for an existing certified allocation
+
+A certified allocation can pin an older OCI release. An approved source fix
+keeps that release, package and admission unchanged, and mounts the signed host's
+`src/umi` read-only into the worker. It cannot change dependencies or native
+helpers in the image; qualification must exercise the fix with the pinned image.
+
+For an initial upgrade, include `worker_source_overlay` in the root-owned
+operator consent **before sealing the installation receipt**. Its exact scope is
+`package_sha256`, `release_bundle_sha256`, `recipient_amendment_sha256` and an
+optional `successor_recipient_amendment_sha256`. This requires consent for
+`competition_weights` and the continuing reward authority. The source is the
+original signed host selected by `approved_host_manifest_sha256`.
+
+The sealed consent survives interrupted installation and restart. Do not append
+the scope to an existing receipt. On each worker launch, the host verifies the
+source files and the allocation scope; a mismatch stops launch. Consent without
+this field keeps the original image-only behavior and serialization.
+
+For an installed successor, `umi-supervisor-host-maintenance/2` can explicitly
+authorize a replacement worker source using the same `worker_overlay` scope.
+Host-only maintenance retains an initial source approval. Keep its original host
+tree available while that approval is in use. Services using `RootDirectory`
+must retain read-only bindings for both the original and replacement host trees.
+Container labels identify the signed host supplying the worker source.
+
 <a id="successor-supervisor-upgrade"></a>
 
 ## Successor supervisor upgrade requirements
 
-Status: implemented upgrade command with synthetic native Linux migration
-coverage. This document does not approve production artifacts or a transition.
-Keep UID 0 and UID 54 on their existing bridge policy until an authorized
-transition, explicit replacement or revocation. The current ongoing bridge has
-no scheduled sunset; historical finite bridge policies keep their original
-cutoffs.
+Use the installed upgrade command only with qualified artifacts and controls
+for the specific installation. Keep its current policy until an authorized
+transition, explicit replacement or revocation. An ongoing bridge has no
+scheduled sunset; finite signed bridge policies keep their original cutoffs.
 
 <a id="successor-supervisor-upgrade--available-read-only-inspection"></a>
 
@@ -81,15 +105,6 @@ and 64 MiB, with the runtime's configured journal limits enforced separately.
 Smaller continuations keep the existing page encoding. HTTP delivery cannot
 substitute a different local continuation, including through its cache.
 
-Thirteen focused tests passed on the Studio Linux VM, covering 68-update
-catch-up, restart, host verification and HTTP delivery. They took 751.00 seconds.
-The separate Linux exchange test exposed an old page parser in the anchor
-reader. That reader and the target observer now accept the bounded local history;
-their integrated rerun passed four cases in 357.99 seconds. The broader
-adapter/materializer regression passed 102 tests in 3246.16 seconds before the
-shared-registry change below. Synthetic test authority keys are reused within
-each generated chain. No live validator was upgraded.
-
 <a id="successor-supervisor-upgrade--shared-recovery-registry-history"></a>
 
 #### Shared recovery-registry history
@@ -112,15 +127,6 @@ registry written by this version.
 Stopped recovery audits each retained run, then retains only authorization
 identities between audits. It reconstructs the relevant history again when
 reconciling an unsettled transaction. No attempt or recovery source is discarded.
-
-The first shared-storage snapshot passed 11 focused tests in 245.98 seconds,
-including lossless 68-record reconstruction, prefix storage growth, legacy
-record preservation and atomic insertion failure. The expanded link-validation
-suite passed 11 tests in 476.15 seconds, including missing nodes, broken links
-with recomputed storage checksums, reference/head mismatches and depth bounds.
-The recovery regression passed 45 tests in 1391.01 seconds. The registry still
-has its configured byte and record limits. All 18 repository checks passed for
-`1448bba`, including the complete Python suites and both Linux architectures.
 
 <a id="successor-supervisor-upgrade--download-history-bindings"></a>
 
@@ -159,8 +165,7 @@ An existing `history.json` from an earlier version is preserved and checked
 against the supplied bytes on every refetch. A changed continuation for an
 already cached head, corrupt binding or differing legacy file fails closed.
 Older delivery binaries reject the new cache filename; rollback over these
-cache entries is unsupported. The focused delivery regression passed five tests
-in 264.03 seconds. Package/object capacity limits remain in effect.
+cache entries is unsupported. Package/object capacity limits remain in effect.
 
 <a id="successor-supervisor-upgrade--retiring-redundant-materialized-inputs"></a>
 
@@ -182,10 +187,7 @@ or recovery inputs stop cleanup. All traversal and accounting limits remain.
 Only exact redundant cache copies are removed; they can be reconstructed from
 the retained sources. Cleanup does not grant weight or activation authority.
 
-The initial 11-test interruption and repeated-round suite passed on the Studio
-in 346.11 seconds. Additional bounded-rescan and inode-alias checks, plus the
-surrounding materializer/adapter regression, are running. Full checks must pass
-before deployment. Older binaries do not recognize an interrupted `retiring-*`
+Older binaries do not recognize an interrupted `retiring-*`
 entry; complete recovery with this version before attempting a rollback.
 
 <a id="successor-supervisor-upgrade--initial-history-after-multiple-feed-pages"></a>
