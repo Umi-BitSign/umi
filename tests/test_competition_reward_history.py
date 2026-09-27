@@ -193,6 +193,22 @@ async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
 
     monkeypatch.setattr(h.item.verifier, "verify_many", verify_many)
 
+    def read_many(*, state_root, storage_keys, proof, **limits):
+        if proof != (b"proof",):
+            raise ValueError("invalid synthetic historical proof")
+        expected = values[roots[state_root]]
+        return tuple(
+            (
+                key,
+                None
+                if expected["0x" + key.hex()] is None
+                else bytes.fromhex(expected["0x" + key.hex()][2:]),
+            )
+            for key in storage_keys
+        )
+
+    monkeypatch.setattr(h.item.verifier, "read_many", read_many)
+
     def verify_events(self, **kw):
         height = roots[kw["state_root"]]
         return (

@@ -221,9 +221,10 @@ class _Rpc:
 
 
 class _Verifier:
-    def __init__(self, finality):
+    def __init__(self, finality, values=None):
         self.finality = finality
         self.checked = []
+        self.values = values
 
     def __call__(self, **kwargs):
         raise AssertionError("registration collection must use multiproofs")
@@ -233,13 +234,29 @@ class _Verifier:
         assert kwargs["state_root"] == bytes.fromhex(self.finality.ref.state_root[2:])
         return kwargs["proof"] == (b"proof",)
 
+    def read_many(self, *, state_root, storage_keys, proof, **limits):
+        # Explicit synthetic trie port. The separate native proof suite uses
+        # retained Finney nodes; these provider tests exercise owned bindings.
+        if (
+            self.values is None
+            or state_root != bytes.fromhex(self.finality.ref.state_root[2:])
+            or proof != (b"proof",)
+        ):
+            raise ValueError("invalid synthetic proof")
+        values = []
+        for key in storage_keys:
+            pallet, item, params = json.loads(key)
+            value = self.values.get((pallet, item, tuple(params)))
+            values.append((key, None if value is None else canonical_json_bytes(value)))
+        return tuple(values)
+
 
 @pytest.fixture
 def chain(chain_config, policy, monkeypatch):
     monkeypatch.setattr("umi.validator_chain.bittensor_core.Runtime", _Runtime)
     finality = _Finality(chain_config, policy)
     rpc = _Rpc(finality)
-    verifier = _Verifier(finality)
+    verifier = _Verifier(finality, rpc.values)
     proofs = FinalizedProofCollector(rpc, finality=finality, verifier=verifier)
     clock = SimpleNamespace(now=_NOW)
     provider = FinalizedRegistrationProvider(

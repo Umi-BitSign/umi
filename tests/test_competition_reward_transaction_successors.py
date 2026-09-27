@@ -55,6 +55,13 @@ async def test_three_original_intents_survive_repeated_expiry_and_restart(
         def __call__(self, **kwargs):
             raise AssertionError("unexpected single proof")
 
+        def read_many(self, *, state_root, storage_keys, proof, **limits):
+            expected = states.get(state_root, {})
+            values = tuple((key, expected.get(key)) for key in storage_keys)
+            if not self.verify_many(state_root=state_root, proof=proof, items=values):
+                raise ValueError("invalid synthetic proof")
+            return values
+
         def verify_many(self, **kwargs):
             expected = states.get(kwargs["state_root"], {})
             return kwargs["proof"] == (b"fixture-proof",) and all(

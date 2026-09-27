@@ -54,6 +54,21 @@ async def capture_source(h, monkeypatch, distance=5):
             and kw["proof"] == (b"proof",)
         ),
     )
+
+    def read_many(*, state_root, storage_keys, proof, **limits):
+        if state_root != bytes.fromhex(w.original.state_root[2:]) or proof != (b"proof",):
+            raise ValueError("invalid synthetic historical proof")
+        return tuple(
+            (
+                key,
+                None
+                if archive.values["0x" + key.hex()] is None
+                else bytes.fromhex(archive.values["0x" + key.hex()][2:]),
+            )
+            for key in storage_keys
+        )
+
+    monkeypatch.setattr(h.item.verifier, "read_many", read_many)
     original_request = h.item.rpc.request
     calls = []
 

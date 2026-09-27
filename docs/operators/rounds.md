@@ -805,8 +805,13 @@ named runtime decodes. This needs a pinned helper supporting the
 [proof-read protocol](../../rust/substrate-proof-verifier/README.md). Each batch
 uses one proof RPC, checks every requested key and retains the existing evidence
 verification. Missing or invalid proofs never become absent values or a fallback
-to unverified RPC claims. Current reward providers do not select this path;
-coverage collection, provider budgets and installed qualification remain pending.
+to unverified RPC claims. `FinalizedRewardControlProvider` uses this path for
+standing control and inherited weight-state reads, including complete recipient
+discovery. The configured proof helper must support the read protocol; an older
+helper causes a hold. The existing legacy weight provider keeps its read path.
+Runtime-code and finality collection have separate requests and limits.
+Coverage accounting, measured provider budgets and installed qualification remain
+pending.
 
 `StandingRewardPreparation` connects complete-history selection to native package
 replay. Supply a `StandingRewardManifest` whose digest matches the independently

@@ -367,6 +367,21 @@ async def test_historical_capture_uses_owned_executed_runtime(runtime_archive, m
     header = _decode_header(archive.encoded, maximum_bytes=1024 * 1024)
     original_request = h.item.rpc.request
 
+    def read_many(*, state_root, storage_keys, proof, **limits):
+        if state_root != bytes.fromhex(h.old.state_root[2:]) or proof != (b"proof",):
+            raise ValueError("invalid synthetic historical proof")
+        return tuple(
+            (
+                key,
+                None
+                if archive.values["0x" + key.hex()] is None
+                else bytes.fromhex(archive.values["0x" + key.hex()][2:]),
+            )
+            for key in storage_keys
+        )
+
+    monkeypatch.setattr(h.item.verifier, "read_many", read_many)
+
     async def request(method, params):
         if method == "chain_getBlockHash" and params == (h.old.height,):
             return h.old.block_hash

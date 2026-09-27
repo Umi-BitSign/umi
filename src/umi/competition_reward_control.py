@@ -180,7 +180,14 @@ class FinalizedRewardControlProvider(FinalizedCompetitionWeightProvider):
     from an untrusted package or a numeric UID. Proven absence is returned as
     absence; it is not revocation or permission to reuse a cached allocation.
     Configuration and lifecycle are the existing validator provider's contract.
+
+    Standing control and inherited weight reads extract values from proofs.
+    They require the selected helper's proof-read protocol and never fall back
+    to separate value requests. Legacy weight providers keep their read path.
     """
+
+    async def _weight_read(self, runtime, specs):
+        return await super()._weight_read(runtime, specs, proof_values=True)
 
     async def collect_control(self, control_hotkey: str) -> OwnedRewardControlObservation:
         if self._closed:

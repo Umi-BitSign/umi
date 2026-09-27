@@ -156,6 +156,12 @@ async def original(native_encoding, chain_config, policy, tmp_path, request):
 
         verify_many = staticmethod(verify)
 
+        def read_many(self, *, state_root, storage_keys, proof, **limits):
+            values = tuple((key, raw_values.get(key)) for key in storage_keys)
+            if not verify(state_root=state_root, proof=proof, items=values):
+                raise ValueError("invalid synthetic proof")
+            return values
+
     verifier = Verifier()
     proofs = FinalizedProofCollector(rpc, finality=finality, verifier=verifier)
     providers = []

@@ -914,8 +914,10 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             object.__setattr__(observation, "_binding", _binding(observation))
             return observation
 
-    async def _weight_read(self, runtime, specs) -> VerifiedStorageBatch:
-        if self._weight_rpc is None:
+    async def _weight_read(self, runtime, specs, *, proof_values=False) -> VerifiedStorageBatch:
+        if proof_values:
+            batch = await self._proofs.storage_reads(runtime, specs, proof_values=True)
+        elif self._weight_rpc is None:
             batch = await self._proofs.storage_reads(runtime, specs)
         else:
             keys = tuple(runtime.storage_key(spec.pallet, spec.item, spec.params) for spec in specs)
