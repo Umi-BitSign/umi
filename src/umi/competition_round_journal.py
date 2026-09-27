@@ -508,7 +508,11 @@ class RoundJournal:
             raise ValueError("round journal capacity exhausted")
 
     def reserve_records(
-        self, batch_id: str, specs: Iterable[RecordReservation]
+        self,
+        batch_id: str,
+        specs: Iterable[RecordReservation],
+        *,
+        db: sqlite3.Connection | None = None,
     ) -> dict[str, str | int] | None:
         """Atomically enable reservations and retain a complete private batch.
 
@@ -516,6 +520,9 @@ class RoundJournal:
         value may omit its hash; its first immutable write still has to fit the
         reserved bound. No records are published and no signing occurs here.
         This reserves logical journal capacity, not disk space or other stores.
+        With ``db``, borrow this journal's active transaction. This allows a
+        ``put_many`` index callback to reserve future signature capacity in the
+        same commit as the original intent; the caller owns commit/rollback.
         """
         if type(batch_id) is not str or not 1 <= len(batch_id.encode()) <= 128:
             raise ValueError("invalid round reservation batch identity")
@@ -551,38 +558,40 @@ class RoundJournal:
         )
         if len(manifest) > min(MAX_BYTES, self.maximum_bytes):
             raise ValueError("round reservation manifest capacity exhausted")
-        with self.transaction() as db:
-            self._enable_reservations(db)
-            old = self._bounded_blob(
-                db, "record_reservation_batches", "body", where="WHERE id=?", arguments=(batch_id,)
-            )
-            if old is not None:
-                if old != manifest:
-                    raise ValueError("round reservation batch changed")
-                return self._reservation(db, batch_id)
-            for (kind, key), doc in documents.items():
-                if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
-                    raise ValueError("round journal conflict held")
-                body = canonical_json_bytes(doc)
-                prior = self._obligation(db, kind, key)
-                if prior is not None and prior != doc:
-                    raise ValueError("round reservation identity conflict")
-                retained = self._record(db, kind, key)
-                if retained is not None and (
-                    len(retained) > doc["maximum_bytes"]
-                    or (
-                        doc["value_sha256"] is not None
-                        and sha256_hex(retained) != doc["value_sha256"]
-                    )
-                ):
-                    raise ValueError("retained round record differs from reservation")
-                if prior is None:
-                    db.execute(
-                        "INSERT INTO record_reservations VALUES (?,?,?,?,?)",
-                        (kind, key, doc["maximum_bytes"], doc["value_sha256"], body),
-                    )
-            db.execute("INSERT INTO record_reservation_batches VALUES (?,?)", (batch_id, manifest))
+        if db is not None:
+            return self._reserve_records(db, batch_id, documents, manifest)
+        with self.transaction() as owned:
+            return self._reserve_records(owned, batch_id, documents, manifest)
+
+    def _reserve_records(self, db, batch_id, documents, manifest):
+        self._enable_reservations(db)
+        old = self._bounded_blob(
+            db, "record_reservation_batches", "body", where="WHERE id=?", arguments=(batch_id,)
+        )
+        if old is not None:
+            if old != manifest:
+                raise ValueError("round reservation batch changed")
             return self._reservation(db, batch_id)
+        for (kind, key), doc in documents.items():
+            if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
+                raise ValueError("round journal conflict held")
+            body = canonical_json_bytes(doc)
+            prior = self._obligation(db, kind, key)
+            if prior is not None and prior != doc:
+                raise ValueError("round reservation identity conflict")
+            retained = self._record(db, kind, key)
+            if retained is not None and (
+                len(retained) > doc["maximum_bytes"]
+                or (doc["value_sha256"] is not None and sha256_hex(retained) != doc["value_sha256"])
+            ):
+                raise ValueError("retained round record differs from reservation")
+            if prior is None:
+                db.execute(
+                    "INSERT INTO record_reservations VALUES (?,?,?,?,?)",
+                    (kind, key, doc["maximum_bytes"], doc["value_sha256"], body),
+                )
+        db.execute("INSERT INTO record_reservation_batches VALUES (?,?)", (batch_id, manifest))
+        return self._reservation(db, batch_id)
 
     def _reservation(self, db, batch_id):
         identity_raw = self._bounded_blob(db, "record_reservation_identity", "body", maximum=65536)

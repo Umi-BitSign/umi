@@ -2,19 +2,20 @@
 
 These records preserve recovery inputs. They grant no signing, submission or
 retry authority. An unresolved intent excludes a different attempt, including
-after restart; native reconciliation must be integrated before release.
+after restart; a native result gates each atomic successor reservation.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal
 
 import bittensor as bt
 from pydantic import Field, model_validator
 
+from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain_state import OwnedCompetitionChainObservation
 from .competition_cohort_reward_allocation import CohortRewardProjection
 from .competition_round_journal import RecordReservation, RoundJournal
@@ -26,6 +27,7 @@ Block = Annotated[int, Field(ge=1, le=2**53 - 1)]
 MAX_CONTEXT_BYTES = 32 * 1024**2
 MAX_INTENT_BYTES = 128 * 1024
 MAX_SIGNED_RECORD_BYTES = 2 * MAX_SIGNED_EXTRINSIC_BYTES + 1024
+_END_ISSUER = object()
 
 
 def standing_weight_call(
@@ -162,13 +164,80 @@ class StandingRecoveryInputs:
     metadata: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class StandingTransactionEnd:
+    """Local evidence for reconciling an attempt; not reward authority.
+
+    Expiry leaves the historical outcome unknown. A finalized dispatch receipt
+    establishes success/failure of that call, not current weights or emissions.
+    Serialized records cannot recreate this process-local result.
+    """
+
+    pending: PendingStandingWeight
+    snapshot: FinalizedSnapshotRef
+    reason: Literal["expired_outcome_unknown", "dispatch_succeeded", "dispatch_failed"]
+    receipt_sha256: str | None = None
+    chain_submission_authorized: Literal[False] = False
+    _issuer: object = field(default=None, repr=False, compare=False)
+    _binding: str = field(default="", repr=False, compare=False)
+
+
+def _end_binding(value):
+    return digest(
+        {
+            "intent_sha256": digest(value.pending.intent),
+            "signed_sha256": None if value.pending.signed is None else digest(value.pending.signed),
+            "snapshot": asdict(value.snapshot),
+            "reason": value.reason,
+            "receipt_sha256": value.receipt_sha256,
+            "chain_submission_authorized": value.chain_submission_authorized,
+        }
+    )
+
+
+def _issue_standing_end(pending, snapshot, reason, receipt_sha256=None):
+    result = StandingTransactionEnd(pending, snapshot, reason, receipt_sha256, _issuer=_END_ISSUER)
+    object.__setattr__(result, "_binding", _end_binding(result))
+    return result
+
+
+def _validate_end(value, prior, successor):
+    if (
+        type(value) is not StandingTransactionEnd
+        or value._issuer is not _END_ISSUER
+        or value._binding != _end_binding(value)
+        or value.pending != prior
+        or value.chain_submission_authorized is not False
+        or successor.block < value.snapshot.block_number
+        or (
+            successor.block == value.snapshot.block_number
+            and successor.block_hash != value.snapshot.block_hash
+        )
+        or successor.block <= prior.intent.block
+        or (
+            successor.block < prior.intent.block + prior.intent.mortality_period
+            and successor.nonce <= prior.intent.nonce
+        )
+    ):
+        raise ValueError("standing successor requires native reconciliation of its prior attempt")
+
+
+class StandingWeightSuccessor(StrictProtocolModel):
+    """Atomic lineage only; this record makes no claim about past rewards."""
+
+    schema_: Literal["umi-standing-weight-successor/1"] = Field(alias="schema")
+    prior_intent_sha256: Hex32
+    next_intent_sha256: Hex32
+    prior_signed_extrinsic_hash: BlockHash | None
+
+
 class StandingWeightJournal:
     """Reuse the common journal's locking, atomic writes and capacity reservations.
 
     The selected series and hotkey bind this directory. Capacity may increase
     on reopen without changing the intent. Both unsigned and signed records
-    remain pending until an independent native reconciliation consumer exists.
-    No reset or retirement port is exposed by this storage component.
+    remain pending until native reconciliation allows an atomic successor.
+    Original intents, inputs and signed bytes are never deleted or rewritten.
     """
 
     def __init__(
@@ -215,28 +284,65 @@ class StandingWeightJournal:
 
     def _pending(self):
         keys = self.journal.keys("standing_weight_intent")
-        if len(keys) > 1:
-            raise ValueError("standing journal has multiple unresolved attempts")
         signed_keys = self.journal.keys("standing_weight_signed")
         if any(key not in keys for key in signed_keys):
             raise ValueError("standing signed bytes lost their intent")
+        intents = {}
+        for key in keys:
+            value = self.journal.get("standing_weight_intent", key)
+            intent = self._intent(
+                StandingWeightIntent.model_validate_json(canonical_json_bytes(value))
+            )
+            if digest(intent) != key:
+                raise ValueError("standing intent identity changed")
+            intents[key] = intent
+        signatures = {}
+        for key in signed_keys:
+            signed = StandingSignedWeight.model_validate(
+                self.journal.get("standing_weight_signed", key)
+            )
+            if signed.intent_sha256 != key:
+                raise ValueError("standing signed bytes belong to another intent")
+            signatures[key] = signed
+        successors, children = {}, set()
+        for key in self.journal.keys("standing_weight_successor"):
+            link = StandingWeightSuccessor.model_validate(
+                self.journal.get("standing_weight_successor", key)
+            )
+            if (
+                link.prior_intent_sha256 != key
+                or key not in keys
+                or link.next_intent_sha256 not in keys
+                or link.next_intent_sha256 in children
+                or key == link.next_intent_sha256
+                or intents[link.next_intent_sha256].block <= intents[key].block
+            ):
+                raise ValueError("standing journal successor lineage is invalid")
+            prior_signed = signatures.get(key)
+            prior_hash = None if prior_signed is None else prior_signed.extrinsic_hash
+            if prior_hash != link.prior_signed_extrinsic_hash:
+                raise ValueError("standing journal predecessor signature changed")
+            successors[key] = link.next_intent_sha256
+            children.add(link.next_intent_sha256)
         if not keys:
             return None
-        value = self.journal.get("standing_weight_intent", keys[0])
-        intent = self._intent(StandingWeightIntent.model_validate_json(canonical_json_bytes(value)))
-        if digest(intent) != keys[0]:
-            raise ValueError("standing intent identity changed")
-        for key in {
+        roots = set(keys) - children
+        if len(roots) != 1:
+            raise ValueError("standing journal has multiple unresolved attempts")
+        key, visited = roots.pop(), set()
+        while key in successors and key not in visited:
+            visited.add(key)
+            key = successors[key]
+        if key in visited or len(visited) + 1 != len(keys):
+            raise ValueError("standing journal successor lineage is incomplete or cyclic")
+        intent = intents[key]
+        for object_key in {
             intent.chain_evidence_sha256,
             intent.control_evidence_sha256,
             intent.metadata_sha256,
         }:
-            self._object(key)
-        value = self.journal.get("standing_weight_signed", keys[0])
-        signed = None if value is None else StandingSignedWeight.model_validate(value)
-        if signed is not None and signed.intent_sha256 != keys[0]:
-            raise ValueError("standing signed bytes belong to another intent")
-        return PendingStandingWeight(intent, signed)
+            self._object(object_key)
+        return PendingStandingWeight(intent, signatures.get(key))
 
     def pending(self) -> PendingStandingWeight | None:
         with self.journal.locked():
@@ -269,7 +375,13 @@ class StandingWeightJournal:
         return raw
 
     def reserve(
-        self, intent: StandingWeightIntent, *, chain: bytes, control: bytes, metadata: bytes
+        self,
+        intent: StandingWeightIntent,
+        *,
+        chain: bytes,
+        control: bytes,
+        metadata: bytes,
+        previous: StandingTransactionEnd | None = None,
     ) -> PendingStandingWeight:
         """Commit exact recovery inputs and signature allowance before signing."""
         intent = self._intent(intent)
@@ -289,19 +401,40 @@ class StandingWeightJournal:
         records.extend(
             ("standing_weight_object", name, body) for name, body in sorted(objects.items())
         )
-        specs = [
-            RecordReservation(
-                kind, name, len(canonical_json_bytes(body)), sha256_hex(canonical_json_bytes(body))
-            )
-            for kind, name, body in records
-        ]
-        specs.append(RecordReservation("standing_weight_signed", key, MAX_SIGNED_RECORD_BYTES))
         with self.journal.locked():
             old = self._pending()
-            if old is not None and old.intent != intent:
-                raise ValueError("another standing transaction requires native reconciliation")
-            self.journal.reserve_records("standing-weight:" + key, specs)
-            self.journal.put_many(records)
+            if old is not None:
+                if old.intent == intent:
+                    return old
+                _validate_end(previous, old, intent)
+                prior_key = digest(old.intent)
+                link = StandingWeightSuccessor(
+                    schema="umi-standing-weight-successor/1",
+                    prior_intent_sha256=prior_key,
+                    next_intent_sha256=key,
+                    prior_signed_extrinsic_hash=None
+                    if old.signed is None
+                    else old.signed.extrinsic_hash,
+                )
+                records.append(("standing_weight_successor", prior_key, link))
+            elif previous is not None:
+                raise ValueError("standing successor has no retained predecessor")
+            specs = [
+                RecordReservation(
+                    kind,
+                    name,
+                    len(canonical_json_bytes(body)),
+                    sha256_hex(canonical_json_bytes(body)),
+                )
+                for kind, name, body in records
+            ]
+            specs.append(RecordReservation("standing_weight_signed", key, MAX_SIGNED_RECORD_BYTES))
+            self.journal.put_many(
+                records,
+                index=lambda db: self.journal.reserve_records(
+                    "standing-weight:" + key, specs, db=db
+                ),
+            )
             return self._pending()
 
     def retain_signed(self, intent: StandingWeightIntent, encoded: bytes) -> PendingStandingWeight:

@@ -41,6 +41,7 @@ from .competition_reward_decisions import (
 from .competition_reward_history import OwnedRewardControlHistory
 from .competition_reward_transactions import (
     PendingStandingWeight,
+    StandingTransactionEnd,
     StandingWeightIntent,
     StandingWeightJournal,
     standing_weight_call,
@@ -385,6 +386,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
         chain: OwnedCompetitionChainObservation,
         chain_config: CompetitionChainConfig,
+        previous: StandingTransactionEnd | None = None,
     ) -> PendingStandingWeight:
         """Retain an unsigned intent and recovery inputs before any signing.
 
@@ -401,6 +403,7 @@ class StandingRewardPreparation:
                     chain=chain.evidence,
                     control=control.evidence,
                     metadata=chain.runtime.metadata_bytes,
+                    previous=previous,
                 )
                 # A slow commit may expire the preflight. Its durable intent
                 # remains available for recovery; never start another attempt.
