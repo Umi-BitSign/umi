@@ -30,7 +30,7 @@ from .competition_reward_eligibility import (
     _vector,
 )
 from .competition_reward_eligibility_math import epoch_eligibility
-from .competition_reward_transaction_recovery import _hex, _WeightArchive
+from .competition_weight_archive import WeightStateArchive, _hex
 from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .open_competition import BurnDestination, Registration, digest
@@ -268,7 +268,9 @@ async def review_reward_eligibility(
             != profile.runtime_code_sha256
         ):
             raise ValueError("historical eligibility requires the proved qualified runtime")
-        weights = await run_owned_thread(_WeightArchive, chain, runtime, provider.config, control)
+        weights = await run_owned_thread(
+            WeightStateArchive, chain, runtime, provider.config, control
+        )
         if weights.body.get("registrations_complete") is not True:
             raise ValueError("historical eligibility requires complete registration evidence")
         collector = provider._proofs.with_evidence_rpc(weights)

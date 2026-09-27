@@ -1027,6 +1027,30 @@ signed bytes remain intact; interrupted writes and lost replies cannot leave a
 half-linked successor. Stored lineage selects the current attempt but grants no
 transaction authority. The journal exposes no reset or deletion operation.
 
+For the first migration, `review_legacy_weight_expiry` consumes an original C4
+attempt, weight-state evidence and metadata. It authenticates the historical
+header, runtime and storage proofs, then checks the actual encoded call, signer,
+signature, nonce and mortality. Pinned and executed original runtimes are
+supported. Replay needs no historical state RPC when the original evidence and
+owned ancestry are available, and has no cumulative age or elapsed-time cutoff.
+
+Finalized progress at or beyond the verified death block produces a native
+`LegacyWeightExpiry` for those exact bytes. A live transaction remains pending;
+missing signed bytes cannot establish a drain. Local `applied`, `unknown` or
+`expired_unconsumed_nonce` flags do not bypass this review. The result proves
+only that the original bytes cannot execute again, without claiming whether they
+landed. `validate_legacy_weight_expiry` binds it to the inventory entry, chain and
+validator. Restart replays the original evidence; a serialized result is not a
+capability.
+
+The first activation remains held until the installed migration consumer fences
+the old writer, accounts for its complete transaction inventory and binds that
+handoff to the approved series. Reviewing one attempt does not establish any of
+those conditions, and unsigned intentions still require the original stopped
+writer's recovery protocol. This consumer remains necessary while any C4 writer
+or retained C4 attempt can enter the standing series; remove it only after those
+migration and recovery consumers have retired.
+
 These APIs neither sign nor submit. The execution service must still enforce
 installed-series qualification, prior reward opportunity, migration fencing and
 single-writer ownership before any signing or transmission. Actual reward coverage must be
