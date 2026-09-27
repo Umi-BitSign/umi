@@ -442,14 +442,15 @@ def test_recovery_reuse_rechecks_changed_binding_with_the_same_package_path(adap
             }
         )
     else:
+        identity = directive.release.replay_release_identity.model_copy(
+            update={"umi_revision": "f" * 40}
+        )
         directive = directive.model_copy(
             update={
                 "release": directive.release.model_copy(
                     update={
                         "umi_git_revision": "f" * 40,
-                        "replay_release_identity": directive.release.replay_release_identity.model_copy(
-                            update={"umi_revision": "f" * 40}
-                        ),
+                        "replay_release_identity": identity,
                     }
                 ),
             }
