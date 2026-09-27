@@ -536,4 +536,6 @@ jobs:
             --manifest-path rust/grandpa-finality-observer/Cargo.toml
 
       - name: Execute all conformance fixtures
-        run: uv run --locked pytest -q tests/test_conformance.py
+        env:
+          UMI_TEST_PROOF_BINARY: ${{ github.workspace }}/rust/substrate-proof-verifier/target/release/umi-substrate-proof-verifier
+        run: uv run --locked pytest -q tests/test_conformance.py tests/test_substrate_proof_read_native.py

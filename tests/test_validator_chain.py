@@ -154,7 +154,7 @@ def _collector(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("many", [False, True])
+@pytest.mark.parametrize("many", [False, True, "proof"])
 async def test_native_proof_verification_does_not_block_event_loop(many):
     owner = threading.get_ident()
     observed = []
@@ -165,17 +165,25 @@ async def test_native_proof_verification_does_not_block_event_loop(many):
         return True
 
     verify.verify_many = verify
+
+    def read(**kwargs):
+        verify(**kwargs)
+        return tuple((key, None) for key in kwargs["storage_keys"])
+
+    verify.read_many = read
     collector = _collector(_rpc(), verifier=verify)
     snapshot = FakeFinality().snapshot
-    if many:
+    if many == "proof":
+        await collector.storage_evidence_many_from_proof(snapshot, (b"key",))
+    elif many:
         await collector.storage_evidence_many(snapshot, (b"key",))
     else:
         await collector.storage_evidence(snapshot, b"key")
-    assert len(observed) == 1
+    assert len(observed) == (2 if many == "proof" else 1)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("many", [False, True])
+@pytest.mark.parametrize("many", [False, True, "proof"])
 async def test_native_proof_cancellation_drains_worker_before_return(many):
     entered, release = threading.Event(), threading.Event()
 
@@ -185,13 +193,20 @@ async def test_native_proof_cancellation_drains_worker_before_return(many):
         return True
 
     verify.verify_many = verify
+
+    def read(**kwargs):
+        verify(**kwargs)
+        return tuple((key, None) for key in kwargs["storage_keys"])
+
+    verify.read_many = read
     collector = _collector(_rpc(), verifier=verify)
     snapshot = FakeFinality().snapshot
-    pending = (
-        collector.storage_evidence_many(snapshot, (b"key",))
-        if many
-        else collector.storage_evidence(snapshot, b"key")
-    )
+    if many == "proof":
+        pending = collector.storage_evidence_many_from_proof(snapshot, (b"key",))
+    elif many:
+        pending = collector.storage_evidence_many(snapshot, (b"key",))
+    else:
+        pending = collector.storage_evidence(snapshot, b"key")
     task = asyncio.create_task(pending)
     try:
         for _ in range(1000):
@@ -365,7 +380,8 @@ async def test_storage_multiproof_canonicalizes_keys_and_verifies_all_claims_onc
 
 
 @pytest.mark.asyncio
-async def test_named_storage_batch_decodes_one_shared_multiproof(monkeypatch) -> None:
+@pytest.mark.parametrize("proof_values", [False, True])
+async def test_named_storage_batch_decodes_one_shared_multiproof(monkeypatch, proof_values) -> None:
     base = _rpc()
     base.responses.update(
         {
@@ -387,6 +403,11 @@ async def test_named_storage_batch_decodes_one_shared_multiproof(monkeypatch) ->
         },
     )
     verifier = FakeMultiVerifier()
+
+    def read(**kwargs):
+        return tuple((key, b"value" if key == item_key else None) for key in kwargs["storage_keys"])
+
+    verifier.read_many = read
     monkeypatch.setattr("umi.validator_chain.bittensor_core.Runtime", FakeRuntime)
     collector = _collector(rpc, verifier=verifier)
     snapshot = await collector.finalized_snapshot()
@@ -404,6 +425,7 @@ async def test_named_storage_batch_decodes_one_shared_multiproof(monkeypatch) ->
             StorageReadSpec("Pallet", "OptionalItem"),
             StorageReadSpec("Pallet", "Item", (78,)),
         ),
+        proof_values=proof_values,
     )
 
     by_item = {read.spec.item: read for read in batch.reads}
@@ -411,6 +433,9 @@ async def test_named_storage_batch_decodes_one_shared_multiproof(monkeypatch) ->
     assert by_item["OptionalItem"].decoded_value is None
     assert len(verifier.multi_calls) == 1
     assert len(batch.evidence.proof) == 2
+    assert sum(method == "state_getStorageAt" for method, _ in rpc.calls) == (
+        0 if proof_values else 2
+    )
 
 
 @pytest.mark.asyncio
@@ -640,6 +665,62 @@ async def test_malformed_proof_never_reaches_verifier() -> None:
     with pytest.raises(ValidatorChainError) as caught:
         await collector.storage_evidence(snapshot, b"key")
     assert caught.value.reason_code == "storage_proof_node_invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "unavailable",
+        "changed-key",
+        "empty",
+        "oversized-value",
+        "oversized-total",
+        "non-affirming",
+        "reader-error",
+        "rpc-error",
+    ],
+)
+async def test_proof_value_collection_never_falls_back_or_trusts_a_partial_read(fault):
+    verifier = FakeMultiVerifier()
+
+    def read(**kwargs):
+        assert kwargs["maximum_value_bytes"] == 2
+        assert kwargs["maximum_total_value_bytes"] == 3
+        if fault == "reader-error":
+            raise RuntimeError("reader failure")
+        if fault == "changed-key":
+            return ((b"x", None), (b"b", None))
+        if fault == "empty":
+            return ()
+        if fault == "oversized-value":
+            return ((b"a", b"big"), (b"b", None))
+        if fault == "oversized-total":
+            return ((b"a", b"12"), (b"b", b"34"))
+        return ((b"a", None), (b"b", b""))
+
+    if fault != "unavailable":
+        verifier.read_many = read
+    if fault == "non-affirming":
+        verifier.verify_many = lambda **_kwargs: None
+    rpc = _rpc()
+    if fault == "rpc-error":
+        rpc.responses["state_getReadProof"] = ConnectionError("connection interrupted")
+    collector = _collector(
+        rpc,
+        verifier=verifier,
+        limits=ProofCollectionLimits(maximum_storage_value_bytes=2, maximum_storage_values_bytes=3),
+    )
+    with pytest.raises(ValidatorChainError) as error:
+        await collector.storage_evidence_many_from_proof(FakeFinality().snapshot, (b"a", b"b"))
+    expected = {
+        "unavailable": "storage_proof_reader_unavailable",
+        "rpc-error": "storage_proof_rpc_failed",
+    }.get(fault, "storage_proof_verification_failed")
+    assert error.value.reason_code == expected
+    assert [method for method, _ in rpc.calls] == (
+        [] if fault == "unavailable" else ["state_getReadProof"]
+    )
 
 
 class _FakeWebSocket:

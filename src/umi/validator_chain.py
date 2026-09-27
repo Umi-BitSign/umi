@@ -793,24 +793,7 @@ class FinalizedProofCollector:
     ) -> MultiStorageEvidence:
         """Collect several raw values and authenticate them with one multiproof."""
 
-        if not isinstance(snapshot, FinalizedSnapshotRef):
-            raise TypeError("snapshot must be a FinalizedSnapshotRef")
-        if isinstance(storage_keys, (str, bytes, bytearray)) or not isinstance(
-            storage_keys, Sequence
-        ):
-            raise TypeError("storage_keys must be a sequence")
-        keys = tuple(storage_keys)
-        if not keys:
-            raise ValueError("storage_keys must not be empty")
-        if len(keys) > self._limits.maximum_storage_keys:
-            raise ValidatorChainError("storage_key_count_limit")
-        if any(not isinstance(key, bytes) or not key for key in keys):
-            raise ValueError("storage keys must be non-empty bytes")
-        if any(len(key) > self._limits.maximum_storage_key_bytes for key in keys):
-            raise ValidatorChainError("storage_key_limit")
-        if len(set(keys)) != len(keys):
-            raise ValueError("storage keys must be unique")
-        ordered_keys = tuple(sorted(keys))
+        ordered_keys = self._storage_keys(snapshot, storage_keys)
         key_hexes = tuple("0x" + key.hex() for key in ordered_keys)
 
         try:
@@ -848,6 +831,85 @@ class FinalizedProofCollector:
                     )
                 )
             except (TypeError, ValueError) as error:
+                raise ValidatorChainError("storage_proof_verification_failed") from error
+        except ValidatorChainError:
+            raise
+        except Exception as error:
+            raise ValidatorChainError("storage_proof_rpc_failed") from error
+
+    def _storage_keys(
+        self, snapshot: FinalizedSnapshotRef, storage_keys: Sequence[bytes]
+    ) -> tuple[bytes, ...]:
+
+        if not isinstance(snapshot, FinalizedSnapshotRef):
+            raise TypeError("snapshot must be a FinalizedSnapshotRef")
+        if isinstance(storage_keys, (str, bytes, bytearray)) or not isinstance(
+            storage_keys, Sequence
+        ):
+            raise TypeError("storage_keys must be a sequence")
+        keys = tuple(storage_keys)
+        if not keys:
+            raise ValueError("storage_keys must not be empty")
+        if len(keys) > self._limits.maximum_storage_keys:
+            raise ValidatorChainError("storage_key_count_limit")
+        if any(not isinstance(key, bytes) or not key for key in keys):
+            raise ValueError("storage keys must be non-empty bytes")
+        if any(len(key) > self._limits.maximum_storage_key_bytes for key in keys):
+            raise ValidatorChainError("storage_key_limit")
+        if len(set(keys)) != len(keys):
+            raise ValueError("storage keys must be unique")
+        return tuple(sorted(keys))
+
+    async def storage_evidence_many_from_proof(
+        self, snapshot: FinalizedSnapshotRef, storage_keys: Sequence[bytes]
+    ) -> MultiStorageEvidence:
+        """Read only a multiproof; decode values through the selected verifier.
+
+        This opt-in path requires a helper supporting the proof-read protocol.
+        It never retries an invalid proof against raw RPC claims. The ordinary
+        claim verifier still checks the extracted values when creating evidence.
+        Finality ownership remains the caller's prerequisite, as for other reads.
+        """
+        ordered_keys = self._storage_keys(snapshot, storage_keys)
+        key_hexes = tuple("0x" + key.hex() for key in ordered_keys)
+        read_many = getattr(self._verifier, "read_many", None)
+        verify_many = getattr(self._verifier, "verify_many", None)
+        if not callable(read_many) or not callable(verify_many):
+            raise ValidatorChainError("storage_proof_reader_unavailable")
+        try:
+            proof = await self._read_proof(snapshot, key_hexes)
+
+            def read():
+                values = read_many(
+                    state_root=bytes.fromhex(snapshot.state_root[2:]),
+                    storage_keys=ordered_keys,
+                    proof=proof,
+                    maximum_value_bytes=self._limits.maximum_storage_value_bytes,
+                    maximum_total_value_bytes=self._limits.maximum_storage_values_bytes,
+                )
+                if tuple(key for key, _ in values) != ordered_keys:
+                    raise ValueError("proof reader changed selected keys")
+                claims = tuple(StorageClaim(storage_key=key, value=value) for key, value in values)
+                if any(
+                    claim.value is not None
+                    and len(claim.value) > self._limits.maximum_storage_value_bytes
+                    for claim in claims
+                ):
+                    raise ValueError("proof reader exceeded the value limit")
+                if sum(len(claim.value or b"") for claim in claims) > (
+                    self._limits.maximum_storage_values_bytes
+                ):
+                    raise ValueError("proof reader exceeded the total value limit")
+                return MultiStorageEvidence(
+                    snapshot=snapshot,
+                    claims=claims,
+                    proof=proof,
+                    verifier=verify_many,
+                )
+
+            try:
+                return await run_owned_thread(read)
+            except (TypeError, ValueError, RuntimeError) as error:
                 raise ValidatorChainError("storage_proof_verification_failed") from error
         except ValidatorChainError:
             raise
@@ -923,8 +985,13 @@ class FinalizedProofCollector:
         self,
         runtime: PinnedRuntimeContext,
         specs: Sequence[StorageReadSpec],
+        *,
+        proof_values: bool = False,
     ) -> VerifiedStorageBatch:
         """Construct, multiprove, and decode named values at one runtime snapshot."""
+
+        if type(proof_values) is not bool:
+            raise TypeError("proof_values must be a boolean")
 
         if not isinstance(runtime, PinnedRuntimeContext):
             raise TypeError("runtime must be a PinnedRuntimeContext")
@@ -943,7 +1010,10 @@ class FinalizedProofCollector:
         if len({key for key, _spec in keyed}) != len(keyed):
             raise ValueError("storage read specs resolve to duplicate keys")
         keyed.sort(key=lambda item: item[0])
-        evidence = await self.storage_evidence_many(
+        collect = (
+            self.storage_evidence_many_from_proof if proof_values else self.storage_evidence_many
+        )
+        evidence = await collect(
             runtime.snapshot,
             tuple(key for key, _spec in keyed),
         )

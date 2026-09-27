@@ -41,6 +41,36 @@ public state-version-1 proof for the Aura authority set at Finney's official
 GRANDPA warp checkpoint. Tests verify the original proof and reject changed
 values, missing nodes, and modified nodes.
 
+To extract values without fetching separate RPC claims, use the read protocol:
+
+```json
+{"schema":"umi-substrate-proof-read/1","request_id":"opaque","state_version":1,"state_root":"0x...","keys":["0x..."],"proof":["0x..."],"maximum_value_bytes":65536,"maximum_total_value_bytes":1048576}
+```
+
+Its success response binds the same request ID, root, version and exact ordered
+keys, with proved values (`"0x"` for empty bytes, `null` for absence):
+
+```json
+{"schema":"umi-substrate-proof-values/1","request_id":"opaque","ok":true,"state_version":1,"state_root":"0x...","items":[{"key":"0x...","value":"0x..."}]}
+```
+
+A failed read returns that response schema, request ID, `ok: false` and a bounded
+`error_code`; it never returns partial items. Input limits and strict key ordering
+match the claim protocol. Reads additionally cap each value at 16 MiB and the
+sum of returned values at 32 MiB, including repeated content. Each caller must
+supply positive byte ceilings within those native bounds. The Python adapter
+uses the stricter of caller, local and native limits and drains bounded stdout
+while writing stdin, with one deadline for the entire child process. Old helper
+binaries do not support this protocol; clients fail without falling back.
+
+`FinalizedProofCollector.storage_evidence_many_from_proof` uses one
+`state_getReadProof` call and no separate storage-value RPC. It verifies the
+extracted claims again through the existing evidence constructor. Named runtime
+reads opt in with `storage_reads(..., proof_values=True)`; existing callers keep
+their current path. This does not establish finality, select a runtime or measure
+rewards. Native protocol tests run in the executable-conformance CI job against
+the same built binary as the other conformance fixtures.
+
 LayoutV1 includes large external values as individual raw proof nodes. The
 per-node ceiling is 16 MiB, matching the storage-value ceiling so runtime
 `:code` membership proofs above 2 MiB can be verified. The complete proof is

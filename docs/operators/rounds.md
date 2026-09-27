@@ -799,6 +799,15 @@ configuration before projecting fixed amounts. Package certification, current
 standing control, prior opportunity and transaction authorization remain
 separate execution requirements.
 
+Proof collectors can opt into extracting values directly from a multiproof with
+`storage_evidence_many_from_proof`, or `storage_reads(..., proof_values=True)` for
+named runtime decodes. This needs a pinned helper supporting the
+[proof-read protocol](../../rust/substrate-proof-verifier/README.md). Each batch
+uses one proof RPC, checks every requested key and retains the existing evidence
+verification. Missing or invalid proofs never become absent values or a fallback
+to unverified RPC claims. Current reward providers do not select this path;
+coverage collection, provider budgets and installed qualification remain pending.
+
 `StandingRewardPreparation` connects complete-history selection to native package
 replay. Supply a `StandingRewardManifest` whose digest matches the independently
 selected series. It binds the policy and one terms/catalog selection for every
