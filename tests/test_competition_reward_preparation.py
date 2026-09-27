@@ -690,6 +690,11 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         + series.maximum_proof_lag_blocks
         + series.maximum_transaction_lifetime_blocks
     )
+    variant = getattr(request, "param", "matching")
+    if variant == "journal":
+        # Both adjacent endpoints are after the activation fence. This adds
+        # one block only to the retention/recovery case, not selection tests.
+        end += 1
     # Seed the proved chain row from the native package using the same public
     # projection as a writer, then the pinned pallet's storage conversion.
     from umi.competition_cohort_reward_allocation import project_reward_allocation
@@ -712,7 +717,6 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     )
     weights = dict(zip(projection.uids, projection.weights, strict=True))
     stored = subtensor_stored_weights(tuple(weights.get(i, 0) for i in range(len(members))))
-    variant = getattr(request, "param", "matching")
     row = list(enumerate(stored))
     if variant == "raw_row":
         row = [(i, weights.get(i, 0)) for i in range(len(members))]
@@ -958,3 +962,213 @@ async def test_complete_native_history_package_and_projection_restart_without_co
     assert again.projection == result.projection
     assert again.current.selection == result.current.selection
     assert h.body_requests == list(range(h.old.height, h.end + 1))
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["journal"], indirect=True)
+async def test_native_coverage_retention_retries_and_offline_restart(
+    complete_preparation_case, tmp_path, monkeypatch
+):
+    from umi.competition_reward_coverage import review_reward_coverage
+    from umi.competition_reward_coverage_intervals import RewardCoverageRule, coverage_point
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_eligibility_archive import review_reward_eligibility
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    rule = RewardCoverageRule(
+        schema="umi-reward-coverage-rule/1",
+        series_sha256=digest(c.series),
+        runtime_profile_sha256=digest(h.item.profile),
+        maximum_interval_ms=12000,  # Fixture choice, not an approved production parameter.
+    )
+    selected = dict(expected_rule_sha256=digest(rule))
+    query = dict(
+        activation_sha256=digest(c.active.decision.activation), validator_hotkey=h.validator_hotkey
+    )
+
+    def owner():
+        return StandingRewardPreparation(c.reader, p.store, maximum_promotion_bytes=1_000_000)
+
+    async def history(height):
+        for _ in range(100):
+            try:
+                value = await h.reader.advance(
+                    h.item.provider, through_block=height, maximum_blocks=4096
+                )
+            except HistoricalHeaderRecoveryPending:
+                continue
+            if value.history is not None:
+                return value.history
+        pytest.fail("complete history did not converge")
+
+    StandingRewardPreparation(c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000)
+    preparation_owner = owner()
+    endpoints = []
+    for height in (h.end - 1, h.end):
+        retained = await history(height)
+        control, captured = await current_state(
+            h, retained.tip, validator_hotkey=h.validator_hotkey, eligibility_profile=h.item.profile
+        )
+        # current_state closes its temporary provider. Reopen the native
+        # archive provider without discarding this history owner's prefix.
+        await h.restart()
+        eligibility = await review_reward_eligibility(
+            h.item.provider,
+            control=control.evidence,
+            metadata=captured.chain.runtime.metadata_bytes,
+            chain=captured.chain.evidence,
+            eligibility=captured.evidence,
+            validator_hotkey=h.validator_hotkey,
+            control_hotkey=c.series.control_hotkey,
+            profile=h.item.profile,
+            expected_runtime_profile_sha256=digest(h.item.profile),
+        )
+        endpoint = await review_reward_coverage(
+            preparation_owner,
+            p.package,
+            eligibility=eligibility,
+            history=retained,
+            source=c.source,
+            expected_runtime_profile_sha256=digest(h.item.profile),
+        )
+        assert endpoint.covered
+        endpoints.append(endpoint)
+    left, right = endpoints
+
+    def counts(journal):
+        with journal.journal.transaction() as db:
+            return db.execute("SELECT COUNT(*),SUM(LENGTH(body)) FROM records").fetchone()
+
+    # Capacity errors and interrupted transactions preserve atomicity. No
+    # endpoint, interval or verified total is acknowledged before commit.
+    tiny = RewardCoverageJournal(tmp_path / "tiny", rule, maximum_bytes=1024, **selected)
+    with pytest.raises(ValueError, match="capacity exhausted"):
+        await tiny.credit(left, right)
+    assert counts(tiny) == (0, None)
+    assert await tiny.verified_ms(**query) == 0
+    roomy = RewardCoverageJournal(tmp_path / "tiny", rule, **selected)
+    assert (await roomy.credit(left, right)).credited_ms == 12000
+    assert await roomy.verified_ms(**query) == 12000
+
+    journal = RewardCoverageJournal(tmp_path / "coverage", rule, **selected)
+    original_put = journal.journal.put_many
+
+    def interrupt_before_commit(records):
+        def fail(db):
+            assert db.execute("SELECT COUNT(*) FROM records").fetchone()[0] > 0
+            raise OSError("simulated interrupted commit")
+
+        original_put(records, index=fail)
+
+    with monkeypatch.context() as m:
+        m.setattr(journal.journal, "put_many", interrupt_before_commit)
+        with pytest.raises(OSError, match="interrupted commit"):
+            await journal.credit(left, right)
+    assert counts(journal) == (0, None)
+    assert await journal.verified_ms(**query) == 0
+
+    def lost_acknowledgement(records):
+        original_put(records)
+        raise OSError("simulated lost acknowledgement")
+
+    with monkeypatch.context() as m:
+        m.setattr(journal.journal, "put_many", lost_acknowledgement)
+        with pytest.raises(OSError, match="lost acknowledgement"):
+            await journal.credit(left, right)
+    assert await journal.verified_ms(**query) == 0
+    committed = counts(journal)
+    assert committed[0] > 0
+    result = await journal.credit(left, right)
+    assert result.credited_ms == 12000
+    assert counts(journal) == committed
+    assert await journal.credit(left, right) == result
+    assert await journal.retain_endpoint(left) == result.left
+    assert counts(journal) == committed
+    assert await journal.verified_ms(**query) == 12000
+    assert await journal.interval_keys(limit=1) == (result.key(),)
+    assert await journal.interval_keys(after=result.key(), limit=1) == ()
+
+    # Reopening restores obligations, not trusted totals. Even reading the
+    # stored interval cannot give it native proof provenance.
+    restarted = RewardCoverageJournal(tmp_path / "coverage", rule, **selected)
+    assert await restarted.verified_ms(**query) == 0
+    hint = await restarted.retained_interval(result.key())
+    assert hint == result
+    assert await restarted.verified_ms(**query) == 0
+
+    h.reader = await h.restart()
+    h.reader = h.new_reader(maximum_bytes=64 * 1024**2)
+    c.reader = c.reopen()
+    c.objects.clear()  # Coordinator decisions are available only in retained history.
+    h.offline_through = h.end - 1
+    histories = [await history(height) for height in (h.end - 1, h.end)]
+    h.offline_through = h.end
+    h.rpc_calls.clear()
+    preparation_owner = owner()
+    restored = []
+    for key, retained in zip((hint.left, hint.right), histories, strict=True):
+        restored.append(
+            await restarted.review_endpoint(
+                key,
+                provider=h.item.provider,
+                preparation=preparation_owner,
+                package=p.package,
+                history=retained,
+                source=c.source,
+                profile=h.item.profile,
+            )
+        )
+    assert [coverage_point(e, rule) for e in restored] == [
+        coverage_point(e, rule) for e in endpoints
+    ]
+    assert await restarted.credit(*restored) == result
+    assert await restarted.credit(*restored) == result
+    assert await restarted.verified_ms(**query) == 12000
+    assert counts(restarted) == committed
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+    assert h.body_requests == list(range(h.old.height, h.end + 1))
+
+    # Caller cancellation drains the disk owner before another writer can
+    # acquire its lock. A committed interval remains one interval on retry.
+    cancelled = RewardCoverageJournal(tmp_path / "cancelled", rule, **selected)
+    entered, release = threading.Event(), threading.Event()
+    original_put = cancelled.journal.put_many
+
+    def slow_commit(records):
+        entered.set()
+        assert release.wait(20)
+        original_put(records)
+
+    with monkeypatch.context() as m:
+        m.setattr(cancelled.journal, "put_many", slow_commit)
+        pending = asyncio.create_task(cancelled.credit(*restored))
+        try:
+            assert await asyncio.to_thread(entered.wait, 20)
+            pending.cancel()
+            await asyncio.sleep(0)
+            assert not pending.done()
+            with pytest.raises((ValueError, BlockingIOError)), cancelled.journal.locked():
+                pytest.fail("cancelled disk owner released its lock too soon")
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+    assert await cancelled.verified_ms(**query) == 12000
+    assert await cancelled.credit(*restored) == result
+    assert await cancelled.verified_ms(**query) == 12000
+
+    # Corruption is a hold, not permission to replace evidence or reset the
+    # accounting journal. This operates only on the isolated fixture database.
+    with restarted.journal.transaction() as db:
+        sha, raw = db.execute(
+            "SELECT id,body FROM records WHERE kind='coverage_object' LIMIT 1"
+        ).fetchone()
+        db.execute("DELETE FROM records WHERE kind='coverage_object' AND id=?", (sha,))
+    damaged = counts(restarted)
+    with pytest.raises(ValueError, match="evidence object is missing"):
+        await restarted.credit(*restored)
+    assert counts(restarted) == damaged
+    with restarted.journal.transaction() as db:
+        db.execute("INSERT INTO records VALUES ('coverage_object',?,?)", (sha, raw))
+    assert counts(restarted) == committed
+    assert await restarted.credit(*restored) == result

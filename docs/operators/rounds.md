@@ -831,10 +831,30 @@ matching row still needs eligibility. The returned endpoint binds the series,
 activation, manifest requirement, allocation, runtime profile and original proofs.
 Altered or serialized success records cannot replace native review.
 
-An endpoint describes one finalized block. Durable observation retention,
-adjacent interval accounting, deduplication and minimum certification remain
-unfinished. No elapsed time or payment is credited by this API. Installed
-execution remains unqualified.
+An endpoint describes one finalized block. `RewardCoverageJournal` retains its
+original control, metadata, weight and eligibility bytes using the existing
+lossless evidence store. Packages, promotion assets and complete control history
+remain in their respective stores. All are required for recovery.
+
+`credit` accepts two native endpoints with adjacent finalized ancestry and
+increasing chain timestamps. Both must cover the same activation, allocation,
+validator and selected proof domain. It counts the smaller of elapsed chain time
+and the explicitly selected interval cap. There is no default cap or minimum.
+Unknown or uncovered intervals cannot contribute time. A changed recipient
+projection is allowed only when both endpoints independently prove the correct
+projection for that root.
+
+Proofs and interval records commit together. Stable block identities deduplicate
+retries, including lost acknowledgements; storage exhaustion preserves existing
+records for recovery after capacity growth. On restart, totals begin unverified.
+Page through retained interval hints, replay each endpoint's original evidence
+with `review_endpoint`, then call `credit` to rebuild the verified set. Reading a
+stored total or interval cannot substitute for native replay. The selected rule
+digest must match on reopening, and damaged evidence holds without replacement.
+
+Minimum-opportunity certification, approved runtime and timing parameters,
+automatic replay scheduling and installed execution remain unqualified. These
+local interval totals establish neither emission payments nor submission authority.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and
 original admission but do not exclude overwritten control writes. Installed
