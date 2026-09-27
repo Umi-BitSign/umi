@@ -433,15 +433,16 @@ def test_future_reward_validity_may_overlap_next_cutoff_without_changing_work_ti
     for cycle in range(6):
         actual = migrated.public_launch.schedule_for_cycle(cycle)
         unchanged = previous.schedule_for_cycle(cycle + 1)
-        assert actual.model_copy(
-            update={"round_valid_through_block": unchanged.round_valid_through_block}
-        ) == unchanged
+        assert (
+            actual.model_copy(
+                update={"round_valid_through_block": unchanged.round_valid_through_block}
+            )
+            == unchanged
+        )
         assert actual.round_valid_through_block > (
             migrated.public_launch.schedule_for_cycle(cycle + 1).evidence_cutoff_block
         )
-    restarted = CompetitionStore(
-        migrated.directory, setup.policy, public_launch=replacement
-    )
+    restarted = CompetitionStore(migrated.directory, setup.policy, public_launch=replacement)
     assert restarted.public_launch == replacement
 
 

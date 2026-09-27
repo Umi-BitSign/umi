@@ -481,8 +481,11 @@ def _package_reuse_key(
         for name in _PAYLOAD_NAMES:
             item = declared[name]
             body = _read_sealed_file(
-                root_fd, name, maximum_bytes=_limit_for(name, limits),
-                expected_size=item.size_bytes, expected_sha256=item.sha256,
+                root_fd,
+                name,
+                maximum_bytes=_limit_for(name, limits),
+                expected_size=item.size_bytes,
+                expected_sha256=item.sha256,
             )
             fingerprints.append((name, len(body), item.sha256))
             total += len(body)
@@ -490,8 +493,11 @@ def _package_reuse_key(
         if before != _directory_identity(root_fd):
             raise ValueError("package directory changed while it was read")
     return (
-        expected_package_sha256, expected_policy_sha256,
-        canonical_json_bytes(release), canonical_json_bytes(limits), tuple(fingerprints),
+        expected_package_sha256,
+        expected_policy_sha256,
+        canonical_json_bytes(release),
+        canonical_json_bytes(limits),
+        tuple(fingerprints),
     ), total
 
 

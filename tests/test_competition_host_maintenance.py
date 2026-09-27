@@ -37,15 +37,23 @@ def _approval(staged):
 def test_maintenance_authenticates_new_host_without_rewriting_original_receipt(staged):
     receipt, approval = _approval(staged)
     before = canonical_json_bytes(receipt)
-    assert verify_host_maintenance(
-        canonical_json_bytes(approval), config=staged.config, receipt=receipt
-    ) == staged.signed
+    assert (
+        verify_host_maintenance(
+            canonical_json_bytes(approval), config=staged.config, receipt=receipt
+        )
+        == staged.signed
+    )
     assert canonical_json_bytes(receipt) == before
 
 
-@pytest.mark.parametrize("field", [
-    "config_sha256", "installation_receipt_sha256", "original_host_manifest_sha256",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "config_sha256",
+        "installation_receipt_sha256",
+        "original_host_manifest_sha256",
+    ],
+)
 def test_maintenance_rejects_wrong_installation(staged, field):
     receipt, approval = _approval(staged)
     approval = approval.model_copy(update={field: "c" * 64})
@@ -60,8 +68,8 @@ def test_maintenance_still_requires_release_authority_signature(staged):
     body = approval.model_dump(mode="json", by_alias=True)
     signature = body["signed_host"]["signatures"][0]["signature"]
     body["signed_host"]["signatures"][0]["signature"] = (
-        ("0" if signature[0] != "0" else "1") + signature[1:]
-    )
+        "0" if signature[0] != "0" else "1"
+    ) + signature[1:]
     with pytest.raises(ValueError):
         verify_host_maintenance(canonical_json_bytes(body), config=staged.config, receipt=receipt)
 

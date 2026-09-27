@@ -100,15 +100,27 @@ def test_reuse_preserves_release_policy_and_capacity_checks(
     with package_verification_session():
         _load(package_case, policy, package_limits, release_identity)
         with pytest.raises(ValueError):
-            _load(package_case, policy, package_limits, release_identity,
-                  expected_policy_sha256="f" * 64)
+            _load(
+                package_case,
+                policy,
+                package_limits,
+                release_identity,
+                expected_policy_sha256="f" * 64,
+            )
         with pytest.raises(ValueError):
-            _load(package_case, policy, package_limits,
-                  release_identity.model_copy(update={"umi_revision": "1" * 40}))
+            _load(
+                package_case,
+                policy,
+                package_limits,
+                release_identity.model_copy(update={"umi_revision": "1" * 40}),
+            )
         with pytest.raises(ValueError):
-            _load(package_case, policy,
-                  package_limits.model_copy(update={"maximum_evidence_bytes": 1}),
-                  release_identity)
+            _load(
+                package_case,
+                policy,
+                package_limits.model_copy(update={"maximum_evidence_bytes": 1}),
+                release_identity,
+            )
 
 
 def test_small_cache_falls_back_without_rejecting_valid_work(
@@ -127,8 +139,10 @@ def test_failed_verification_is_not_remembered(
 ):
     original = package._load_competition_package
     with package_verification_session():
+
         def fail(*args, **kwargs):
             raise ValueError("injected failure")
+
         monkeypatch.setattr(package, "_load_competition_package", fail)
         with pytest.raises(ValueError, match="injected"):
             _load(package_case, policy, package_limits, release_identity)

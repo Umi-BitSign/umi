@@ -26,9 +26,7 @@ TOKEN = "private-example-token"
 
 
 @pytest.mark.parametrize("routed", [False, True])
-async def test_stalled_first_address_does_not_consume_provider_timeout(
-    route, monkeypatch, routed
-):
+async def test_stalled_first_address_does_not_consume_provider_timeout(route, monkeypatch, routed):
     """Race DNS addresses before giving up a provider; send the request only once."""
     import socket
 
@@ -46,8 +44,10 @@ async def test_stalled_first_address_does_not_consume_provider_timeout(
 
         async def resolve(host, selected_port, *args, **kwargs):
             if host == "rpc-address-test.invalid":
-                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))
-                        for ip in ("127.0.0.2", "127.0.0.1")]
+                return [
+                    (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))
+                    for ip in ("127.0.0.2", "127.0.0.1")
+                ]
             return await original_resolve(host, selected_port, *args, **kwargs)
 
         async def dial(errors, info, local_addresses=None):
@@ -65,12 +65,14 @@ async def test_stalled_first_address_does_not_consume_provider_timeout(
         if routed:
             private = rpc_transport._PrivateConnect
             monkeypatch.setattr(
-                rpc_transport, "_PrivateConnect",
+                rpc_transport,
+                "_PrivateConnect",
                 lambda endpoint, **kw: private(url, **kw),
             )
             endpoint = PRIMARY
         else:
             endpoint = url
+
         async def exchange():
             async with rpc_transport.websocket_connect(endpoint, proxy=None) as ws:
                 await ws.send("one request")
@@ -125,9 +127,7 @@ def test_routes_are_opt_in_and_do_not_send_headers_to_backups(route, monkeypatch
     assert all(c[1]["max_size"] == 123 and c[1]["proxy"] is None for c in calls)
     monkeypatch.delenv(rpc_transport.CONFIG_ENV)
     rpc_transport.websocket_connect(PRIMARY, max_size=12)
-    assert calls[-1] == (
-        PRIMARY, {"max_size": 12, "happy_eyeballs_delay": 0.25, "interleave": 1}
-    )
+    assert calls[-1] == (PRIMARY, {"max_size": 12, "happy_eyeballs_delay": 0.25, "interleave": 1})
 
 
 @pytest.mark.parametrize("status", [301, 307, 401, 429, 503])
