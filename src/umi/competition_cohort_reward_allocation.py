@@ -11,6 +11,11 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .competition_chain import CompetitionChainConfig
+from .competition_chain_state import (
+    OwnedCompetitionChainObservation,
+    validate_owned_weight_observation,
+)
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_quality_signing import CohortQualityManifest, review_quality_manifest
 from .competition_cohort_service_allocation import RawWeight, ServiceRecipientAmount
@@ -164,6 +169,45 @@ class CohortRewardProjection(StrictProtocolModel):
     uids: tuple[int, ...]
     weights: tuple[RawWeight, ...]
     chain_submission_authorized: Literal[False] = False
+
+
+def project_owned_reward_allocation(
+    allocation: CohortRewardAllocation,
+    observation: OwnedCompetitionChainObservation,
+    policy: CompetitionPolicy,
+    *,
+    chain_config: CompetitionChainConfig,
+) -> CohortRewardProjection:
+    """Project against a fresh, complete registry from the selected proof owner.
+
+    The execution consumer must independently replay the allocation's certificate,
+    current standing control and transaction authority. This only verifies the
+    registration input to the fixed-amount projection.
+    """
+    validate_owned_weight_observation(observation)
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    chain_config = CompetitionChainConfig.model_validate_json(canonical_json_bytes(chain_config))
+    if (
+        chain_config.policy_sha256 != digest(policy)
+        or observation.chain_config_sha256 != digest(chain_config)
+        or observation.registrations_complete is not True
+        or tuple(r.uid for r in observation.registrations)
+        != tuple(range(observation.registered_uid_count))
+    ):
+        raise ValueError("reward projection requires the selected complete registration proof")
+    snapshot = RegistrationSnapshot(
+        network="finney",
+        netuid=78,
+        block=observation.block,
+        block_hash=observation.block_hash,
+        registrations=observation.registrations,
+        burn_destination=observation.burn_destination,
+    )
+    result = project_reward_allocation(
+        allocation, snapshot, policy, current_block=observation.block
+    )
+    validate_owned_weight_observation(observation)
+    return result
 
 
 def project_reward_allocation(

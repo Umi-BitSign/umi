@@ -774,6 +774,21 @@ The projection checks snapshot freshness and shape. Its caller must independentl
 verify current registration, burn identity and standing control; neither the
 allocation nor projection grants transaction authority.
 
+`FinalizedCompetitionWeightProvider.collect_registered_weights` discovers the
+complete current registry alongside the validator's nonce, permit and weight
+state. It proves `SubnetworkN`, every `Keys` entry in that bounded UID domain and
+each inverse `Uids` mapping against the same finalized root. Missing entries,
+duplicates, inconsistent mappings and interrupted proofs prevent a result;
+they never become inferred recipient absence. The ordinary `collect_weights`
+path still verifies only the supplied recipients.
+
+`project_owned_reward_allocation` requires that complete, fresh observation and
+the host's independently selected chain configuration and policy. It rejects
+partial observations, altered evidence and observations from another proof
+configuration before projecting fixed amounts. Package certification, current
+standing control, prior opportunity and transaction authorization remain
+separate execution requirements.
+
 ### Participation admission
 
 The opt-in recoverable-cohort implementation has a durable admission queue and

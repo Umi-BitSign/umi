@@ -210,6 +210,7 @@ class OwnedCompetitionChainObservation:
     runtime: PinnedRuntimeContext = field(repr=False)
     evidence: bytes = field(repr=False)
     burn_destination: BurnDestination | None = None
+    registrations_complete: bool = False
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
 
@@ -645,7 +646,28 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             timeout=self.config.collection_timeout_seconds,
         )
 
-    async def _collect_weights_locked(self, hotkey, recipients, anchor):
+    async def collect_registered_weights(
+        self, validator_hotkey: str
+    ) -> OwnedCompetitionChainObservation:
+        """Discover every current registration along with the validator's state.
+
+        Prove the bounded UID domain and both mapping directions at one root.
+        This permits a consumer to distinguish absence from an omitted recipient;
+        it does not authorize weights or select a reward allocation.
+        """
+        if self._closed:
+            raise ValueError("weight provider is closed")
+        _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+        return await wait_for_owned(
+            self._collect_weights_locked(
+                _hotkey(validator_hotkey), (), None, complete_registrations=True
+            ),
+            timeout=self.config.collection_timeout_seconds,
+        )
+
+    async def _collect_weights_locked(
+        self, hotkey, recipients, anchor, *, complete_registrations=False
+    ):
         async with self._lock:
             if self._closed:
                 raise ValueError("weight provider is closed")
@@ -722,6 +744,33 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 ):
                     raise ValueError("validator/recipient mapping collision")
                 all_registrations[item.uid] = item
+            batches = [base]
+            if complete_registrations:
+                keys = await self._weight_read(
+                    runtime,
+                    tuple(
+                        StorageReadSpec("SubtensorModule", "Keys", (78, i))
+                        for i in range(registered_uid_count)
+                    ),
+                )
+                batches.append(keys)
+                kv = {read.spec: read.decoded_value for read in keys.reads}
+                discovered = {
+                    i: Registration(
+                        uid=i,
+                        hotkey=_hotkey(kv[StorageReadSpec("SubtensorModule", "Keys", (78, i))]),
+                    )
+                    for i in range(registered_uid_count)
+                }
+                if len({account_id32(r.hotkey) for r in discovered.values()}) != len(discovered):
+                    raise ValueError("duplicate registration hotkey")
+                for required in all_registrations.values():
+                    actual = discovered.get(required.uid)
+                    if actual is None or account_id32(actual.hotkey) != account_id32(
+                        required.hotkey
+                    ):
+                        raise ValueError("recipient or validator registration changed")
+                all_registrations = discovered
             mapping_specs = tuple(
                 spec
                 for item in sorted(all_registrations.values(), key=lambda entry: entry.uid)
@@ -729,23 +778,27 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     StorageReadSpec("SubtensorModule", "Keys", (78, item.uid)),
                     StorageReadSpec("SubtensorModule", "Uids", (78, item.hotkey)),
                 )
+                if not complete_registrations or spec.item == "Uids"
             )
             # Maximum 512 mapping keys, plus the row in a separate proof batch.
             mappings = await self._weight_read(runtime, mapping_specs)
+            batches.append(mappings)
             mv = {read.spec: read.decoded_value for read in mappings.reads}
             for item in all_registrations.values():
                 if (
-                    account_id32(
+                    not complete_registrations
+                    and account_id32(
                         _hotkey(mv[StorageReadSpec("SubtensorModule", "Keys", (78, item.uid))])
                     )
                     != account_id32(item.hotkey)
-                    or _uint(mv[StorageReadSpec("SubtensorModule", "Uids", (78, item.hotkey))], 255)
-                    != item.uid
-                ):
+                ) or _uint(
+                    mv[StorageReadSpec("SubtensorModule", "Uids", (78, item.hotkey))], 255
+                ) != item.uid:
                     raise ValueError("recipient or validator registration changed")
             row_batch = await self._weight_read(
                 runtime, (StorageReadSpec("SubtensorModule", "Weights", (78, uid)),)
             )
+            batches.append(row_batch)
             raw_row = row_batch.reads[0].decoded_value
             if not isinstance(raw_row, (list, tuple)) or len(raw_row) > 256:
                 raise ValueError("invalid proven weight row")
@@ -798,8 +851,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                             ],
                             "proof": ["0x" + node.hex() for node in batch.evidence.proof],
                         }
-                        for batch in (base, mappings, row_batch)
+                        for batch in batches
                     ],
+                    **({"registrations_complete": True} if complete_registrations else {}),
                     "pending_commitment_absence_proven": False,
                 }
             )
@@ -835,6 +889,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 burn_destination=verified_model_burn_destination(
                     self.policy, by_spec, tuple(all_registrations.values())
                 ),
+                registrations_complete=complete_registrations,
                 captured_monotonic_ns=time.monotonic_ns(),
                 expires_monotonic_ns=time.monotonic_ns()
                 + max(0, block.timestamp_ms + self.config.maximum_head_age_ms - self._now_ms())
