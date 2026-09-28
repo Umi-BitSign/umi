@@ -25,7 +25,9 @@ from .protocol import canonical_json_bytes
 from .validator_supervisor import ValidatorSupervisorConfig
 
 HOST_BUNDLE_MAGIC = b"UMI-SUCCESSOR-HOST-BUNDLE-V1\0"
-MAX_HOST_STAGE_SLOTS = 8
+# Retain installed and rollback runtimes across several cohorts without pruning
+# stages that still have service or recovery consumers.
+MAX_HOST_STAGE_SLOTS = 32
 _CHUNK_BYTES = 1024 * 1024
 
 
