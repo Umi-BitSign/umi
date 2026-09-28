@@ -12,8 +12,12 @@ import pytest
 from umi import competition_cohort_review_boot as boot
 from umi import competition_cohort_review_cli as cli
 from umi.competition_cohort_admission_journal import CohortAdmissionSignerConfig
+from umi.competition_cohort_benchmark_host import BenchmarkHostConfig
+from umi.competition_cohort_execution_journal import CohortExecutionConfig
 from umi.competition_cohort_intake import CohortIntakeBinding
 from umi.competition_cohort_model_review import ModelReviewConfig
+from umi.competition_cohort_order_inbox import CohortOrderInboxConfig
+from umi.competition_cohort_order_signer import CohortOrderSignerConfig
 from umi.competition_cohort_progress_signer import CohortProgressSignerConfig
 from umi.competition_cohort_review_config import PhaseReviewServiceConfig, load_phase_review_config
 from umi.competition_cohort_service_review import ServiceReviewConfig
@@ -146,6 +150,86 @@ def with_models(config):
             )
         )
     )
+
+
+def with_benchmark(config):
+    config = with_models(config)
+    common = dict(
+        policy_sha256=digest(config.policy),
+        signer=config.signing.signer,
+        cohorts=config.signing.cohorts,
+    )
+    base = config.signing.directory
+    benchmark = BenchmarkHostConfig(
+        schema="umi-cohort-benchmark-host/1",
+        directory=base + "-benchmark",
+        orders=CohortOrderSignerConfig(
+            schema="umi-cohort-order-signer-config/1", directory=base + "-orders", **common
+        ),
+        inbox=CohortOrderInboxConfig(
+            schema="umi-cohort-order-inbox-config/1", directory=base + "-inbox", **common
+        ),
+        execution=CohortExecutionConfig(
+            schema="umi-cohort-execution-config/1", directory=base + "-execution", **common
+        ),
+        archive_directory=config.model_signing.archive_directory,
+        videos_directory=base + "-videos",
+        workspace_directory=base + "-workspace",
+        request_export_directory=base + "-exports",
+    )
+    return PhaseReviewServiceConfig.model_validate_json(
+        canonical_json_bytes(
+            config.model_copy(
+                update={"schema_": "umi-cohort-phase-review-service/5", "benchmark": benchmark}
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize("fault", ["missing", "version", "signer", "scope", "overlap", "archive"])
+def test_benchmark_host_binds_orders_execution_and_private_stores(selected, fault):
+    c = with_benchmark(selected.config)
+    if fault == "missing":
+        c = c.model_copy(update={"benchmark": None})
+    elif fault == "version":
+        c = c.model_copy(update={"schema_": "umi-cohort-phase-review-service/4"})
+    else:
+        benchmark = c.benchmark
+        if fault in ("signer", "scope"):
+            changes = {"signer": c.owner_hotkey} if fault == "signer" else {"cohorts": ()}
+            benchmark = benchmark.model_copy(
+                update={"execution": benchmark.execution.model_copy(update=changes)}
+            )
+        elif fault == "overlap":
+            benchmark = benchmark.model_copy(update={"videos_directory": c.signing.directory})
+        else:
+            benchmark = benchmark.model_copy(
+                update={
+                    "directory": c.model_signing.archive_directory,
+                    "archive_directory": c.signing.directory + "-other-archive",
+                }
+            )
+        c = c.model_copy(update={"benchmark": benchmark})
+    with pytest.raises(ValueError):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+async def test_benchmark_boot_routes_exclusive_execution_and_restart(selected, providers):
+    c = with_benchmark(selected.config)
+    for _ in range(2):
+        async with boot.phase_review_app(c) as app:
+            assert app.state.benchmark is not None
+            with pytest.raises(BlockingIOError):
+                os.close(lock_private_file(Path(c.benchmark.directory) / "service.lock"))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://review.example"
+            ) as client:
+                for path in ("votes/lookup", "votes/attest", "inbox/lookup", "inbox/accept"):
+                    assert (
+                        await client.post("/internal/cohorts/orders/" + path, json={})
+                    ).status_code == 401
+    assert providers.events.count("started") == providers.events.count("closed") == 2
+    os.close(lock_private_file(Path(c.benchmark.directory) / "service.lock"))
 
 
 @pytest.mark.parametrize("fault", ["missing", "version", "signer", "policy", "tracks", "overlap"])
@@ -464,13 +548,24 @@ async def test_failed_startup_closes_provider_and_releases_lease(
     os.close(lock_private_file(Path(selected.config.signing.directory) / "service.lock"))
 
 
-async def test_real_loopback_listener_starts_and_stops_with_owned_resources(selected, providers):
+@pytest.mark.parametrize("benchmark", [False, True])
+async def test_real_loopback_listener_starts_and_stops_with_owned_resources(
+    selected, providers, benchmark, monkeypatch
+):
     import socket
 
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    config = selected.config.model_copy(update={"listen_port": port})
+    config = (with_benchmark(selected.config) if benchmark else selected.config).model_copy(
+        update={"listen_port": port}
+    )
+    if benchmark:
+
+        async def unavailable(self):
+            raise OSError("temporary finality outage")
+
+        monkeypatch.setattr(providers.provider, "collect", unavailable)
     stop = asyncio.Event()
     task = asyncio.create_task(boot.run_phase_review_service(config, stop))
     try:
@@ -491,6 +586,11 @@ async def test_real_loopback_listener_starts_and_stops_with_owned_resources(sele
 
             assert (await asyncio.wait_for(request(), 5)).status_code == 401
             assert "closed" not in providers.events
+            if benchmark:
+                # The actual configured workers start after listener startup,
+                # even with no future orders or current chain observation.
+                await asyncio.sleep(0.35)
+                assert not task.done()
     finally:
         stop.set()
         await asyncio.wait_for(task, 5)
@@ -529,12 +629,14 @@ async def test_host_drains_listener_before_provider_and_lease(
 
     class Server:
         should_exit = False
+        started = False
 
         def __init__(self, config):
             assert config.timeout_graceful_shutdown is None
             assert not config.access_log
 
         async def serve(self):
+            self.started = True
             entered.set()
             if failure == "listener":
                 return

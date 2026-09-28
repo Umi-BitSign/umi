@@ -31,6 +31,7 @@ from .competition_cohort_intake_export import IntakeReviewExporter
 from .competition_cohort_intake_review import NativeIntakeProgressSource
 from .competition_cohort_intake_review_http import intake_review_routes
 from .competition_cohort_lifecycle_host import LifecycleHost
+from .competition_cohort_order_host import CohortOrderHost
 from .competition_cohort_preparation_export import PreparationReviewExporter
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_review_http import preparation_review_routes
@@ -182,6 +183,7 @@ async def admission_owner_app(
         app.state.finality_provider = provider
         app.state.lifecycle = None
         app.state.dispatch = None
+        app.state.orders = None
         if service_host is not None:
             if service_host.preparation is not preparation or service_host.provider is not provider:
                 raise ValueError("phase control requires the same owned admission and finality")
@@ -202,6 +204,8 @@ async def admission_owner_app(
                     clip_token,
                 )
                 app.include_router(service_work_routes(app.state.dispatch, token=token))
+            if service_host.config.orders is not None:
+                app.state.orders = CohortOrderHost(service_host, client, credentials)
         yield app
 
 
@@ -256,6 +260,8 @@ async def run_admission_owner(
                     workers.append(asyncio.create_task(app.state.lifecycle.run(stop)))
                 if app.state.dispatch is not None:
                     workers.append(asyncio.create_task(app.state.dispatch.run(stop)))
+                if app.state.orders is not None:
+                    workers.append(asyncio.create_task(app.state.orders.run(stop)))
                 logger.info("cohort_admission_owner_ready config_sha256=%s", digest(config))
             await asyncio.wait((serving, stopping, *workers), return_when=asyncio.FIRST_COMPLETED)
             for task in (serving, *workers):

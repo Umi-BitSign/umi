@@ -44,7 +44,11 @@ def main(argv=None):
                 )
             )
             return
-        for name in ("umi.competition_cohort_review_boot", "umi.competition.progress"):
+        for name in (
+            "umi.competition_cohort_review_boot",
+            "umi.competition_cohort_benchmark_host",
+            "umi.competition.progress",
+        ):
             logger = logging.getLogger(name)
             loggers.append((logger, logger.level, logger.propagate))
             logger.addHandler(handler)

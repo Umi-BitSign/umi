@@ -1550,10 +1550,40 @@ The resulting preparation certificate binds the exact round used by the roster
 and order consumers. It contains no reference labels or weight authority.
 
 These review ports run against the intake owner's configured stores. Remote
-reviewers need authenticated exports; they must not inspect another host's live
-SQLite database. Fixed service wiring and peer delivery for preparation
-certification, automatic request closure/reveal, and settlement-input publication
-remain integration requirements for an unattended cohort.
+reviewers use authenticated original exports and their own proof archives; they
+must not inspect another host's live SQLite database. The admission owner starts
+the configured phase controllers, rest gate and accepted-service dispatch.
+Installed private replication, combined request readiness and complete cohort
+qualification remain required before launch.
+
+Service admission configuration version 7 adds `orders`, an
+`umi-cohort-order-host/1` selection. Its queue binds the same policy, cohorts and
+independent reviewers as the admission owner. After certified preparation it
+derives one order for every accepted participant from the original incumbent,
+pinned CPU runtime and committed suite. Orders contain case IDs, video hashes
+and strata; reference labels stay in the private source store. A durable complete
+roster marker is published only after every original order is retained. Partial
+selection resumes unchanged; delivery proceeds independently through private
+reviewer HTTP routes and acknowledged evaluator inboxes.
+
+Phase review configuration version 5 adds `benchmark`, an
+`umi-cohort-benchmark-host/1` selection with order-signing, inbox and execution
+journals; model/video archives; scratch storage; and completion-export storage.
+The selected model archive may be the exact archive used by model review. All
+other state, scratch, export and credential paths remain disjoint. Configure the
+same execution selection in settlement so it verifies this evaluator's original
+runs. Native CPU execution and completion exports start after listener startup
+and drain before the service releases its key, finality provider and process
+locks. Polling uses bounded batches and concurrency; a slow or unavailable peer
+leaves the original work pending without a cohort deadline.
+
+The private `/internal/cohorts/orders/votes/{lookup,attest}` and
+`/internal/cohorts/orders/inbox/{lookup,accept}` POST routes require the reviewer
+credential. They expose bounded original votes and receipts; a lost HTTP reply
+can recover the same acknowledgement without signing or executing again.
+They do not publish scores or authorize weights. Endpoint benchmarks also need
+the endpoint transport/retirement worker and original signed responses: CPU
+comparator completion alone cannot produce an endpoint completion certificate.
 
 When the original header was skipped or the reviewer was offline, admission
 review reconstructs it from that reviewer's nearest retained finalized

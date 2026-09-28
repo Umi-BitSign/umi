@@ -221,7 +221,13 @@ class CohortExecutionWorker:
                         assignment = await run_owned_thread(self.inbox.assignment, slot)
                         result = await self.executor.advance(assignment)
                         return slot, "complete" if result is not None else "progress", ""
-                    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                    except (
+                        OSError,
+                        ValueError,
+                        RuntimeError,
+                        sqlite3.Error,
+                        asyncio.TimeoutError,
+                    ) as error:
                         return slot, "pending", type(error).__name__
 
             tasks = [asyncio.create_task(one(slot)) for slot in slots]
@@ -259,7 +265,13 @@ class CohortExecutionWorker:
                     return
                 try:
                     result = task.result()
-                except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                except (
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                    sqlite3.Error,
+                    asyncio.TimeoutError,
+                ) as error:
                     result = {
                         "status": "cohort_execution_pending",
                         "last_retry_type": type(error).__name__,

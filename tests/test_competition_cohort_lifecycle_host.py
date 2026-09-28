@@ -13,6 +13,8 @@ import umi.competition_cohort_admission_host as boot
 from umi.competition_cohort_clip_delivery import ClipDeliveryConfig
 from umi.competition_cohort_dispatch_host import ServiceDispatchConfig, ServiceDispatchHost
 from umi.competition_cohort_lifecycle_host import LifecycleHostConfig
+from umi.competition_cohort_order_host import OrderHostConfig
+from umi.competition_cohort_order_queue import CohortOrderQueueConfig
 from umi.competition_cohort_phase_vote_http import phase_vote_routes
 from umi.competition_cohort_readiness import intake_readiness
 from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver, RequestReadiness
@@ -203,9 +205,11 @@ async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(ho
         assert max(h.calls.values()) == 1
 
 
-@pytest.mark.parametrize("dispatch_enabled", [False, True])
+@pytest.mark.parametrize(
+    "dispatch_enabled, orders_enabled", [(False, False), (True, False), (True, True)]
+)
 async def test_owner_service_starts_and_drains_configured_lifecycle(
-    host, monkeypatch, tmp_path, chain_config, dispatch_enabled
+    host, monkeypatch, tmp_path, chain_config, dispatch_enabled, orders_enabled
 ):
     o, h = host, host.h
     for worker in h.admissions:
@@ -258,6 +262,27 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(
             )
 
         monkeypatch.setattr(boot, "start_service_dispatch", start)
+    if orders_enabled:
+        from umi.open_competition import identity
+
+        orders = OrderHostConfig(
+            schema="umi-cohort-order-host/1",
+            queue=CohortOrderQueueConfig(
+                schema="umi-cohort-order-queue-config/1",
+                directory=str(tmp_path / "orders"),
+                policy_sha256=digest(h.intake.policy),
+                cohorts=h.intake.config.cohorts,
+                reviewers=tuple(sorted((p.signer for p in owner.reviewers), key=identity)),
+            ),
+            poll_seconds=1,
+        )
+        o.service.config = ServiceAdmissionHostConfig.model_validate_json(
+            canonical_json_bytes(
+                o.service.config.model_copy(
+                    update={"schema_": "umi-cohort-service-admission-host/7", "orders": orders}
+                )
+            )
+        )
     server_type, apps = boot._Server, []
 
     def server(config):
@@ -288,6 +313,9 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(
     try:
         control = await asyncio.wait_for(reaches_preparation(), timeout=30)
         assert control.nodes[h.cohort].request_start is control.gate
+        if orders_enabled:
+            assert apps[0].state.orders is not None
+            assert apps[0].state.orders.last_reports
         if dispatch_enabled:
             worker_host = apps[0].state.dispatch
             assert worker_host.tasks

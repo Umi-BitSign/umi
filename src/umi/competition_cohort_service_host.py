@@ -30,6 +30,7 @@ from .competition_cohort_model_acceptance_store import CohortModelAcceptances
 from .competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
 from .competition_cohort_model_review_http import ModelReviewPeer, ModelReviewPeerConfig
 from .competition_cohort_model_upload import CohortModelUploads, ModelUploadConfig
+from .competition_cohort_order_host import OrderHostConfig
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_recovery import ModelRewardCohortAuthority, verify_recovery_authority
@@ -58,6 +59,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         "umi-cohort-service-admission-host/4",
         "umi-cohort-service-admission-host/5",
         "umi-cohort-service-admission-host/6",
+        "umi-cohort-service-admission-host/7",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     manifest: RewardManifest
@@ -71,6 +73,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     admission_owner: AdmissionOwnerConfig | None = None
     lifecycle: LifecycleHostConfig | None = None
     dispatch: ServiceDispatchConfig | None = None
+    orders: OrderHostConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -85,6 +88,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("lifecycle", None)
         if self.dispatch is None:
             value.pop("dispatch", None)
+        if self.orders is None:
+            value.pop("orders", None)
         return value
 
     @model_validator(mode="after")
@@ -93,6 +98,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             "umi-cohort-service-admission-host/4",
             "umi-cohort-service-admission-host/5",
             "umi-cohort-service-admission-host/6",
+            "umi-cohort-service-admission-host/7",
         } and (
             (self.schema_ != "umi-cohort-service-admission-host/1") != bool(self.model_review_peers)
         ):
@@ -101,6 +107,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             "umi-cohort-service-admission-host/4",
             "umi-cohort-service-admission-host/5",
             "umi-cohort-service-admission-host/6",
+            "umi-cohort-service-admission-host/7",
         } and (
             (self.schema_ == "umi-cohort-service-admission-host/3")
             != (self.model_uploads is not None)
@@ -114,17 +121,29 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                 "umi-cohort-service-admission-host/4",
                 "umi-cohort-service-admission-host/5",
                 "umi-cohort-service-admission-host/6",
+                "umi-cohort-service-admission-host/7",
             }
         ) != (self.admission_owner is not None):
             raise ValueError("automatic admission requires service admission host version four")
         if (
             self.schema_
-            in {"umi-cohort-service-admission-host/5", "umi-cohort-service-admission-host/6"}
+            in {
+                "umi-cohort-service-admission-host/5",
+                "umi-cohort-service-admission-host/6",
+                "umi-cohort-service-admission-host/7",
+            }
         ) != (self.lifecycle is not None):
             raise ValueError("automatic phase control requires service admission host version five")
-        if (self.schema_ == "umi-cohort-service-admission-host/6") != (self.dispatch is not None):
+        if (
+            self.schema_
+            in {"umi-cohort-service-admission-host/6", "umi-cohort-service-admission-host/7"}
+        ) != (self.dispatch is not None):
             raise ValueError(
                 "automatic service dispatch requires service admission host version six"
+            )
+        if (self.schema_ == "umi-cohort-service-admission-host/7") != (self.orders is not None):
+            raise ValueError(
+                "automatic benchmark orders require service admission host version seven"
             )
         if len({identity(p.signer) for p in self.model_review_peers}) != len(
             self.model_review_peers
@@ -151,6 +170,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             *tokens,
             *(self.lifecycle.stores() if self.lifecycle else ()),
             *(self.dispatch.stores() if self.dispatch else ()),
+            *((Path(self.orders.queue.directory),) if self.orders else ()),
             *((Path(self.model_uploads.directory),) if self.model_uploads else ()),
             *(
                 (

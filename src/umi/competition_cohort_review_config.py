@@ -8,6 +8,7 @@ from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
+from .competition_cohort_benchmark_host import BenchmarkHostConfig
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_model_review import ModelReviewConfig
 from .competition_cohort_progress_signer import CohortProgressSignerConfig
@@ -28,6 +29,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         "umi-cohort-phase-review-service/2",
         "umi-cohort-phase-review-service/3",
         "umi-cohort-phase-review-service/4",
+        "umi-cohort-phase-review-service/5",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -52,6 +54,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     service_signing: ServiceReviewConfig | None = None
     admission_signing: CohortAdmissionSignerConfig | None = None
     model_signing: ModelReviewConfig | None = None
+    benchmark: BenchmarkHostConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -62,6 +65,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("admission_signing", None)
         if self.model_signing is None:
             value.pop("model_signing", None)
+        if self.benchmark is None:
+            value.pop("benchmark", None)
         return value
 
     def stores(self) -> tuple[Path, ...]:
@@ -84,6 +89,19 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                     if self.model_signing
                     else ()
                 ),
+                *(
+                    (
+                        p
+                        for p in self.benchmark.stores()
+                        # Artifact review and execution intentionally read the
+                        # same immutable retained model archive when selected.
+                        if self.model_signing is None
+                        or p != Path(self.benchmark.archive_directory)
+                        or p != Path(self.model_signing.archive_directory)
+                    )
+                    if self.benchmark
+                    else ()
+                ),
             )
         )
 
@@ -99,13 +117,20 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             raise ValueError("service review signing requires version two host configuration")
         if (
             self.schema_
-            in ("umi-cohort-phase-review-service/3", "umi-cohort-phase-review-service/4")
+            in (
+                "umi-cohort-phase-review-service/3",
+                "umi-cohort-phase-review-service/4",
+                "umi-cohort-phase-review-service/5",
+            )
         ) != (self.admission_signing is not None):
             raise ValueError("admission signing requires version three host configuration")
-        if (self.schema_ == "umi-cohort-phase-review-service/4") != (
-            self.model_signing is not None
-        ):
+        if (
+            self.schema_
+            in ("umi-cohort-phase-review-service/4", "umi-cohort-phase-review-service/5")
+        ) != (self.model_signing is not None):
             raise ValueError("model signing requires version four host configuration")
+        if (self.schema_ == "umi-cohort-phase-review-service/5") != (self.benchmark is not None):
+            raise ValueError("benchmark execution requires version five host configuration")
         private_path(self.chain.state_directory)
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
         verify_recovery_authority(self.series.recovery, self.policy)
@@ -116,6 +141,12 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             for k in sorted(digest(p) for p in self.series.cohorts)
         )
         authorized = {identity(e.hotkey) for e in self.policy.evaluators}
+        if self.benchmark is not None and (
+            self.benchmark.orders.cohorts != expected
+            or self.benchmark.orders.policy_sha256 != digest(self.policy)
+            or identity(self.benchmark.orders.signer) != identity(self.signing.signer)
+        ):
+            raise ValueError("benchmark execution changes host signer or scope")
         model = self.model_signing
         if model is not None and (
             model.cohorts != expected

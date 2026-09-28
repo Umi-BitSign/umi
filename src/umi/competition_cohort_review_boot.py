@@ -17,6 +17,7 @@ from .competition_cohort_admission_http import (
 )
 from .competition_cohort_admission_journal import CohortAdmissionJournal
 from .competition_cohort_admission_signer import CohortAdmissionSigner
+from .competition_cohort_benchmark_host import BenchmarkHost
 from .competition_cohort_model_review import ModelArtifactReviewer
 from .competition_cohort_model_review_http import model_review_routes
 from .competition_cohort_phase_vote_http import phase_vote_routes
@@ -166,6 +167,15 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                     )
                 )
         app.state.finality_provider = provider
+        app.state.benchmark = None
+        if config.benchmark is not None:
+            ensure_private_directory(Path(config.benchmark.directory))
+            resources.callback(
+                os.close, lock_private_file(Path(config.benchmark.directory) / "service.lock")
+            )
+            benchmark = BenchmarkHost(config, provider, client, owner_token, vote_token, sign)
+            app.include_router(benchmark.routes)
+            app.state.benchmark = benchmark
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))
         yield app
@@ -191,17 +201,33 @@ async def run_phase_review_service(config: PhaseReviewServiceConfig, stop: async
             )
         )
         serving = asyncio.create_task(server.serve())
+        workers = None
         try:
             while not stop.is_set() and not serving.done():
                 app.state.finality_provider.ensure_observer_running()
-                await asyncio.wait((serving,), timeout=0.25)
+                if server.started and app.state.benchmark is not None and workers is None:
+                    workers = asyncio.create_task(app.state.benchmark.run(stop))
+                await asyncio.wait((serving, *((workers,) if workers else ())), timeout=0.25)
+                if workers is not None and workers.done():
+                    workers.result()
+                    if not stop.is_set():
+                        raise RuntimeError("benchmark workers exited before shutdown")
             if serving.done():
                 serving.result()
                 if not stop.is_set():
                     raise RuntimeError("phase review listener exited before shutdown")
         finally:
             server.should_exit = True
+
+            async def drain_workers():
+                if workers is not None:
+                    workers.cancel()
+                    await asyncio.gather(workers, return_exceptions=True)
+
             # Uvicorn drains all HTTP tasks; request/signing budgets already
             # bound individual work. Keep the key/provider/lease until it ends.
-            await await_owned_task(serving)
+            try:
+                await await_owned_task(asyncio.create_task(drain_workers()))
+            finally:
+                await await_owned_task(serving)
             logger.info("phase_review_stopped config_sha256=%s", digest(config))

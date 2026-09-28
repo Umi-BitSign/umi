@@ -24,7 +24,7 @@ from .competition_cohort_orders import RecoverableEvaluationOrder, SignedRecover
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import identity
 
-_RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error)
+_RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError)
 
 
 class OrderReviewerPort(Protocol):

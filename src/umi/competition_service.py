@@ -1,12 +1,14 @@
-"""Wallet-free successor intake behind an operator-managed HTTPS proxy.
+"""Successor intake behind an operator-managed HTTPS proxy.
 
 This service accepts signed submissions using the owned-finality registration
-provider. It has no scoring scheduler, signing wallet or weight-submit path.
+provider. Its opt-in cohort owner also runs admission, phase and work services
+with an explicitly selected signing key. It has no weight-submit path.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -449,12 +451,33 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
     app = create_intake_app(config, policy)
     # Terminate TLS at a reviewed reverse proxy. Never trust forwarded headers or
     # accept a request-selected source of finality. One process owns this cache.
-    serve_with_finality_supervision(
-        app,
-        host=config.host,
-        port=config.port,
-        workers=1,
-        proxy_headers=False,
-        access_log=False,
-        backlog=config.api_limits.socket_backlog,
-    )
+    handler, loggers = logging.StreamHandler(), []
+    try:
+        if config.recoverable_service is not None:
+            for suffix in (
+                "admission_host",
+                "lifecycle_host",
+                "dispatch_host",
+                "order_host",
+                "service_host",
+            ):
+                logger = logging.getLogger("umi.competition_cohort_" + suffix)
+                loggers.append((logger, logger.level, logger.propagate))
+                logger.addHandler(handler)
+                logger.setLevel(logging.INFO)
+                logger.propagate = False
+        serve_with_finality_supervision(
+            app,
+            host=config.host,
+            port=config.port,
+            workers=1,
+            proxy_headers=False,
+            access_log=False,
+            backlog=config.api_limits.socket_backlog,
+        )
+    finally:
+        for logger, level, propagate in loggers:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            logger.propagate = propagate
+        handler.close()

@@ -186,14 +186,23 @@ class RequestExportWorker:
                 "chain_submission_authorized": False,
             }
 
-    async def run(self, stop, *, poll_seconds=5):
+    async def run(self, stop, *, poll_seconds=5, report=None):
         if type(poll_seconds) not in (int, float) or not 0 < poll_seconds <= 60:
             raise ValueError("request export poll interval is outside bounds")
         while not stop.is_set():
             try:
-                report = await self.poll_once()
-            except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
-                report = {"status": "request_exports_retry", "error_type": type(error).__name__}
-            logger.info("cohort_request_exports %s", report)
+                result = await self.poll_once()
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                asyncio.TimeoutError,
+            ) as error:
+                result = {"status": "request_exports_retry", "error_type": type(error).__name__}
+            if report is None:
+                logger.info("cohort_request_exports %s", result)
+            else:
+                report(result)
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
