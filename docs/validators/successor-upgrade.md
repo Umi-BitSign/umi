@@ -411,8 +411,22 @@ selected-only intake export cannot replace that evidence. Retries retain the
 original preparation and incumbent even after a newer promotion becomes current.
 Fresh owner challenges and a second local promotion replay detect changes during
 review. Supply original model/promotion evidence and archive replication before
-enabling this service. Request-completion review still needs its own authenticated
-owner export for remote deployment.
+enabling this service.
+
+Request completion uses `RequestReviewExporter` and
+`RemoteRequestProgressReviewer` at `POST /internal/cohorts/request-review`.
+Configure the certified prepared roster, complete service catalog set and
+transport policy at the reviewer. The export cannot change those selections.
+It contains the owner's original service observations, queue seals, intake and
+exact terminal replay objects. Local and remote review use the same native
+closure verifier. Missing responses, changed objects or an incomplete accepted
+inventory prevent completion; no new inference is performed by review. The
+reviewer independently checks original registration archives and rereads the
+authenticated owner after proof verification. The owner must be explicitly
+trusted to report its service observations and complete queue inventories; its
+signature does not prove network availability. Preserve unresolved work and
+increase operational storage/transport capacity if delivery cannot fit. A
+transport timeout does not expire the cohort.
 
 `phase_vote_routes` exposes the native durable signer on private progress and
 decision routes under `/internal/cohorts/PHASE/votes/`. Configure one selected

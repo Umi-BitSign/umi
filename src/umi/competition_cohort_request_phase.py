@@ -53,10 +53,11 @@ from .competition_cohort_service_closure import (
 )
 from .competition_cohort_service_queue import ServiceWorkQueue
 from .competition_cohort_service_requests import ServiceWorkRequests
+from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_terminal import ServiceWorkTerminals
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_round_journal import RoundJournal
-from .open_competition import digest
+from .open_competition import CompetitionPolicy, digest
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -315,6 +316,12 @@ class NativeRequestProgressSource:
             return progress
 
     def read(self, progress: CohortPhaseProgress) -> NativeRequestReview:
+        return self._read(progress, self.objects)
+
+    def _read(
+        self, progress: CohortPhaseProgress, objects: EndpointObjectSource
+    ) -> NativeRequestReview:
+        """The exporter wraps owned objects to retain the exact native read set."""
         progress = CohortPhaseProgress.model_validate_json(canonical_json_bytes(progress))
         raw = self.journal.get("request_progress", digest(progress))
         if raw is None:
@@ -322,7 +329,7 @@ class NativeRequestProgressSource:
         record = RequestProgressReviewRecord.model_validate_json(canonical_json_bytes(raw))
         with self.intake._connection() as (db, store):
             state, _ = store.status(self.cohort)
-            history, decisions, sources, restored, prior = self._state(store, state)
+            history, decisions, _sources, restored, prior = self._state(store, state)
             if record.progress != progress or record.history_sha256 != digest(history):
                 raise ValueError("request review changed its original progress or history")
             availability = self._availability(store)
@@ -332,37 +339,23 @@ class NativeRequestProgressSource:
                 fence = self._fence(db, availability, state, restored, prior)
                 if fence is None or record.fence != fence:
                     raise ValueError("request completion lacks its original window fence")
-                closure = CohortServiceRequestClosure.model_validate_json(
-                    self.objects(progress.phase_result_sha256)
-                )
                 seals = tuple(q.retained_seal() for q in self.queues)
                 if any(s is None or s.observation.block < fence.observation.block for s in seals):
                     raise ValueError("request completion changed an owner queue fence")
-                review_service_request_closure(
-                    closure,
-                    self.roster,
-                    ReplayObjectCollector(self.objects, self.replay_bytes),
-                    self.intake.policy,
-                    history,
-                    self.transport,
-                    expected_catalogs=self.catalogs,
-                    expected_seals=seals,
-                    decision_source=sources.__getitem__,
-                    intake_records=records,
-                    expected_tip_sha256=state.tip_sha256,
-                    current_block=progress.observed_at_block,
-                )
-                expected, evidence = request_closure_progress(closure, record.service, state)
-                retained = RequestClosureProgressEvidence.model_validate_json(
-                    self.objects(progress.evidence_sha256)
-                )
-                if retained != evidence:
-                    raise ValueError("request completion changed its original closure evidence")
             else:
-                expected = pending_availability_progress(state, record.service)
-            if expected != progress:
-                raise ValueError("request progress differs from native completion")
-            return NativeRequestReview(record, history, decisions, tuple(k for k, _ in records))
+                seals = ()
+            return replay_request_completion(
+                record,
+                history,
+                decisions,
+                policy=self.intake.policy,
+                roster=self.roster,
+                catalogs=self.catalogs,
+                seals=seals,
+                transport=self.transport,
+                intake_records=records,
+                objects=ReplayObjectCollector(objects, self.replay_bytes),
+            )
 
     def decision(self, transition, evidence: CohortDecisionInput):
         reviewed = self.read(evidence.progress.progress)
@@ -383,3 +376,77 @@ class NativeRequestProgressSource:
         if transition != expected:
             raise ValueError("request decision differs from native completion")
         return digest(reviewed.history)
+
+
+def replay_request_completion(
+    record: RequestProgressReviewRecord,
+    history: CohortRecoveryHistory,
+    decisions: tuple[CohortDecisionInput, ...],
+    *,
+    policy: CompetitionPolicy,
+    roster: RecoverableRosterEvidence,
+    catalogs: tuple[SignedServiceWorkCatalog, ...],
+    seals: tuple[ServiceWorkSeal, ...],
+    transport: ScoringPolicy,
+    intake_records: tuple[tuple[str, bytes], ...],
+    objects: EndpointObjectSource,
+) -> NativeRequestReview:
+    """Replay original terminal evidence after authenticating its owner and service history."""
+    progress = record.progress
+    sources = {digest(d): d for d in decisions}
+    required = {
+        t.transition.evidence_sha256
+        for t in history.transitions
+        if t.transition.operation != "revoke"
+    }
+    if len(sources) != len(decisions) or set(sources) != required:
+        raise ValueError("request review needs every original decision exactly once")
+    state, restored, prior = replay_cohort_decisions(history, policy, sources.__getitem__)
+    if (
+        not isinstance(history.authority.authority, StandingCohortRecoveryAuthority)
+        or state.phase != "requests"
+        or record.history_sha256 != digest(history)
+        or record.service.unavailable_blocks < max(restored, prior)
+    ):
+        raise ValueError("request review differs from its original standing history")
+    expected = pending_availability_progress(state, record.service)
+    if progress.completion == "complete":
+        fence = record.fence
+        target = next(t.target_block for t in state.targets if t.phase == "requests")
+        if (
+            fence is None
+            or not fence.serving
+            or fence.observation.block > record.service.observation.block
+            or fence.observation.block < target + fence.unavailable_blocks - restored
+            or any(s.observation.block < fence.observation.block for s in seals)
+        ):
+            raise ValueError("request completion lacks its original compensated fence")
+        pending_availability_progress(state, fence)
+        closure = CohortServiceRequestClosure.model_validate_json(
+            objects(progress.phase_result_sha256)
+        )
+        review_service_request_closure(
+            closure,
+            roster,
+            objects,
+            policy,
+            history,
+            transport,
+            expected_catalogs=catalogs,
+            expected_seals=seals,
+            decision_source=sources.__getitem__,
+            intake_records=intake_records,
+            expected_tip_sha256=state.tip_sha256,
+            current_block=progress.observed_at_block,
+        )
+        expected, evidence = request_closure_progress(closure, record.service, state)
+        retained = RequestClosureProgressEvidence.model_validate_json(
+            objects(progress.evidence_sha256)
+        )
+        if retained != evidence:
+            raise ValueError("request completion changed its original closure evidence")
+    elif seals:
+        raise ValueError("pending request review cannot claim a complete queue inventory")
+    if expected != progress:
+        raise ValueError("request progress differs from native completion")
+    return NativeRequestReview(record, history, decisions, tuple(k for k, _ in intake_records))
