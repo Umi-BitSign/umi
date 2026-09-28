@@ -38,6 +38,8 @@ from .competition_cohort_intake_review import (
 )
 from .competition_cohort_intake_seal import CohortIntakeSeal, build_intake_seal
 from .competition_cohort_recovery import CohortRecoveryTransition
+from .competition_cohort_review_export import review_export_limits as _bounds
+from .competition_cohort_review_export import review_selection
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .concurrency import run_owned_thread, wait_for_owned
@@ -74,13 +76,6 @@ class IntakeReviewResponse(StrictProtocolModel):
 class SignedIntakeReviewResponse(StrictProtocolModel):
     response: IntakeReviewResponse
     signature: Signature
-
-
-def _bounds(maximum_bytes: int, timeout_seconds: int) -> None:
-    if type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 512 * 1024**2:
-        raise ValueError("intake review export capacity is outside bounds")
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 1200:
-        raise ValueError("intake review timeout is outside bounds")
 
 
 class IntakeReviewExporter:
@@ -277,16 +272,7 @@ class RemoteIntakeProgressReviewer:
         _bounds(maximum_bytes, timeout_seconds)
         if type(maximum_sample_gap_blocks) is not int or not 1 <= maximum_sample_gap_blocks <= 300:
             raise ValueError("intake export sampling gap is outside bounds")
-        self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(provider.policy))
-        self.cohorts = tuple(
-            CohortIntakeBinding.model_validate_json(canonical_json_bytes(c)) for c in cohorts
-        )
-        keys = tuple(c.cohort_sha256 for c in self.cohorts)
-        if not 1 <= len(keys) <= 512 or keys != tuple(sorted(set(keys))):
-            raise ValueError("intake reviewer needs unique ordered cohort bindings")
-        self.owner = identity(owner)
-        if self.owner not in {identity(e.hotkey) for e in self.policy.evaluators}:
-            raise ValueError("intake reviewer owner is outside the configured evaluator set")
+        self.policy, self.cohorts, self.owner = review_selection(provider.policy, cohorts, owner)
         self.provider, self.fetch, self.archive = provider, fetch, archive
         self.gap, self.maximum_bytes, self.timeout_seconds = (
             maximum_sample_gap_blocks,

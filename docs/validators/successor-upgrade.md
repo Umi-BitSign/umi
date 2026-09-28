@@ -398,8 +398,33 @@ drain cancelled operations before releasing capacity. The public intake API does
 not enable this route or load a wallet. The enclosing host must supply its
 approved export signer, private transport credential and original registration
 archive delivery. The owner's signature authenticates local service observations;
-it does not independently prove network availability. Preparation and request
-review still need their own authenticated owner exports for remote deployment.
+it does not independently prove network availability.
+
+Preparation uses `PreparationReviewExporter` and
+`RemotePreparationProgressReviewer`. Its private route is
+`POST /internal/cohorts/preparation-review`. The reviewer reconstructs the exact
+prepared round from every original consent, the certified intake closure and all
+selected participant admissions. It independently checks original registration
+archives and looks up the selected promotion in its own preserved promotion
+store. Configure the allowed tracks locally. An owner's claimed promotion or a
+selected-only intake export cannot replace that evidence. Retries retain the
+original preparation and incumbent even after a newer promotion becomes current.
+Fresh owner challenges and a second local promotion replay detect changes during
+review. Supply original model/promotion evidence and archive replication before
+enabling this service. Request-completion review still needs its own authenticated
+owner export for remote deployment.
+
+`phase_vote_routes` exposes the native durable signer on private progress and
+decision routes under `/internal/cohorts/PHASE/votes/`. Configure one selected
+phase, reviewer and private bearer credential. `PhaseVotePeer` connects those
+routes to `CertifiedPhaseObserver` without a coordinator-side signing key. The
+peer verifies the returned signature against the exact requested body and
+configured reviewer identity. A successful HTTP response alone is insufficient.
+The existing signing journal preserves original intents, committed votes and
+decision exclusivity across retries. Committed votes can be redelivered after
+the owner advances or disconnects. Transport timeouts cancel and drain the request;
+they do not expire its cohort or authorize a different decision. These routes
+are explicit host components, not default public API endpoints.
 
 `CohortLifecycleService` runs intake, preparation and request control through the
 same durable controller. Its configured factories create the native phase
