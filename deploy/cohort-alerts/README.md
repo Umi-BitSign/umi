@@ -38,10 +38,13 @@ an alert. Cloudflare or email-provider failure can delay notifications.
    }
    ```
 
-5. Install the supplied service and timer in `/etc/systemd/system/`, reload
-   systemd and enable `umi-cohort-heartbeat.timer`. The dynamic service user reads
+5. Create the system account `umi-cohort-monitor`, with no home directory or login
+   shell. Install the supplied service and timer in `/etc/systemd/system/`, reload
+   systemd and enable `umi-cohort-heartbeat.timer`. The unprivileged service user reads
    its secret through systemd's credential facility; it has no validator state
    or wallet access. Select only services whose healthy substate is `running`.
+   A systemd query failure aborts the poll; it does not report every service as
+   failed. The external missing-heartbeat alarm still detects that loss of monitoring.
 6. Check authenticated `GET /status` for a fresh heartbeat and future alarm.
    Test a missing heartbeat by stopping only this new timer, then restart it
    and check incident/recovery notification receipts. Confirm inbox delivery
@@ -52,6 +55,6 @@ the token requires updating both the Worker secret and the coordinator's private
 credential file. Disable both the timer and the Worker when deliberately retiring
 the monitor; stopping only the coordinator timer raises an alert.
 
-Run `node --test monitor.test.mjs` for storage/retry/cooldown checks and
+Run `npm ci && npm test` for storage/retry/cooldown and Workers runtime checks and
 `wrangler deploy --dry-run --outdir /TASK-SCRATCH/build` before deployment.
 Installed delivery and timer persistence require separate qualification.

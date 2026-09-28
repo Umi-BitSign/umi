@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-DynamicUser=yes
+User=umi-cohort-monitor
 LoadCredential=config:/etc/umi-cohort-alerts/heartbeat.json
 ExecStart=/usr/bin/python3 -I -B /opt/umi-cohort-alerts/heartbeat.py --config %d/config
 TimeoutStartSec=135
@@ -15,4 +15,3 @@ ProtectHome=yes
 PrivateTmp=yes
 MemoryMax=64M
 UMask=0077
-

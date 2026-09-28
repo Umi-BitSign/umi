@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -25,13 +26,11 @@ def heartbeat(services):
                 check=False,
             )
             fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-            ok = (
-                result.returncode == 0
-                and fields.get("ActiveState") == "active"
-                and fields.get("SubState") == "running"
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            ok = False
+            if result.returncode or not {"ActiveState", "SubState"} <= fields.keys():
+                raise RuntimeError("service_status_unavailable")
+            ok = fields["ActiveState"] == "active" and fields["SubState"] == "running"
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("service_status_unavailable") from error
         states[service] = "running" if ok else "failed"
     return {"schema": "umi-service-heartbeat/1", "services": states}
 
@@ -53,7 +52,11 @@ def main():
     request = urllib.request.Request(
         config["url"],
         data=json.dumps(heartbeat(config["services"])).encode(),
-        headers={"Authorization": "Bearer " + config["token"], "Content-Type": "application/json"},
+        headers={
+            "Authorization": "Bearer " + config["token"],
+            "Content-Type": "application/json",
+            "User-Agent": "umi-cohort-monitor/1",
+        },
         method="POST",
     )
 
@@ -72,6 +75,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        print(json.dumps({"status": "heartbeat_failed"}))
+    except Exception as error:
+        result = {"status": "heartbeat_failed", "error_type": type(error).__name__}
+        if isinstance(error, urllib.error.HTTPError):
+            result["http_status"] = error.code
+        print(json.dumps(result))
         raise SystemExit(1) from None
