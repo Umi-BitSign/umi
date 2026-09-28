@@ -32,7 +32,6 @@ class CohortEndpointAttemptWorker:
             raise ValueError("endpoint attempt workers must share one recovery owner")
         self.requests, self.decisions = requests, decisions
         self.recovery = requests.recovery
-        self.dispatcher = CohortEndpointDispatcher(self.recovery, requests.signer.blocks)
 
     def current(self, slot, case_id):
         seen = set()
@@ -66,7 +65,10 @@ class CohortEndpointAttemptWorker:
         slot, selected, assignment, _ = await run_owned_thread(self.current, original_slot, case_id)
         # Lost sends only poll the original response. Retirement performs the
         # remote fence before any replacement request can be constructed.
-        sent = await self.dispatcher.dispatch(slot, case_id)
+        dispatcher = CohortEndpointDispatcher(
+            self.recovery, self.requests.signer.blocks_for(selected.transport_policy)
+        )
+        sent = await dispatcher.dispatch(slot, case_id)
         result = await self.decisions.advance(slot, case_id)
         if result.certificate is None:
             return {

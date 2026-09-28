@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -148,7 +149,7 @@ class CohortEndpointCaseCoordinator:
                     raise ValueError("case reviewer returned another identity")
                 await self.signer.collect(decision_slot, vote)
                 certificate = await self._certificate(decision_slot)
-            except (ValueError, OSError):
+            except (ValueError, OSError, asyncio.TimeoutError):
                 # A faulty/unavailable reviewer cannot erase already retained
                 # votes or prevent another independent group being tried.
                 continue

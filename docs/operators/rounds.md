@@ -1581,9 +1581,30 @@ The private `/internal/cohorts/orders/votes/{lookup,attest}` and
 `/internal/cohorts/orders/inbox/{lookup,accept}` POST routes require the reviewer
 credential. They expose bounded original votes and receipts; a lost HTTP reply
 can recover the same acknowledgement without signing or executing again.
-They do not publish scores or authorize weights. Endpoint benchmarks also need
-the endpoint transport/retirement worker and original signed responses: CPU
-comparator completion alone cannot produce an endpoint completion certificate.
+They do not publish scores or authorize weights. CPU comparator completion alone
+cannot produce an endpoint completion certificate.
+
+Phase review configuration version 6 adds `endpoint`, an
+`umi-cohort-endpoint-host/1` selection, and requires service review signing.
+Configure its request and retirement-decision journals for the same evaluator,
+policy and cohorts; its separate origin observer with two backup RPCs; renewable
+clip delivery; terms objects and transport policies; and authenticated origins
+for every other policy evaluator. The clip source may share the benchmark's
+exact immutable video directory. Other stores and credentials remain disjoint.
+The cohort's manifest selects its terms and transport hash. Peer requests cannot
+select a different transport. Each signed request and replacement uses its own
+selected transport's finalized block adapter.
+
+The endpoint worker starts alongside CPU execution and completion exports. It
+delivers requests, retrieves retained responses, obtains independent retirement
+votes and resumes certified replacements. Missing inputs or unavailable peers
+remain pending; original completed responses survive restart without another
+inference. The private `/internal/cohorts/endpoint/votes/{request,decision}` POST
+routes require the reviewer credential and validate native evidence before
+signing. Response signatures are checked against the exact submitted body.
+Both finality observers and all workers drain before releasing the host key and
+exclusive lease. These workers alone do not establish combined request readiness
+or qualification of an installed cohort.
 
 When the original header was skipped or the reviewer was offline, admission
 review reconstructs it from that reviewer's nearest retained finalized

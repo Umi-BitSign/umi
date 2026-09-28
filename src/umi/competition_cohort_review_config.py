@@ -9,6 +9,7 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_benchmark_host import BenchmarkHostConfig
+from .competition_cohort_endpoint_host import EndpointHostConfig
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_model_review import ModelReviewConfig
 from .competition_cohort_progress_signer import CohortProgressSignerConfig
@@ -30,6 +31,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         "umi-cohort-phase-review-service/3",
         "umi-cohort-phase-review-service/4",
         "umi-cohort-phase-review-service/5",
+        "umi-cohort-phase-review-service/6",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -55,6 +57,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     admission_signing: CohortAdmissionSignerConfig | None = None
     model_signing: ModelReviewConfig | None = None
     benchmark: BenchmarkHostConfig | None = None
+    endpoint: EndpointHostConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -67,6 +70,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("model_signing", None)
         if self.benchmark is None:
             value.pop("benchmark", None)
+        if self.endpoint is None:
+            value.pop("endpoint", None)
         return value
 
     def stores(self) -> tuple[Path, ...]:
@@ -87,6 +92,17 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                         self.model_signing.archive_directory,
                     )
                     if self.model_signing
+                    else ()
+                ),
+                *(
+                    (
+                        p
+                        for p in self.endpoint.stores()
+                        if self.benchmark is None
+                        or p != Path(self.endpoint.clips.videos_directory)
+                        or p != Path(self.benchmark.videos_directory)
+                    )
+                    if self.endpoint
                     else ()
                 ),
                 *(
@@ -121,16 +137,30 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 "umi-cohort-phase-review-service/3",
                 "umi-cohort-phase-review-service/4",
                 "umi-cohort-phase-review-service/5",
+                "umi-cohort-phase-review-service/6",
             )
         ) != (self.admission_signing is not None):
             raise ValueError("admission signing requires version three host configuration")
         if (
             self.schema_
-            in ("umi-cohort-phase-review-service/4", "umi-cohort-phase-review-service/5")
+            in (
+                "umi-cohort-phase-review-service/4",
+                "umi-cohort-phase-review-service/5",
+                "umi-cohort-phase-review-service/6",
+            )
         ) != (self.model_signing is not None):
             raise ValueError("model signing requires version four host configuration")
-        if (self.schema_ == "umi-cohort-phase-review-service/5") != (self.benchmark is not None):
+        if (
+            self.schema_
+            in ("umi-cohort-phase-review-service/5", "umi-cohort-phase-review-service/6")
+        ) != (self.benchmark is not None):
             raise ValueError("benchmark execution requires version five host configuration")
+        if (self.schema_ == "umi-cohort-phase-review-service/6") != (self.endpoint is not None):
+            raise ValueError("endpoint execution requires version six host configuration")
+        if self.endpoint is not None:
+            if self.service_signing is None:
+                raise ValueError("complete evaluator startup requires service review signing")
+            self.endpoint.check_scope(self)
         private_path(self.chain.state_directory)
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
         verify_recovery_authority(self.series.recovery, self.policy)

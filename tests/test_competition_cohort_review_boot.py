@@ -13,15 +13,20 @@ from umi import competition_cohort_review_boot as boot
 from umi import competition_cohort_review_cli as cli
 from umi.competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from umi.competition_cohort_benchmark_host import BenchmarkHostConfig
+from umi.competition_cohort_clip_delivery import ClipDeliveryConfig
+from umi.competition_cohort_endpoint_decision_signer import CohortEndpointDecisionConfig
+from umi.competition_cohort_endpoint_host import EndpointHostConfig
 from umi.competition_cohort_execution_journal import CohortExecutionConfig
 from umi.competition_cohort_intake import CohortIntakeBinding
 from umi.competition_cohort_model_review import ModelReviewConfig
 from umi.competition_cohort_order_inbox import CohortOrderInboxConfig
 from umi.competition_cohort_order_signer import CohortOrderSignerConfig
 from umi.competition_cohort_progress_signer import CohortProgressSignerConfig
+from umi.competition_cohort_request_signer import EndpointRequestSignerConfig
 from umi.competition_cohort_review_config import PhaseReviewServiceConfig, load_phase_review_config
+from umi.competition_cohort_review_http import CohortReviewPeerConfig
 from umi.competition_cohort_service_review import ServiceReviewConfig
-from umi.open_competition import digest
+from umi.open_competition import digest, identity
 from umi.private_files import lock_private_file
 from umi.protocol import canonical_json_bytes
 
@@ -548,7 +553,7 @@ async def test_failed_startup_closes_provider_and_releases_lease(
     os.close(lock_private_file(Path(selected.config.signing.directory) / "service.lock"))
 
 
-@pytest.mark.parametrize("benchmark", [False, True])
+@pytest.mark.parametrize("benchmark", [False, True, "endpoint"])
 async def test_real_loopback_listener_starts_and_stops_with_owned_resources(
     selected, providers, benchmark, monkeypatch
 ):
@@ -560,6 +565,10 @@ async def test_real_loopback_listener_starts_and_stops_with_owned_resources(
     config = (with_benchmark(selected.config) if benchmark else selected.config).model_copy(
         update={"listen_port": port}
     )
+    if benchmark == "endpoint":
+        config = with_endpoint(selected.config).model_copy(update={"listen_port": port})
+        endpoint_credentials(config)
+        monkeypatch.setattr(boot, "CohortEndpointFinalityProvider", providers.provider)
     if benchmark:
 
         async def unavailable(self):
@@ -678,3 +687,140 @@ async def test_host_drains_listener_before_provider_and_lease(
         await task
     assert events[-2:] == ["drained", "closed"]
     os.close(lock_private_file(Path(selected.config.signing.directory) / "service.lock"))
+
+
+def with_endpoint(config):
+    c = with_benchmark(with_service(config))
+    base = c.signing.directory
+    common = dict(
+        policy_sha256=digest(c.policy), signer=c.signing.signer, cohorts=c.signing.cohorts
+    )
+    endpoint = EndpointHostConfig(
+        schema="umi-cohort-endpoint-host/1",
+        requests=EndpointRequestSignerConfig(
+            schema="umi-cohort-endpoint-request-signer/1",
+            directory=base + "-endpoint-requests",
+            **common,
+        ),
+        decisions=CohortEndpointDecisionConfig(
+            schema="umi-cohort-endpoint-decision-config/1",
+            directory=base + "-endpoint-decisions",
+            **common,
+        ),
+        origins=c.chain.model_copy(update={"state_directory": base + "-origins"}),
+        clips=ClipDeliveryConfig(
+            schema="umi-cohort-clip-delivery-config/1",
+            directory=base + "-clips",
+            videos_directory=c.benchmark.videos_directory,
+            origin="https://clips.example",
+            upload_token_file=base + "-clip-token",
+        ),
+        objects_directory=base + "-endpoint-objects",
+        transport_directory=base + "-endpoint-transports",
+        reviewers=tuple(
+            CohortReviewPeerConfig(
+                signer=e.hotkey,
+                origin="https://peer-" + str(i) + ".example",
+                token_file=base + "-peer-token-" + str(i),
+            )
+            for i, e in enumerate(sorted(c.policy.evaluators, key=lambda e: identity(e.hotkey)))
+            if identity(e.hotkey) != identity(c.signing.signer)
+        ),
+    )
+    c = c.model_copy(update={"schema_": "umi-cohort-phase-review-service/6", "endpoint": endpoint})
+    return PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing",
+        "old_version",
+        "policy",
+        "cohorts",
+        "signer",
+        "backups",
+        "peers",
+        "overlap",
+        "video_alias",
+    ],
+)
+def test_endpoint_configuration_preserves_scope_and_private_stores(selected, fault):
+    c = with_endpoint(selected.config)
+    e = c.endpoint
+    if fault == "missing":
+        c = c.model_copy(update={"endpoint": None})
+    elif fault == "old_version":
+        c = c.model_copy(update={"schema_": "umi-cohort-phase-review-service/5"})
+    elif fault in ("policy", "cohorts", "signer"):
+        changes = {
+            "policy": {"policy_sha256": "ff" * 32},
+            "cohorts": {"cohorts": ()},
+            "signer": {"signer": wallet("Charlie").hotkey.ss58_address},
+        }
+        e = e.model_copy(update={"requests": e.requests.model_copy(update=changes[fault])})
+    elif fault == "backups":
+        e = e.model_copy(
+            update={"origins": e.origins.model_copy(update={"proof_rpc_fallback_urls": ()})}
+        )
+    elif fault == "peers":
+        e = e.model_copy(update={"reviewers": e.reviewers[:0]})
+    elif fault == "overlap":
+        e = e.model_copy(update={"objects_directory": c.benchmark.execution.directory})
+    else:
+        e = e.model_copy(update={"objects_directory": c.benchmark.videos_directory})
+    if fault not in ("missing", "old_version"):
+        c = c.model_copy(update={"endpoint": e})
+    with pytest.raises(ValueError):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+def endpoint_credentials(c):
+    for path, token in [
+        (c.endpoint.clips.upload_token_file, "ab" * 32),
+        *((p.token_file, "peer-token" * 4) for p in c.endpoint.reviewers),
+    ]:
+        Path(path).write_text(token + "\n")
+        Path(path).chmod(0o440)
+
+
+async def test_endpoint_boot_owns_origin_provider_and_native_workers(
+    selected, providers, monkeypatch
+):
+    c = with_endpoint(selected.config)
+    endpoint_credentials(c)
+    monkeypatch.setattr(boot, "CohortEndpointFinalityProvider", providers.provider)
+    async with boot.phase_review_app(c) as app:
+        assert app.state.endpoint is not None
+        assert app.state.benchmark.workers["endpoints"] is app.state.endpoint.worker
+        assert app.state.endpoint.recovery.journal is app.state.benchmark.execution
+        assert providers.events.count("started") == 2
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            for kind in ("request", "decision"):
+                assert (
+                    await client.post(
+                        "http://local/internal/cohorts/endpoint/votes/" + kind, json={}
+                    )
+                ).status_code == 401
+        with pytest.raises(BlockingIOError):
+            async with boot.phase_review_app(c):
+                pytest.fail("second endpoint writer")
+    assert providers.events.count("closed") == 2
+
+
+async def test_failed_endpoint_origin_start_closes_both_owned_providers(
+    selected, providers, monkeypatch
+):
+    c = with_endpoint(selected.config)
+    endpoint_credentials(c)
+
+    class Broken(providers.provider):
+        async def start(self):
+            raise OSError("origin unavailable")
+
+    monkeypatch.setattr(boot, "CohortEndpointFinalityProvider", Broken)
+    with pytest.raises(OSError, match="origin unavailable"):
+        async with boot.phase_review_app(c):
+            pytest.fail("failed provider started")
+    assert providers.events.count("closed") == 2
+    os.close(lock_private_file(Path(c.signing.directory) / "service.lock"))

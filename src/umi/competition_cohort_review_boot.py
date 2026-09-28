@@ -18,8 +18,12 @@ from .competition_cohort_admission_http import (
 from .competition_cohort_admission_journal import CohortAdmissionJournal
 from .competition_cohort_admission_signer import CohortAdmissionSigner
 from .competition_cohort_benchmark_host import BenchmarkHost
+from .competition_cohort_clip_delivery import CohortClipDelivery
+from .competition_cohort_endpoint_host import EndpointHost
+from .competition_cohort_endpoint_vote_http import endpoint_vote_routes
 from .competition_cohort_model_review import ModelArtifactReviewer
 from .competition_cohort_model_review_http import model_review_routes
+from .competition_cohort_origin import CohortEndpointFinalityProvider
 from .competition_cohort_phase_vote_http import phase_vote_routes
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_review_config import PhaseReviewServiceConfig
@@ -75,7 +79,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             httpx.AsyncClient(
                 trust_env=False,
                 follow_redirects=False,
-                limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
+                limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
             )
         )
         proofs = RewardProofArchive(Path(config.proof_import_directory))
@@ -168,6 +172,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
         app.state.finality_provider = provider
         app.state.benchmark = None
+        app.state.endpoint = None
         if config.benchmark is not None:
             ensure_private_directory(Path(config.benchmark.directory))
             resources.callback(
@@ -176,6 +181,27 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             benchmark = BenchmarkHost(config, provider, client, owner_token, vote_token, sign)
             app.include_router(benchmark.routes)
             app.state.benchmark = benchmark
+            if config.endpoint is not None:
+                endpoint_config = config.endpoint
+                origins = CohortEndpointFinalityProvider(endpoint_config.origins, config.policy)
+                resources.push_async_callback(_close_provider, origins)
+                credentials = tuple(_token(p.token_file) for p in endpoint_config.reviewers)
+                clips = CohortClipDelivery(
+                    endpoint_config.clips, client, _token(endpoint_config.clips.upload_token_file)
+                )
+                endpoint = EndpointHost(
+                    config, benchmark, origins, client, credentials, key, sign, clips
+                )
+                app.include_router(
+                    endpoint_vote_routes(
+                        endpoint,
+                        token=vote_token,
+                        timeout_seconds=config.review_timeout_seconds,
+                    )
+                )
+                benchmark.workers["endpoints"] = endpoint.worker
+                app.state.endpoint = endpoint
+                await origins.start()
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))
         yield app
@@ -205,6 +231,8 @@ async def run_phase_review_service(config: PhaseReviewServiceConfig, stop: async
         try:
             while not stop.is_set() and not serving.done():
                 app.state.finality_provider.ensure_observer_running()
+                if app.state.endpoint is not None:
+                    app.state.endpoint.recovery.origin.provider.ensure_observer_running()
                 if server.started and app.state.benchmark is not None and workers is None:
                     workers = asyncio.create_task(app.state.benchmark.run(stop))
                 await asyncio.wait((serving, *((workers,) if workers else ())), timeout=0.25)

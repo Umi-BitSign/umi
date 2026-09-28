@@ -17,11 +17,11 @@ from .competition_cohort_endpoint_archive import export_endpoint_archive
 from .competition_cohort_endpoint_schedule import CohortEndpointSchedule
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_order_inbox import CohortOrderInbox
-from .concurrency import run_owned_thread, wait_for_owned
+from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .policy import ScoringPolicy
 
-_RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error)
+_RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError)
 TransportPolicySource = Callable[[CohortExecutionAssignment], Awaitable[ScoringPolicy]]
 
 
@@ -168,13 +168,17 @@ class CohortEndpointWorker:
 
     @staticmethod
     async def _gather(coros):
-        tasks = [asyncio.create_task(c) for c in coros]
-        try:
-            return await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        async def collect():
+            tasks = [asyncio.create_task(c) for c in coros]
+            try:
+                return await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        task = asyncio.create_task(collect())
+        return await await_owned_task(task, on_cancel=task.cancel)
 
     async def run(
         self,
@@ -203,8 +207,12 @@ class CohortEndpointWorker:
                 if report is not None:
                     report(result)
             finally:
-                task.cancel()
-                stopping.cancel()
-                await asyncio.gather(task, stopping, return_exceptions=True)
+
+                async def drain(task=task, stopping=stopping):
+                    task.cancel()
+                    stopping.cancel()
+                    await asyncio.gather(task, stopping, return_exceptions=True)
+
+                await await_owned_task(asyncio.create_task(drain()))
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_seconds)

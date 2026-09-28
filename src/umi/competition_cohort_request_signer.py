@@ -317,11 +317,24 @@ class EndpointRequestJournal:
 
 
 class EndpointRequestSigner:
-    def __init__(self, journal: EndpointRequestJournal, provider, blocks, history, sign):
+    def __init__(
+        self,
+        journal: EndpointRequestJournal,
+        provider,
+        blocks,
+        history,
+        sign,
+        *,
+        transport_blocks=None,
+    ):
         if provider.policy != journal.policy:
             raise ValueError("request finality belongs to another policy")
         self.journal, self.provider, self.blocks = journal, provider, blocks
         self.history, self.sign, self.serial = history, sign, asyncio.Lock()
+        self.transport_blocks = transport_blocks
+
+    def blocks_for(self, transport):
+        return self.transport_blocks(transport) if self.transport_blocks else self.blocks
 
     async def _source(self, plan):
         timeout = self.journal.config.read_timeout_seconds
@@ -360,7 +373,9 @@ class EndpointRequestSigner:
                     for height in sorted({r.issued_block for r in plan.body.requests}):
                         windows.append(
                             await wait_for_owned(
-                                capture_request_window(plan.transport, self.blocks, height),
+                                capture_request_window(
+                                    plan.transport, self.blocks_for(plan.transport), height
+                                ),
                                 timeout=config.read_timeout_seconds,
                             )
                         )

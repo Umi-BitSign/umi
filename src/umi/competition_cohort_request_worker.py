@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -69,8 +70,9 @@ class CohortEndpointRequestWorker:
 
     async def _window(self, transport):
         async def capture():
-            height = await self.signer.blocks.finalized_head_height()
-            return await capture_request_window(transport, self.signer.blocks, height)
+            blocks = self.signer.blocks_for(transport)
+            height = await blocks.finalized_head_height()
+            return await capture_request_window(transport, blocks, height)
 
         return await wait_for_owned(
             capture(), timeout=self.signer.journal.config.read_timeout_seconds
@@ -185,7 +187,7 @@ class CohortEndpointRequestWorker:
                     raise ValueError("request reviewer returned another identity")
                 await self.signer.collect(slot, vote)
                 certificate = await self._certificate(slot)
-            except (OSError, ValueError):
+            except (OSError, ValueError, asyncio.TimeoutError):
                 continue
         if certificate is None:
             return EndpointRequestOutcome("pending", "request_quorum_pending")
