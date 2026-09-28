@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 from pydantic import Field, model_validator
 
@@ -20,10 +20,10 @@ from .competition_cohort_coordinator import (
     CohortPhaseProgress,
 )
 from .competition_cohort_intake import CohortIntakeBinding
-from .competition_cohort_intake_review import IntakeProgressReviewer
-from .competition_cohort_preparation_review import PreparationProgressReviewer
+from .competition_cohort_intake_review import IntakeProgressReviewRecord
+from .competition_cohort_preparation_phase import PreparationProgressReviewRecord
 from .competition_cohort_recovery import SignedCohortRecoveryTransition, verify_recovery_quorum
-from .competition_cohort_request_review import RequestProgressReviewer
+from .competition_cohort_request_phase import RequestProgressReviewRecord
 from .competition_progress import log_phase
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
@@ -37,6 +37,19 @@ from .open_competition import (
 )
 from .private_files import Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+
+
+class PhaseProgressReviewer(Protocol):
+    policy: CompetitionPolicy
+    cohorts: tuple[CohortIntakeBinding, ...]
+
+    async def review(
+        self, progress: CohortPhaseProgress
+    ) -> (
+        IntakeProgressReviewRecord | PreparationProgressReviewRecord | RequestProgressReviewRecord
+    ): ...
+
+    async def decision(self, transition, evidence: CohortDecisionInput) -> str: ...
 
 
 class CohortProgressSignerConfig(StrictProtocolModel):
@@ -60,16 +73,16 @@ class CohortProgressSigner:
     def __init__(
         self,
         config,
-        reviewer: IntakeProgressReviewer | PreparationProgressReviewer | RequestProgressReviewer,
+        reviewer: PhaseProgressReviewer,
         sign,
     ):
         self.config = CohortProgressSignerConfig.model_validate_json(canonical_json_bytes(config))
-        self.policy = reviewer.source.intake.policy
+        self.policy = reviewer.policy
         if self.config.policy_sha256 != digest(self.policy) or identity(self.config.signer) not in {
             identity(e.hotkey) for e in self.policy.evaluators
         }:
             raise ValueError("progress signer is not authorized by the selected policy")
-        if self.config.cohorts != reviewer.source.intake.config.cohorts:
+        if self.config.cohorts != reviewer.cohorts:
             raise ValueError("progress signer and owned intake have different cohort authorities")
         self.reviewer, self.sign = reviewer, sign
         self.serial = asyncio.Lock()
@@ -133,7 +146,7 @@ class CohortProgressSigner:
 
         async def review():
             record = await self.reviewer.review(evidence.progress.progress)
-            history = await run_owned_thread(self.reviewer.source.decision, transition, evidence)
+            history = await self.reviewer.decision(transition, evidence)
             if history != record.history_sha256:
                 raise OSError("cohort history changed before decision signing")
             return {

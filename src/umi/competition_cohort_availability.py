@@ -70,6 +70,35 @@ def pending_availability_progress(
     )
 
 
+def unavailable_service_blocks(
+    prior: CohortAvailabilityObservation | None,
+    current: CohortAvailabilityObservation,
+    maximum_sample_gap_blocks: int,
+) -> int:
+    start = current.phase_started_block
+    block = current.observation.block
+    if prior is None:
+        return max(0, block - start)
+    if (
+        block < prior.observation.block
+        or current.phase_started_block != prior.phase_started_block
+        or (
+            block == prior.observation.block
+            and (current.observation.block_hash, current.observation.state_root)
+            != (prior.observation.block_hash, prior.observation.state_root)
+        )
+    ):
+        raise ValueError("service observation finality regressed or changed")
+    elapsed = max(0, block - max(start, prior.observation.block))
+    continuous = (
+        current.process_epoch == prior.process_epoch
+        and current.serving
+        and prior.serving
+        and block - prior.observation.block <= maximum_sample_gap_blocks
+    )
+    return prior.unavailable_blocks + (0 if continuous else elapsed)
+
+
 class CohortServiceEpoch:
     """One service lifetime, shared across its short-lived database connections."""
 
@@ -141,28 +170,7 @@ class CohortServiceAvailability:
             raise
 
     def _unavailable(self, prior, current) -> int:
-        start = current.phase_started_block
-        block = current.observation.block
-        if prior is None:
-            return max(0, block - start)
-        if (
-            block < prior.observation.block
-            or current.phase_started_block != prior.phase_started_block
-            or (
-                block == prior.observation.block
-                and (current.observation.block_hash, current.observation.state_root)
-                != (prior.observation.block_hash, prior.observation.state_root)
-            )
-        ):
-            raise ValueError("service observation finality regressed or changed")
-        elapsed = max(0, block - max(start, prior.observation.block))
-        continuous = (
-            current.process_epoch == prior.process_epoch
-            and current.serving
-            and prior.serving
-            and block - prior.observation.block <= self.gap
-        )
-        return prior.unavailable_blocks + (0 if continuous else elapsed)
+        return unavailable_service_blocks(prior, current, self.gap)
 
     def _last(self, cohort: str, phase: str) -> CohortAvailabilityObservation | None:
         version = self._version()

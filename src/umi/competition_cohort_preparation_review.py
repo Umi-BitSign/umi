@@ -27,7 +27,11 @@ class PreparationProgressReviewer:
         if provider.policy != source.intake.policy:
             raise ValueError("preparation reviewer finality belongs to another policy")
         self.source, self.provider, self.archive = source, provider, archive
+        self.policy, self.cohorts = source.intake.policy, source.intake.config.cohorts
         self.queue = source.owner.queue
+
+    async def decision(self, transition, evidence):
+        return await run_owned_thread(self.source.decision, transition, evidence)
 
     @log_phase("cohort_preparation_review")
     async def review(self, progress: CohortPhaseProgress) -> PreparationProgressReviewRecord:

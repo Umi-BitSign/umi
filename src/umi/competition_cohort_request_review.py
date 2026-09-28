@@ -24,7 +24,11 @@ class RequestProgressReviewer:
         if provider.policy != source.intake.policy:
             raise ValueError("request reviewer finality belongs to another policy")
         self.source, self.provider, self.archive = source, provider, archive
+        self.policy, self.cohorts = source.intake.policy, source.intake.config.cohorts
         self.queue = CohortAdmissionQueue(source.intake)
+
+    async def decision(self, transition, evidence):
+        return await run_owned_thread(self.source.decision, transition, evidence)
 
     @log_phase("cohort_request_completion_review")
     async def review(self, progress) -> RequestProgressReviewRecord:

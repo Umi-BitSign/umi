@@ -379,6 +379,28 @@ readiness probes. Remote deployments still need authenticated owner exports;
 do not point a reviewer at another process's live SQLite files. Preserve the
 intake, request-completion, queue and signing journals together on migration.
 
+Intake can use `RemoteIntakeProgressReviewer` with `IntakeReviewExporter` in the
+owning process. The exporter copies the original decision inputs, service
+observation prefix and complete sealed consent inventory under the intake lock.
+The independent reviewer reconstructs the seal and outage accounting, checks
+registration archives with its own finality provider, then requests the same
+evidence again before signing. Each response signs a fresh challenge using the
+configured owner's evaluator identity. A saved response cannot satisfy a later
+challenge, and a changed history or disconnected owner delays a new vote.
+Completed signing-journal votes remain available offline.
+
+For remote delivery, explicitly install `intake_review_routes` on a private host
+API and use `IntakeReviewHTTPClient` at the reviewer. The route is
+`POST /internal/cohorts/intake-review`; it requires a private bearer credential,
+bounds request size and allows one export at a time. The client accepts a
+configured HTTPS origin, refuses redirects and bounds received bytes. Both ends
+drain cancelled operations before releasing capacity. The public intake API does
+not enable this route or load a wallet. The enclosing host must supply its
+approved export signer, private transport credential and original registration
+archive delivery. The owner's signature authenticates local service observations;
+it does not independently prove network availability. Preparation and request
+review still need their own authenticated owner exports for remote deployment.
+
 `CohortLifecycleService` runs intake, preparation and request control through the
 same durable controller. Its configured factories create the native phase
 observer and independent signers only when that phase is needed. Progress and

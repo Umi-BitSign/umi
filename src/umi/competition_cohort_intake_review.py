@@ -70,105 +70,108 @@ class NativeIntakeProgressSource:
         cohort = progress.cohort_sha256
         self.intake._allowed(cohort)
         with self.intake._connection() as (db, store):
-            history = store.published_history(cohort)
-            state, restored, prior = replay_cohort_decisions(
-                history,
-                self.intake.policy,
-                lambda key: store.source(cohort, key, CohortDecisionInput),
-            )
-            if (
-                state.phase != "intake"
-                or progress.phase != "intake"
-                or progress.recovery_tip_sha256 != history_tip(history)
-                or progress.observed_at_block < state.observed_at_block
+            return self._read(db, store, progress)
+
+    def _read(self, db, store, progress: CohortPhaseProgress) -> NativeIntakeReview:
+        """One owner-locked snapshot shared by local review and remote export."""
+        cohort = progress.cohort_sha256
+        history = store.published_history(cohort)
+        state, restored, prior = replay_cohort_decisions(
+            history,
+            self.intake.policy,
+            lambda key: store.source(cohort, key, CohortDecisionInput),
+        )
+        if (
+            state.phase != "intake"
+            or progress.phase != "intake"
+            or progress.recovery_tip_sha256 != history_tip(history)
+            or progress.observed_at_block < state.observed_at_block
+        ):
+            raise ValueError("intake progress differs from the owned current history")
+        availability = CohortServiceAvailability(
+            store, self.intake.policy, maximum_sample_gap_blocks=self.gap
+        )
+        # Replay the entire retained chain, including sequence and cumulative
+        # outage accounting. A later sample may coexist with an older vote.
+        availability._last(cohort, "intake")
+        seal = None
+        if progress.completion == "complete":
+            seal = self.intake._seal(db, history, state.tip_sha256)
+            if seal is None or (
+                progress.phase_result_sha256 != digest(seal)
+                or progress.evidence_sha256 != digest(seal)
             ):
-                raise ValueError("intake progress differs from the owned current history")
-            availability = CohortServiceAvailability(
-                store, self.intake.policy, maximum_sample_gap_blocks=self.gap
-            )
-            # Replay the entire retained chain, including sequence and cumulative
-            # outage accounting. A later sample may coexist with an older vote.
-            availability._last(cohort, "intake")
-            seal = None
-            if progress.completion == "complete":
-                seal = self.intake._seal(db, history, state.tip_sha256)
-                if seal is None or (
-                    progress.phase_result_sha256 != digest(seal)
-                    or progress.evidence_sha256 != digest(seal)
-                ):
-                    raise ValueError("intake progress lacks its exact native seal")
-                row = db.execute(
-                    "SELECT substr(body,1,16385) FROM cohort_intake_service_seals "
-                    "WHERE cohort=? AND tip=?",
-                    (cohort, state.tip_sha256),
-                ).fetchone()
-                if row is None:
-                    raise ValueError("intake seal lacks its retained service observation")
-                raw = row[0]
-            else:
-                raw = next(
-                    (
-                        row[0]
-                        for row in db.execute(
-                            "SELECT substr(body,1,16385) FROM cohort_service_observations "
-                            "WHERE cohort=? AND phase='intake' ORDER BY sequence DESC",
-                            (cohort,),
-                        )
-                        if digest(CohortAvailabilityObservation.model_validate_json(row[0]))
-                        == progress.evidence_sha256
-                    ),
-                    None,
-                )
-                if raw is None:
-                    raise ValueError("intake progress has no retained service observation")
-            service = CohortAvailabilityObservation.model_validate_json(raw)
-            retained = db.execute(
-                "SELECT substr(body,1,16385) FROM cohort_service_observations "
-                "WHERE cohort=? AND phase='intake' AND sequence=?",
-                (cohort, service.sequence),
+                raise ValueError("intake progress lacks its exact native seal")
+            row = db.execute(
+                "SELECT substr(body,1,16385) FROM cohort_intake_service_seals "
+                "WHERE cohort=? AND tip=?",
+                (cohort, state.tip_sha256),
             ).fetchone()
-            if (
-                len(raw) > 16384
-                or canonical_json_bytes(service) != raw
-                or retained != (raw,)
-                or service.cohort_sha256 != cohort
-                or service.recovery_tip_sha256 != state.tip_sha256
-                or service.phase != "intake"
-                or service.unavailable_blocks != progress.unavailable_blocks
-                or service.unavailable_blocks < max(restored, prior)
-            ):
-                raise ValueError("intake progress differs from its original service evidence")
-            if seal is None:
-                if pending_availability_progress(state, service) != progress:
-                    raise ValueError("pending intake progress changed its original observation")
-            elif (
-                not service.serving
-                or service.observation != seal.observation
-                or seal.observation.block > progress.observed_at_block
-                or seal.observation.block
-                < state.targets[0].target_block + service.unavailable_blocks - restored
-            ):
-                raise ValueError("intake closed before restoring unavailable service")
-            # _seal already reconstructs membership from every original record.
-            # Review registration proofs for all records, including superseded
-            # submissions and currently unregistered participants.
-            consents = (
-                tuple(key for key, _ in self.intake._records(db, history))
-                if seal is not None
-                else ()
-            )
-            return NativeIntakeReview(
-                IntakeProgressReviewRecord(
-                    schema="umi-intake-progress-review/1",
-                    progress=progress,
-                    history_sha256=digest(history),
-                    service=service,
-                    seal_sha256=None if seal is None else digest(seal),
+            if row is None:
+                raise ValueError("intake seal lacks its retained service observation")
+            raw = row[0]
+        else:
+            raw = next(
+                (
+                    row[0]
+                    for row in db.execute(
+                        "SELECT substr(body,1,16385) FROM cohort_service_observations "
+                        "WHERE cohort=? AND phase='intake' ORDER BY sequence DESC",
+                        (cohort,),
+                    )
+                    if digest(CohortAvailabilityObservation.model_validate_json(row[0]))
+                    == progress.evidence_sha256
                 ),
-                history,
-                seal,
-                consents,
+                None,
             )
+            if raw is None:
+                raise ValueError("intake progress has no retained service observation")
+        service = CohortAvailabilityObservation.model_validate_json(raw)
+        retained = db.execute(
+            "SELECT substr(body,1,16385) FROM cohort_service_observations "
+            "WHERE cohort=? AND phase='intake' AND sequence=?",
+            (cohort, service.sequence),
+        ).fetchone()
+        if (
+            len(raw) > 16384
+            or canonical_json_bytes(service) != raw
+            or retained != (raw,)
+            or service.cohort_sha256 != cohort
+            or service.recovery_tip_sha256 != state.tip_sha256
+            or service.phase != "intake"
+            or service.unavailable_blocks != progress.unavailable_blocks
+            or service.unavailable_blocks < max(restored, prior)
+        ):
+            raise ValueError("intake progress differs from its original service evidence")
+        if seal is None:
+            if pending_availability_progress(state, service) != progress:
+                raise ValueError("pending intake progress changed its original observation")
+        elif (
+            not service.serving
+            or service.observation != seal.observation
+            or seal.observation.block > progress.observed_at_block
+            or seal.observation.block
+            < state.targets[0].target_block + service.unavailable_blocks - restored
+        ):
+            raise ValueError("intake closed before restoring unavailable service")
+        # _seal already reconstructs membership from every original record.
+        # Review registration proofs for all records, including superseded
+        # submissions and currently unregistered participants.
+        consents = (
+            tuple(key for key, _ in self.intake._records(db, history)) if seal is not None else ()
+        )
+        return NativeIntakeReview(
+            IntakeProgressReviewRecord(
+                schema="umi-intake-progress-review/1",
+                progress=progress,
+                history_sha256=digest(history),
+                service=service,
+                seal_sha256=None if seal is None else digest(seal),
+            ),
+            history,
+            seal,
+            consents,
+        )
 
     def decision(self, transition: CohortRecoveryTransition, evidence: CohortDecisionInput):
         """Recompute the exact proposed transition from the owned decision history."""
@@ -204,7 +207,11 @@ class IntakeProgressReviewer:
         if provider.policy != source.intake.policy:
             raise ValueError("intake reviewer finality belongs to another policy")
         self.source, self.provider, self.archive = source, provider, archive
+        self.policy, self.cohorts = source.intake.policy, source.intake.config.cohorts
         self.queue = CohortAdmissionQueue(source.intake)
+
+    async def decision(self, transition, evidence):
+        return await run_owned_thread(self.source.decision, transition, evidence)
 
     @log_phase("cohort_intake_review")
     async def review(self, progress: CohortPhaseProgress) -> IntakeProgressReviewRecord:
