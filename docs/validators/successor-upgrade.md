@@ -774,7 +774,7 @@ visits only the eight selected slots, logs retry reasons without evidence payloa
 and continues after an unavailable slot. All these stores are private.
 
 `umi-cohort-settlement check --config CONFIG.json` validates the root-owned,
-canonical mode-`0444` `umi-cohort-settlement-config/1` or `/2` selection.
+canonical mode-`0444` `umi-cohort-settlement-config/1`, `/2` or `/3` selection.
 `umi-cohort-settlement run --config CONFIG.json` starts the recurring native
 service for every selected cohort. Coordinator and reviewer roles each load
 only their named evaluator key and their own original execution journals.
@@ -783,6 +783,27 @@ phase votes use separate retained intents. Missing evidence or votes stays
 pending, with a bounded retry reason in the service log. A new observation
 requires fresh finality; completing an existing intent uses its original
 observation without an age cutoff.
+
+Version 3 requires `request_export_directory` and starts a recurring exporter
+alongside settlement, including while request closure is still pending. Each
+evaluator seals its completed local execution and endpoint responses with its
+own key. It copies the complete native replay objects into
+`request_export_directory/objects/`, then publishes immutable order and terminal
+indexes under `orders/ROUND_DIGEST/SUBMISSION_DIGEST.json` and
+`terminals/SIGNED_ORDER_DIGEST/EVALUATOR_IDENTITY.json`. Indexes contain only the
+referenced object's competition digest. No references or model labels are added.
+
+Replicate these private files to the request owner's selected
+`RequestCompletionFiles` store. The receiver must replay the signed originals;
+neither an index nor an exporter status certifies closure. Interrupted copies,
+missing endpoint responses and busy execution locks stay pending. Retries reuse
+the original terminal signature, and the durable scan cursor revisits pending
+work without blocking other assignments. Export reports describe the current
+batch. They do not confirm remote delivery or successful reward submission.
+The exporter runs on both coordinator and reviewer roles. Version 3 coordinators
+may also select `original_sources` for automatic settlement input assembly.
+The export directory must be separate from execution journals, service state
+and the named key. Versions 1 and 2 retain their original canonical bytes.
 
 Each service retains these inputs per cohort:
 

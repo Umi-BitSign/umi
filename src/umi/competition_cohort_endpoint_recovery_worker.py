@@ -112,5 +112,5 @@ class CohortEndpointRecoveryWorker:
                     await task
                 with suppress(asyncio.CancelledError):
                     await stopping
-            with suppress(TimeoutError):
+            with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), poll_seconds)

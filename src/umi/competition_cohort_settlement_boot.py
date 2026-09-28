@@ -9,11 +9,14 @@ from pathlib import Path
 
 from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_recovery_store import CohortRecoveryStore
+from .competition_cohort_request_export_worker import RequestExportWorker
+from .competition_cohort_request_files import RequestCompletionFiles
 from .competition_cohort_settlement_config import SettlementServiceConfig
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_cohort_settlement_service import CohortSettlementService
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_reward_service import _close_provider, _stop_task
+from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
 from .named_hotkey import load_named_hotkey
@@ -120,8 +123,32 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     sign=sign,
                 )
             )
+        exports = None
+        if config.request_export_directory is not None:
+            exports = RequestExportWorker(
+                executions,
+                provider,
+                sign,
+                RequestCompletionFiles(
+                    Path(config.request_export_directory),
+                    maximum_bytes=config.maximum_package_bytes,
+                ),
+                RoundJournal(
+                    root / "request-exports",
+                    {
+                        "schema": "umi-cohort-request-export-owner/1",
+                        "series": digest(config.series),
+                        "signer": config.signer_hotkey,
+                        "executions": [e.directory for e in config.executions],
+                        "destination": config.request_export_directory,
+                    },
+                    maximum_bytes=config.maximum_state_bytes,
+                ),
+            )
         await provider.start()
         tasks = [asyncio.create_task(node.run(stop)) for node in nodes]
+        if exports is not None:
+            tasks.append(asyncio.create_task(exports.run(stop, poll_seconds=config.poll_seconds)))
         for task in tasks:
             resources.push_async_callback(_stop_task, task)
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

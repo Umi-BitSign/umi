@@ -3375,8 +3375,12 @@ async def test_native_request_certification_starts_recurring_settlement(
 
     from umi.competition_cohort_intake import CohortIntakePublisher
     from umi.competition_cohort_lifecycle import CohortLifecycleService, CohortPhaseDriver
+    from umi.competition_cohort_order_signer import order_slot
     from umi.competition_cohort_recovery import StandingCohortRecoveryAuthority
+    from umi.competition_cohort_request_export_worker import RequestExportWorker
+    from umi.competition_cohort_request_files import RequestCompletionFiles
     from umi.competition_cohort_request_publication import CohortRequestSettlementPublisher
+    from umi.competition_round_journal import RoundJournal
 
     from .test_competition_cohort_request_phase import make_request_owner, request_controller
 
@@ -3394,6 +3398,33 @@ async def test_native_request_certification_starts_recurring_settlement(
     h.assemble_inputs, h.seed_handoff = True, False
     h.original_sources, h.intake = owner.sources, owner.intake
     a, z = await h.start("Charlie"), await h.start("Dave")
+    # The original inference fixture has finished, but its terminal signatures
+    # and their delivery now belong to the recurring evaluator export workers.
+    for (order_sha, evaluator), evaluator_owner in b["owners"].items():
+        order = next(o for o in b["orders"] if digest(o) == order_sha)
+        with evaluator_owner.journal.transaction() as db:
+            db.execute(
+                "DELETE FROM records WHERE kind IN ('request_terminal', 'request_terminal_intent')"
+            )
+        endpoint_archive = b["endpoint_archives"][(order_sha, evaluator)]
+        if endpoint_archive is not None:
+            evaluator_owner.journal.put(
+                "endpoint_replay_archive", order_slot(order.order), endpoint_archive
+            )
+    completed = RequestCompletionFiles(tmp_path / "request-exports")
+    owner.source.orders = lambda: completed.orders(b["roster"])
+    owner.source.terminals = completed.terminal
+    owner.source.external = completed.objects
+    exporters = tuple(
+        RequestExportWorker(
+            node.executions,
+            node.provider,
+            node.sign,
+            completed,
+            RoundJournal(tmp_path / ("request-exporter-" + name), {"signer": name}),
+        )
+        for name, node in (("Charlie", a), ("Dave", z))
+    )
     handoff = Path(a.config.history_directory) / (owner.cohort + ".json")
     assert not handoff.exists()
     for node in (a, z):
@@ -3417,8 +3448,9 @@ async def test_native_request_certification_starts_recurring_settlement(
         # hand-authored closure or phase history file.
         await asyncio.sleep(0.1)
         assert not output.exists()
-        owner.window()
+        assert owner.window().completion == "pending"
         h.clock.block = owner.block + 100
+        tasks.extend(asyncio.create_task(e.run(stop, poll_seconds=1)) for e in exporters)
         with request_controller(owner, tmp_path, publication) as control:
 
             async def no_intake():

@@ -252,3 +252,102 @@ def test_settlement_sqlite_rejects_duplicate_owner_and_unsafe_files(tmp_path):
     with pytest.raises(ValueError, match="auxiliary"), boot.settlement_store(root, 1024**2):
         pass
     assert outside.read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("fault", [None, "version", "missing", "key", "execution"])
+def test_request_export_is_explicit_private_configuration(selected, tmp_path, fault):
+    c = selected.config
+    assert "request_export_directory" not in c.model_dump(mode="json", by_alias=True)
+    data = c.model_dump(mode="json", by_alias=True)
+    data.update(
+        schema="umi-cohort-settlement-config/3",
+        request_export_directory=str(tmp_path / "request-exports"),
+    )
+    if fault == "version":
+        data["schema"] = "umi-cohort-settlement-config/1"
+    elif fault == "missing":
+        data.pop("request_export_directory")
+    elif fault == "key":
+        data["request_export_directory"] = str(Path(c.signer_key_file).parent)
+    elif fault == "execution":
+        data["request_export_directory"] = c.executions[0].directory
+    if fault:
+        with pytest.raises(ValueError):
+            SettlementServiceConfig.model_validate_json(canonical_json_bytes(data))
+    else:
+        value = SettlementServiceConfig.model_validate_json(canonical_json_bytes(data))
+        selected.save(selected.path, canonical_json_bytes(value))
+        assert load_settlement_service_config(selected.path) == value
+
+
+@pytest.mark.parametrize("failure", [None, "construction", "runtime"])
+async def test_export_worker_runs_before_settlement_and_drains_with_it(
+    selected, tmp_path, monkeypatch, failure
+):
+    config = SettlementServiceConfig.model_validate_json(
+        canonical_json_bytes(
+            selected.config.model_copy(
+                update={
+                    "schema_": "umi-cohort-settlement-config/3",
+                    "request_export_directory": str(tmp_path / "exports"),
+                }
+            )
+        )
+    )
+    events, stop, entered = [], asyncio.Event(), asyncio.Event()
+
+    class Provider:
+        def __init__(self, chain, policy):
+            self.policy = policy
+
+        async def start(self):
+            events.append("provider_started")
+
+        async def aclose(self):
+            events.append("provider_closed")
+
+    class Node:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, halted):
+            events.append("node_started")
+            try:
+                entered.set()
+                await halted.wait()
+            finally:
+                events.append("node_drained")
+
+    class Exports:
+        def __init__(self, executions, provider, sign, files, journal):
+            assert executions[0].config == config.executions[0]
+            assert files.root == Path(config.request_export_directory)
+            if failure == "construction":
+                raise ValueError("export constructor failed")
+            self.sign = sign
+
+        async def run(self, halted, *, poll_seconds):
+            try:
+                await entered.wait()
+                events.append("export_started")
+                signature = await self.sign(config.series)
+                verify_signature(config.series, signature)
+                if failure == "runtime":
+                    raise RuntimeError("export worker failed")
+                halted.set()
+            finally:
+                events.append("export_drained")
+
+    monkeypatch.setattr(boot, "HistoricalRegistrationProvider", Provider)
+    monkeypatch.setattr(boot, "load_named_hotkey", lambda *args: wallet("Charlie"))
+    monkeypatch.setattr(boot, "CohortSettlementService", Node)
+    monkeypatch.setattr(boot, "RequestExportWorker", Exports)
+    if failure:
+        with pytest.raises((ValueError, RuntimeError), match="export"):
+            await boot.run_settlement_service(config, stop)
+    else:
+        await boot.run_settlement_service(config, stop)
+    assert events[-1] == "provider_closed"
+    assert ("node_started" in events) == (failure != "construction")
+    assert ("node_drained" in events) == (failure != "construction")
+    assert ("export_drained" in events) == (failure != "construction")

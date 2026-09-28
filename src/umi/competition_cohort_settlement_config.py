@@ -46,9 +46,11 @@ class SettlementOriginalSources(StrictProtocolModel):
 
 
 class SettlementServiceConfig(StrictProtocolModel):
-    schema_: Literal["umi-cohort-settlement-config/1", "umi-cohort-settlement-config/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-cohort-settlement-config/1",
+        "umi-cohort-settlement-config/2",
+        "umi-cohort-settlement-config/3",
+    ] = Field(alias="schema")
     role: Literal["coordinator", "reviewer"]
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -73,12 +75,15 @@ class SettlementServiceConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
     original_sources: SettlementOriginalSources | None = None
+    request_export_directory: Directory | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
         if self.original_sources is None:
             value.pop("original_sources", None)
+        if self.request_export_directory is None:
+            value.pop("request_export_directory", None)
         return value
 
     def stores(self):
@@ -97,6 +102,7 @@ class SettlementServiceConfig(StrictProtocolModel):
                 self.exchange_outbox,
                 *(e.directory for e in self.executions),
                 *(self.original_sources.stores() if self.original_sources else ()),
+                *((self.request_export_directory,) if self.request_export_directory else ()),
             )
         )
 
@@ -108,8 +114,14 @@ class SettlementServiceConfig(StrictProtocolModel):
         who, proposer = identity(self.signer_hotkey), identity(self.proposer_hotkey)
         cohorts = {digest(p) for p in self.series.cohorts}
         sources = self.original_sources
-        if (self.schema_ == "umi-cohort-settlement-config/2") != (sources is not None):
+        if self.schema_ != "umi-cohort-settlement-config/3" and (
+            self.schema_ == "umi-cohort-settlement-config/2"
+        ) != (sources is not None):
             raise ValueError("automatic settlement sources require configuration version 2")
+        if (self.schema_ == "umi-cohort-settlement-config/3") != (
+            self.request_export_directory is not None
+        ):
+            raise ValueError("automatic request exports require configuration version 3")
         if sources is not None and (
             self.role != "coordinator"
             or len(set(sources.eligible_tracks)) != len(sources.eligible_tracks)

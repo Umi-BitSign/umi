@@ -218,7 +218,7 @@ class CohortLifecycleService:
                 self.last_sampling_report = result
                 if sample_report is not None:
                     sample_report(result)
-                with suppress(TimeoutError):
+                with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=sample_seconds)
 
         async def loop():
@@ -246,7 +246,7 @@ class CohortLifecycleService:
                     report(result)
                 if result["status"] in {"settlement_handoff_published", "revoked"}:
                     return result
-                with suppress(TimeoutError):
+                with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
             return {
                 "status": "stopped",
