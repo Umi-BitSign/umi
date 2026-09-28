@@ -379,6 +379,26 @@ readiness probes. Remote deployments still need authenticated owner exports;
 do not point a reviewer at another process's live SQLite files. Preserve the
 intake, request-completion, queue and signing journals together on migration.
 
+`CohortLifecycleService` runs intake, preparation and request control through the
+same durable controller. Its configured factories create the native phase
+observer and independent signers only when that phase is needed. Progress and
+decision retries select the phase recorded in the original intent. Preparation
+and request result publications must finish before the next phase starts. The
+preparation publisher's `publish_history` port restores the original round file
+from the owning journal after a lost acknowledgement or a missing derived file.
+After request publication succeeds, the lifecycle returns
+`settlement_handoff_published` and the recurring settlement service takes over.
+
+The enclosing host owns process locks, finality lifetimes, admission and execution
+workers, readiness probes and authenticated reviewer delivery. Configure all
+three phase factories; a missing dependency remains a retry. The lifecycle logs
+the cohort, phase and failed stage without including request contents. Shutdown
+drains pending phase work before the host closes its stores. Keep service
+sampling independent of slow certification so healthy intervals can be observed
+within the configured gap; unknown intervals receive no inferred service credit.
+Qualify the actual host composition and restart behavior before enabling cohort
+launch.
+
 Use `CohortRequestSettlementPublisher` as the request controller's publication
 port to deliver certified requests into the recurring settlement service. It
 commits the intake owner's certified history, replays the original service

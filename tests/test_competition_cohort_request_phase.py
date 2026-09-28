@@ -341,10 +341,13 @@ def request_controller(h, tmp_path, publication=None):
     async def sample(state, observed):
         return await run_owned_thread(lambda: h.source.observe(state, observed, serving=True))
 
-    def controller():
-        ports = CertifiedPhaseObserver(
+    def observer():
+        return CertifiedPhaseObserver(
             sample, tuple(h.signer(n) for n in ("Charlie", "Dave")), policy
         )
+
+    def controller():
+        ports = observer()
         return CohortRecoveryCoordinator(
             store,
             h.cohort,
@@ -359,7 +362,13 @@ def request_controller(h, tmp_path, publication=None):
         )
 
     try:
-        yield SimpleNamespace(reopen=controller, store=store, publisher=publisher)
+        yield SimpleNamespace(
+            reopen=controller,
+            store=store,
+            publisher=publisher,
+            observer=observer,
+            decision=decision,
+        )
     finally:
         db.close()
 

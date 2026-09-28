@@ -16,6 +16,7 @@ from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .concurrency import run_owned_thread
+from .open_competition import digest
 from .private_files import Directory, publish_private_model
 from .protocol import StrictProtocolModel
 
@@ -59,17 +60,7 @@ class CohortPreparationPublisher:
                 if view.state.phase == "revoked":
                     revoked += 1
                     continue
-                prepared = await run_owned_thread(
-                    partial(self.owner.prepare, cohort, capture, expected_tip_sha256=tip)
-                )
-                await run_owned_thread(
-                    partial(
-                        publish_private_model,
-                        self.output / (cohort + ".json"),
-                        prepared,
-                        maximum_bytes=self.owner.maximum_bytes,
-                    )
-                )
+                await self._publish(cohort, capture, tip)
                 published += 1
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 pending += 1
@@ -85,3 +76,34 @@ class CohortPreparationPublisher:
             "revoked_cohorts": revoked,
             "chain_submission_authorized": False,
         }
+
+    async def publish_history(self, history) -> None:
+        """Lifecycle handoff: publish the exact retained prepared round."""
+        cohort = digest(history.plan)
+        self.provider.ensure_observer_running()
+        current = await run_owned_thread(self.owner.queue.intake.history, cohort)
+        if current != history:
+            raise OSError("preparation publication history changed")
+        capture = await self.provider.collect()
+        view = verify_cohort_history(
+            history,
+            self.owner.queue.policy,
+            expected_tip_sha256=history_tip(history),
+            current_block=execution_boundary(capture).block,
+        )
+        if view.state.phase in {"intake", "revoked"}:
+            raise ValueError("preparation publication requires active prepared authority")
+        await self._publish(cohort, capture, history_tip(history))
+
+    async def _publish(self, cohort, capture, tip):
+        prepared = await run_owned_thread(
+            partial(self.owner.prepare, cohort, capture, expected_tip_sha256=tip)
+        )
+        await run_owned_thread(
+            partial(
+                publish_private_model,
+                self.output / (cohort + ".json"),
+                prepared,
+                maximum_bytes=self.owner.maximum_bytes,
+            )
+        )

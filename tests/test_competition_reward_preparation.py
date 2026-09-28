@@ -3369,6 +3369,8 @@ async def test_native_request_certification_starts_recurring_settlement(
 ):
     from pathlib import Path
 
+    from umi.competition_cohort_intake import CohortIntakePublisher
+    from umi.competition_cohort_lifecycle import CohortLifecycleService, CohortPhaseDriver
     from umi.competition_cohort_recovery import StandingCohortRecoveryAuthority
     from umi.competition_cohort_request_publication import CohortRequestSettlementPublisher
 
@@ -3414,7 +3416,32 @@ async def test_native_request_certification_starts_recurring_settlement(
         owner.window()
         h.clock.block = owner.block + 100
         with request_controller(owner, tmp_path, publication) as control:
-            await control.reopen().tick()
+
+            async def no_intake():
+                pytest.fail("certified intake must not reopen")
+
+            async def prepared_driver():
+                async def already_published(history):
+                    # This test starts with original prepared-round fixtures;
+                    # the lifecycle intake/preparation tests produce them natively.
+                    assert (Path(owner.sources.round_directory) / (owner.cohort + ".json")).exists()
+
+                return CohortPhaseDriver(control.observer(), already_published)
+
+            async def request_driver():
+                return CohortPhaseDriver(control.observer(), control.publisher)
+
+            lifecycle = CohortLifecycleService(
+                control.store,
+                owner.cohort,
+                owner.b["policy"],
+                b["history"].genesis_signatures,
+                owner.provider,
+                CohortIntakePublisher(owner.intake, owner.provider.collect, control.decision),
+                {"intake": no_intake, "preparation": prepared_driver, "requests": request_driver},
+            )
+            result = await asyncio.wait_for(lifecycle.run(stop, poll_seconds=0.01), timeout=60)
+            assert result["status"] == "settlement_handoff_published"
         assert handoff.exists()
         request_signatures = tuple(owner.calls)
 
