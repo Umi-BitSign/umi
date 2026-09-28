@@ -1483,6 +1483,29 @@ proofs, capacity exhaustion and unavailable finality leave work pending. Increas
 These byte limits cover logical records; provision separate disk headroom for
 SQLite, finality state, backups and migration.
 
+The admission worker can also prepare rounds automatically. Set its optional
+`preparation` object to select `promotion_directory` and `output_directory`.
+These directories must be disjoint from each other, the intake, signer and
+finality stores, and the wallet directory. `maximum_bytes` defaults to 64 MiB
+per prepared round; `maximum_promotion_bytes` defaults to 16 MiB per promotion
+receipt. Preparation records count toward `admission_capacity` as well.
+
+After certified intake closure, the worker waits for every selected admission
+certificate, reconstructs the full intake seal, and selects the locally reviewed
+incumbent. It commits the roster, incumbent receipt and original finalized
+observation under the intake owner's lock before publishing
+`output_directory/COHORT_SHA256.json` as a private `PreparedCohortRound`.
+Superseded intake records remain required for membership verification.
+Restart and lost publication reuse the original round bytes; they cannot select
+a newer incumbent or change the prepared block. Missing evidence or storage
+capacity leaves preparation pending, and revocation prevents republication.
+
+This output supplies preparation evidence. Dispatch still requires an
+independently reviewed preparation certificate. Automatic preparation review,
+request closure, reference reveal and settlement-input publication remain
+integration requirements for an unattended cohort. The output contains no
+reference labels and grants no weight-submission authority.
+
 When the original header was skipped or the reviewer was offline, admission
 review reconstructs it from that reviewer's nearest retained finalized
 descendant. Each RPC header must hash to the committed parent. The walk has no

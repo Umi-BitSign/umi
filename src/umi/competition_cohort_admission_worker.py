@@ -21,8 +21,13 @@ from .competition_cohort_admission_journal import (
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_admission_signer import CohortAdmissionSigner
 from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
+from .competition_cohort_preparation_owner import CohortPreparation
+from .competition_cohort_preparation_publisher import (
+    CohortPreparationPublicationConfig,
+    CohortPreparationPublisher,
+)
 from .competition_historical_registration import HistoricalRegistrationProvider
-from .competition_store import AdmissionCapacity
+from .competition_store import AdmissionCapacity, CompetitionStore
 from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, digest, identity, sign_object
 from .private_files import Directory, ensure_private_directory, lock_private_file
@@ -45,6 +50,7 @@ class CohortAdmissionWorkerConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     historical_header_maximum_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
     historical_header_batch_size: Annotated[int, Field(ge=1, le=4096)] = 256
+    preparation: CohortPreparationPublicationConfig | None = None
 
     @model_validator(mode="after")
     def bindings(self):
@@ -61,12 +67,23 @@ class CohortAdmissionWorkerConfig(StrictProtocolModel):
             Path(p).resolve()
             for p in (self.intake.directory, self.signing.directory, self.chain.state_directory)
         ]
+        if self.preparation is not None:
+            roots.append(Path(self.wallet_path).resolve())
+            roots.extend(
+                Path(p).resolve()
+                for p in (
+                    self.preparation.promotion_directory,
+                    self.preparation.output_directory,
+                )
+            )
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(roots)
             for b in roots[i + 1 :]
         ):
-            raise ValueError("admission intake, signer and finality state must not overlap")
+            raise ValueError(
+                "admission intake, signer, finality and preparation state must not overlap"
+            )
         return self
 
 
@@ -207,6 +224,19 @@ async def run_admission_worker(
             CohortAdmissionSigner(journal, provider, history, sign),
             batch_size=config.batch_size,
         )
+        preparation = None
+        if config.preparation is not None:
+            selected = config.preparation
+            preparation = CohortPreparationPublisher(
+                CohortPreparation(
+                    queue,
+                    CompetitionStore(Path(selected.promotion_directory), policy),
+                    maximum_bytes=selected.maximum_bytes,
+                    maximum_promotion_bytes=selected.maximum_promotion_bytes,
+                ),
+                provider,
+                Path(selected.output_directory),
+            )
         if own_stop:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, stop.set)
@@ -215,7 +245,10 @@ async def run_admission_worker(
 
         async def cycle():
             provider.ensure_observer_running()
-            return await worker.poll_once()
+            result = await worker.poll_once()
+            if preparation is not None:
+                result["preparation"] = await preparation.poll_once()
+            return result
 
         while not stop.is_set():
             task, stopping = asyncio.create_task(cycle()), asyncio.create_task(stop.wait())

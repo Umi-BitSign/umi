@@ -12,6 +12,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from umi.competition_artifacts import preserve_bundle
 from umi.competition_cli import execute
 from umi.competition_client import CompetitionSubmissionError
 from umi.competition_cohort_admission_queue import CohortAdmissionQueue
@@ -24,11 +25,13 @@ from umi.competition_cohort_api import cohort_routes
 from umi.competition_cohort_client import fetch_cohort_admission, submit_cohort_participation
 from umi.competition_cohort_intake import CohortIntake, history_tip
 from umi.competition_cohort_intake_records import read_participation
+from umi.competition_cohort_preparation import PreparedCohortRound
+from umi.competition_cohort_preparation_publisher import CohortPreparationPublicationConfig
 from umi.competition_commands.arguments import build_parser
-from umi.competition_store import AdmissionCapacity
+from umi.competition_store import AdmissionCapacity, CompetitionStore
 from umi.concurrency import run_owned_thread
 from umi.open_competition import digest, sign_object
-from umi.private_files import lock_private_file
+from umi.private_files import lock_private_file, read_private_model
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_chain import chain as chain
@@ -40,8 +43,8 @@ from .test_competition_cohort_consumers import scenario as scenario
 from .test_competition_cohort_intake import request_for
 from .test_competition_cohort_recovery import recovery as recovery
 from .test_competition_historical_registration import archive as archive
+from .test_open_competition import bundle_at, submission, wallet
 from .test_open_competition import policy as policy
-from .test_open_competition import submission, wallet
 
 
 @pytest.fixture
@@ -259,6 +262,66 @@ async def test_runner_owns_provider_lifecycle_and_stop(relay, monkeypatch, tmp_p
     assert result["status"] == "stopped" and reports[0]["votes_published"] == 1
     started.assert_awaited_once()
     closed.assert_awaited_once()
+
+
+async def test_running_admission_service_also_publishes_native_preparation(
+    relay, monkeypatch, tmp_path
+):
+    h = relay
+    await submit(h)
+    await h.reviewer("Charlie").poll_once()
+    await h.reviewer("Dave").poll_once()
+    closed = closed_source(h)
+    h.intake.seal(h.cohort, h.archive.capture, expected_tip_sha256=history_tip(h.source.history))
+    h.intake.publish(
+        closed.history, await h.archive.reviewer.collect(), closure_input=closed.closure
+    )
+    selected = CohortPreparationPublicationConfig(
+        promotion_directory=str(tmp_path / "promotion"),
+        output_directory=str(tmp_path / "prepared"),
+    )
+    model = tmp_path / "model"
+    bundle = bundle_at(model)
+    preserve_bundle(bundle, model, tmp_path / "archive", h.intake.policy)
+    store = CompetitionStore(Path(selected.promotion_directory), h.intake.policy)
+    store.initialize_baseline(bundle, tmp_path / "archive")
+    config = CohortAdmissionWorkerConfig(
+        schema="umi-cohort-admission-worker-config/1",
+        policy_sha256=digest(h.intake.policy),
+        intake=h.intake_config,
+        signing=h.configs["Charlie"],
+        chain=h.archive.chain.config,
+        wallet_name="test",
+        hotkey_name="default",
+        wallet_path=str(tmp_path / "wallet"),
+        preparation=selected,
+    )
+    provider = h.archive.reviewer
+    monkeypatch.setattr(provider, "start", AsyncMock())
+    monkeypatch.setattr(provider, "aclose", AsyncMock())
+    monkeypatch.setattr(provider, "ensure_observer_running", lambda: None)
+    result = await run_admission_worker(
+        config,
+        h.intake.policy,
+        once=True,
+        wallet=wallet("Charlie"),
+        provider_factory=lambda *a, **kw: provider,
+    )
+    assert result["preparation"]["rounds_published"] == 1
+    assert result["preparation"]["retry_count"] == 0
+    prepared = read_private_model(
+        Path(selected.output_directory) / (h.cohort + ".json"), PreparedCohortRound
+    )
+    assert prepared.roster.intake_seal == closed.seal
+    assert prepared.roster.round.participants[0].submission_sha256 == digest(
+        h.request.signed_submission.submission
+    )
+    assert prepared.roster.round.prepared_at_block in h.intake.retained_registration_blocks()
+    for unsafe in (h.intake_config.directory, str(Path(config.wallet_path) / "nested")):
+        invalid = config.model_dump(mode="json", by_alias=True)
+        invalid["preparation"]["output_directory"] = unsafe
+        with pytest.raises(ValueError, match="overlap"):
+            CohortAdmissionWorkerConfig.model_validate_json(canonical_json_bytes(invalid))
 
 
 @pytest.mark.parametrize("failure", ["policy", "consent", "quorum", "reward_claim"])
