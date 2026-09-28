@@ -23,7 +23,7 @@ from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_scoring import score_single_reference
 from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse
-from .open_competition import Hotkey, digest
+from .open_competition import EvaluationSuite, Hotkey, digest, validate_suite_profile
 from .policy import scoring_policy_hash
 from .protocol import (
     Hex32,
@@ -88,6 +88,86 @@ class ServiceReferenceReveal(StrictProtocolModel):
     request_closure_sha256: Hex32
     benchmark_suite_sha256: Hex32
     catalogs: Annotated[tuple[CatalogReferences, ...], Field(min_length=1, max_length=64)]
+
+
+def _committed_references(catalogs, objects):
+    references = {}
+    for catalog in catalogs:
+        for item in catalog.catalog.work:
+            ref = ServiceReference.model_validate_json(
+                read_endpoint_object(objects, item.reference_sha256)
+            )
+            if (ref.case_id, ref.video_sha256, ref.stratum) != (
+                item.case_id,
+                item.video_sha256,
+                item.stratum,
+            ):
+                raise ValueError("service reference belongs to another committed input")
+            references[item.reference_sha256] = ref
+    return references
+
+
+def build_service_reference_reveal(
+    closure,
+    roster,
+    suite,
+    objects,
+    policy,
+    history,
+    transport,
+    *,
+    expected_catalogs,
+    expected_seals,
+    decision_source,
+    intake_records,
+    expected_tip_sha256,
+    current_block,
+) -> ServiceReferenceReveal:
+    """Reveal the complete committed inventory after certified request closure.
+
+    The host independently selects history, catalogs, owner seals and original
+    finality. Missing evidence raises before a reveal can be signed. References
+    remain private until the enclosing publication service releases them.
+    """
+    view = verify_cohort_history(
+        history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
+    )
+    if view.state.phase != "reference_reveal":
+        raise ValueError("reference publication requires the reference-reveal phase")
+    if current_block <= view.closure("requests").observed_at_block:
+        raise ValueError("reference publication must follow certified request closure")
+    closure = verify_certified_service_request_closure(
+        closure,
+        roster,
+        objects,
+        policy,
+        history,
+        transport,
+        expected_catalogs=expected_catalogs,
+        expected_seals=expected_seals,
+        decision_source=decision_source,
+        intake_records=intake_records,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
+    validate_suite_profile(suite, policy)
+    if digest(suite) != roster.round.suite_sha256 or suite.policy_sha256 != digest(policy):
+        raise ValueError("revealed suite differs from certified preparation")
+    _committed_references(expected_catalogs, objects)
+    return ServiceReferenceReveal(
+        schema="umi-cohort-service-reference-reveal/1",
+        policy_sha256=digest(policy),
+        request_closure_sha256=digest(closure),
+        benchmark_suite_sha256=digest(suite),
+        catalogs=tuple(
+            CatalogReferences(
+                catalog_sha256=digest(c.catalog),
+                references=tuple(w.reference_sha256 for w in c.catalog.work),
+            )
+            for c in expected_catalogs
+        ),
+    )
 
 
 class ServiceWorkQuality(StrictProtocolModel):
@@ -181,21 +261,10 @@ def replay_closed_service_quality(
         != tuple(c.catalog_sha256 for c in closure.catalogs)
     ):
         raise ValueError("service references differ from certified complete reveal")
-    references = {}
     for declared, catalog in zip(reveal.catalogs, expected_catalogs, strict=True):
         if declared.references != tuple(w.reference_sha256 for w in catalog.catalog.work):
             raise ValueError("service reveal substituted its committed reference inventory")
-        for item in catalog.catalog.work:
-            ref = ServiceReference.model_validate_json(
-                read_endpoint_object(objects, item.reference_sha256)
-            )
-            if (ref.case_id, ref.video_sha256, ref.stratum) != (
-                item.case_id,
-                item.video_sha256,
-                item.stratum,
-            ):
-                raise ValueError("service reference belongs to another committed input")
-            references[item.reference_sha256] = ref
+    references = _committed_references(expected_catalogs, objects)
     outcomes = []
     for catalog_closure in closure.catalogs:
         for key in catalog_closure.terminals:

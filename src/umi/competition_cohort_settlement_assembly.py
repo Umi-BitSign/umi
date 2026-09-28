@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from .competition_cohort_coordinator import replay_cohort_decisions
+from .competition_cohort_endpoint_archive import EndpointObjectSource
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_preparation import PreparedCohortRound
@@ -14,7 +15,11 @@ from .competition_cohort_reward_package import (
     _check_bound,
 )
 from .competition_cohort_service_closure import CohortServiceRequestClosure
-from .competition_cohort_service_quality import ServiceReferenceReveal, ServiceTerms
+from .competition_cohort_service_quality import (
+    ServiceReferenceReveal,
+    ServiceTerms,
+    build_service_reference_reveal,
+)
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
 from .competition_cohort_settlement_config import SettlementOriginalSources
@@ -37,27 +42,30 @@ def assemble_settlement_inputs(
     *,
     current_block: int,
     maximum_bytes: int,
+    retained_objects: EndpointObjectSource | None = None,
 ) -> SettlementInputPackage:
     """No signer or inference port; incomplete original evidence stays pending.
 
     The caller selects current certified history independently of the source files.
-    A late first build uses the original evidence-phase prefix, so advancing the
-    current history does not change the package identity.
+    Each stage uses its original certified prefix. A late scoring-package build
+    still selects the evidence-phase prefix, preserving its package identity.
     """
     _check_bound(maximum_bytes)
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=history_tip(history), current_block=current_block
     )
     if view.state.phase not in {
+        "reference_reveal",
         "evidence",
         "review",
         "certification",
         "first_admission",
         "complete",
     }:
-        raise ValueError("settlement assembly requires active certified reference reveal")
+        raise ValueError("settlement assembly requires active certified request closure")
     replay_cohort_decisions(history, policy, decisions)
-    revealed = view.closure("reference_reveal")
+    revealing = view.state.phase == "reference_reveal"
+    revealed = view.closure("requests" if revealing else "reference_reveal")
     count = next(i + 1 for i, s in enumerate(history.transitions) if s.transition == revealed)
     original = history.model_copy(update={"transitions": history.transitions[:count]})
     cohort = digest(history.plan)
@@ -78,9 +86,17 @@ def assemble_settlement_inputs(
         PreparedCohortRound,
         maximum_bytes,
     )
-    objects = ReplayObjectCollector(
-        SettlementEvidenceFiles(Path(sources.objects_directory)), maximum_bytes
-    )
+    files = SettlementEvidenceFiles(Path(sources.objects_directory))
+
+    def source_object(key):
+        try:
+            return files(key)
+        except FileNotFoundError:
+            if retained_objects is None:
+                raise
+            return retained_objects(key)
+
+    objects = ReplayObjectCollector(source_object, maximum_bytes)
 
     def phase_result(phase, model):
         decision = decisions(view.closure(phase).evidence_sha256)
@@ -89,7 +105,6 @@ def assemble_settlement_inputs(
         return model.model_validate_json(objects(decision.progress.progress.phase_result_sha256))
 
     closure = phase_result("requests", CohortServiceRequestClosure)
-    reveal = phase_result("reference_reveal", ServiceReferenceReveal)
     terms = ServiceTerms.model_validate_json(objects(requirement.terms_sha256))
     catalogs = tuple(
         source_file(
@@ -101,26 +116,48 @@ def assemble_settlement_inputs(
     )
     if tuple(digest(c.catalog) for c in catalogs) != requirement.catalog_sha256s:
         raise ValueError("settlement catalog delivery changes the approved inventory")
-    inputs = RewardReplayInputs(
-        closure=closure,
-        roster=prepared.roster,
-        suite=EvaluationSuite.model_validate_json(objects(history.plan.suite_sha256)),
-        transport=source_file(
-            Path(sources.transport_directory) / (terms.transport_policy_sha256 + ".json"),
-            ScoringPolicy,
-            8 * 1024**2,
-        ),
-        terms=terms,
-        reveal=reveal,
-        catalogs=catalogs,
-        seals=tuple(
-            ServiceWorkSeal.model_validate_json(objects(c.seal_sha256)) for c in closure.catalogs
-        ),
-        history=original,
+    suite = EvaluationSuite.model_validate_json(objects(history.plan.suite_sha256))
+    transport = source_file(
+        Path(sources.transport_directory) / (terms.transport_policy_sha256 + ".json"),
+        ScoringPolicy,
+        8 * 1024**2,
+    )
+    seals = tuple(
+        ServiceWorkSeal.model_validate_json(objects(c.seal_sha256)) for c in closure.catalogs
     )
     intake = CohortIntake(sources.intake, policy, eligible_tracks=sources.eligible_tracks)
     records = intake.export_records(
         cohort, maximum_bytes=maximum_bytes, maximum_records=MAX_PACKAGE_OBJECTS
+    )
+    reveal = (
+        build_service_reference_reveal(
+            closure,
+            prepared.roster,
+            suite,
+            objects,
+            policy,
+            original,
+            transport,
+            expected_catalogs=catalogs,
+            expected_seals=seals,
+            decision_source=decisions,
+            intake_records=iter(records),
+            expected_tip_sha256=history_tip(original),
+            current_block=current_block,
+        )
+        if revealing
+        else phase_result("reference_reveal", ServiceReferenceReveal)
+    )
+    inputs = RewardReplayInputs(
+        closure=closure,
+        roster=prepared.roster,
+        suite=suite,
+        transport=transport,
+        terms=terms,
+        reveal=reveal,
+        catalogs=catalogs,
+        seals=seals,
+        history=original,
     )
 
     def pulse(number):

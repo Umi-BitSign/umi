@@ -286,6 +286,16 @@ class CohortRecoveryStore:
                 raise ValueError("published cohort tip differs after import")
             return state
 
+    def has_published_history(self, cohort: str) -> bool:
+        """Check admission presence without hiding corrupt retained history."""
+        with self._transaction():
+            return (
+                self.db.execute(
+                    "SELECT 1 FROM cohort_published_genesis WHERE cohort=?", (cohort,)
+                ).fetchone()
+                is not None
+            )
+
     def published_history(self, cohort: str) -> CohortRecoveryHistory:
         with self._transaction():
             row = self.db.execute(

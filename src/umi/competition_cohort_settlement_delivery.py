@@ -67,6 +67,8 @@ class SettlementResultVotes:
         outbox: Path,
     ):
         self.inputs, self.hotkey, self.account = inputs, hotkey, identity(hotkey)
+        if inputs.quality is None or inputs.service is None:
+            raise ValueError("result votes require certified reference reveal")
         self.executions, self.journal, self.sign = executions, journal, sign
         self.cohort = digest(inputs.inputs.history.plan)
         self.inbox, self.outbox = (Path(private_path(str(p))) for p in (inbox, outbox))

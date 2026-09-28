@@ -1,6 +1,6 @@
 """Native settlement phase review with durable, independently collected votes.
 
-These ports are for the evidence, review and certification phases only. The
+These ports cover reference reveal, evidence, review and certification. The
 host selects current history and original finality independently; replay does
 not authorize new miner work, change membership or submit chain transactions.
 """

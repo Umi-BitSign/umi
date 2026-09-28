@@ -373,7 +373,7 @@ selected history, including revocation. Run it under the cohort service's
 sole-writer lock with independently selected plan, authority, scoring terms,
 catalogs and finality.
 
-Before certification, `prepare_settlement_inputs` exports a private
+For scoring, `prepare_settlement_inputs` exports a private version 1
 `SettlementInputPackage` from the original evidence-phase history. It replays
 every benchmark participant and the complete service allocation, retaining the
 exact execution objects, intake records, cohort decisions and reveal pulses
@@ -401,8 +401,9 @@ Native replay runs in an owned worker thread without sharing the controller's
 SQLite connection, and shutdown drains replay and signing before releasing
 resources.
 
-`SettlementReviewExchange` persists six immutable request slots per standing
-cohort: progress and transition requests for evidence, review and certification.
+`SettlementReviewExchange` persists eight immutable request slots per standing
+cohort: progress and transition requests for reference reveal, evidence, review
+and certification.
 Only a locally reviewed, durable proposer vote can create a request. Each request
 carries its certified history and every original decision input; the receiver
 checks the configured cohort, authority, proposer and history before native
@@ -417,7 +418,7 @@ uses bounded, immutable proof
 frames; the receiver authenticates them against its own finality provider. The
 file envelope alone supplies no verification authority. Existing exported proof
 bytes remain available when the original provider is offline. The reviewer loop
-visits only the six selected slots, logs retry reasons without evidence payloads,
+visits only the eight selected slots, logs retry reasons without evidence payloads,
 and continues after an unavailable slot. All these stores are private.
 
 `umi-cohort-settlement check --config CONFIG.json` validates the root-owned,
@@ -431,14 +432,19 @@ pending, with a bounded retry reason in the service log. A new observation
 requires fresh finality; completing an existing intent uses its original
 observation without an age cutoff.
 
-Each service retains two separately selected inputs per cohort:
+Each service retains these inputs per cohort:
 
-- `inputs_directory/COHORT_SHA256.json`: immutable `SettlementInputPackage`.
+- `inputs_directory/COHORT_SHA256-reference.json`: version 2 `SettlementInputPackage`
+  for reference certification, containing the complete committed reference inventory
+  and original request evidence. It contains no quality results or reveal pulses.
+- `inputs_directory/COHORT_SHA256.json`: version 1 `SettlementInputPackage` after
+  reference certification, including the original pulses needed to score responses.
   The first native replay pins its digest in local state.
 - `history_directory/COHORT_SHA256.json`: the host's current
   `CohortOrderHistory` handoff, including every original decision input.
-  The upstream history owner publishes this atomically. It must cover reference
-  reveal before settlement can begin and deliver later revocation or recovery
+  The upstream history owner publishes this atomically. It must cover certified
+  request closure before reference certification can begin and deliver later
+  revocation or recovery
   history. It cannot be inferred from the input package or an arbitrary replica.
 
 Coordinator configuration version 2 adds `original_sources` for automatic input
@@ -448,7 +454,7 @@ assembly. It names the existing `intake` configuration and its exact
 - `round_directory/COHORT_SHA256.json`: the admission worker's
   `PreparedCohortRound` publication.
 - `objects_directory/COMPETITION_DIGEST.json`: `RewardPackageObject` wrappers
-  for the suite, service terms, certified request closure and reference reveal,
+  for the suite, service terms, certified request closure,
   queue seals, original responses, references and all replay dependencies.
 - `catalogs_directory/CATALOG_BODY_DIGEST.json`: original `SignedServiceWorkCatalog`
   envelopes for every catalog selected by the approved reward manifest.
@@ -458,13 +464,21 @@ assembly. It names the existing `intake` configuration and its exact
 
 The service reads the complete consent inventory through the intake owner's
 locked export, including superseded consent. Certified history selects the
-closure and reveal; the approved manifest selects terms and catalogs. Native
+closure; the approved manifest selects terms and catalogs. During reference
+reveal, the service checks the complete certified request closure, suite commitment
+and every catalog reference before proposing the exact manifest. Independent
+reviewers check the same originals and finalized observation before signing.
+No scoring votes are produced in this phase. The certified reveal is retained in
+the owner's journal, and subsequent input assembly reads it there. A service
+starting after reference certification also accepts the original reveal in the
+object directory. Native
 replay checks every selected miner and all accepted service work before the
 package is retained. A first build after settlement has advanced still uses the
 original evidence-phase history. Missing sources stay pending; no missing work
 becomes a zero or an omitted participant.
 
-Assembly occurs only when no original package or reviewed-package marker exists.
+Assembly occurs only when no original package or reviewed-package marker exists
+for that stage. Each stage has a separate immutable file and digest pin.
 Restarts reuse the saved bytes, without requiring the upstream sources again.
 If a reviewed package is lost, restore that exact package from a replica; the
 service does not replace it with a new selection. Source directories, mutable
@@ -478,10 +492,22 @@ or unavailable handoff stops progress for retry; it never turns into a miner
 zero. Migration must transfer this ledger and the signer journals while fencing
 the previous writer.
 
+Reviewers also import certified history publications from their private exchange
+before producing result votes. Each publication must extend the independently
+selected handoff, carry exactly its original decisions and pass native history
+and original-finality replay. Imports are bounded to 128 publications and the
+configured package byte allowance. This lets reference certification reach the
+reviewer before the coordinator asks for scoring votes. A late reviewer need not
+add its own vote to a phase already closed by a valid quorum; existing local
+votes remain available for retransmission.
+
 Replicate fixed paths in each evaluator's exchange outbox into its peers' inboxes:
 `quality/`, `service/`, `requests/`, `votes/`, `objects/` and `history/`.
-Copy the coordinator's `inputs/COHORT_SHA256.json` publication into each
-reviewer's `inputs_directory`; reviewers independently replay it before voting.
+Copy both coordinator `inputs/COHORT_SHA256-reference.json` and
+`inputs/COHORT_SHA256.json` publications into each reviewer's `inputs_directory`;
+reviewers independently replay them before voting. The reference package cannot
+stand in for the certified scoring package, and changing its schema does not
+change the history required by replay.
 Use private immutable delivery with retry after a lost acknowledgement.
 Replicate proof exports to the configured proof imports separately. Never copy
 live execution SQLite databases between evaluators. The service reconstructs

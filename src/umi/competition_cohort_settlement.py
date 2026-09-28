@@ -49,6 +49,7 @@ from .competition_cohort_service_certification import (
     collect_service_allocation,
     verify_service_allocation_certificate,
 )
+from .competition_cohort_service_quality import build_service_reference_reveal
 from .competition_reward_manifest import RewardReplayRequirement
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
@@ -170,14 +171,21 @@ class CohortSettlement:
         )
         replay_cohort_decisions(history, self.policy, self.decisions)
         phase = view.state.phase
-        if phase not in {"evidence", "review", "certification", "first_admission", "complete"}:
-            raise ValueError("settlement requires an active cohort after reference reveal")
+        if phase not in {
+            "reference_reveal",
+            "evidence",
+            "review",
+            "certification",
+            "first_admission",
+            "complete",
+        }:
+            raise ValueError("settlement requires an active cohort after request closure")
         if proposed_progress is not None:
             proposed_progress = CohortPhaseProgress.model_validate_json(
                 canonical_json_bytes(proposed_progress)
             )
             if (
-                phase not in {"evidence", "review", "certification"}
+                phase not in {"reference_reveal", "evidence", "review", "certification"}
                 or proposed_progress.cohort_sha256 != view.state.cohort_sha256
                 or proposed_progress.recovery_tip_sha256 != view.state.tip_sha256
                 or proposed_progress.phase != phase
@@ -187,6 +195,26 @@ class CohortSettlement:
             ):
                 raise ValueError("settlement proposal differs from selected phase and observation")
         records = tuple(intake_records)
+        if phase == "reference_reveal":
+            reveal = build_service_reference_reveal(
+                inputs.closure,
+                inputs.roster,
+                inputs.suite,
+                self._object,
+                self.policy,
+                history,
+                inputs.transport,
+                expected_catalogs=inputs.catalogs,
+                expected_seals=inputs.seals,
+                decision_source=self.decisions,
+                intake_records=iter(records),
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+            )
+            if reveal != inputs.reveal:
+                raise ValueError("reference proposal changes the committed inventory")
+            self.archive.put(reveal)
+            return self._progress(view, current_block, reveal)
         common = dict(
             expected_catalogs=inputs.catalogs,
             expected_seals=inputs.seals,

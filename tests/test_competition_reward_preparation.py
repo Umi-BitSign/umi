@@ -2902,7 +2902,7 @@ def original_settlement_inputs(service_quality_inputs):
 
 
 @pytest.fixture
-async def recurring_settlement_case(original_settlement_inputs, registered_case, tmp_path):
+async def recurring_settlement_case(original_settlement_inputs, registered_case, tmp_path, request):
     """Real owner journals, signatures, file exchange and native settlement.
 
     Only finality/proof verification and the original fixture model are synthetic.
@@ -2925,6 +2925,10 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
 
     c, b = original_settlement_inputs, original_settlement_inputs.b
     history = c.package.inputs.history
+    reference_start = getattr(request, "param", False)
+    if reference_start:
+        assert history.transitions[-1].transition.phase == "reference_reveal"
+        history = history.model_copy(update={"transitions": history.transitions[:-1]})
     manifest = StandingRewardManifest(
         schema="umi-standing-reward-manifest/1",
         policy_sha256=digest(b["policy"]),
@@ -2982,6 +2986,7 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
         clock=clock,
         provider=provider,
         assemble_inputs=False,
+        reference_start=reference_start,
     )
 
     def config(name):
@@ -3139,6 +3144,68 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
             stack.close()
 
 
+def test_reference_input_package_cannot_replace_certified_scoring_inputs(
+    original_settlement_inputs,
+):
+    from umi.competition_cohort_settlement_delivery import SettlementResultVotes
+    from umi.competition_cohort_settlement_inputs import (
+        prepare_settlement_inputs,
+        replay_settlement_inputs,
+    )
+
+    h, b = original_settlement_inputs, original_settlement_inputs.b
+    original = h.package.inputs.history
+    prefix = original.model_copy(update={"transitions": original.transitions[:-1]})
+    inputs = h.package.inputs.model_copy(update={"history": prefix})
+
+    def no_pulses(_):
+        pytest.fail("reference certification must not decrypt or score miner responses")
+
+    package = prepare_settlement_inputs(
+        inputs,
+        b["policy"],
+        h.requirement,
+        b["objects"].__getitem__,
+        b["decisions"].__getitem__,
+        b["records"],
+        no_pulses,
+        expected_tip_sha256=tip(prefix),
+        current_block=1000000,
+    )
+
+    def replay(value, history):
+        return replay_settlement_inputs(
+            value,
+            b["policy"],
+            h.requirement,
+            history,
+            expected_package_sha256=digest(value),
+            expected_tip_sha256=tip(history),
+            current_block=1000000,
+            current_decisions=b["decisions"].__getitem__,
+        )
+
+    data = replay(package, prefix)
+    assert package.schema_ == "umi-settlement-input-package/2"
+    assert package.pulses == () and data.quality is None and data.service is None
+    with pytest.raises(ValueError, match="certified reference reveal"):
+        SettlementResultVotes(
+            data,
+            hotkey=wallet("Charlie").hotkey.ss58_address,
+            executions=(),
+            journal=None,
+            sign=None,
+            inbox=None,
+            outbox=None,
+        )
+    with pytest.raises(ValueError):
+        replay(package, original)  # Scoring needs the newly certified input package.
+    with pytest.raises(ValueError, match="schema's phase"):
+        replay(package.model_copy(update={"schema_": "umi-settlement-input-package/1"}), prefix)
+    with pytest.raises(ValueError, match="schema's phase"):
+        replay(h.package.model_copy(update={"schema_": "umi-settlement-input-package/2"}), original)
+
+
 async def test_recurring_settlement_certifies_without_inference_or_manual_votes(
     recurring_settlement_case,
 ):
@@ -3289,7 +3356,10 @@ async def test_recurring_settlement_loops_publish_with_automatic_file_delivery(
     assert h.b["service_case"].p.model.calls == 1
 
 
-async def test_automatic_settlement_assembly_delivery_and_late_restart(recurring_settlement_case):
+@pytest.mark.parametrize("recurring_settlement_case", [False, True], indirect=True)
+async def test_automatic_settlement_assembly_delivery_and_late_restart(
+    recurring_settlement_case, monkeypatch
+):
     from pathlib import Path
 
     from umi.competition_cohort_settlement_assembly import assemble_settlement_inputs
@@ -3299,6 +3369,24 @@ async def test_automatic_settlement_assembly_delivery_and_late_restart(recurring
     h = recurring_settlement_case
     h.assemble_inputs = True
     a, z = await h.start("Charlie"), await h.start("Dave")
+    if h.reference_start:
+        # The new reveal must be constructed by the coordinator, retained in
+        # its owner journal and recovered from there for settlement assembly.
+        (
+            Path(a.config.original_sources.objects_directory) / (digest(h.b["reveal"]) + ".json")
+        ).unlink()
+        from umi import competition_cohort_settlement_service as service_module
+
+        original_votes = service_module.SettlementResultVotes
+        failed = []
+
+        def interrupted_stage(*args, **kwargs):
+            if not failed:
+                failed.append(True)
+                raise OSError("interrupted setup after scoring-input retention")
+            return original_votes(*args, **kwargs)
+
+        monkeypatch.setattr(service_module, "SettlementResultVotes", interrupted_stage)
     for node in (a, z):
         assert not (Path(node.config.inputs_directory) / (node.cohort + ".json")).exists()
         node.config = node.config.model_copy(update={"poll_seconds": 1})
@@ -3322,7 +3410,23 @@ async def test_automatic_settlement_assembly_delivery_and_late_restart(recurring
         await asyncio.gather(*tasks)
     path = Path(a.config.inputs_directory) / (a.cohort + ".json")
     package = read_private_model(path, SettlementInputPackage)
-    assert package == h.c.package
+    if h.reference_start:
+        assert failed == [True]
+        assert package.inputs.reveal == h.b["reveal"]
+        assert package.inputs.history.transitions[-1] != h.c.package.inputs.history.transitions[-1]
+        reference_path = Path(a.config.inputs_directory) / (a.cohort + "-reference.json")
+        reference = read_private_model(reference_path, SettlementInputPackage)
+        assert reference.schema_ == "umi-settlement-input-package/2"
+        assert reference.pulses == ()
+        assert reference.inputs.history.transitions[-1].transition.phase == "requests"
+        assert (
+            read_private_model(
+                Path(z.config.inputs_directory) / reference_path.name, SettlementInputPackage
+            )
+            == reference
+        )
+    else:
+        assert package == h.c.package
     assert len(package.intake) == 3  # Includes superseded consent for the two selected miners.
     # A first producer arriving after certification must select the same original prefix.
     current = a.store.published_history(a.cohort)
@@ -3336,6 +3440,7 @@ async def test_automatic_settlement_assembly_delivery_and_late_restart(recurring
             a._decisions,
             current_block=h.clock.block + 100000,
             maximum_bytes=a.config.maximum_package_bytes,
+            retained_objects=a.phases.owner._object,
         )
         == package
     )
@@ -3352,6 +3457,131 @@ async def test_automatic_settlement_assembly_delivery_and_late_restart(recurring
     assert path.read_bytes() == outbox.read_bytes() == original
     assert dict(h.calls) == before and max(h.calls.values()) == 1
     assert h.b["service_case"].p.model.calls == 1
+
+
+@pytest.mark.parametrize("recurring_settlement_case", [True], indirect=True)
+@pytest.mark.parametrize("fault", [None, "signature", "decisions", "fork", "proof", "filename"])
+async def test_reviewer_imports_only_verified_history_extensions(
+    recurring_settlement_case, fault, monkeypatch
+):
+    from pathlib import Path
+
+    from umi.competition_cohort_order_signer import CohortOrderHistory
+    from umi.private_files import publish_private_model
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    z = await h.start("Dave")
+    current = await z._handoff()
+    before = z.store.status(z.cohort)[0]
+    history = h.c.package.inputs.history
+    decisions = tuple(h.b["decisions"][t.transition.evidence_sha256] for t in history.transitions)
+    if fault == "signature":
+        last = history.transitions[-1].model_copy(update={"signatures": ()})
+        history = history.model_copy(update={"transitions": (*history.transitions[:-1], last)})
+    elif fault == "decisions":
+        decisions = decisions[:-1]
+    elif fault == "fork":
+        history = history.model_copy(
+            update={"plan": history.plan.model_copy(update={"suite_sha256": "00" * 32})}
+        )
+    elif fault == "proof":
+
+        async def missing_proof(_):
+            raise FileNotFoundError("original archive unavailable")
+
+        monkeypatch.setattr(z.proofs, "read", missing_proof)
+    value = CohortOrderHistory(history=history, decisions=decisions)
+    path = (
+        Path(z.config.exchange_inbox)
+        / "history"
+        / z.cohort
+        / (("00" * 32 if fault == "filename" else tip(history)) + ".json")
+    )
+    publish_private_model(path, value)
+    if fault is None:
+        assert await z._receive_history(current) == history
+        assert z.store.status(z.cohort)[0].phase == "evidence"
+        assert await z._receive_history(history) == history
+        assert not h.calls
+        assert await z._handoff() == history
+        # History can arrive before the package. Restart must retain that
+        # certified advance even though no input digest has been pinned yet.
+        z = await h.start("Dave")
+        with pytest.raises(FileNotFoundError):
+            await z.tick()
+        assert z.store.status(z.cohort)[0].phase == "evidence"
+        assert not h.calls
+
+        from umi.competition_cohort_settlement_exchange import SettlementProgressRequest
+        from umi.competition_cohort_settlement_inputs import publish_settlement_inputs
+
+        decision = decisions[-1]
+        vote = next(
+            s
+            for s in decision.progress.signatures
+            if s.hotkey == wallet("Charlie").hotkey.ss58_address
+        )
+        old_request = SettlementProgressRequest(
+            schema="umi-settlement-progress-request/1",
+            history=current,
+            decisions=decisions[:-1],
+            observation=decision.observation,
+            progress=decision.progress.model_copy(update={"signatures": (vote,)}),
+        )
+        publish_private_model(
+            Path(z.config.exchange_inbox)
+            / "requests"
+            / z.cohort
+            / "reference_reveal-progress.json",
+            old_request,
+        )
+        publish_settlement_inputs(
+            Path(z.config.inputs_directory) / (z.cohort + ".json"), h.c.package
+        )
+        assert await z.tick() == "reviewing"
+        assert ("Dave", digest(decision.progress.progress)) not in h.calls
+    else:
+        with pytest.raises((ValueError, FileNotFoundError)):
+            await z._receive_history(current)
+        assert z.store.status(z.cohort)[0] == before
+        assert not h.calls
+
+
+@pytest.mark.parametrize("recurring_settlement_case", [True], indirect=True)
+async def test_reference_service_resumes_original_intent_without_fresh_observation(
+    recurring_settlement_case,
+):
+    from pathlib import Path
+
+    from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    a, z = await h.start("Charlie"), await h.start("Dave")
+    with pytest.raises(SettlementPhaseQuorumPending):
+        await a.tick()
+    package_path = Path(a.config.inputs_directory) / (a.cohort + "-reference.json")
+    original = package_path.read_bytes()
+    h.deliver()
+    assert await z.tick() == "reviewing"
+    h.deliver()
+    # The controller already reserved its original finalized observation.
+    # Restart cannot demand another RPC observation or upstream assembly.
+    sources = Path(a.config.original_sources.intake.directory).parent
+    sources.rename(sources.with_name("reference-sources-offline"))
+    h.clock.block += 100000
+    h.clock.fail_collect = True
+    a = await h.start("Charlie")
+    with pytest.raises(SettlementPhaseQuorumPending):
+        await a.tick()
+    h.deliver()
+    assert await z.tick() == "reviewing"
+    h.deliver()
+    assert await a.tick() == "evidence"
+    assert a.store.status(a.cohort)[0].phase == "evidence"
+    assert package_path.read_bytes() == original
+    assert len(h.calls) == 4 and set(h.calls.values()) == {1}
 
 
 @pytest.mark.parametrize(
@@ -3923,7 +4153,7 @@ async def test_native_settlement_waits_for_service_votes_then_recovers_capacity(
 
 
 @pytest.fixture
-async def settlement_signing_case(native_settlement_case, tmp_path):
+async def settlement_signing_case(native_settlement_case, tmp_path, request):
     import sqlite3
     from collections import Counter
 
@@ -3944,6 +4174,17 @@ async def settlement_signing_case(native_settlement_case, tmp_path):
     from .test_competition_cohort_coordinator import Harness
 
     c = native_settlement_case
+    if getattr(request, "param", False):
+        # Start with certified requests; the native owner must now construct
+        # and certify reference reveal before any quality phase can close.
+        assert c.inputs.history.transitions[-1].transition.phase == "reference_reveal"
+        c.inputs = c.inputs.model_copy(
+            update={
+                "history": c.inputs.history.model_copy(
+                    update={"transitions": c.inputs.history.transitions[:-1]}
+                )
+            }
+        )
     initial = c.inputs.history
     h = SimpleNamespace(
         c=c,
@@ -4114,6 +4355,46 @@ async def settlement_signing_case(native_settlement_case, tmp_path):
         yield h
     finally:
         h.db.close()
+
+
+@pytest.mark.parametrize("settlement_signing_case", [True], indirect=True)
+@pytest.mark.parametrize(
+    "fault", ["reference", "corrupt_reference", "suite", "catalog", "reveal", "terminal", "early"]
+)
+async def test_reference_review_rejects_incomplete_or_changed_inputs(
+    settlement_signing_case, fault
+):
+    import json
+
+    h = settlement_signing_case
+    h.coordinator()
+    inputs = h.c.inputs
+    key = inputs.catalogs[0].catalog.work[0].reference_sha256
+    if fault == "reference":
+        del h.c.objects[key]
+    elif fault == "corrupt_reference":
+        original = json.loads(h.c.objects[key])
+        h.c.objects[key] = canonical_json_bytes({**original, "reference": "substitution"})
+    elif fault == "suite":
+        h.c.inputs = inputs.model_copy(
+            update={"suite": inputs.suite.model_copy(update={"policy_sha256": "00" * 32})}
+        )
+    elif fault == "catalog":
+        h.c.inputs = inputs.model_copy(update={"catalogs": ()})
+    elif fault == "reveal":
+        h.c.inputs = inputs.model_copy(
+            update={
+                "reveal": inputs.reveal.model_copy(update={"request_closure_sha256": "00" * 32})
+            }
+        )
+    elif fault == "terminal":
+        del h.c.objects[inputs.closure.catalogs[0].terminals[0]]
+    else:
+        h.provider.block = inputs.history.transitions[-1].transition.observed_at_block
+    capture = await h.raw_provider.collect()
+    with pytest.raises((ValueError, KeyError, FileNotFoundError)):
+        await h.signers["Charlie"].attest(h.review("Charlie", capture))
+    assert not h.signatures
 
 
 @pytest.mark.parametrize("offline_stage", ["progress", "transition"])
@@ -4361,18 +4642,22 @@ async def settlement_file_case(settlement_signing_case, tmp_path):
             db.close()
 
 
-async def test_settlement_file_delivery_recovers_three_phases_with_independent_state(
+@pytest.mark.parametrize("settlement_signing_case", [False, True], indirect=True)
+async def test_settlement_file_delivery_recovers_phases_with_independent_state(
     settlement_file_case,
 ):
     from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
 
     h = settlement_file_case
     controller = h.file_start()
-    for phase, following in (
+    transitions = [
         ("evidence", "review"),
         ("review", "certification"),
         ("certification", "first_admission"),
-    ):
+    ]
+    if h.store.status(h.cohort)[0].phase == "reference_reveal":
+        transitions.insert(0, ("reference_reveal", "evidence"))
+    for phase, following in transitions:
         h.provider.block += 1
         original_block = h.provider.block
         with pytest.raises(SettlementPhaseQuorumPending):
@@ -4402,8 +4687,8 @@ async def test_settlement_file_delivery_recovers_three_phases_with_independent_s
         assert report["phase"] == following
         assert h.inputs().history.transitions[-1].transition.observed_at_block == original_block
         h.provider.fail_collect = False
-    assert h.provider.collects == 3
-    assert len(h.signatures) == 12 and set(h.signatures.values()) == {1}
+    assert h.provider.collects == len(transitions)
+    assert len(h.signatures) == 4 * len(transitions) and set(h.signatures.values()) == {1}
     result = h.owner("Charlie").advance(
         h.inputs(),
         iter(h.c.b["records"]),

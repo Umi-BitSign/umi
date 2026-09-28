@@ -1,6 +1,6 @@
 """Immutable requests and independently reviewed settlement votes.
 
-Each approved cohort has six fixed request slots. Replication can retry without
+Each approved cohort has eight fixed request slots. Replication can retry without
 a deadline or access to a signing key or live SQLite database. Every new vote
 requires native result replay and the reviewer's own original-proof check.
 """
@@ -43,7 +43,7 @@ from .private_files import read_private_model as read
 from .protocol import Hex32, StrictProtocolModel
 
 logger = logging.getLogger(__name__)
-PHASES = ("evidence", "review", "certification")
+PHASES = ("reference_reveal", "evidence", "review", "certification")
 MAX_REQUEST_BYTES = 8 * 1024**2
 
 

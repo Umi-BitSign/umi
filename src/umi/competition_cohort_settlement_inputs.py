@@ -37,15 +37,21 @@ from .competition_cohort_reward_package import (
     _check_bound,
 )
 from .competition_cohort_service_certification import ServiceAllocationReview
+from .competition_cohort_service_quality import build_service_reference_reveal
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_reward_manifest import RewardReplayRequirement
 from .open_competition import CompetitionPolicy, digest
+from .policy import scoring_policy_hash
 from .private_files import publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class SettlementInputPackage(StrictProtocolModel):
-    schema_: Literal["umi-settlement-input-package/1"] = Field(alias="schema")
+    # Version 2 carries complete committed originals for reference certification.
+    # Version 1 keeps its existing post-reveal semantics and canonical bytes.
+    schema_: Literal["umi-settlement-input-package/1", "umi-settlement-input-package/2"] = Field(
+        alias="schema"
+    )
     policy_sha256: Hex32
     inputs: RewardReplayInputs
     intake: Annotated[tuple[RewardIntakeRef, ...], Field(max_length=MAX_PACKAGE_OBJECTS)]
@@ -71,8 +77,8 @@ class ReplayedSettlementInputs:
     objects: EndpointObjectSource
     decisions: DecisionSource
     pulses: PulseSource
-    quality: ClosedQualityReview
-    service: ServiceAllocationReview
+    quality: ClosedQualityReview | None
+    service: ServiceAllocationReview | None
 
 
 def _reviews(
@@ -85,14 +91,39 @@ def _reviews(
     pulses: PulseSource,
     tip: str,
     block: int,
-) -> tuple[ClosedQualityReview, ServiceAllocationReview]:
+) -> tuple[ClosedQualityReview | None, ServiceAllocationReview | None]:
     if (
         digest(inputs.history.plan) != requirement.cohort_sha256
         or digest(inputs.terms) != requirement.terms_sha256
         or tuple(digest(c.catalog) for c in inputs.catalogs) != requirement.catalog_sha256s
     ):
         raise ValueError("settlement inputs differ from the approved cohort or service terms")
-    replay_cohort_decisions(inputs.history, policy, decisions)
+    state, _, _ = replay_cohort_decisions(inputs.history, policy, decisions)
+    if state.phase == "reference_reveal":
+        if (
+            inputs.terms.policy_sha256 != digest(policy)
+            or inputs.terms.transport_policy_sha256 != scoring_policy_hash(inputs.transport)
+            or any(c.catalog.service_terms_sha256 != digest(inputs.terms) for c in inputs.catalogs)
+        ):
+            raise ValueError("reference inputs differ from selected service terms")
+        reveal = build_service_reference_reveal(
+            inputs.closure,
+            inputs.roster,
+            inputs.suite,
+            objects,
+            policy,
+            inputs.history,
+            inputs.transport,
+            expected_catalogs=inputs.catalogs,
+            expected_seals=inputs.seals,
+            decision_source=decisions,
+            intake_records=iter(intake),
+            expected_tip_sha256=tip,
+            current_block=block,
+        )
+        if inputs.reveal != reveal:
+            raise ValueError("reference inputs changed the committed inventory")
+        return None, None
     common = dict(
         expected_catalogs=inputs.catalogs,
         expected_seals=inputs.seals,
@@ -144,7 +175,7 @@ def prepare_settlement_inputs(
     current_block: int,
     maximum_bytes: int = DEFAULT_PACKAGE_BYTES,
 ) -> SettlementInputPackage:
-    """Capture the native read set after reference reveal, before quality votes."""
+    """Capture originals for reference certification or subsequent quality votes."""
     inputs = RewardReplayInputs.model_validate_json(canonical_json_bytes(inputs))
     view = verify_cohort_history(
         inputs.history,
@@ -152,8 +183,8 @@ def prepare_settlement_inputs(
         expected_tip_sha256=expected_tip_sha256,
         current_block=current_block,
     )
-    if view.state.phase != "evidence":
-        raise ValueError("original settlement inputs require the evidence phase")
+    if view.state.phase not in {"reference_reveal", "evidence"}:
+        raise ValueError("original settlement inputs require reference reveal or evidence")
     captured = ReplayObjectCollector(objects, maximum_bytes)
     records, intake, pulse_refs = [], [], {}
     for key, raw in intake_records:
@@ -194,7 +225,9 @@ def prepare_settlement_inputs(
         current_block,
     )
     package = SettlementInputPackage(
-        schema="umi-settlement-input-package/1",
+        schema="umi-settlement-input-package/2"
+        if view.state.phase == "reference_reveal"
+        else "umi-settlement-input-package/1",
         policy_sha256=digest(policy),
         inputs=inputs,
         intake=tuple(sorted(intake, key=lambda r: r.consent_sha256)),
@@ -251,21 +284,27 @@ def replay_settlement_inputs(
         expected_tip_sha256=original_tip,
         current_block=current_block,
     )
-    if original_view.state.phase != "evidence":
-        raise ValueError("original settlement inputs require the evidence phase")
+    reference = package.schema_ == "umi-settlement-input-package/2"
+    if original_view.state.phase != ("reference_reveal" if reference else "evidence"):
+        raise ValueError("original settlement inputs differ from their schema's phase")
     view = verify_cohort_history(
         current_history,
         policy,
         expected_tip_sha256=expected_tip_sha256,
         current_block=current_block,
     )
-    if view.state.phase not in {
-        "evidence",
-        "review",
-        "certification",
-        "first_admission",
-        "complete",
-    }:
+    allowed = (
+        {"reference_reveal"}
+        if reference
+        else {
+            "evidence",
+            "review",
+            "certification",
+            "first_admission",
+            "complete",
+        }
+    )
+    if view.state.phase not in allowed:
         raise ValueError("settlement input history is not active after reference reveal")
     inventory = {o.sha256: canonical_json_bytes(o.value) for o in package.objects}
     captured = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)

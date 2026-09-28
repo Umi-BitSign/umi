@@ -10,7 +10,13 @@ from contextlib import suppress
 from functools import partial
 from pathlib import Path
 
-from .competition_cohort_coordinator import CohortDecisionInput, CohortRecoveryCoordinator
+from .competition_cohort_coordinator import (
+    CohortDecisionInput,
+    CohortProgressIntent,
+    CohortRecoveryCoordinator,
+    replay_cohort_decisions,
+)
+from .competition_cohort_endpoint_archive import JournalEndpointObjects
 from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
@@ -37,6 +43,7 @@ from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
 from .open_competition import Signature, digest, identity
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
+from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 MAX_HISTORY_BYTES = 8 * 1024**2
@@ -96,6 +103,7 @@ class CohortSettlementService:
         self.last_report = None
         self.published_tip = None
         self.package = None
+        self.reference = False
 
     async def _handoff(self):
         # This host-selected publication is mandatory, even after restart.
@@ -112,7 +120,7 @@ class CohortSettlementService:
         if history.plan != self.plan or history.authority != self.config.series.recovery:
             raise ValueError("settlement handoff changes the selected cohort or authority")
         decisions = value.inputs()
-        if self.journal.get("settlement_input", "original") is not None:
+        if self.store.has_published_history(self.cohort):
             current = self.store.published_history(self.cohort)
             if (
                 current.genesis != history.genesis
@@ -132,6 +140,7 @@ class CohortSettlementService:
             expected_tip_sha256=history_tip(history),
             current_block=block,
         )
+        replay_cohort_decisions(history, self.config.policy, decisions.__getitem__)
         # Independently authenticate every original decision's finalized capture.
         # Missing archives remain retryable; age alone never rejects them.
         for decision in decisions.values():
@@ -153,6 +162,70 @@ class CohortSettlementService:
     def _decisions(self, key):
         return self.store.source(self.cohort, key, CohortDecisionInput)
 
+    def _history_deliveries(self):
+        root = Path(self.config.exchange_inbox) / "history" / self.cohort
+        values, used = [], 0
+        if not root.exists():
+            return ()
+        for path in root.iterdir():
+            if path.suffix != ".json":
+                continue
+            if len(values) >= 128:
+                raise ValueError("settlement history delivery exceeds its slot bound")
+            value = read_private_model(path, CohortOrderHistory, maximum_bytes=MAX_HISTORY_BYTES)
+            used += len(canonical_json_bytes(value))
+            if used > self.config.maximum_package_bytes:
+                raise ValueError("settlement history delivery exceeds its byte bound")
+            if path.stem != history_tip(value.history):
+                raise ValueError("settlement history delivery changed its identity")
+            values.append(value)
+        return tuple(sorted(values, key=lambda v: len(v.history.transitions)))
+
+    async def _receive_history(self, current):
+        """Import certified extensions of the independently selected handoff.
+
+        A reviewer needs reference certification before producing result votes;
+        waiting for an evidence-vote request would deadlock that handoff. The
+        private file supplies originals, never an unchecked readiness signal.
+        """
+        if self.config.role != "reviewer":
+            return current
+        selected = None
+        for value in await run_owned_thread(self._history_deliveries):
+            incoming = value.history
+            anchor = current if selected is None else selected.history
+            shared = min(len(anchor.transitions), len(incoming.transitions))
+            if (
+                incoming.plan != anchor.plan
+                or incoming.authority != anchor.authority
+                or incoming.genesis != anchor.genesis
+                or incoming.genesis_signatures != anchor.genesis_signatures
+                or incoming.transitions[:shared] != anchor.transitions[:shared]
+            ):
+                raise ValueError("settlement history delivery forks its selected handoff")
+            if len(incoming.transitions) > len(anchor.transitions):
+                selected = value
+        if selected is None:
+            return current
+        history, decisions = selected.history, selected.inputs()
+        block = execution_boundary(await self.provider.collect()).block
+        verify_cohort_history(
+            history,
+            self.config.policy,
+            expected_tip_sha256=history_tip(history),
+            current_block=block,
+        )
+        replay_cohort_decisions(history, self.config.policy, decisions.__getitem__)
+        for decision in decisions.values():
+            raw, metadata = await self.proofs.read(decision.observation)
+            reviewed = await self.provider.review_archive(decision.observation, raw, metadata)
+            if reviewed.original != decision.observation:
+                raise ValueError("settlement history proof changed its original observation")
+        for decision in decisions.values():
+            self.store.retain_source(self.cohort, decision)
+        self.store.publish_history(history, self.config.policy, current_block=block)
+        return history
+
     async def _start(self, history):
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
@@ -160,8 +233,19 @@ class CohortSettlementService:
             if t.transition.operation != "revoke"
         }
         state, _ = self.store.status(self.cohort)
-        path = Path(self.config.inputs_directory) / (self.cohort + ".json")
-        prior = self.journal.get("settlement_input", "original")
+        reference = state.phase == "reference_reveal"
+        kind = "settlement_reference_input" if reference else "settlement_input"
+        filename = self.cohort + ("-reference.json" if reference else ".json")
+        path = Path(self.config.inputs_directory) / filename
+        prior = self.journal.get(kind, "original")
+        block = state.observed_at_block
+        if reference:
+            intent = self.store.progress_intent(self.cohort, state.tip_sha256, CohortProgressIntent)
+            block = (
+                intent.observation.block
+                if intent is not None
+                else execution_boundary(await self.provider.collect()).block
+            )
         try:
             package = await run_owned_thread(
                 partial(
@@ -176,7 +260,9 @@ class CohortSettlementService:
             # from a possibly different source set or newer selection.
             if prior is not None or self.config.original_sources is None:
                 raise
-            logger.info("settlement_inputs cohort=%s status=assembling", self.cohort)
+            logger.info(
+                "settlement_inputs cohort=%s phase=%s status=assembling", self.cohort, state.phase
+            )
             package = await run_owned_thread(
                 partial(
                     assemble_settlement_inputs,
@@ -185,8 +271,9 @@ class CohortSettlementService:
                     self.config.manifest.requirement(self.cohort),
                     history,
                     decisions.__getitem__,
-                    current_block=state.observed_at_block,
+                    current_block=block,
                     maximum_bytes=self.config.maximum_package_bytes,
+                    retained_objects=JournalEndpointObjects(self.journal),
                 )
             )
             await run_owned_thread(
@@ -197,7 +284,9 @@ class CohortSettlementService:
                     maximum_bytes=self.config.maximum_package_bytes,
                 )
             )
-            logger.info("settlement_inputs cohort=%s status=retained", self.cohort)
+            logger.info(
+                "settlement_inputs cohort=%s phase=%s status=retained", self.cohort, state.phase
+            )
         if prior is not None and prior != {"sha256": digest(package)}:
             raise ValueError("settlement inputs changed after their first native review")
         self.data = await run_owned_thread(
@@ -209,12 +298,12 @@ class CohortSettlementService:
                 history,
                 expected_package_sha256=digest(package),
                 expected_tip_sha256=history_tip(history),
-                current_block=state.observed_at_block,
+                current_block=block,
                 current_decisions=decisions.__getitem__,
                 maximum_bytes=self.config.maximum_package_bytes,
             )
         )
-        self.journal.put("settlement_input", "original", {"sha256": digest(package)})
+        self.journal.put(kind, "original", {"sha256": digest(package)})
         self.package = package
         delivered = SettlementEvidenceFiles(Path(self.config.exchange_inbox) / "objects")
 
@@ -238,14 +327,18 @@ class CohortSettlementService:
             maximum_promotion_bytes=self.config.maximum_promotion_bytes,
             maximum_package_bytes=self.config.maximum_package_bytes,
         )
-        self.votes = SettlementResultVotes(
-            self.data,
-            hotkey=self.config.signer_hotkey,
-            executions=self.executions,
-            journal=self.signing,
-            sign=self.sign,
-            inbox=Path(self.config.exchange_inbox),
-            outbox=Path(self.config.exchange_outbox),
+        self.votes = (
+            None
+            if reference
+            else SettlementResultVotes(
+                self.data,
+                hotkey=self.config.signer_hotkey,
+                executions=self.executions,
+                journal=self.signing,
+                sign=self.sign,
+                inbox=Path(self.config.exchange_inbox),
+                outbox=Path(self.config.exchange_outbox),
+            )
         )
         signer = SettlementPhaseSigner(
             self.signing,
@@ -287,6 +380,7 @@ class CohortSettlementService:
                 attest_progress=phases.attest,
             )
         self.phases, self.exchange = phases, exchange
+        self.reference = reference
 
     def source(self):
         return SettlementInputBatch(
@@ -317,25 +411,28 @@ class CohortSettlementService:
 
     async def tick(self) -> str:
         self.provider.ensure_observer_running()
-        history = await self._handoff()
+        history = await self._receive_history(await self._handoff())
         state, _ = self.store.status(self.cohort)
         if state.phase == "revoked":
             return "revoked"
         if self.published_tip == state.tip_sha256:
             return "package_published"
-        if self.phases is None:
+        if self.phases is None or self.reference != (state.phase == "reference_reveal"):
             await self._start(history)
         if self.config.role == "coordinator":
             await run_owned_thread(
                 partial(
                     publish_settlement_inputs,
-                    Path(self.config.exchange_outbox) / "inputs" / (self.cohort + ".json"),
+                    Path(self.config.exchange_outbox)
+                    / "inputs"
+                    / (self.cohort + ("-reference.json" if self.reference else ".json")),
                     self.package,
                     maximum_bytes=self.config.maximum_package_bytes,
                 )
             )
-        await self.votes.publish()
-        self.batch_votes = await run_owned_thread(self.votes.collect)
+        if self.votes is not None:
+            await self.votes.publish()
+            self.batch_votes = await run_owned_thread(self.votes.collect)
         if self.config.role == "reviewer":
             for phase in PHASES:
                 for kind in ("progress", "transition"):
@@ -346,6 +443,20 @@ class CohortSettlementService:
                     key, sha = (phase, kind), digest(request)
                     if key in self.completed_requests and self.completed_requests[key] != sha:
                         raise ValueError("completed settlement request changed")
+                    closed = any(
+                        t.transition.phase == phase and t.transition.operation == "close_phase"
+                        for t in self.store.published_history(self.cohort).transitions
+                    )
+                    if closed:
+                        self.exchange._check(request)
+                        try:
+                            self.phases.signer.retained_vote(self.exchange._body(request))
+                        except FileNotFoundError:
+                            # A late reviewer can accept a quorum certificate
+                            # without having voted itself. It must not roll back
+                            # to generate a redundant vote for that closed phase.
+                            self.completed_requests[key] = sha
+                            continue
                     await self.exchange.review(request)
                     self.completed_requests[key] = sha
             return "reviewing"
@@ -388,7 +499,12 @@ class CohortSettlementService:
             except Exception as error:
                 report = "retry:" + type(error).__name__
             if report != self.last_report:
-                logger.info("settlement_status cohort=%s status=%s", self.cohort, report)
+                logger.info(
+                    "settlement_status cohort=%s role=%s status=%s",
+                    self.cohort,
+                    self.config.role,
+                    report,
+                )
                 self.last_report = report
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
