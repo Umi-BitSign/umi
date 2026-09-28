@@ -1,0 +1,18 @@
+[Unit]
+Description=Report UMI service availability to the external email monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+LoadCredential=config:/etc/umi-cohort-alerts/heartbeat.json
+ExecStart=/usr/bin/python3 -I -B /opt/umi-cohort-alerts/heartbeat.py --config %d/config
+TimeoutStartSec=135
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=64M
+UMask=0077
+

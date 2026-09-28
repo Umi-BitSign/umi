@@ -362,7 +362,7 @@ retries indefinitely; a restart reuses the original intent and signature.
 evidence and independent evaluator votes. It retains partial votes, derives the
 benchmark and service certificates, fixes the promotion attribution once, and
 returns native progress for the existing cohort phase controller. Independent
-phase signers must still replay each result. Missing votes wait; missing or
+phase signers replay each result. Missing votes wait; missing or
 invalid source evidence raises for retry and never creates a scored zero.
 
 After native certification, the owner publishes `CohortRewardPackage` as
@@ -371,8 +371,19 @@ original certification prefix, so later phase advances or an arbitrarily late
 restart preserve identical bytes. Each invocation first checks the currently
 selected history, including revocation. Run it under the cohort service's
 sole-writer lock with independently selected plan, authority, scoring terms,
-catalogs and finality. Its source/vote delivery and phase-signing adapters still
-need recurring-service wiring; this library port is not an installed daemon.
+catalogs and finality.
+
+`CohortSettlementPhases` connects this owner to the recovery controller's durable
+progress intent. The intent retains the original result and finalized boundary
+before requesting signatures. `SettlementPeerReviewer` verifies the proposer's
+signature, independently replays that original proof archive and metadata, then
+replays the exact proposed result and transition. Each signer retains its intent,
+vote and first complete certificate in its own journal. Late peers reuse that
+observation; they do not resample the phase or select a newer promotion head.
+Native replay runs in an owned worker thread without sharing the controller's
+SQLite connection, and shutdown drains replay and signing before releasing
+resources. Recurring startup and authenticated source/vote delivery still need
+host wiring; these library ports are not an installed daemon.
 
 The reward coordinator derives the next activation
 from that package and the approved manifest. Initial activation names the

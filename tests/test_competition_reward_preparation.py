@@ -2839,13 +2839,13 @@ async def native_settlement_case(native_package, service_quality_inputs, tmp_pat
         for signature in p.package.service.signatures
     )
 
-    def reopen():
+    def reopen(name="settlement"):
         return CohortSettlement(
             plan=b["history"].plan,
             authority=b["history"].authority,
             requirement=p.requirement,
             policy=b["policy"],
-            journal=RoundJournal(tmp_path / "settlement", {"cohort": p.requirement.cohort_sha256}),
+            journal=RoundJournal(tmp_path / name, {"cohort": p.requirement.cohort_sha256}),
             promotion_store=p.store,
             objects=objects.__getitem__,
             decisions=b["decisions"].__getitem__,
@@ -3004,7 +3004,25 @@ async def test_native_settlement_waits_for_service_votes_then_recovers_capacity(
     native_settlement_case,
 ):
     c = native_settlement_case
-    inputs = c.native.package.inputs
+    complete = c.native.package.inputs
+    evidence_close = next(
+        i + 1
+        for i, t in enumerate(complete.history.transitions)
+        if t.transition.phase == "evidence"
+    )
+    inputs = complete.model_copy(
+        update={
+            "history": complete.history.model_copy(
+                update={"transitions": complete.history.transitions[:evidence_close]}
+            )
+        }
+    )
+    for value in (
+        c.native.package.benchmark,
+        c.native.package.service,
+        c.native.package.allocation,
+    ):
+        c.objects[digest(value)] = canonical_json_bytes(value)
     owner = c.reopen()
 
     def advance(**kwargs):
@@ -3022,12 +3040,353 @@ async def test_native_settlement_waits_for_service_votes_then_recovers_capacity(
     assert not owner.output.exists()
     owner = c.reopen()
     assert advance().status == "waiting_service_votes"
+    assert advance(service_votes=c.service_votes[1:]).status == "phase_ready"
+    inputs = complete
     owner.package_bytes = 1024
     with pytest.raises(ValueError, match=r"bound|capacity"):
-        advance(service_votes=c.service_votes[1:])
+        advance()
     assert not owner.output.exists()
     owner = c.reopen()
     result = advance()
     assert result.status == "package_published"
     assert canonical_json_bytes(result.package) == canonical_json_bytes(c.native.package)
     assert owner.output.read_bytes() == canonical_json_bytes(c.native.package)
+
+
+@pytest.fixture
+async def settlement_signing_case(native_settlement_case, tmp_path):
+    import sqlite3
+    from collections import Counter
+
+    from umi.competition_cohort_coordinator import CohortDecisionInput, CohortRecoveryCoordinator
+    from umi.competition_cohort_recovery_store import CohortRecoveryStore
+    from umi.competition_cohort_settlement_controller import (
+        CohortSettlementPhases,
+        SettlementInputBatch,
+        SettlementPeer,
+        SettlementPeerReviewer,
+    )
+    from umi.competition_cohort_settlement_signing import (
+        SettlementPhaseReview,
+        SettlementPhaseSigner,
+    )
+    from umi.competition_execution import execution_boundary
+
+    from .test_competition_cohort_coordinator import Harness
+
+    c = native_settlement_case
+    initial = c.inputs.history
+    h = SimpleNamespace(
+        c=c,
+        cohort=digest(initial.plan),
+        signatures=Counter(),
+        published=[],
+        captures={},
+        fail=None,
+        provider=SimpleNamespace(
+            block=initial.transitions[-1].transition.observed_at_block + 100,
+            collects=0,
+            fail_collect=False,
+        ),
+    )
+    h.db = sqlite3.connect(tmp_path / "settlement-controller.sqlite3")
+    h.store = CohortRecoveryStore(h.db)
+    h.store.publish_history(initial, c.b["policy"], current_block=h.provider.block)
+    for certified in initial.transitions:
+        if certified.transition.operation != "revoke":
+            h.store.retain_source(h.cohort, c.b["decisions"][certified.transition.evidence_sha256])
+
+    async def collect():
+        capture = await Harness.collect(h.provider)
+        h.captures[capture.snapshot.block] = capture
+        return capture
+
+    h.raw_provider = SimpleNamespace(collect=collect)
+
+    def signer(name):
+        async def sign(body):
+            h.signatures[(name, digest(body))] += 1
+            return sign_object(body, wallet(name))
+
+        return SettlementPhaseSigner(
+            RoundJournal(tmp_path / ("phase-votes-" + name), {"cohort": h.cohort, "signer": name}),
+            c.b["policy"],
+            wallet(name).hotkey.ss58_address,
+            sign,
+        )
+
+    def inputs():
+        return c.inputs.model_copy(
+            update={
+                "history": h.store.export_history(
+                    h.cohort,
+                    genesis_signatures=initial.genesis_signatures,
+                )
+            }
+        )
+
+    def owner(name):
+        selected = c.reopen("settlement-evidence-" + name)
+        selected.decisions = lambda key: h.store.source(h.cohort, key, CohortDecisionInput)
+        if name == "Dave":
+            # In-process immutable object delivery stands in for replication.
+            def source(key):
+                try:
+                    return c.objects[key]
+                except KeyError:
+                    return owner("Charlie").archive(key)
+
+            selected.external = source
+            # A late reviewer uses the native historical promotion verifier.
+            # It must not select a new current head for the same allocation.
+            selected.promotion_store = SimpleNamespace(
+                policy=c.native.store.policy,
+                reviewed_promotion_at=c.native.store.reviewed_promotion_at,
+            )
+        return selected
+
+    def review(name, capture, proposed_progress=None):
+        selected = inputs()
+        return SettlementPhaseReview(
+            owner(name),
+            selected,
+            iter(c.b["records"]),
+            observation=execution_boundary(capture),
+            expected_tip_sha256=tip(selected.history),
+            current_block=h.provider.block,
+            quality_votes=c.quality_votes,
+            service_votes=c.service_votes,
+            proposed_progress=proposed_progress,
+        )
+
+    async def archive(observation):
+        # Proof RPC/finality are synthetic; use the original retained capture.
+        assert execution_boundary(h.captures[observation.block]) == observation
+        return b"original-registration-proof", b"runtime-metadata"
+
+    async def review_archive(observation, raw, metadata):
+        assert (raw, metadata) == await archive(observation)
+        return SimpleNamespace(
+            original=observation, replayed_at=SimpleNamespace(block_number=h.provider.block)
+        )
+
+    async def peer_progress(request, observation):
+        if h.fail == "progress":
+            h.fail = None
+            raise OSError("peer unavailable")
+        return await h.peer.progress(request, observation)
+
+    async def peer_transition(proposal, evidence):
+        if h.fail == "transition":
+            h.fail = None
+            raise OSError("peer unavailable")
+        return await h.peer.transition(proposal, evidence)
+
+    async def publish(history):
+        # Local durable history stands in for remote replicated publication.
+        h.published.append(canonical_json_bytes(history))
+
+    def coordinator():
+        h.signers = {name: signer(name) for name in ("Charlie", "Dave")}
+
+        def source():
+            return SettlementInputBatch(
+                inputs(), tuple(c.b["records"]), c.quality_votes, c.service_votes
+            )
+
+        h.peer = SettlementPeerReviewer(
+            CohortSettlementPhases(
+                owner=owner("Dave"),
+                store=h.store,
+                signer=h.signers["Dave"],
+                source=source,
+                peers=(),
+            ),
+            SimpleNamespace(policy=c.b["policy"], review_archive=review_archive),
+            archive,
+            proposer=wallet("Charlie").hotkey.ss58_address,
+        )
+        h.phases = CohortSettlementPhases(
+            owner=owner("Charlie"),
+            store=h.store,
+            signer=h.signers["Charlie"],
+            source=source,
+            peers=(
+                SettlementPeer(wallet("Dave").hotkey.ss58_address, peer_progress, peer_transition),
+            ),
+        )
+        return CohortRecoveryCoordinator(
+            h.store,
+            h.cohort,
+            c.b["policy"],
+            initial.genesis_signatures,
+            h.raw_provider,
+            None,
+            h.phases.certify,
+            publish,
+            sample_progress=h.phases.sample,
+            attest_progress=h.phases.attest,
+        )
+
+    def reopen():
+        h.db.close()
+        h.db = sqlite3.connect(tmp_path / "settlement-controller.sqlite3")
+        h.store = CohortRecoveryStore(h.db)
+        return coordinator()
+
+    h.coordinator, h.reopen, h.inputs, h.owner, h.review = (
+        coordinator,
+        reopen,
+        inputs,
+        owner,
+        review,
+    )
+    try:
+        yield h
+    finally:
+        h.db.close()
+
+
+@pytest.mark.parametrize("offline_stage", ["progress", "transition"])
+async def test_native_settlement_controller_resumes_original_votes_after_peer_outage(
+    settlement_signing_case,
+    offline_stage,
+):
+    """No phase-completion helper after reveal: native review/signing/controller."""
+    from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
+
+    h = settlement_signing_case
+    h.fail = offline_stage
+    controller = h.coordinator()
+    with pytest.raises(SettlementPhaseQuorumPending):
+        await controller.tick()
+    observed = h.provider.block
+    assert h.provider.collects == 1
+    h.provider.block += 100000
+    h.provider.fail_collect = True
+    controller = h.reopen()
+    report = await controller.tick()
+    assert report["status"] == "phase_decision_published"
+    assert report["phase"] == "review"
+    assert h.provider.collects == 1  # Reuse the original completed-phase capture.
+    assert h.inputs().history.transitions[-1].transition.observed_at_block == observed
+    h.provider.fail_collect = False
+    for phase in ("certification", "first_admission"):
+        h.provider.block += 1
+        report = await h.reopen().tick()
+        assert report["phase"] == phase
+    assert h.provider.collects == 3
+    assert len(h.signatures) == 12  # Two evaluator keys, two signatures per phase.
+    assert set(h.signatures.values()) == {1}
+    selected = h.inputs()
+    result = h.owner("Charlie").advance(
+        selected,
+        iter(h.c.b["records"]),
+        expected_tip_sha256=tip(selected.history),
+        current_block=h.provider.block,
+    )
+    assert result.status == "package_published"
+    assert result.package.allocation == h.c.native.allocation
+    assert result.package.benchmark == h.c.native.package.benchmark
+    assert result.package.service == h.c.native.package.service
+    assert h.c.b["service_case"].p.model.calls == 1
+
+
+async def test_settlement_phase_signing_rejects_changed_body_and_drains_cancellation(
+    settlement_signing_case,
+    tmp_path,
+):
+    from umi.competition_cohort_settlement_signing import SettlementPhaseSigner
+
+    h = settlement_signing_case
+    capture = await h.raw_provider.collect()
+    reviewed = h.review("Charlie", capture)
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def sign(body):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return sign_object(body, wallet("Charlie"))
+
+    journal = RoundJournal(tmp_path / "cancelled-phase-vote", {"cohort": h.cohort})
+    signer = SettlementPhaseSigner(
+        journal, h.c.b["policy"], wallet("Charlie").hotkey.ss58_address, sign
+    )
+    task = asyncio.create_task(signer.attest(reviewed))
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    reopened = SettlementPhaseSigner(
+        journal, h.c.b["policy"], wallet("Charlie").hotkey.ss58_address, sign
+    )
+    vote = await reopened.attest(reviewed)
+    assert calls == 1
+    assert await reopened.collect(reviewed, [vote]) is None
+    with pytest.raises(ValueError):
+        await reopened.collect(reviewed, [sign_object(reviewed.progress, wallet("Alice"))])
+    h.provider.block += 1
+    changed = h.review("Charlie", await h.raw_provider.collect())
+    with pytest.raises(ValueError):
+        await reopened.attest(changed)
+    assert calls == 1
+
+
+async def test_settlement_peer_replays_original_proofs_before_signing_without_blocking_loop(
+    settlement_signing_case,
+):
+    from umi.competition_cohort_coordinator import AttestedCohortPhaseProgress
+    from umi.competition_execution import execution_boundary
+
+    h = settlement_signing_case
+    h.coordinator()
+    capture = await h.raw_provider.collect()
+    state, _ = h.store.status(h.cohort)
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        progress = await h.phases.sample(state, capture)
+    finally:
+        stop.set()
+        await heartbeat_task
+    assert ticks > 1  # Native replay leaves the finality/service loop responsive.
+    observation = execution_boundary(capture)
+    request = AttestedCohortPhaseProgress(
+        progress=progress, signatures=(sign_object(progress, wallet("Charlie")),)
+    )
+    bad = request.model_copy(update={"signatures": (sign_object(progress, wallet("Alice")),)})
+    with pytest.raises(ValueError, match="proposer"):
+        await h.peer.progress(bad, observation)
+    with pytest.raises(ValueError, match="another block"):
+        await h.peer.progress(
+            request, observation.model_copy(update={"block": observation.block + 1})
+        )
+
+    original = h.peer.provider.review_archive
+
+    async def unavailable(*args):
+        raise OSError("original finality unavailable")
+
+    h.peer.provider.review_archive = unavailable
+    with pytest.raises(OSError, match="finality unavailable"):
+        await h.peer.progress(request, observation)
+    assert not h.signatures
+    h.peer.provider.review_archive = original
+    h.provider.block += 100000
+    vote = await h.peer.progress(request, observation)
+    assert vote.hotkey == wallet("Dave").hotkey.ss58_address
+    assert sum(h.signatures.values()) == 1

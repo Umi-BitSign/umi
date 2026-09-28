@@ -1117,6 +1117,20 @@ full participant opportunity, including compensation for unavailable service.
 Version 1 retains its signed extension rules; existing signatures cannot be
 reinterpreted as version 2 authority.
 
+The controller retains a `CohortProgressIntent` with its original progress and
+finalized observation before collecting signatures. An unavailable reviewer or
+restart resumes that intent. Intake and settlement use the same reservation
+mechanism, so a late signature cannot silently resample a phase's completion
+boundary. A completed transition clears only its associated progress intent.
+Signers independently replay the original evidence before signing; a retained
+timestamp alone does not establish completion.
+
+`GET /v1/competition/cohorts/{cohort_sha256}/readiness` reports native intake
+readiness for a supplied 32-character hexadecimal nonce. It uses the dedicated
+readiness queue and a bounded finality capture. Backpressure or unavailable proof
+returns an unavailable result rather than an admission promise. This diagnostic
+does not prove continuous availability over a participant's opportunity window.
+
 Recoverable score replay can also verify every common-result signer's separate
 run receipt against the certified preparation/request interval, exact outputs,
 resource eligibility and independent control groups. Delayed replay preserves

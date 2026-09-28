@@ -72,6 +72,12 @@ class CohortDecisionInput(StrictProtocolModel):
     observation: ExecutionBoundary
 
 
+class CohortProgressIntent(StrictProtocolModel):
+    schema_: Literal["umi-cohort-progress-intent/1"] = Field(alias="schema")
+    progress: CohortPhaseProgress
+    observation: ExecutionBoundary
+
+
 def _choice(
     state: CohortRecoveryState,
     authority: RecoveryAuthority,
@@ -216,14 +222,26 @@ class CohortRecoveryCoordinator:
         policy: CompetitionPolicy,
         genesis_signatures: tuple[Signature, ...],
         provider: RecoveryFinality,
-        observe: ProgressObserver,
+        observe: ProgressObserver | None,
         certify: DecisionCertifier,
         publish: HistoryPublisher,
+        *,
+        sample_progress: Callable[
+            [CohortRecoveryState, RegistrationCapture], Awaitable[CohortPhaseProgress]
+        ]
+        | None = None,
+        attest_progress: Callable[[CohortPhaseProgress], Awaitable[AttestedCohortPhaseProgress]]
+        | None = None,
     ) -> None:
         self.store, self.cohort, self.provider = store, cohort, provider
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.genesis_signatures = genesis_signatures
         self.observe, self.certify, self.publish = observe, certify, publish
+        if (sample_progress is None) != (attest_progress is None):
+            raise ValueError("durable progress needs both the native sampler and certifier")
+        if observe is None and sample_progress is None:
+            raise ValueError("cohort recovery needs an observer or durable native sampler")
+        self.sample_progress, self.attest_progress = sample_progress, attest_progress
         self.serial = asyncio.Lock()
         self._history()
 
@@ -250,9 +268,30 @@ class CohortRecoveryCoordinator:
             if pending is not None and pending.operation == "revoke":
                 return self._report(state, "awaiting_revocation_certificate")
             if pending is None:
-                capture = await self.provider.collect()
-                observation = execution_boundary(capture)
-                progress = await self.observe(state, capture)
+                intent = None
+                if self.sample_progress is None:
+                    capture = await self.provider.collect()
+                    observation = execution_boundary(capture)
+                    progress = await self.observe(state, capture)
+                else:
+                    intent = self.store.progress_intent(
+                        self.cohort, state.tip_sha256, CohortProgressIntent
+                    )
+                    if intent is None:
+                        capture = await self.provider.collect()
+                        intent = CohortProgressIntent(
+                            schema="umi-cohort-progress-intent/1",
+                            progress=await self.sample_progress(state, capture),
+                            observation=execution_boundary(capture),
+                        )
+                        intent = self.store.reserve_progress(self.cohort, state.tip_sha256, intent)
+                    # This observation was current when the native phase was
+                    # sampled. Signing may finish arbitrarily later; preserve
+                    # its original freshness boundary across every restart.
+                    progress = await self.attest_progress(intent.progress)
+                    if progress.progress != intent.progress:
+                        raise ValueError("progress certifier changed the reserved observation")
+                    observation = intent.observation
                 evidence = CohortDecisionInput(
                     schema="umi-cohort-decision-input/1", progress=progress, observation=observation
                 )
@@ -265,6 +304,8 @@ class CohortRecoveryCoordinator:
                     prior_unavailable,
                 )
                 if proposal is None:
+                    if intent is not None:
+                        self.store.finish_progress(self.cohort, state.tip_sha256, intent)
                     return self._report(state, "waiting_phase_progress")
                 key = self.store.retain_source(self.cohort, evidence)
                 pending = self.store.reserve(
@@ -275,6 +316,8 @@ class CohortRecoveryCoordinator:
                     evidence_sha256=key,
                     extension_blocks=proposal.extension_blocks,
                 )
+                if intent is not None:
+                    self.store.finish_progress(self.cohort, state.tip_sha256, intent)
             current, retained = self.store.status(self.cohort)
             if current != state or pending != retained:
                 return self._report(current, "history_changed_retry")

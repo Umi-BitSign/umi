@@ -6,8 +6,9 @@ import asyncio
 import re
 import sqlite3
 from collections.abc import Awaitable, Callable
+from functools import partial
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from .competition_chain import RegistrationCapture
@@ -15,6 +16,7 @@ from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_intake_records import read_participation
 from .competition_cohort_participation import CohortAdmissionStatus, CohortParticipationRequest
+from .competition_cohort_readiness import intake_readiness
 from .competition_execution import ExecutionBoundary
 from .competition_store import AdmissionCapacityError
 from .concurrency import run_owned_thread
@@ -63,6 +65,25 @@ def cohort_routes(
             value = await run_owned_thread(intake.history, cohort)
         except (ValueError, OSError, sqlite3.Error) as error:
             raise HTTPException(503, "cohort history unavailable; retry later") from error
+        return value.model_dump(mode="json", by_alias=True)
+
+    @router.get("/v1/competition/cohorts/{cohort}/readiness")
+    async def readiness(cohort: str, nonce: str = Query(pattern=r"^[0-9a-f]{32}$")):
+        allowed(cohort)
+        try:
+            current = await asyncio.wait_for(capture(), timeout=20)
+            value = await run_owned_thread(
+                partial(
+                    intake_readiness,
+                    intake,
+                    cohort,
+                    current,
+                    nonce=nonce,
+                    archive_available=archive is not None,
+                )
+            )
+        except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
+            raise HTTPException(503, "cohort intake readiness unavailable") from error
         return value.model_dump(mode="json", by_alias=True)
 
     @router.get("/v1/competition/cohorts/{cohort}/admissions/{consent}")

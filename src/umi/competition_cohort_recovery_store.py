@@ -99,6 +99,8 @@ class CohortRecoveryStore:
                 PRIMARY KEY(cohort,digest))""")
             self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_published_genesis (
                 cohort TEXT PRIMARY KEY, body BLOB NOT NULL)""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_progress_intents (
+                cohort TEXT PRIMARY KEY, tip TEXT NOT NULL, body BLOB NOT NULL)""")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -317,6 +319,53 @@ class CohortRecoveryStore:
                 "INSERT OR IGNORE INTO cohort_recovery_sources VALUES (?,?,?)", (cohort, key, raw)
             )
         return key
+
+    def progress_intent(self, cohort: str, tip: str, model: type[_Record]) -> _Record | None:
+        """Recover an unfinished native observation before asking signers again."""
+        with self._transaction():
+            _, state, _ = self._load(cohort)
+            if state.tip_sha256 != tip:
+                raise ValueError("progress observation belongs to another current history")
+            row = self.db.execute(
+                "SELECT tip,substr(body,1,262145) FROM cohort_progress_intents WHERE cohort=?",
+                (cohort,),
+            ).fetchone()
+            return None if row is None or row[0] != tip else _decode(model, row[1], 256 * 1024)
+
+    def reserve_progress(self, cohort: str, tip: str, value: _Record) -> _Record:
+        """Reserve one observation per current tip before any progress signature.
+
+        The previous decision's source and certificate retain its evidence.
+        This slot covers the earlier gap between native observation and quorum.
+        It has no wall-clock expiry and cannot replace an unfinished same-tip
+        observation. Consumers must validate the returned body, including retries.
+        """
+        raw = canonical_json_bytes(value)
+        _decode(type(value), raw, 256 * 1024)
+        with self._transaction():
+            _, state, pending = self._load(cohort)
+            if state.tip_sha256 != tip or pending is not None:
+                raise ValueError("cohort changed before progress reservation")
+            row = self.db.execute(
+                "SELECT tip,substr(body,1,262145) FROM cohort_progress_intents WHERE cohort=?",
+                (cohort,),
+            ).fetchone()
+            if row is not None and row[0] == tip:
+                return _decode(type(value), row[1], 256 * 1024)
+            self.db.execute(
+                "INSERT INTO cohort_progress_intents VALUES (?,?,?) "
+                "ON CONFLICT(cohort) DO UPDATE SET tip=excluded.tip,body=excluded.body",
+                (cohort, tip, raw),
+            )
+            return value
+
+    def finish_progress(self, cohort: str, tip: str, value: StrictProtocolModel) -> None:
+        """Release only this exact observation after decision reservation or no-op."""
+        with self._transaction():
+            self.db.execute(
+                "DELETE FROM cohort_progress_intents WHERE cohort=? AND tip=? AND body=?",
+                (cohort, tip, canonical_json_bytes(value)),
+            )
 
     def source(self, cohort: str, key: str, model: type[_Record]) -> _Record:
         """Read a content-bound input; it is not itself proof of phase completion."""

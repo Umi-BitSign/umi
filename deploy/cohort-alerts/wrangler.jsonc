@@ -1,0 +1,25 @@
+{
+  "name": "umi-cohort-alerts",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "MONITORS", "class_name": "CohortMonitor" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CohortMonitor"] }],
+  "send_email": [{ "name": "EMAIL", "destination_address": "operator@example.com",
+    "allowed_sender_addresses": ["cohorts@alerts.example.com"] }],
+  "vars": {
+    "NODE_NAME": "pilot-coordinator",
+    "ALERT_TO": "operator@example.com",
+    "ALERT_FROM": "cohorts@alerts.example.com",
+    "EXPECTED_SERVICES": "umi-validator@0.service,umi-validator@54.service"
+  }
+}
