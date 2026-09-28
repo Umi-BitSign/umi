@@ -619,6 +619,13 @@ changed inputs, journal conflicts and a stopped finality observer stop the comma
 the service manager can restart it without clearing durable holds. Reaching
 capacity stops new work without deleting history.
 
+If a private journal mutex is busy during a follow tick, the publisher reports
+`waiting_for_local_state` and retries at the configured poll interval. It keeps
+the provider and verified package cache alive and reconciles retained signatures
+before continuing. `lock_operation` and `lock_resource_sha256` identify the
+contention without exposing local paths. Other I/O and integrity failures retain
+their usual failure behavior.
+
 Discovery accepts canonical private `<settlement-digest>.package.json`
 descriptors whose sealed manifests match the descriptor, filename, policy and
 fixed package root. It checks at most `2 * maximum_rounds + 1` directory entries
