@@ -13,6 +13,7 @@ from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_reward_continuity import UNTIL_SUPERSEDED_BLOCK
+from .competition_worker_overlay_scope import WorkerSourceOverlayScope
 from .crypto import verify_response_signature
 from .encoding import account_id32
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -53,12 +54,15 @@ class OriginalSuccessorConsent(StrictProtocolModel):
     valid_through_block: Annotated[int, Field(ge=1, le=MAX_JSON_SAFE_INTEGER)]
 
     reward_continuity_sha256: Hex32 | None = None
+    worker_source_overlay: WorkerSourceOverlayScope | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_consent(self, handler):
         value = handler(self)
         if self.reward_continuity_sha256 is None:
             value.pop("reward_continuity_sha256", None)
+        if self.worker_source_overlay is None:
+            value.pop("worker_source_overlay", None)
         return value
 
     @field_validator("validator_hotkey")
@@ -69,6 +73,10 @@ class OriginalSuccessorConsent(StrictProtocolModel):
 
     @model_validator(mode="after")
     def validate_consent(self) -> Self:
+        if self.worker_source_overlay is not None and (
+            self.reward_continuity_sha256 is None or "competition_weights" not in self.allowed_modes
+        ):
+            raise ValueError("initial worker source overlay requires reward continuity consent")
         if (
             self.reward_continuity_sha256 is not None
             and self.valid_through_block != UNTIL_SUPERSEDED_BLOCK

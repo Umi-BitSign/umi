@@ -25,15 +25,40 @@ The supervisor reuses immutable package verification within one process, checkin
 all file bytes and bounds on each load. Restart verifies the package again. Reward
 authority and current chain state are checked separately for each execution.
 
+### Worker source fixes for an existing certified allocation
+
+A certified allocation can pin an older OCI release. An approved source fix
+keeps that release, package and admission unchanged, and mounts the signed host's
+`src/umi` read-only into the worker. It cannot change dependencies or native
+helpers in the image; qualification must exercise the fix with the pinned image.
+
+For an initial upgrade, include `worker_source_overlay` in the root-owned
+operator consent **before sealing the installation receipt**. Its exact scope is
+`package_sha256`, `release_bundle_sha256`, `recipient_amendment_sha256` and an
+optional `successor_recipient_amendment_sha256`. This requires consent for
+`competition_weights` and the continuing reward authority. The source is the
+original signed host selected by `approved_host_manifest_sha256`.
+
+The sealed consent survives interrupted installation and restart. Do not append
+the scope to an existing receipt. On each worker launch, the host verifies the
+source files and the allocation scope; a mismatch stops launch. Consent without
+this field keeps the original image-only behavior and serialization.
+
+For an installed successor, `umi-supervisor-host-maintenance/2` can explicitly
+authorize a replacement worker source using the same `worker_overlay` scope.
+Host-only maintenance retains an initial source approval. Keep its original host
+tree available while that approval is in use. Services using `RootDirectory`
+must retain read-only bindings for both the original and replacement host trees.
+Container labels identify the signed host supplying the worker source.
+
 <a id="successor-supervisor-upgrade"></a>
 
 ## Successor supervisor upgrade requirements
 
-Status: implemented upgrade command with synthetic native Linux migration
-coverage. This document does not approve production artifacts or a transition.
-Keep the installed validator on its current authorized policy until a verified
-transition, explicit replacement or revocation. Existing bridge and competition
-policies keep their original validity rules during recovery.
+Use the installed upgrade command only with qualified artifacts and controls
+for the specific installation. Keep its current policy until an authorized
+transition, explicit replacement or revocation. An ongoing bridge has no
+scheduled sunset; finite signed bridge policies keep their original cutoffs.
 
 <a id="successor-supervisor-upgrade--available-read-only-inspection"></a>
 
@@ -80,15 +105,6 @@ and 64 MiB, with the runtime's configured journal limits enforced separately.
 Smaller continuations keep the existing page encoding. HTTP delivery cannot
 substitute a different local continuation, including through its cache.
 
-Thirteen focused tests passed on the Studio Linux VM, covering 68-update
-catch-up, restart, host verification and HTTP delivery. They took 751.00 seconds.
-The separate Linux exchange test exposed an old page parser in the anchor
-reader. That reader and the target observer now accept the bounded local history;
-their integrated rerun passed four cases in 357.99 seconds. The broader
-adapter/materializer regression passed 102 tests in 3246.16 seconds before the
-shared-registry change below. Synthetic test authority keys are reused within
-each generated chain. No live validator was upgraded.
-
 <a id="successor-supervisor-upgrade--shared-recovery-registry-history"></a>
 
 #### Shared recovery-registry history
@@ -111,15 +127,6 @@ registry written by this version.
 Stopped recovery audits each retained run, then retains only authorization
 identities between audits. It reconstructs the relevant history again when
 reconciling an unsettled transaction. No attempt or recovery source is discarded.
-
-The first shared-storage snapshot passed 11 focused tests in 245.98 seconds,
-including lossless 68-record reconstruction, prefix storage growth, legacy
-record preservation and atomic insertion failure. The expanded link-validation
-suite passed 11 tests in 476.15 seconds, including missing nodes, broken links
-with recomputed storage checksums, reference/head mismatches and depth bounds.
-The recovery regression passed 45 tests in 1391.01 seconds. The registry still
-has its configured byte and record limits. All 18 repository checks passed for
-`1448bba`, including the complete Python suites and both Linux architectures.
 
 <a id="successor-supervisor-upgrade--download-history-bindings"></a>
 
@@ -158,8 +165,7 @@ An existing `history.json` from an earlier version is preserved and checked
 against the supplied bytes on every refetch. A changed continuation for an
 already cached head, corrupt binding or differing legacy file fails closed.
 Older delivery binaries reject the new cache filename; rollback over these
-cache entries is unsupported. The focused delivery regression passed five tests
-in 264.03 seconds. Package/object capacity limits remain in effect.
+cache entries is unsupported. Package/object capacity limits remain in effect.
 
 <a id="successor-supervisor-upgrade--retiring-redundant-materialized-inputs"></a>
 
@@ -181,10 +187,7 @@ or recovery inputs stop cleanup. All traversal and accounting limits remain.
 Only exact redundant cache copies are removed; they can be reconstructed from
 the retained sources. Cleanup does not grant weight or activation authority.
 
-The initial 11-test interruption and repeated-round suite passed on the Studio
-in 346.11 seconds. Additional bounded-rescan and inode-alias checks, plus the
-surrounding materializer/adapter regression, are running. Full checks must pass
-before deployment. Older binaries do not recognize an interrupted `retiring-*`
+Older binaries do not recognize an interrupted `retiring-*`
 entry; complete recovery with this version before attempting a rollback.
 
 <a id="successor-supervisor-upgrade--initial-history-after-multiple-feed-pages"></a>
@@ -991,7 +994,63 @@ file identities and parsed content before reuse. It still checks the current
 installed policy, chain row and proof expiry on every acceptance. No historical
 signature or current chain authority is inferred from a longer service timeout.
 
-Its pre-stop child runs as the installed non-root account, verifies its complete
+<a id="legacy-version-1-drain"></a>
+
+#### Uncertain version-1 bridge submissions
+
+For the audited directive `48c31a89e51944a2e66b0dcc94eea7594f8484e37c81c2c4ea2f5987128a1748`,
+an upgrade with `--legacy-marker-consent /ABSOLUTE/PRIVATE/legacy-marker-consent.json`
+can retire an uncertain v1 attempt while preserving its original journal. Other
+releases require a separate source/dependency audit. This path requires a signed
+host bundle containing the drain implementation and the usual signed successor
+controls; an image update cannot upgrade the old host by itself.
+
+The additional canonical JSON file must be root-owned, sealed (`0400`, `0440`
+or `0444`) and inside a root-private control directory. Its fields are:
+
+```json
+{
+  "schema": "umi-legacy-marker-consent/1",
+  "validator_hotkey": "PUBLIC_VALIDATOR_HOTKEY",
+  "source_config_sha256": "SHA256_OF_EXACT_INSTALLED_CONFIG_BYTES",
+  "accepted_directive_sha256": "48c31a89e51944a2e66b0dcc94eea7594f8484e37c81c2c4ea2f5987128a1748",
+  "accept_marker_transaction_fees": true,
+  "all_other_hotkey_writers_stopped": true,
+  "maximum_marker_transactions": 1
+}
+```
+
+This is a field example; replace placeholders and serialize with the project's
+canonical JSON encoder before sealing it. The operator must fence any copies on
+other hosts. The local command cannot discover them. The named validator hotkey
+needs spendable TAO for a `System.remark` fee. Consent caps the number of marker
+transactions (1-4), not the chain's fee amount. No coldkey is opened or copied.
+
+After stopping and locking the original installation, the command generates a
+random marker, captures owned runtime/nonce evidence, signs one 64-block mortal
+remark with zero tip, and saves its exact bytes and send intent before broadcast.
+A lost reply does not cause another send. The observer searches the authenticated
+era and verifies eight further finalized blocks before accepting the drain.
+It then reconciles current weights and archives a version-3 checkpoint with
+`retired_legacy_attempt_outcome_unknown`. This classification does not assert the
+old transaction's nonce or whether it was included. Unrelated recovery holds and
+unexpected current rows still prevent activation.
+
+Recovery records live under `legacy-marker-outbox` in the private controls
+directory. Keep them with the upgrade archive. A process restart invalidates its
+old challenge authority: another attempt waits for the retained marker's exact
+era to end and consumes another consented transaction slot. The command waits up
+to 30 minutes; timeout preserves uncertainty and leaves the service stopped.
+Do not delete the outbox to reset its fee budget. After source publication begins,
+use the existing `resume-publication` or `resume-start` command for the retained
+switch instead of paying for another drain. Service startup must still be followed
+by a verified finalized weight update.
+
+Keep this migration path while deployed v1 journals require it. Once those
+consumers are gone, retain only the archive decoder needed by installed recovery
+receipts.
+
+The upgrade command's pre-stop child runs as the installed non-root account, verifies its complete
 signed host tree and stages the signed OCI bundle before exercising the actual
 Podman sandbox. The named wallet directory is inaccessible to that child.
 Bounded progress records identify control, host, release and sandbox stages.

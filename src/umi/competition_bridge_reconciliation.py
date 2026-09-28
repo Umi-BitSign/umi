@@ -5,10 +5,15 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING
 
+from .bridge.journal import RegistrationBridgeJournal
 from .bridge.receipts import VerifiedBridgeExpiry, VerifiedBridgeReceipt, _check_receipt
 from .bridge.transactions import RegistrationBridgeTransactionJournal, parse_bridge_journal
 from .competition_bridge_recovery import BridgeHistoryAudit
-from .competition_recovery_models import BridgeRecoveryOutcome, CompetitionRecoveryError
+from .competition_recovery_models import (
+    BridgeRecoveryOutcome,
+    CompetitionRecoveryError,
+    LegacyDrainReport,
+)
 from .protocol import canonical_json_bytes
 
 if TYPE_CHECKING:
@@ -159,3 +164,42 @@ def retained_outcomes_agree(
             and new.resolution_block_hash != old.resolution_block_hash
         ):
             raise CompetitionRecoveryError("recollected expiry rolled back or changed")
+
+
+def legacy_drain_matches_current_state(audit, drain: LegacyDrainReport, observation) -> bool:
+    """Called only after authenticating the live stopped drain proof.
+
+    Preserve uncertainty about the old submission. Current storage must match
+    either its prior LastUpdate, or its possible applied row before the drain.
+    An unrelated row or later writer prevents this migration.
+    """
+    current = audit.current
+    if (
+        type(current) is not RegistrationBridgeJournal
+        or current.phase not in {"submitting", "outcome_unknown"}
+        or set(audit.holds) != {"registration_bridge_attempt_mortality_unknown"}
+        or any(type(j) is not RegistrationBridgeJournal for _, j in audit.attempts)
+        or drain.attempt_id != current.attempt.attempt_id
+        or drain.journal_sha256 != hashlib.sha256(canonical_json_bytes(current)).hexdigest()
+        or observation.block < drain.verified_head_block
+        or observation.block < current.last_observed_block
+    ):
+        return False
+    writers = [p for p in current.attempt.roster if p.hotkey == current.validator_hotkey]
+    if len(writers) != 1 or writers[0].uid != observation.validator_uid:
+        return False
+    if observation.validator_last_update == current.attempt.prior_last_update:
+        previous = audit.attempts[-2][1] if len(audit.attempts) > 1 else None
+        return previous is None or (
+            previous.phase == "applied"
+            and previous.weight_call is not None
+            and previous.weight_call.block_number == observation.validator_last_update
+            and tuple(tuple(pair) for pair in previous.attempt.expected_row)
+            == observation.validator_row
+        )
+    return (
+        current.attempt.preflight_block
+        < observation.validator_last_update
+        < drain.included_block + 8
+        and tuple(tuple(pair) for pair in current.attempt.expected_row) == observation.validator_row
+    )

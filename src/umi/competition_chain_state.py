@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
+from .bridge.drain import LegacyDrainReader, VerifiedLegacyDrain
 from .bridge.receipts import BridgeReceiptReader, VerifiedBridgeExpiry, VerifiedBridgeReceipt
 from .bridge.signing import FinalizedIdentity
 from .bridge.transactions import RegistrationBridgeTransactionJournal, parse_bridge_journal
@@ -322,6 +323,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         self._weight_rpc = None
         self._runtime_rpc = None
         self._bridge_receipts = None
+        self._legacy_drain = None
         try:
             super().__init__(*args, **kwargs)
             self._configure_weight_collector()
@@ -497,6 +499,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         # The base close method holds the collection lock until all receipt
         # reads and their native proof work have drained.
         self._bridge_receipts = None
+        self._legacy_drain = None
         try:
             await super()._close_resources()
         finally:
@@ -534,6 +537,47 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         """
         async with self._lock:
             return await MortalReceiptReader.find(self._bridge_reader(), query)
+
+    async def read_legacy_drain(
+        self, *, marker: bytes, block_number: int, block_hash: str
+    ) -> VerifiedLegacyDrain:
+        """Prove marker inclusion and elapsed mortality using owned finality.
+
+        This proves neither when the marker was generated nor exclusive writer
+        ownership. Only the stopped upgrade may establish those prerequisites;
+        this method cannot clear a journal or authorize another submission.
+        """
+        async with self._lock:
+            receipts = self._bridge_reader()  # Recheck owner even for cached results.
+            if self._legacy_drain is None:
+                self._legacy_drain = LegacyDrainReader(receipts)
+            while True:
+                before = self._legacy_drain.progress
+                try:
+                    return await self._legacy_drain.read(
+                        marker=marker, block_number=block_number, block_hash=block_hash
+                    )
+                except asyncio.TimeoutError:
+                    if self._legacy_drain.progress == before:
+                        raise
+
+    async def find_legacy_drain(
+        self, *, marker: bytes, birth_block: int, birth_hash: str, period: int
+    ):
+        """Authenticate marker inclusion even when its submit reply was lost."""
+        async with self._lock:
+            receipts = self._bridge_reader()
+            if self._legacy_drain is None:
+                self._legacy_drain = LegacyDrainReader(receipts)
+            while True:
+                before = self._legacy_drain.progress
+                try:
+                    return await self._legacy_drain.find(
+                        marker=marker, birth_block=birth_block, birth_hash=birth_hash, period=period
+                    )
+                except asyncio.TimeoutError:
+                    if self._legacy_drain.progress == before:
+                        raise
 
     async def read_bridge_expiry(
         self, journal: RegistrationBridgeTransactionJournal

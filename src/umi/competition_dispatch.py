@@ -54,6 +54,7 @@ from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .sqlite_contention import is_sqlite_contention
 from .validator import prepare_request_attempt, send_prepared_request
 from .validator_chain import StorageReadSpec
 from .validator_plans import VerifiedFinalizedBlock
@@ -635,8 +636,7 @@ class EndpointDispatcher:
                 )
             )
         except sqlite3.OperationalError as error:
-            code = getattr(error, "sqlite_errorcode", None)
-            if code is None or code & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            if not is_sqlite_contention(error):
                 raise
             # No new task or cursor advance; the normal poll interval retries.
             # In-flight claims stay owned and are never cancelled or resent.

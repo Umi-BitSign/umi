@@ -273,9 +273,7 @@ async def _stop_startup_worker(config, lease: SuccessorStartupLease) -> None:
         raise
 
 
-def _delivery_client(installation):
-    from .competition_delivery_config import successor_delivery_client
-
+def _installed_signed_host(installation):
     host_payload = _root_control(
         ACTIVATION_MOUNT_ROOT / ANCHOR_DIRECTORY_NAME / SIGNED_HOST_ARTIFACT_FILENAME,
         MAX_HOST_MANIFEST_BYTES,
@@ -284,12 +282,41 @@ def _delivery_client(installation):
         hashlib.sha256(host_payload).hexdigest()
         != installation._receipt.signed_host_artifact_sha256
     ):
-        raise ValueError("delivery host manifest differs from installed receipt")
+        raise ValueError("host manifest differs from installed receipt")
+    return parse_signed_host_artifact(host_payload)
+
+
+def _delivery_client(installation):
+    from .competition_delivery_config import successor_delivery_client
+
     return successor_delivery_client(
         installation.config,
-        parse_signed_host_artifact(host_payload),
+        _installed_signed_host(installation),
         expected_manifest_sha256=installation.host_manifest_sha256,
     )
+
+
+def _worker_source_overlay(installation):
+    from .competition_worker_maintenance import (
+        approved_initial_worker_source_overlay,
+        approved_worker_source_overlay,
+    )
+
+    maintenance_path = Path("/etc/umi/validator-supervisor-maintenance.json")
+    if maintenance_path.exists():
+        overlay = approved_worker_source_overlay(
+            _root_control(maintenance_path, MAX_HOST_MANIFEST_BYTES),
+            installation=installation,
+            running_root=Path(__file__).parent.parent.parent,
+        )
+        if overlay is not None:
+            return overlay
+    if installation.operator_consent.worker_source_overlay is not None:
+        return approved_initial_worker_source_overlay(
+            installation=installation,
+            signed_host=_installed_signed_host(installation),
+        )
+    return None
 
 
 def _build_runtime(installation, config_path, *, startup_lease):
@@ -335,15 +362,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
         container = _new_container(config)
         rpc_config = transport_config_path()
         container.rpc_transport_directory = None if rpc_config is None else rpc_config.parent
-        maintenance_path = Path("/etc/umi/validator-supervisor-maintenance.json")
-        if maintenance_path.exists():
-            from .competition_worker_maintenance import approved_worker_source_overlay
-
-            container.source_overlay = approved_worker_source_overlay(
-                _root_control(maintenance_path, MAX_HOST_MANIFEST_BYTES),
-                installation=installation,
-                running_root=Path(__file__).parent.parent.parent,
-            )
+        container.source_overlay = _worker_source_overlay(installation)
         return ProductionSuccessorRuntimeAdapter(
             installation=installation,
             materializer=materializer,

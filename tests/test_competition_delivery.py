@@ -190,7 +190,7 @@ def test_initial_history_cli_stages_exact_bytes_without_overwriting(
 
     case = initial_history_case
 
-    def fetcher(config, *, client):
+    def fetcher(config, *, client=None):
         assert config == case.fetcher.config
         assert client is None
         return case.fetcher

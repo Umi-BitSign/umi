@@ -1,9 +1,13 @@
 """Complete signed bridge-to-successor migration on disposable Linux hosts.
 
 Real boundaries: signed controls/host/OCI, rooted systemd units, old process
-locks, journal reconciliation/archive, sealed anchor, publication and restart.
-The finalized observation and long-running host are synthetic, so this test
-cannot attest to GRANDPA, model inference or permission to submit weights.
+locks, journal reconciliation/archive, sealed source approval and restart.
+The recovered inputs are also loaded in the selected OCI image with the approved
+source mounted read-only; the amd64 CI migration selects the frozen C4 image.
+The finalized observation and long-running host are synthetic. The pending-v1
+scenario also substitutes transaction encoding and delivery and uses only public
+development keys. These tests cannot attest to GRANDPA, real transactions,
+model inference or permission to submit weights.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -31,20 +36,26 @@ from umi.validator_supervisor_adapters import (
     SupervisorRegistrationBridgeInputBundle,
 )
 
-from .coordinator_rehearsal import LEGACY_FRAGMENT, coordinator_roots, fixture_validator_hotkey
+from .coordinator_rehearsal import (
+    LEGACY_FRAGMENT,
+    coordinator_roots,
+    fixture_validator_hotkey,
+    rooted_podman,
+)
 from .test_competition_bridge_recovery import add_attempt
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_initial_preflight_linux import _signed_preflight_case
 from .test_competition_initial_preflight_linux import oci_release as oci_release
 from .test_competition_initial_preflight_linux import release_identity as release_identity
-from .test_competition_package import package_case as package_case
 from .test_competition_package import package_limits as package_limits
 from .test_competition_publication import replay_limits as replay_limits
+from .test_competition_recipient_amendment import package_case as package_case
+from .test_competition_recipient_amendment import policy as policy
 from .test_competition_recovery import limits as limits
 from .test_competition_service_linux import _command, _owned_directory, _show_unit, _wait, _write
 from .test_competition_upgrade import release as install_legacy_release
 from .test_competition_worker import worker_capacity as worker_capacity
-from .test_open_competition import policy as policy
+from .test_open_competition import policy as base_policy  # noqa: F401
 from .test_registration_bridge import observation, policy_body
 from .test_registration_bridge import signed_policy as signed_policy
 from .test_validator_supervisor import _config
@@ -71,7 +82,11 @@ with (state / 'supervisor-process.lock').open('r+b') as lock:
 
 def _startup_probe(authority):
     return f"""import argparse, fcntl, json, os, pathlib, time
+from types import SimpleNamespace
 from umi import registration_bridge
+from umi.competition_host_activation import load_successor_worker_inputs
+from umi.competition_worker_maintenance import approved_initial_worker_source_overlay
+from umi.competition_host_artifacts import SignedSuccessorHostArtifact
 from umi.competition_host_anchor import load_materialized_successor_anchor
 registration_bridge.REGISTRATION_BRIDGE_COORDINATOR = {authority!r}
 p = argparse.ArgumentParser()
@@ -79,15 +94,31 @@ p.add_argument('--config', required=True)
 args = p.parse_args()
 anchor = load_materialized_successor_anchor(pathlib.Path(args.config))
 assert not anchor.receipt.chain_submission_authorized
-assert anchor.initial_page.directives[-1].directive.mode == 'competition_replay'
+assert anchor.initial_page.directives[-1].directive.mode == 'competition_weights'
 state = pathlib.Path(anchor.config.state_root)
 with (state / 'supervisor-process.lock').open('r+b') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     anchor.recheck()
+    deadline = time.monotonic() + 120
+    while not (anchor.source_root / 'current').exists():
+        assert time.monotonic() < deadline, 'fixture current inputs were not installed'
+        time.sleep(0.1)
+    inputs = load_successor_worker_inputs()
+    overlay = approved_initial_worker_source_overlay(
+        installation=inputs, signed_host=SignedSuccessorHostArtifact.model_validate_json(
+            (anchor.anchor_path / 'signed-host-artifact.json').read_bytes()))
+    assert overlay is not None
+    view = SimpleNamespace(_inputs=inputs, package_sha256=inputs.package_sha256,
+        release_identity=inputs.release_identity)
+    selected_source = overlay.source_for(view)
+    inputs.recheck()
     (state / 'successor-probe.json').write_text(json.dumps({{
         'pid': os.getpid(), 'receipt': anchor.receipt_sha256,
         'checkpoint': anchor.receipt.checkpoint_sha256,
         'hotkey': anchor.config.validator_hotkey, 'chain_submission_authorized': False,
+        'source': str(selected_source), 'source_host': overlay.host_manifest_sha256,
+        'checkpoint_schema': anchor.recovery.schema_,
+        'release_revision': inputs.release_identity.umi_revision,
     }}))
     while True:
         time.sleep(1)
@@ -103,7 +134,7 @@ def _owned_tree(root, user, *, private_directories=False):
         os.chown(path, user.pw_uid, user.pw_gid)
 
 
-def _prepare_legacy(layout, user, target, signer):
+def _prepare_legacy(layout, user, target, signer, *, pending=False):
     config = _config(
         validator_hotkey=fixture_validator_hotkey(layout.instance),
         target_platform=target,
@@ -151,7 +182,7 @@ def _prepare_legacy(layout, user, target, signer):
         ).model_dump(mode="python")
     )
     files = {"service.lock": b""}
-    current = add_attempt(files, signed, base)
+    current = add_attempt(files, signed, base, phase="submitting" if pending else "applied")
     for name, raw in files.items():
         _write(worker / name, raw, 0o600)
     _owned_tree(worker, user, private_directories=True)
@@ -175,13 +206,33 @@ def _prepare_legacy(layout, user, target, signer):
     _write(
         layout.physical(Path("/opt/umi-validator-supervisor/legacy-probe")), _LEGACY_PROBE, 0o555
     )
-    evidence = canonical_json_bytes({"schema": "test-owned-chain-observation", "block": 180})
+    if pending:
+        from bittensor.keyfiles import serialized_keypair_to_keyfile_data
+
+        # This publicly derivable fixture key is never used by a network port.
+        key = dev_wallet("//CoordinatorRehearsalValidator" + layout.instance).hotkey
+        assert key.ss58_address == config.validator_hotkey
+        hotkey_path = (
+            layout.physical(Path(config.wallet.path))
+            / config.wallet.name
+            / "hotkeys"
+            / config.wallet.hotkey
+        )
+        _write(hotkey_path, bytes(serialized_keypair_to_keyfile_data(key)), 0o400)
+    # The uncertain case needs nine additional finalized blocks for its marker
+    # and drain, before the successor's existing activation headroom check.
+    observed_block = 170 if pending else 180
+    evidence = canonical_json_bytes(
+        {"schema": "test-owned-chain-observation", "block": observed_block}
+    )
     owned = SimpleNamespace(
         validator_hotkey=config.validator_hotkey,
         validator_uid=instance,
         validator_row=tuple(tuple(pair) for pair in current.attempt.expected_row),
-        validator_last_update=current.weight_call.block_number,
-        block=180,
+        validator_last_update=(
+            current.attempt.prior_last_update if pending else current.weight_call.block_number
+        ),
+        block=observed_block,
         block_hash="0x" + "18" * 32,
         genesis_hash=base.genesis_hash,
         chain_config_sha256="29" * 32,
@@ -202,6 +253,7 @@ def _prepare_legacy(layout, user, target, signer):
         state_root=state,
         layout=layout,
         user=user,
+        pending=pending,
     )
 
 
@@ -236,13 +288,117 @@ def _fork(run, label, action, *, exit_code=0):
 
 def _probe(item, successor=False):
     unit = _show_unit(item.layout.unit_name)
-    assert unit["ActiveState"] != "failed", "fixture service failed"
+    if unit["ActiveState"] == "failed" or unit.get("Result", "success") != "success":
+        logs = _command(
+            "/usr/bin/journalctl",
+            "-u",
+            item.layout.unit_name,
+            "--no-pager",
+            "-n",
+            "40",
+            check=False,
+        ).stdout
+        raise AssertionError("fixture service failed: " + logs.decode(errors="replace"))
     path = item.state_root / ("successor-probe.json" if successor else "legacy-probe.json")
     if unit["ActiveState"] == "active" and path.exists():
         value = json.loads(path.read_bytes())
         if value["pid"] == int(unit["MainPID"]):
             return value
     return None
+
+
+def _stage_worker_current(item, case, package_case, oci_release):
+    """Prepare signed rolling inputs, without writing the installed anchor."""
+    activation = upgrade.activation
+    current = item.run / "worker-current"
+    current.mkdir(mode=0o700)
+    controls = case.worker_controls
+    for name, value in (
+        (activation.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME, controls.current),
+        (activation.RELEASE_IDENTITY_FILENAME, oci_release.identity),
+        (activation.WORKER_EXECUTION_FILENAME, controls.execution),
+        (activation.WEIGHT_AUTHORIZATION_FILENAME, controls.authorization),
+    ):
+        _write(current / name, canonical_json_bytes(value), 0o444)
+    shutil.copytree(package_case.path, current / activation.PACKAGE_DIRECTORY_NAME)
+    for path in (current, *current.rglob("*")):
+        assert not path.is_symlink()
+        # Keep the package's private 0500/0400 modes, as native delivery does.
+        # Only the current directory and its public control files use 0555/0444.
+        if path == current:
+            path.chmod(0o555)
+        os.chown(path, item.user.pw_uid, item.user.pw_gid)
+
+
+def _publish_worker_current(item):
+    # Only fixture delivery is substituted. The running service uses the real
+    # read-only mount, receipt/recovery/package loader and source approval.
+    source = item.state_root / "successor-v4/activation-source"
+    assert source.is_dir() and not (source / "current").exists()
+    (item.run / "worker-current").rename(source / "current")
+
+
+def _check_worker_container(item, started, release, authority):
+    """Verify the recovered installed inputs in the actual immutable OCI image."""
+    source = item.state_root / "successor-v4/activation-source"
+    approved_source = Path(started["source"])
+    program = (
+        "import json; from umi import registration_bridge; "
+        f"registration_bridge.REGISTRATION_BRIDGE_COORDINATOR={authority!r}; "
+        "from umi.competition_host_activation import load_successor_worker_inputs; "
+        "i=load_successor_worker_inputs(); i.recheck(); "
+        "print(json.dumps({'checkpoint':i.checkpoint_sha256,"
+        "'receipt':i.receipt_sha256,'mode':i.directive.mode,"
+        "'revision':i.release_identity.umi_revision}))"
+    )
+    binds = (source, approved_source.parent.parent)
+    assert (
+        json.loads(
+            rooted_podman(
+                item.layout,
+                item.user,
+                "ps",
+                "--format=json",
+                binds=binds,
+            ).stdout
+        )
+        == []
+    )
+    rooted_podman(item.layout, item.user, "system", "migrate", binds=binds)
+    output = rooted_podman(
+        item.layout,
+        item.user,
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit=128",
+        f"--userns=keep-id:uid={item.config.worker_uid},gid={item.config.worker_gid}",
+        f"--user={item.config.worker_uid}:{item.config.worker_gid}",
+        "--volume",
+        f"{source}:/run/umi-successor-activation:ro",
+        "--volume",
+        f"{approved_source}:/opt/umi/src/umi:ro",
+        "--entrypoint",
+        "/opt/umi/.venv/bin/python",
+        release.target.oci_repository + "@sha256:" + release.target.oci_manifest_sha256,
+        "-B",
+        "-c",
+        program,
+        binds=binds,
+        timeout=300,
+    )
+    result = json.loads(output.stdout)
+    assert result == {
+        "checkpoint": started["checkpoint"],
+        "receipt": started["receipt"],
+        "mode": "competition_weights",
+        "revision": release.identity.umi_revision,
+    }
+    _write(item.run / "worker-inputs-result.json", canonical_json_bytes(result))
 
 
 def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges(
@@ -266,7 +422,11 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
         try:
             for layout, user in accounts:
                 item = _prepare_legacy(
-                    layout, user, oci_release.target.target_platform, signed_policy
+                    layout,
+                    user,
+                    oci_release.target.target_platform,
+                    signed_policy,
+                    pending=layout.instance == "0",
                 )
                 records.append(item)
                 item.run = run / ("uid" + layout.instance)
@@ -311,8 +471,10 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                         chain_config,
                         predecessor=item,
                         startup_probe=_startup_probe(signed_policy.body.coordinator_hotkey),
+                        weight_overlay=True,
                     )
 
+                    _stage_worker_current(item, case, package_case, oci_release)
                     from umi import competition_chain_state as chain_state
                     from umi import competition_host_observer as host_observer
 
@@ -324,6 +486,7 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     class FinalityPort:
                         def __init__(self, chain, policy):
                             assert digest(chain) == item.owned.chain_config_sha256
+                            self.config = chain
 
                         async def start(self):
                             pass
@@ -344,7 +507,14 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     host_observer.FinalizedCompetitionWeightProvider = FinalityPort
                     host_observer.validate_owned_weight_observation = check_owned
                     chain_state.validate_owned_weight_observation = check_owned
-                    if index == 1:
+                    marker_consent = None
+                    if item.pending:
+                        from .legacy_drain_rehearsal import install_legacy_marker_ports
+
+                        marker_consent = install_legacy_marker_ports(
+                            item, case, FinalityPort, check_owned
+                        )
+                    if item.pending:
                         original = restart.publish_switch_intent
 
                         def die_after_intent(*args):
@@ -361,17 +531,18 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                         oci_bundle=case.bundle,
                         recovery_root=item.archives,
                         recovery_limits_path=item.run / "recovery-limits.json",
+                        legacy_marker_consent_path=marker_consent,
                     )
                     _write(item.run / "result.json", canonical_json_bytes(result))
 
-                _fork(item.run, "migration", migrate, exit_code=0 if index == 0 else 73)
-                if index == 1:
+                _fork(item.run, "migration", migrate, exit_code=73 if item.pending else 0)
+                if item.pending:
                     unit = _show_unit(item.layout.unit_name)
                     assert unit["ActiveState"] == "inactive" and unit["MainPID"] == "0"
                     marker = Path("/etc/systemd/system") / (item.layout.unit_name + ".d")
                     assert (marker / restart.INTENT_FILENAME).is_file()
                     assert not (marker / "50-umi-successor.conf").exists()
-                    assert _probe(other, successor=True) == before_other
+                    assert _probe(other, successor=index == 1) == before_other
 
                     def resume(item=item):
                         result = restart.resume_and_start_successor_service(
@@ -383,7 +554,24 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                 result = json.loads((item.run / "result.json").read_bytes())
                 assert result["status"] == "successor_service_running"
                 assert not result["chain_submission_authorized"]
+                _publish_worker_current(item)
                 started = _wait(lambda item=item: _probe(item, successor=True))
+                _check_worker_container(
+                    item, started, oci_release, signed_policy.body.coordinator_hotkey
+                )
+                # Restart must reload the same sealed recovery/source authority.
+                _command("/usr/bin/systemctl", "restart", item.layout.unit_name)
+                restarted = _wait(lambda item=item: _probe(item, successor=True))
+                assert restarted["pid"] != started["pid"]
+                assert {k: v for k, v in restarted.items() if k != "pid"} == {
+                    k: v for k, v in started.items() if k != "pid"
+                }
+                assert started["source_host"]
+                assert started["checkpoint_schema"] == (
+                    "umi-successor-recovery-checkpoint/3"
+                    if item.pending
+                    else "umi-successor-recovery-checkpoint/1"
+                )
                 assert started["pid"] == result["main_pid"]
                 assert started["checkpoint"] == result["checkpoint_sha256"]
                 assert started["hotkey"] == item.config.validator_hotkey
@@ -401,8 +589,32 @@ def test_signed_initial_migration_and_process_death_resume_preserve_both_bridges
                     if p.is_file()
                 } == item.files
                 wallet = item.layout.physical(Path(item.config.wallet.path))
-                assert sorted(p.name for p in wallet.iterdir()) == ["inert-marker"]
+                expected = (
+                    ["inert-marker", item.config.wallet.name] if item.pending else ["inert-marker"]
+                )
+                assert sorted(p.name for p in wallet.iterdir()) == sorted(expected)
                 assert (wallet / "inert-marker").read_bytes() == b"not a key\n"
+                if item.pending:
+                    checkpoint = json.loads(
+                        (
+                            item.archives / result["checkpoint_sha256"] / "checkpoint.json"
+                        ).read_bytes()
+                    )
+                    assert checkpoint["schema"] == "umi-successor-recovery-checkpoint/3"
+                    assert checkpoint["prior_effects_reconciled"] and not checkpoint["holds"]
+                    assert (
+                        checkpoint["legacy_drain"]["historical_submission_outcome_known"] is False
+                    )
+                    (retired,) = checkpoint["reconciled_effects"]
+                    assert retired["classification"] == "retired_legacy_attempt_outcome_unknown"
+                    outbox = item.run / "controls/legacy-marker-outbox"
+                    assert sorted(p.name for p in outbox.iterdir()) == [
+                        ".publish.lock",
+                        "attempt-1.json",
+                        "attempt-1.send.json",
+                        "consent.json",
+                        "marker.lock",
+                    ]
         finally:
             # Stop only units whose names were admitted by the fixture guards.
             for item in records:

@@ -255,7 +255,12 @@ class SuccessorSupervisorOperatorConsent(OriginalSuccessorConsent):
     @model_serializer(mode="wrap")
     def preserve_original_consent(self, handler):
         value = handler(self)
-        for field in ("reward_continuity_sha256", "historical_consent", "history_compatibility"):
+        for field in (
+            "reward_continuity_sha256",
+            "historical_consent",
+            "history_compatibility",
+            "worker_source_overlay",
+        ):
             if getattr(self, field) is None:
                 value.pop(field, None)
         return value

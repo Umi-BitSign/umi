@@ -196,6 +196,11 @@ class _PrivateConnect(connect):
 
 
 def websocket_connect(endpoint: str, **kwargs: Any):
+    # Race connection establishment across DNS addresses. One dropped TCP route
+    # must not consume the whole provider timeout. TLS and the RPC send still
+    # use one winning socket; transactions are never sent on several sockets.
+    kwargs.setdefault("happy_eyeballs_delay", 0.25)
+    kwargs.setdefault("interleave", 1)
     path = transport_config_path()
     route = None if path is None else load_routes(path).get(endpoint)
     if route is None:
