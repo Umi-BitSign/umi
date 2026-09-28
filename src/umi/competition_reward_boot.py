@@ -33,6 +33,7 @@ from .competition_reward_host import StandingRewardHostApproval
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
+from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
 from .competition_store import CompetitionStore
 from .competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
@@ -77,6 +78,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
     eligibility: RewardEligibilityRuntime
     delivery_directory: Directory
     promotion_directory: Directory
+    proof_import_directory: Directory
+    proof_export_directory: Directory
     service: StandingRewardServiceLimits
     maximum_history_bytes: Capacity
     maximum_coverage_bytes: Capacity
@@ -113,6 +116,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 self.chain.state_directory,
                 self.delivery_directory,
                 self.promotion_directory,
+                self.proof_import_directory,
+                self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
             )
         )
@@ -182,12 +187,16 @@ async def run_installed_standing_rewards(
         maximum_promotion_bytes=config.maximum_promotion_bytes,
         maximum_package_bytes=config.maximum_package_bytes,
     )
+    imported = RewardProofArchive(Path(config.proof_import_directory))
+    exported = RewardProofArchive(Path(config.proof_export_directory))
     history = RewardControlHistoryReader(
         root / "history",
         control_hotkey=config.series.control_hotkey,
         chain_config_sha256=digest(config.chain),
         first_block=config.series.recovery.authority.issued_at_block,
         maximum_bytes=config.maximum_history_bytes,
+        archive=imported,
+        export_archive=exported,
     )
     coverage = RewardCoverageJournal(
         root / "coverage",
@@ -196,6 +205,8 @@ async def run_installed_standing_rewards(
             opportunity_rule(config.manifest, config.series, config.policy)
         ),
         maximum_bytes=config.maximum_coverage_bytes,
+        archive=imported,
+        export_archive=exported,
     )
     async with AsyncExitStack() as constructing:
         providers = {}

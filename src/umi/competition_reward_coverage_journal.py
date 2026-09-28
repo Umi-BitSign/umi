@@ -8,11 +8,13 @@ its verified set from original evidence. Capacity exhaustion holds without loss.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
+    MAX_METADATA_BYTES,
     MAX_RECIPE_BYTES,
     checked_digest,
     checked_size,
@@ -37,6 +39,7 @@ from .competition_reward_opportunity import (
     RewardOpportunityWitness,
 )
 from .competition_reward_preparation import StandingRewardPreparation
+from .competition_reward_proof_archive import RewardProofArchive
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
 from .open_competition import digest, identity
@@ -60,9 +63,13 @@ class RewardCoverageJournal:
         *,
         expected_rule_sha256: str,
         maximum_bytes: int = 4 * 1024**3,
+        archive: RewardProofArchive | None = None,
+        export_archive: RewardProofArchive | None = None,
     ):
         self.rule = RewardCoverageRule.model_validate_json(canonical_json_bytes(rule))
         self.rule_sha256 = checked_digest(expected_rule_sha256)
+        self.archive = archive
+        self.export_archive = export_archive
         self._check_rule()
         self.journal = RoundJournal(
             root,
@@ -186,6 +193,43 @@ class RewardCoverageJournal:
         )
         return key, records
 
+    def _import(self, key):
+        if self.archive is None:
+            raise FileNotFoundError("coverage endpoint is not retained")
+        frame, blobs = self.archive.read(
+            "endpoint",
+            key,
+            bounds={
+                name: MAX_METADATA_BYTES if kind == "metadata" else MAX_EVIDENCE_BYTES
+                for name, kind in _FIELDS.items()
+            },
+        )
+        if set(frame) != {"point", "validator_hotkey", "package"}:
+            raise ValueError("imported coverage frame has invalid fields")
+        point = CoveragePoint.model_validate(frame["point"])
+        if (
+            point.key() != key
+            or point.series_sha256 != self.rule.series_sha256
+            or point.runtime_profile_sha256 != self.rule.runtime_profile_sha256
+            or identity(frame["validator_hotkey"]) != point.validator_account_id
+        ):
+            raise ValueError("imported coverage frame changes its requested domain")
+        checked_digest(frame["package"])
+        return point, frame, blobs
+
+    def _export(self, key: str, archive: RewardProofArchive) -> None:
+        point, frame, blobs = self._load(key)
+        archive.write(
+            "endpoint",
+            key,
+            context={
+                "point": point.model_dump(mode="json"),
+                "package": frame["package"],
+                "validator_hotkey": frame["validator_hotkey"],
+            },
+            fields=blobs,
+        )
+
     async def retain_endpoint(self, endpoint: OwnedRewardCoverageEndpoint) -> str:
         async with self._lock:
             return await run_owned_thread(self._retain, endpoint)
@@ -195,6 +239,8 @@ class RewardCoverageJournal:
             self._check_rule()
             key, records = self._records(endpoint)
             self.journal.put_many(records)
+            if self.export_archive is not None:
+                self._export(key, self.export_archive)
             return key
 
     async def credit(
@@ -213,6 +259,11 @@ class RewardCoverageJournal:
             # Both endpoint frames, all proof objects and the interval commit
             # together. Update verified totals only after durable acknowledgement.
             self.journal.put_many(records)
+            if self.export_archive is not None:
+                for endpoint in (left, right):
+                    self._export(coverage_point(endpoint, self.rule).key(), self.export_archive)
+                if interval is not None:
+                    self.export_archive.retain_interval(interval.key(), interval)
             if interval is not None:
                 self._verified[interval.key()] = interval
                 self._verified_through[interval.key()] = coverage_point(right, self.rule).block
@@ -292,6 +343,8 @@ class RewardCoverageJournal:
         async with self._lock:
             self._check_rule()
             raw = await run_owned_thread(self.journal.get, "coverage_interval", key)
+            if raw is None and self.archive is not None:
+                raw = await run_owned_thread(self.archive.interval, key)
             if raw is None:
                 raise FileNotFoundError("coverage interval is not retained")
             value = RewardCoverageInterval.model_validate_json(canonical_json_bytes(raw))
@@ -306,7 +359,9 @@ class RewardCoverageJournal:
             self._check_rule()
             frame = await run_owned_thread(self.journal.get, "coverage_endpoint", key)
             if frame is None:
-                raise FileNotFoundError("coverage endpoint is not retained")
+                # An imported summary is a hint only. replay_endpoint must
+                # establish its native coverage before anything is retained.
+                return (await run_owned_thread(self._import, key))[0]
             point = CoveragePoint.model_validate_json(canonical_json_bytes(frame["point"]))
             if point.key() != key or point.series_sha256 != self.rule.series_sha256:
                 raise ValueError("coverage endpoint hint has changed identity")
@@ -319,15 +374,17 @@ class RewardCoverageJournal:
         provider: HistoricalRewardControlProvider,
         preparation: StandingRewardPreparation,
         package: CohortRewardPackage,
-        history: OwnedRewardControlHistory,
+        history: OwnedRewardControlHistory | None,
         source: DecisionSource,
         profile: RewardEligibilityRuntime,
+        history_source: Callable[[int], Awaitable[OwnedRewardControlHistory]] | None = None,
     ) -> OwnedRewardCoverageEndpoint:
         async with self._lock:
             with self.journal.locked():
                 saved = await run_owned_thread(self._load, key)
+                imported = saved is None
                 if saved is None:
-                    raise FileNotFoundError("coverage endpoint is not retained")
+                    saved = await run_owned_thread(self._import, key)
                 point, frame, blobs = saved
                 if await run_owned_thread(digest, package) != frame["package"]:
                     raise ValueError("coverage endpoint requires its original package")
@@ -339,6 +396,12 @@ class RewardCoverageJournal:
                     profile=profile,
                     expected_runtime_profile_sha256=self.rule.runtime_profile_sha256,
                 )
+                if history is None:
+                    if history_source is None:
+                        raise ValueError("coverage replay requires native control history")
+                    # Imported summaries cannot choose an arbitrary history
+                    # target. Native original proofs establish this height.
+                    history = await history_source(eligibility.control.snapshot.block_number)
                 endpoint = await review_reward_coverage(
                     preparation,
                     package,
@@ -350,4 +413,9 @@ class RewardCoverageJournal:
                 self._check_rule()
                 if coverage_point(endpoint, self.rule) != point:
                     raise ValueError("native coverage replay differs from retained summary")
+                if imported:
+                    # Only native replay may populate the live journal. An
+                    # invalid remote frame cannot reserve an immutable key.
+                    records = await run_owned_thread(self._records, endpoint)
+                    await run_owned_thread(self.journal.put_many, records[1])
                 return endpoint

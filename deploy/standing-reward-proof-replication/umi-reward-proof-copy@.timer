@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry UMI original reward proof replication (%i)
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=umi-reward-proof-copy@%i.service
+
+[Install]
+WantedBy=timers.target

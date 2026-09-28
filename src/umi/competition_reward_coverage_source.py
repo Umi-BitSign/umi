@@ -116,15 +116,14 @@ class NativeRewardCoverageSource:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
-        point = await self.journal.retained_point(key)
-        history = await self._history(point.block)
         return self._remember(
             await self.journal.review_endpoint(
                 key,
                 provider=self.provider,
                 preparation=self.preparation,
                 package=self.package,
-                history=history,
+                history=None,
+                history_source=self._history,
                 source=self.decisions,
                 profile=self.profile,
             )

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from .chain_evidence import FinalizedSnapshotRef
@@ -39,6 +40,7 @@ from .competition_reward_control_writes import (
     capture_control_writes,
     validate_control_writes,
 )
+from .competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from .competition_reward_write_archive import review_control_writes
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
@@ -134,6 +136,8 @@ class RewardControlHistoryReader:
         chain_config_sha256: str,
         first_block: int,
         maximum_bytes: int = 4 * 1024**3,
+        archive: RewardProofArchive | None = None,
+        export_archive: RewardProofArchive | None = None,
     ) -> None:
         _uint(first_block, 2**53 - 1)
         if first_block == 0:
@@ -141,6 +145,8 @@ class RewardControlHistoryReader:
         self.hotkey = _hotkey(control_hotkey)
         self.config_sha256 = checked_digest(chain_config_sha256)
         self.first_block = first_block
+        self.archive = archive
+        self.export_archive = export_archive
         binding = {
             "schema": "umi-reward-control-history/1",
             "control_hotkey": self.hotkey,
@@ -338,6 +344,24 @@ class RewardControlHistoryReader:
                     if self._next > through_block:
                         break
                     saved = await run_owned_thread(self._load, self._next)
+                    retained = saved is not None
+                    if not retained and self.archive is not None:
+                        try:
+                            context, saved = await run_owned_thread(
+                                partial(
+                                    self.archive.read,
+                                    "history",
+                                    history_archive_key(
+                                        self.config_sha256, self.hotkey, self._next
+                                    ),
+                                    bounds=_FIELDS,
+                                ),
+                            )
+                        except FileNotFoundError:
+                            saved = None
+                        else:
+                            if context != self._archive_context(self._next):
+                                raise ValueError("imported history changes its requested domain")
                     observation = (
                         await capture_control_writes(provider, self.hotkey, self._next)
                         if saved is None
@@ -354,7 +378,7 @@ class RewardControlHistoryReader:
                         and slot.snapshot.parent_hash != self._tip.slot.snapshot.block_hash
                     ):
                         raise ValueError("control history has a gap or a different parent")
-                    if saved is None:
+                    if not retained:
                         await run_owned_thread(self._save, observation)
                     unresolved = bool(observation.unresolved_extrinsics)
                     if self._tip is not None and not observation.writes:
@@ -366,6 +390,10 @@ class RewardControlHistoryReader:
                             # A cleared slot or an unattributed effect must be
                             # resolved by a future native decoder, never skipped.
                             unresolved = True
+                    if self.export_archive is not None:
+                        # Retain original bytes before advancing the replay cursor.
+                        # A failed export leaves this block retryable after restart.
+                        await run_owned_thread(self._export, self._next, self.export_archive)
                     if unresolved:
                         self._unresolved.append(self._next)
                     self._writes.extend(
@@ -392,3 +420,21 @@ class RewardControlHistoryReader:
                 if self._next == through_block + 1:
                     history = self._prefix(through_block)
                 return ControlHistoryProgress(self._next, through_block, history)
+
+    def _archive_context(self, height):
+        return {
+            "chain_config_sha256": self.config_sha256,
+            "control_hotkey": self.hotkey,
+            "block": height,
+        }
+
+    def _export(self, height: int, archive: RewardProofArchive) -> None:
+        saved = self._load(height)
+        if saved is None:
+            raise FileNotFoundError("verified control history is not retained")
+        archive.write(
+            "history",
+            history_archive_key(self.config_sha256, self.hotkey, height),
+            context=self._archive_context(height),
+            fields=saved,
+        )

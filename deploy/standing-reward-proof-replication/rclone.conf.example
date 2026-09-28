@@ -1,0 +1,11 @@
+# Private credential file, supplied through systemd LoadCredential. Publishers
+# use bucket-scoped write credentials; receiving hosts use separate read-only
+# credentials. Do not commit filled-in credentials.
+[proof_r2]
+type = s3
+provider = Cloudflare
+endpoint = https://ACCOUNT_ID.r2.cloudflarestorage.com
+access_key_id = ACCESS_KEY_ID
+secret_access_key = SECRET_ACCESS_KEY
+acl = private
+no_check_bucket = true

@@ -102,6 +102,8 @@ def inputs(series_case, tmp_path, monkeypatch):
         eligibility=profile,
         delivery_directory=str(tmp_path / "delivery"),
         promotion_directory=str(tmp_path / "promotions"),
+        proof_import_directory=str(tmp_path / "proof-import"),
+        proof_export_directory=str(tmp_path / "proof-export"),
         service=StandingRewardServiceLimits(
             maximum_journal_bytes=8 * 1024**2, mortality_period=128
         ),
@@ -162,7 +164,8 @@ def test_boot_reads_original_root_approval_and_accepts_capacity_increase(inputs)
 
 
 @pytest.mark.parametrize(
-    "mutation", ["policy", "profile", "fallbacks", "handoff", "stores", "legacy", "mortality"]
+    "mutation",
+    ["policy", "profile", "fallbacks", "handoff", "stores", "legacy", "mortality", "proofs"],
 )
 def test_boot_rejects_mismatched_inputs_before_resources(inputs, mutation):
     v = inputs.value
@@ -174,6 +177,7 @@ def test_boot_rejects_mismatched_inputs_before_resources(inputs, mutation):
         "fallbacks": {"chain": v.chain.model_copy(update={"proof_rpc_fallback_urls": ()})},
         "handoff": {"handoff": v.handoff.model_copy(update={"legacy_package_sha256": "aa" * 32})},
         "stores": {"delivery_directory": v.promotion_directory + "/nested"},
+        "proofs": {"proof_import_directory": v.proof_export_directory + "/nested"},
         "legacy": {"legacy_chains": (v.legacy_chains[0], v.legacy_chains[0])},
         "mortality": {"service": v.service.model_copy(update={"mortality_period": 256})},
     }[mutation]
@@ -238,6 +242,10 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert collection.provider is kwargs["provider"]
         assert collection.preparation is kwargs["preparation"]
         assert collection.history is kwargs["history"]
+        assert collection.history.archive.root == Path(i.value.proof_import_directory)
+        assert collection.history.export_archive.root == Path(i.value.proof_export_directory)
+        assert collection.journal.archive is collection.history.archive
+        assert collection.journal.export_archive is collection.history.export_archive
         assert kwargs["opportunity"] == collection.opportunity
         if failure == "service":
             raise RuntimeError("fixture service failure")

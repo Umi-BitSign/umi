@@ -256,9 +256,9 @@ The private delivery directory supplies canonical `packages/<sha>.json`,
 Decisions use the signed body's digest; the other files use the complete object's
 digest. These files are content, not authority. Native consumers verify the
 signatures, original evidence, complete control history and current chain state.
-Opportunity replay also requires the original interval and endpoint records in
-the coverage journal. The independently populated promotion store must contain
-the authenticated model assets and lineage required by package replay.
+Opportunity replay also requires original interval and endpoint proofs. The
+independently populated promotion store must contain the authenticated model
+assets and lineage required by package replay.
 
 The installed service automatically discovers the effective activation from
 complete finalized control history and collects opportunity evidence for every
@@ -273,10 +273,38 @@ The service supervises the collector and drains its work before closing proof
 providers. Completion establishes the configured opportunity, not a payment
 receipt.
 
-Automatic artifact and proof-archive delivery, the full series simulation, and
-installed restart/isolation qualification remain required before deploying this
-selection. Local collection does not replicate original evidence to other hosts.
-The CLI path alone does not establish unattended readiness.
+The explicit, disjoint `proof_export_directory` receives original proof objects
+and frames automatically during history replay and interval collection. An
+interrupted write retries the same bytes before advancing the local cursor or
+crediting an interval. Objects are published before their frame. The separate
+`proof_import_directory` accepts transferred frames; native readers verify every
+proof before populating a recovery journal or crediting time. An imported block
+number cannot choose the history target before its chain proof is verified.
+Restart requires native replay even when all archive files are already present.
+
+Private R2 replication uses the [copy service and timer templates](../../deploy/standing-reward-proof-replication/)
+with [rclone's R2 backend](https://developers.cloudflare.com/r2/examples/rclone/).
+Stage a verified rclone executable and replace the template paths and service
+account. Each upload/download job has its own root-owned environment file and
+private credential file supplied through `LoadCredential`. Use a private bucket,
+separate bucket-scoped publisher/read-only receiver credentials, and a distinct
+series/producer prefix. Configure filesystem capacity for both archive roots
+in addition to the native journals; do not point replication at a journal,
+wallet, model store or general home directory.
+
+The timer retries failed copies indefinitely. `copy --immutable --checksum`
+retains existing destination files and refuses conflicting bytes; it does not
+delete objects absent from the source. The filters copy only proof objects and
+frames, excluding lock and temporary files. Transfers can arrive out of order;
+missing referenced objects remain pending. Reading R2 uses the receiver's own
+credential, so already uploaded proofs remain available when the coordinator is
+offline. A copied file or successful transfer grants no reward authority.
+
+These templates are uninstalled. Private bucket/credential provisioning, real
+R2 upload and restore, retention controls, installed timer/restart qualification,
+artifact/decision delivery, and the full series simulation remain required
+before deployment. Local archive checks do not establish remote durability or
+unattended readiness.
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;

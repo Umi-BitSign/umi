@@ -1682,3 +1682,240 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
     assert "coverage_complete" in caplog.text
     await service.step()
     assert await journal.interval_keys() == interval_keys
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc(
+    complete_preparation_case, tmp_path, monkeypatch
+):
+    import json
+    import shutil
+
+    from umi.competition_chain_resources import CompetitionChainResources
+    from umi.competition_reward_control_archive import HistoricalRewardControlProvider
+    from umi.competition_reward_coverage_collector import RewardCoverageCollector
+    from umi.competition_reward_coverage_intervals import coverage_point
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import (
+        CoverageHistoryPending,
+        NativeRewardCoverageSource,
+    )
+    from umi.competition_reward_history import RewardControlHistoryReader
+    from umi.competition_reward_opportunity import opportunity_rule
+    from umi.competition_reward_opportunity_review import review_opportunity_certificate
+    from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    rule = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    terms = dict(
+        manifest=p.manifest,
+        series=c.series,
+        policy=c.reader.policy,
+        activation=c.active.decision.activation,
+    )
+    owner = StandingRewardPreparation(
+        c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+    )
+    archive = RewardProofArchive(tmp_path / "proof-export")
+    original_write = archive.write
+    interrupted = set()
+
+    def lost_export_reply(kind, *args, **kwargs):
+        original_write(kind, *args, **kwargs)
+        if kind not in interrupted:
+            interrupted.add(kind)
+            raise OSError("export acknowledgement lost")
+
+    monkeypatch.setattr(archive, "write", lost_export_reply)
+    h.reader = RewardControlHistoryReader(
+        tmp_path / "export-history",
+        control_hotkey=c.series.control_hotkey,
+        chain_config_sha256=digest(h.item.config),
+        first_block=h.old.height,
+        maximum_bytes=64 * 1024**2,
+        export_archive=archive,
+    )
+    journal = RewardCoverageJournal(
+        tmp_path / "source-coverage",
+        rule,
+        expected_rule_sha256=digest(rule),
+        export_archive=archive,
+    )
+    source = NativeRewardCoverageSource(
+        provider=h.item.provider,
+        journal=journal,
+        history=h.reader,
+        preparation=owner,
+        package=p.package,
+        decisions=c.source,
+        profile=h.item.profile,
+        maximum_history_blocks=4096,
+    )
+
+    async def head():
+        return h.end
+
+    source.finalized_height = head
+    collector = RewardCoverageCollector(journal, source, **terms, first_block=h.end - 1)
+    for _ in range(100):
+        progress = await collector.step()
+        if progress.certificate is not None:
+            break
+    else:
+        pytest.fail("source opportunity capture did not complete")
+    certificate = progress.certificate
+    assert interrupted == {"history", "endpoint", "interval"}
+    (interval_key,) = await journal.interval_keys()
+    interval = await journal.retained_interval(interval_key)
+    assert len(tuple((archive.root / "history").glob("*.json"))) == h.end - h.old.height + 1
+    witness_bytes = {
+        contribution.witness_sha256: canonical_json_bytes(
+            journal.journal.get("opportunity_witness", contribution.witness_sha256)
+        )
+        for contribution in certificate.contributions
+    }
+
+    # File transfer substitutes only the network port. No live SQLite file,
+    # verification flag, aggregate total or provider cache moves to the receiver.
+    remote_root = tmp_path / "proof-import"
+    shutil.copytree(archive.root, remote_root)
+    assert not tuple(remote_root.rglob("*.sqlite3"))
+    imported = RewardProofArchive(remote_root)
+    resources = CompetitionChainResources.from_config(h.item.config).model_copy(
+        update={"state_directory": str(tmp_path / "receiver-chain-cache")}
+    )
+    h.reopen = lambda: HistoricalRewardControlProvider(
+        h.item.config,
+        h.item.policy,
+        resources=resources,
+        historical_header_directory=tmp_path / "receiver-headers",
+        finality=h.item.finality,
+        proofs=h.item.proofs,
+        now_ms=lambda: h.item.clock.now,
+    )
+    await h.restart()
+    h.offline_through = h.end
+    h.rpc_calls.clear()
+    history = RewardControlHistoryReader(
+        tmp_path / "receiver-history",
+        control_hotkey=c.series.control_hotkey,
+        chain_config_sha256=digest(h.item.config),
+        first_block=h.old.height,
+        maximum_bytes=64 * 1024**2,
+        archive=imported,
+    )
+    receiver = RewardCoverageJournal(
+        tmp_path / "receiver-coverage",
+        rule,
+        expected_rule_sha256=digest(rule),
+        archive=imported,
+    )
+    # The immutable package, model/promotion assets and signed decisions are
+    # supplied separately. This test qualifies original proof portability.
+    reader = StandingRewardControlReader(
+        tmp_path / "receiver-control",
+        c.series,
+        c.reader.policy,
+        expected_series_sha256=digest(c.series),
+        expected_chain_config_sha256=digest(h.item.config),
+        maximum_bytes=8 * 1024**2,
+    )
+    owner = StandingRewardPreparation(
+        reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+    )
+    source = NativeRewardCoverageSource(
+        provider=h.item.provider,
+        journal=receiver,
+        history=history,
+        preparation=owner,
+        package=p.package,
+        decisions=c.source,
+        profile=h.item.profile,
+        maximum_history_blocks=4096,
+    )
+    assert (
+        await receiver.verified_ms(
+            activation_sha256=digest(terms["activation"]), validator_hotkey=h.validator_hotkey
+        )
+        == 0
+    )
+    first_key = history_archive_key(history.config_sha256, history.hotkey, history.first_block)
+    first_path = remote_root / "history" / (first_key + ".json")
+    first_bytes = first_path.read_bytes()
+    changed = json.loads(first_bytes)
+    changed["context"]["block"] += 1
+    first_path.write_bytes(canonical_json_bytes(changed))
+    with pytest.raises(ValueError, match="requested domain"):
+        await history.advance(h.item.provider, through_block=h.end, maximum_blocks=4096)
+    assert history.journal.keys("control_history_block") == []
+    first_path.write_bytes(first_bytes)
+
+    left_path = remote_root / "endpoint" / (interval.left + ".json")
+    left_bytes = left_path.read_bytes()
+    changed = json.loads(left_bytes)
+    changed["context"]["point"]["block"] += 100000
+    left_path.write_bytes(canonical_json_bytes(changed))
+    for _ in range(100):
+        try:
+            await source.replay(interval.left)
+        except (HistoricalHeaderRecoveryPending, CoverageHistoryPending):
+            continue
+        except ValueError as error:
+            assert "native coverage replay differs" in str(error)
+            break
+        else:
+            pytest.fail("altered remote point became a native endpoint")
+    else:
+        pytest.fail("native replay did not reach imported summary check")
+    assert history._next <= h.end + 1  # never chase the untrusted +100000 height
+    assert receiver.journal.get("coverage_endpoint", interval.left) is None
+    left_path.write_bytes(left_bytes)
+
+    interval_path = remote_root / "interval" / (interval_key + ".json")
+    interval_bytes = interval_path.read_bytes()
+    changed = json.loads(interval_bytes)
+    changed["context"]["credited_ms"] += 1
+    interval_path.write_bytes(canonical_json_bytes(changed))
+
+    async def review():
+        return await review_opportunity_certificate(
+            canonical_json_bytes(certificate),
+            expected_sha256=digest(certificate),
+            journal=receiver,
+            witness_source=witness_bytes.__getitem__,
+            review_endpoint=source.replay,
+            **terms,
+        )
+
+    for _ in range(100):
+        try:
+            await review()
+        except (HistoricalHeaderRecoveryPending, CoverageHistoryPending):
+            continue
+        except ValueError as error:
+            assert "ordered native coverage" in str(error)
+            break
+        else:
+            pytest.fail("altered remote interval became a native certificate")
+    else:
+        pytest.fail("native replay did not reach imported interval check")
+    assert receiver.journal.get("coverage_interval", interval_key) is None
+    assert (
+        await receiver.verified_ms(
+            activation_sha256=digest(terms["activation"]), validator_hotkey=h.validator_hotkey
+        )
+        == 0
+    )
+    interval_path.write_bytes(interval_bytes)
+    verified = await review()
+    assert verified.certificate == certificate
+    assert (
+        await receiver.verified_ms(
+            activation_sha256=digest(terms["activation"]), validator_hotkey=h.validator_hotkey
+        )
+        == 12000
+    )
+    assert receiver.journal.get("coverage_interval", interval_key) is not None
+    assert coverage_point(await source.replay(interval.left), rule).key() == interval.left
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
