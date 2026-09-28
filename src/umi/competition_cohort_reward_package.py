@@ -106,7 +106,7 @@ class CohortRewardPackage(StrictProtocolModel):
         return self
 
 
-class _Objects:
+class ReplayObjectCollector:
     """Bound and authenticate each source before retaining or replaying it."""
 
     def __init__(self, source: EndpointObjectSource, maximum_bytes: int):
@@ -238,7 +238,7 @@ def prepare_reward_package(
     and the selected promotion history before advertising durable admission.
     """
     inputs = RewardReplayInputs.model_validate_json(canonical_json_bytes(inputs))
-    captured = _Objects(objects, maximum_bytes)
+    captured = ReplayObjectCollector(objects, maximum_bytes)
     refs, records, pulse_refs = [], [], {}
     for key, raw in intake_records:
         if len(refs) >= MAX_PACKAGE_OBJECTS:
@@ -342,7 +342,7 @@ def replay_reward_package(
     ):
         raise ValueError("reward package differs from selected identity or policy")
     inventory = {o.sha256: canonical_json_bytes(o.value) for o in package.objects}
-    source = _Objects(inventory.__getitem__, maximum_bytes)
+    source = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)
     # Check every declared object, including those missing from a replay traversal.
     for key in inventory:
         read_endpoint_object(inventory.__getitem__, key)

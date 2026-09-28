@@ -373,6 +373,23 @@ selected history, including revocation. Run it under the cohort service's
 sole-writer lock with independently selected plan, authority, scoring terms,
 catalogs and finality.
 
+Before certification, `prepare_settlement_inputs` exports a private
+`SettlementInputPackage` from the original evidence-phase history. It replays
+every benchmark participant and the complete service allocation, retaining the
+exact execution objects, intake records, cohort decisions and reveal pulses
+read by those reviews. It does not require quality votes or a reward package.
+Publish the immutable package privately and replicate it alongside the original
+proof archives. Its references and responses must never be exposed by the public
+results API.
+
+`load_settlement_inputs` checks the selected package digest, owned policy and
+current history, and the manifest's cohort, service terms and catalog bindings.
+It replays the replica through native quality and service review after any delay,
+rejecting missing, changed or unreferenced evidence. Later settlement decisions
+come from the receiver's current history source; the original input bytes stay
+fixed. Evaluators still need their own retained execution journal to sign a
+quality vote. The input package provides neither finality nor signing authority.
+
 `CohortSettlementPhases` connects this owner to the recovery controller's durable
 progress intent. The intent retains the original result and finalized boundary
 before requesting signatures. `SettlementPeerReviewer` verifies the proposer's
@@ -400,9 +417,10 @@ frames; the receiver authenticates them against its own finality provider. The
 file envelope alone supplies no verification authority. Existing exported proof
 bytes remain available when the original provider is offline. The reviewer loop
 visits only the six selected slots, logs retry reasons without evidence payloads,
-and continues after an unavailable slot. Original result objects and promotion
-artifacts also require independent delivery. Recurring host startup and that
-source delivery still need wiring; these components are not an installed daemon.
+and continues after an unavailable slot. Original input packages, later result
+objects and promotion artifacts require independent delivery. Recurring host
+startup, automatic input publication and the combined source-delivery service
+still need wiring; these components are not an installed daemon.
 
 The reward coordinator derives the next activation
 from that package and the approved manifest. Initial activation names the

@@ -2865,6 +2865,271 @@ async def native_settlement_case(native_package, service_quality_inputs, tmp_pat
     )
 
 
+@pytest.fixture
+def original_settlement_inputs(service_quality_inputs):
+    from umi.competition_cohort_settlement_inputs import prepare_settlement_inputs
+
+    b = service_quality_inputs
+    c = b["service_case"]
+    inputs = RewardReplayInputs(
+        closure=b["closure"],
+        roster=b["roster"],
+        suite=b["suite"],
+        transport=b["transport"],
+        terms=c.terms,
+        reveal=b["reveal"],
+        catalogs=(c.assignment.catalog,),
+        seals=(b["service_seal"],),
+        history=b["history"],
+    )
+    requirement = RewardReplayRequirement(
+        cohort_sha256=digest(inputs.history.plan),
+        terms_sha256=digest(c.terms),
+        catalog_sha256s=(digest(c.assignment.catalog.catalog),),
+    )
+    package = prepare_settlement_inputs(
+        inputs,
+        b["policy"],
+        requirement,
+        b["objects"].__getitem__,
+        b["decisions"].__getitem__,
+        iter(b["records"]),
+        lambda _: RetainedRevealPulse(**pulse_record()),
+        expected_tip_sha256=tip(inputs.history),
+        current_block=1000000,
+    )
+    return SimpleNamespace(b=b, package=package, requirement=requirement)
+
+
+async def test_settlement_input_replica_recovers_before_quality_votes(
+    original_settlement_inputs, tmp_path
+):
+    """Native execution/replay/votes; phase quorum and model assets are fixtures."""
+    from umi.competition_cohort_settlement import CohortSettlement
+    from umi.competition_cohort_settlement_inputs import (
+        load_settlement_inputs,
+        publish_settlement_inputs,
+    )
+
+    from .test_competition_cohort_quality import votes_for
+
+    c, b = original_settlement_inputs, original_settlement_inputs.b
+    assert all(not owner.journal.keys("closed_quality_vote") for owner in b["owners"].values())
+    path = tmp_path / "replica" / "inputs.json"
+    publish_settlement_inputs(path, c.package)
+    raw = path.read_bytes()
+    publish_settlement_inputs(path, c.package)  # Lost acknowledgement retry.
+    assert path.read_bytes() == raw
+    original_intake = tuple(b["records"])
+    b["objects"].clear()
+    b["decisions"].clear()
+    b["records"] = ()
+    history, block = c.package.inputs.history, 1100000
+
+    def read():
+        return load_settlement_inputs(
+            path,
+            b["policy"],
+            c.requirement,
+            history,
+            expected_package_sha256=digest(c.package),
+            expected_tip_sha256=tip(history),
+            current_block=block,
+            current_decisions=b["decisions"].__getitem__,
+        )
+
+    restored = read()
+    assert sorted(restored.intake) == sorted(original_intake)
+    store = CompetitionStore(tmp_path / "promotion", b["policy"])
+    bundle = bundle_at(tmp_path / "model")
+    preserve_bundle(bundle, tmp_path / "model", tmp_path / "archive", b["policy"])
+    store.initialize_baseline(bundle, tmp_path / "archive")
+
+    def reopen(data):
+        return CohortSettlement(
+            plan=history.plan,
+            authority=history.authority,
+            requirement=c.requirement,
+            policy=b["policy"],
+            journal=RoundJournal(tmp_path / "settlement", {"scope": "replica"}),
+            promotion_store=store,
+            objects=data.objects,
+            decisions=data.decisions,
+            pulses=data.pulses,
+            output_directory=tmp_path / "settled",
+            maximum_promotion_bytes=1000000,
+        )
+
+    pending = reopen(restored).advance(
+        restored.inputs,
+        restored.intake,
+        expected_tip_sha256=tip(history),
+        current_block=block,
+    )
+    assert pending.status == "waiting_quality_votes" and pending.package is None
+    quality_votes = []
+    for order in b["orders"]:
+        quality_votes.extend(await votes_for(b, restored.quality, order))
+    service_votes = []
+    for name in ("Charlie", "Dave"):
+
+        async def sign(body, name=name):
+            return sign_object(body, wallet(name))
+
+        service_votes.append(
+            await sign_service_allocation(
+                RoundJournal(tmp_path / ("replica-service-" + name), {"scope": "replica-service"}),
+                restored.service,
+                wallet(name).hotkey.ss58_address,
+                sign,
+            )
+        )
+    for phase in ("evidence", "review", "certification", "first_admission"):
+        restored = read()
+        owner = reopen(restored)
+        result = owner.advance(
+            restored.inputs,
+            restored.intake,
+            expected_tip_sha256=tip(history),
+            current_block=block,
+            quality_votes=quality_votes,
+            service_votes=service_votes,
+        )
+        if phase == "first_admission":
+            assert result.status == "package_published"
+            break
+        assert result.status == "phase_ready" and result.progress.phase == phase
+        history = close(
+            history, b["policy"], b["decisions"], block, result.progress.phase_result_sha256
+        )
+        block += 100000
+    assert canonical_json_bytes(result.package) == owner.output.read_bytes()
+    assert len(result.package.benchmark.participants) == len(restored.quality.closure.participants)
+    assert not b["objects"] and not b["records"]
+    assert b["service_case"].p.model.calls == 1
+    assert path.read_bytes() == raw
+
+
+async def test_settlement_input_replica_rejects_missing_or_changed_evidence(
+    original_settlement_inputs, tmp_path
+):
+    from umi.competition_cohort_reward_package import RewardPackageObject
+    from umi.competition_cohort_settlement_inputs import (
+        publish_settlement_inputs,
+        replay_settlement_inputs,
+    )
+
+    from .test_competition_cohort_consumers import transition
+
+    c, b = original_settlement_inputs, original_settlement_inputs.b
+
+    def replay(package, **changes):
+        args = dict(
+            expected_package_sha256=digest(package),
+            expected_tip_sha256=tip(c.package.inputs.history),
+            current_block=2**53 - 1,
+        )
+        args.update(changes)
+        return replay_settlement_inputs(
+            package,
+            b["policy"],
+            c.requirement,
+            c.package.inputs.history,
+            **args,
+        )
+
+    with pytest.raises(ValueError, match="identity or history"):
+        replay(c.package, expected_package_sha256="a" * 64)
+    with pytest.raises(ValueError, match="selected current tip"):
+        replay(c.package, expected_tip_sha256="b" * 64)
+    with pytest.raises(ValueError, match="byte bound"):
+        replay(c.package, maximum_bytes=1024)
+    history = c.package.inputs.history
+    revoked = transition(history, b["policy"], "revoke", 2000000)
+    with pytest.raises(ValueError, match="not active after reference reveal"):
+        replay_settlement_inputs(
+            c.package,
+            b["policy"],
+            c.requirement,
+            revoked,
+            expected_package_sha256=digest(c.package),
+            expected_tip_sha256=tip(revoked),
+            current_block=2000000,
+        )
+    rollback = history.model_copy(update={"transitions": history.transitions[:-1]})
+    with pytest.raises(ValueError, match="identity or history"):
+        replay_settlement_inputs(
+            c.package,
+            b["policy"],
+            c.requirement,
+            rollback,
+            expected_package_sha256=digest(c.package),
+            expected_tip_sha256=tip(rollback),
+            current_block=2000000,
+        )
+
+    original_decision = c.package.inputs.history.transitions[0].transition.evidence_sha256
+    missing_decision = c.package.model_copy(
+        update={"objects": tuple(o for o in c.package.objects if o.sha256 != original_decision)}
+    )
+    with pytest.raises(ValueError, match="lack original decision"):
+        replay(missing_decision)
+
+    # Retain all history and intake but remove one original execution object.
+    reserved = (
+        {r.record_sha256 for r in c.package.intake}
+        | {t.transition.evidence_sha256 for t in c.package.inputs.history.transitions}
+        | {p.pulse_sha256 for p in c.package.pulses}
+    )
+    missing = next(o for o in c.package.objects if o.sha256 not in reserved)
+    with pytest.raises((KeyError, FileNotFoundError)):
+        replay(
+            c.package.model_copy(
+                update={"objects": tuple(o for o in c.package.objects if o != missing)}
+            )
+        )
+    altered = missing.model_copy(update={"value": {"changed": True}})
+    with pytest.raises(ValueError, match="bounded identity"):
+        replay(
+            c.package.model_copy(
+                update={"objects": tuple(altered if o == missing else o for o in c.package.objects)}
+            )
+        )
+    extra = RewardPackageObject(sha256=digest({"unused": True}), value={"unused": True})
+    with pytest.raises(ValueError, match="unreferenced evidence"):
+        replay(
+            c.package.model_copy(
+                update={
+                    "objects": tuple(
+                        sorted(
+                            (*c.package.objects, extra),
+                            key=lambda o: o.sha256,
+                        )
+                    )
+                }
+            )
+        )
+    wrong_terms = c.package.inputs.terms.model_copy(
+        update={"stratum_weights": {"fingerspelling": 99, "continuous": 1}}
+    )
+    with pytest.raises(ValueError, match="approved cohort or service terms"):
+        replay(
+            c.package.model_copy(
+                update={
+                    "inputs": c.package.inputs.model_copy(
+                        update={"terms": wrong_terms},
+                    )
+                }
+            )
+        )
+    path = tmp_path / "replica" / "inputs.json"
+    publish_settlement_inputs(path, c.package)
+    with pytest.raises(ValueError):
+        publish_settlement_inputs(path, missing_decision)
+    assert path.read_bytes() == canonical_json_bytes(c.package)
+    assert all(not owner.journal.keys("closed_quality_vote") for owner in b["owners"].values())
+
+
 @pytest.mark.parametrize(
     "lost_reply",
     ["closed_quality_peer", "service_allocation_peer", "cohort_reward_allocation", "publish"],
