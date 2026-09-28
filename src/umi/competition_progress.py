@@ -44,6 +44,7 @@ _PHASES = frozenset(
         "cohort_request_completion_review",
         "cohort_progress_vote",
         "cohort_decision_vote",
+        "cohort_service_vote",
     }
 )
 _REASONS = {

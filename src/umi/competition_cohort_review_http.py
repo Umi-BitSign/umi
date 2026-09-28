@@ -157,5 +157,5 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
 
 
 def _request_limit(value: int) -> None:
-    if type(value) is not int or not 1024 <= value <= 8 * 1024**2:
+    if type(value) is not int or not 1024 <= value <= 32 * 1024**2:
         raise ValueError("phase review request capacity is outside bounds")

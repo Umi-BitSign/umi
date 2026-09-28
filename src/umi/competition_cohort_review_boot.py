@@ -15,6 +15,8 @@ from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_review_config import PhaseReviewServiceConfig
 from .competition_cohort_review_http import _credential
 from .competition_cohort_review_selection import SelectedPhaseReviewer
+from .competition_cohort_service_selection import SelectedServiceReviewer
+from .competition_cohort_service_vote_http import service_vote_routes
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_host_activation import _read_root_control_path
@@ -99,6 +101,14 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 phase_vote_routes(
                     signer,
                     phase=phase,
+                    token=vote_token,
+                    timeout_seconds=config.review_timeout_seconds,
+                )
+            )
+        if config.service_signing is not None:
+            app.include_router(
+                service_vote_routes(
+                    SelectedServiceReviewer(config, provider, client, owner_token, archive, sign),
                     token=vote_token,
                     timeout_seconds=config.review_timeout_seconds,
                 )

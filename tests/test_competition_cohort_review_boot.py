@@ -14,6 +14,7 @@ from umi import competition_cohort_review_cli as cli
 from umi.competition_cohort_intake import CohortIntakeBinding
 from umi.competition_cohort_progress_signer import CohortProgressSignerConfig
 from umi.competition_cohort_review_config import PhaseReviewServiceConfig, load_phase_review_config
+from umi.competition_cohort_service_review import ServiceReviewConfig
 from umi.open_competition import digest
 from umi.private_files import lock_private_file
 from umi.protocol import canonical_json_bytes
@@ -81,6 +82,73 @@ def test_exact_root_config_and_cli_check_without_loading_keys(selected, capsys):
     selected.save(selected.path, b" " + canonical_json_bytes(selected.config))
     with pytest.raises(ValueError, match="canonical"):
         load_phase_review_config(selected.path)
+
+
+def with_service(config):
+    signing = ServiceReviewConfig(
+        schema="umi-service-review-config/1",
+        directory=config.signing.directory + "-service",
+        policy_sha256=digest(config.policy),
+        signer=config.signing.signer,
+        owner=config.owner_hotkey,
+        cohorts=config.signing.cohorts,
+    )
+    return PhaseReviewServiceConfig.model_validate_json(
+        canonical_json_bytes(
+            config.model_copy(
+                update={"schema_": "umi-cohort-phase-review-service/2", "service_signing": signing}
+            )
+        )
+    )
+
+
+def test_v1_canonical_bytes_omit_new_optional_service_configuration(selected):
+    raw = canonical_json_bytes(selected.config)
+    assert "service_signing" not in json.loads(raw)
+    assert canonical_json_bytes(PhaseReviewServiceConfig.model_validate_json(raw)) == raw
+
+
+@pytest.mark.parametrize(
+    "fault", ["version", "missing", "owner", "signer", "cohorts", "policy", "overlap"]
+)
+def test_service_review_configuration_keeps_original_host_authority(selected, fault):
+    c = with_service(selected.config)
+    if fault == "version":
+        c = c.model_copy(update={"schema_": "umi-cohort-phase-review-service/1"})
+    elif fault == "missing":
+        c = c.model_copy(update={"service_signing": None})
+    else:
+        changed = {
+            "owner": {"owner": wallet("Dave").hotkey.ss58_address},
+            "signer": {"signer": wallet("Charlie").hotkey.ss58_address},
+            "cohorts": {"cohorts": c.signing.cohorts[:1]},
+            "policy": {"policy_sha256": "ff" * 32},
+            "overlap": {"directory": c.signing.directory},
+        }[fault]
+        c = c.model_copy(update={"service_signing": c.service_signing.model_copy(update=changed)})
+    with pytest.raises(ValueError):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+async def test_service_review_boot_registers_private_routes_without_future_inputs(
+    selected, providers
+):
+    c = with_service(selected.config)
+    async with (
+        boot.phase_review_app(c) as app,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://local"
+        ) as client,
+    ):
+        for kind in ("request", "retry"):
+            path = f"/internal/cohorts/service/votes/{kind}"
+            assert (await client.post(path, json={})).status_code == 401
+            assert (
+                await client.post(
+                    path, json={}, headers={"authorization": "Bearer " + "vote-token" * 4}
+                )
+            ).status_code == 422
+    assert providers.events[-1] == "closed"
 
 
 def test_cli_reports_phase_failure_without_private_exception_text(selected, monkeypatch, capsys):

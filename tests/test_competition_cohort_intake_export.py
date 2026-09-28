@@ -15,6 +15,13 @@ from umi.competition_cohort_coordinator import (
     _choice,
     replay_cohort_decisions,
 )
+from umi.competition_cohort_history_http import (
+    CohortHistoryExporter,
+    CohortHistoryHTTPClient,
+    CohortHistoryReader,
+    SignedCohortHistoryResponse,
+    cohort_history_routes,
+)
 from umi.competition_cohort_intake import CohortIntake, history_tip
 from umi.competition_cohort_intake_export import (
     IntakeReviewExporter,
@@ -125,6 +132,81 @@ def remote(archive, accepted, tmp_path):
 
     h.signer = signer
     return h
+
+
+async def test_owner_history_http_returns_original_published_decisions(remote):
+    from fastapi import FastAPI
+
+    h = remote
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, sign)
+    app = FastAPI()
+    app.include_router(cohort_history_routes(exporter, token="h" * 32))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        fetch = CohortHistoryHTTPClient(client, "https://owner.example", token="h" * 32)
+        reader = CohortHistoryReader(wallet("Charlie").hotkey.ss58_address, fetch)
+        source = await reader(digest(h.history.plan))
+        assert source.history == h.intake.history(digest(h.history.plan))
+        assert source.inputs().keys() == {
+            t.transition.evidence_sha256
+            for t in source.history.transitions
+            if t.transition.operation != "revoke"
+        }
+        fetch.token = "x" * 32
+        with pytest.raises(OSError):
+            await reader(digest(h.history.plan))
+
+
+@pytest.mark.parametrize("fault", ["challenge", "signer", "signature", "canonical", "decisions"])
+async def test_owner_history_rejects_replayed_or_modified_export(remote, fault):
+    h = remote
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, sign)
+
+    async def fetch(request):
+        raw = await exporter.respond(request)
+        if fault == "canonical":
+            return b" " + raw
+        value = SignedCohortHistoryResponse.model_validate_json(raw)
+        response, signature = value.response, value.signature
+        if fault == "challenge":
+            response = response.model_copy(update={"challenge": "aa" * 32})
+            signature = sign_object(response, wallet("Charlie"))
+        elif fault == "signer":
+            signature = sign_object(response, wallet("Dave"))
+        elif fault == "signature":
+            signature = sign_object(
+                response.model_copy(update={"challenge": "aa" * 32}), wallet("Charlie")
+            )
+        else:
+            extra = CohortDecisionInput(
+                schema="umi-cohort-decision-input/1",
+                progress=AttestedCohortPhaseProgress(
+                    progress=h.result.progress, signatures=signatures(h.result.progress)
+                ),
+                observation=execution_boundary(h.archive.capture),
+            )
+            response = response.model_copy(
+                update={
+                    "source": response.source.model_copy(
+                        update={"decisions": (*response.source.decisions, extra)}
+                    )
+                }
+            )
+            signature = sign_object(response, wallet("Charlie"))
+        return canonical_json_bytes(
+            SignedCohortHistoryResponse(response=response, signature=signature)
+        )
+
+    reader = CohortHistoryReader(wallet("Charlie").hotkey.ss58_address, fetch)
+    with pytest.raises(ValueError):
+        await reader(digest(h.history.plan))
 
 
 async def test_remote_native_proof_review_matches_owner_and_retains_offline_vote(remote):

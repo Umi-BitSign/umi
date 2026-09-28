@@ -4,12 +4,13 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import httpx
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_progress_signer import CohortProgressSignerConfig
 from .competition_cohort_recovery import verify_recovery_authority
+from .competition_cohort_service_review import ServiceReviewConfig
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -20,7 +21,9 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 
 
 class PhaseReviewServiceConfig(StrictProtocolModel):
-    schema_: Literal["umi-cohort-phase-review-service/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-phase-review-service/1", "umi-cohort-phase-review-service/2"] = (
+        Field(alias="schema")
+    )
     series: StandingRewardSeries
     policy: CompetitionPolicy
     manifest: RewardManifest
@@ -41,6 +44,14 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     maximum_promotion_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 16 * 1024**2
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
     review_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 1200
+    service_signing: ServiceReviewConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        value = handler(self)
+        if self.service_signing is None:
+            value.pop("service_signing", None)
+        return value
 
     def stores(self) -> tuple[Path, ...]:
         return tuple(
@@ -51,11 +62,16 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.inputs_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
+                *((self.service_signing.directory,) if self.service_signing else ()),
             )
         )
 
     @model_validator(mode="after")
     def selection(self):
+        if (self.schema_ == "umi-cohort-phase-review-service/2") != (
+            self.service_signing is not None
+        ):
+            raise ValueError("service review signing requires version two host configuration")
         private_path(self.chain.state_directory)
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
         verify_recovery_authority(self.series.recovery, self.policy)
@@ -66,6 +82,14 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             for k in sorted(digest(p) for p in self.series.cohorts)
         )
         authorized = {identity(e.hotkey) for e in self.policy.evaluators}
+        service = self.service_signing
+        if service is not None and (
+            service.cohorts != expected
+            or service.policy_sha256 != digest(self.policy)
+            or identity(service.signer) != identity(self.signing.signer)
+            or identity(service.owner) != identity(self.owner_hotkey)
+        ):
+            raise ValueError("service review changes host signer, owner or scope")
         if (
             self.signing.cohorts != expected
             or self.signing.policy_sha256 != digest(self.policy)

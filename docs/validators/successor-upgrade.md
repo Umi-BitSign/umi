@@ -443,7 +443,10 @@ are explicit host components, not default public API endpoints.
 Run a private reviewer with `umi-cohort-phase-review run --config CONFIG.json`.
 The `check` action validates the selection without opening the signer or proving
 runtime readiness. The configuration is canonical, root-owned mode `0444` and
-uses `umi-cohort-phase-review-service/1`. Select the full standing series,
+uses `umi-cohort-phase-review-service/1` for phase votes, or
+`umi-cohort-phase-review-service/2` with
+`service_signing` for service-request and retry votes. Version one keeps its
+original canonical bytes. Select the full standing series,
 manifest, competition policy, all cohort/authority bindings, named evaluator
 hotkey, owned chain configuration with two backup proof RPCs, allowed tracks,
 trusted owner hotkey and HTTPS origin. Configure explicit resource capacities
@@ -535,8 +538,31 @@ Preserve the review journal across restarts. It binds each work item to its
 original assignment and evaluator, reserves vote space before signing, and
 recovers completed votes without live sources. Unfinished signing uses retained
 proofs while rechecking current authority and the owner's original assignment.
-These ports require production host wiring, reviewer vote transport and installed
-qualification; the components alone do not prove unattended operation.
+The version-two private reviewer host accepts a `ServiceReviewConfig` in
+`service_signing`, with its own directory and the same signer, owner, policy and
+complete cohort bindings as phase signing. It serves
+`/internal/cohorts/service/votes/request` and `/internal/cohorts/service/votes/retry`
+using the vote credential. Requests are bounded to 32 MiB including the original
+parent grant; returned signatures are bounded to 2 KiB. Catalog hashes come from
+the selected series manifest. Terms and transport are retained before review, so
+recovery does not depend on the original input files remaining available.
+
+Install `CohortHistoryExporter` beside the original intake owner at the private
+`/internal/cohorts/history` route. Its signed challenge response contains the
+published history and original decision inputs. Reviewers replay that history;
+the owner's signature alone cannot certify a phase. The reviewer shares its
+owned registration observer through `CompetitionTransportFinality` only when
+transport and registration select identical chain and verifier pins. The view
+preserves proof bytes and never rewrites the finality database.
+
+Configure `ServiceVotePeer` for each independent reviewer's HTTPS origin and vote
+credential. Pass `ServiceWorkPeerReviews.reviewers` and `.retry` to the recurring
+service worker. Request votes remain in its original queue; partial retry votes
+and certificates are retained there before acknowledgement. A restarted worker
+reuses those votes even while a previously responding peer is offline. The host
+reports bounded `cohort_service_vote` diagnostics without request bodies or URLs.
+Coordinator startup, readiness probes, archive replication and installed
+qualification still need to connect these components before unattended launch.
 
 Selected requests, reviewer votes, signed miner receipts, original responses and
 terminal signing intents remain in the owning queue. Dispatch records its intent
