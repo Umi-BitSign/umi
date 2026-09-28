@@ -8,6 +8,7 @@ from .competition_cohort_coordinator import (
     replay_cohort_decisions,
 )
 from .competition_cohort_history import verify_cohort_history
+from .competition_cohort_model_award import build_model_award
 from .competition_cohort_reward_allocation import (
     CohortRewardAllocation,
     build_reward_allocation,
@@ -34,13 +35,23 @@ def replay_reward_allocation(
     allocation = CohortRewardAllocation.model_validate_json(canonical_json_bytes(allocation))
     if digest(promotion_store.policy) != digest(service_review.policy):
         raise ValueError("promotion history belongs to another policy")
-    promotion = promotion_store.reviewed_promotion_at(
-        allocation.round_sha256,
-        allocation.promotion_head.promotion_sha256,
-        maximum_bytes=maximum_promotion_bytes,
-    )
+    model_award = None
+    if allocation.model_award is not None:
+        model_award = build_model_award(
+            benchmark,
+            benchmark_review,
+            allocation.model_award.acceptances,
+            promotion_store.directory / "model-reward-artifacts",
+        )
+        promotion = None
+    else:
+        promotion = promotion_store.reviewed_promotion_at(
+            allocation.round_sha256,
+            allocation.promotion_head.promotion_sha256,
+            maximum_bytes=maximum_promotion_bytes,
+        )
     expected = build_reward_allocation(
-        service, service_review, benchmark, benchmark_review, promotion
+        service, service_review, benchmark, benchmark_review, promotion, model_award=model_award
     )
     if allocation != expected:
         raise ValueError("reward allocation differs from independently replayed evidence")

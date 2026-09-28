@@ -1993,6 +1993,9 @@ async def test_service_allocation_signing_failure_capacity_and_self_review(
 
 
 @pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+@pytest.mark.parametrize(
+    "receipt_scenario", ["extensions", "standing", "model-awards"], indirect=True
+)
 async def test_native_reward_allocation_replays_lost_commit_without_new_head(
     service_quality_inputs, tmp_path, monkeypatch
 ):
@@ -2058,8 +2061,10 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
             owner, store, service, sr, benchmark, br, maximum_promotion_bytes=1_000_000
         )
 
-    with pytest.raises(ValueError, match="missing"):
-        retain()
+    uses_model_award = br.history.authority.authority.schema_ == "umi-cohort-recovery-authority/3"
+    if not uses_model_award:
+        with pytest.raises(ValueError, match="missing"):
+            retain()
     assert owner.get("cohort_reward_allocation", sr.slot) is None
     bundle = bundle_at(tmp_path / "model")
     preserve_bundle(bundle, tmp_path / "model", tmp_path / "archive", b["policy"])
@@ -2150,6 +2155,12 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
         verify(transition(certified, b["policy"], "revoke", start + 30))
     changed = result.model_copy(
         update={
+            "model_award": result.model_award.model_copy(
+                update={"recipient_hotkey": wallet("Alice").hotkey.ss58_address}
+            )
+        }
+        if uses_model_award
+        else {
             "promotion_head": result.promotion_head.model_copy(
                 update={"contributor_hotkey": wallet("Alice").hotkey.ss58_address}
             )
@@ -2230,8 +2241,15 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
 
     # A portable package cannot replace independently retained model provenance.
     missing_promotion = CompetitionStore(tmp_path / "missing-promotion", b["policy"])
-    with pytest.raises(ValueError, match="missing"):
-        load_reward_package(path, b["policy"], missing_promotion, certified, **selection)
+    if uses_model_award:
+        # No model entrants means no archive or reference promotion is needed.
+        assert (
+            load_reward_package(path, b["policy"], missing_promotion, certified, **selection)
+            == result
+        )
+    else:
+        with pytest.raises(ValueError, match="missing"):
+            load_reward_package(path, b["policy"], missing_promotion, certified, **selection)
     path.chmod(0o644)
     with pytest.raises(ValueError, match="private regular file"):
         load_reward_package(path, b["policy"], reopened, certified, **selection)

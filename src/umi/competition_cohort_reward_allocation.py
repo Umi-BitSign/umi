@@ -1,7 +1,7 @@
 """Immutable service/model amounts and fresh registration projection.
 
-The owner selects a verified local promotion once. These records still need a
-settlement certificate and standing chain authority before any transaction.
+Version 1 uses a verified promotion; version 2 uses the cohort's model award.
+Both need a settlement certificate and standing authority before a transaction.
 """
 
 from __future__ import annotations
@@ -9,15 +9,21 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_state import (
     OwnedCompetitionChainObservation,
     validate_owned_weight_observation,
 )
+from .competition_cohort_model_award import (
+    CohortModelAward,
+    build_model_award,
+    read_model_acceptances,
+)
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_quality_signing import CohortQualityManifest, review_quality_manifest
+from .competition_cohort_recovery import ModelRewardCohortAuthority
 from .competition_cohort_service_allocation import RawWeight, ServiceRecipientAmount
 from .competition_cohort_service_certification import (
     CertifiedServiceAllocation,
@@ -32,19 +38,35 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_h
 
 
 class CohortRewardAllocation(StrictProtocolModel):
-    schema_: Literal["umi-cohort-reward-allocation/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-reward-allocation/1", "umi-cohort-reward-allocation/2"] = Field(
+        alias="schema"
+    )
     policy_sha256: Hex32
     round_sha256: Hex32
     service_certificate_sha256: Hex32
     quality_manifest_sha256: Hex32
-    promotion_head: PromotionHeadBinding
+    promotion_head: PromotionHeadBinding | None = None
+    model_award: CohortModelAward | None = None
     recipients: Annotated[tuple[ServiceRecipientAmount, ...], Field(max_length=65535)]
     burn_weight: RawWeight
     recipient_rule: Literal["fixed_hotkey_absence_to_burn"] = "fixed_hotkey_absence_to_burn"
     chain_submission_authorized: Literal[False] = False
 
+    @model_serializer(mode="wrap")
+    def preserve_versions(self, handler):
+        value = handler(self)
+        for field in ("promotion_head", "model_award"):
+            if getattr(self, field) is None:
+                value.pop(field, None)
+        return value
+
     @model_validator(mode="after")
     def conserved(self):
+        if self.schema_ == "umi-cohort-reward-allocation/1":
+            if self.promotion_head is None or self.model_award is not None:
+                raise ValueError("legacy reward allocation requires only promotion attribution")
+        elif self.model_award is None or self.promotion_head is not None:
+            raise ValueError("model award allocation requires only the cohort model decision")
         keys = [identity(r.hotkey) for r in self.recipients]
         if keys != sorted(set(keys)) or any(r.raw_weight == 0 for r in self.recipients):
             raise ValueError("reward recipients must be positive, unique and canonically ordered")
@@ -58,16 +80,37 @@ def build_reward_allocation(
     service_review: ServiceAllocationReview,
     benchmark: CohortQualityManifest,
     benchmark_review: ClosedQualityReview,
-    promotion: PromotionHeadBinding,
+    promotion: PromotionHeadBinding | None,
+    *,
+    model_award: CohortModelAward | None = None,
 ) -> CohortRewardAllocation:
-    """Assemble replayed evidence; promotion must come from the owner's store.
+    """Assemble replayed evidence using the owner's selected model decision.
 
-    This pure builder does not authenticate the caller's promotion selection.
-    Use retain_reward_allocation at the service boundary.
+    This pure builder does not authenticate the caller's promotion or award.
+    Use retain_reward_allocation or replay_reward_allocation at service boundaries.
     """
     service_amounts = verify_service_allocation_certificate(service, service_review)
     review_quality_manifest(benchmark, benchmark_review)
-    promotion = PromotionHeadBinding.model_validate_json(canonical_json_bytes(promotion))
+    selected_model_rule = isinstance(
+        benchmark_review.history.authority.authority, ModelRewardCohortAuthority
+    )
+    if selected_model_rule != (model_award is not None):
+        raise ValueError("model reward allocation must follow the pre-intake signed authority")
+    if model_award is None:
+        promotion = PromotionHeadBinding.model_validate_json(canonical_json_bytes(promotion))
+        model_recipient = promotion.contributor_hotkey
+    else:
+        if promotion is not None:
+            raise ValueError("model payout is independent of promotion attribution")
+        model_award = CohortModelAward.model_validate_json(canonical_json_bytes(model_award))
+        if (
+            model_award.policy_sha256 != digest(benchmark_review.policy)
+            or model_award.round_sha256 != digest(benchmark_review.roster.round)
+            or model_award.quality_manifest_sha256 != digest(benchmark)
+            or model_award.authority_sha256 != digest(benchmark_review.history.authority.authority)
+        ):
+            raise ValueError("model award belongs to different quality or authority")
+        model_recipient = model_award.recipient_hotkey
     statement = service_review.statement
     if (
         statement.policy_sha256 != digest(benchmark_review.policy)
@@ -81,21 +124,22 @@ def build_reward_allocation(
         amounts[who] += item.raw_weight
         hotkeys[who] = item.hotkey
     burn = service_amounts.burn_weight
-    if promotion.contributor_hotkey is None:
+    if model_recipient is None:
         burn += service_amounts.model_budget
     elif service_amounts.model_budget:
-        key = identity(promotion.contributor_hotkey)
+        key = identity(model_recipient)
         amounts[key] += service_amounts.model_budget
-        hotkeys[key] = min(
-            hotkeys.get(key, promotion.contributor_hotkey), promotion.contributor_hotkey
-        )
+        hotkeys[key] = min(hotkeys.get(key, model_recipient), model_recipient)
     return CohortRewardAllocation(
-        schema="umi-cohort-reward-allocation/1",
+        schema="umi-cohort-reward-allocation/2"
+        if model_award is not None
+        else "umi-cohort-reward-allocation/1",
         policy_sha256=statement.policy_sha256,
         round_sha256=statement.round_sha256,
         service_certificate_sha256=digest(service),
         quality_manifest_sha256=digest(benchmark),
         promotion_head=promotion,
+        model_award=model_award,
         recipients=tuple(
             ServiceRecipientAmount(hotkey=hotkeys[key], raw_weight=amount)
             for key, amount in sorted(amounts.items())
@@ -117,10 +161,9 @@ def retain_reward_allocation(
 ) -> CohortRewardAllocation:
     """Retain the first complete allocation, replay it unchanged on restart.
 
-    New selection uses the independently accepted local promotion head. Recovery
-    checks that same historical receipt, so a later promotion cannot rewrite
-    already sealed rewards. The host must authenticate the selected stores and
-    recheck current cohort authority before calling this port.
+    The signed cohort authority selects promotion attribution or the model award
+    rule. Recovery uses the original receipts and verifies artifact bytes again.
+    The host must authenticate its stores and recheck current cohort authority.
     """
     if digest(promotion_store.policy) != digest(service_review.policy):
         raise ValueError("promotion store belongs to another policy")
@@ -133,17 +176,40 @@ def retain_reward_allocation(
             else CohortRewardAllocation.model_validate_json(canonical_json_bytes(old))
         )
         round_id = service_review.statement.round_sha256
-        promotion = (
-            promotion_store.reviewed_promotion_head(round_id, maximum_bytes=maximum_promotion_bytes)
-            if previous is None
-            else promotion_store.reviewed_promotion_at(
-                round_id,
-                previous.promotion_head.promotion_sha256,
-                maximum_bytes=maximum_promotion_bytes,
+        model_award = None
+        if isinstance(benchmark_review.history.authority.authority, ModelRewardCohortAuthority):
+            if previous is not None and previous.model_award is None:
+                raise ValueError("retained allocation uses another model reward rule")
+            acceptances = (
+                read_model_acceptances(
+                    promotion_store.directory / "model-reward-acceptances", benchmark_review
+                )
+                if previous is None
+                else previous.model_award.acceptances
             )
-        )
+            model_award = build_model_award(
+                benchmark,
+                benchmark_review,
+                acceptances,
+                promotion_store.directory / "model-reward-artifacts",
+            )
+            promotion = None
+        else:
+            if previous is not None and previous.promotion_head is None:
+                raise ValueError("retained allocation uses another model reward rule")
+            promotion = (
+                promotion_store.reviewed_promotion_head(
+                    round_id, maximum_bytes=maximum_promotion_bytes
+                )
+                if previous is None
+                else promotion_store.reviewed_promotion_at(
+                    round_id,
+                    previous.promotion_head.promotion_sha256,
+                    maximum_bytes=maximum_promotion_bytes,
+                )
+            )
         result = build_reward_allocation(
-            service, service_review, benchmark, benchmark_review, promotion
+            service, service_review, benchmark, benchmark_review, promotion, model_award=model_award
         )
         raw = canonical_json_bytes(result)
         journal.reserve_records(

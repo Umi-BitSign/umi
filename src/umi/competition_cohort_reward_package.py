@@ -1,7 +1,7 @@
 """Private, portable reward evidence for delayed native validator replay.
 
 The host selects policy, cohort inputs and current history independently. Model
-promotion receipts/assets stay in its verified promotion store. A package never
+promotion receipts/assets and model award assets stay in its verified store. A package never
 authorizes a transaction or asserts that its embedded history is still current.
 Legacy competition packages and their admission deadlines are unchanged.
 """

@@ -49,11 +49,15 @@ def policy(base_policy, runtime):
     return base_policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
 
 
-def setup_scenario(original, tmp_path, runtime, *, mode="paired_model"):
+def setup_scenario(original, tmp_path, runtime, *, mode="paired_model", baseline_entry=False):
     s = original.copy()
     incumbent = bundle_at(tmp_path / "incumbent")
     bundle = (
-        bundle_at(tmp_path / "candidate", "candidate", digest(incumbent))
+        (
+            incumbent
+            if baseline_entry
+            else bundle_at(tmp_path / "candidate", "candidate", digest(incumbent))
+        )
         if mode == "paired_model"
         else None
     )

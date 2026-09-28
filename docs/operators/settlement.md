@@ -2,10 +2,51 @@
 
 # Settle rounds and publish weights
 
+- [Recoverable cohort model awards](#recoverable-cohort-model-awards)
 - [Automatic settlement preparation](#open-competition-settlement-preparation)
 - [Independent settlement signing](#open-competition-settlement-signing)
 - [Automatic settlement delivery](#open-competition-settlement-delivery)
 - [Per-round successor signing](#open-competition-round-publisher)
+
+## Recoverable cohort model awards
+
+The candidate recoverable cohort implementation separates model payout from
+reference-model promotion. It requires explicit pre-intake consent through
+`umi-cohort-recovery-authority/3` and the rule
+`baseline_or_better_best_score_first_complete/1`. Existing authorities retain
+their original allocation behavior. This format is not a public launch notice.
+
+The complete sealed model roster must have independently certified quality,
+complete preserved bundles and signed rights/reconstruction acceptances. Model
+quality version 2 compares both sides with the same normalized baseline metric
+on the frozen suite and runtime. Equality qualifies, including an unchanged
+baseline or a baseline below the promotion threshold. Higher exact aggregate
+quality wins; exact ties use the earliest certified complete-artifact acceptance
+ordinal. Duplicate content cannot multiply the model pool or present inconsistent
+quality. A sole eligible entrant receives the entire policy-selected model pool.
+With no eligible entrant, that pool is burned. Missing evidence remains pending.
+
+Under the configured `CompetitionStore` directory, the reward owner reads
+`model-reward-acceptances/<cohort-sha256>/<submission-sha256>.json` as private
+`CertifiedModelArtifactAcceptance` records. The artifact archive is
+`model-reward-artifacts/<model-sha256>/{manifest.json,model/}`. Each consumer
+verifies all candidate and baseline bytes with the native preserved-bundle
+reader. The acceptance binds policy, authority, submission, recipient, content,
+rights/reconstruction evidence, acceptance block and ordinal. Reviewers must
+retain the original review documents in the content-addressed evidence source.
+The signatures attest review; a file hash does not establish permission to use
+or redistribute a model.
+
+Allocation version 2 carries the complete model decision and its signed
+acceptances. Portable package replay includes the original review documents,
+replays quality and selection, and checks independently retained artifact bytes.
+Recovery uses the original acceptances without selecting a newer promotion or
+assigning authorship to the reward recipient. Existing cohort certification and
+standing chain checks still apply before any weight transaction.
+
+The acceptance producer, complete artifact replication and installed coordinator
+qualification must be connected before selecting this authority in production.
+Component tests use synthetic finality, inference and rights-review inputs.
 
 ## Lost coordinator outcomes
 

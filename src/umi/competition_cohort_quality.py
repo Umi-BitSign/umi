@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import (
@@ -24,6 +24,7 @@ from .competition_cohort_execution import replay_execution_steps
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_orders import recoverable_order_job
+from .competition_cohort_recovery import ModelRewardCohortAuthority
 from .competition_cohort_request_closure import (
     CohortRequestClosure,
     verify_certified_request_closure,
@@ -83,7 +84,10 @@ class ClosedEvaluatorQuality(StrictProtocolModel):
 
 
 class ClosedParticipantQuality(StrictProtocolModel):
-    schema_: Literal["umi-cohort-closed-quality/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-closed-quality/1", "umi-cohort-closed-quality/2"] = Field(
+        alias="schema"
+    )
+    quality_rule: Literal["paired_baseline_metric/1"] | None = None
     policy_sha256: Hex32
     round_sha256: Hex32
     suite_sha256: Hex32
@@ -99,6 +103,22 @@ class ClosedParticipantQuality(StrictProtocolModel):
     service_credit_authorized: Literal[False] = False
     promotion_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def preserve_versions(self, handler):
+        value = handler(self)
+        if self.quality_rule is None:
+            value.pop("quality_rule", None)
+        return value
+
+    @model_validator(mode="after")
+    def selected_metric(self):
+        if self.schema_ == "umi-cohort-closed-quality/2":
+            if self.quality_rule != "paired_baseline_metric/1" or self.track != "model":
+                raise ValueError("paired baseline metric requires a model quality result")
+        elif self.quality_rule is not None:
+            raise ValueError("legacy quality cannot adopt another metric")
+        return self
 
 
 @dataclass(frozen=True)
@@ -278,6 +298,9 @@ class ClosedQualityReview:
             ]:
                 raise ValueError("quality case catalog differs from the revealed suite")
             submission = order.submission.submission
+            paired_metric = submission.track == "model" and isinstance(
+                self.history.authority.authority, ModelRewardCohortAuthority
+            )
             archive = RequestExecutionArchive.model_validate_json(
                 read_endpoint_object(self.objects, terminal.execution_archive_sha256)
             )
@@ -329,7 +352,9 @@ class ClosedQualityReview:
                     incumbent_observations_sha256=observations_sha256(incumbent),
                     candidate_basis=basis,
                     reason=reason,
-                    candidate=quality_totals(candidate, self.suite, self.policy)
+                    candidate=quality_totals(
+                        candidate, self.suite, self.policy, incumbent=paired_metric
+                    )
                     if reason is None
                     else None,
                     incumbent=quality_totals(incumbent, self.suite, self.policy, incumbent=True)
@@ -365,7 +390,10 @@ class ClosedQualityReview:
         ):
             reason = "observation_disagreement"
         result = ClosedParticipantQuality(
-            schema="umi-cohort-closed-quality/1",
+            schema="umi-cohort-closed-quality/2"
+            if paired_metric
+            else "umi-cohort-closed-quality/1",
+            quality_rule="paired_baseline_metric/1" if paired_metric else None,
             policy_sha256=digest(self.policy),
             round_sha256=digest(self.roster.round),
             suite_sha256=digest(self.suite),

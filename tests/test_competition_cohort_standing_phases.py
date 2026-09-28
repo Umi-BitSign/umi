@@ -10,6 +10,7 @@ from umi.competition_cohort_participation import admit_recovery_participant
 from umi.competition_cohort_recovery import (
     PHASES,
     CohortRecoveryAuthority,
+    ModelRewardCohortAuthority,
     SignedCohortRecoveryAuthority,
     StandingCohortRecoveryAuthority,
     admit_recoverable_cohort,
@@ -32,15 +33,23 @@ from .test_open_competition import wallet
 legacy_scenario = consumers.scenario
 
 
-def standing(plan, policy):
-    body = StandingCohortRecoveryAuthority(
-        schema="umi-cohort-recovery-authority/2",
+def standing(plan, policy, *, model_rewards=False):
+    selected = ModelRewardCohortAuthority if model_rewards else StandingCohortRecoveryAuthority
+    body = selected(
+        schema="umi-cohort-recovery-authority/3"
+        if model_rewards
+        else "umi-cohort-recovery-authority/2",
         policy_sha256=digest(policy),
         cohort_sha256s=(digest(plan),),
         issued_at_block=150,
         lifetime="until_completed_or_revoked",
         closure_rule="quorum_certified_phase_completion",
         timing_rule="targets_without_extension_signatures",
+        **(
+            {"model_reward_rule": "baseline_or_better_best_score_first_complete/1"}
+            if model_rewards
+            else {}
+        ),
     )
     signed = SignedCohortRecoveryAuthority(authority=body, signatures=signatures(body))
     genesis, state = admit_recoverable_cohort(plan, signed, policy, admitted_at_block=160)

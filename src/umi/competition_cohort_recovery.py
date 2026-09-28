@@ -122,8 +122,15 @@ class StandingCohortRecoveryAuthority(StrictProtocolModel):
         return self
 
 
+class ModelRewardCohortAuthority(StandingCohortRecoveryAuthority):
+    """Pre-intake consent to model awards independent of reference promotion."""
+
+    schema_: Literal["umi-cohort-recovery-authority/3"] = Field(alias="schema")
+    model_reward_rule: Literal["baseline_or_better_best_score_first_complete/1"]
+
+
 RecoveryAuthority = Annotated[
-    CohortRecoveryAuthority | StandingCohortRecoveryAuthority,
+    CohortRecoveryAuthority | StandingCohortRecoveryAuthority | ModelRewardCohortAuthority,
     Field(discriminator="schema_"),
 ]
 _AUTHORITY_ADAPTER = TypeAdapter(RecoveryAuthority)

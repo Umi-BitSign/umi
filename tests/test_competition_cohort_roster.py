@@ -79,9 +79,12 @@ def close(history, policy, decisions, block, result_hash, *, unavailable=0):
     )
 
 
-def retained(s, name, sequence):
+def retained(s, name, sequence, *, bundle=None):
     signed = submission(
-        s["policy"], bundle=s["signed"].submission.model_bundle, name=name, sequence=sequence
+        s["policy"],
+        bundle=bundle or s["signed"].submission.model_bundle,
+        name=name,
+        sequence=sequence,
     )
     body = s["consent"].consent.model_copy(
         update={"submission_sha256": digest(signed.submission), "hotkey": signed.submission.hotkey}
@@ -115,12 +118,22 @@ def retained(s, name, sequence):
 
 
 def make_round(
-    s, *, omit_prepared_member=False, unavailable=1200, preparation_hash=None, include_outcomes=True
+    s,
+    *,
+    omit_prepared_member=False,
+    unavailable=1200,
+    preparation_hash=None,
+    include_outcomes=True,
+    participant_names=("Alice", "Bob"),
+    participant_bundles=None,
 ):
     # The replaced submission is still in the original inventory. A consumer
     # cannot delete it merely because the seal selects a newer submission.
     prior = retained(s, "Alice", 1)
-    members = (retained(s, "Alice", 2), retained(s, "Bob", 1))
+    members = tuple(
+        retained(s, name, 2 if name == "Alice" else 1, bundle=(participant_bundles or {}).get(name))
+        for name in participant_names
+    )
     records = tuple(
         sorted(
             (digest(p.record.request.consent.consent), canonical_json_bytes(p.record))
@@ -182,7 +195,19 @@ def make_round(
                             "round": round_,
                             "preparation_closure_sha256": preparation_hash,
                         }
-                    )
+                    ),
+                    "steps": tuple(
+                        step.model_copy(
+                            update={
+                                "execution": step.execution.model_copy(
+                                    update={"model_sha256": m["signed"].submission.model_revision}
+                                )
+                            }
+                        )
+                        if step.role == "candidate"
+                        else step
+                        for step in a.steps
+                    ),
                 }
             )
             for a in s["artifacts"]

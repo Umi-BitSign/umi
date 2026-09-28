@@ -69,7 +69,7 @@ def allocate_service_quality(
     """Pure arithmetic; callers must replay complete evidence before certification.
 
     Model attribution is deliberately not chosen here. Its fixed pool remains
-    explicit for the settlement consumer to bind to a verified promotion head.
+    explicit for settlement to bind to a promotion or the selected cohort award.
     """
     quality = ClosedServiceQuality.model_validate_json(canonical_json_bytes(quality))
     terms = ServiceTerms.model_validate_json(canonical_json_bytes(terms))
