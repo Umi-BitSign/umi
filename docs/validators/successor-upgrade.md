@@ -358,9 +358,23 @@ before signing. The proposer retains its vote before exporting
 slots, authenticated canonical data and no executable callbacks. Missing delivery
 retries indefinitely; a restart reuses the original intent and signature.
 
-The settlement owner uses `prepare_reward_package` and `publish_reward_package`
-to retain a canonical `CohortRewardPackage` as `COHORT_SHA256.json` in the
-configured settlement directory. The coordinator derives the next activation
+`CohortSettlement.advance` assembles native settlement from retained execution
+evidence and independent evaluator votes. It retains partial votes, derives the
+benchmark and service certificates, fixes the promotion attribution once, and
+returns native progress for the existing cohort phase controller. Independent
+phase signers must still replay each result. Missing votes wait; missing or
+invalid source evidence raises for retry and never creates a scored zero.
+
+After native certification, the owner publishes `CohortRewardPackage` as
+`COHORT_SHA256.json` in the configured settlement directory. Packaging uses the
+original certification prefix, so later phase advances or an arbitrarily late
+restart preserve identical bytes. Each invocation first checks the currently
+selected history, including revocation. Run it under the cohort service's
+sole-writer lock with independently selected plan, authority, scoring terms,
+catalogs and finality. Its source/vote delivery and phase-signing adapters still
+need recurring-service wiring; this library port is not an installed daemon.
+
+The reward coordinator derives the next activation
 from that package and the approved manifest. Initial activation names the
 approved legacy handoff. A successor waits for the preceding allocation's
 retained completion certificate; the native reviewer checks every original
@@ -379,8 +393,8 @@ files with mode `0600`. The systemd template in
 `deploy/standing-reward-coordinator/` owns provider startup, retries and orderly
 shutdown. It must select the qualified installed Python environment.
 
-These services remain uninstalled. The upstream recurring settlement producer,
-full later-cohort replay, independent peer and artifact delivery, key provisioning,
+These services remain uninstalled. Recurring settlement startup, native
+phase/vote delivery, full later-cohort replay, independent peer and artifact delivery, key provisioning,
 migration ownership and combined Linux restart/effect qualification remain
 required before deployment. Configuration
 validation is not runtime qualification.

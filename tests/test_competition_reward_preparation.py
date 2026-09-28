@@ -2814,3 +2814,220 @@ async def test_reward_input_publication_holds_incomplete_or_conflicting_inputs(
     with pytest.raises((ValueError, FileNotFoundError)):
         retain_standing_reward_inputs(files, p.reader.series, p.reader.policy, prefix, source)
     assert not tuple((files.root / "decisions").glob("*.json"))
+
+
+@pytest.fixture
+async def native_settlement_case(native_package, service_quality_inputs, tmp_path):
+    from umi.competition_cohort_quality_signing import (
+        CertifiedClosedQuality,
+        SignedClosedQualityVote,
+    )
+    from umi.competition_cohort_service_certification import ServiceAllocationVote
+    from umi.competition_cohort_settlement import CohortSettlement
+
+    p, b = native_package, service_quality_inputs
+    objects = {item.sha256: canonical_json_bytes(item.value) for item in p.package.objects}
+    votes = []
+    for ref in p.package.benchmark.participants:
+        cert = CertifiedClosedQuality.model_validate_json(objects[ref.certificate_sha256])
+        votes.extend(
+            SignedClosedQualityVote(result=cert.result, signature=signature)
+            for signature in cert.signatures
+        )
+    service_votes = tuple(
+        ServiceAllocationVote(statement=p.package.service.statement, signature=signature)
+        for signature in p.package.service.signatures
+    )
+
+    def reopen():
+        return CohortSettlement(
+            plan=b["history"].plan,
+            authority=b["history"].authority,
+            requirement=p.requirement,
+            policy=b["policy"],
+            journal=RoundJournal(tmp_path / "settlement", {"cohort": p.requirement.cohort_sha256}),
+            promotion_store=p.store,
+            objects=objects.__getitem__,
+            decisions=b["decisions"].__getitem__,
+            pulses=lambda _: RetainedRevealPulse(**pulse_record()),
+            output_directory=tmp_path / "settled-packages",
+            maximum_promotion_bytes=1_000_000,
+        )
+
+    return SimpleNamespace(
+        native=p,
+        b=b,
+        inputs=p.package.inputs.model_copy(update={"history": b["history"]}),
+        quality_votes=tuple(votes),
+        service_votes=service_votes,
+        reopen=reopen,
+        objects=objects,
+    )
+
+
+@pytest.mark.parametrize(
+    "lost_reply",
+    ["closed_quality_peer", "service_allocation_peer", "cohort_reward_allocation", "publish"],
+)
+async def test_native_settlement_recovers_every_stage_and_keeps_one_package(
+    native_settlement_case, monkeypatch, lost_reply
+):
+    """Native execution/certificates; phase quorum and finality are synthetic."""
+    from umi import competition_cohort_settlement as settlement
+
+    c = native_settlement_case
+    owner = c.reopen()
+    inputs = c.inputs
+    block = inputs.history.transitions[-1].transition.observed_at_block + 100
+
+    def advance(**kwargs):
+        return owner.advance(
+            inputs,
+            iter(c.b["records"]),
+            expected_tip_sha256=tip(inputs.history),
+            current_block=block,
+            **kwargs,
+        )
+
+    # An incomplete vote set must survive a restart and never drop a miner.
+    result = advance(quality_votes=c.quality_votes[:1])
+    assert result.status == "waiting_quality_votes"
+    assert result.progress is None and result.package is None
+    assert not owner.output.exists()
+    owner = c.reopen()
+    assert advance().status == "waiting_quality_votes"
+    failed = False
+
+    original_put = RoundJournal.put
+
+    def put(journal, kind, key, value):
+        nonlocal failed
+        original_put(journal, kind, key, value)
+        if not failed and kind == lost_reply and journal.root == owner.journal.root:
+            failed = True
+            raise OSError("lost durable write acknowledgement")
+
+    original_publish = settlement.publish_reward_package
+
+    def publish(*args, **kwargs):
+        nonlocal failed
+        original_publish(*args, **kwargs)
+        if not failed and lost_reply == "publish":
+            failed = True
+            raise OSError("lost durable write acknowledgement")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(RoundJournal, "put", put)
+        patch.setattr(settlement, "publish_reward_package", publish)
+        for phase in ("evidence", "review", "certification", "first_admission"):
+            while True:
+                try:
+                    result = advance(quality_votes=c.quality_votes, service_votes=c.service_votes)
+                    break
+                except OSError as error:
+                    assert str(error) == "lost durable write acknowledgement"
+                    owner = c.reopen()
+                    block += 100000  # Processing authority does not expire during an outage.
+            if phase == "first_admission":
+                break
+            assert result.status == "phase_ready" and result.progress.phase == phase
+            assert result.package is None and not owner.output.exists()
+            h = close(
+                inputs.history,
+                c.b["policy"],
+                c.b["decisions"],
+                block,
+                result.progress.phase_result_sha256,
+            )
+            assert (
+                c.b["decisions"][h.transitions[-1].transition.evidence_sha256].progress.progress
+                == result.progress
+            )
+            inputs = inputs.model_copy(update={"history": h})
+            owner = c.reopen()
+            block += 10
+    assert failed
+    assert result.status == "package_published"
+    raw = owner.output.read_bytes()
+    assert canonical_json_bytes(result.package) == raw
+    assert result.package.allocation == c.native.allocation
+    assert result.package.service == c.native.package.service
+    assert result.package.benchmark == c.native.package.benchmark
+
+    # Completed history is newer, but packaging remains byte-for-byte stable.
+    h = close(inputs.history, c.b["policy"], c.b["decisions"], block, digest(result.package))
+    inputs = inputs.model_copy(update={"history": h})
+    block = 2**53 - 1
+    owner = c.reopen()
+
+    def no_new_promotion(*args, **kwargs):
+        raise AssertionError("recovery selected a different promotion head")
+
+    monkeypatch.setattr(c.native.store, "reviewed_promotion_head", no_new_promotion)
+    assert canonical_json_bytes(advance().package) == raw
+    assert owner.output.read_bytes() == raw
+    assert c.b["service_case"].p.model.calls == 1
+
+
+@pytest.mark.parametrize("fault", ["terms", "missing_evidence", "wrong_phase_result", "revoked"])
+async def test_native_settlement_does_not_publish_invalid_or_revoked_evidence(
+    native_settlement_case, fault
+):
+    from .test_competition_cohort_consumers import transition
+
+    c, owner = native_settlement_case, native_settlement_case.reopen()
+    inputs = c.inputs
+    block = inputs.history.transitions[-1].transition.observed_at_block + 100
+    if fault == "terms":
+        owner.requirement = owner.requirement.model_copy(update={"terms_sha256": "ff" * 32})
+    elif fault == "missing_evidence":
+        c.objects.clear()
+    elif fault == "wrong_phase_result":
+        h = close(inputs.history, c.b["policy"], c.b["decisions"], block, "ab" * 32)
+        inputs = inputs.model_copy(update={"history": h})
+    else:
+        h = transition(inputs.history, c.b["policy"], "revoke", block)
+        inputs = inputs.model_copy(update={"history": h})
+    with pytest.raises((ValueError, KeyError)):
+        owner.advance(
+            inputs,
+            iter(c.b["records"]),
+            expected_tip_sha256=tip(inputs.history),
+            current_block=block,
+            quality_votes=c.quality_votes,
+            service_votes=c.service_votes,
+        )
+    assert not owner.output.exists()
+
+
+async def test_native_settlement_waits_for_service_votes_then_recovers_capacity(
+    native_settlement_case,
+):
+    c = native_settlement_case
+    inputs = c.native.package.inputs
+    owner = c.reopen()
+
+    def advance(**kwargs):
+        return owner.advance(
+            inputs,
+            iter(c.b["records"]),
+            expected_tip_sha256=tip(inputs.history),
+            current_block=2**53 - 1,
+            **kwargs,
+        )
+
+    result = advance(quality_votes=c.quality_votes, service_votes=c.service_votes[:1])
+    assert result.status == "waiting_service_votes"
+    assert result.progress is None and result.package is None
+    assert not owner.output.exists()
+    owner = c.reopen()
+    assert advance().status == "waiting_service_votes"
+    owner.package_bytes = 1024
+    with pytest.raises(ValueError, match=r"bound|capacity"):
+        advance(service_votes=c.service_votes[1:])
+    assert not owner.output.exists()
+    owner = c.reopen()
+    result = advance()
+    assert result.status == "package_published"
+    assert canonical_json_bytes(result.package) == canonical_json_bytes(c.native.package)
+    assert owner.output.read_bytes() == canonical_json_bytes(c.native.package)
