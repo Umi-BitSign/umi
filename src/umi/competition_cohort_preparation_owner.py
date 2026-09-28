@@ -9,7 +9,7 @@ from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_preparation import PreparedCohortRound, prepare_cohort_round
 from .competition_cohort_roster import RecoverableRosterParticipant
-from .competition_execution import execution_boundary
+from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_store import AdmissionCapacityError, CompetitionStore
 from .open_competition import digest
 from .protocol import canonical_json_bytes
@@ -44,9 +44,32 @@ class CohortPreparation:
         The host owns the capture provider and these stores. This method does not read
         another running process's database, sign a phase, or reveal evaluation labels.
         """
+        observation = execution_boundary(capture)
+        return self._prepare(
+            cohort,
+            observation,
+            expected_tip_sha256=expected_tip_sha256,
+            current_block=observation.block,
+        )
+
+    def retained(
+        self, cohort: str, *, expected_tip_sha256: str, current_block: int
+    ) -> PreparedCohortRound:
+        """Replay a retained round without selecting or creating a new one."""
+        return self._prepare(
+            cohort, None, expected_tip_sha256=expected_tip_sha256, current_block=current_block
+        )
+
+    def _prepare(
+        self,
+        cohort: str,
+        observation: ExecutionBoundary | None,
+        *,
+        expected_tip_sha256: str,
+        current_block: int,
+    ) -> PreparedCohortRound:
         queue, intake = self.queue, self.queue.intake
         intake._allowed(cohort)
-        observation = execution_boundary(capture)
         with queue._connection() as (db, store):
             history = store.published_history(cohort)
             if history_tip(history) != expected_tip_sha256:
@@ -55,7 +78,7 @@ class CohortPreparation:
                 history,
                 queue.policy,
                 expected_tip_sha256=expected_tip_sha256,
-                current_block=observation.block,
+                current_block=current_block,
             )
             if view.state.phase in {"intake", "revoked"}:
                 raise ValueError("round preparation requires certified intake and active authority")
@@ -86,6 +109,8 @@ class CohortPreparation:
                     raise ValueError("retained preparation changed its canonical bytes or identity")
             elif view.state.phase != "preparation":
                 raise FileNotFoundError("original preparation must be restored after certification")
+            elif observation is None:
+                raise FileNotFoundError("original prepared round is not retained yet")
             members = []
             for selected in sorted(seal.selected, key=lambda s: s.submission_sha256):
                 _, record = queue._record(db, store, cohort, selected.consent_sha256)
@@ -115,7 +140,7 @@ class CohortPreparation:
                 decision_source=lambda key: store.source(cohort, key, CohortDecisionInput),
                 intake_records=intake._records(db, history),
                 expected_tip_sha256=expected_tip_sha256,
-                current_block=observation.block,
+                current_block=current_block,
             )
             raw = canonical_json_bytes(result)
             if previous is not None:

@@ -1,4 +1,4 @@
-"""Durable intake progress votes and exact-decision certificates.
+"""Durable phase progress votes and exact-decision certificates.
 
 Each signer owns its journal, native evidence reviewer and unlocked hotkey.
 Committed votes can be returned offline. Unfinished votes recheck the original
@@ -14,9 +14,14 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from .competition_cohort_coordinator import AttestedCohortPhaseProgress, CohortDecisionInput
+from .competition_cohort_coordinator import (
+    AttestedCohortPhaseProgress,
+    CohortDecisionInput,
+    CohortPhaseProgress,
+)
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_intake_review import IntakeProgressReviewer
+from .competition_cohort_preparation_review import PreparationProgressReviewer
 from .competition_cohort_recovery import SignedCohortRecoveryTransition, verify_recovery_quorum
 from .competition_progress import log_phase
 from .competition_round_journal import RoundJournal
@@ -51,7 +56,9 @@ class CohortProgressSignerConfig(StrictProtocolModel):
 
 
 class CohortProgressSigner:
-    def __init__(self, config, reviewer: IntakeProgressReviewer, sign):
+    def __init__(
+        self, config, reviewer: IntakeProgressReviewer | PreparationProgressReviewer, sign
+    ):
         self.config = CohortProgressSignerConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = reviewer.source.intake.policy
         if self.config.policy_sha256 != digest(self.policy) or identity(self.config.signer) not in {
@@ -136,8 +143,8 @@ class CohortProgressSigner:
         return await self._vote("phase_decision", slot, transition, review)
 
 
-class CertifiedIntakeObserver:
-    """Native coordinator ports: observe actual intake, gather independent votes."""
+class CertifiedPhaseObserver:
+    """Native coordinator ports: observe phase evidence, gather independent votes."""
 
     def __init__(self, observe, signers, policy: CompetitionPolicy):
         self.observe, self.signers = observe, tuple(signers)
@@ -172,7 +179,8 @@ class CertifiedIntakeObserver:
         return await self.attest(await self.sample(state, capture))
 
     async def sample(self, state, capture):
-        return (await self.observe(state, capture)).progress
+        observed = await self.observe(state, capture)
+        return observed if isinstance(observed, CohortPhaseProgress) else observed.progress
 
     async def attest(self, progress):
         signatures = await self._signatures(progress, "attest", progress)
@@ -181,3 +189,7 @@ class CertifiedIntakeObserver:
     async def certify(self, transition, evidence):
         signatures = await self._signatures(transition, "certify", transition, evidence)
         return SignedCohortRecoveryTransition(transition=transition, signatures=signatures)
+
+
+class CertifiedIntakeObserver(CertifiedPhaseObserver):
+    """Retained public name for existing intake controller consumers."""

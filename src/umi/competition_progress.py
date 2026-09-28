@@ -40,6 +40,7 @@ _PHASES = frozenset(
         "materializer_observation",
         "materializer_activation",
         "cohort_intake_review",
+        "cohort_preparation_review",
         "cohort_progress_vote",
         "cohort_decision_vote",
     }

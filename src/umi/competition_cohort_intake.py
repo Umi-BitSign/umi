@@ -86,6 +86,7 @@ def cohort_intake_bytes(db) -> int:
             "cohort_admission_votes",
             "cohort_admission_certificates",
             "cohort_prepared_rounds",
+            "cohort_preparation_progress",
         )
         if name in tables
     )
@@ -529,14 +530,14 @@ class CohortIntake:
 
     def retained_registration_blocks(self) -> frozenset[int]:
         with self._connection() as (db, _):
-            prepared = (
-                [r[0] for r in db.execute("SELECT DISTINCT observed FROM cohort_prepared_rounds")]
+            prepared = []
+            for table in ("cohort_prepared_rounds", "cohort_preparation_progress"):
                 if db.execute(
-                    "SELECT 1 FROM sqlite_master "
-                    "WHERE type='table' AND name='cohort_prepared_rounds'"
-                ).fetchone()
-                else []
-            )
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone():
+                    prepared.extend(
+                        r[0] for r in db.execute(f"SELECT DISTINCT observed FROM {table}")
+                    )
             return frozenset(
                 [row[0] for row in db.execute("SELECT DISTINCT observed FROM cohort_consents")]
                 + [

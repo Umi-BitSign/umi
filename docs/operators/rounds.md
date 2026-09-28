@@ -1500,11 +1500,27 @@ Restart and lost publication reuse the original round bytes; they cannot select
 a newer incumbent or change the prepared block. Missing evidence or storage
 capacity leaves preparation pending, and revocation prevents republication.
 
-This output supplies preparation evidence. Dispatch still requires an
-independently reviewed preparation certificate. Automatic preparation review,
-request closure, reference reveal and settlement-input publication remain
-integration requirements for an unattended cohort. The output contains no
-reference labels and grants no weight-submission authority.
+`NativePreparationProgressSource` samples preparation under the intake owner's
+lock and retains its original observation before signing. Its records count
+toward the shared storage allowance and pin their original registration blocks
+for archive retention. `PreparationProgressReviewer` replays the preserved
+round and promotion receipt, then checks the seal, preparation, progress,
+decision and every original consent archive against its own finality provider.
+Missing superseded consent evidence also prevents certification.
+
+`CohortProgressSigner` retains each reviewed intent and vote.
+`CertifiedPhaseObserver` connects these reviewers to
+`CohortRecoveryCoordinator` through its durable sampling and attestation ports.
+Partial progress or transition signing resumes at the original observation
+after an outage; a changed finalized boundary or round cannot replace it.
+The resulting preparation certificate binds the exact round used by the roster
+and order consumers. It contains no reference labels or weight authority.
+
+These review ports run against the intake owner's configured stores. Remote
+reviewers need authenticated exports; they must not inspect another host's live
+SQLite database. Fixed service wiring and peer delivery for preparation
+certification, automatic request closure/reveal, and settlement-input publication
+remain integration requirements for an unattended cohort.
 
 When the original header was skipped or the reviewer was offline, admission
 review reconstructs it from that reviewer's nearest retained finalized
