@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -35,7 +34,6 @@ from .competition_weights import (
     verify_competition_weight_authorization,
 )
 from .competition_worker import CompetitionReplayWorker, CompetitionWorkerCapacity
-from .encoding import account_id32
 from .open_competition import Registration
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -48,7 +46,6 @@ WORKER_FINALITY_BINARY = Path("/opt/umi/bin/umi-grandpa-finality-observer")
 WORKER_PROOF_BINARY = Path("/opt/umi/bin/umi-substrate-proof-verifier")
 WORKER_RUNTIME_METADATA_BINARY = Path("/opt/umi/bin/umi-runtime-metadata")
 WORKER_CHAIN_SPEC = Path("/opt/umi/raw_spec_finney.json")
-_MAX_KEYFILE_BYTES = 128 * 1024
 _MAX_STDOUT_BYTES = 128 * 1024
 
 
@@ -115,50 +112,9 @@ class SuccessorWorkerExecutionConfig(StrictProtocolModel):
 
 
 def _load_hotkey(expected_hotkey: str):
-    # No Wallet constructor, coldkey lookup, password environment or prompt.
-    # Only the already-approved hotkey file is mounted into this worker.
-    from bittensor.keyfiles import (
-        deserialize_keypair_from_keyfile_data,
-        keyfile_data_is_encrypted,
-    )
+    from .named_hotkey import load_named_hotkey
 
-    from .competition_upgrade import _fingerprint, _open_without_links
-
-    descriptor = _open_without_links(WORKER_HOTKEY_FILE)
-    try:
-        before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_uid not in {0, os.geteuid()}
-            or stat.S_IMODE(before.st_mode) != 0o400
-            or not 0 < before.st_size <= _MAX_KEYFILE_BYTES
-        ):
-            raise ValueError("successor hotkey mount is unsafe")
-        body = bytearray()
-        while chunk := os.read(descriptor, min(8192, _MAX_KEYFILE_BYTES + 1 - len(body))):
-            body.extend(chunk)
-            if len(body) > _MAX_KEYFILE_BYTES:
-                raise ValueError("successor hotkey mount exceeds its bound")
-        if len(body) != before.st_size or _fingerprint(os.fstat(descriptor)) != _fingerprint(
-            before
-        ):
-            raise ValueError("successor hotkey mount changed while reading")
-    finally:
-        os.close(descriptor)
-    try:
-        if keyfile_data_is_encrypted(bytes(body)):
-            raise ValueError("successor hotkey must be unlocked by its operator before staging")
-        signer = deserialize_keypair_from_keyfile_data(bytes(body))
-        if account_id32(signer.ss58_address) != account_id32(expected_hotkey):
-            raise ValueError("successor hotkey differs from its installed identity")
-        if signer.crypto_type not in {0, 1}:
-            raise ValueError("successor hotkey has an unsupported signing scheme")
-        return signer
-    finally:
-        # Best-effort cleanup of this mutable read buffer, not a claim that
-        # Python or the SDK can erase all private-key copies from memory.
-        body[:] = b"\x00" * len(body)
+    return load_named_hotkey(WORKER_HOTKEY_FILE, expected_hotkey)
 
 
 def _load_inputs():

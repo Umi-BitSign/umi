@@ -231,9 +231,38 @@ uses the retained proofs and a fixed target block while catching up; it grants n
 current submission authority. The executor checks fresh control before signing.
 Cancellation drains owned signing work before releasing the writer locks.
 
-This library is not selected by the installed supervisor CLI. Approved native
-configuration assembly, artifact and opportunity delivery, and installed restart
-qualification are still required before enabling it.
+The supervisor CLI accepts an explicit `--standing-config` for the same installed
+service and process lock. It reads a canonical root-owned mode-0444
+`umi-standing-reward-boot/1` configuration and its separate host approval before
+the startup stop. The configuration selects the series, replay and opportunity
+manifest, current and legacy chain configurations, eligibility runtime, handoff
+plan, private input directories and resource capacities. It supplies no callbacks
+or executable plugins. Without this option, the existing C4 path is unchanged.
+
+During initial history/package replay, the original supervisor continues C4
+reconciliation. The durable handoff intent stops that continuation before C5
+signing, including after restart. A failed old feed does not prevent independent
+C5 recovery. Status logs identify bootstrap progress, holds and transaction
+progress without enabling HTTP-client logging.
+
+Legacy configurations retain their original bytes and digests. Each selects
+host-local `CompetitionChainResources` for tools, chain specification, optional
+metadata and a separate cache; all verification hashes still come from the
+original configuration. Mutable stores must be disjoint. Do not copy a live
+SQLite cache or rewrite old signed inputs to relocate it.
+
+The private delivery directory supplies canonical `packages/<sha>.json`,
+`decisions/<sha>.json`, `opportunities/<sha>.json` and `witnesses/<sha>.json`.
+Decisions use the signed body's digest; the other files use the complete object's
+digest. These files are content, not authority. Native consumers verify the
+signatures, original evidence, complete control history and current chain state.
+Opportunity replay also requires the original interval and endpoint records in
+the coverage journal. The independently populated promotion store must contain
+the authenticated model assets and lineage required by package replay.
+
+Automatic artifact/coverage delivery and collection, the full series simulation,
+and installed restart/isolation qualification remain required before deploying
+this selection. The CLI path alone does not establish unattended readiness.
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;

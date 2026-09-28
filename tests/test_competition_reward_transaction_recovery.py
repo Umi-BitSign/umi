@@ -166,14 +166,17 @@ async def original(native_encoding, chain_config, policy, tmp_path, request):
     proofs = FinalizedProofCollector(rpc, finality=finality, verifier=verifier)
     providers = []
 
-    def reopen():
+    def reopen(**locations):
         provider = HistoricalRewardControlProvider(
             config,
             policy,
-            historical_header_directory=tmp_path / "headers",
+            historical_header_directory=locations.pop(
+                "historical_header_directory", tmp_path / "headers"
+            ),
             finality=finality,
             proofs=proofs,
             now_ms=lambda: clock.now,
+            **locations,
         )
         providers.append(provider)
         return provider

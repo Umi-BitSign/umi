@@ -604,8 +604,13 @@ async def test_service_boot_retries_before_handoff_and_keeps_replay_target(
 
     c.provider.collect_control = collect
     monkeypatch.setattr(service, "_prepare_first", prepare)
+
+    async def predecessor():
+        return SimpleNamespace(status="healthy", reason="fixture_legacy_continuation")
+
     async with c.reopen() as runtime:
         c.current_runtime = runtime
+        monkeypatch.setattr(runtime, "reconcile", predecessor)
         await run_standing_reward_service(runtime, **c.service_options)
     assert targets == ([1000, 1001] if failure == "not_activated" else [1000, 1000])
     assert captures == ([1000, 1001] if failure == "not_activated" else [1000])
@@ -625,9 +630,72 @@ async def test_service_stop_during_boot_preserves_old_handoff_state(service_case
 
     c.provider.collect_control = collect
     monkeypatch.setattr(service, "_prepare_first", prepare)
+
+    async def predecessor():
+        return SimpleNamespace(status="healthy", reason="fixture_legacy_continuation")
+
     async with c.reopen() as runtime:
         c.current_runtime = runtime
+        monkeypatch.setattr(runtime, "reconcile", predecessor)
         await run_standing_reward_service(runtime, **c.service_options)
         assert runtime._standing_handoff_intent() is None
     assert not c.executors and "signer" not in c.events
     assert c.events[-2:] == ["close-legacy", "close-current"]
+
+
+@pytest.mark.parametrize("feed_fails", [False, True])
+async def test_slow_boot_continues_c4_and_feed_failure_does_not_block_c5(
+    service_case, monkeypatch, feed_fails
+):
+    c = service_case
+    c.service_options.pop("first")
+    reconciled = asyncio.Event()
+    reconciles = []
+
+    async def collect(hotkey):
+        return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
+
+    async def prepare(*args):
+        await asyncio.wait_for(reconciled.wait(), timeout=2)
+        assert c.current_runtime._standing_handoff_intent() is None
+        assert "signer" not in c.events
+        return c.prepared
+
+    c.provider.collect_control = collect
+    monkeypatch.setattr(service, "_prepare_first", prepare)
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+
+        async def reconcile():
+            async with runtime._mutex:
+                assert runtime._standing_handoff_intent() is None
+                reconciles.append("old-worker")
+                reconciled.set()
+                if feed_fails:
+                    raise OSError("fixture unavailable old feed")
+                return SimpleNamespace(status="healthy", reason="current_worker_healthy")
+
+        monkeypatch.setattr(runtime, "reconcile", reconcile)
+        await run_standing_reward_service(runtime, **c.service_options)
+        assert runtime._standing_handoff_intent() is not None
+    assert reconciles == ["old-worker"]
+    assert len(c.executors) == 1
+    assert not any(t.get_name() == "standing-predecessor-continuation" for t in asyncio.all_tasks())
+
+
+async def test_boot_continuation_never_restarts_c4_after_retained_handoff(
+    service_case, monkeypatch
+):
+    c = service_case
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        await run_standing_reward_service(runtime, **c.service_options)
+    c.stop.clear()
+    async with c.reopen() as runtime:
+        assert runtime._standing_handoff_intent() is not None
+
+        async def forbidden():
+            pytest.fail("retained C5 handoff must not fetch or restart C4")
+
+        monkeypatch.setattr(runtime, "reconcile", forbidden)
+        await service._continue_predecessor(runtime, c.stop, 0.001)

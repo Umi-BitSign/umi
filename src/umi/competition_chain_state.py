@@ -339,7 +339,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 self._weight_rpc,
                 finality=self._finality,
                 verifier=SubprocessStorageProofVerifier(
-                    binary_path=self.config.proof_binary,
+                    binary_path=self.resources.proof_binary,
                     expected_sha256=self.config.proof_binary_sha256,
                 ),
                 limits=ProofCollectionLimits(
@@ -353,7 +353,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         self._runtime_proofs = None
         if self.config.runtime_metadata_binary is not None:
             self._runtime_executor = RuntimeMetadataExecutor(
-                binary_path=Path(self.config.runtime_metadata_binary),
+                binary_path=Path(self.resources.runtime_metadata_binary),
                 expected_sha256=self.config.runtime_metadata_binary_sha256,
             )
             # A separate raw-key collector prevents an enlarged :code ceiling
@@ -365,7 +365,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     self._runtime_rpc,
                     finality=self._finality,
                     verifier=SubprocessStorageProofVerifier(
-                        binary_path=self.config.proof_binary,
+                        binary_path=self.resources.proof_binary,
                         expected_sha256=self.config.proof_binary_sha256,
                     ),
                     limits=ProofCollectionLimits(
@@ -408,7 +408,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             self._cache_lease = None
 
     def _cache_directory(self, config):
-        root = _prepare_private_directory(Path(config.state_directory), "weight finality state")
+        root = _prepare_private_directory(
+            Path(self.resources.state_directory), "weight finality state"
+        )
         root_fd = _open_directory_without_links(root)
         lock = None
         try:
@@ -585,7 +587,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 finality=_ReceiptFinality(self._proofs, self.config.minimum_finalized_block),
                 rpc=self._weight_rpc,
                 verifier=SubprocessStorageProofVerifier(
-                    binary_path=self.config.proof_binary,
+                    binary_path=self.resources.proof_binary,
                     expected_sha256=self.config.proof_binary_sha256,
                 ),
                 runtime_executor=self._runtime_executor,

@@ -290,7 +290,9 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             raise
 
     def _cache_directory(self, config: CompetitionChainConfig) -> Path:
-        root = _canonical_absolute_path(Path(config.state_directory), "weight finality state")
+        root = _canonical_absolute_path(
+            Path(self.resources.state_directory), "weight finality state"
+        )
         if self._hint_directory.is_relative_to(root) or root.is_relative_to(self._hint_directory):
             raise ValueError("historical header directory must be disjoint from current cache")
         _prepare_private_directory(self._hint_directory, "historical header directory")

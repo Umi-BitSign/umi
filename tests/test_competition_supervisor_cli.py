@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -138,6 +139,62 @@ async def test_cli_orders_seal_host_lock_recovery_and_shutdown(host):
         "close-observer",
         "leave-lock-scope",
     ]
+
+
+@pytest.mark.parametrize("reject", [False, True])
+async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
+    host, monkeypatch, reject
+):
+    from umi import competition_reward_boot as boot
+
+    selection, adapter = object(), object()
+    host.runtime._require_lease = lambda: host.events.append("require-lease")
+    host.runtime.adapter = cli._DeferredAdapter(lambda: adapter)
+
+    def load(path, anchor):
+        assert path == Path("/etc/umi/standing.json")
+        host.events.append("standing-approval")
+        if reject:
+            raise ValueError("fixture denied approval")
+        return selection
+
+    async def run(runtime, config, stop):
+        assert runtime is host.runtime and runtime.adapter is adapter
+        assert config is selection and stop is host.stop
+        host.events.append("standing-service")
+
+    monkeypatch.setattr(boot, "load_standing_boot", load)
+    monkeypatch.setattr(boot, "run_installed_standing_rewards", run)
+    if reject:
+        with pytest.raises(ValueError):
+            await cli.run_supervisor(
+                Path("/etc/umi/supervisor.json"),
+                stop_event=host.stop,
+                standing_config=Path("/etc/umi/standing.json"),
+            )
+        assert "stop-startup-worker" not in host.events
+    else:
+        await cli.run_supervisor(
+            Path("/etc/umi/supervisor.json"),
+            stop_event=host.stop,
+            standing_config=Path("/etc/umi/standing.json"),
+        )
+        assert host.events.index("standing-approval") < host.events.index("stop-startup-worker")
+        assert host.events.index("lock-and-recover") < host.events.index("require-lease")
+        assert host.events.index("require-lease") < host.events.index("standing-service")
+        assert "reconcile" not in host.events
+        assert host.events[-3:] == ["stop-and-unlock", "close-observer", "leave-lock-scope"]
+
+
+def test_standing_cli_emits_progress_without_enabling_transport_logs(capsys):
+    logger = logging.getLogger("umi.competition_reward_service")
+    http = logging.getLogger("httpx")
+    before, transport_level = (logger.level, logger.propagate, tuple(logger.handlers)), http.level
+    with cli._standing_logs():
+        logger.info("standing_boot_waiting_for_initial_activation")
+        assert http.level == transport_level
+    assert "standing_boot_waiting_for_initial_activation" in capsys.readouterr().err
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == before
 
 
 @pytest.mark.parametrize("distinct_async_timeout", [False, True])

@@ -14,6 +14,7 @@ from pathlib import Path
 import bittensor as bt
 import pytest
 
+from umi.competition_chain_resources import CompetitionChainResources
 from umi.competition_reward_legacy_recovery import (
     LegacyWeightExpiry,
     review_legacy_weight_expiry,
@@ -192,14 +193,31 @@ async def test_expiry_requires_owned_current_finality(original, fault):
         await review_legacy_weight_expiry(t.provider, **inputs(t))
 
 
-async def test_restart_replays_original_evidence_without_a_saved_capability(original):
+@pytest.mark.parametrize("relocate", [False, True])
+async def test_restart_replays_original_evidence_without_a_saved_capability(
+    original, tmp_path, relocate
+):
     t = original
     args = inputs(t)
     first = await review_legacy_weight_expiry(t.provider, **args)
+    config_bytes = canonical_json_bytes(t.provider.config)
+    journal_before = t.journal.recovery_inputs()
+    locations = (
+        {}
+        if not relocate
+        else {
+            "resources": CompetitionChainResources.from_config(t.provider.config).model_copy(
+                update={"state_directory": str(tmp_path / "new-host-cache")}
+            ),
+            "historical_header_directory": tmp_path / "new-host-headers",
+        }
+    )
     await t.provider.aclose()
-    t.provider = t.reopen()
+    t.provider = t.reopen(**locations)
     second = await review_legacy_weight_expiry(t.provider, **args)
     assert second == first and second is not first
+    assert canonical_json_bytes(t.provider.config) == config_bytes
+    assert t.journal.recovery_inputs() == journal_before
     assert not any(m in {"state_getStorageAt", "chain_getBlock"} for m, _ in t.calls)
 
 

@@ -26,6 +26,7 @@ from typing_extensions import Self
 from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
+from .competition_chain_resources import CompetitionChainResources
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_proof_rpc import FailoverProofRpc
 from .concurrency import await_owned_task, run_owned_thread
@@ -451,8 +452,15 @@ class FinalizedRegistrationProvider:
         proofs: Any = None,
         now_ms: Callable[[], int] | None = None,
         retained_capture_blocks: Callable[[], frozenset[int]] | None = None,
+        resources: CompetitionChainResources | None = None,
     ):
         self.config = CompetitionChainConfig.model_validate_json(canonical_json_bytes(config))
+        self.resources = (
+            CompetitionChainResources.from_config(self.config)
+            if resources is None
+            else CompetitionChainResources.model_validate_json(canonical_json_bytes(resources))
+        )
+        self.resources.check(self.config)
         if self.config.runtime_metadata_binary is not None and not self._supports_executed_runtime:
             raise ValueError("runtime metadata execution is only supported by the weight provider")
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -492,8 +500,8 @@ class FinalizedRegistrationProvider:
             observer = GrandpaFinalityObserver.from_policy_pin(
                 config.finality_pin,
                 target_triple=config.target_triple,
-                binary_path=config.finality_binary,
-                chain_spec_path=config.chain_spec,
+                binary_path=self.resources.finality_binary,
+                chain_spec_path=self.resources.chain_spec,
                 record_timeout_seconds=min(
                     _OBSERVER_RECORD_TIMEOUT_SECONDS, config.maximum_head_age_ms / 2000
                 ),
@@ -517,7 +525,7 @@ class FinalizedRegistrationProvider:
                 config.minimum_finalized_block - 1 if head is None else head.height
             )
             verifier = SubprocessStorageProofVerifier(
-                binary_path=config.proof_binary,
+                binary_path=self.resources.proof_binary,
                 expected_sha256=config.proof_binary_sha256,
             )
             if config.proof_rpc_fallback_urls:
@@ -552,7 +560,7 @@ class FinalizedRegistrationProvider:
         self._proofs = proofs
 
     def _load_storage_codec(self):
-        value = self.config.storage_codec_metadata_path
+        value = self.resources.storage_codec_metadata_path
         if value is None:
             return None
         path = Path(value)
@@ -582,7 +590,7 @@ class FinalizedRegistrationProvider:
         return await self._proofs.pinned_runtime(ref, self._runtime_pin)
 
     def _cache_directory(self, config: CompetitionChainConfig) -> Path:
-        return Path(config.state_directory)
+        return Path(self.resources.state_directory)
 
     def _finality_policy_hash(self) -> str:
         return digest(self.policy)

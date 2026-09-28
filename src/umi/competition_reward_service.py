@@ -59,6 +59,30 @@ async def _close_provider(provider):
     await await_owned_task(asyncio.create_task(provider.aclose()))
 
 
+async def _continue_predecessor(runtime, stop, poll_seconds):
+    """Keep the existing supervisor reconciling while initial C5 replay waits.
+
+    The native runtime checks its durable handoff intent under the same mutex
+    as the handoff itself. A loop already awaiting that mutex cannot resurrect
+    the old writer after the handoff has begun.
+    """
+    while not stop.is_set() and runtime._standing_handoff_intent() is None:
+        try:
+            result = await runtime.reconcile()
+            logger.info("standing_predecessor status=%s reason=%s", result.status, result.reason)
+        except Exception as error:
+            # Legacy feed/RPC failure cannot prevent independent C5 recovery.
+            logger.warning("standing_predecessor_retry reason=%s", type(error).__name__)
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+
+
+async def _stop_predecessor(task):
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await await_owned_task(task)
+
+
 async def _prepare_first(preparation, provider, history, packages, decisions, height, maximum):
     if height < history.first_block:
         return None
@@ -144,6 +168,12 @@ async def run_standing_reward_service(
             or history.first_block != preparation.reader.series.recovery.authority.issued_at_block
         ):
             raise ValueError("standing service differs from approved chain execution")
+        if first is None:
+            predecessor = asyncio.create_task(
+                _continue_predecessor(runtime, stop, float(runtime.config.poll_seconds)),
+                name="standing-predecessor-continuation",
+            )
+            resources.push_async_callback(_stop_predecessor, predecessor)
         for value in owners.values():
             await value.start()
         bootstrap_height = None

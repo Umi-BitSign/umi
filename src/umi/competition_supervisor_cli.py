@@ -10,13 +10,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import logging
 import os
 import platform
 import signal
 import stat
 import sys
 from collections.abc import Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 
@@ -334,7 +335,31 @@ def _emit(result):
     )
 
 
-async def run_supervisor(config_path: Path, *, stop_event=None):
+@contextmanager
+def _standing_logs():
+    # These modules emit bounded status/identity fields and exception classes.
+    # Do not enable HTTP/SDK debug logging, which can contain credentials.
+    handler = logging.StreamHandler()
+    selected = []
+    for name in ("umi.competition_reward_service", "umi.competition_reward_executor"):
+        logger = logging.getLogger(name)
+        selected.append((logger, logger.level, logger.propagate))
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        for logger, level, propagate in selected:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            logger.propagate = propagate
+        handler.close()
+
+
+async def run_supervisor(
+    config_path: Path, *, stop_event=None, standing_config: Path | None = None
+):
     if sys.platform != "linux" or os.geteuid() == 0:
         raise ValueError("successor supervisor requires the installed non-root Linux service")
     config_bytes = _root_control(config_path, MAX_SUPERVISOR_DOCUMENT_BYTES)
@@ -343,6 +368,11 @@ async def run_supervisor(config_path: Path, *, stop_event=None):
     if config_bytes != canonical_json_bytes(anchor.config):
         raise ValueError("supervisor config differs from the root-sealed anchor")
     _verify_running_host_anchor(anchor)
+    standing = None
+    if standing_config is not None:
+        from .competition_reward_boot import load_standing_boot
+
+        standing = load_standing_boot(standing_config, anchor)
     with hold_successor_startup_lease(anchor) as startup_lease:
         await _stop_startup_worker(config, startup_lease)
         repair_successor_source_permissions(anchor=anchor, limits=_materialization_limits())
@@ -360,6 +390,16 @@ async def run_supervisor(config_path: Path, *, stop_event=None):
                     loop.add_signal_handler(signum, stop.set)
                     handlers.append(signum)
             async with runtime:
+                if standing is not None:
+                    from .competition_reward_boot import run_installed_standing_rewards
+
+                    runtime._require_lease()
+                    if type(runtime.adapter) is not _DeferredAdapter:
+                        raise TypeError("standing startup requires the native adapter factory")
+                    runtime.adapter = runtime.adapter._get()
+                    with _standing_logs():
+                        await run_installed_standing_rewards(runtime, standing, stop)
+                    return
                 while not stop.is_set():
                     result = await runtime.reconcile()
                     _emit(result)
@@ -378,9 +418,15 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--config", type=Path, required=True, help="existing root-owned supervisor config"
     )
+    parser.add_argument(
+        "--standing-config",
+        type=Path,
+        help="root-owned standing reward configuration for this installed validator",
+    )
     args = parser.parse_args(argv)
     try:
-        asyncio.run(run_supervisor(args.config))
+        options = {} if args.standing_config is None else {"standing_config": args.standing_config}
+        asyncio.run(run_supervisor(args.config, **options))
     except KeyboardInterrupt:
         return 130
     except Exception:
