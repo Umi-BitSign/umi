@@ -42,6 +42,15 @@ class StandingRewardFiles:
     def package(self, sha: str) -> CohortRewardPackage:
         return self._read("packages", sha, CohortRewardPackage, self.maximum_package_bytes)
 
+    def retain_package(self, package: CohortRewardPackage) -> None:
+        """Retain immutable package bytes; presence does not replace native replay."""
+        package = CohortRewardPackage.model_validate_json(canonical_json_bytes(package))
+        publish_private_model(
+            self.root / "packages" / (digest(package) + ".json"),
+            package,
+            maximum_bytes=self.maximum_package_bytes,
+        )
+
     def decision(self, sha: str) -> bytes:
         return canonical_json_bytes(
             self._read("decisions", sha, SignedRewardControlDecision, MAX_DECISION_BYTES)

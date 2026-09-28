@@ -156,7 +156,7 @@ class StandingRewardCoordinator:
         publisher: StandingControlPublisher,
         signer: RewardDecisionSigner,
         readback: StandingRewardFiles,
-        offers: Callable[[str], RewardActivation | None],
+        offers: Callable[[str, Prefix], RewardActivation | None],
         voters: Sequence[VotePort],
         vote_timeout_seconds: float = 300,
     ):
@@ -186,6 +186,7 @@ class StandingRewardCoordinator:
         self.vote_timeout = vote_timeout_seconds
         self.serial = asyncio.Lock()
         self._reviewed: ReviewedRewardDecision | None = None
+        self._unreviewed: RewardControlDecision | None = None
         self.phase, self.sequence = "starting", 0
 
     def _prefix(self) -> Prefix:
@@ -245,11 +246,18 @@ class StandingRewardCoordinator:
                 )
         self.phase = "select_decision"
         body = await run_owned_thread(self._pending, sequence)
+        predecessor = None if not prefix else digest(prefix[-1].decision)
+        candidate = self._unreviewed
+        if body is None and candidate is not None:
+            if candidate.sequence == sequence and candidate.predecessor_sha256 == predecessor:
+                body = candidate
+            else:
+                self._unreviewed = None
         if body is None:
             activation = None
             if sequence:
                 cohort = digest(p.series.cohorts[sequence - 1])
-                activation = await run_owned_thread(self.offers, cohort)
+                activation = await run_owned_thread(self.offers, cohort, prefix)
                 if activation is None:
                     return RewardCoordinationProgress("allocation_pending", sequence)
                 activation = RewardActivation.model_validate_json(canonical_json_bytes(activation))
@@ -260,11 +268,15 @@ class StandingRewardCoordinator:
                 schema="umi-reward-control-decision/1",
                 series_sha256=digest(p.series),
                 sequence=sequence,
-                predecessor_sha256=None if not prefix else digest(prefix[-1].decision),
+                predecessor_sha256=predecessor,
                 kind="admit_series" if sequence == 0 else "activate",
                 observed_at_block=observation.snapshot.block_number,
                 activation=activation,
             )
+            # Bounded history recovery must finish a fixed target even if the
+            # chain grows faster than a slow host can replay it. This is only
+            # an in-process candidate; it grants no durable signing reservation.
+            self._unreviewed = body
         review = self._reviewed
         if review is None or review.intent.decision != body or review.preceding != prefix:
             self.phase = "native_review"
@@ -275,9 +287,14 @@ class StandingRewardCoordinator:
                 review = await self.reviewer.review(body, prefix)
             except RewardReviewPending:
                 return RewardCoordinationProgress("review_pending", sequence, digest(body))
+            except (ValueError, KeyError):
+                # Invalid input must not pin a sequence before native review.
+                self._unreviewed = None
+                raise
             # Immutable original evidence can be reused while waiting for votes.
             # A process restart reconstructs it through the native archives.
             self._reviewed = review
+        self._unreviewed = None
         # Only a successfully reviewed body becomes an immutable intent.
         # Bad offers cannot pin this sequence, and no signature precedes retention.
         self.phase = "sign_decision"

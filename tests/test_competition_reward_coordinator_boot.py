@@ -42,7 +42,7 @@ def config_case(inputs, tmp_path):
         state_directory=str(tmp_path / "coordinator-state"),
         files_directory=str(tmp_path / "files"),
         readback_directory=str(tmp_path / "readback"),
-        offer_directory=str(tmp_path / "offers"),
+        settlement_directory=str(tmp_path / "settlements"),
         exchange_inbox=str(tmp_path / "inbox"),
         exchange_outbox=str(tmp_path / "outbox"),
     )
@@ -97,8 +97,15 @@ def test_wallet_and_replication_stores_cannot_overlap(config_case):
             boot.RewardCoordinatorConfig.model_validate(config.model_dump(by_alias=True) | change)
 
 
-@pytest.mark.parametrize("role", ["coordinator", "reviewer"])
-@pytest.mark.parametrize("failure", [None, "key", "start", "run"])
+@pytest.mark.parametrize(
+    "role,failure",
+    [
+        (role, failure)
+        for role in ("coordinator", "reviewer")
+        for failure in (None, "key", "start", "run")
+    ]
+    + [("coordinator", "coverage"), ("coordinator", "coverage_exit")],
+)
 async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
     config_case, monkeypatch, role, failure
 ):
@@ -113,10 +120,10 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
                 signer_key_file=str(Path(config.signer_key_file).with_name("Dave")),
                 control_key_file=None,
                 readback_directory=None,
-                offer_directory=None,
+                settlement_directory=None,
             )
         )
-    providers, loaded = [], []
+    providers, loaded, collector_lifecycle = [], [], []
 
     class Provider:
         def __init__(self, chain, policy, **kwargs):
@@ -130,6 +137,8 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             self.started = True
 
         async def aclose(self):
+            if collector_lifecycle:
+                assert collector_lifecycle[-1] == "stopped"
             self.closed = True
 
     def key(path, expected):
@@ -163,14 +172,29 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         async def run(self, stop, *, poll_seconds):
             assert self.kw["publisher"].provider is self.kw["reviewer"].provider
             await running(self.kw["signer"], self.kw["reviewer"].provider)
+            if failure in {"coverage", "coverage_exit"}:
+                await asyncio.Event().wait()
+            stop.set()
+
+    async def collect(self, stop, *, poll_seconds):
+        collector_lifecycle.append("started")
+        try:
+            if failure == "coverage":
+                raise OSError("coverage failure")
+            if failure == "coverage_exit":
+                return
+            await stop.wait()
+        finally:
+            collector_lifecycle.append("stopped")
 
     async def reviewer(self, owner, stop, *, poll_seconds):
         await running(self.signer, owner.provider)
 
     monkeypatch.setattr(boot, "StandingRewardCoordinator", Coordinator)
+    monkeypatch.setattr(boot.StandingRewardCoverageService, "run", collect)
     monkeypatch.setattr(boot.RewardReviewExchange, "run_reviewer", reviewer)
     if failure:
-        with pytest.raises(OSError):
+        with pytest.raises(RuntimeError if failure == "coverage_exit" else OSError):
             await boot.run_reward_coordinator(config, asyncio.Event())
     else:
         await boot.run_reward_coordinator(config, asyncio.Event())

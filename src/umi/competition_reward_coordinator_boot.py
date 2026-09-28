@@ -28,7 +28,6 @@ from .competition_reward_coordinator import (
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_service import StandingRewardCoverageService
 from .competition_reward_decisions import (
-    RewardActivation,
     StandingRewardControlReader,
     StandingRewardSeries,
 )
@@ -38,6 +37,7 @@ from .competition_reward_files import StandingRewardFiles
 from .competition_reward_handoff_models import LegacyRewardHandoffPlan
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
+from .competition_reward_offers import StandingRewardOffers
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_proof_archive import RewardProofArchive
@@ -51,7 +51,6 @@ from .private_files import (
     Directory,
     ensure_private_directory,
     lock_private_file,
-    read_private_model,
 )
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -74,7 +73,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     state_directory: Directory
     files_directory: Directory
     readback_directory: Directory | None = None
-    offer_directory: Directory | None = None
+    settlement_directory: Directory | None = None
     promotion_directory: Directory
     proof_import_directory: Directory
     proof_export_directory: Directory
@@ -103,7 +102,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
             or len(set(evaluators.values())) < self.policy.required_evaluator_groups
             or (self.control_key_file is not None) != coordinator
             or (self.readback_directory is not None) != coordinator
-            or (self.offer_directory is not None) != coordinator
+            or (self.settlement_directory is not None) != coordinator
             or self.chain.policy_sha256 != digest(self.policy)
             or len(self.chain.proof_rpc_fallback_urls) != 2
             or self.handoff.series_sha256 != digest(self.series)
@@ -132,7 +131,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 self.chain.state_directory,
                 self.files_directory,
                 self.readback_directory,
-                self.offer_directory,
+                self.settlement_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
                 self.proof_export_directory,
@@ -276,21 +275,19 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 submission_timeout_seconds=config.service.submission_timeout_seconds,
             )
 
-            def offer(cohort):
-                try:
-                    return read_private_model(
-                        Path(config.offer_directory) / (cohort + ".json"),
-                        RewardActivation,
-                        maximum_bytes=8192,
-                    )
-                except FileNotFoundError:
-                    return None
-
             coordinator = StandingRewardCoordinator(
                 reviewer=reviewer,
                 publisher=publisher,
                 signer=signer,
-                offers=offer,
+                offers=StandingRewardOffers(
+                    series=config.series,
+                    policy=config.policy,
+                    manifest=config.manifest,
+                    handoff=config.handoff,
+                    settlements=Path(config.settlement_directory),
+                    files=files,
+                    coverage=coverage.journal,
+                ),
                 readback=StandingRewardFiles(
                     Path(config.readback_directory),
                     maximum_package_bytes=config.maximum_package_bytes,
@@ -311,6 +308,18 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
         await provider.start()
         work = asyncio.create_task(run(stop, poll_seconds=config.service.poll_seconds))
         resources.push_async_callback(_stop_task, work)
-        # Opportunity certificates are reviewed from imported original proofs on
-        # demand. Validators independently collect/export their coverage.
-        await work
+        if config.role == "coordinator":
+            # Capture and recover minimum opportunity automatically, including
+            # while the next cohort is being evaluated. Validators also export
+            # original proofs; no periodic coordinator renewal is involved.
+            collector = asyncio.create_task(
+                coverage.run(stop, poll_seconds=config.service.poll_seconds)
+            )
+            resources.push_async_callback(_stop_task, collector)
+            done, _ = await asyncio.wait((work, collector), return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+            if not stop.is_set():
+                raise RuntimeError("reward coordinator component exited before shutdown")
+        else:
+            await work

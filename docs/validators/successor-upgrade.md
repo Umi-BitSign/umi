@@ -358,18 +358,31 @@ before signing. The proposer retains its vote before exporting
 slots, authenticated canonical data and no executable callbacks. Missing delivery
 retries indefinitely; a restart reuses the original intent and signature.
 
-The coordinator reads canonical `RewardActivation` offers from
-`COHORT_SHA256.json` files in its configured offer directory. Its separate
-readback directory must be populated by the independently authenticated receiver;
+The settlement owner uses `prepare_reward_package` and `publish_reward_package`
+to retain a canonical `CohortRewardPackage` as `COHORT_SHA256.json` in the
+configured settlement directory. The coordinator derives the next activation
+from that package and the approved manifest. Initial activation names the
+approved legacy handoff. A successor waits for the preceding allocation's
+retained completion certificate; the native reviewer checks every original
+opportunity interval before signing. No separately prepared activation file is
+needed. Missing results or proofs remain pending without a cohort deadline.
+
+The coordinator supervises coverage capture alongside decision publication.
+Both tasks drain before the provider closes; an unexpected component exit fails
+the invocation for supervised restart. Bounded proposal review keeps a fixed
+chain target while it catches up. Invalid unreviewed input cannot reserve a
+signing sequence. Its separate readback directory must be populated by the
+independently authenticated receiver;
 distinct local paths alone do not prove remote availability. Precreate input
 directories as the service user with mode `0700`, and deliver private regular
 files with mode `0600`. The systemd template in
 `deploy/standing-reward-coordinator/` owns provider startup, retries and orderly
 shutdown. It must select the qualified installed Python environment.
 
-These services remain uninstalled. Automatic offer production, independent peer
-and artifact delivery, key provisioning, migration ownership and combined Linux
-restart/effect qualification remain required before deployment. Configuration
+These services remain uninstalled. The upstream recurring settlement producer,
+full later-cohort replay, independent peer and artifact delivery, key provisioning,
+migration ownership and combined Linux restart/effect qualification remain
+required before deployment. Configuration
 validation is not runtime qualification.
 
 The timer retries failed copies indefinitely. `copy --immutable --checksum`

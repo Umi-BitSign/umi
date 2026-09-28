@@ -94,7 +94,7 @@ def coordinator_case(publisher_case, tmp_path, monkeypatch):
             publisher=h.publisher,
             signer=h.owner,
             readback=h.readback,
-            offers=lambda _: h.offer,
+            offers=lambda _cohort, _prefix: h.offer,
             voters=(peer,),
         )
 
@@ -174,6 +174,22 @@ async def test_rejected_offer_does_not_pin_the_sequence_or_sign(coordinator_case
         h.bad_offer = False
         assert (await h.coordinator.step()).status == "certified_delivery_pending"
         assert h.owner.journal.load(0).decision.observed_at_block == 600
+        assert len(h.votes) == 1 and not h.sends
+
+
+async def test_slow_original_review_keeps_fixed_target_without_reserving_intent(coordinator_case):
+    h = coordinator_case
+    h.review_pending = True
+    with h.publisher.hold_writer():
+        assert (await h.coordinator.step()).status == "review_pending"
+        original = h.reviews[-1]
+        h.current = h.state(block=original.observed_at_block + 10000)
+        assert (await h.coordinator.step()).status == "review_pending"
+        assert h.reviews[-1] == original
+        assert h.owner.journal.load(0) is None and not h.votes
+        h.review_pending = False
+        assert (await h.coordinator.step()).status == "certified_delivery_pending"
+        assert h.owner.journal.load(0).decision == original
         assert len(h.votes) == 1 and not h.sends
 
 

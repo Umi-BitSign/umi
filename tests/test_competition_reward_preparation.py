@@ -993,21 +993,24 @@ async def test_native_control_publisher_recovers_original_proofs_and_finalized_h
 @pytest.mark.parametrize("preparation_case", [8], indirect=True)
 @pytest.mark.parametrize("complete_preparation_case", ["coordinator"], indirect=True)
 async def test_native_coordinator_recovers_admission_then_certifies_first_activation(
-    complete_preparation_case, tmp_path
+    complete_preparation_case, tmp_path, monkeypatch
 ):
     import shutil
 
+    from umi.competition_cohort_reward_package import publish_reward_package
     from umi.competition_reward_control_journal import RewardControlTransactionJournal
     from umi.competition_reward_control_publisher import StandingControlPublisher
     from umi.competition_reward_coordinator import (
         StandingRewardCoordinator,
         StandingRewardDecisionReviewer,
     )
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
     from umi.competition_reward_exchange import RewardReviewExchange
     from umi.competition_reward_files import StandingRewardFiles
     from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
+    from umi.competition_reward_offers import StandingRewardOffers
+    from umi.competition_reward_opportunity import opportunity_rule
     from umi.competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
-    from umi.private_files import publish_private_model
 
     h = complete_preparation_case
     c, p = h.c, h.package_case
@@ -1021,11 +1024,6 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
         )
         for name in ("coordinator-delivery", "independent-readback")
     )
-    publish_private_model(
-        primary.root / "packages" / (digest(p.package) + ".json"),
-        p.package,
-        maximum_bytes=primary.maximum_package_bytes,
-    )
     handoff = LegacyRewardHandoffPlan(
         schema="umi-legacy-reward-handoff-plan/1",
         series_sha256=digest(c.series),
@@ -1034,7 +1032,22 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
         legacy_round_sha256="22" * 32,
         legacy_package_sha256="33" * 32,
     )
-    offer, unavailable, local_calls, peer_calls = None, True, [], []
+    unavailable, local_calls, peer_calls = True, [], []
+    rule = opportunity_rule(p.manifest, c.series, h.item.policy)
+    settlements = tmp_path / "completed-settlements"
+
+    def offers():
+        return StandingRewardOffers(
+            series=c.series,
+            policy=h.item.policy,
+            manifest=p.manifest,
+            handoff=handoff,
+            settlements=settlements,
+            files=primary,
+            coverage=RewardCoverageJournal(
+                tmp_path / "coordinator-coverage", rule, expected_rule_sha256=digest(rule)
+            ),
+        )
 
     async def no_opportunity(_):
         pytest.fail("initial activation uses the approved legacy handoff")
@@ -1131,7 +1144,7 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
             publisher=publisher,
             signer=local,
             readback=readback,
-            offers=lambda _: offer,
+            offers=offers(),
             voters=(vote,),
         )
 
@@ -1177,6 +1190,20 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
     offer = c.active.decision.activation.model_copy(
         update={"prior_opportunity_sha256": digest(handoff)}
     )
+    publish_reward_package(settlements / (offer.cohort_sha256 + ".json"), p.package)
+    retain = primary.retain_package
+
+    def lost_publication_reply(package):
+        retain(package)
+        raise OSError("package acknowledgement lost")
+
+    monkeypatch.setattr(primary, "retain_package", lost_publication_reply)
+    with pytest.raises(OSError, match="acknowledgement"):
+        await converge(coordinator)
+    assert coordinator.signer.journal.load(1) is None and len(local_calls) == 1
+    assert primary.package(offer.package_sha256) == p.package
+    monkeypatch.setattr(primary, "retain_package", retain)
+    coordinator = build()
     assert (await converge(coordinator)).status == "certified_delivery_pending"
     certificate = coordinator.signer.journal.prefix(2)[1]
     assert certificate.decision.activation == offer
@@ -1184,6 +1211,197 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
     assert len(local_calls) == 2 and len(peer_calls) == 2
     assert (await converge(coordinator)).status == "delivery_pending"
     assert coordinator.publisher.journal.pending() is None
+
+
+@pytest.mark.parametrize("successor", [False, True])
+async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
+    native_package, tmp_path, successor
+):
+    """Discovery only: later-slot authority and interval claims are synthetic.
+
+    The first-activation integration above separately performs native review.
+    An emitted offer carries no signature or chain permission.
+    """
+    from umi.competition_cohort_reward_package import publish_reward_package
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_service import CoverageCompletion
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
+    from umi.competition_reward_manifest import (
+        RewardOpportunityTerms,
+        StandingRewardOpportunityManifest,
+    )
+    from umi.competition_reward_offers import StandingRewardOffers
+    from umi.competition_reward_opportunity import (
+        RewardOpportunityCertificate,
+        RewardOpportunityContribution,
+        RewardOpportunityWitness,
+        opportunity_rule,
+    )
+    from umi.open_competition import identity
+
+    p, policy = native_package, native_package.store.policy
+    history = p.package.inputs.history
+    plans = (history.plan,)
+    if successor:
+        plans = (
+            history.plan.model_copy(update={"sequence": history.plan.sequence - 1}),
+            history.plan,
+        )
+    body = history.authority.authority.model_copy(
+        update={"cohort_sha256s": tuple(sorted(digest(plan) for plan in plans))}
+    )
+    authority = history.authority.model_copy(
+        update={
+            "authority": body,
+            "signatures": tuple(
+                sorted(
+                    (sign_object(body, wallet(n)) for n in ("Charlie", "Dave")),
+                    key=lambda signature: identity(signature.hotkey),
+                )
+            ),
+        }
+    )
+    package = p.package.model_copy(
+        update={
+            "inputs": p.package.inputs.model_copy(
+                update={"history": history.model_copy(update={"authority": authority})}
+            )
+        }
+    )
+    manifest = StandingRewardOpportunityManifest(
+        schema="umi-standing-reward-manifest/2",
+        policy_sha256=digest(policy),
+        cohorts=tuple(
+            p.requirement.model_copy(update={"cohort_sha256": digest(plan)}) for plan in plans
+        ),
+        opportunity=RewardOpportunityTerms(
+            runtime_profile_sha256="12" * 32, maximum_interval_ms=12000, minimum_validator_ms=12000
+        ),
+    )
+    validator = wallet("Charlie").hotkey.ss58_address
+    series = StandingRewardSeries(
+        schema="umi-standing-reward-series/1",
+        genesis_hash=FINNEY_GENESIS_HASH,
+        netuid=78,
+        policy_sha256=digest(policy),
+        policy_epoch=1,
+        manifest_sha256=digest(manifest),
+        control_hotkey=wallet("Ferdie").hotkey.ss58_address,
+        recovery=authority,
+        cohorts=plans,
+        validators=(validator,),
+        maximum_proof_lag_blocks=2,
+        maximum_transaction_lifetime_blocks=8,
+        lifetime="until_superseded_or_revoked",
+    )
+    handoff = LegacyRewardHandoffPlan(
+        schema="umi-legacy-reward-handoff-plan/1",
+        series_sha256=digest(series),
+        cohort_sha256=digest(plans[0]),
+        legacy_policy_sha256="11" * 32,
+        legacy_round_sha256="22" * 32,
+        legacy_package_sha256="33" * 32,
+    )
+    prefix = (
+        signed(
+            RewardControlDecision(
+                schema="umi-reward-control-decision/1",
+                series_sha256=digest(series),
+                sequence=0,
+                predecessor_sha256=None,
+                kind="admit_series",
+                observed_at_block=body.issued_at_block,
+                activation=None,
+            )
+        ),
+    )
+    prior = None
+    if successor:
+        prior = RewardActivation(
+            cohort_sha256=digest(plans[0]),
+            allocation_sha256="44" * 32,
+            package_sha256="55" * 32,
+            recovery_tip_sha256="66" * 32,
+            prior_opportunity_sha256=digest(handoff),
+        )
+        prefix += (
+            signed(
+                RewardControlDecision(
+                    schema="umi-reward-control-decision/1",
+                    series_sha256=digest(series),
+                    sequence=1,
+                    predecessor_sha256=digest(prefix[-1].decision),
+                    kind="activate",
+                    observed_at_block=body.issued_at_block + 1,
+                    activation=prior,
+                )
+            ),
+        )
+    files = StandingRewardFiles(
+        tmp_path / "offer-files", maximum_package_bytes=8 * 1024**2, maximum_witness_bytes=1024**2
+    )
+    rule = opportunity_rule(manifest, series, policy)
+    coverage = RewardCoverageJournal(
+        tmp_path / "offer-coverage", rule, expected_rule_sha256=digest(rule)
+    )
+    settlements = tmp_path / "settlements"
+    offers = StandingRewardOffers(
+        series=series,
+        policy=policy,
+        manifest=manifest,
+        handoff=handoff,
+        settlements=settlements,
+        files=files,
+        coverage=coverage,
+    )
+    cohort = digest(plans[-1])
+    with pytest.raises(ValueError, match="next admitted"):
+        offers("ff" * 32, prefix)
+    assert offers(cohort, prefix) is None
+    path = settlements / (cohort + ".json")
+    publish_reward_package(path, package)
+    if successor:
+        assert offers(cohort, prefix) is None
+        assert not (files.root / "packages").exists()
+        witness = RewardOpportunityWitness(
+            schema="umi-reward-opportunity-witness/1",
+            rule_sha256=digest(rule),
+            activation_sha256=digest(prior),
+            validator_account_id=identity(validator),
+            interval_keys=("77" * 32,),
+        )
+        certificate = RewardOpportunityCertificate(
+            schema="umi-reward-opportunity-certificate/1",
+            series_sha256=digest(series),
+            manifest_sha256=digest(manifest),
+            rule_sha256=digest(rule),
+            activation_sha256=digest(prior),
+            contributions=(
+                RewardOpportunityContribution(
+                    validator_account_id=identity(validator),
+                    witness_sha256=digest(witness),
+                    credited_ms=12000,
+                    through_block=body.issued_at_block + 20,
+                ),
+            ),
+        )
+        completion = CoverageCompletion(
+            schema="umi-reward-coverage-completion/1", certificate_sha256=digest(certificate)
+        )
+        coverage.journal.put("coverage_completion", prior.cohort_sha256, completion)
+        with pytest.raises(FileNotFoundError):
+            offers(cohort, prefix)
+        files.retain_completion(certificate, lambda _: canonical_json_bytes(witness))
+    offer = offers(cohort, prefix)
+    assert offer.package_sha256 == digest(package)
+    assert offer.prior_opportunity_sha256 == (digest(certificate) if successor else digest(handoff))
+    assert files.package(offer.package_sha256) == package
+    assert offers(cohort, prefix) == offer
+    # A conflicting or misrouted settlement cannot change a proposal silently.
+    path.write_bytes(canonical_json_bytes(package.model_copy(update={"policy_sha256": "ee" * 32})))
+    with pytest.raises(ValueError, match="approved cohort"):
+        offers(cohort, prefix)
 
 
 async def test_boot_reconstructs_initial_package_from_native_retained_history(
@@ -2506,7 +2724,7 @@ async def test_reward_input_publication_recovers_original_bytes_and_offline_sour
         maximum_package_bytes=8 * 1024**2,
         maximum_witness_bytes=1024**2,
     )
-    original = module.publish_private_model
+    original = file_module.publish_private_model
     interrupted = False
 
     def lost_reply(path, *args, **kwargs):
@@ -2516,7 +2734,6 @@ async def test_reward_input_publication_recovers_original_bytes_and_offline_sour
             interrupted = True
             raise OSError("publication reply lost")
 
-    monkeypatch.setattr(module, "publish_private_model", lost_reply)
     monkeypatch.setattr(file_module, "publish_private_model", lost_reply)
     with pytest.raises(OSError, match="reply lost"):
         module.retain_standing_reward_inputs(
