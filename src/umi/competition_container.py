@@ -37,6 +37,7 @@ from .competition_worker import _open_directory_without_links
 from .concurrency import kill_and_reap
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
+from .rpc_transport import CONFIG_ENV, CONFIG_FILENAME, WORKER_DIRECTORY, load_routes
 from .validator_supervisor import ValidatorSupervisorConfig
 from .validator_supervisor_adapters import (
     AsyncCommandRunner,
@@ -367,6 +368,8 @@ class PodmanSuccessorContainer:
         self._hotkey_sha256 = hashlib.sha256(account_id32(config.validator_hotkey)).hexdigest()
         self.name = f"umi-successor-{self._hotkey_sha256[:32]}"
         self._rehearsed: set[str] = set()
+        self.source_overlay = None
+        self.rpc_transport_directory: Path | None = None
 
     async def _command(self, *arguments):
         # Pin the manager even on the first rootless namespace creation. Host
@@ -599,8 +602,13 @@ class PodmanSuccessorContainer:
         descriptor = _open_directory_without_links(root)
         try:
             info = os.fstat(descriptor)
-            if info.st_uid != 0 or info.st_mode & 0o022:
-                raise SuccessorContainerError("activation root lacks host root provenance")
+            # The installer and current-view materializer require a sealed
+            # service-owned parent. Root provenance belongs to the anchor
+            # subtree, which is checked separately below.
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o555:
+                raise SuccessorContainerError(
+                    "activation root differs from installed service owner"
+                )
             names = set()
             with os.scandir(descriptor) as children:
                 for entry in children:
@@ -677,6 +685,14 @@ class PodmanSuccessorContainer:
             finally:
                 os.close(parent)
             mounts.append(_bind_mount(key, HOTKEY_PATH, read_only=True))
+        if self.source_overlay is not None:
+            source = self.source_overlay.source_for(activation)
+            mounts.append(_bind_mount(source, "/opt/umi/src/umi", read_only=True))
+        if self.rpc_transport_directory is not None:
+            load_routes(self.rpc_transport_directory / CONFIG_FILENAME)
+            mounts.append(
+                _bind_mount(self.rpc_transport_directory, WORKER_DIRECTORY, read_only=True)
+            )
         return tuple(mounts)
 
     def _validate_activation(self, activation, release):
@@ -705,6 +721,40 @@ class PodmanSuccessorContainer:
             _LABEL + "profile": activation.profile,
         }
 
+    async def _refresh_mount_namespace(self, mounts):
+        """Refresh an empty rootless namespace left behind by a host upgrade.
+
+        A retained pause process can see an older service mount tree. Compare
+        inode identities without reading mounted credentials or evidence.
+        The caller owns the supervisor lock; never migrate another workload.
+        """
+        sources = tuple(
+            dict(part.split("=", 1) for part in mount.split(","))["src"] for mount in mounts
+        )
+        expected = b"".join(
+            f"{value.st_dev}:{value.st_ino}\n".encode("ascii")
+            for value in (os.stat(path, follow_symlinks=False) for path in sources)
+        )
+
+        async def visible():
+            try:
+                return (
+                    await self._command(
+                        "unshare", "/usr/bin/stat", "--format=%d:%i", "--", *sources
+                    )
+                    == expected
+                )
+            except SuccessorContainerError:
+                return False
+
+        if await visible():
+            return
+        if _json(await self._command("ps", "--all", "--format=json")) != []:
+            raise SuccessorContainerError("stale Podman namespace still owns containers")
+        await self._command("system", "migrate")
+        if not await visible():
+            raise SuccessorContainerError("Podman namespace differs from service mounts")
+
     async def launch(
         self, activation: AuthenticatedSuccessorActivation, release: VerifiedSuccessorOCI
     ) -> SuccessorContainerStatus:
@@ -721,7 +771,12 @@ class PodmanSuccessorContainer:
         await self.check_host()
         await self._inspect_image(release)
         mounts = self._worker_mounts(activation)
+        await self._refresh_mount_namespace(mounts)
         labels = self._labels(activation)
+        if self.source_overlay is not None:
+            labels[_LABEL + "worker-source-host"] = (
+                self.source_overlay.approval.signed_host.manifest_sha256
+            )
         network = (
             "none"
             if activation.profile == "competition_replay"
@@ -732,6 +787,8 @@ class PodmanSuccessorContainer:
             args.extend(("--label", f"{key}={value}"))
         for mount in mounts:
             args.extend(("--mount", mount))
+        if self.rpc_transport_directory is not None:
+            args.extend(("--env", f"{CONFIG_ENV}={WORKER_DIRECTORY}/{CONFIG_FILENAME}"))
         args.extend(
             ("--entrypoint", ENTRYPOINT, self._image_reference(release), activation.profile)
         )

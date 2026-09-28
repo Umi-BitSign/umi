@@ -138,6 +138,56 @@ def test_first_run_and_exact_restart_return_the_same_receipt(
     assert first.receipt.runtime_identity_authenticated is False
 
 
+@pytest.mark.parametrize("restart", [False, True])
+def test_completed_replay_reuses_publications_after_retry_or_restart(
+    package_case,
+    policy,
+    package_limits,
+    release_identity,
+    worker_capacity,
+    tmp_path,
+    monkeypatch,
+    restart,
+):
+    worker = _worker(tmp_path, package_limits, worker_capacity)
+    first = _run(worker, package_case, policy, release_identity)
+
+    def duplicate(*args, **kwargs):
+        raise AssertionError("completed evidence must not be replayed into the journal again")
+
+    monkeypatch.setattr(PublicationJournal, "record_cutoff", duplicate)
+    monkeypatch.setattr(PublicationJournal, "record_settlement", duplicate)
+    if restart:
+        worker = _worker(tmp_path, package_limits, worker_capacity)
+    second = _run(worker, package_case, policy, release_identity)
+    assert second == first
+    worker.verify_publication_unchanged(second)
+
+
+def test_completed_replay_still_rejects_changed_package_bytes(
+    package_case,
+    policy,
+    package_limits,
+    release_identity,
+    worker_capacity,
+    tmp_path,
+):
+    worker = _worker(tmp_path, package_limits, worker_capacity)
+    _run(worker, package_case, policy, release_identity)
+    manifest = package_case.path / "manifest.json"
+    manifest.chmod(0o600)
+    original = manifest.read_bytes()
+    try:
+        manifest.write_bytes(original + b" ")
+        manifest.chmod(0o400)
+        with pytest.raises(ValueError):
+            _run(worker, package_case, policy, release_identity)
+    finally:
+        manifest.chmod(0o600)
+        manifest.write_bytes(original)
+        manifest.chmod(0o400)
+
+
 def test_cached_receipt_gets_fresh_conflict_status_after_restart(
     package_case,
     policy,

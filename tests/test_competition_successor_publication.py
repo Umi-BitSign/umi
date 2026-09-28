@@ -347,7 +347,9 @@ def test_expired_partial_signing_preserves_bytes_and_allows_a_later_round(
     assert not case.builder.journal.keys("expired_intent")
     monkeypatch.setattr(publication_module, "sign_response_digest", real_sign)
     case.builder = SuccessorRoundPublicationBuilder(case.root, case.plan)
-    with pytest.raises(ValueError, match="reserved publication expired"):
+    with pytest.raises(
+        ValueError, match="publication lacks its original activation and mortality window"
+    ):
         build(case, package_case, 240)
     second = build(case, next_package, 240)
     assert second.intent.sequence == 2 and second.intent.round_sequence == 2

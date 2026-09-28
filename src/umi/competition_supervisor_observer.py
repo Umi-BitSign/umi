@@ -32,6 +32,7 @@ from .competition_host_activation import (
     _validate_worker_execution_bindings,
     validate_authenticated_successor_installation,
 )
+from .competition_reward_continuity import authorized_reward_row
 from .competition_supervisor import (
     load_bound_successor_replay_package,
     parse_canonical_successor_supervisor_directive_history,
@@ -217,7 +218,7 @@ class OwnedSuccessorHostObserver:
             return await self._capture(initial.chain, initial.policy, ())
         recipients = tuple(
             Registration(uid=item.uid, hotkey=item.hotkey)
-            for item in package.retained_settlement.projection.allocations
+            for item in authorized_reward_row(package, authorization).allocations
         )
         return await self._capture(execution.weights.chain, package.policy, recipients)
 

@@ -371,9 +371,7 @@ async def test_partial_decision_recovers_original_observation(harness, scenario)
         await ports.signers[0].certify(conflicting, evidence)
 
 
-async def test_controller_recovers_partial_progress_after_repeated_outages(
-    harness, scenario
-):
+async def test_controller_recovers_partial_progress_after_repeated_outages(harness, scenario):
     h = harness
     native = healthy(h.phase, scenario)
     history = scenario["intake_history"]

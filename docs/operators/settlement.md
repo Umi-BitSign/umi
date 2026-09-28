@@ -690,9 +690,14 @@ python -m umi.competition_successor_publisher_cli \
 Add `--once` to perform one tick and exit. Stdout contains bounded status records,
 not package paths or wallet material. The process owns one finalized provider;
 it closes that provider on exit and drains active signing work on cancellation.
-Invalid inputs, journal conflicts and provider failures stop the command. A
-service manager may restart it with a delay; restarting cannot clear a durable
-conflict hold. Reaching capacity stops new work without deleting history.
+Continuous following retries RPC throttling, transport failures, observation
+timeouts and stale finalized heads at the configured poll interval. It retains
+the same provider and completed package verification, reports `waiting_for_chain`
+with a fixed reason code, and rechecks fresh authority before signing. Lost
+publication acknowledgements recover the original signed record. Invalid proofs,
+changed inputs, journal conflicts and a stopped finality observer stop the command;
+the service manager can restart it without clearing durable holds. Reaching
+capacity stops new work without deleting history.
 
 Discovery accepts canonical private `<settlement-digest>.package.json`
 descriptors whose sealed manifests match the descriptor, filename, policy and
@@ -941,10 +946,43 @@ package across restart. A newer certified allocation replaces it; older rounds
 cannot return. Pending or cryptographically invalid candidate packages confer
 no replacement authority. Corrupt discovery metadata or conflicts remain holds.
 
-If a recipient UID changes hotkey, the whole old row holds. The implementation
-neither pays the new hotkey nor drops or redistributes that allocation. A valid
-newer certified package can still replace the held row. This behavior does not
-create a permanent policy-conflict latch by itself.
+The signed call retains the allocation's raw weights. Subtensor scales the
+largest submitted weight to 65,535 before storing the row. Submission checks
+and stopped-worker recovery apply that same fixed-point scaling and rounding
+when comparing finalized storage, together with the nonce, last-update and
+recipient identity checks. This lets recovery recognize an already-applied
+transaction without changing the signed allocation or submitting it again.
+
+If a recipient UID changes hotkey, the original rule holds the row. A separately
+threshold-signed `umi-reward-recipient-amendment/1` can route listed recipients'
+exact raw shares to the policy's existing burn destination. It binds the original
+continuity authority, package and projection. It cannot choose replacement
+miners, change other shares or rewrite scores. Version 2 continuations carry the
+amendment alongside the original timely admission. Current burn registration and
+mode remain mandatory at publication and submission. The publisher retains one
+immutable amendment per package; retry and restart reuse it. Older continuations
+retain their original bytes and whole-row hold behavior.
+
+Apply an approved signed amendment through the publisher's
+`--prepared-package <private-preparation.json> --recipient-amendment
+<private-signed-amendment.json>` mode, with the existing `--config` and `--policy`.
+The command retains the amendment; ordinary publication/renewal produces the new
+authorization. It does not submit weights. All consumers must support the new
+continuation before it is published. A valid newer certified package can still
+replace a held row without changing the original evidence.
+
+An explicit `umi-reward-recipient-amendment/2` can also group an endpoint-only
+allocation by the literal IP addresses in its certified, signed submissions.
+Ports do not create separate groups; IPv4-mapped IPv6 addresses use their IPv4
+identity. Each group's share uses its highest qualifying certified score, and
+the resulting group budget is divided equally among its qualifying UIDs.
+Integer rounding preserves the total endpoint budget and burn allocation.
+Current endpoint changes cannot alter the retained grouping. This amendment
+requires the model allocation to go to the policy's burn destination, preserves
+the preceding burn amendment, and binds its signed digest. The publisher retains
+both amendments and uses the grouping in subsequent renewals. Historical scores,
+certificates and payments are unchanged. Upgrade all consumers before publishing
+the new amendment; older consumers reject its schema.
 
 A threshold-signed continuity revocation durably stops new publisher leases.
 Already issued leases expire within the configured maximum write-authorization

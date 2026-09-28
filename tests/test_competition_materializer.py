@@ -407,3 +407,20 @@ def test_plain_document_is_not_an_installation(case):
             config_path=case.item.paths.config,
             limits=case.limits,
         )
+
+
+async def test_slow_anchor_check_preserves_floor_and_recaptures_proof(case, monkeypatch):
+    recheck = case.value._recheck
+    initial = case.mint()
+
+    def slow_recheck():
+        recheck()
+        for proof in case.issued:
+            proof.live = False
+
+    monkeypatch.setattr(case.value, "_recheck", slow_recheck)
+    result = await case.value.activate(case.selection, case.files, owned_observation=initial)
+    result.recheck()
+    assert not initial.live
+    assert result._observation is case.issued[-1]
+    assert result._observation is not initial and result._observation.live

@@ -47,8 +47,10 @@ from .competition_host_activation import (
     validate_authenticated_successor_installation,
 )
 from .competition_package import VerifiedCompetitionPackage
+from .competition_progress import log_phase
 from .competition_recovery_packages import RecoveryPackageReplay
 from .competition_release import VerifiedSuccessorOCI
+from .competition_reward_continuity import authorized_reward_row
 from .competition_supervisor import (
     MAX_SUCCESSOR_HISTORY_BYTES,
     MAX_SUCCESSOR_HISTORY_RECORDS,
@@ -81,6 +83,7 @@ from .competition_worker_cli import SuccessorWorkerExecutionConfig
 from .encoding import account_id32
 from .open_competition import digest
 from .protocol import canonical_json_bytes
+from .weight_storage import subtensor_stored_weights
 
 _MAX_EXECUTION_BYTES = 128 * 1024
 _MAX_AUTHORIZATION_BYTES = 128 * 1024
@@ -456,6 +459,7 @@ class ProductionSuccessorRuntimeAdapter:
                 ),
             )
 
+    @log_phase("package_verification")
     def _verify(self, selection, files, *, recovery_packages: RecoveryPackageReplay | None = None):
         validate_authenticated_successor_installation(self.installation)
         if selection.continuation_bytes is not None and (
@@ -508,6 +512,7 @@ class ProductionSuccessorRuntimeAdapter:
         )
         return _Prepared(selection, files, execution, package, authorization)
 
+    @log_phase("publication_replay")
     def _replay(self, prepared):
         worker = CompetitionReplayWorker(
             self.root / "preflight-replay",
@@ -524,6 +529,7 @@ class ProductionSuccessorRuntimeAdapter:
             raise SuccessorAdapterError("successor publication replay is held")
         return result
 
+    @log_phase("artifact_staging")
     async def stage(self, selection):
         files = await self.materializer.fetch(selection)
         if type(files) is not SuccessorArtifactFiles:
@@ -577,6 +583,7 @@ class ProductionSuccessorRuntimeAdapter:
     async def preflight(self, selection, observation):
         await self._preflight_at_floor(selection, self._observation_floor(observation))
 
+    @log_phase("preflight")
     async def _preflight_at_floor(self, selection, floor):
         prepared = self._staged.get(selection.directive_sha256)
         if prepared is None:
@@ -662,6 +669,7 @@ class ProductionSuccessorRuntimeAdapter:
                 result[identity] = attempt
             return result
 
+    @log_phase("transaction_recovery")
     async def recover_stopped_transactions(self, observation):
         self._recovered = None
         self._recovered_floor = None
@@ -849,11 +857,14 @@ class ProductionSuccessorRuntimeAdapter:
                 prepared.execution.weights.chain,
                 submission=False,
             )
-            row = prepared.package.retained_settlement.projection
-            if current.validator_row != tuple(zip(row.uids, row.weights, strict=True)):
+            row = authorized_reward_row(prepared.package, prepared.authorization.authorization)
+            if current.validator_row != tuple(
+                zip(row.uids, subtensor_stored_weights(row.weights), strict=True)
+            ):
                 return False
         return True
 
+    @log_phase("worker_start")
     async def _start(self, selection, expected_mode):
         if (
             selection.mode != expected_mode
@@ -876,9 +887,10 @@ class ProductionSuccessorRuntimeAdapter:
         # and collect a new owned proof after the image work below.
         floor = self._recovered_floor
         await self.container.prepare_image(prepared.release)
+        # Complete immutable package verification before the launch proof.
+        prepared = self._verify(selection, prepared.files)
         await self._preflight_at_floor(selection, floor)
         observation = self._preflight[selection.directive_sha256]
-        prepared = self._verify(selection, prepared.files)
         if prepared.authorization is not None:
             if prepared.authorization.authorization.authorization_id in self._attempts():
                 # A stopped failed/held process may have had its exact effect

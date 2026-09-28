@@ -23,7 +23,6 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
-from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain_resources import CompetitionChainResources
@@ -48,6 +47,7 @@ from .open_competition import (
 )
 from .policy import FinalityVerifierPin, LiveChainObservationPin
 from .protocol import canonical_json_bytes
+from .rpc_transport import websocket_connect
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
     BittensorRawJsonRpc,
@@ -96,6 +96,10 @@ def verified_model_burn_destination(policy, values, registrations):
     ):
         raise ValueError("model burn destination registration changed")
     return BurnDestination(uid=destination.uid, hotkey=destination.hotkey, mode="Burn")
+
+
+class RegistrationProviderTimeout(ValueError):
+    """A bounded observation attempt expired; retained evidence remains usable."""
 
 
 class _AwaitingFinality(ValueError):
@@ -748,7 +752,7 @@ class FinalizedRegistrationProvider:
                 retry_startup(), timeout=self.config.startup_timeout_seconds
             )
         except asyncio.TimeoutError as error:
-            raise ValueError("registration startup timed out") from error
+            raise RegistrationProviderTimeout("registration startup timed out") from error
 
     async def aclose(self) -> None:
         self._closed = True
@@ -800,7 +804,7 @@ class FinalizedRegistrationProvider:
                 self._collect_locked(height), self.config.collection_timeout_seconds
             )
         except asyncio.TimeoutError as error:
-            raise ValueError("registration collection timed out") from error
+            raise RegistrationProviderTimeout("registration collection timed out") from error
 
     async def _collect_locked(self, height: int | None = None) -> RegistrationCapture:
         async with self._lock:

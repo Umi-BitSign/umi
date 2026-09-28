@@ -4,6 +4,27 @@
 
 - [Successor supervisor upgrade requirements](#successor-supervisor-upgrade)
 
+## Supervisor maintenance for an installed successor
+
+A supervisor fix can retain the installed worker release, reward package,
+signed directive history and original recovery journals. Stage the replacement
+under its own revision and signed host manifest. A root-owned
+`/etc/umi/validator-supervisor-maintenance.json` selects that host for the exact
+configuration and installation receipt, using `umi-supervisor-host-maintenance/1`.
+It contains their SHA-256 digests, the original host manifest digest and the new
+signed host artifact. The replacement must satisfy the installed release authority.
+
+After native stop/cleanup, select the new executable and read-only host mount in
+the existing service. Startup verifies both the original activation controls and
+the replacement's source/interpreter, and reports the effective host identity.
+Retain the original host and controls while worker or recovery consumers use them.
+Keep the maintenance approval while this executable is selected; remove it after
+a later installed transition no longer depends on the original receipt.
+
+The supervisor reuses immutable package verification within one process, checking
+all file bytes and bounds on each load. Restart verifies the package again. Reward
+authority and current chain state are checked separately for each execution.
+
 <a id="successor-supervisor-upgrade"></a>
 
 ## Successor supervisor upgrade requirements
@@ -1226,6 +1247,61 @@ Publish and verify separate `linux/amd64` and `linux/arm64` host artifacts and O
 images. Both architectures need the same contract and migration tests. UID 0 and
 UID 54 remain separate installations with separate hotkeys, state and service
 lifecycles. Upgrade and verify one without stopping or changing the other.
+
+### Worker mount visibility after host updates
+
+Before launching a worker, the host compares each bind source with the same path
+inside Podman's rootless namespace. A retained pause process can still see the
+previous systemd mount tree. If the namespace differs and Podman owns no containers,
+the host runs native `podman system migrate` and verifies the paths again. Any
+retained container, including a stopped one, prevents this automatic refresh.
+The supervisor must first reconcile and remove its own prior worker. Keep each
+validator on its dedicated service account.
+
+### Authenticated RPC providers
+
+Successor hosts can select an operational RPC route with the service environment
+variable `UMI_RPC_TRANSPORT_CONFIG`, pointing to an absolute `transport.json` file.
+This changes the connection destination without rewriting signed chain inputs or
+retained transaction bindings. Native finality and storage proofs still decide
+which returned values are accepted. The existing two backup providers remain in
+the chain configuration and receive no primary-provider credentials.
+
+```json
+{
+  "schema": "umi-rpc-transport/1",
+  "routes": [{
+    "source": "wss://archive.chain.opentensor.ai:443",
+    "endpoint": "wss://api.taostats.io/api/v1/rpc/ws/finney_archive",
+    "authorization_file": "taostats.key"
+  }]
+}
+```
+
+Store the key in the named file beside the configuration, with mode `0600` and
+ownership by the service account. Use a dedicated directory containing only the
+RPC configuration and its credentials. Neither URLs nor configuration JSON
+contain the key. Keep both files outside Git and signed artifact trees. The host
+mounts that directory read-only into each worker and passes only the configuration
+path in its environment. Both proof reads and the pinned transaction transport
+use the route; exact signed transaction bytes and recovery semantics are unchanged.
+
+Match the source URL exactly, including an explicit port if the installed
+configuration contains one. Add separate route entries for different source
+spellings when needed. Retain two independent backup providers.
+
+The provider receives an `Authorization` header. Authenticated connections do
+not follow redirects or emit WebSocket debug logs. Route logs identify source,
+destination and whether authentication is enabled, without credential contents.
+Small JSON-RPC error frames with code `429` trigger a 30-second provider cooldown,
+including gateway throttles with a sentinel request ID. Proof reads and SDK reads
+can use the existing backups during that cooldown. A transmitted transaction
+keeps the SDK's unknown-outcome recovery behavior and is never blindly resent.
+Other response frames retain their original validation and request-ID checks.
+An unavailable credential fails that provider's connection and permits the
+existing transport fallback. An invalid route configuration requires correction.
+Verify authenticated reads from the installed host and worker before claiming
+the operational switch is complete.
 
 <a id="successor-supervisor-upgrade--acceptance-checks"></a>
 

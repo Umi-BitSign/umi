@@ -26,6 +26,7 @@ from .competition_materialization import (
     stage_successor_current,
 )
 from .competition_materialization_retention import retire_redundant_successor_inputs
+from .competition_progress import log_phase
 from .competition_supervisor import verify_signed_successor_supervisor_directive
 from .competition_supervisor_adapters import SuccessorArtifactFiles, SuccessorArtifactObserver
 from .competition_supervisor_runtime import SuccessorWorkerSelection
@@ -60,6 +61,7 @@ class AuthenticatedSuccessorArtifactMaterializer:
         self._anchor = load_materialized_successor_anchor(config_path)
         self._recheck()
 
+    @log_phase("materializer_anchor")
     def _recheck(self):
         validate_authenticated_successor_installation(self.installation)
         self._anchor.recheck()
@@ -77,6 +79,7 @@ class AuthenticatedSuccessorArtifactMaterializer:
                 "materializer differs from the installed root controls"
             )
 
+    @log_phase("materializer_stage")
     def _stage(self, selection, files):
         self._recheck()
         return stage_successor_current(
@@ -117,6 +120,7 @@ class AuthenticatedSuccessorArtifactMaterializer:
             )
         return observation.block, observation.block_hash
 
+    @log_phase("materializer_observation")
     async def _fresh(self, selection, files, floor, *, worker_inputs=None):
         # Root source/archive authentication may be expensive. Complete it
         # before capturing finality; afterward the verified RO inode snapshot
@@ -149,11 +153,12 @@ class AuthenticatedSuccessorArtifactMaterializer:
             )
         return observation
 
+    @log_phase("materializer_activation")
     async def activate(self, selection, artifacts, *, owned_observation):
         async with self._mutex:
-            self._recheck()
             # This immutable floor is not current authority after slow work.
             floor = self._floor(owned_observation, selection)
+            self._recheck()
             staged = self._stage(selection, artifacts)
             current = await self._fresh(selection, artifacts, floor)
             floor = (current.block, current.block_hash)

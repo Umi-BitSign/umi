@@ -19,9 +19,15 @@ from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProv
 from .competition_launch import PublicLaunchIdentity
 from .competition_package import PreparedCompetitionPackage
 from .competition_policy_lineage import replay_lineage
+from .competition_reward_continuity import SignedRewardRecipientAmendment
 from .competition_store import CompetitionStore
 from .competition_successor_feed import SuccessorFeedConfig, SuccessorPublicationFeed
-from .competition_successor_follow import AutomaticSuccessorPublisher, SuccessorFollowConfig
+from .competition_successor_follow import (
+    AutomaticSuccessorPublisher,
+    SuccessorFollowConfig,
+    poll_successor_rounds,
+    wait_publisher_ready,
+)
 from .competition_successor_publication import (
     SuccessorRoundPublicationBuilder,
     SuccessorRoundPublicationPlan,
@@ -82,16 +88,22 @@ class SuccessorPublisherConfig(StrictProtocolModel):
 
 
 @asynccontextmanager
-async def _managed_publisher(config, policy, *, feed_config=None, predecessor_policies=()):
+async def _managed_publisher(
+    config, policy, *, feed_config=None, predecessor_policies=(), retry_seconds=None, report=None
+):
     # Scope the operator's admitted lineage to this publisher, including its
     # owned replay threads. A package's own lineage cannot authorize the store.
     with replay_lineage(policy, predecessor_policies):
-        async with _managed_publisher_sources(config, policy, feed_config=feed_config) as managed:
+        async with _managed_publisher_sources(
+            config, policy, feed_config=feed_config, retry_seconds=retry_seconds, report=report
+        ) as managed:
             yield managed
 
 
 @asynccontextmanager
-async def _managed_publisher_sources(config, policy, *, feed_config=None):
+async def _managed_publisher_sources(
+    config, policy, *, feed_config=None, retry_seconds=None, report=None
+):
     config = SuccessorPublisherConfig.model_validate_json(canonical_json_bytes(config))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if config.plan.policy_sha256 != digest(policy):
@@ -145,7 +157,10 @@ async def _managed_publisher_sources(config, policy, *, feed_config=None):
     try:
         publisher = CurrentSuccessorRoundPublisher(builder, store, replay, provider)
         await provider.start()
-        await provider.wait_ready()
+        if retry_seconds is None:
+            await provider.wait_ready()
+        else:
+            await wait_publisher_ready(provider, retry_seconds=retry_seconds, report=report)
         # Only the explicitly named authority hotkeys are resolved by the
         # signing core. No coldkey or validator wallet is selected implicitly.
         signers = {
@@ -169,6 +184,21 @@ async def sign_round(config, policy, prepared, *, feed_config=None, predecessor_
         if feed is not None:
             await feed.retain_async(result, prepared)
         return result
+
+
+async def amend_recipients(config, policy, prepared, signed, *, predecessor_policies=()):
+    async with _managed_publisher(config, policy, predecessor_policies=predecessor_policies) as (
+        publisher,
+        _,
+        _signers,
+    ):
+        await publisher.amend_recipients(prepared, signed)
+        return {
+            "status": "recipient_amendment_retained",
+            "package_sha256": prepared.package_sha256,
+            "amendment_sha256": digest(signed),
+            "chain_submission_authorized": False,
+        }
 
 
 async def follow_rounds(
@@ -195,22 +225,17 @@ async def follow_rounds(
             if source == other or source in other.parents or other in source.parents:
                 raise ValueError("completed-round sources overlap authority or execution state")
     async with _managed_publisher(
-        config, policy, feed_config=feed_config, predecessor_policies=predecessor_policies
-    ) as (
-        publisher,
-        feed,
-        signers,
-    ):
+        config,
+        policy,
+        feed_config=feed_config,
+        predecessor_policies=predecessor_policies,
+        retry_seconds=None if once else follow_config.poll_interval_seconds,
+        report=report,
+    ) as (publisher, feed, signers):
         automatic = AutomaticSuccessorPublisher(publisher, feed, follow_config, **signers)
-        while True:
-            # Invalid inputs and journal conflicts fail closed. A service
-            # manager may restart this command; durable holds are not cleared.
-            result = await automatic.tick()
-            if report is not None:
-                report(result)
-            if once:
-                return result
-            await asyncio.sleep(follow_config.poll_interval_seconds)
+        return await poll_successor_rounds(
+            automatic, poll_seconds=follow_config.poll_interval_seconds, once=once, report=report
+        )
 
 
 def main(argv=None):
@@ -229,11 +254,16 @@ def main(argv=None):
     mode.add_argument("--follow-config", type=Path)
     parser.add_argument("--feed-config", type=Path)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--recipient-amendment", type=Path)
     args = parser.parse_args(argv)
     if args.follow_config is not None and args.feed_config is None:
         parser.error("--follow-config requires --feed-config")
     if args.once and args.follow_config is None:
         parser.error("--once requires --follow-config")
+    if args.recipient_amendment is not None and (
+        args.prepared_package is None or args.feed_config is not None
+    ):
+        parser.error("--recipient-amendment requires --prepared-package without --feed-config")
     try:
         config = _read(args.config, SuccessorPublisherConfig)
         policy = _read(args.policy, CompetitionPolicy)
@@ -258,6 +288,15 @@ def main(argv=None):
             )
             return
         prepared = _read(args.prepared_package, PreparedCompetitionPackage)
+        if args.recipient_amendment is not None:
+            signed = _read(args.recipient_amendment, SignedRewardRecipientAmendment)
+            result = asyncio.run(
+                amend_recipients(
+                    config, policy, prepared, signed, predecessor_policies=predecessors
+                )
+            )
+            print(canonical_json_bytes(result).decode("utf-8"))
+            return
         result = asyncio.run(
             sign_round(
                 config,

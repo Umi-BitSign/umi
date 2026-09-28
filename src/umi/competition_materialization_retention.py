@@ -14,6 +14,7 @@ import uuid
 
 from . import competition_host_anchor as anchors
 from . import competition_materialization as material
+from .competition_progress import log_phase
 from .protocol import canonical_json_bytes
 
 
@@ -143,6 +144,7 @@ def _cache_names(cache_fd, limits):
     return sorted(names)
 
 
+@log_phase("cache_retirement")
 def retire_redundant_successor_inputs(*, anchor, limits, retained):
     """Retire exact cache copies backed by the adapter's audited run registry.
 
