@@ -3,10 +3,11 @@
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_execution_journal import CohortExecutionConfig
+from .competition_cohort_intake import CohortIntakeConfig
 from .competition_cohort_recovery import verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import ObjectCapacity, _disjoint
@@ -16,13 +17,38 @@ from .competition_reward_manifest import (
     StandingRewardOpportunityManifest,
     verify_reward_manifest,
 )
-from .open_competition import CompetitionPolicy, Hotkey, digest, identity
+from .open_competition import CompetitionPolicy, Hotkey, Track, digest, identity
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 
+class SettlementOriginalSources(StrictProtocolModel):
+    intake: CohortIntakeConfig
+    eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)]
+    round_directory: Directory
+    objects_directory: Directory
+    catalogs_directory: Directory
+    transport_directory: Directory
+    pulses_directory: Directory
+
+    def stores(self):
+        return tuple(
+            Path(p)
+            for p in (
+                self.intake.directory,
+                self.round_directory,
+                self.objects_directory,
+                self.catalogs_directory,
+                self.transport_directory,
+                self.pulses_directory,
+            )
+        )
+
+
 class SettlementServiceConfig(StrictProtocolModel):
-    schema_: Literal["umi-cohort-settlement-config/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-settlement-config/1", "umi-cohort-settlement-config/2"] = Field(
+        alias="schema"
+    )
     role: Literal["coordinator", "reviewer"]
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -46,6 +72,14 @@ class SettlementServiceConfig(StrictProtocolModel):
     maximum_state_bytes: Annotated[int, Field(ge=1024 * 1024, le=16 * 1024**3)]
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
+    original_sources: SettlementOriginalSources | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        value = handler(self)
+        if self.original_sources is None:
+            value.pop("original_sources", None)
+        return value
 
     def stores(self):
         return tuple(
@@ -62,6 +96,7 @@ class SettlementServiceConfig(StrictProtocolModel):
                 self.exchange_inbox,
                 self.exchange_outbox,
                 *(e.directory for e in self.executions),
+                *(self.original_sources.stores() if self.original_sources else ()),
             )
         )
 
@@ -72,6 +107,19 @@ class SettlementServiceConfig(StrictProtocolModel):
         groups = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
         who, proposer = identity(self.signer_hotkey), identity(self.proposer_hotkey)
         cohorts = {digest(p) for p in self.series.cohorts}
+        sources = self.original_sources
+        if (self.schema_ == "umi-cohort-settlement-config/2") != (sources is not None):
+            raise ValueError("automatic settlement sources require configuration version 2")
+        if sources is not None and (
+            self.role != "coordinator"
+            or len(set(sources.eligible_tracks)) != len(sources.eligible_tracks)
+            or {c.cohort_sha256 for c in sources.intake.cohorts} != cohorts
+            or any(
+                c.authority_sha256 != digest(self.series.recovery.authority)
+                for c in sources.intake.cohorts
+            )
+        ):
+            raise ValueError("original settlement sources differ from coordinator authority")
         if (
             who not in groups
             or proposer not in groups

@@ -18,11 +18,16 @@ from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery import RecoverableCohortPlan
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_settlement import CohortSettlement
+from .competition_cohort_settlement_assembly import assemble_settlement_inputs
 from .competition_cohort_settlement_config import SettlementServiceConfig
 from .competition_cohort_settlement_controller import CohortSettlementPhases, SettlementInputBatch
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles, SettlementResultVotes
 from .competition_cohort_settlement_exchange import PHASES, SettlementReviewExchange
-from .competition_cohort_settlement_inputs import SettlementInputPackage, replay_settlement_inputs
+from .competition_cohort_settlement_inputs import (
+    SettlementInputPackage,
+    publish_settlement_inputs,
+    replay_settlement_inputs,
+)
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_cohort_settlement_signing import SettlementPhaseSigner
 from .competition_execution import execution_boundary
@@ -90,6 +95,7 @@ class CohortSettlementService:
         self.completed_requests = {}
         self.last_report = None
         self.published_tip = None
+        self.package = None
 
     async def _handoff(self):
         # This host-selected publication is mandatory, even after restart.
@@ -148,23 +154,52 @@ class CohortSettlementService:
         return self.store.source(self.cohort, key, CohortDecisionInput)
 
     async def _start(self, history):
-        package = await run_owned_thread(
-            partial(
-                read_private_model,
-                Path(self.config.inputs_directory) / (self.cohort + ".json"),
-                SettlementInputPackage,
-                maximum_bytes=self.config.maximum_package_bytes,
-            )
-        )
-        prior = self.journal.get("settlement_input", "original")
-        if prior is not None and prior != {"sha256": digest(package)}:
-            raise ValueError("settlement inputs changed after their first native review")
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
             for t in history.transitions
             if t.transition.operation != "revoke"
         }
         state, _ = self.store.status(self.cohort)
+        path = Path(self.config.inputs_directory) / (self.cohort + ".json")
+        prior = self.journal.get("settlement_input", "original")
+        try:
+            package = await run_owned_thread(
+                partial(
+                    read_private_model,
+                    path,
+                    SettlementInputPackage,
+                    maximum_bytes=self.config.maximum_package_bytes,
+                )
+            )
+        except FileNotFoundError:
+            # Once reviewed, a missing original must be restored, never rebuilt
+            # from a possibly different source set or newer selection.
+            if prior is not None or self.config.original_sources is None:
+                raise
+            logger.info("settlement_inputs cohort=%s status=assembling", self.cohort)
+            package = await run_owned_thread(
+                partial(
+                    assemble_settlement_inputs,
+                    self.config.original_sources,
+                    self.config.policy,
+                    self.config.manifest.requirement(self.cohort),
+                    history,
+                    decisions.__getitem__,
+                    current_block=state.observed_at_block,
+                    maximum_bytes=self.config.maximum_package_bytes,
+                )
+            )
+            await run_owned_thread(
+                partial(
+                    publish_settlement_inputs,
+                    path,
+                    package,
+                    maximum_bytes=self.config.maximum_package_bytes,
+                )
+            )
+            logger.info("settlement_inputs cohort=%s status=retained", self.cohort)
+        if prior is not None and prior != {"sha256": digest(package)}:
+            raise ValueError("settlement inputs changed after their first native review")
         self.data = await run_owned_thread(
             partial(
                 replay_settlement_inputs,
@@ -180,6 +215,7 @@ class CohortSettlementService:
             )
         )
         self.journal.put("settlement_input", "original", {"sha256": digest(package)})
+        self.package = package
         delivered = SettlementEvidenceFiles(Path(self.config.exchange_inbox) / "objects")
 
         def objects(key):
@@ -289,6 +325,15 @@ class CohortSettlementService:
             return "package_published"
         if self.phases is None:
             await self._start(history)
+        if self.config.role == "coordinator":
+            await run_owned_thread(
+                partial(
+                    publish_settlement_inputs,
+                    Path(self.config.exchange_outbox) / "inputs" / (self.cohort + ".json"),
+                    self.package,
+                    maximum_bytes=self.config.maximum_package_bytes,
+                )
+            )
         await self.votes.publish()
         self.batch_votes = await run_owned_thread(self.votes.collect)
         if self.config.role == "reviewer":

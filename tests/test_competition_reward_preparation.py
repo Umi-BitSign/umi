@@ -2981,6 +2981,7 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
         calls=calls,
         clock=clock,
         provider=provider,
+        assemble_inputs=False,
     )
 
     def config(name):
@@ -3005,8 +3006,18 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
                 "exchange_outbox",
             )
         }
+        from .cohort_settlement_original_fixture import select_original_sources
+
+        sources = (
+            select_original_sources(root / "originals", history)
+            if result.assemble_inputs and name == "Charlie"
+            else None
+        )
         return SettlementServiceConfig(
-            schema="umi-cohort-settlement-config/1",
+            schema="umi-cohort-settlement-config/2"
+            if sources
+            else "umi-cohort-settlement-config/1",
+            original_sources=sources,
             role="coordinator" if name == "Charlie" else "reviewer",
             series=series,
             policy=b["policy"],
@@ -3051,10 +3062,15 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
         for d in b["decisions"].values():
             await proofs.publish(d.observation)
         copy(Path(conf.proof_export_directory), Path(conf.proof_import_directory))
-        publish_settlement_inputs(
-            Path(conf.inputs_directory) / (digest(history.plan) + ".json"),
-            c.package,
-        )
+        if not result.assemble_inputs:
+            publish_settlement_inputs(
+                Path(conf.inputs_directory) / (digest(history.plan) + ".json"),
+                c.package,
+            )
+        elif conf.original_sources is not None and name not in result.nodes:
+            from .cohort_settlement_original_fixture import publish_original_sources
+
+            result.intake = publish_original_sources(conf.original_sources, b)
         publish_private_model(
             Path(conf.history_directory) / (digest(history.plan) + ".json"),
             CohortOrderHistory(
@@ -3112,6 +3128,8 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
             a, z = result.configs[sender], result.configs[receiver]
             copy(Path(a.exchange_outbox), Path(z.exchange_inbox))
             copy(Path(a.proof_export_directory), Path(z.proof_import_directory))
+            if a.role == "coordinator":
+                copy(Path(a.exchange_outbox) / "inputs", Path(z.inputs_directory))
 
     result.start, result.deliver = start, deliver
     try:
@@ -3269,6 +3287,222 @@ async def test_recurring_settlement_loops_publish_with_automatic_file_delivery(
     assert a.last_report == "package_published"
     assert max(h.calls.values()) == 1
     assert h.b["service_case"].p.model.calls == 1
+
+
+async def test_automatic_settlement_assembly_delivery_and_late_restart(recurring_settlement_case):
+    from pathlib import Path
+
+    from umi.competition_cohort_settlement_assembly import assemble_settlement_inputs
+    from umi.competition_cohort_settlement_inputs import SettlementInputPackage
+    from umi.private_files import read_private_model
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    a, z = await h.start("Charlie"), await h.start("Dave")
+    for node in (a, z):
+        assert not (Path(node.config.inputs_directory) / (node.cohort + ".json")).exists()
+        node.config = node.config.model_copy(update={"poll_seconds": 1})
+    stop = asyncio.Event()
+    tasks = [asyncio.create_task(n.run(stop)) for n in (a, z)]
+    output = Path(a.config.settlement_directory) / (a.cohort + ".json")
+
+    async def replicate():
+        while not output.exists():
+            h.deliver()
+            for task in tasks:
+                if task.done():
+                    task.result()
+                    pytest.fail("settlement stopped before publication")
+            await asyncio.sleep(0.05)
+
+    try:
+        await asyncio.wait_for(replicate(), timeout=180)
+    finally:
+        stop.set()
+        await asyncio.gather(*tasks)
+    path = Path(a.config.inputs_directory) / (a.cohort + ".json")
+    package = read_private_model(path, SettlementInputPackage)
+    assert package == h.c.package
+    assert len(package.intake) == 3  # Includes superseded consent for the two selected miners.
+    # A first producer arriving after certification must select the same original prefix.
+    current = a.store.published_history(a.cohort)
+    assert len(current.transitions) > len(package.inputs.history.transitions)
+    assert (
+        assemble_settlement_inputs(
+            a.config.original_sources,
+            a.config.policy,
+            h.c.requirement,
+            current,
+            a._decisions,
+            current_block=h.clock.block + 100000,
+            maximum_bytes=a.config.maximum_package_bytes,
+        )
+        == package
+    )
+    before = dict(h.calls)
+    original = path.read_bytes()
+    # Lose the entire upstream publication and export, retaining the original reviewed package.
+    sources_root = Path(a.config.original_sources.intake.directory).parent
+    sources_root.rename(sources_root.with_name("sources-offline"))
+    outbox = Path(a.config.exchange_outbox) / "inputs" / (a.cohort + ".json")
+    outbox.unlink()
+    h.clock.block += 100000
+    a = await h.start("Charlie")
+    assert await a.tick() == "package_published"
+    assert path.read_bytes() == outbox.read_bytes() == original
+    assert dict(h.calls) == before and max(h.calls.values()) == 1
+    assert h.b["service_case"].p.model.calls == 1
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "changed", "superseded", "round", "catalog", "pulse", "revoked"]
+)
+async def test_automatic_settlement_incomplete_sources_never_sign(recurring_settlement_case, fault):
+    from pathlib import Path
+
+    from umi.competition_cohort_intake_records import read_participation
+    from umi.competition_cohort_order_signer import CohortOrderHistory
+    from umi.private_files import read_private_model
+
+    from .test_competition_cohort_consumers import transition
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    a = await h.start("Charlie")
+    s, restore = a.config.original_sources, None
+    if fault in {"missing", "changed"}:
+        path = Path(s.objects_directory) / (digest(h.b["closure"]) + ".json")
+    elif fault == "round":
+        path = Path(s.round_directory) / (a.cohort + ".json")
+    elif fault == "catalog":
+        path = Path(s.catalogs_directory) / (h.c.requirement.catalog_sha256s[0] + ".json")
+    elif fault == "pulse":
+        path = next(Path(s.pulses_directory).glob("*.json"))
+    elif fault == "superseded":
+        key = next(
+            k
+            for k, raw in h.b["records"]
+            if read_participation(raw).request.signed_submission.submission.sequence == 1
+            and k
+            not in {m.record.proposed_admission.consent_sha256 for m in h.b["roster"].participants}
+        )
+        with h.intake._connection() as (db, _):
+            restore = db.execute("SELECT * FROM cohort_consents WHERE consent=?", (key,)).fetchone()
+            db.execute("DELETE FROM cohort_consents WHERE consent=?", (key,))
+    else:
+        path = Path(a.config.history_directory) / (a.cohort + ".json")
+        selected = read_private_model(path, CohortOrderHistory)
+        revoked = transition(selected.history, a.config.policy, "revoke", h.clock.block)
+        path.write_bytes(canonical_json_bytes(selected.model_copy(update={"history": revoked})))
+        assert await a.tick() == "revoked"
+        assert not h.calls
+        assert not (Path(a.config.inputs_directory) / (a.cohort + ".json")).exists()
+        return
+    if restore is None:
+        raw = path.read_bytes()
+        if fault == "changed":
+            path.write_bytes(b"{}")
+        else:
+            path.unlink()
+    with pytest.raises((FileNotFoundError, ValueError)):
+        await a.tick()
+    assert not h.calls
+    assert a.journal.get("settlement_input", "original") is None
+    assert not (Path(a.config.inputs_directory) / (a.cohort + ".json")).exists()
+    if restore is not None:
+        with h.intake._connection() as (db, _):
+            db.execute("INSERT INTO cohort_consents VALUES (?,?,?,?,?,?,?,?)", restore)
+    else:
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    # A delay is not an expiry. Recover on the next normal polling pass.
+    h.clock.block += 100000
+    with pytest.raises(RuntimeError, match="not ready for attestation"):
+        await a.tick()
+    assert a.package == h.c.package
+
+
+@pytest.mark.parametrize("where", ["before_input", "after_input", "export"])
+async def test_automatic_settlement_recovers_interrupted_publication(
+    recurring_settlement_case, monkeypatch, where
+):
+    from pathlib import Path
+
+    from umi import competition_cohort_settlement_service as service_module
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    a = await h.start("Charlie")
+    publish = service_module.publish_settlement_inputs
+    local = Path(a.config.inputs_directory) / (a.cohort + ".json")
+
+    def interrupted(path, *args, **kwargs):
+        target = path == local if where != "export" else "inputs" in path.parts and path != local
+        if target and where == "before_input":
+            raise OSError("publication interrupted")
+        publish(path, *args, **kwargs)
+        if target:
+            raise OSError("publication acknowledgement lost")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service_module, "publish_settlement_inputs", interrupted)
+        with pytest.raises(OSError):
+            await a.tick()
+    assert not h.calls
+    if where != "before_input":
+
+        def no_rebuild(*args, **kwargs):
+            raise AssertionError("retained package must be reused")
+
+        monkeypatch.setattr(service_module, "assemble_settlement_inputs", no_rebuild)
+    h.clock.block += 100000
+    a = await h.start("Charlie")
+    with pytest.raises(RuntimeError, match="not ready for attestation"):
+        await a.tick()
+    assert a.package == h.c.package
+
+
+@pytest.mark.parametrize("damage", ["lost", "changed"])
+async def test_reviewed_automatic_inputs_require_original_replica(
+    recurring_settlement_case, monkeypatch, damage
+):
+    from pathlib import Path
+
+    from umi import competition_cohort_settlement_service as service_module
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    a = await h.start("Charlie")
+    original_config = a.config
+    a.config = a.config.model_copy(update={"maximum_package_bytes": 1024})
+    with pytest.raises(ValueError, match="byte bound"):
+        await a.tick()
+    assert not h.calls and a.journal.get("settlement_input", "original") is None
+    a.config = original_config
+    await a._start(await a._handoff())
+    path = Path(a.config.inputs_directory) / (a.cohort + ".json")
+    original = path.read_bytes()
+    if damage == "lost":
+        path.unlink()
+    else:
+        path.write_bytes(
+            canonical_json_bytes(a.package.model_copy(update={"policy_sha256": "ff" * 32}))
+        )
+
+    def no_rebuild(*args, **kwargs):
+        raise AssertionError("a reviewed package must be restored, not rebuilt")
+
+    monkeypatch.setattr(service_module, "assemble_settlement_inputs", no_rebuild)
+    a = await h.start("Charlie")
+    with pytest.raises((FileNotFoundError, ValueError)):
+        await a.tick()
+    assert not h.calls
+    path.write_bytes(original)
+    path.chmod(0o600)
+    h.clock.block += 100000
+    with pytest.raises(RuntimeError, match="not ready for attestation"):
+        await a.tick()
+    assert a.package == h.c.package
 
 
 async def test_settlement_input_replica_recovers_before_quality_votes(

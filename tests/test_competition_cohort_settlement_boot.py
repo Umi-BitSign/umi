@@ -87,6 +87,53 @@ def test_settlement_config_and_cli_use_exact_root_selection(selected, capsys):
         load_settlement_service_config(selected.path)
 
 
+@pytest.mark.parametrize(
+    "fault", [None, "version", "role", "tracks", "cohort", "authority", "key", "overlap"]
+)
+def test_original_sources_are_explicit_coordinator_selection(selected, tmp_path, fault):
+    from .cohort_settlement_original_fixture import select_original_sources
+
+    c = selected.config
+    assert "original_sources" not in c.model_dump(mode="json", by_alias=True)
+    data = c.model_dump(mode="json", by_alias=True)
+    plan = c.series.cohorts[0]
+    from types import SimpleNamespace
+
+    sources = select_original_sources(
+        tmp_path / "originals",
+        SimpleNamespace(
+            plan=plan,
+            authority=c.series.recovery,
+        ),
+    ).model_dump(mode="json")
+    sources["intake"]["cohorts"] = [
+        {"cohort_sha256": digest(p), "authority_sha256": digest(c.series.recovery.authority)}
+        for p in sorted(c.series.cohorts, key=digest)
+    ]
+    data.update(schema="umi-cohort-settlement-config/2", original_sources=sources)
+    if fault == "version":
+        data["schema"] = "umi-cohort-settlement-config/1"
+    elif fault == "role":
+        data.update(role="reviewer", proposer_hotkey=wallet("Dave").hotkey.ss58_address)
+    elif fault == "tracks":
+        sources["eligible_tracks"] = ["endpoint", "endpoint"]
+    elif fault == "cohort":
+        sources["intake"]["cohorts"][0]["cohort_sha256"] = "12" * 32
+    elif fault == "authority":
+        sources["intake"]["cohorts"][0]["authority_sha256"] = "12" * 32
+    elif fault == "key":
+        data["signer_key_file"] = sources["objects_directory"] + "/key"
+    elif fault == "overlap":
+        sources["round_directory"] = c.inputs_directory
+    if fault:
+        with pytest.raises(ValueError):
+            SettlementServiceConfig.model_validate_json(canonical_json_bytes(data))
+    else:
+        value = SettlementServiceConfig.model_validate_json(canonical_json_bytes(data))
+        selected.save(selected.path, canonical_json_bytes(value))
+        assert load_settlement_service_config(selected.path) == value
+
+
 @pytest.mark.parametrize("fault", ["role", "key", "stores", "execution", "rpc", "authority"])
 def test_settlement_config_rejects_changed_authority_and_shared_stores(selected, fault):
     c = selected.config

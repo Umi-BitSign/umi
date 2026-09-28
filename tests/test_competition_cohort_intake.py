@@ -140,6 +140,25 @@ def test_extended_intake_retains_explicit_consent_beyond_original_expiry(intake,
     assert canonical_json_bytes(request.signed_submission) == original
 
 
+def test_owner_export_includes_superseded_consent_and_bounds_complete_inventory(intake, scenario):
+    from umi.competition_cohort_intake_records import read_participation
+    from umi.competition_store import AdmissionCapacityError
+
+    intake.retain(request_for(scenario), capture_at(210))
+    intake.retain(request_for(scenario, sequence=2, block=240), capture_at(240))
+    cohort = digest(scenario["intake_history"].plan)
+    original = intake.export_records(cohort, maximum_bytes=1024**2, maximum_records=2)
+    assert len(original) == 2
+    assert {
+        read_participation(raw).request.signed_submission.submission.sequence for _, raw in original
+    } == {1, 2}
+    for size, count in ((1, 2), (1024**2, 1)):
+        with pytest.raises(AdmissionCapacityError):
+            intake.export_records(cohort, maximum_bytes=size, maximum_records=count)
+    restored = CohortIntake(intake.config, intake.policy)
+    assert restored.export_records(cohort, maximum_bytes=1024**2, maximum_records=2) == original
+
+
 def test_closed_intake_rejects_new_work_but_keeps_exact_receipt(intake, scenario):
     request = request_for(scenario)
     receipt = intake.retain(request, capture_at(210))

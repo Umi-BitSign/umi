@@ -421,7 +421,7 @@ visits only the six selected slots, logs retry reasons without evidence payloads
 and continues after an unavailable slot. All these stores are private.
 
 `umi-cohort-settlement check --config CONFIG.json` validates the root-owned,
-canonical mode-`0444` `umi-cohort-settlement-config/1` selection.
+canonical mode-`0444` `umi-cohort-settlement-config/1` or `/2` selection.
 `umi-cohort-settlement run --config CONFIG.json` starts the recurring native
 service for every selected cohort. Coordinator and reviewer roles each load
 only their named evaluator key and their own original execution journals.
@@ -431,7 +431,7 @@ pending, with a bounded retry reason in the service log. A new observation
 requires fresh finality; completing an existing intent uses its original
 observation without an age cutoff.
 
-The service requires two separately selected inputs per cohort:
+Each service retains two separately selected inputs per cohort:
 
 - `inputs_directory/COHORT_SHA256.json`: immutable `SettlementInputPackage`.
   The first native replay pins its digest in local state.
@@ -440,6 +440,36 @@ The service requires two separately selected inputs per cohort:
   The upstream history owner publishes this atomically. It must cover reference
   reveal before settlement can begin and deliver later revocation or recovery
   history. It cannot be inferred from the input package or an arbitrary replica.
+
+Coordinator configuration version 2 adds `original_sources` for automatic input
+assembly. It names the existing `intake` configuration and its exact
+`eligible_tracks`, plus private directories:
+
+- `round_directory/COHORT_SHA256.json`: the admission worker's
+  `PreparedCohortRound` publication.
+- `objects_directory/COMPETITION_DIGEST.json`: `RewardPackageObject` wrappers
+  for the suite, service terms, certified request closure and reference reveal,
+  queue seals, original responses, references and all replay dependencies.
+- `catalogs_directory/CATALOG_BODY_DIGEST.json`: original `SignedServiceWorkCatalog`
+  envelopes for every catalog selected by the approved reward manifest.
+- `transport_directory/POLICY_SHA256.json`: the original `ScoringPolicy`, keyed
+  by its plain canonical SHA-256 rather than the competition object digest.
+- `pulses_directory/ROUND.json`: original `RetainedRevealPulse` values.
+
+The service reads the complete consent inventory through the intake owner's
+locked export, including superseded consent. Certified history selects the
+closure and reveal; the approved manifest selects terms and catalogs. Native
+replay checks every selected miner and all accepted service work before the
+package is retained. A first build after settlement has advanced still uses the
+original evidence-phase history. Missing sources stay pending; no missing work
+becomes a zero or an omitted participant.
+
+Assembly occurs only when no original package or reviewed-package marker exists.
+Restarts reuse the saved bytes, without requiring the upstream sources again.
+If a reviewed package is lost, restore that exact package from a replica; the
+service does not replace it with a new selection. Source directories, mutable
+stores and the signing key must be disjoint. Version 1 configurations retain
+their original canonical bytes and continue to accept delivered input packages.
 
 Initial history import independently verifies the original decision archives.
 The private local ledger retains subsequent certified phases and refuses forks.
@@ -450,6 +480,9 @@ the previous writer.
 
 Replicate fixed paths in each evaluator's exchange outbox into its peers' inboxes:
 `quality/`, `service/`, `requests/`, `votes/`, `objects/` and `history/`.
+Copy the coordinator's `inputs/COHORT_SHA256.json` publication into each
+reviewer's `inputs_directory`; reviewers independently replay it before voting.
+Use private immutable delivery with retry after a lost acknowledgement.
 Replicate proof exports to the configured proof imports separately. Never copy
 live execution SQLite databases between evaluators. The service reconstructs
 lost vote deliveries from its own original journals. The coordinator writes

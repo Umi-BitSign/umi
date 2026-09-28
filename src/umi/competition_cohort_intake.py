@@ -334,6 +334,32 @@ class CohortIntake:
         with self._connection() as (_, store):
             return store.published_history(cohort)
 
+    def export_records(
+        self, cohort: str, *, maximum_bytes: int, maximum_records: int
+    ) -> tuple[tuple[str, bytes], ...]:
+        """Copy the complete inventory under the owner's lock, including superseded consent.
+
+        Consumers must replay this inventory against their selected certified seal.
+        No connection or lazy iterator escapes the owner's transaction.
+        """
+        self._allowed(cohort)
+        if (
+            type(maximum_bytes) is not int
+            or not 1 <= maximum_bytes <= 512 * 1024**2
+            or type(maximum_records) is not int
+            or not 1 <= maximum_records <= 65536
+        ):
+            raise ValueError("invalid cohort intake export bound")
+        with self._connection() as (db, store):
+            history = store.published_history(cohort)
+            records, size = [], 0
+            for key, raw in self._records(db, history):
+                size += len(raw)
+                if len(records) >= maximum_records or size > maximum_bytes:
+                    raise AdmissionCapacityError("complete intake export exceeds its capacity")
+                records.append((key, raw))
+            return tuple(records)
+
     def _receipt(self, raw: bytes, store: CohortRecoveryStore, request: CohortParticipationRequest):
         retained = read_participation(raw)
         proposed = retained.proposed_admission
