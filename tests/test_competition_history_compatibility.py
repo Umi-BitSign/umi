@@ -7,12 +7,15 @@ import pytest
 
 from umi.competition_history_compatibility import (
     HistoryCompatibilityBody,
+    OriginalSuccessorConsent,
     SignedHistoryCompatibility,
     history_compatibility_digest,
     original_consent_digest,
+    transition_target_consent,
     verify_history_compatibility,
 )
 from umi.competition_package import competition_release_identity_digest
+from umi.competition_reward_continuity import UNTIL_SUPERSEDED_BLOCK
 from umi.competition_supervisor import (
     SuccessorSupervisorOperatorConsent,
     advance_successor_supervisor_directive_history_state,
@@ -195,6 +198,46 @@ def test_old_history_keeps_exact_state_and_signatures(transition):
         verify_signed_successor_supervisor_directive(
             t.case.signed, config=t.config, operator_consent=t.consent, finalized_block=150
         )
+
+
+def test_migration_preserves_deployed_overlay_consent_bytes_and_binding(transition):
+    t = transition
+    original = OriginalSuccessorConsent.model_validate(
+        {
+            **t.case.consent.model_dump(by_alias=True),
+            "allowed_modes": ["competition_replay", "competition_weights"],
+            "reward_continuity_sha256": "ab" * 32,
+            "valid_through_block": UNTIL_SUPERSEDED_BLOCK,
+            "worker_source_overlay": {
+                "package_sha256": "bc" * 32,
+                "release_bundle_sha256": "cd" * 32,
+                "recipient_amendment_sha256": "de" * 32,
+            },
+        }
+    )
+    original_bytes = canonical_json_bytes(original)
+    assert (
+        canonical_json_bytes(SuccessorSupervisorOperatorConsent.model_validate_json(original_bytes))
+        == original_bytes
+    )
+    target = transition_target_consent(t.consent)
+    signed = sign(
+        t.body.model_copy(update={"original_consent_sha256": original_consent_digest(original)})
+    )
+    value = {
+        **target.model_dump(by_alias=True, mode="json"),
+        "schema": "umi-validator-supervisor-operator-consent/2",
+        "historical_consent": original.model_dump(by_alias=True, mode="json"),
+        "history_compatibility": signed.model_dump(by_alias=True, mode="json"),
+    }
+    consent = SuccessorSupervisorOperatorConsent.model_validate_json(canonical_json_bytes(value))
+    assert canonical_json_bytes(consent.historical_consent) == original_bytes
+    assert (
+        verify_history_compatibility(consent.history_compatibility, config=t.config) == signed.body
+    )
+    value["historical_consent"]["worker_source_overlay"]["package_sha256"] = "ef" * 32
+    with pytest.raises(ValueError, match="consent binding mismatch"):
+        SuccessorSupervisorOperatorConsent.model_validate_json(canonical_json_bytes(value))
 
 
 def test_forward_transition_retains_anchor_and_advances_exactly_once(transition):

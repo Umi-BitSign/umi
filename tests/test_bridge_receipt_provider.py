@@ -45,10 +45,10 @@ async def provider(history, tx, monkeypatch):
     item._runtime_executor = tx.case.executor
     item.config = SimpleNamespace(
         minimum_finalized_block=history.birth,
-        proof_binary="/synthetic/proof-verifier",
         proof_binary_sha256="aa" * 32,
         collection_timeout_seconds=60,
     )
+    item.resources = SimpleNamespace(proof_binary="/synthetic/proof-verifier")
     item.proof_captures = 0
     item.rpc_closed = False
 
@@ -63,7 +63,7 @@ async def provider(history, tx, monkeypatch):
 
     def verifier(**kwargs):
         assert kwargs == {
-            "binary_path": item.config.proof_binary,
+            "binary_path": item.resources.proof_binary,
             "expected_sha256": item.config.proof_binary_sha256,
         }
         return history.verifier
