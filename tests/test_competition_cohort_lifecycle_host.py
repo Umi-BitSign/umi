@@ -316,6 +316,8 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(
         if orders_enabled:
             assert apps[0].state.orders is not None
             assert apps[0].state.orders.last_reports
+            assert o.service.request_readiness is apps[0].state.request_readiness
+            assert o.service.request_readiness.running()
         if dispatch_enabled:
             worker_host = apps[0].state.dispatch
             assert worker_host.tasks
@@ -329,6 +331,7 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(
     finally:
         stop.set()
         await asyncio.wait_for(task, timeout=10)
+    assert o.service.request_readiness is None
     if dispatch_enabled:
         assert all(t.done() for t in worker_host.tasks.values())
     # Service shutdown releases the control database lease, not only HTTP.

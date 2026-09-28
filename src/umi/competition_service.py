@@ -21,6 +21,7 @@ from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, creat
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
 from .competition_cohort_model_upload_http import model_upload_routes
+from .competition_cohort_request_readiness_host import request_readiness_routes
 from .competition_cohort_service_api import service_admission_routes
 from .competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
 from .competition_commands.common import load_json
@@ -355,6 +356,7 @@ def create_intake_app(
     app.state.service_admission_host = service_host
     if service_host is not None:
         app.include_router(service_admission_routes(service_host.api))
+        app.include_router(request_readiness_routes(service_host))
         if service_host.uploads is not None:
             app.include_router(
                 model_upload_routes(
@@ -460,6 +462,7 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
                 "dispatch_host",
                 "order_host",
                 "service_host",
+                "request_readiness_host",
             ):
                 logger = logging.getLogger("umi.competition_cohort_" + suffix)
                 loggers.append((logger, logger.level, logger.propagate))

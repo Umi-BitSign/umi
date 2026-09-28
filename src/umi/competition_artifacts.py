@@ -203,6 +203,11 @@ def verify_preserved_bundle(
     archive: Path,
     policy: CompetitionPolicy,
 ) -> str:
+    _preserved_manifest(bundle, archive)
+    return verify_bundle_directory(bundle, archive / digest(bundle) / "model", policy)
+
+
+def _preserved_manifest(bundle: ModelBundle, archive: Path) -> None:
     with _directory(archive / digest(bundle)) as root_fd:
         manifest_fd = os.open(
             "manifest.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd
@@ -217,4 +222,18 @@ def verify_preserved_bundle(
                 or manifest.read(len(expected) + 1) != expected
             ):
                 raise ValueError("preserved manifest mismatch")
-    return verify_bundle_directory(bundle, archive / digest(bundle) / "model", policy)
+
+
+def preserved_bundle_available(bundle: ModelBundle, archive: Path, policy: CompetitionPolicy):
+    """Check readable, bounded inputs without hashing model weights in a health probe.
+
+    Execution still calls verify_preserved_bundle before loading any model.
+    Availability is not an integrity receipt or permission to execute.
+    """
+    validate_bundle_policy(bundle, policy)
+    _preserved_manifest(bundle, archive)
+    with _directory(archive / digest(bundle) / "model") as root_fd:
+        _check_tree(root_fd, bundle)
+        for record in bundle.files:
+            with _artifact(root_fd, record):
+                pass

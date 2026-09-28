@@ -594,6 +594,12 @@ async def test_real_loopback_listener_starts_and_stops_with_owned_resources(
                         await asyncio.sleep(0.01)
 
             assert (await asyncio.wait_for(request(), 5)).status_code == 401
+            if benchmark == "endpoint":
+                response = await client.post(
+                    f"http://127.0.0.1:{port}/internal/cohorts/requests/readiness",
+                    content=b"invalid",
+                )
+                assert response.status_code == 401
             assert "closed" not in providers.events
             if benchmark:
                 # The actual configured workers start after listener startup,

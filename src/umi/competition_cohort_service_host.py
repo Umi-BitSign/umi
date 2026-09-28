@@ -203,6 +203,7 @@ class ServiceAdmissionHost:
         if intake.bindings != expected:
             raise ValueError("service admission series differs from owned intake")
         self.intake, self.capture = intake, capture
+        self.runtime_tasks, self.request_readiness = (), None
         self.provider = provider
         if c.admission_owner is not None:
             c.admission_owner.check_policy(policy)
@@ -406,6 +407,7 @@ class ServiceAdmissionHost:
                 )
             )
             polling = asyncio.create_task(self._poll(stop))
+            self.runtime_tasks = (owner, polling)
             try:
                 await asyncio.wait((owner, polling), return_when=asyncio.FIRST_COMPLETED)
                 for task in (owner, polling):
@@ -414,6 +416,7 @@ class ServiceAdmissionHost:
                         if not stop.is_set():
                             raise RuntimeError("service admission worker exited before shutdown")
             finally:
+                self.request_readiness, self.runtime_tasks = None, ()
                 try:
                     await _stop_task(owner)
                 finally:

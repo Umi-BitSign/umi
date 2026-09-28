@@ -133,6 +133,7 @@ class BenchmarkHost:
             self.signer, self.inbox, token=vote_token, timeout_seconds=config.review_timeout_seconds
         )
         self.tasks, self.last_reports = {}, {}
+        self.stop = None
         self.workers = {"execution": self.worker, "exports": self.exporter}
 
     def report(self, name, result):
@@ -147,6 +148,7 @@ class BenchmarkHost:
         if self.tasks:
             raise RuntimeError("benchmark workers are already running")
         stopping = asyncio.create_task(stop.wait())
+        self.stop = stop
         try:
             for name, worker in self.workers.items():
                 self.tasks[name] = asyncio.create_task(
@@ -174,3 +176,4 @@ class BenchmarkHost:
                 await await_owned_task(asyncio.create_task(drain()))
             finally:
                 self.tasks.clear()
+                self.stop = None

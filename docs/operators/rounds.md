@@ -1553,7 +1553,7 @@ These review ports run against the intake owner's configured stores. Remote
 reviewers use authenticated original exports and their own proof archives; they
 must not inspect another host's live SQLite database. The admission owner starts
 the configured phase controllers, rest gate and accepted-service dispatch.
-Installed private replication, combined request readiness and complete cohort
+Installed private replication and complete cohort
 qualification remain required before launch.
 
 Service admission configuration version 7 adds `orders`, an
@@ -1603,8 +1603,25 @@ inference. The private `/internal/cohorts/endpoint/votes/{request,decision}` POS
 routes require the reviewer credential and validate native evidence before
 signing. Response signatures are checked against the exact submitted body.
 Both finality observers and all workers drain before releasing the host key and
-exclusive lease. These workers alone do not establish combined request readiness
-or qualification of an installed cohort.
+exclusive lease.
+
+The public `GET /v1/competition/cohorts/{cohort_sha256}/requests/readiness`
+route accepts a fresh 32-character hexadecimal `nonce`. The version 7 coordinator
+checks the active admission, lifecycle, order and dispatch tasks, selected complete
+roster, available service clips and current finalized observation. It probes every
+configured evaluator through the authenticated private
+`POST /internal/cohorts/requests/readiness` route. Evaluators check their active
+workers, acknowledged original orders, selected transport, readable model inputs,
+video hashes, pinned runtime and clip delivery. Model availability checks file
+shape and size; native execution still verifies all model hashes before use.
+
+Replies bind the nonce, policy, cohort, recovery tip, catalogs and assigned orders.
+An unavailable input, stopped worker, stale or mismatched reply leaves the request
+clock paused. Recovery retries the same cohort automatically. Readiness uses its
+own peer connection pool and bounded requests; it cannot wait behind a phase vote
+that needs this observation. Public replies are not cached. Shutdown clears
+readiness before draining the workers. Readiness observations authorize neither
+results nor weights, and installed cohort qualification remains required.
 
 When the original header was skipped or the reviewer was offline, admission
 review reconstructs it from that reviewer's nearest retained finalized

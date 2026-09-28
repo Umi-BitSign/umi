@@ -35,6 +35,8 @@ from .competition_cohort_order_host import CohortOrderHost
 from .competition_cohort_preparation_export import PreparationReviewExporter
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_review_http import preparation_review_routes
+from .competition_cohort_request_probe import tasks_running
+from .competition_cohort_request_readiness_host import CombinedRequestReadiness
 from .competition_cohort_request_review_http import request_review_routes
 from .competition_cohort_review_boot import _token
 from .competition_cohort_review_http import CohortReviewPeerConfig
@@ -184,6 +186,7 @@ async def admission_owner_app(
         app.state.lifecycle = None
         app.state.dispatch = None
         app.state.orders = None
+        app.state.request_readiness = None
         if service_host is not None:
             if service_host.preparation is not preparation or service_host.provider is not provider:
                 raise ValueError("phase control requires the same owned admission and finality")
@@ -206,6 +209,25 @@ async def admission_owner_app(
                 app.include_router(service_work_routes(app.state.dispatch, token=token))
             if service_host.config.orders is not None:
                 app.state.orders = CohortOrderHost(service_host, client, credentials)
+                if app.state.dispatch is not None:
+                    # Readiness cannot queue behind the phase vote that is
+                    # currently awaiting the public readiness response.
+                    probes = await resources.enter_async_context(
+                        httpx.AsyncClient(
+                            trust_env=False,
+                            follow_redirects=False,
+                            limits=httpx.Limits(max_connections=len(c.reviewers)),
+                        )
+                    )
+                    app.state.request_readiness = CombinedRequestReadiness(
+                        service_host,
+                        app.state.lifecycle,
+                        app.state.dispatch,
+                        app.state.orders,
+                        probes,
+                        credentials,
+                        lambda: False,
+                    )
         yield app
 
 
@@ -262,6 +284,11 @@ async def run_admission_owner(
                     workers.append(asyncio.create_task(app.state.dispatch.run(stop)))
                 if app.state.orders is not None:
                     workers.append(asyncio.create_task(app.state.orders.run(stop)))
+                if app.state.request_readiness is not None:
+                    app.state.request_readiness.running = lambda: (
+                        not stop.is_set() and tasks_running((serving, *workers))
+                    )
+                    service_host.request_readiness = app.state.request_readiness
                 logger.info("cohort_admission_owner_ready config_sha256=%s", digest(config))
             await asyncio.wait((serving, stopping, *workers), return_when=asyncio.FIRST_COMPLETED)
             for task in (serving, *workers):
@@ -270,6 +297,8 @@ async def run_admission_owner(
                     if not stop.is_set():
                         raise RuntimeError("admission owner task exited before shutdown")
         finally:
+            if service_host is not None:
+                service_host.request_readiness = None
             server.should_exit = True
 
             async def drain_workers():
