@@ -9,9 +9,11 @@ from fractions import Fraction
 import pytest
 
 from umi.competition_artifacts import preserve_bundle
-from umi.competition_cohort_model_award import (
+from umi.competition_cohort_model_acceptance import (
     CertifiedModelArtifactAcceptance,
     ModelArtifactAcceptance,
+)
+from umi.competition_cohort_model_award import (
     PendingModelAward,
     build_model_award,
 )

@@ -25,6 +25,10 @@ from .competition_cohort_coordinator import (
 )
 from .competition_cohort_intake import CohortIntake, cohort_intake_bytes, history_tip
 from .competition_cohort_intake_seal import CohortIntakeSeal, EmptyCohortIntake, build_intake_seal
+from .competition_cohort_model_acceptance_store import (
+    PendingModelArtifacts,
+    model_acceptances_for_seal,
+)
 from .competition_cohort_recovery import CohortRecoveryState
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacityError
@@ -197,7 +201,10 @@ class CohortIntakePhaseObserver:
                         self.intake._records(db, history),
                         expected_tip_sha256=expected_tip_sha256,
                     )
-                except EmptyCohortIntake:
+                    model_acceptances_for_seal(
+                        db, seal, history, self.intake.policy, self.intake._records(db, history)
+                    )
+                except (EmptyCohortIntake, PendingModelArtifacts):
                     return NativeIntakeProgress(
                         pending_availability_progress(state, service), service, None
                     )

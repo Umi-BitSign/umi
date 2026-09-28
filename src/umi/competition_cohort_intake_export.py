@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_admission_review import review_cohort_participation
 from .competition_cohort_availability import (
@@ -37,7 +37,12 @@ from .competition_cohort_intake_review import (
     NativeIntakeReview,
 )
 from .competition_cohort_intake_seal import CohortIntakeSeal, build_intake_seal
-from .competition_cohort_recovery import CohortRecoveryTransition
+from .competition_cohort_model_acceptance import CertifiedModelArtifactAcceptance
+from .competition_cohort_model_acceptance_store import (
+    model_acceptances_for_seal,
+    verify_sealed_model_acceptances,
+)
+from .competition_cohort_recovery import CohortRecoveryTransition, ModelRewardCohortAuthority
 from .competition_cohort_review_export import review_export_limits as _bounds
 from .competition_cohort_review_export import review_selection
 from .competition_execution import ExecutionBoundary, execution_boundary
@@ -56,7 +61,9 @@ class IntakeReviewRequest(StrictProtocolModel):
 
 
 class IntakeReviewExport(StrictProtocolModel):
-    schema_: Literal["umi-intake-review-export/1"] = Field(alias="schema")
+    schema_: Literal["umi-intake-review-export/1", "umi-intake-review-export/2"] = Field(
+        alias="schema"
+    )
     progress: CohortPhaseProgress
     history: CohortRecoveryHistory
     decisions: Annotated[tuple[CohortDecisionInput, ...], Field(max_length=128)]
@@ -65,6 +72,25 @@ class IntakeReviewExport(StrictProtocolModel):
     ]
     seal: CohortIntakeSeal | None
     records: Annotated[tuple[RetainedCohortParticipation, ...], Field(max_length=65536)]
+    model_acceptances: (
+        Annotated[tuple[CertifiedModelArtifactAcceptance, ...], Field(max_length=512)] | None
+    ) = None
+
+    @model_serializer(mode="wrap")
+    def preserve_versions(self, handler):
+        value = handler(self)
+        if self.model_acceptances is None:
+            value.pop("model_acceptances", None)
+        return value
+
+    @model_validator(mode="after")
+    def model_binding(self):
+        selected = isinstance(self.history.authority.authority, ModelRewardCohortAuthority)
+        if selected != (self.schema_ == "umi-intake-review-export/2") or selected != (
+            self.model_acceptances is not None
+        ):
+            raise ValueError("model award authority requires its complete acceptance export")
+        return self
 
 
 class IntakeReviewResponse(StrictProtocolModel):
@@ -124,8 +150,9 @@ class IntakeReviewExporter:
                     if size > self.maximum_bytes:
                         raise OSError("complete intake export exceeds capacity; preserve and retry")
                     records.append(read_participation(raw))
+            models = isinstance(native.history.authority.authority, ModelRewardCohortAuthority)
             result = IntakeReviewExport(
-                schema="umi-intake-review-export/1",
+                schema="umi-intake-review-export/2" if models else "umi-intake-review-export/1",
                 progress=progress,
                 history=native.history,
                 decisions=tuple(
@@ -136,6 +163,19 @@ class IntakeReviewExporter:
                 services=tuple(services),
                 seal=native.seal,
                 records=tuple(records),
+                model_acceptances=(
+                    model_acceptances_for_seal(
+                        db,
+                        native.seal,
+                        native.history,
+                        intake.policy,
+                        intake._records(db, native.history),
+                    )
+                    if native.seal is not None
+                    else ()
+                )
+                if models
+                else None,
             )
         if len(canonical_json_bytes(result)) > self.maximum_bytes:
             raise OSError("complete intake export exceeds capacity; preserve and retry")
@@ -166,6 +206,7 @@ def replay_intake_export(
     maximum_sample_gap_blocks: int,
 ) -> NativeIntakeReview:
     """Replay the same original inventory, progress and outage arithmetic as the owner."""
+    exported = IntakeReviewExport.model_validate_json(canonical_json_bytes(exported))
     progress, history = exported.progress, exported.history
     cohort, tip = progress.cohort_sha256, history_tip(history)
     decisions = {digest(d): d for d in exported.decisions}
@@ -225,6 +266,10 @@ def replay_intake_export(
         )
         if rebuilt != seal:
             raise ValueError("intake export changes its sealed original inventory")
+        if exported.model_acceptances is not None:
+            verify_sealed_model_acceptances(
+                exported.model_acceptances, seal, history, policy, records
+            )
         if (
             not service.serving
             or service.observation != seal.observation
@@ -233,7 +278,12 @@ def replay_intake_export(
             < state.targets[0].target_block + service.unavailable_blocks - restored
         ):
             raise ValueError("intake export closes before restoring unavailable service")
-    elif seal is not None or records or pending_availability_progress(state, service) != progress:
+    elif (
+        seal is not None
+        or records
+        or exported.model_acceptances
+        or pending_availability_progress(state, service) != progress
+    ):
         raise ValueError("pending intake export changes its original observation")
     return NativeIntakeReview(
         IntakeProgressReviewRecord(

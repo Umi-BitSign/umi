@@ -34,6 +34,7 @@ from .competition_cohort_intake_seal import (
     build_intake_seal,
     verify_intake_closure,
 )
+from .competition_cohort_model_acceptance_store import model_acceptances_for_seal
 from .competition_cohort_participation import (
     CohortParticipationReceipt,
     CohortParticipationRequest,
@@ -87,6 +88,8 @@ def cohort_intake_bytes(db) -> int:
             "cohort_admission_certificates",
             "cohort_prepared_rounds",
             "cohort_preparation_progress",
+            "cohort_model_acceptance_intents",
+            "cohort_model_acceptances",
         )
         if name in tables
     )
@@ -131,6 +134,8 @@ class CohortIntakePublisher:
 
 
 class CohortIntake:
+    retained_bytes = staticmethod(cohort_intake_bytes)
+
     def __init__(
         self,
         config: CohortIntakeConfig,
@@ -507,6 +512,7 @@ class CohortIntake:
         )
         if seal != expected:
             raise ValueError("retained intake seal differs from its original records")
+        model_acceptances_for_seal(db, seal, prefix, self.policy, self._records(db, prefix))
         return seal
 
     def sealed(self, cohort: str, tip: str | None = None) -> CohortIntakeSeal | None:
@@ -546,6 +552,7 @@ class CohortIntake:
                 expected_tip_sha256=expected_tip_sha256,
             )
             raw = canonical_json_bytes(result)
+            model_acceptances_for_seal(db, result, history, self.policy, self._records(db, history))
             if len(raw) > 4 * 1024 * 1024:
                 raise AdmissionCapacityError("intake seal needs additional durable capacity")
             # The process lock serializes this commit with retain() and publish().

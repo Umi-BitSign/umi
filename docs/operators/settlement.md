@@ -44,9 +44,39 @@ Recovery uses the original acceptances without selecting a newer promotion or
 assigning authorship to the reward recipient. Existing cohort certification and
 standing chain checks still apply before any weight transaction.
 
-The acceptance producer, complete artifact replication and installed coordinator
-qualification must be connected before selecting this authority in production.
-Component tests use synthetic finality, inference and rights-review inputs.
+The intake owner reserves artifact-acceptance proposals under its existing lock,
+after admission certification and verification of all model bytes. It retains
+the original review documents, block and completion ordinal before requesting
+review. Independent reviewers approve that exact proposal; the intake owner
+cannot sign on their behalf. A retry preserves the reserved position. The
+ordinal records when the complete bundle and review documents were reserved,
+not when the last review response reached the coordinator.
+
+For authority version 3, intake remains open until every selected model has a
+certified artifact acceptance. Missing evidence neither drops a participant nor
+closes the phase. Private intake review export version 2 includes the full set
+of model acceptance certificates so independent closure reviewers check the
+same condition. Legacy intake and review export bytes remain unchanged.
+
+The service-admission host polls private `model-reviews/<model-sha256>.json`
+inputs and publishes retained `ModelAcceptanceIntent` records under the
+competition store's `model-acceptance-proposals/<cohort>/<submission>.json`.
+The configured input directory receives independent
+`ModelAcceptancePublication` records under
+`model-acceptance-publications/<cohort>/<submission>.json`. Its worker verifies
+the original proposal, quorum, submission and model bytes before retaining
+acceptance. It exports the original review documents under `objects/` before
+publishing the certificate under `model-reward-acceptances/`. Replication must
+deliver those objects to each settlement consumer's evidence source and full
+bundles to its model archive. Pending entries do not prevent siblings from
+being processed. Completed entries replay from retained state before RPC,
+reviewers or original delivery inputs are consulted.
+
+The independent rights/reconstruction review service, complete artifact
+ingestion and replication, and installed coordinator qualification remain
+required before production selection. The private input directory is an
+exchange boundary, not a replacement for those services. Current component
+tests use synthetic finality, inference and rights-review documents.
 
 ## Lost coordinator outcomes
 

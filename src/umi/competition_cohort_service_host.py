@@ -22,9 +22,11 @@ from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_intake import CohortIntake, history_tip
+from .competition_cohort_model_acceptance_store import CohortModelAcceptances
+from .competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_preparation_owner import CohortPreparation
-from .competition_cohort_recovery import verify_recovery_authority
+from .competition_cohort_recovery import ModelRewardCohortAuthority, verify_recovery_authority
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
@@ -72,6 +74,16 @@ class ServiceAdmissionHost:
             raise ValueError("service admission series differs from owned intake")
         self.intake, self.capture = intake, capture
         self.preparation = CohortPreparation(CohortAdmissionQueue(intake), promotion)
+        self.models = (
+            ModelAcceptanceWorker(
+                CohortModelAcceptances(intake, promotion.directory / "model-reward-artifacts"),
+                capture,
+                Path(c.inputs_directory),
+                promotion.directory,
+            )
+            if isinstance(c.series.recovery.authority, ModelRewardCohortAuthority)
+            else None
+        )
         self.queues, self.cohorts = {}, {}
         root = Path(c.queue_directory) / digest(c.series)
         for requirement in c.manifest.cohorts:
@@ -138,6 +150,7 @@ class ServiceAdmissionHost:
             )
 
     async def poll_once(self) -> dict:
+        models = None if self.models is None else await self.models.poll_once()
         ready = pending = 0
         last_error = ""
         for key, queue in self.queues.items():
@@ -182,6 +195,7 @@ class ServiceAdmissionHost:
             "catalogs_installed": ready,
             "catalogs_pending": pending,
             "last_error_type": last_error,
+            "model_acceptance": models,
             "dispatch_authorized": False,
             "chain_submission_authorized": False,
         }
