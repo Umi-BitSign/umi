@@ -17,7 +17,11 @@ from .competition_cohort_coordinator import (
     _choice,
     replay_cohort_decisions,
 )
-from .competition_cohort_recovery import SignedCohortRecoveryTransition, verify_recovery_quorum
+from .competition_cohort_recovery import (
+    CohortRecoveryTransition,
+    SignedCohortRecoveryTransition,
+    verify_recovery_quorum,
+)
 from .competition_cohort_reward_package import RewardReplayInputs
 from .competition_cohort_settlement import CohortSettlement
 from .competition_execution import ExecutionBoundary
@@ -117,6 +121,26 @@ class SettlementPhaseSigner:
             )
         self.journal, self.sign, self.timeout = journal, sign, timeout_seconds
         self.serial = asyncio.Lock()
+
+    def retained_vote(self, body: CohortPhaseProgress | CohortRecoveryTransition) -> Signature:
+        """Read an exact locally reviewed vote before publishing a peer request."""
+        if isinstance(body, CohortPhaseProgress):
+            kind, tip = "settlement_progress", body.recovery_tip_sha256
+        elif isinstance(body, CohortRecoveryTransition):
+            kind, tip = "settlement_transition", body.predecessor_sha256
+        else:
+            raise TypeError("unknown settlement vote body")
+        slot = phase_slot(body.cohort_sha256, tip)
+        with self.journal.locked():
+            intent = self.journal.get(kind + "_intent", slot)
+            if intent is None:
+                raise FileNotFoundError("settlement request lacks its original reviewed intent")
+            if canonical_json_bytes(intent) != canonical_json_bytes(body):
+                raise ValueError("settlement request lacks its original reviewed intent")
+            vote = self._saved(kind, slot, body, self.account)
+            if vote is None:
+                raise FileNotFoundError("settlement request lacks its original durable vote")
+            return vote
 
     def _body(self, review: SettlementPhaseReview, evidence: CohortDecisionInput | None):
         if type(review) is not SettlementPhaseReview or digest(review.policy) != digest(

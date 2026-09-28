@@ -28,7 +28,7 @@ from .protocol import Hex32, StrictProtocolModel
 
 MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
-Kind = Literal["history", "endpoint", "interval"]
+Kind = Literal["history", "endpoint", "interval", "registration"]
 
 
 class _Bytes(StrictProtocolModel):
@@ -67,7 +67,7 @@ class RewardProofArchive:
         self.root = Path(private_path(str(root)))
 
     def _path(self, kind: Kind, key: str) -> Path:
-        if kind not in ("history", "endpoint", "interval"):
+        if kind not in ("history", "endpoint", "interval", "registration"):
             raise ValueError("unknown reward archive frame kind")
         return self.root / kind / (checked_digest(key) + ".json")
 

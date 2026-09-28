@@ -3390,3 +3390,253 @@ async def test_settlement_peer_replays_original_proofs_before_signing_without_bl
     vote = await h.peer.progress(request, observation)
     assert vote.hotkey == wallet("Dave").hotkey.ss58_address
     assert sum(h.signatures.values()) == 1
+
+
+@pytest.fixture
+async def settlement_file_case(settlement_signing_case, tmp_path):
+    """Separate SQLite owners and actual immutable request/vote delivery.
+
+    Native result replay is retained. Original object/promotion and proof verification
+    sources still use the native fixture's synthetic delivery boundaries.
+    """
+    import sqlite3
+
+    from umi.competition_cohort_coordinator import CohortDecisionInput
+    from umi.competition_cohort_recovery_store import CohortRecoveryStore
+    from umi.competition_cohort_settlement_controller import SettlementInputBatch
+    from umi.competition_cohort_settlement_exchange import SettlementReviewExchange
+    from umi.competition_cohort_settlement_proofs import SettlementRegistrationFiles
+    from umi.private_files import ensure_private_directory
+
+    h = settlement_signing_case
+    initial = h.c.inputs.history
+    db = None
+
+    def start(reopen=False):
+        nonlocal db
+        if db is not None:
+            db.close()
+        controller = h.reopen() if reopen else h.coordinator()
+        db = sqlite3.connect(tmp_path / "independent-reviewer.sqlite3")
+        peer = h.peer.phases
+        peer.store = CohortRecoveryStore(db)
+        # A replacement reviewer may have only the approved admission. Each
+        # delivered request must bring its signed prefix and decision sources.
+        if not db.execute("SELECT count(*) FROM cohort_recovery_bindings").fetchone()[0]:
+            peer.store.publish_history(
+                initial.model_copy(update={"transitions": ()}),
+                h.c.b["policy"],
+                current_block=h.provider.block,
+            )
+        peer.owner.decisions = lambda key: peer.store.source(h.cohort, key, CohortDecisionInput)
+
+        def source():
+            history = peer.store.export_history(
+                h.cohort, genesis_signatures=initial.genesis_signatures
+            )
+            return SettlementInputBatch(
+                h.c.inputs.model_copy(update={"history": history}),
+                tuple(h.c.b["records"]),
+                h.c.quality_votes,
+                h.c.service_votes,
+            )
+
+        peer.source = source
+        h.peer.provider.ensure_observer_running = lambda: None
+        h.sender = SettlementReviewExchange(
+            h.phases,
+            proposer=wallet("Charlie").hotkey.ss58_address,
+            inbox=tmp_path / "sender-inbox",
+            outbox=tmp_path / "sender-outbox",
+            proofs=SettlementRegistrationFiles(
+                SimpleNamespace(policy=h.c.b["policy"], retained_archive=h.peer.archive),
+                inbox=tmp_path / "sender-inbox/proofs",
+                outbox=tmp_path / "sender-outbox/proofs",
+            ),
+        )
+        h.receiver = SettlementReviewExchange(
+            peer,
+            proposer=wallet("Charlie").hotkey.ss58_address,
+            inbox=tmp_path / "receiver-inbox",
+            outbox=tmp_path / "receiver-outbox",
+            proofs=SettlementRegistrationFiles(
+                h.peer.provider,
+                inbox=tmp_path / "receiver-inbox/proofs",
+                outbox=tmp_path / "receiver-outbox/proofs",
+            ),
+        )
+        h.phases.peers = (h.sender.peer(wallet("Dave").hotkey.ss58_address),)
+        return controller
+
+    def copy_files(origin, target):
+        import os
+
+        for path in origin.rglob("*.json"):
+            destination = target / path.relative_to(origin)
+            ensure_private_directory(destination.parent)
+            raw = path.read_bytes()
+            if destination.exists():
+                assert destination.read_bytes() == raw
+            else:
+                with open(destination, "xb") as out:
+                    os.chmod(destination, 0o600)
+                    out.write(raw)
+
+    h.file_start = start
+    h.deliver_requests = lambda: copy_files(h.sender.outbox, h.receiver.inbox)
+    h.deliver_votes = lambda: copy_files(h.receiver.outbox, h.sender.inbox)
+    try:
+        yield h
+    finally:
+        if db is not None:
+            db.close()
+
+
+async def test_settlement_file_delivery_recovers_three_phases_with_independent_state(
+    settlement_file_case,
+):
+    from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
+
+    h = settlement_file_case
+    controller = h.file_start()
+    for phase, following in (
+        ("evidence", "review"),
+        ("review", "certification"),
+        ("certification", "first_admission"),
+    ):
+        h.provider.block += 1
+        original_block = h.provider.block
+        with pytest.raises(SettlementPhaseQuorumPending):
+            await controller.tick()  # Request durable; peer has not received it.
+        local_signatures = sum(h.signatures.values())
+        h.provider.block += 100000
+        h.provider.fail_collect = True
+        controller = h.file_start(reopen=True)
+        h.deliver_requests()
+        request = h.receiver.request(phase, "progress")
+        assert request.observation.block == original_block
+        await h.receiver.review(request)
+        assert h.peer.phases.store is not h.store
+        # Crash and lose the delivery acknowledgement after native signing.
+        count = sum(h.signatures.values())
+        controller = h.file_start(reopen=True)
+        await h.receiver.review(h.receiver.request(phase, "progress"))
+        assert sum(h.signatures.values()) == count == local_signatures + 1
+        h.deliver_votes()
+        with pytest.raises(SettlementPhaseQuorumPending):
+            await controller.tick()  # Transition request now retained.
+        h.deliver_requests()
+        await h.receiver.review(h.receiver.request(phase, "transition"))
+        h.deliver_votes()
+        controller = h.file_start(reopen=True)
+        report = await controller.tick()
+        assert report["phase"] == following
+        assert h.inputs().history.transitions[-1].transition.observed_at_block == original_block
+        h.provider.fail_collect = False
+    assert h.provider.collects == 3
+    assert len(h.signatures) == 12 and set(h.signatures.values()) == {1}
+    result = h.owner("Charlie").advance(
+        h.inputs(),
+        iter(h.c.b["records"]),
+        expected_tip_sha256=tip(h.inputs().history),
+        current_block=h.provider.block,
+    )
+    assert result.status == "package_published"
+    assert result.package.allocation == h.c.native.allocation
+    # Old delivered requests remain replayable after the receiver has advanced.
+    before = dict(h.signatures)
+    await h.receiver.review(h.receiver.request("evidence", "progress"))
+    assert dict(h.signatures) == before
+    old_request = h.receiver.request("evidence", "progress")
+    delivery = h.receiver._vote_path(
+        h.receiver.outbox, old_request, wallet("Dave").hotkey.ss58_address
+    )
+    original_bytes = delivery.read_bytes()
+    delivery.unlink()  # Restore scenario: signer journal survives, outbox does not.
+    await h.receiver.review(old_request)
+    assert delivery.read_bytes() == original_bytes
+    assert dict(h.signatures) == before
+    assert h.c.b["service_case"].p.model.calls == 1
+
+
+async def test_settlement_file_request_rejects_changes_before_history_or_proof_io(
+    settlement_file_case,
+):
+    from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
+
+    h = settlement_file_case
+    controller = h.file_start()
+    with pytest.raises(SettlementPhaseQuorumPending):
+        await controller.tick()
+    h.deliver_requests()
+    request = h.receiver.request("evidence", "progress")
+    state = h.peer.phases.store.status(h.cohort)
+    count = sum(h.signatures.values())
+    # A valid signed request with an undelivered proof cannot advance history.
+    proof = h.receiver.proofs.inbox.root / "registration" / (digest(request.observation) + ".json")
+    held = proof.with_suffix(".held")
+    proof.rename(held)
+    with pytest.raises(FileNotFoundError):
+        await h.receiver.review(request)
+    assert h.peer.phases.store.status(h.cohort) == state
+    assert sum(h.signatures.values()) == count
+    held.rename(proof)
+    changed_vote = sign_object(request.progress.progress, wallet("Alice"))
+    cases = (
+        request.model_copy(update={"decisions": request.decisions[:-1]}),
+        request.model_copy(update={"decisions": (*request.decisions, request.decisions[0])}),
+        request.model_copy(
+            update={
+                "observation": request.observation.model_copy(
+                    update={"block": request.observation.block + 1}
+                )
+            }
+        ),
+        request.model_copy(
+            update={"progress": request.progress.model_copy(update={"signatures": (changed_vote,)})}
+        ),
+    )
+    for changed in cases:
+        with pytest.raises(ValueError):
+            await h.receiver.review(changed)
+        assert h.peer.phases.store.status(h.cohort) == state
+        assert sum(h.signatures.values()) == count
+
+
+async def test_settlement_file_reviewer_loop_recovers_after_missing_proof(settlement_file_case):
+    from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
+
+    h = settlement_file_case
+    with pytest.raises(SettlementPhaseQuorumPending):
+        await h.file_start().tick()
+    h.deliver_requests()
+    request = h.receiver.request("evidence", "progress")
+    native = h.peer.provider.review_archive
+    attempted = asyncio.Event()
+
+    async def unavailable(*args):
+        attempted.set()
+        raise FileNotFoundError("proof transport unavailable")
+
+    h.peer.provider.review_archive = unavailable
+    original_state = h.peer.phases.store.status(h.cohort)
+    stop = asyncio.Event()
+    task = asyncio.create_task(h.receiver.run_reviewer(stop, poll_seconds=0.01))
+    try:
+        await asyncio.wait_for(attempted.wait(), 10)
+        assert not tuple(h.receiver.outbox.rglob("*.json"))
+        assert h.peer.phases.store.status(h.cohort) == original_state
+        h.peer.provider.review_archive = native
+
+        async def delivered():
+            while not tuple(h.receiver.outbox.rglob("*.json")):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(delivered(), 20)
+    finally:
+        stop.set()
+        await task
+    assert h.receiver._vote_path(
+        h.receiver.outbox, request, wallet("Dave").hotkey.ss58_address
+    ).exists()
+    assert sum(v for (name, _), v in h.signatures.items() if name == "Dave") == 1

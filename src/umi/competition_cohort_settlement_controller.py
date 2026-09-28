@@ -203,9 +203,8 @@ class SettlementPeerReviewer:
         ):
             raise ValueError("settlement peer has a different policy or proposer")
 
-    async def _review(self, progress, observation):
-        if observation.block != progress.observed_at_block:
-            raise ValueError("settlement peer observation belongs to another block")
+    async def verify_observation(self, observation: ExecutionBoundary):
+        """Authenticate original finality before a receiver adopts its history."""
         raw, metadata = await self.archive(observation)
         original = await self.provider.review_archive(observation, raw, metadata)
         if (
@@ -213,6 +212,12 @@ class SettlementPeerReviewer:
             or original.replayed_at.block_number < observation.block
         ):
             raise ValueError("settlement peer did not verify the original observation")
+        return original
+
+    async def _review(self, progress, observation):
+        if observation.block != progress.observed_at_block:
+            raise ValueError("settlement peer observation belongs to another block")
+        await self.verify_observation(observation)
         return await self.phases.review(observation, progress)
 
     async def progress(self, request: AttestedCohortPhaseProgress, observation: ExecutionBoundary):

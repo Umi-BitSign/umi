@@ -382,8 +382,27 @@ vote and first complete certificate in its own journal. Late peers reuse that
 observation; they do not resample the phase or select a newer promotion head.
 Native replay runs in an owned worker thread without sharing the controller's
 SQLite connection, and shutdown drains replay and signing before releasing
-resources. Recurring startup and authenticated source/vote delivery still need
-host wiring; these library ports are not an installed daemon.
+resources.
+
+`SettlementReviewExchange` persists six immutable request slots per standing
+cohort: progress and transition requests for evidence, review and certification.
+Only a locally reviewed, durable proposer vote can create a request. Each request
+carries its certified history and every original decision input; the receiver
+checks the configured cohort, authority, proposer and history before native
+review. Reviewers maintain separate journals and SQLite state. Their replies
+name the exact request digest and selected signer. Lost deliveries retry using
+the original observation and signature, including after a receiver advances to
+another phase.
+
+The proposer exports its original registration archive and runtime metadata before
+publishing a request. `SettlementRegistrationFiles` uses bounded, immutable proof
+frames; the receiver authenticates them against its own finality provider. The
+file envelope alone supplies no verification authority. Existing exported proof
+bytes remain available when the original provider is offline. The reviewer loop
+visits only the six selected slots, logs retry reasons without evidence payloads,
+and continues after an unavailable slot. Original result objects and promotion
+artifacts also require independent delivery. Recurring host startup and that
+source delivery still need wiring; these components are not an installed daemon.
 
 The reward coordinator derives the next activation
 from that package and the approved manifest. Initial activation names the
@@ -404,8 +423,8 @@ files with mode `0600`. The systemd template in
 `deploy/standing-reward-coordinator/` owns provider startup, retries and orderly
 shutdown. It must select the qualified installed Python environment.
 
-These services remain uninstalled. Recurring settlement startup, native
-phase/vote delivery, full later-cohort replay, independent peer and artifact delivery, key provisioning,
+These services remain uninstalled. Recurring settlement startup, full later-cohort
+replay, deployed peer and artifact replication, key provisioning,
 migration ownership and combined Linux restart/effect qualification remain
 required before deployment. Configuration
 validation is not runtime qualification.
