@@ -24,6 +24,7 @@ from .competition_cohort_admission_host import AdmissionOwnerConfig, run_admissi
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_intake import CohortIntake, history_tip
+from .competition_cohort_lifecycle_host import LifecycleHostConfig
 from .competition_cohort_model_acceptance_store import CohortModelAcceptances
 from .competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
 from .competition_cohort_model_review_http import ModelReviewPeer, ModelReviewPeerConfig
@@ -54,6 +55,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         "umi-cohort-service-admission-host/2",
         "umi-cohort-service-admission-host/3",
         "umi-cohort-service-admission-host/4",
+        "umi-cohort-service-admission-host/5",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     manifest: RewardManifest
@@ -65,6 +67,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
     model_uploads: ModelUploadConfig | None = None
     admission_owner: AdmissionOwnerConfig | None = None
+    lifecycle: LifecycleHostConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -75,25 +78,36 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("model_uploads", None)
         if self.admission_owner is None:
             value.pop("admission_owner", None)
+        if self.lifecycle is None:
+            value.pop("lifecycle", None)
         return value
 
     @model_validator(mode="after")
     def peers(self):
-        if self.schema_ != "umi-cohort-service-admission-host/4" and (
+        if self.schema_ not in {
+            "umi-cohort-service-admission-host/4",
+            "umi-cohort-service-admission-host/5",
+        } and (
             (self.schema_ != "umi-cohort-service-admission-host/1") != bool(self.model_review_peers)
         ):
             raise ValueError("model peers require service admission host version two")
-        if self.schema_ != "umi-cohort-service-admission-host/4" and (
+        if self.schema_ not in {
+            "umi-cohort-service-admission-host/4",
+            "umi-cohort-service-admission-host/5",
+        } and (
             (self.schema_ == "umi-cohort-service-admission-host/3")
             != (self.model_uploads is not None)
         ):
             raise ValueError("model delivery requires service admission host version three")
         if self.model_uploads is not None and not self.model_review_peers:
             raise ValueError("model delivery requires configured reviewers")
-        if (self.schema_ == "umi-cohort-service-admission-host/4") != (
-            self.admission_owner is not None
-        ):
+        if (
+            self.schema_
+            in {"umi-cohort-service-admission-host/4", "umi-cohort-service-admission-host/5"}
+        ) != (self.admission_owner is not None):
             raise ValueError("automatic admission requires service admission host version four")
+        if (self.schema_ == "umi-cohort-service-admission-host/5") != (self.lifecycle is not None):
+            raise ValueError("automatic phase control requires service admission host version five")
         if len({identity(p.signer) for p in self.model_review_peers}) != len(
             self.model_review_peers
         ):
@@ -117,6 +131,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             Path(self.queue_directory),
             Path(self.inputs_directory),
             *tokens,
+            *(self.lifecycle.stores() if self.lifecycle else ()),
             *((Path(self.model_uploads.directory),) if self.model_uploads else ()),
             *(
                 (
@@ -348,6 +363,7 @@ class ServiceAdmissionHost:
                     self.preparation,
                     self.provider,
                     stop,
+                    service_host=self if self.config.lifecycle else None,
                 )
             )
             polling = asyncio.create_task(self._poll(stop))

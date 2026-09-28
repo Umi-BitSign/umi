@@ -555,3 +555,163 @@ async def test_request_publication_rechecks_native_authority_and_evidence(
             await control.publisher(current)
         assert tuple(h.calls) == calls
         assert not handoff.exists()
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True, "precommitted"], indirect=True)
+async def test_configured_request_factory_replays_delivered_terminals_and_exports(
+    request_owner, tmp_path
+):
+    from contextlib import AsyncExitStack
+    from pathlib import Path
+
+    import httpx
+
+    from umi.competition_cohort_admission_queue import CohortAdmissionQueue
+    from umi.competition_cohort_lifecycle_host import LifecycleHost
+    from umi.competition_cohort_preparation import PreparedCohortRound
+    from umi.competition_cohort_request_export import (
+        RequestReviewRequest,
+        SignedRequestReviewResponse,
+    )
+    from umi.competition_cohort_request_readiness import RequestReadiness
+    from umi.competition_cohort_service_host import ServiceAdmissionHost
+    from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
+    from umi.competition_execution import execution_boundary
+    from umi.competition_reward_decisions import StandingRewardSeries
+    from umi.competition_reward_manifest import StandingRewardManifest
+    from umi.competition_settlement import PromotionHeadBinding
+    from umi.competition_store import CompetitionStore
+    from umi.grandpa_finality import FINNEY_GENESIS_HASH
+    from umi.policy import scoring_policy_hash
+    from umi.private_files import publish_private_model
+    from umi.protocol import canonical_json_bytes
+
+    from .test_competition_cohort_lifecycle_host import configured
+
+    h, b = request_owner, request_owner.b
+    catalog = h.c.assignment.catalog
+    manifest = StandingRewardManifest(
+        schema="umi-standing-reward-manifest/1",
+        policy_sha256=digest(b["policy"]),
+        cohorts=(
+            {
+                "cohort_sha256": h.cohort,
+                "terms_sha256": digest(h.c.terms),
+                "catalog_sha256s": (digest(catalog.catalog),),
+            },
+        ),
+    )
+    series = StandingRewardSeries(
+        schema="umi-standing-reward-series/1",
+        genesis_hash=FINNEY_GENESIS_HASH,
+        netuid=78,
+        policy_sha256=digest(b["policy"]),
+        policy_epoch=1,
+        manifest_sha256=digest(manifest),
+        control_hotkey=wallet("Ferdie").hotkey.ss58_address,
+        recovery=b["history"].authority,
+        cohorts=(b["history"].plan,),
+        validators=(wallet("Charlie").hotkey.ss58_address,),
+        maximum_proof_lag_blocks=2,
+        maximum_transaction_lifetime_blocks=128,
+        lifetime="until_superseded_or_revoked",
+    )
+    h.precommitted = catalog, manifest, series
+    c = configured(h, tmp_path / "configured")
+    c = c.model_copy(
+        update={
+            "admission_owner": c.admission_owner.model_copy(
+                update={"maximum_sample_gap_blocks": 300}
+            )
+        }
+    )
+    h.provider.config = SimpleNamespace(maximum_head_age_ms=120000, maximum_future_skew_ms=30000)
+    h.provider.ensure_observer_running = lambda: None
+
+    async def archive(_):
+        return b"proof", b"metadata"
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    # The earlier preparation and inference are retained fixture originals.
+    # The tested factory reads their real publication formats and owned queue.
+    h.provider.retained_archive = archive
+    promotion = CompetitionStore(tmp_path / "promotion", b["policy"])
+    service = ServiceAdmissionHost(
+        c, h.intake, promotion, h.provider.collect, archive, provider=h.provider
+    )
+    service.queues[digest(catalog.catalog)] = h.c.queue
+    originals = c.lifecycle.sources
+    prepared = PreparedCohortRound(
+        schema="umi-prepared-cohort-round/1",
+        roster=b["roster"],
+        promotion_head=PromotionHeadBinding(
+            sequence=0,
+            promotion_sha256="a1" * 32,
+            model_sha256=b["roster"].round.incumbent_model_sha256,
+            contributor_hotkey=None,
+        ),
+        observation=execution_boundary(capture(b["roster"].round.prepared_at_block)),
+    )
+    publish_private_model(Path(originals.round_directory) / (h.cohort + ".json"), prepared)
+    publish_private_model(
+        Path(originals.transport_directory) / (scoring_policy_hash(b["transport"]) + ".json"),
+        b["transport"],
+    )
+    SettlementEvidenceFiles(Path(originals.objects_directory)).publish(
+        digest(h.c.terms), lambda _: canonical_json_bytes(h.c.terms)
+    )
+    service.history = lambda cohort: run_owned_thread(
+        CohortAdmissionQueue(h.intake).history, cohort
+    )
+    serving = False
+
+    async def ready(request):
+        value = RequestReadiness(
+            schema="umi-cohort-request-readiness/1",
+            nonce=request.url.params["nonce"],
+            policy_sha256=digest(b["policy"]),
+            cohort_sha256=h.cohort,
+            recovery_tip_sha256=h.state.tip_sha256,
+            catalog_sha256s=(digest(catalog.catalog),),
+            observation=execution_boundary(capture(h.block)),
+            ready=serving,
+        )
+        return httpx.Response(200, json=value.model_dump(mode="json", by_alias=True))
+
+    async with AsyncExitStack() as resources:
+        client = await resources.enter_async_context(
+            httpx.AsyncClient(transport=httpx.MockTransport(ready))
+        )
+        host = LifecycleHost(service, resources, client, ("v" * 32, "v" * 32), sign)
+        for terminal in b["terminals"].values():
+            host.files.publish(
+                terminal,
+                b["objects"].__getitem__,
+                b["policy"],
+                opened_at_block=h.state.observed_at_block,
+                completed_by_block=h.block,
+            )
+        driver = await host._requests(h.cohort)
+        unavailable = await driver.sample_service(h.state, capture(h.block))
+        assert not unavailable.serving
+        assert h.c.queue.retained_seal() is None
+        serving = True
+        h.source = host.requests[h.cohort]
+        progress = h.window()
+        assert progress.completion == "complete"
+        response = SignedRequestReviewResponse.model_validate_json(
+            await host.respond(
+                RequestReviewRequest(
+                    schema="umi-request-review-request/1",
+                    challenge="ab" * 32,
+                    progress=progress,
+                )
+            )
+        )
+        assert response.response.evidence.record.progress == progress
+        calls = tuple(h.calls)
+        h.source.external = lambda _: pytest.fail("completed review must retain its own originals")
+        assert h.source.read(progress).record.progress == progress
+        assert tuple(h.calls) == calls

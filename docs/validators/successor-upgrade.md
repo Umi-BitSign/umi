@@ -550,8 +550,8 @@ from the owning journal after a lost acknowledgement or a missing derived file.
 After request publication succeeds, the lifecycle returns
 `settlement_handoff_published` and the recurring settlement service takes over.
 
-For a standing series, supply `SeriesRequestStart` through the lifecycle's
-`request_start` argument before enabling dispatch. Its private
+For a standing series, the configured lifecycle host supplies `SeriesRequestStart`
+through the lifecycle's `request_start` argument before enabling dispatch. Its private
 `umi-cohort-request-start-config/1` selects a journal directory and
 `first_cohort_not_before_unix_ms`. The deployment must derive that first floor
 from the qualified preceding C4 closure and the announced launch notice. The
@@ -644,6 +644,35 @@ reuses retained votes and certificates without operator resubmission.
 These workers certify enrollment. Cohort phase progression, dispatch and
 settlement still require their configured lifecycle workers; admission
 readiness alone does not establish an operational request phase.
+
+Select `umi-cohort-service-admission-host/5` to run phase control in that same
+owner process. It requires `admission_owner` and a `lifecycle` object with schema
+`umi-cohort-lifecycle-host/1`: a private `directory`, `request_start`,
+`request_completion_directory`, `settlement_history_directory`,
+`proof_export_directory`, `sources` (`SettlementOriginalSources`), and the
+serving API's HTTPS `public_origin`. Intake and catalog selections must match
+the enclosing admission host. Other state, credential and delivery roots must
+be disjoint. Keep the control journals when migrating the owner.
+
+The private listener starts native intake, preparation and request factories,
+using the configured independent reviewers for each phase. It also exposes the
+authenticated `/internal/cohorts/request-review` route. Preparation publishes
+the original round; request closure publishes its objects and registration
+proofs before the settlement history becomes visible. Pending files, proofs or
+votes retry without replacing original decisions. Each cohort has its own
+control connection and loop; a waiting cohort does not stop another cohort.
+
+Dispatch and private evidence replication require their own running services.
+The lifecycle probes
+`GET /v1/competition/cohorts/COHORT_SHA256/requests/readiness?nonce=32_HEX_DIGITS`
+at `public_origin`. A dispatch service must return `umi-cohort-request-readiness/1`
+with that nonce, exact policy, cohort, recovery tip and ordered catalog hashes,
+a fresh finalized observation, and a `ready` flag derived from its owned workers
+and admission availability. The intake host alone does not serve this combined
+dispatch readiness route. Missing, stale or mismatched responses count as
+unavailable request time. Do not substitute a static success response or ordinary
+HTTP health check. The lifecycle remains pending until native work and delivered
+terminals satisfy closure; it does not start evaluator processes itself.
 
 Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
 own finality/history and registration archive sources, pinned cohort authorities,

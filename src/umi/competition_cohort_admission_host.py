@@ -28,9 +28,11 @@ from .competition_cohort_admission_worker import CohortAdmissionWorker
 from .competition_cohort_intake_export import IntakeReviewExporter
 from .competition_cohort_intake_review import NativeIntakeProgressSource
 from .competition_cohort_intake_review_http import intake_review_routes
+from .competition_cohort_lifecycle_host import LifecycleHost
 from .competition_cohort_preparation_export import PreparationReviewExporter
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_review_http import preparation_review_routes
+from .competition_cohort_request_review_http import request_review_routes
 from .competition_cohort_review_boot import _token
 from .competition_cohort_review_http import CohortReviewPeerConfig
 from .competition_reward_boot import _disjoint
@@ -89,7 +91,9 @@ class AdmissionOwnerConfig(StrictProtocolModel):
 
 
 @asynccontextmanager
-async def admission_owner_app(config: AdmissionOwnerConfig, preparation, provider):
+async def admission_owner_app(
+    config: AdmissionOwnerConfig, preparation, provider, *, service_host=None
+):
     """Hold the key, process lease and HTTP clients until every caller drains."""
     c = AdmissionOwnerConfig.model_validate_json(canonical_json_bytes(config))
     queue, intake = preparation.queue, preparation.queue.intake
@@ -170,6 +174,12 @@ async def admission_owner_app(config: AdmissionOwnerConfig, preparation, provide
         app.state.admission_workers = workers
         app.state.admission_reports = {}
         app.state.finality_provider = provider
+        app.state.lifecycle = None
+        if service_host is not None:
+            if service_host.preparation is not preparation or service_host.provider is not provider:
+                raise ValueError("phase control requires the same owned admission and finality")
+            app.state.lifecycle = LifecycleHost(service_host, resources, client, credentials, sign)
+            app.include_router(request_review_routes(app.state.lifecycle, token=token))
         yield app
 
 
@@ -180,8 +190,10 @@ class _Server(uvicorn.Server):
         yield
 
 
-async def run_admission_owner(config: AdmissionOwnerConfig, preparation, provider, stop):
-    async with admission_owner_app(config, preparation, provider) as app:
+async def run_admission_owner(
+    config: AdmissionOwnerConfig, preparation, provider, stop, *, service_host=None
+):
+    async with admission_owner_app(config, preparation, provider, service_host=service_host) as app:
         server = _Server(
             uvicorn.Config(
                 app,
@@ -218,6 +230,8 @@ async def run_admission_owner(config: AdmissionOwnerConfig, preparation, provide
                 await asyncio.wait((serving, stopping), timeout=0.05)
             if not stop.is_set() and server.started:
                 workers = [asyncio.create_task(poll(w)) for w in app.state.admission_workers]
+                if app.state.lifecycle is not None:
+                    workers.append(asyncio.create_task(app.state.lifecycle.run(stop)))
                 logger.info("cohort_admission_owner_ready config_sha256=%s", digest(config))
             await asyncio.wait((serving, stopping, *workers), return_when=asyncio.FIRST_COMPLETED)
             for task in (serving, *workers):
