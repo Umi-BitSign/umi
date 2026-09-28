@@ -23,6 +23,7 @@ from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_intake_review import IntakeProgressReviewer
 from .competition_cohort_preparation_review import PreparationProgressReviewer
 from .competition_cohort_recovery import SignedCohortRecoveryTransition, verify_recovery_quorum
+from .competition_cohort_request_review import RequestProgressReviewer
 from .competition_progress import log_phase
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
@@ -57,7 +58,10 @@ class CohortProgressSignerConfig(StrictProtocolModel):
 
 class CohortProgressSigner:
     def __init__(
-        self, config, reviewer: IntakeProgressReviewer | PreparationProgressReviewer, sign
+        self,
+        config,
+        reviewer: IntakeProgressReviewer | PreparationProgressReviewer | RequestProgressReviewer,
+        sign,
     ):
         self.config = CohortProgressSignerConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = reviewer.source.intake.policy

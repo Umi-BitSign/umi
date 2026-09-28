@@ -358,6 +358,27 @@ before signing. The proposer retains its vote before exporting
 slots, authenticated canonical data and no executable callbacks. Missing delivery
 retries indefinitely; a restart reuses the original intent and signature.
 
+`NativeRequestProgressSource` supplies the request phase controller with native
+queue completion. The owning runtime supplies actual admission/dispatch readiness
+and finalized observations. This runtime requires version 2 standing cohort
+authority, so missing terminal work cannot demand another signed window extension.
+Legacy closure and replay consumers retain their original contracts.
+Unknown intervals restore service time. Once the
+compensated request window is satisfied, the observer retains its window fence,
+seals each configured queue and waits for every benchmark evaluator and accepted
+service job to provide its original terminal. Missing work stays pending without
+an age cutoff. A completed observation retains the entire replay read-set before
+it becomes available for certification.
+
+`RequestProgressReviewer` reads through that owner, replays its service history,
+queue seals and complete closure, and independently checks the original phase
+and participation proofs. It plugs into `CohortProgressSigner` and
+`CertifiedPhaseObserver`; the controller retains the exact observation before
+collecting votes. These ports require a configured owning runtime and its
+readiness probes. Remote deployments still need authenticated owner exports;
+do not point a reviewer at another process's live SQLite files. Preserve the
+intake, request-completion, queue and signing journals together on migration.
+
 `CohortSettlement.advance` assembles native settlement from retained execution
 evidence and independent evaluator votes. It retains partial votes, derives the
 benchmark and service certificates, fixes the promotion attribution once, and

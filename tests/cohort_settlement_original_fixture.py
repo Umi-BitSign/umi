@@ -48,10 +48,10 @@ def select_original_sources(root, history):
     )
 
 
-def publish_original_sources(sources, b):
+def publish_original_intake(config, b):
     history, policy = b["history"], b["policy"]
     cohort = digest(history.plan)
-    intake = CohortIntake(sources.intake, policy, initialize=True)
+    intake = CohortIntake(config, policy, initialize=True)
     with intake._connection() as (db, store):
         store.admit(
             history.plan,
@@ -78,6 +78,17 @@ def publish_original_sources(sources, b):
                     raw,
                 ),
             )
+        seal = b["roster"].intake_seal
+        db.execute(
+            "INSERT INTO cohort_intake_seals VALUES (?,?,?)",
+            (cohort, seal.recovery_tip_sha256, canonical_json_bytes(seal)),
+        )
+    return intake
+
+
+def publish_original_sources(sources, b):
+    intake = publish_original_intake(sources.intake, b)
+    cohort = digest(b["history"].plan)
     objects = SettlementEvidenceFiles(Path(sources.objects_directory))
     values = dict(b["objects"])
     c = b["service_case"]

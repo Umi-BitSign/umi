@@ -330,6 +330,35 @@ class ServiceWorkQueue:
             (RecordReservation("service_work_seal", key, MAX_SERVICE_SEAL_BYTES),),
         )
 
+    def retained_seal(self) -> ServiceWorkSeal | None:
+        """Read the owner's complete immutable fence without closing admissions."""
+        with self.journal.locked():
+            return self._retained_seal()
+
+    def _retained_seal(self) -> ServiceWorkSeal | None:
+        old = self.journal.get("service_work_seal", self.config.catalog_sha256)
+        if old is None:
+            return None
+        catalog, round_ = self._catalog()
+        value = ServiceWorkSeal.model_validate_json(canonical_json_bytes(old))
+        assignments = tuple(
+            sealed_service_assignments(
+                value,
+                JournalEndpointObjects(self.journal),
+                self.policy,
+                catalog=catalog,
+                round_=round_,
+            )
+        )
+        with self.journal.transaction() as db:
+            rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
+            if tuple(r[0] for r in rows) != tuple(range(1, len(assignments) + 1)):
+                raise ValueError("service seal differs from the owner's accepted prefix")
+            for row, assignment in zip(rows, assignments, strict=True):
+                if self._assignment(self._read(row[0], db), db) != assignment:
+                    raise ValueError("service seal changed an original accepted assignment")
+        return value
+
     def seal(self, source, capture, *, expected_tip_sha256: str) -> ServiceWorkSeal:
         """Close new admissions atomically; accepted work and duplicate claims survive.
 
@@ -340,14 +369,9 @@ class ServiceWorkQueue:
         objects = JournalEndpointObjects(self.journal)
         with self.journal.locked():
             catalog, round_ = self._catalog()
-            old = self.journal.get("service_work_seal", key)
+            old = self._retained_seal()
             if old is not None:
-                value = ServiceWorkSeal.model_validate_json(canonical_json_bytes(old))
-                for _ in sealed_service_assignments(
-                    value, objects, self.policy, catalog=catalog, round_=round_
-                ):
-                    pass
-                return value
+                return old
             boundary = execution_boundary(capture)
             review_service_catalog(
                 catalog,
