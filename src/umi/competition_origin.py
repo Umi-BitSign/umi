@@ -24,7 +24,8 @@ from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import FinalizedRegistrationProvider, _AwaitingFinality, _hotkey, _uint
 from .competition_cohort_origin_scope import (
     CohortEndpointOriginScope,
-    review_endpoint_origin_scope,
+    CohortServiceOriginScope,
+    review_origin_recovery_scope,
 )
 from .competition_policy_lineage import submission_policy_admitted
 from .concurrency import run_owned_thread, wait_for_owned
@@ -362,7 +363,11 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             raise ValueError("endpoint origin proof collection timed out") from error
 
     async def _collect_origin_locked(
-        self, signed, origin, *, recovery: CohortEndpointOriginScope | None = None
+        self,
+        signed,
+        origin,
+        *,
+        recovery: CohortEndpointOriginScope | CohortServiceOriginScope | None = None,
     ) -> EndpointOriginCapture:
         async with self._lock:
             if self._closed:
@@ -391,7 +396,7 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
                 # Authenticate accepted work at the native observation height.
                 # Local authority replay has no overall network timeout.
                 recovery = await run_owned_thread(
-                    review_endpoint_origin_scope, recovery, signed, self.policy, ref.block_number
+                    review_origin_recovery_scope, recovery, signed, self.policy, ref.block_number
                 )
                 # A slow but valid local replay must not force another replay
                 # merely because its initial network observation aged out.
@@ -462,7 +467,9 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         evidence = canonical_json_bytes(
             {
                 "schema": (
-                    "umi-cohort-endpoint-origin-evidence/1"
+                    "umi-cohort-service-origin-evidence/1"
+                    if isinstance(recovery, CohortServiceOriginScope)
+                    else "umi-cohort-endpoint-origin-evidence/1"
                     if recovery is not None
                     else "umi-competition-endpoint-origin-evidence/1"
                     if dns is None
@@ -552,9 +559,16 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         # submission digest or overwriting a legacy origin at the same block.
         body = json.loads(capture.evidence)
         record_key = capture.submission_sha256
-        if body["schema"] == "umi-cohort-endpoint-origin-evidence/1":
+        if body["schema"] in {
+            "umi-cohort-endpoint-origin-evidence/1",
+            "umi-cohort-service-origin-evidence/1",
+        }:
             record_key = digest(
-                ["umi-cohort-endpoint-origin-key/1", record_key, body["recovery_scope_sha256"]]
+                [
+                    body["schema"].replace("-evidence/", "-key/"),
+                    record_key,
+                    body["recovery_scope_sha256"],
+                ]
             )
         connection = self._connect()
         try:

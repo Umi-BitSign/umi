@@ -259,7 +259,7 @@ async def test_slow_authority_review_has_no_collection_timeout(endpoint, monkeyp
     p = endpoint
     from umi import competition_origin as module
 
-    real = module.review_endpoint_origin_scope
+    real = module.review_origin_recovery_scope
     entered, release = threading.Event(), threading.Event()
 
     def slow(*args):
@@ -267,7 +267,7 @@ async def test_slow_authority_review_has_no_collection_timeout(endpoint, monkeyp
         assert release.wait(5)
         return real(*args)
 
-    monkeypatch.setattr(module, "review_endpoint_origin_scope", slow)
+    monkeypatch.setattr(module, "review_origin_recovery_scope", slow)
     task = asyncio.create_task(p.service(collection_timeout_seconds=1).collect(p.e.assignment))
     try:
         assert await asyncio.to_thread(entered.wait, 3)
@@ -304,7 +304,7 @@ async def test_slow_review_refreshes_native_head_without_replaying_authority(end
     p = endpoint
     from umi import competition_origin as module
 
-    real = module.review_endpoint_origin_scope
+    real = module.review_origin_recovery_scope
     calls = []
 
     def slow(*args):
@@ -319,7 +319,7 @@ async def test_slow_review_refreshes_native_head_without_replaying_authority(end
         )
         return result
 
-    monkeypatch.setattr(module, "review_endpoint_origin_scope", slow)
+    monkeypatch.setattr(module, "review_origin_recovery_scope", slow)
     assert (await p.collect()).block == _HEIGHT + 15
     assert calls == [_HEIGHT]
 
@@ -387,7 +387,7 @@ async def test_cancelled_authority_review_drains_before_releasing_assignment_loc
     p = endpoint
     from umi import competition_origin as module
 
-    real = module.review_endpoint_origin_scope
+    real = module.review_origin_recovery_scope
     entered, release = threading.Event(), threading.Event()
 
     def slow(*args):
@@ -395,7 +395,7 @@ async def test_cancelled_authority_review_drains_before_releasing_assignment_loc
         assert release.wait(5)
         return real(*args)
 
-    monkeypatch.setattr(module, "review_endpoint_origin_scope", slow)
+    monkeypatch.setattr(module, "review_origin_recovery_scope", slow)
     task = asyncio.create_task(p.collect())
     try:
         assert await asyncio.to_thread(entered.wait, 3)

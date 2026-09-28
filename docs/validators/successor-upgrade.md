@@ -514,12 +514,29 @@ Run `ServiceWorkWorker` for each selected service catalog alongside benchmark
 dispatch. It rotates the original FIFO admission journal in bounded batches,
 serializes work for each miner and holds a process lease until active work has
 drained. Bind its `ServiceWorkTransport` to the designated evaluator key, owned
-finalized blocks and an origin provider that independently authenticates current
-cohort authority, registration and the submitted HTTPS origin. Supply renewable
-media/window inputs, authenticated history/registration observations, independent
-request-review ports, a certified retry-review port and terminal signing. These
-ports require production host wiring and qualification; the worker alone does
-not provide remote reviewers or prove installed unattended operation.
+finalized blocks and `ServiceWorkAuthority`. Its `observe` and `origin` ports
+recheck certified history and native registration/Axon proofs against the original
+queue assignment. A valid closure is retained before execution is refused, so a
+stale history cannot reopen work. Supply renewable media/window inputs and
+terminal signing separately.
+
+Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
+own finality/history and registration archive sources, pinned cohort authorities,
+transport policy, named signer and trusted owner. `ServiceWorkReader` authenticates
+the exact original claim through `ServiceWorkExporter` at the private
+`/internal/cohorts/service-work` route. Each lookup uses a fresh signed challenge;
+HTTP delivery also requires a private bearer credential. The reviewer replays
+original registration proofs and request windows independently before retaining
+its intent. A replacement review includes its exact parent grant. Retry votes
+require a signed no-response retirement receipt and independently observed
+request expiry; assemble them with `certify_service_retry`.
+
+Preserve the review journal across restarts. It binds each work item to its
+original assignment and evaluator, reserves vote space before signing, and
+recovers completed votes without live sources. Unfinished signing uses retained
+proofs while rechecking current authority and the owner's original assignment.
+These ports require production host wiring, reviewer vote transport and installed
+qualification; the components alone do not prove unattended operation.
 
 Selected requests, reviewer votes, signed miner receipts, original responses and
 terminal signing intents remain in the owning queue. Dispatch records its intent
