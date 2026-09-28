@@ -629,6 +629,16 @@ and the retained availability evidence. Late replay needs no fresh deadline;
 elapsed time or missing infrastructure evidence creates neither a zero nor a
 void. Version 1 benchmark closures keep their existing schema and checks.
 
+`build_service_request_closure` constructs this manifest from the complete
+benchmark closure, configured catalogs and original owner seals.
+`ServiceWorkTerminals.read` supplies each accepted job's verified retained
+response through the queue owner. An unsigned intent or missing response keeps
+that job pending; missing archive objects prevent completion. Restart and late
+delivery reuse the original response and benchmark observation. The builder
+replays the complete manifest before returning it and does not reveal labels.
+The recurring host still needs to publish the resulting closure and certify
+its availability evidence before advancing the phase.
+
 These library components are not a deployed service scheduler. Connect recurring
 authenticated delivery, independent review and original service measurements;
 qualify evaluator replacement, abandonment and operational storage growth.

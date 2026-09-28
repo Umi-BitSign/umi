@@ -26,6 +26,7 @@ from .competition_cohort_service_grant import (
     verify_service_parent,
 )
 from .competition_cohort_service_requests import ServiceWorkRequests
+from .competition_cohort_service_work import ServiceWorkAssignment
 from .competition_execution import ExecutionBoundary
 from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse, verify_recovered_response
@@ -150,6 +151,33 @@ class ServiceWorkTerminals:
         self.requests = requests
         self.journal, self.policy = requests.journal, requests.policy
         self.objects = JournalEndpointObjects(self.journal)
+
+    def read(self, assignment: ServiceWorkAssignment) -> SignedServiceTerminal | None:
+        """Recover the original terminal and any interrupted immutable export."""
+        assignment = ServiceWorkAssignment.model_validate_json(canonical_json_bytes(assignment))
+        owned = self.requests.queue.assignment(assignment.admission.claim)
+        if owned != assignment:
+            raise ValueError("service terminal lookup changed its accepted assignment")
+        work = owned.admission.work_sha256
+        with self.journal.locked():
+            raw = self.journal.get("service_terminal", work)
+            if raw is None:
+                return None
+            signed = SignedServiceTerminal.model_validate_json(canonical_json_bytes(raw))
+            intent = self.journal.get("service_terminal_intent", work)
+            if intent is None or canonical_json_bytes(intent) != canonical_json_bytes(
+                signed.terminal
+            ):
+                raise ValueError("service terminal differs from its original signing intent")
+            grant = read_service_terminal(
+                signed, self.objects, self.policy, self.requests.transport
+            )
+            if grant.body.assignment != owned:
+                raise ValueError("service terminal belongs to another accepted assignment")
+            # Retention can commit before export acknowledges. Recover that
+            # exact object without another signature or fresh execution.
+            self.objects.put(signed)
+            return signed
 
     def prepare(self, slot, response=None, retirement=None, source=None, observation=None):
         body = self.requests._body(slot)
