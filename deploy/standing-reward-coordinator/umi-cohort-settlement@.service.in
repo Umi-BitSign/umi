@@ -1,0 +1,26 @@
+[Unit]
+Description=UMI native cohort settlement or independent review (%i)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+UMask=0077
+ExecStart=@PYTHON@ -I -B -m umi.competition_cohort_settlement_cli run --config @CONFIG_DIRECTORY@/%i.json
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=infinity
+KillSignal=SIGTERM
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@STATE_ROOT@ @CHAIN_STATE@ @EXECUTION_ROOTS@ @PROMOTION_ROOT@ @SETTLEMENT_ROOT@ @PROOF_EXPORT@ @EXCHANGE_OUTBOX@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

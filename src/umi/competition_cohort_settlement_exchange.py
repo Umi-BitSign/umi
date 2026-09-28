@@ -33,6 +33,7 @@ from .competition_cohort_settlement_controller import (
     SettlementPeer,
     SettlementPeerReviewer,
 )
+from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_execution import ExecutionBoundary
 from .concurrency import run_owned_thread
@@ -202,6 +203,10 @@ class SettlementReviewExchange:
         # A completed export remains usable without that provider after restart.
         observation = request.observation if kind == "progress" else request.evidence.observation
         await self.proofs.publish(observation)
+        # A reviewer needs the exact certificate objects referenced by this
+        # proposal, including any signatures whose envelopes differ locally.
+        # Publish them before the request; interrupted delivery simply retries.
+        await run_owned_thread(self.publish_objects)
         await run_owned_thread(
             partial(
                 publish_private_model,
@@ -210,6 +215,11 @@ class SettlementReviewExchange:
                 maximum_bytes=MAX_REQUEST_BYTES,
             )
         )
+
+    def publish_objects(self) -> None:
+        files = SettlementEvidenceFiles(self.outbox / "objects")
+        for key in self.phases.owner.journal.keys("endpoint_replay_object"):
+            files.publish(key, self.phases.owner.archive)
 
     def request(self, phase: str, kind: str) -> Request:
         model = SettlementProgressRequest if kind == "progress" else SettlementTransitionRequest

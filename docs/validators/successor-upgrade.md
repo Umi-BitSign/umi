@@ -411,16 +411,52 @@ name the exact request digest and selected signer. Lost deliveries retry using
 the original observation and signature, including after a receiver advances to
 another phase.
 
-The proposer exports its original registration archive and runtime metadata before
-publishing a request. `SettlementRegistrationFiles` uses bounded, immutable proof
+The proposer exports its original registration archive, runtime metadata and
+native result objects before publishing a request. `SettlementRegistrationFiles`
+uses bounded, immutable proof
 frames; the receiver authenticates them against its own finality provider. The
 file envelope alone supplies no verification authority. Existing exported proof
 bytes remain available when the original provider is offline. The reviewer loop
 visits only the six selected slots, logs retry reasons without evidence payloads,
-and continues after an unavailable slot. Original input packages, later result
-objects and promotion artifacts require independent delivery. Recurring host
-startup, automatic input publication and the combined source-delivery service
-still need wiring; these components are not an installed daemon.
+and continues after an unavailable slot. All these stores are private.
+
+`umi-cohort-settlement check --config CONFIG.json` validates the root-owned,
+canonical mode-`0444` `umi-cohort-settlement-config/1` selection.
+`umi-cohort-settlement run --config CONFIG.json` starts the recurring native
+service for every selected cohort. Coordinator and reviewer roles each load
+only their named evaluator key and their own original execution journals.
+Quality votes are derived under the execution owner's lock; service votes and
+phase votes use separate retained intents. Missing evidence or votes stays
+pending, with a bounded retry reason in the service log. A new observation
+requires fresh finality; completing an existing intent uses its original
+observation without an age cutoff.
+
+The service requires two separately selected inputs per cohort:
+
+- `inputs_directory/COHORT_SHA256.json`: immutable `SettlementInputPackage`.
+  The first native replay pins its digest in local state.
+- `history_directory/COHORT_SHA256.json`: the host's current
+  `CohortOrderHistory` handoff, including every original decision input.
+  The upstream history owner publishes this atomically. It must cover reference
+  reveal before settlement can begin and deliver later revocation or recovery
+  history. It cannot be inferred from the input package or an arbitrary replica.
+
+Initial history import independently verifies the original decision archives.
+The private local ledger retains subsequent certified phases and refuses forks.
+An older matching handoff prefix cannot roll that ledger back. A conflicting
+or unavailable handoff stops progress for retry; it never turns into a miner
+zero. Migration must transfer this ledger and the signer journals while fencing
+the previous writer.
+
+Replicate fixed paths in each evaluator's exchange outbox into its peers' inboxes:
+`quality/`, `service/`, `requests/`, `votes/`, `objects/` and `history/`.
+Replicate proof exports to the configured proof imports separately. Never copy
+live execution SQLite databases between evaluators. The service reconstructs
+lost vote deliveries from its own original journals. The coordinator writes
+the certified package to `settlement_directory/COHORT_SHA256.json`, which is
+the existing reward coordinator's input directory. Publication is idempotent;
+reward activation still requires the standing control and validator path.
+Promotion assets remain a separately verified input.
 
 The reward coordinator derives the next activation
 from that package and the approved manifest. Initial activation names the
@@ -441,8 +477,8 @@ files with mode `0600`. The systemd template in
 `deploy/standing-reward-coordinator/` owns provider startup, retries and orderly
 shutdown. It must select the qualified installed Python environment.
 
-These services remain uninstalled. Recurring settlement startup, full later-cohort
-replay, deployed peer and artifact replication, key provisioning,
+These services remain uninstalled. Automatic upstream input/history publication,
+full later-cohort replay, deployed peer and artifact replication, key provisioning,
 migration ownership and combined Linux restart/effect qualification remain
 required before deployment. Configuration
 validation is not runtime qualification.

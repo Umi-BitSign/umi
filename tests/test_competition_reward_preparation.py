@@ -2901,6 +2901,376 @@ def original_settlement_inputs(service_quality_inputs):
     return SimpleNamespace(b=b, package=package, requirement=requirement)
 
 
+@pytest.fixture
+async def recurring_settlement_case(original_settlement_inputs, registered_case, tmp_path):
+    """Real owner journals, signatures, file exchange and native settlement.
+
+    Only finality/proof verification and the original fixture model are synthetic.
+    No completed package or quality votes are supplied to these services.
+    """
+    from collections import Counter
+    from contextlib import ExitStack
+    from pathlib import Path
+
+    from umi.competition_cohort_order_signer import CohortOrderHistory
+    from umi.competition_cohort_settlement_boot import settlement_store
+    from umi.competition_cohort_settlement_config import SettlementServiceConfig
+    from umi.competition_cohort_settlement_inputs import publish_settlement_inputs
+    from umi.competition_cohort_settlement_proofs import SettlementRegistrationFiles
+    from umi.competition_cohort_settlement_service import CohortSettlementService
+    from umi.open_competition import identity
+    from umi.private_files import ensure_private_directory, publish_private_model
+
+    from .test_competition_cohort_coordinator import Harness
+
+    c, b = original_settlement_inputs, original_settlement_inputs.b
+    history = c.package.inputs.history
+    manifest = StandingRewardManifest(
+        schema="umi-standing-reward-manifest/1",
+        policy_sha256=digest(b["policy"]),
+        cohorts=(c.requirement,),
+    )
+    series = StandingRewardSeries(
+        schema="umi-standing-reward-series/1",
+        genesis_hash=FINNEY_GENESIS_HASH,
+        netuid=78,
+        policy_sha256=digest(b["policy"]),
+        policy_epoch=1,
+        manifest_sha256=digest(manifest),
+        control_hotkey=wallet("Ferdie").hotkey.ss58_address,
+        recovery=history.authority,
+        cohorts=(history.plan,),
+        validators=(registered_case.hotkey,),
+        maximum_proof_lag_blocks=2,
+        maximum_transaction_lifetime_blocks=128,
+        lifetime="until_superseded_or_revoked",
+    )
+    clock = SimpleNamespace(
+        block=history.transitions[-1].transition.observed_at_block + 100,
+        collects=0,
+        fail_collect=False,
+    )
+    calls = Counter()
+
+    async def collect():
+        return await Harness.collect(clock)
+
+    async def archive(observation):
+        return b"original-registration-proof", b"runtime-metadata"
+
+    async def review_archive(observation, raw, metadata):
+        assert (raw, metadata) == await archive(observation)
+        assert observation.block <= clock.block
+        return SimpleNamespace(
+            original=observation, replayed_at=SimpleNamespace(block_number=clock.block)
+        )
+
+    provider = SimpleNamespace(
+        policy=b["policy"],
+        collect=collect,
+        retained_archive=archive,
+        review_archive=review_archive,
+        ensure_observer_running=lambda: None,
+    )
+    result = SimpleNamespace(
+        c=c,
+        b=b,
+        nodes={},
+        stacks={},
+        configs={},
+        calls=calls,
+        clock=clock,
+        provider=provider,
+    )
+
+    def config(name):
+        root = tmp_path / ("recurring-" + name)
+        ensure_private_directory(root)
+        configs = tuple(
+            o.config
+            for o in b["owners"].values()
+            if identity(o.config.signer) == identity(wallet(name).hotkey.ss58_address)
+        )
+        paths = {
+            key: str(root / key)
+            for key in (
+                "state_directory",
+                "inputs_directory",
+                "history_directory",
+                "promotion_directory",
+                "settlement_directory",
+                "proof_import_directory",
+                "proof_export_directory",
+                "exchange_inbox",
+                "exchange_outbox",
+            )
+        }
+        return SettlementServiceConfig(
+            schema="umi-cohort-settlement-config/1",
+            role="coordinator" if name == "Charlie" else "reviewer",
+            series=series,
+            policy=b["policy"],
+            manifest=manifest,
+            chain=registered_case.config.model_copy(
+                update={
+                    "policy_sha256": digest(b["policy"]),
+                    "state_directory": str(root / "chain"),
+                    "proof_rpc_fallback_urls": (
+                        "wss://backup-one.example.org",
+                        "wss://backup-two.example.org",
+                    ),
+                }
+            ),
+            signer_hotkey=wallet(name).hotkey.ss58_address,
+            proposer_hotkey=wallet("Charlie").hotkey.ss58_address,
+            signer_key_file=str(root / "key"),
+            executions=configs,
+            maximum_package_bytes=64 * 1024**2,
+            maximum_promotion_bytes=1_000_000,
+            maximum_state_bytes=128 * 1024**2,
+            **paths,
+        )
+
+    async def start(name):
+        old = result.stacks.pop(name, None)
+        if old:
+            old.close()
+        conf = result.configs.setdefault(name, config(name))
+        stack = result.stacks[name] = ExitStack()
+        store = stack.enter_context(
+            settlement_store(
+                Path(conf.state_directory) / digest(series) / digest(history.plan),
+                conf.maximum_state_bytes,
+            )
+        )
+        proofs = SettlementRegistrationFiles(
+            provider,
+            inbox=Path(conf.proof_import_directory),
+            outbox=Path(conf.proof_export_directory),
+        )
+        for d in b["decisions"].values():
+            await proofs.publish(d.observation)
+        copy(Path(conf.proof_export_directory), Path(conf.proof_import_directory))
+        publish_settlement_inputs(
+            Path(conf.inputs_directory) / (digest(history.plan) + ".json"),
+            c.package,
+        )
+        publish_private_model(
+            Path(conf.history_directory) / (digest(history.plan) + ".json"),
+            CohortOrderHistory(
+                history=history,
+                decisions=tuple(
+                    b["decisions"][t.transition.evidence_sha256]
+                    for t in history.transitions
+                    if t.transition.operation != "revoke"
+                ),
+            ),
+            maximum_bytes=8 * 1024**2,
+        )
+        promotion = CompetitionStore(Path(conf.promotion_directory), b["policy"])
+        if name not in result.nodes:
+            root = tmp_path / ("native-model-" + name)
+            bundle = bundle_at(root)
+            archive_root = tmp_path / ("native-archive-" + name)
+            preserve_bundle(bundle, root, archive_root, b["policy"])
+            promotion.initialize_baseline(bundle, archive_root)
+
+        async def sign(body):
+            calls[(name, digest(body))] += 1
+            return sign_object(body, wallet(name))
+
+        executions = tuple(
+            o
+            for o in b["owners"].values()
+            if identity(o.config.signer) == identity(conf.signer_hotkey)
+        )
+        node = CohortSettlementService(
+            conf,
+            history.plan,
+            store=store,
+            provider=provider,
+            proofs=proofs,
+            promotion=promotion,
+            executions=executions,
+            sign=sign,
+        )
+        result.nodes[name] = node
+        return node
+
+    def copy(origin, target):
+        for path in origin.rglob("*.json"):
+            destination = target / path.relative_to(origin)
+            ensure_private_directory(destination.parent)
+            if destination.exists():
+                assert destination.read_bytes() == path.read_bytes()
+            else:
+                destination.write_bytes(path.read_bytes())
+                destination.chmod(0o600)
+
+    def deliver():
+        for sender, receiver in (("Charlie", "Dave"), ("Dave", "Charlie")):
+            a, z = result.configs[sender], result.configs[receiver]
+            copy(Path(a.exchange_outbox), Path(z.exchange_inbox))
+            copy(Path(a.proof_export_directory), Path(z.proof_import_directory))
+
+    result.start, result.deliver = start, deliver
+    try:
+        yield result
+    finally:
+        for stack in result.stacks.values():
+            stack.close()
+
+
+async def test_recurring_settlement_certifies_without_inference_or_manual_votes(
+    recurring_settlement_case,
+):
+    from pathlib import Path
+
+    from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
+
+    h = recurring_settlement_case
+    assert all(not o.journal.keys("closed_quality_vote") for o in h.b["owners"].values())
+    a, z = await h.start("Charlie"), await h.start("Dave")
+    assert await z.tick() == "reviewing"
+    h.deliver()
+    with pytest.raises(SettlementPhaseQuorumPending):
+        await a.tick()
+    h.deliver()
+    assert await z.tick() == "reviewing"
+    h.deliver()
+    # Lose a published local quality reply after the native signature committed.
+    lost = next(Path(z.config.exchange_outbox).glob("quality/**/*.json"))
+    original = lost.read_bytes()
+    lost.unlink()
+    h.clock.block += 100000
+    a, z = await h.start("Charlie"), await h.start("Dave")
+    for _ in range(15):
+        h.deliver()
+        await z.tick()
+        h.deliver()
+        try:
+            status = await a.tick()
+        except SettlementPhaseQuorumPending:
+            continue
+        if status == "package_published":
+            break
+    else:
+        pytest.fail("recurring settlement did not publish its reward package")
+    assert lost.read_bytes() == original
+    assert max(h.calls.values()) == 1
+    assert h.b["service_case"].p.model.calls == 1
+    package_path = Path(a.config.settlement_directory) / (a.cohort + ".json")
+    raw = package_path.read_bytes()
+    from umi.competition_cohort_reward_package import CohortRewardPackage
+
+    package = CohortRewardPackage.model_validate_json(raw)
+    assert canonical_json_bytes(package) == raw
+    assert len(package.benchmark.participants) == len(a.data.quality.closure.participants)
+    h.clock.block += 100000
+    a = await h.start("Charlie")
+    assert await a.tick() == "package_published"
+    assert package_path.read_bytes() == raw and max(h.calls.values()) == 1
+
+
+@pytest.mark.parametrize("fault", ["missing_execution", "missing_proof", "revoked", "changed_vote"])
+async def test_recurring_settlement_retries_without_signing_unverified_results(
+    recurring_settlement_case,
+    fault,
+):
+    from pathlib import Path
+
+    from umi.competition_cohort_order_signer import CohortOrderHistory
+    from umi.competition_cohort_quality_signing import SignedClosedQualityVote
+    from umi.open_competition import identity
+    from umi.private_files import read_private_model
+
+    from .test_competition_cohort_consumers import transition
+
+    h = recurring_settlement_case
+    z = await h.start("Dave")
+    if fault == "missing_execution":
+        z.executions = ()
+        with pytest.raises(FileNotFoundError):
+            await z.tick()
+        assert not h.calls
+        z = await h.start("Dave")
+        assert await z.tick() == "reviewing"
+    elif fault == "missing_proof":
+        files = list(Path(z.config.proof_import_directory).rglob("*.json"))
+        assert files
+        for path in files:
+            path.unlink()
+        with pytest.raises(FileNotFoundError):
+            await z.tick()
+        assert not h.calls
+        z = await h.start("Dave")
+        assert await z.tick() == "reviewing"
+    elif fault == "revoked":
+        path = Path(z.config.history_directory) / (z.cohort + ".json")
+        original = read_private_model(path, CohortOrderHistory, maximum_bytes=8 * 1024**2)
+        history = transition(original.history, h.b["policy"], "revoke", h.clock.block)
+        path.write_bytes(canonical_json_bytes(original.model_copy(update={"history": history})))
+        assert await z.tick() == "revoked"
+        assert not h.calls and z.phases is None
+    else:
+        a = await h.start("Charlie")
+        await z.tick()
+        h.deliver()
+        await a._handoff()
+        await a._start(a.store.published_history(a.cohort))
+        path = next(Path(a.config.exchange_inbox).glob("quality/**/*.json"))
+        vote = read_private_model(path, SignedClosedQualityVote, maximum_bytes=16 * 1024**2)
+        wrong = vote.model_copy(
+            update={
+                "signature": vote.signature.model_copy(
+                    update={
+                        "hotkey": wallet("Alice").hotkey.ss58_address,
+                    }
+                )
+            }
+        )
+        path.write_bytes(canonical_json_bytes(wrong))
+        before = dict(h.calls)
+        with pytest.raises(ValueError):
+            a.votes.collect()
+        assert h.calls == before
+        assert not list(Path(a.config.settlement_directory).glob("*.json"))
+        assert all(name != "Charlie" for name, _ in h.calls)
+        assert identity(wrong.signature.hotkey) != identity(vote.signature.hotkey)
+
+
+async def test_recurring_settlement_loops_publish_with_automatic_file_delivery(
+    recurring_settlement_case,
+):
+    from pathlib import Path
+
+    h = recurring_settlement_case
+    a, z = await h.start("Charlie"), await h.start("Dave")
+    for node in (a, z):
+        node.config = node.config.model_copy(update={"poll_seconds": 1})
+    stop = asyncio.Event()
+    tasks = [asyncio.create_task(node.run(stop)) for node in (a, z)]
+    output = Path(a.config.settlement_directory) / (a.cohort + ".json")
+
+    async def replicate_and_wait():
+        while not output.exists():
+            h.deliver()
+            for task in tasks:
+                if task.done():
+                    task.result()
+                    pytest.fail("settlement loop stopped unexpectedly")
+            await asyncio.sleep(0.05)
+
+    try:
+        await asyncio.wait_for(replicate_and_wait(), timeout=180)
+    finally:
+        stop.set()
+        await asyncio.gather(*tasks)
+    assert a.last_report == "package_published"
+    assert max(h.calls.values()) == 1
+    assert h.b["service_case"].p.model.calls == 1
+
+
 async def test_settlement_input_replica_recovers_before_quality_votes(
     original_settlement_inputs, tmp_path
 ):
