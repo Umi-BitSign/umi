@@ -20,9 +20,8 @@ from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage_journal import RewardCoverageJournal
-from .competition_reward_coverage_source import NativeRewardCoverageSource
+from .competition_reward_coverage_service import StandingRewardCoverageService
 from .competition_reward_decisions import (
-    SignedRewardControlDecision,
     StandingRewardControlReader,
     StandingRewardSeries,
 )
@@ -33,13 +32,12 @@ from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_host import StandingRewardHostApproval
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import opportunity_rule
-from .competition_reward_opportunity_review import review_opportunity_certificate
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
 from .competition_store import CompetitionStore
 from .competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime
-from .concurrency import await_owned_task, run_owned_thread
+from .concurrency import await_owned_task
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -219,45 +217,15 @@ async def run_installed_standing_rewards(
             providers[sha] = provider
             constructing.push_async_callback(_close_provider, provider)
         current = providers[digest(config.chain)]
-        completed_opportunities = {}
-
-        async def opportunity(activation):
-            key = digest(activation)
-            if key in completed_opportunities:
-                return completed_opportunities[key]
-            index = tuple(digest(c) for c in config.series.cohorts).index(activation.cohort_sha256)
-            if index == 0:
-                raise ValueError("initial opportunity requires the native legacy handoff")
-            prior = SignedRewardControlDecision.model_validate_json(
-                canonical_json_bytes(reader.journal.get("reward_control_decision", f"{index:04d}"))
-            ).decision
-            if prior.activation is None:
-                raise ValueError("standing predecessor activation is unavailable")
-            package = await run_owned_thread(files.package, prior.activation.package_sha256)
-            source = NativeRewardCoverageSource(
-                provider=current,
-                journal=coverage,
-                history=history,
-                preparation=preparation,
-                package=package,
-                decisions=files.decision,
-                profile=config.eligibility,
-                maximum_history_blocks=config.service.maximum_history_blocks,
-            )
-            verified = await review_opportunity_certificate(
-                await run_owned_thread(files.certificate, activation.prior_opportunity_sha256),
-                expected_sha256=activation.prior_opportunity_sha256,
-                journal=coverage,
-                witness_source=files.witness,
-                review_endpoint=source.replay,
-                manifest=config.manifest,
-                series=config.series,
-                policy=config.policy,
-                activation=prior.activation,
-                maximum_witness_bytes=config.maximum_witness_bytes,
-            )
-            completed_opportunities[key] = verified
-            return verified
+        collection = StandingRewardCoverageService(
+            provider=current,
+            journal=coverage,
+            history=history,
+            preparation=preparation,
+            files=files,
+            profile=config.eligibility,
+            maximum_history_blocks=config.service.maximum_history_blocks,
+        )
 
         def signer():
             from .named_hotkey import load_named_hotkey
@@ -282,7 +250,8 @@ async def run_installed_standing_rewards(
             history=history,
             packages=files.package,
             decisions=files.decision,
-            opportunity=opportunity,
+            opportunity=collection.opportunity,
+            coverage=collection,
             load_signer=signer,
             stop=stop,
             limits=config.service,

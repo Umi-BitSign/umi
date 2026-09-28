@@ -19,6 +19,7 @@ from pydantic import Field, model_validator
 
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_control_archive import HistoricalRewardControlProvider
+from .competition_reward_coverage_service import StandingRewardCoverageService
 from .competition_reward_decisions import DecisionSource, RewardActivation
 from .competition_reward_executor import StandingHistoryPending, StandingRewardExecutor
 from .competition_reward_handoff import hold_legacy_reward_handoff
@@ -77,10 +78,30 @@ async def _continue_predecessor(runtime, stop, poll_seconds):
             await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
 
 
-async def _stop_predecessor(task):
+async def _stop_task(task):
     task.cancel()
     with suppress(asyncio.CancelledError):
         await await_owned_task(task)
+
+
+def _check_coverage(task, stop):
+    if task is not None and task.done():
+        task.result()
+        if not stop.is_set():
+            raise RuntimeError("standing coverage collector stopped unexpectedly")
+
+
+async def _run_executor(executor, stop, limits, coverage):
+    if coverage is None:
+        await executor.run(stop, poll_seconds=limits.poll_seconds)
+        return
+    async with AsyncExitStack() as tasks:
+        execution = asyncio.create_task(executor.run(stop, poll_seconds=limits.poll_seconds))
+        tasks.push_async_callback(_stop_task, execution)
+        await asyncio.wait((execution, coverage), return_when=asyncio.FIRST_COMPLETED)
+        _check_coverage(coverage, stop)
+        if execution.done():
+            execution.result()
 
 
 async def _prepare_first(preparation, provider, history, packages, decisions, height, maximum):
@@ -129,6 +150,7 @@ async def run_standing_reward_service(
     load_signer: Callable,
     stop: asyncio.Event,
     limits: StandingRewardServiceLimits,
+    coverage: StandingRewardCoverageService | None = None,
 ) -> None:
     """Own the passed providers until stopped; preserve journals on every retry.
 
@@ -173,11 +195,26 @@ async def run_standing_reward_service(
                 _continue_predecessor(runtime, stop, float(runtime.config.poll_seconds)),
                 name="standing-predecessor-continuation",
             )
-            resources.push_async_callback(_stop_predecessor, predecessor)
+            resources.push_async_callback(_stop_task, predecessor)
         for value in owners.values():
             await value.start()
+        collection = None
+        if coverage is not None:
+            if (
+                type(coverage) is not StandingRewardCoverageService
+                or coverage.provider is not provider
+                or coverage.history is not history
+                or coverage.preparation is not preparation
+                or opportunity != coverage.opportunity
+            ):
+                raise ValueError("standing coverage must share the native service owners")
+            collection = asyncio.create_task(
+                coverage.run(stop, poll_seconds=limits.poll_seconds), name="standing-coverage"
+            )
+            resources.push_async_callback(_stop_task, collection)
         bootstrap_height = None
         while not stop.is_set():
+            _check_coverage(collection, stop)
             for value in owners.values():
                 value.ensure_observer_running()
             try:
@@ -253,7 +290,7 @@ async def run_standing_reward_service(
                     logger.info(
                         "standing_service_running series_sha256=%s", preparation.series_sha256
                     )
-                    await executor.run(stop, poll_seconds=limits.poll_seconds)
+                    await _run_executor(executor, stop, limits, collection)
             except StandingHistoryPending:
                 if bootstrap_height is not None:
                     # A completed chunk made durable progress. Keep catching

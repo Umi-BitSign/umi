@@ -23,8 +23,12 @@ from .competition_reward_coverage_source import CoverageHistoryPending
 from .competition_reward_decisions import RewardActivation, StandingRewardSeries
 from .competition_reward_manifest import StandingRewardOpportunityManifest
 from .competition_reward_opportunity import RewardOpportunityCertificate, opportunity_rule
-from .competition_reward_opportunity_review import prepare_opportunity_certificate
+from .competition_reward_opportunity_review import (
+    DEFAULT_WITNESS_BYTES,
+    prepare_opportunity_certificate,
+)
 from .open_competition import CompetitionPolicy, digest, identity
+from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,7 @@ class RewardCoverageCollector:
         maximum_replay_intervals: int = 8,
         maximum_endpoints_per_validator: int = 4,
         capture_window_blocks: int = 128,
+        maximum_witness_bytes: int = DEFAULT_WITNESS_BYTES,
     ):
         if journal.rule != opportunity_rule(manifest, series, policy):
             raise ValueError("coverage collector differs from approved opportunity terms")
@@ -66,6 +71,8 @@ class RewardCoverageCollector:
         checked_size(maximum_replay_intervals, 4096)
         checked_size(maximum_endpoints_per_validator, 4096)
         checked_size(capture_window_blocks, 65536)
+        checked_size(maximum_witness_bytes, MAX_CONFIGURED_PRIVATE_BYTES)
+        self.maximum_witness_bytes = maximum_witness_bytes
         self.journal, self.source = journal, source
         self.terms = dict(manifest=manifest, series=series, policy=policy, activation=activation)
         self.activation = digest(activation)
@@ -99,7 +106,9 @@ class RewardCoverageCollector:
 
     async def _complete(self, totals):
         if self._certificate is None and all(n >= self.minimum_ms for _, n in totals):
-            self._certificate = await prepare_opportunity_certificate(self.journal, **self.terms)
+            self._certificate = await prepare_opportunity_certificate(
+                self.journal, **self.terms, maximum_witness_bytes=self.maximum_witness_bytes
+            )
         return self._certificate
 
     async def step(self) -> CoverageProgress:

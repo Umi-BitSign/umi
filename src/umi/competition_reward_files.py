@@ -13,7 +13,7 @@ from .competition_reward_decisions import MAX_DECISION_BYTES, SignedRewardContro
 from .competition_reward_opportunity import RewardOpportunityCertificate, RewardOpportunityWitness
 from .competition_reward_opportunity_review import MAX_CERTIFICATE_BYTES
 from .open_competition import digest
-from .private_files import private_path, read_private_model
+from .private_files import private_path, publish_private_model, read_private_model
 from .protocol import canonical_json_bytes
 
 
@@ -49,4 +49,31 @@ class StandingRewardFiles:
     def witness(self, sha: str) -> bytes:
         return canonical_json_bytes(
             self._read("witnesses", sha, RewardOpportunityWitness, self.maximum_witness_bytes)
+        )
+
+    def retain_completion(self, certificate: RewardOpportunityCertificate, witness_source) -> None:
+        """Publish immutable witnesses first; retry a partial export exactly.
+
+        These are discovery inputs, not evidence of payment or authority. The
+        original endpoints and proof archive are needed for native replay.
+        """
+        for contribution in certificate.contributions:
+            raw = witness_source(contribution.witness_sha256)
+            if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_witness_bytes:
+                raise ValueError("completion witness exceeds host byte capacity")
+            witness = RewardOpportunityWitness.model_validate_json(raw)
+            if (
+                canonical_json_bytes(witness) != raw
+                or digest(witness) != contribution.witness_sha256
+            ):
+                raise ValueError("completion witness differs from selected identity")
+            publish_private_model(
+                self.root / "witnesses" / (digest(witness) + ".json"),
+                witness,
+                maximum_bytes=self.maximum_witness_bytes,
+            )
+        publish_private_model(
+            self.root / "opportunities" / (digest(certificate) + ".json"),
+            certificate,
+            maximum_bytes=MAX_CERTIFICATE_BYTES,
         )

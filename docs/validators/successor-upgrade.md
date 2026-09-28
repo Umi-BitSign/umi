@@ -260,9 +260,23 @@ Opportunity replay also requires the original interval and endpoint records in
 the coverage journal. The independently populated promotion store must contain
 the authenticated model assets and lineage required by package replay.
 
-Automatic artifact/coverage delivery and collection, the full series simulation,
-and installed restart/isolation qualification remain required before deploying
-this selection. The CLI path alone does not establish unattended readiness.
+The installed service automatically discovers the effective activation from
+complete finalized control history and collects opportunity evidence for every
+designated validator. Each bounded pass retains progress; failures retry without
+expiring the cohort. Original evidence must be replayed after restart. A durable
+completion identity is retained before publishing its immutable certificate and
+witnesses into the delivery directory, so interrupted publication retries the
+same content. Collection and discovery retry independently: retained evidence
+can finish even when new head discovery or the coordinator is unavailable.
+Collection logs report pending coverage, retry causes and completion identities.
+The service supervises the collector and drains its work before closing proof
+providers. Completion establishes the configured opportunity, not a payment
+receipt.
+
+Automatic artifact and proof-archive delivery, the full series simulation, and
+installed restart/isolation qualification remain required before deploying this
+selection. Local collection does not replicate original evidence to other hosts.
+The CLI path alone does not establish unattended readiness.
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;

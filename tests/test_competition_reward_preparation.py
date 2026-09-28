@@ -1517,3 +1517,168 @@ async def test_automatic_coverage_capture_lost_ack_and_offline_restart(
         **terms,
     )
     assert reviewed.certificate == certificate
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+@pytest.mark.parametrize("interruption", ["completion_ack", "export", "none"])
+async def test_installed_coverage_discovers_completes_and_recovers_without_coordinator(
+    complete_preparation_case, tmp_path, monkeypatch, caplog, interruption
+):
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_service import StandingRewardCoverageService
+    from umi.competition_reward_decisions import SignedRewardControlDecision
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_reward_opportunity import opportunity_rule
+    from umi.private_files import publish_private_model
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    rule = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    files = StandingRewardFiles(
+        tmp_path / "delivery",
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=1024 * 1024,
+    )
+    publish_private_model(
+        files.root / "packages" / (digest(p.package) + ".json"),
+        p.package,
+        maximum_bytes=files.maximum_package_bytes,
+    )
+    for sha, raw in c.objects.items():
+        publish_private_model(
+            files.root / "decisions" / (sha + ".json"),
+            SignedRewardControlDecision.model_validate_json(raw),
+        )
+    root = tmp_path / "installed-coverage"
+
+    async def fresh_height(_hotkey):
+        # This is a discovery hint only. Native retained control/eligibility
+        # proof readers establish the actual selection and every interval.
+        return SimpleNamespace(snapshot=SimpleNamespace(block_number=h.end))
+
+    def setup():
+        journal = RewardCoverageJournal(root, rule, expected_rule_sha256=digest(rule))
+        owner = StandingRewardPreparation(
+            c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+        )
+        service = StandingRewardCoverageService(
+            provider=h.item.provider,
+            journal=journal,
+            history=h.reader,
+            preparation=owner,
+            files=files,
+            profile=h.item.profile,
+            maximum_history_blocks=4096,
+        )
+        return journal, service
+
+    monkeypatch.setattr(h.item.provider, "collect_control", fresh_height)
+    journal, service = setup()
+    original_put = journal.journal.put_many
+    original_export = files.retain_completion
+    failure = False
+
+    def lose_ack(records, **kw):
+        nonlocal failure
+        original_put(records, **kw)
+        if any(kind == "coverage_completion" for kind, _, _ in records):
+            failure = True
+            raise OSError("private URL must not be logged")
+
+    def partial_export(certificate, witness_source):
+        nonlocal failure
+        # A fully exported record may also lose its acknowledgement. Retry
+        # must neither replace the certificate nor increment credited time.
+        original_export(certificate, witness_source)
+        failure = True
+        raise OSError("private URL must not be logged")
+
+    if interruption == "completion_ack":
+        monkeypatch.setattr(journal.journal, "put_many", lose_ack)
+    if interruption == "export":
+        monkeypatch.setattr(files, "retain_completion", partial_export)
+    key = c.active.decision.activation.cohort_sha256
+    if interruption == "none":
+        for _ in range(100):
+            await service.step()
+            if journal.journal.get("coverage_work", key) is not None:
+                break
+        else:
+            pytest.fail("native discovery did not converge")
+        read = journal.journal.get
+
+        def changed_start(kind, record_key, **kwargs):
+            value = read(kind, record_key, **kwargs)
+            if kind == "coverage_work" and value is not None:
+                return {**value, "first_block": value["first_block"] + 1}
+            return value
+
+        monkeypatch.setattr(journal.journal, "get", changed_start)
+        with pytest.raises(ValueError, match="original effective control"):
+            await service._collect()
+        assert journal.journal.get("coverage_completion", key) is None
+        monkeypatch.setattr(journal.journal, "get", read)
+    with caplog.at_level("INFO"):
+        for _ in range(100):
+            await service.step()
+            if failure or key in service._completed:
+                break
+        else:
+            pytest.fail("automatic installed collection did not finish: " + caplog.text)
+    completion = journal.journal.get("coverage_completion", key)
+    assert completion is not None
+    if interruption != "none":
+        assert key not in service._completed
+    assert "private URL" not in caplog.text
+    interval_keys = await journal.interval_keys()
+    assert len(interval_keys) == 1
+
+    # Reopen all native owners with no trusted totals. Coordinator decisions,
+    # current-head discovery and historical state/body RPCs are unavailable.
+    h.reader = await h.restart()
+    c.reader = c.reopen()
+    h.offline_through = h.end
+    c.objects.clear()
+    for path in (files.root / "decisions").glob("*.json"):
+        path.unlink()
+    monkeypatch.setattr(files, "retain_completion", original_export)
+
+    async def unavailable(_hotkey):
+        raise TimeoutError("private provider credential must not be logged")
+
+    monkeypatch.setattr(h.item.provider, "collect_control", unavailable)
+    journal, service = setup()
+    assert (
+        await journal.verified_ms(
+            activation_sha256=digest(c.active.decision.activation),
+            validator_hotkey=h.validator_hotkey,
+        )
+        == 0
+    )
+    with caplog.at_level("INFO"):
+        for _ in range(100):
+            await service.step()
+            if key in service._completed:
+                break
+        else:
+            pytest.fail("retained native coverage failed to recover: " + caplog.text)
+    verified = service._completed[key]
+    assert digest(verified.certificate) == completion["certificate_sha256"]
+    assert verified.certificate.contributions[0].credited_ms == 12000
+    assert (
+        await journal.verified_ms(
+            activation_sha256=digest(c.active.decision.activation),
+            validator_hotkey=h.validator_hotkey,
+        )
+        == 12000
+    )
+    assert not verified.chain_submission_authorized
+    assert files.certificate(digest(verified.certificate)) == canonical_json_bytes(
+        verified.certificate
+    )
+    assert await journal.interval_keys() == interval_keys
+    assert journal.journal.get("coverage_completion", key) == completion
+    assert "private provider credential" not in caplog.text
+    assert "coverage_complete" in caplog.text
+    await service.step()
+    assert await journal.interval_keys() == interval_keys

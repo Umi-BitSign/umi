@@ -234,6 +234,11 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert providers[1].kwargs["resources"] == old.resources
         assert kwargs["history"].config_sha256 == digest(i.value.chain)
         assert kwargs["preparation"].policy_sha256 == digest(i.value.policy)
+        collection = kwargs["coverage"]
+        assert collection.provider is kwargs["provider"]
+        assert collection.preparation is kwargs["preparation"]
+        assert collection.history is kwargs["history"]
+        assert kwargs["opportunity"] == collection.opportunity
         if failure == "service":
             raise RuntimeError("fixture service failure")
         if failure == "cancel":

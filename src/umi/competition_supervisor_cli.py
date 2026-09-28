@@ -341,7 +341,11 @@ def _standing_logs():
     # Do not enable HTTP/SDK debug logging, which can contain credentials.
     handler = logging.StreamHandler()
     selected = []
-    for name in ("umi.competition_reward_service", "umi.competition_reward_executor"):
+    for name in (
+        "umi.competition_reward_service",
+        "umi.competition_reward_executor",
+        "umi.competition_reward_coverage_service",
+    ):
         logger = logging.getLogger(name)
         selected.append((logger, logger.level, logger.propagate))
         logger.setLevel(logging.INFO)

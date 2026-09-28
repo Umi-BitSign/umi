@@ -699,3 +699,61 @@ async def test_boot_continuation_never_restarts_c4_after_retained_handoff(
 
         monkeypatch.setattr(runtime, "reconcile", forbidden)
         await service._continue_predecessor(runtime, c.stop, 0.001)
+
+
+@pytest.mark.parametrize("failure", [None, "observer", "early_return", "cancel"])
+async def test_installed_coverage_lifecycle_drains_before_providers(
+    service_case, monkeypatch, failure
+):
+    from umi.competition_reward_coverage_service import StandingRewardCoverageService
+
+    c = service_case
+    collection = object.__new__(StandingRewardCoverageService)
+    collection.provider = c.provider
+    collection.history = c.service_options["history"]
+    collection.preparation = c.preparation
+    c.service_options.update(coverage=collection, opportunity=collection.opportunity)
+    started, executing = asyncio.Event(), asyncio.Event()
+
+    async def collect(self, stop, *, poll_seconds):
+        assert self is collection
+        assert "start-current" in c.events and "start-legacy" in c.events
+        c.events.append("coverage-started")
+        started.set()
+        try:
+            await executing.wait()
+            if failure == "observer":
+                raise RuntimeError("fixture finality child stopped")
+            if failure == "early_return":
+                return
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.001)  # owned cleanup must be drained
+            c.events.append("coverage-stopped")
+
+    async def execute(_inputs):
+        await started.wait()
+        executing.set()
+        if failure is None:
+            c.stop.set()
+        else:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(StandingRewardCoverageService, "run", collect)
+    c.execute = execute
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        task = asyncio.create_task(run_standing_reward_service(runtime, **c.service_options))
+        if failure == "cancel":
+            await asyncio.wait_for(executing.wait(), 10)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif failure:
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(task, 10)
+        else:
+            await asyncio.wait_for(task, 10)
+    for stopped in ("coverage-stopped", "executor-stopped"):
+        assert c.events.index(stopped) < c.events.index("close-current")
+        assert c.events.index(stopped) < c.events.index("close-legacy")

@@ -186,8 +186,9 @@ async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
         assert host.events[-3:] == ["stop-and-unlock", "close-observer", "leave-lock-scope"]
 
 
-def test_standing_cli_emits_progress_without_enabling_transport_logs(capsys):
-    logger = logging.getLogger("umi.competition_reward_service")
+@pytest.mark.parametrize("name", ["service", "executor", "coverage_service"])
+def test_standing_cli_emits_progress_without_enabling_transport_logs(capsys, name):
+    logger = logging.getLogger("umi.competition_reward_" + name)
     http = logging.getLogger("httpx")
     before, transport_level = (logger.level, logger.propagate, tuple(logger.handlers)), http.level
     with cli._standing_logs():
