@@ -662,7 +662,34 @@ proofs before the settlement history becomes visible. Pending files, proofs or
 votes retry without replacing original decisions. Each cohort has its own
 control connection and loop; a waiting cohort does not stop another cohort.
 
-Dispatch and private evidence replication require their own running services.
+Select `umi-cohort-service-admission-host/6` to also run accepted-service dispatch
+in the owner process. It requires the version-five selections and a `dispatch`
+object with schema `umi-cohort-service-dispatch-config/1`. Configure `origins`
+with the selected competition policy, a separate finality cache and two backup
+RPCs. Configure `clips` with schema `umi-cohort-clip-delivery-config/1`, a private
+journal `directory`, retained content-addressed `videos_directory`, clip Worker
+HTTPS `origin` and root-controlled `upload_token_file`. The upload credential
+must differ from reviewer and export credentials. Capacity and bounded operation
+timeouts are adjustable without replacing the cohort or its request journal.
+
+Each selected queue gets a recurring native worker. Missing future inputs retry;
+accepted work retains its original request, quorum votes, response and retirement
+receipt. Restart recovers completed work before contacting the miner or signing
+again. Reviewers read the selected originals at the authenticated
+`/internal/cohorts/history` and `/internal/cohorts/service-work` routes. Shutdown
+drains workers before releasing keys, clients and process locks.
+
+Clip delivery verifies the local digest, retains the URL before uploading, and
+verifies the downloaded bytes before request selection. Lost acknowledgements
+reuse that URL; missing objects are republished at the same URL. New requests
+after a long outage can use a fresh bounded capability for the same clip. Signed
+requests and past delivery records remain unchanged. The existing clip Worker
+must be deployed with the matching upload credential; private clip replication
+and retention remain separate deployment requirements.
+
+Benchmark evaluator startup and private evidence replication still require their
+own running services. Accepted-service dispatch alone does not establish full
+request readiness.
 The lifecycle probes
 `GET /v1/competition/cohorts/COHORT_SHA256/requests/readiness?nonce=32_HEX_DIGITS`
 at `public_origin`. A dispatch service must return `umi-cohort-request-readiness/1`

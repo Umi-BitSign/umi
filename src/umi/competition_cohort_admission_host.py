@@ -25,6 +25,8 @@ from .competition_cohort_admission_http import (
     admission_history_routes,
 )
 from .competition_cohort_admission_worker import CohortAdmissionWorker
+from .competition_cohort_dispatch_host import start_service_dispatch
+from .competition_cohort_history_http import CohortHistoryExporter, cohort_history_routes
 from .competition_cohort_intake_export import IntakeReviewExporter
 from .competition_cohort_intake_review import NativeIntakeProgressSource
 from .competition_cohort_intake_review_http import intake_review_routes
@@ -35,6 +37,7 @@ from .competition_cohort_preparation_review_http import preparation_review_route
 from .competition_cohort_request_review_http import request_review_routes
 from .competition_cohort_review_boot import _token
 from .competition_cohort_review_http import CohortReviewPeerConfig
+from .competition_cohort_service_export import service_work_routes
 from .competition_reward_boot import _disjoint
 from .competition_reward_service import _stop_task
 from .concurrency import await_owned_task, run_owned_thread
@@ -148,6 +151,9 @@ async def admission_owner_app(
             )
         )
         app.include_router(
+            cohort_history_routes(CohortHistoryExporter(intake, c.owner_hotkey, sign), token=token)
+        )
+        app.include_router(
             intake_review_routes(
                 IntakeReviewExporter(
                     NativeIntakeProgressSource(
@@ -175,11 +181,27 @@ async def admission_owner_app(
         app.state.admission_reports = {}
         app.state.finality_provider = provider
         app.state.lifecycle = None
+        app.state.dispatch = None
         if service_host is not None:
             if service_host.preparation is not preparation or service_host.provider is not provider:
                 raise ValueError("phase control requires the same owned admission and finality")
             app.state.lifecycle = LifecycleHost(service_host, resources, client, credentials, sign)
             app.include_router(request_review_routes(app.state.lifecycle, token=token))
+            if service_host.config.dispatch is not None:
+                clip_token = _token(service_host.config.dispatch.clips.upload_token_file)
+                if clip_token in (token, *credentials):
+                    raise ValueError("clip upload requires a separate credential")
+                app.state.dispatch = await start_service_dispatch(
+                    service_host,
+                    app.state.lifecycle,
+                    resources,
+                    client,
+                    credentials,
+                    key,
+                    sign,
+                    clip_token,
+                )
+                app.include_router(service_work_routes(app.state.dispatch, token=token))
         yield app
 
 
@@ -232,6 +254,8 @@ async def run_admission_owner(
                 workers = [asyncio.create_task(poll(w)) for w in app.state.admission_workers]
                 if app.state.lifecycle is not None:
                     workers.append(asyncio.create_task(app.state.lifecycle.run(stop)))
+                if app.state.dispatch is not None:
+                    workers.append(asyncio.create_task(app.state.dispatch.run(stop)))
                 logger.info("cohort_admission_owner_ready config_sha256=%s", digest(config))
             await asyncio.wait((serving, stopping, *workers), return_when=asyncio.FIRST_COMPLETED)
             for task in (serving, *workers):

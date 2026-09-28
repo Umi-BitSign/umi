@@ -23,6 +23,7 @@ from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_host import AdmissionOwnerConfig, run_admission_owner
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
+from .competition_cohort_dispatch_host import ServiceDispatchConfig
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_lifecycle_host import LifecycleHostConfig
 from .competition_cohort_model_acceptance_store import CohortModelAcceptances
@@ -56,6 +57,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         "umi-cohort-service-admission-host/3",
         "umi-cohort-service-admission-host/4",
         "umi-cohort-service-admission-host/5",
+        "umi-cohort-service-admission-host/6",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     manifest: RewardManifest
@@ -68,6 +70,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     model_uploads: ModelUploadConfig | None = None
     admission_owner: AdmissionOwnerConfig | None = None
     lifecycle: LifecycleHostConfig | None = None
+    dispatch: ServiceDispatchConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -80,6 +83,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("admission_owner", None)
         if self.lifecycle is None:
             value.pop("lifecycle", None)
+        if self.dispatch is None:
+            value.pop("dispatch", None)
         return value
 
     @model_validator(mode="after")
@@ -87,6 +92,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         if self.schema_ not in {
             "umi-cohort-service-admission-host/4",
             "umi-cohort-service-admission-host/5",
+            "umi-cohort-service-admission-host/6",
         } and (
             (self.schema_ != "umi-cohort-service-admission-host/1") != bool(self.model_review_peers)
         ):
@@ -94,6 +100,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         if self.schema_ not in {
             "umi-cohort-service-admission-host/4",
             "umi-cohort-service-admission-host/5",
+            "umi-cohort-service-admission-host/6",
         } and (
             (self.schema_ == "umi-cohort-service-admission-host/3")
             != (self.model_uploads is not None)
@@ -103,11 +110,22 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             raise ValueError("model delivery requires configured reviewers")
         if (
             self.schema_
-            in {"umi-cohort-service-admission-host/4", "umi-cohort-service-admission-host/5"}
+            in {
+                "umi-cohort-service-admission-host/4",
+                "umi-cohort-service-admission-host/5",
+                "umi-cohort-service-admission-host/6",
+            }
         ) != (self.admission_owner is not None):
             raise ValueError("automatic admission requires service admission host version four")
-        if (self.schema_ == "umi-cohort-service-admission-host/5") != (self.lifecycle is not None):
+        if (
+            self.schema_
+            in {"umi-cohort-service-admission-host/5", "umi-cohort-service-admission-host/6"}
+        ) != (self.lifecycle is not None):
             raise ValueError("automatic phase control requires service admission host version five")
+        if (self.schema_ == "umi-cohort-service-admission-host/6") != (self.dispatch is not None):
+            raise ValueError(
+                "automatic service dispatch requires service admission host version six"
+            )
         if len({identity(p.signer) for p in self.model_review_peers}) != len(
             self.model_review_peers
         ):
@@ -132,6 +150,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             Path(self.inputs_directory),
             *tokens,
             *(self.lifecycle.stores() if self.lifecycle else ()),
+            *(self.dispatch.stores() if self.dispatch else ()),
             *((Path(self.model_uploads.directory),) if self.model_uploads else ()),
             *(
                 (

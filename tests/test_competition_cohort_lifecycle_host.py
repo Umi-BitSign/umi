@@ -10,6 +10,8 @@ import pytest
 from fastapi import FastAPI
 
 import umi.competition_cohort_admission_host as boot
+from umi.competition_cohort_clip_delivery import ClipDeliveryConfig
+from umi.competition_cohort_dispatch_host import ServiceDispatchConfig, ServiceDispatchHost
 from umi.competition_cohort_lifecycle_host import LifecycleHostConfig
 from umi.competition_cohort_phase_vote_http import phase_vote_routes
 from umi.competition_cohort_readiness import intake_readiness
@@ -30,6 +32,7 @@ from .test_competition_cohort_lifecycle import policy as policy
 from .test_competition_cohort_lifecycle import precommit_service_inventory
 from .test_competition_cohort_lifecycle import recovery as recovery
 from .test_competition_cohort_lifecycle import scenario as scenario
+from .test_competition_service import chain_config as chain_config
 from .test_open_competition import wallet
 
 pytestmark = pytest.mark.parametrize(
@@ -200,7 +203,10 @@ async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(ho
         assert max(h.calls.values()) == 1
 
 
-async def test_owner_service_starts_and_drains_configured_lifecycle(host, monkeypatch):
+@pytest.mark.parametrize("dispatch_enabled", [False, True])
+async def test_owner_service_starts_and_drains_configured_lifecycle(
+    host, monkeypatch, tmp_path, chain_config, dispatch_enabled
+):
     o, h = host, host.h
     for worker in h.admissions:
         await worker.poll_once()
@@ -209,6 +215,49 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(host, monkey
         port = socket_.getsockname()[1]
     owner = o.config.admission_owner.model_copy(update={"listen_port": port, "poll_seconds": 1})
     o.service.config = o.config.model_copy(update={"admission_owner": owner})
+    if dispatch_enabled:
+        dispatch = ServiceDispatchConfig(
+            schema="umi-cohort-service-dispatch-config/1",
+            origins=chain_config,
+            clips=ClipDeliveryConfig(
+                schema="umi-cohort-clip-delivery-config/1",
+                directory=str(tmp_path / "clips"),
+                videos_directory=str(tmp_path / "videos"),
+                origin="https://clips.example",
+                upload_token_file=str(tmp_path / "clip-token"),
+            ),
+            poll_seconds=1,
+        )
+        o.service.config = ServiceAdmissionHostConfig.model_validate(
+            {
+                **o.service.config.model_dump(by_alias=True),
+                "schema": "umi-cohort-service-admission-host/6",
+                "dispatch": dispatch,
+            }
+        )
+        old_token = boot._token
+        monkeypatch.setattr(
+            boot,
+            "_token",
+            lambda p: "a" * 64 if p == dispatch.clips.upload_token_file else old_token(p),
+        )
+
+        async def start(service, lifecycle, resources, client, credentials, key, sign, token):
+            assert token == "a" * 64
+            # Network finality and media are explicit fixtures. Native dispatch
+            # still waits for this cohort's original prepared inputs and drains.
+            return ServiceDispatchHost(
+                service,
+                lifecycle,
+                SimpleNamespace(policy=h.intake.policy),
+                client,
+                credentials,
+                key,
+                sign,
+                None,
+            )
+
+        monkeypatch.setattr(boot, "start_service_dispatch", start)
     server_type, apps = boot._Server, []
 
     def server(config):
@@ -239,9 +288,21 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(host, monkey
     try:
         control = await asyncio.wait_for(reaches_preparation(), timeout=30)
         assert control.nodes[h.cohort].request_start is control.gate
+        if dispatch_enabled:
+            worker_host = apps[0].state.dispatch
+            assert worker_host.tasks
+            assert all(not t.done() for t in worker_host.tasks.values())
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=apps[0]), base_url="https://owner.example"
+            ) as client:
+                for path in ("/internal/cohorts/history", "/internal/cohorts/service-work"):
+                    response = await client.post(path, content=b"{}")
+                    assert response.status_code == 401
     finally:
         stop.set()
         await asyncio.wait_for(task, timeout=10)
+    if dispatch_enabled:
+        assert all(t.done() for t in worker_host.tasks.values())
     # Service shutdown releases the control database lease, not only HTTP.
     async with o.open() as app:
         node = await app.state.lifecycle.node(h.cohort)
