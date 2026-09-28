@@ -18,6 +18,8 @@ from typing_extensions import Self
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
 from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
+from .competition_cohort_service_api import service_admission_routes
+from .competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
 from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_historical_registration import HistoricalRegistrationProvider
@@ -25,6 +27,7 @@ from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
 from .competition_policy_lineage import register_lineage
 from .competition_public_results import PublicResultsSource
 from .competition_public_results_directory import PublicResultsDirectory
+from .competition_reward_service import _stop_task
 from .competition_store import (
     AdmissionCapacity,
     CompetitionStore,
@@ -54,7 +57,9 @@ class RetainedIntakeState(StrictProtocolModel):
 
 
 class CompetitionServiceConfig(StrictProtocolModel):
-    schema_: Literal["umi-competition-service-config/2"] = Field(alias="schema")
+    schema_: Literal["umi-competition-service-config/2", "umi-competition-service-config/3"] = (
+        Field(alias="schema")
+    )
     mode: Literal["intake_no_weight"]
     policy_sha256: Hex32
     public_deployment: PublicIntakeDeployment
@@ -70,6 +75,7 @@ class CompetitionServiceConfig(StrictProtocolModel):
     public_results_sources: Annotated[tuple[PublicResultsSource, ...], Field(max_length=1024)] = ()
     public_results_directory: PublicResultsDirectory | None = None
     recoverable_intake: CohortIntakeConfig | None = None
+    recoverable_service: ServiceAdmissionHostConfig | None = None
     # Deal-preserving predecessor policy files, newest first. Their signed submissions
     # stay admitted in this same ledger (see competition_policy_lineage). Distinct from
     # historical_archives, which is the terms-change path that archives a predecessor.
@@ -84,10 +90,21 @@ class CompetitionServiceConfig(StrictProtocolModel):
             value.pop("public_results_directory", None)
         if self.recoverable_intake is None:
             value.pop("recoverable_intake", None)
+        if self.recoverable_service is None:
+            value.pop("recoverable_service", None)
         return value
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
+        if (self.schema_ == "umi-competition-service-config/3") != (
+            self.recoverable_service is not None
+        ):
+            raise ValueError("service-work admission requires configuration version three")
+        if self.recoverable_service is not None and (
+            self.recoverable_intake is None
+            or self.recoverable_service.series.policy_sha256 != self.policy_sha256
+        ):
+            raise ValueError("service-work admission requires its own configured cohort intake")
         if self.chain.policy_sha256 != self.policy_sha256:
             raise ValueError("intake and chain configuration bind different policies")
         if self.chain.collection_timeout_seconds > 15:
@@ -106,6 +123,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
         roots = (state.resolve(), checkpoint.resolve(), chain_state.resolve())
         if self.recoverable_intake is not None:
             roots += (Path(self.recoverable_intake.directory).resolve(),)
+        if self.recoverable_service is not None:
+            roots += tuple(p.resolve() for p in self.recoverable_service.stores())
         if any(
             left == right or left in right.parents or right in left.parents
             for index, left in enumerate(roots)
@@ -242,9 +261,17 @@ def create_intake_app(
         )
     )
 
+    service_host = None
+
     def retained_registration_blocks():
-        return store.retained_registration_blocks() | (
-            frozenset() if cohort_intake is None else cohort_intake.retained_registration_blocks()
+        return (
+            store.retained_registration_blocks()
+            | (
+                frozenset()
+                if cohort_intake is None
+                else cohort_intake.retained_registration_blocks()
+            )
+            | (frozenset() if service_host is None else service_host.retained_registration_blocks())
         )
 
     provider_type = (
@@ -263,16 +290,34 @@ def create_intake_app(
         maximum_future_skew_ms=config.chain.maximum_future_skew_ms,
         public_wait_seconds=config.chain.collection_timeout_seconds + 1,
     )
+    if config.recoverable_service is not None:
+        service_host = ServiceAdmissionHost(
+            config.recoverable_service,
+            cohort_intake,
+            store,
+            finality_cache.collect_for_cohort_recovery,
+            provider.retained_archive,
+        )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        service_stop, service_task = asyncio.Event(), None
         try:
             await provider.start()
             await finality_cache.start()
+            if service_host is not None:
+                service_task = asyncio.create_task(service_host.run(service_stop))
             yield
         finally:
-            await finality_cache.aclose()
-            await provider.aclose()
+            service_stop.set()
+            try:
+                if service_task is not None:
+                    await _stop_task(service_task)
+            finally:
+                try:
+                    await finality_cache.aclose()
+                finally:
+                    await provider.aclose()
 
     async def current_snapshot() -> RegistrationSnapshot:
         return (await finality_cache.collect_fresh()).snapshot
@@ -302,6 +347,9 @@ def create_intake_app(
         ),
     )
     app.state.cohort_intake = cohort_intake
+    app.state.service_admission_host = service_host
+    if service_host is not None:
+        app.include_router(service_admission_routes(service_host.api))
     app.state.finality_providers = (provider,)
     app.state.registration_snapshot_cache = finality_cache
     app.state.historical_intake_archives = historical_archives

@@ -17,6 +17,7 @@ from umi.competition_cohort_service_queue import (
     ServiceWorkQueueConfig,
 )
 from umi.competition_cohort_service_work import (
+    PrecommittedServiceWorkCatalog,
     ServiceWorkCatalog,
     ServiceWorkClaim,
     SignedServiceWorkCatalog,
@@ -24,6 +25,7 @@ from umi.competition_cohort_service_work import (
     review_service_catalog,
 )
 from umi.open_competition import digest, sign_object
+from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_execution import setup_scenario
 from .test_competition_cohort_order_signer import harness as harness
@@ -134,6 +136,131 @@ def admit(c, name="Alice", nonce=1, **kwargs):
         expected_tip_sha256=history_tip(c.h.source.history),
         **kwargs,
     )
+
+
+def precommit(c):
+    raw = c.catalog.catalog.model_dump(mode="json", by_alias=True)
+    raw.pop("round_sha256")
+    raw.pop("issued_at_block")
+    raw["schema"] = "umi-cohort-service-work-catalog/2"
+    inventory = PrecommittedServiceWorkCatalog.model_validate_json(canonical_json_bytes(raw))
+    catalog = SignedServiceWorkCatalog(catalog=inventory, signatures=signatures(inventory))
+    config = c.cfg.model_copy(
+        update={"directory": c.cfg.directory + "-precommitted", "catalog_sha256": digest(inventory)}
+    )
+    return SimpleNamespace(
+        h=c.h,
+        round=c.round,
+        catalog=catalog,
+        cfg=config,
+        queue=ServiceWorkQueue(config, c.h.batch["policy"]),
+    )
+
+
+@pytest.mark.parametrize(
+    "receipt_scenario,admission_block",
+    [
+        pytest.param("extensions", 400, id="extensions-current"),
+        pytest.param("standing", 400, id="standing-current"),
+        pytest.param("standing", 1000000, id="standing-late"),
+    ],
+    indirect=["receipt_scenario"],
+)
+def test_precommitted_inventory_needs_no_future_roster_or_observation(queue_case, admission_block):
+    c = precommit(queue_case)
+    # All catalog inputs are available before intake opens. Neither the later
+    # roster nor any future block number participates in this signed identity.
+    # Only standing authority is exercised beyond the original request target.
+    raw = canonical_json_bytes(c.catalog)
+    assert b"round_sha256" not in raw and b"issued_at_block" not in raw
+    source = c.h.source
+    c.queue.install(
+        c.catalog,
+        c.round,
+        source,
+        capture(admission_block),
+        expected_tip_sha256=history_tip(source.history),
+    )
+    assert canonical_json_bytes(c.queue._catalog()[0]) == raw
+    accepted = c.queue.admit(
+        *inputs(c),
+        source,
+        capture(admission_block),
+        expected_tip_sha256=history_tip(source.history),
+    )
+    c.queue = ServiceWorkQueue(c.cfg, c.h.batch["policy"])
+    assert c.queue.lookup(inputs(c)[0]) == accepted
+    assert c.queue.assignment(inputs(c)[0]).round == c.round
+    # Restart needs neither a new catalog nor another quorum signature.
+    c.queue.install(c.catalog, c.round, None, None, expected_tip_sha256="00" * 32)
+    assert c.queue._catalog() == (c.catalog, c.round)
+
+
+@pytest.mark.parametrize("damage", ["round", "catalog", "not_prepared"])
+def test_precommitted_inventory_still_requires_exact_certified_preparation(queue_case, damage):
+    c = precommit(queue_case)
+    round_, catalog, source = c.round, c.catalog, c.h.source
+    if damage == "round":
+        round_ = round_.model_copy(update={"prepared_at_block": round_.prepared_at_block + 1})
+    elif damage == "catalog":
+        body = catalog.catalog.model_copy(update={"authority_sha256": "00" * 32})
+        catalog = SignedServiceWorkCatalog(catalog=body, signatures=signatures(body))
+        c.cfg = c.cfg.model_copy(update={"catalog_sha256": digest(body)})
+        c.queue = ServiceWorkQueue(
+            c.cfg.model_copy(update={"directory": c.cfg.directory + "-bad"}), c.queue.policy
+        )
+    else:
+        history = source.history.model_copy(update={"transitions": ()})
+        source = source_for(c.h.batch, history)
+    with pytest.raises(ValueError):
+        c.queue.install(
+            catalog, round_, source, capture(), expected_tip_sha256=history_tip(source.history)
+        )
+    assert c.queue.journal.get("service_catalog", c.cfg.catalog_sha256) is None
+
+
+def test_precommitted_round_binding_is_retained_and_cannot_be_replaced(queue_case):
+    c = precommit(queue_case)
+    c.queue.install(
+        c.catalog,
+        c.round,
+        c.h.source,
+        capture(),
+        expected_tip_sha256=history_tip(c.h.source.history),
+    )
+    changed = c.round.model_copy(update={"prepared_at_block": c.round.prepared_at_block + 1})
+    with pytest.raises(ValueError, match="cannot be replaced"):
+        c.queue.install(
+            c.catalog,
+            changed,
+            c.h.source,
+            capture(),
+            expected_tip_sha256=history_tip(c.h.source.history),
+        )
+    assert c.queue._catalog()[1] == c.round
+    with c.queue.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='service_catalog_round'")
+    c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
+    with pytest.raises(FileNotFoundError, match="original prepared round"):
+        c.queue.install(
+            c.catalog,
+            changed,
+            c.h.source,
+            capture(),
+            expected_tip_sha256=history_tip(c.h.source.history),
+        )
+
+
+def test_original_catalog_bytes_and_journal_need_no_migration(queue_case):
+    c = queue_case
+    raw = canonical_json_bytes(c.catalog)
+    restored = SignedServiceWorkCatalog.model_validate_json(raw)
+    assert canonical_json_bytes(restored) == raw
+    assert isinstance(restored.catalog, ServiceWorkCatalog)
+    assert c.queue.journal.get("service_catalog_round", c.cfg.catalog_sha256) is None
+    c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
+    assert c.queue._catalog() == (c.catalog, c.round)
+    assert admit(c).ordinal == 1
 
 
 def test_global_work_order_has_no_per_identity_quota(queue_case):

@@ -141,13 +141,16 @@ def create_app(
     @app.middleware("http")
     async def bound_public_requests(request: Request, call_next):
         if request.url.path == "/v1/competition/readiness" or (
-            request.url.path.startswith("/v1/competition/cohorts/")
+            request.url.path.startswith(
+                ("/v1/competition/cohorts/", "/v1/competition/service-work/")
+            )
             and request.url.path.endswith("/readiness")
         ):
             capacity = capacities["readiness"]
         elif request.method == "POST" and (
             request.url.path == "/v1/competition/submissions"
             or request.url.path.startswith("/v1/competition/cohorts/")
+            or request.url.path.startswith("/v1/competition/service-work/")
         ):
             capacity = capacities["submission"]
         else:

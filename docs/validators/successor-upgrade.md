@@ -523,6 +523,39 @@ queue assignment. A valid closure is retained before execution is refused, so a
 stale history cannot reopen work. Supply renewable media/window inputs and
 terminal signing separately.
 
+Select `umi-cohort-service-work-catalog/2` for new series before intake opens.
+It commits the fixed work, policy, cohort, authority and service terms without
+requiring the future roster, preparation block or incumbent. The series manifest
+commits the catalog body hash. Installation verifies the actual round against
+quorum-certified native preparation and retains that exact round in the queue;
+restart cannot replace it. Version-one catalogs remain readable for their signed
+round-specific selections. Do not rewrite an existing manifest or catalog to
+change versions.
+
+The public intake application supports service claims with
+`umi-competition-service-config/3`. Configure `recoverable_intake` and
+`recoverable_service`, whose `ServiceAdmissionHostConfig` selects the same policy,
+standing series and manifest, private `queue_directory` and `inputs_directory`,
+queue capacities and polling interval. These directories must be disjoint from
+each other and the intake and chain stores. Put canonical signed catalogs at
+`inputs_directory/catalogs/CATALOG_SHA256.json`. Each selected catalog waits for
+the intake owner's certified preparation; unavailable future files do not prevent
+existing queues or exact retries from being served. Original registration proofs
+are retained privately and their observation blocks remain pinned in the provider.
+
+`GET /v1/competition/service-work` discovers selected catalogs, including pending
+installation. `POST /v1/competition/service-work/CATALOG_SHA256/claims` accepts a
+bounded `SignedServiceWorkClaim` from an original prepared participant. Preserve
+the claim nonce on retry. The queue commits the accepted claim and original proof
+bytes together before acknowledging it; insufficient capacity accepts no new work.
+Accepted duplicates recover without live RPC, history or preparation calls.
+`GET /v1/competition/service-work/CATALOG_SHA256/readiness?nonce=32_HEX_DIGITS`
+checks current admission inputs and capacity. This is admission readiness only;
+the request-phase service clock must also check actual dispatch. Readiness,
+claims and ordinary reads use separate configured request limits. The application
+owns queue polling and drains it before closing finality resources. Version-two
+intake configuration without service admission retains its original bytes.
+
 Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
 own finality/history and registration archive sources, pinned cohort authorities,
 transport policy, named signer and trusted owner. `ServiceWorkReader` authenticates

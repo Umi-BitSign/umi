@@ -7,6 +7,8 @@ The host must authenticate its phase/proof sources and serialize its lifecycle.
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -31,6 +33,7 @@ from .competition_cohort_service_work import (
     MAX_SERVICE_REQUEST_BYTES,
     ServiceWorkAdmission,
     ServiceWorkAssignment,
+    ServiceWorkCatalog,
     SignedServiceWorkCatalog,
     SignedServiceWorkClaim,
     review_service_admission,
@@ -99,12 +102,16 @@ class ServiceWorkQueue:
             or signed.catalog.service_terms_sha256 != self.config.service_terms_sha256
         ):
             raise ValueError("service catalog differs from the configured selection")
+        if isinstance(signed.catalog, ServiceWorkCatalog):
+            round_key = signed.catalog.round_sha256
+        else:
+            round_key = self.journal.get("service_catalog_round", key, db=db)
+            if not isinstance(round_key, str):
+                raise FileNotFoundError("service catalog lacks its original prepared round")
         round_ = RecoverableEvaluationRound.model_validate_json(
-            canonical_json_bytes(
-                self.journal.get("service_round", signed.catalog.round_sha256, db=db)
-            )
+            canonical_json_bytes(self.journal.get("service_round", round_key, db=db))
         )
-        if digest(round_) != signed.catalog.round_sha256:
+        if digest(round_) != round_key or round_.cohort_sha256 != signed.catalog.cohort_sha256:
             raise ValueError("service round changed its content identity")
         return signed, round_
 
@@ -150,6 +157,11 @@ class ServiceWorkQueue:
                 (
                     ("service_catalog", digest(body), signed),
                     ("service_round", digest(round_), round_),
+                    *(
+                        ()
+                        if isinstance(body, ServiceWorkCatalog)
+                        else (("service_catalog_round", digest(body), digest(round_)),)
+                    ),
                 )
             )
 
@@ -209,7 +221,17 @@ class ServiceWorkQueue:
         capture: RegistrationCapture,
         *,
         expected_tip_sha256: str,
+        index: Callable[[sqlite3.Connection, ServiceWorkAdmission], None] | None = None,
     ) -> ServiceWorkAdmission:
+        """Commit new work and optional owner evidence in one bounded transaction.
+
+        ``index(db, admission)`` runs only for a new claim, before the journal's
+        final capacity check. It must use the supplied connection without
+        committing or closing it. An exception rolls back the claim and evidence;
+        duplicate recovery returns the original admission without this callback.
+        """
+        if index is not None and not callable(index):
+            raise ValueError("service admission index must be callable")
         signed = verify_service_claim(signed)
         if signed.claim.catalog_sha256 != self.config.catalog_sha256:
             raise ValueError("service claim belongs to another catalog")
@@ -270,13 +292,15 @@ class ServiceWorkQueue:
                 (RecordReservation("service_admission", value.work_sha256, MAX_ADMISSION_BYTES),),
             )
 
-            def index(db):
+            def publish(db):
                 db.execute(
                     "INSERT INTO service_claims VALUES (?,?,?)",
                     (value.ordinal, claim_key, digest(value)),
                 )
+                if index is not None:
+                    index(db, value)
 
-            self.journal.put_many((("service_admission", value.work_sha256, value),), index=index)
+            self.journal.put_many((("service_admission", value.work_sha256, value),), index=publish)
             return value
 
     def entries(

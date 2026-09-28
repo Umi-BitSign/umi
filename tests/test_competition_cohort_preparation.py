@@ -183,15 +183,64 @@ def test_lost_commit_ack_recovers_exact_round(preparation, monkeypatch):
     assert result.observation.block == 330
 
 
-def test_two_local_preparers_return_one_identical_committed_round(preparation):
+@pytest.mark.parametrize("first_block,second_block", [(330, 340), (340, 330)])
+def test_two_local_preparers_return_one_identical_committed_round(
+    preparation, monkeypatch, first_block, second_block
+):
+    from threading import Event
+    from unittest.mock import Mock
+
     h = preparation
-    h.certify()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(run, h, block=330)
-        second = pool.submit(run, h, block=340)
-        assert first.result() == second.result()
+    sign = Mock(wraps=sign_object)
+    monkeypatch.setattr(f"{__name__}.sign_object", sign)
+    certificate = h.certify()
+    assert sign.call_count == 2
+    other = CohortPreparation(
+        CohortAdmissionQueue(CohortIntake(h.intake.config, h.intake.policy)), h.store
+    )
+    first_locked, second_ready = Event(), Event()
+    connection = h.queue._connection
+
+    @contextmanager
+    def first_connection():
+        with connection() as owned:
+            # Hold the native intake lock while the other owner captures its
+            # observation. Both acquisition orders are exercised explicitly.
+            first_locked.set()
+            assert second_ready.wait(10)
+            yield owned
+
+    def second_preparer():
+        capture = capture_at(second_block)
+        second_ready.set()
+        return other.prepare(h.cohort, capture, expected_tip_sha256=history_tip(h.history))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(h.queue, "_connection", first_connection)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(run, h, block=first_block)
+            try:
+                assert first_locked.wait(10)
+                second = pool.submit(second_preparer)
+                original = first.result(timeout=10)
+                if second_block < first_block:
+                    with pytest.raises(ValueError, match="outside the closed intake interval"):
+                        second.result(timeout=10)
+                    # A stale capture cannot replay an observation from its
+                    # future. Refresh finality and recover the original round.
+                    recovered = pool.submit(run, h, block=350, owner=other).result(timeout=10)
+                else:
+                    recovered = second.result(timeout=10)
+            finally:
+                second_ready.set()
+    assert canonical_json_bytes(recovered) == canonical_json_bytes(original)
+    assert original.observation.block == original.roster.round.prepared_at_block == first_block
+    assert original.roster.participants[0].admission == certificate
+    assert sign.call_count == 2
     with h.queue._connection() as (db, _):
-        assert db.execute("SELECT COUNT(*) FROM cohort_prepared_rounds").fetchone()[0] == 1
+        assert db.execute("SELECT digest,body,observed FROM cohort_prepared_rounds").fetchall() == [
+            (digest(original), canonical_json_bytes(original), first_block)
+        ]
 
 
 @pytest.mark.parametrize("after_prepare", [False, True])

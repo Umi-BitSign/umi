@@ -43,6 +43,7 @@ from umi.competition_cohort_service_grant import (
 from umi.competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from umi.competition_cohort_service_requests import ServiceWorkRequests
 from umi.competition_cohort_service_work import (
+    PrecommittedServiceWorkCatalog,
     ServiceWorkAssignment,
     ServiceWorkCatalog,
     ServiceWorkClaim,
@@ -134,7 +135,9 @@ def policy(miner_policy, shared_control_group):
     )
 
 
-def admitted_service(p, directory, *, catalog_number=1, terms=None, references=None):
+def admitted_service(
+    p, directory, *, catalog_number=1, terms=None, references=None, precommitted=False
+):
     source, round_ = p.e.r.h.source, p.e.job.round
     work = tuple(
         {
@@ -162,6 +165,17 @@ def admitted_service(p, directory, *, catalog_number=1, terms=None, references=N
         selection_rule="global_fifo_no_identity_quota",
         credit_rule="verified_terminal_work_only",
     )
+    if precommitted:
+        body = PrecommittedServiceWorkCatalog.model_validate_json(
+            canonical_json_bytes(
+                {
+                    **body.model_dump(
+                        mode="json", by_alias=True, exclude={"round_sha256", "issued_at_block"}
+                    ),
+                    "schema": "umi-cohort-service-work-catalog/2",
+                }
+            )
+        )
     catalog = SignedServiceWorkCatalog(catalog=body, signatures=signatures(body))
     cfg = ServiceWorkQueueConfig(
         schema="umi-cohort-service-work-queue-config/1",
@@ -171,7 +185,7 @@ def admitted_service(p, directory, *, catalog_number=1, terms=None, references=N
         service_terms_sha256=body.service_terms_sha256,
     )
     queue = ServiceWorkQueue(cfg, p.c.policy)
-    observed = capture(body.issued_at_block)
+    observed = capture(399 + catalog_number)
     queue.install(
         catalog, round_, source, observed, expected_tip_sha256=history_tip(source.history)
     )
@@ -280,7 +294,13 @@ async def service_owner(granted, tmp_path, monkeypatch, service_catalog_inputs):
             )
             for i, case in enumerate(p.e.job.cases[:2])
         )
-    c = admitted_service(p, tmp_path / "service-queue", terms=terms, references=references)
+    c = admitted_service(
+        p,
+        tmp_path / "service-queue",
+        terms=terms,
+        references=references,
+        precommitted=service_catalog_inputs == "precommitted",
+    )
     c.terms, c.references = terms, references
     if service_catalog_inputs == "miner_failure":
         p.model.fail = True

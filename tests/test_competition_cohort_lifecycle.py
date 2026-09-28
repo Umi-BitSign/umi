@@ -23,6 +23,11 @@ from umi.competition_cohort_intake import CohortIntakePublisher, history_tip
 from umi.competition_cohort_intake_phase import CohortIntakePhaseObserver
 from umi.competition_cohort_intake_review import IntakeProgressReviewer, NativeIntakeProgressSource
 from umi.competition_cohort_lifecycle import CohortLifecycleService, CohortPhaseDriver
+from umi.competition_cohort_order_signer import CohortOrderHistory, CohortOrderParticipant
+from umi.competition_cohort_participation import (
+    CohortParticipationRequest,
+    SignedCohortParticipationConsent,
+)
 from umi.competition_cohort_preparation import PreparedCohortRound
 from umi.competition_cohort_preparation_owner import CohortPreparation
 from umi.competition_cohort_preparation_phase import NativePreparationProgressSource
@@ -40,8 +45,23 @@ from umi.competition_cohort_recovery import (
     admit_recoverable_cohort,
 )
 from umi.competition_cohort_recovery_store import CohortRecoveryStore
+from umi.competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
+from umi.competition_cohort_service_work import (
+    PrecommittedServiceWorkCatalog,
+    ServiceWorkClaim,
+    SignedServiceWorkCatalog,
+    SignedServiceWorkClaim,
+)
+from umi.competition_execution import execution_boundary
+from umi.competition_reward_decisions import StandingRewardSeries
+from umi.competition_reward_manifest import (
+    RewardReplayRequirement,
+    StandingRewardManifest,
+    verify_reward_manifest,
+)
 from umi.competition_store import CompetitionStore
 from umi.concurrency import run_owned_thread
+from umi.grandpa_finality import FINNEY_GENESIS_HASH
 from umi.open_competition import digest, sign_object
 from umi.private_files import read_private_model
 from umi.protocol import canonical_json_bytes
@@ -52,7 +72,7 @@ from .test_competition_cohort_intake import capture_at, request_for
 from .test_competition_cohort_intake import intake as intake
 from .test_competition_cohort_recovery import recovery as recovery
 from .test_competition_cohort_recovery import signatures
-from .test_open_competition import bundle_at, wallet
+from .test_open_competition import bundle_at, submission, wallet
 from .test_open_competition import policy as policy
 
 
@@ -90,7 +110,13 @@ def scenario(request):
 
 
 @pytest.fixture
-def lifecycle(intake, scenario, tmp_path):
+def lifecycle_before_intake(request):
+    """Optional initialization before the lifecycle owner consumes any consent."""
+    return getattr(request, "param", None)
+
+
+@pytest.fixture
+def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
     history, policy = scenario["intake_history"], scenario["policy"]
     h = SimpleNamespace(
         intake=intake,
@@ -140,7 +166,10 @@ def lifecycle(intake, scenario, tmp_path):
             },
         )
 
+    h.capture = capture
     h.queue = CohortAdmissionQueue(intake)
+    if lifecycle_before_intake is not None:
+        lifecycle_before_intake(h)
     for sequence, block in ((1, 210), (2, 240)):
         receipt = intake.retain(
             request_for(scenario, sequence=sequence, block=block), capture(block)
@@ -312,6 +341,212 @@ def lifecycle(intake, scenario, tmp_path):
         yield h
     finally:
         h.db.close()
+
+
+def precommit_service_inventory(h):
+    """Select fixed inventory without reading a roster, promotion or future block."""
+    assert h.intake.export_records(h.cohort, maximum_bytes=1024**2, maximum_records=8) == ()
+    assert not h.intake.history(h.cohort).transitions
+    policy = h.intake.policy
+    body = PrecommittedServiceWorkCatalog(
+        schema="umi-cohort-service-work-catalog/2",
+        policy_sha256=digest(policy),
+        cohort_sha256=h.cohort,
+        authority_sha256=digest(h.history.authority.authority),
+        service_terms_sha256="a1" * 32,
+        work=(
+            {
+                "case_id": "91" * 32,
+                "video_sha256": "92" * 32,
+                "reference_sha256": "93" * 32,
+                "stratum": "fingerspelling",
+            },
+        ),
+        selection_rule="global_fifo_no_identity_quota",
+        credit_rule="verified_terminal_work_only",
+    )
+    catalog = SignedServiceWorkCatalog(catalog=body, signatures=signatures(body))
+    manifest = StandingRewardManifest(
+        schema="umi-standing-reward-manifest/1",
+        policy_sha256=digest(policy),
+        cohorts=(
+            RewardReplayRequirement(
+                cohort_sha256=h.cohort,
+                terms_sha256=body.service_terms_sha256,
+                catalog_sha256s=(digest(body),),
+            ),
+        ),
+    )
+    series = StandingRewardSeries(
+        schema="umi-standing-reward-series/1",
+        genesis_hash=FINNEY_GENESIS_HASH,
+        netuid=78,
+        policy_sha256=digest(policy),
+        policy_epoch=1,
+        manifest_sha256=digest(manifest),
+        control_hotkey=wallet("Ferdie").hotkey.ss58_address,
+        recovery=h.history.authority,
+        cohorts=(h.history.plan,),
+        validators=(wallet("Charlie").hotkey.ss58_address,),
+        maximum_proof_lag_blocks=2,
+        maximum_transaction_lifetime_blocks=128,
+        lifetime="until_superseded_or_revoked",
+    )
+    h.precommitted = catalog, manifest, series
+    h.precommitted_bytes = tuple(canonical_json_bytes(v) for v in h.precommitted)
+    assert verify_reward_manifest(h.precommitted_bytes[1], series, policy) == manifest
+
+
+@pytest.mark.parametrize("lifecycle_before_intake", [precommit_service_inventory], indirect=True)
+@pytest.mark.parametrize(
+    "late_participant,preparation_delay,change_incumbent",
+    [(False, 0, False), (True, 0, False), (False, 100000, False), (False, 0, True)],
+    ids=["original", "late-participant", "late-preparation", "different-incumbent"],
+)
+async def test_precommitted_inventory_survives_native_intake_and_preparation(
+    lifecycle, scenario, tmp_path, late_participant, preparation_delay, change_incumbent
+):
+    h, policy = lifecycle, lifecycle.intake.policy
+    catalog, manifest, series = h.precommitted
+    frozen = h.precommitted_bytes
+    service = h.reopen()
+    await service.tick()
+    assert h.store.status(h.cohort)[0].phase == "intake"
+    if late_participant:
+        # Bob arrives after the first native intake sample and after commitment.
+        h.block += 5
+        signed = submission(policy, name="Bob")
+        consent = scenario["consent"].consent.model_copy(
+            update={
+                "hotkey": signed.submission.hotkey,
+                "submission_sha256": digest(signed.submission),
+                "signed_at_block": h.block,
+            }
+        )
+        request = CohortParticipationRequest(
+            signed_submission=signed,
+            consent=SignedCohortParticipationConsent(
+                consent=consent, signature=sign_object(consent, wallet("Bob"))
+            ),
+        )
+        capture = h.capture(h.block)
+        receipt = h.intake.retain(request, capture)
+        h.queue.attach_evidence(
+            h.cohort,
+            receipt["proposed_admission"]["consent_sha256"],
+            *await h.provider.retained_archive(execution_boundary(capture)),
+        )
+    for worker in h.admissions:
+        await worker.poll_once()
+    for _ in range(100):
+        if h.store.status(h.cohort)[0].phase != "intake":
+            break
+        h.block += 5
+        await service.tick()
+    assert h.store.status(h.cohort)[0].phase == "preparation"
+
+    incumbent = h.owner.promotion.reviewed_promotion_head(h.cohort, maximum_bytes=16 * 1024**2)
+    if change_incumbent:
+        # Select a different real baseline store before preparation first runs.
+        bundle = bundle_at(tmp_path / "later-model", marker="selected-after-precommit")
+        archive = tmp_path / "later-archive"
+        preserve_bundle(bundle, tmp_path / "later-model", archive, policy)
+        promotion = CompetitionStore(tmp_path / "later-promotion", policy)
+        promotion.initialize_baseline(bundle, archive)
+        h.owner.promotion = promotion
+        assert digest(bundle) != incumbent.model_sha256
+        incumbent = promotion.reviewed_promotion_head(h.cohort, maximum_bytes=16 * 1024**2)
+    h.block += preparation_delay
+    preparation_block = h.block
+    await service.tick()
+    assert h.store.status(h.cohort)[0].phase == "requests"
+    with pytest.raises(FileNotFoundError, match="request execution unavailable"):
+        await service.tick()
+    prepared = h.prepared
+    round_ = prepared.roster.round
+    assert round_.prepared_at_block == prepared.observation.block == preparation_block
+    assert round_.incumbent_model_sha256 == incumbent.model_sha256
+    assert prepared.roster.intake_seal.record_count == 2 + late_participant
+    assert len(round_.participants) == 1 + late_participant
+    assert tuple(canonical_json_bytes(v) for v in h.precommitted) == frozen
+    assert verify_reward_manifest(frozen[1], series, policy) == manifest
+
+    history = h.intake.history(h.cohort)
+    assert [t.transition.phase for t in history.transitions] == ["intake", "preparation"]
+    source = CohortOrderHistory(
+        history=history,
+        decisions=tuple(
+            h.store.source(h.cohort, t.transition.evidence_sha256, CohortDecisionInput)
+            for t in history.transitions
+        ),
+    )
+    config = ServiceWorkQueueConfig(
+        schema="umi-cohort-service-work-queue-config/1",
+        directory=str(tmp_path / "precommitted-service"),
+        policy_sha256=digest(policy),
+        catalog_sha256=manifest.requirement(h.cohort).catalog_sha256s[0],
+        service_terms_sha256=manifest.requirement(h.cohort).terms_sha256,
+    )
+    queue = ServiceWorkQueue(config, policy)
+    capture = await h.provider.collect()
+    tip = history_tip(history)
+    with pytest.raises(ValueError, match="preparation"):
+        queue.install(
+            catalog,
+            round_.model_copy(update={"prepared_at_block": preparation_block + 1}),
+            source,
+            capture,
+            expected_tip_sha256=tip,
+        )
+    queue.install(catalog, round_, source, capture, expected_tip_sha256=tip)
+    name = "Bob" if late_participant else "Alice"
+    member = next(
+        p
+        for p in prepared.roster.participants
+        if p.record.request.signed_submission.submission.hotkey == wallet(name).hotkey.ss58_address
+    )
+    signed = member.record.request.signed_submission
+    participant = CohortOrderParticipant(
+        consent=member.record.request.consent,
+        admission=member.admission,
+        admission_snapshot=member.record.snapshot,
+    )
+    claim_body = ServiceWorkClaim(
+        schema="umi-cohort-service-work-claim/1",
+        catalog_sha256=config.catalog_sha256,
+        hotkey=signed.submission.hotkey,
+        submission_sha256=digest(signed.submission),
+        nonce="94" * 32,
+    )
+    claim = SignedServiceWorkClaim(
+        claim=claim_body, signature=sign_object(claim_body, wallet(name))
+    )
+    admitted = queue.admit(claim, signed, participant, source, capture, expected_tip_sha256=tip)
+    assignment = queue.assignment(claim)
+    assert assignment.round == round_
+    assert canonical_json_bytes(assignment.catalog) == frozen[0]
+    assert assignment.admission == admitted
+    assert admitted.ordinal == 1 and admitted.observation.block == h.block
+    if preparation_delay:
+        assert admitted.observation.block > signed.submission.valid_through_block
+        assert admitted.observation.block > policy.valid_through_block
+
+    h.offline = True
+    h.block += 100000
+    with pytest.raises(OSError, match="finality offline"):
+        await h.provider.collect()
+    reopened = ServiceWorkQueue(config, policy)
+    # Exact install/admission retries recover with no current history or capture.
+    reopened.install(catalog, round_, None, None, expected_tip_sha256=tip)
+    assert (
+        reopened.admit(claim, signed, participant, None, None, expected_tip_sha256=tip) == admitted
+    )
+    assert reopened.lookup(claim) == admitted
+    assert canonical_json_bytes(reopened.assignment(claim)) == canonical_json_bytes(assignment)
+    assert reopened.entries() == (admitted,)
+    assert tuple(canonical_json_bytes(v) for v in h.precommitted) == frozen
+    assert h.store.status(h.cohort)[0].phase == "requests"
+    assert max(h.calls.values()) == 1
 
 
 async def test_native_lifecycle_runs_intake_admission_and_preparation(lifecycle):

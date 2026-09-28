@@ -47,14 +47,11 @@ class ServiceWorkItem(StrictProtocolModel):
     units: Literal[1] = 1
 
 
-class ServiceWorkCatalog(StrictProtocolModel):
-    schema_: Literal["umi-cohort-service-work-catalog/1"] = Field(alias="schema")
+class _ServiceWorkInventory(StrictProtocolModel):
     policy_sha256: Hex32
     cohort_sha256: Hex32
     authority_sha256: Hex32
-    round_sha256: Hex32
     service_terms_sha256: Hex32
-    issued_at_block: Block
     work: Annotated[tuple[ServiceWorkItem, ...], Field(min_length=1, max_length=8192)]
     selection_rule: Literal["global_fifo_no_identity_quota"]
     credit_rule: Literal["verified_terminal_work_only"]
@@ -70,8 +67,30 @@ class ServiceWorkCatalog(StrictProtocolModel):
         return self
 
 
+class ServiceWorkCatalog(_ServiceWorkInventory):
+    """Original round-specific format, retained for existing signed evidence."""
+
+    schema_: Literal["umi-cohort-service-work-catalog/1"] = Field(alias="schema")
+    round_sha256: Hex32
+    issued_at_block: Block
+
+
+class PrecommittedServiceWorkCatalog(_ServiceWorkInventory):
+    """Fixed work selected before intake, independent of the eventual roster.
+
+    The prepared round is supplied and verified against its native certified
+    closure when this catalog is installed or replayed. Its absence here does
+    not authorize work before preparation or permit a replacement round.
+    """
+
+    schema_: Literal["umi-cohort-service-work-catalog/2"] = Field(alias="schema")
+
+
+ServiceCatalog = ServiceWorkCatalog | PrecommittedServiceWorkCatalog
+
+
 class SignedServiceWorkCatalog(StrictProtocolModel):
-    catalog: ServiceWorkCatalog
+    catalog: Annotated[ServiceCatalog, Field(discriminator="schema_")]
     signatures: Annotated[tuple[Signature, ...], Field(min_length=1, max_length=64)]
 
 
@@ -131,7 +150,7 @@ def review_service_assignment(value: ServiceWorkAssignment, policy: CompetitionP
     return value
 
 
-def service_work_key(catalog: ServiceWorkCatalog, ordinal: int) -> str:
+def service_work_key(catalog: ServiceCatalog, ordinal: int) -> str:
     if type(ordinal) is not int or not 1 <= ordinal <= len(catalog.work):
         raise ValueError("service work ordinal is outside the committed catalog")
     return digest(
@@ -174,7 +193,7 @@ def review_service_catalog(
     *,
     expected_tip_sha256: str,
     current_block: int,
-) -> ServiceWorkCatalog:
+) -> ServiceCatalog:
     raw = canonical_json_bytes(signed)
     if len(raw) > MAX_CATALOG_BYTES:
         raise ValueError("service catalog exceeds its byte bound")
@@ -194,13 +213,16 @@ def review_service_catalog(
         or body.policy_sha256 != digest(policy)
         or body.cohort_sha256 != state.cohort_sha256
         or body.authority_sha256 != state.authority_sha256
-        or body.round_sha256 != digest(round_)
         or round_.cohort_sha256 != state.cohort_sha256
         or round_.policy_sha256 != digest(policy)
         or inputs[preparation.evidence_sha256].progress.progress.phase_result_sha256
         != digest(round_)
-        or not preparation.observed_at_block <= body.issued_at_block <= current_block
         or any(w.stratum not in policy.stratum_weights for w in body.work)
+    ):
+        raise ValueError("service catalog requires exact preparation and an open request phase")
+    if isinstance(body, ServiceWorkCatalog) and (
+        body.round_sha256 != digest(round_)
+        or not preparation.observed_at_block <= body.issued_at_block <= current_block
     ):
         raise ValueError("service catalog requires exact preparation and an open request phase")
     verify_recovery_quorum(body, signed.signatures, policy)

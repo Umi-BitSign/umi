@@ -173,7 +173,7 @@ def test_pending_request_rejects_roster_not_certified_by_preparation(remote):
         )
 
 
-@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+@pytest.mark.parametrize("service_catalog_inputs", [True, "precommitted"], indirect=True)
 async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vote(
     remote, chain_config, tmp_path, monkeypatch
 ):

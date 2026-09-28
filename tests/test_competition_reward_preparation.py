@@ -63,7 +63,6 @@ from .test_competition_cohort_service_grants import relay as relay
 from .test_competition_cohort_service_grants import runtime as runtime
 from .test_competition_cohort_service_grants import scenario as scenario
 from .test_competition_cohort_service_grants import service as service
-from .test_competition_cohort_service_grants import service_catalog_inputs as service_catalog_inputs
 from .test_competition_cohort_service_grants import service_closed as service_closed
 from .test_competition_cohort_service_grants import service_owner as service_owner
 from .test_competition_cohort_service_grants import service_quality
@@ -87,8 +86,12 @@ original_chain = grant_fixtures.chain
 original_chain_config = grant_fixtures.chain_config
 pytestmark = [
     pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True),
-    pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True),
 ]
+
+
+@pytest.fixture
+def service_catalog_inputs(request):
+    return getattr(request, "param", True)
 
 
 @pytest.fixture
@@ -3213,6 +3216,7 @@ def test_reference_input_package_cannot_replace_certified_scoring_inputs(
         replay(h.package.model_copy(update={"schema_": "umi-settlement-input-package/2"}), original)
 
 
+@pytest.mark.parametrize("service_catalog_inputs", [True, "precommitted"], indirect=True)
 async def test_recurring_settlement_certifies_without_inference_or_manual_votes(
     recurring_settlement_case,
 ):

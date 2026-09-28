@@ -278,6 +278,7 @@ async def networked(reviewed):
             await client.aclose()
 
 
+@pytest.mark.parametrize("service_catalog_inputs", [False, "precommitted"], indirect=True)
 async def test_http_votes_complete_original_work_without_local_signer_callbacks(networked):
     s = networked
     _, terminal, _ = await finish(s)
@@ -421,7 +422,7 @@ async def test_transport_view_preserves_owned_proofs_and_requires_same_pins(revi
         CompetitionTransportFinality(provider, bad)
 
 
-@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+@pytest.mark.parametrize("service_catalog_inputs", [True, "precommitted"], indirect=True)
 async def test_instantiated_service_host_recovers_vote_with_input_files_and_owner_offline(
     reviewed, tmp_path, monkeypatch
 ):
