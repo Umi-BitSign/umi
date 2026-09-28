@@ -4,8 +4,17 @@ from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, model_validator
 
+from .competition_cohort_intake_records import RetainedCohortParticipation
+from .competition_cohort_participation import AttestedCohortParticipantAdmission
 from .competition_cohort_recovery import Block, ModelRewardCohortAuthority, verify_recovery_quorum
-from .open_competition import Hotkey, Signature, digest, identity, model_content_digest
+from .open_competition import (
+    Hotkey,
+    Signature,
+    digest,
+    identity,
+    model_content_digest,
+    verify_signature,
+)
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
@@ -83,8 +92,7 @@ class ModelAcceptanceIntent(StrictProtocolModel):
         return self
 
 
-def verify_model_acceptance(certificate, record, history, policy, *, maximum_block):
-    a = certificate.acceptance
+def verify_model_acceptance_body(a, record, history, policy, *, maximum_block):
     sub, admission = record.request.signed_submission.submission, record.proposed_admission
     authority = history.authority.authority
     if (
@@ -102,6 +110,35 @@ def verify_model_acceptance(certificate, record, history, policy, *, maximum_blo
         or "0" * 64 in (a.rights_evidence_sha256, a.reconstruction_evidence_sha256)
     ):
         raise ValueError("model artifact acceptance differs from the original complete entry")
+
+
+def verify_model_acceptance(certificate, record, history, policy, *, maximum_block):
+    a = certificate.acceptance
+    verify_model_acceptance_body(a, record, history, policy, maximum_block=maximum_block)
     verify_recovery_quorum(a, certificate.signatures, policy)
-    if identity(sub.hotkey) in {identity(s.hotkey) for s in certificate.signatures}:
+    if identity(a.recipient_hotkey) in {identity(s.hotkey) for s in certificate.signatures}:
         raise ValueError("model submitters cannot certify their own artifact acceptance")
+
+
+class ModelReviewRequest(StrictProtocolModel):
+    schema_: Literal["umi-cohort-model-review-request/1"] = Field(alias="schema")
+    acceptance: ModelArtifactAcceptance
+    record: RetainedCohortParticipation
+    admission: AttestedCohortParticipantAdmission
+
+
+class ModelArtifactVote(StrictProtocolModel):
+    acceptance: ModelArtifactAcceptance
+    signature: Signature
+
+
+def check_model_vote(vote: ModelArtifactVote, acceptance, policy, *, signer=None):
+    account = identity(vote.signature.hotkey)
+    if (
+        vote.acceptance != acceptance
+        or account == identity(acceptance.recipient_hotkey)
+        or account not in {identity(e.hotkey) for e in policy.evaluators}
+        or (signer is not None and account != identity(signer))
+    ):
+        raise ValueError("model acceptance vote changes body or independent reviewer")
+    verify_signature(vote.acceptance, vote.signature)

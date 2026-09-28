@@ -16,17 +16,21 @@ from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake_records import read_participation, replay_participation
 from .competition_cohort_model_acceptance import (
+    CertifiedModelArtifactAcceptance,
     ModelAcceptanceIntent,
     ModelAcceptancePublication,
     ModelArtifactAcceptance,
     ModelArtifactReviewInputs,
+    ModelArtifactVote,
+    ModelReviewRequest,
+    check_model_vote,
     verify_model_acceptance,
 )
 from .competition_cohort_participation import AttestedCohortParticipantAdmission
 from .competition_cohort_recovery import ModelRewardCohortAuthority, verify_recovery_quorum
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacityError
-from .open_competition import digest, model_content_digest
+from .open_competition import digest, identity, model_content_digest
 from .private_files import publish_private_model
 from .protocol import canonical_json_bytes
 
@@ -47,6 +51,12 @@ def acceptance_tables(db):
             "(cohort TEXT NOT NULL, submission TEXT NOT NULL, body BLOB NOT NULL, "
             "PRIMARY KEY(cohort,submission))"
         )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS cohort_model_acceptance_votes "
+        "(cohort TEXT NOT NULL, submission TEXT NOT NULL, signer TEXT NOT NULL, "
+        "body BLOB NOT NULL, "
+        "PRIMARY KEY(cohort,submission,signer))"
+    )
 
 
 def _read(db, table, cohort, submission):
@@ -167,6 +177,95 @@ class CohortModelAcceptances:
                 maximum_block=publication.certificate.acceptance.accepted_at_block,
             )
             return publication
+
+    def review_request(self, cohort, submission):
+        """Original reserved body and independently certified participant membership."""
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, store):
+            raw = _read(db, "cohort_model_acceptance_intents", cohort, submission)
+            if raw is None:
+                raise PendingModelArtifacts("model review has no reserved proposal")
+            intent = ModelAcceptanceIntent.model_validate_json(raw)
+            if canonical_json_bytes(intent) != raw:
+                raise ValueError("model proposal changed canonical bytes")
+            record = self._record(db, store.published_history(cohort), submission)
+            row = db.execute(
+                "SELECT body FROM cohort_admission_certificates WHERE consent=?",
+                (record.proposed_admission.consent_sha256,),
+            ).fetchone()
+            if row is None:
+                raise PendingModelArtifacts("model participant admission is not certified")
+            return ModelReviewRequest(
+                schema="umi-cohort-model-review-request/1",
+                acceptance=intent.acceptance,
+                record=record,
+                admission=AttestedCohortParticipantAdmission.model_validate_json(row[0]),
+            )
+
+    def votes(self, cohort, submission):
+        intent = self.intent(cohort, submission)
+        if intent is None:
+            raise PendingModelArtifacts("model review has no reserved proposal")
+        with self.intake._connection() as (db, _):
+            result = []
+            for signer, raw in db.execute(
+                "SELECT signer,substr(body,1,16385) FROM cohort_model_acceptance_votes "
+                "WHERE cohort=? AND submission=? ORDER BY signer",
+                (cohort, submission),
+            ):
+                if len(raw) > 16384:
+                    raise ValueError("model vote exceeds capacity")
+                vote = ModelArtifactVote.model_validate_json(raw)
+                if canonical_json_bytes(vote) != raw:
+                    raise ValueError("model vote changed canonical bytes")
+                check_model_vote(
+                    vote, intent.acceptance, self.intake.policy, signer=bytes.fromhex(signer)
+                )
+                result.append(vote)
+            return tuple(result)
+
+    def publish_vote(self, vote):
+        vote = ModelArtifactVote.model_validate_json(canonical_json_bytes(vote))
+        a = vote.acceptance
+        intent = self.intent(a.cohort_sha256, a.submission_sha256)
+        if intent is None:
+            raise PendingModelArtifacts("model vote has no reserved proposal")
+        check_model_vote(vote, intent.acceptance, self.intake.policy)
+        raw, signer = canonical_json_bytes(vote), identity(vote.signature.hotkey)
+        with self.intake._connection() as (db, _):
+            prior = db.execute(
+                "SELECT body FROM cohort_model_acceptance_votes "
+                "WHERE cohort=? AND submission=? AND signer=?",
+                (a.cohort_sha256, a.submission_sha256, signer),
+            ).fetchone()
+            if prior is not None:
+                # Valid alternate signature bytes authenticate the same reserved body.
+                saved = ModelArtifactVote.model_validate_json(prior[0])
+                check_model_vote(saved, a, self.intake.policy, signer=bytes.fromhex(signer))
+                return saved
+            if self.intake.retained_bytes(db) + len(raw) > self.intake.capacity.maximum_bytes:
+                raise AdmissionCapacityError("model vote needs additional durable capacity")
+            db.execute(
+                "INSERT INTO cohort_model_acceptance_votes VALUES (?,?,?,?)",
+                (a.cohort_sha256, a.submission_sha256, signer, raw),
+            )
+        return vote
+
+    def certified_votes(self, cohort, submission):
+        intent = self.intent(cohort, submission)
+        votes = self.votes(cohort, submission)
+        groups = {identity(e.hotkey): e.control_group for e in self.intake.policy.evaluators}
+        selected = {}
+        for vote in votes:
+            selected.setdefault(groups[identity(vote.signature.hotkey)], vote.signature)
+        if len(selected) < self.intake.policy.required_evaluator_groups:
+            raise PendingModelArtifacts("model review quorum is pending")
+        certificate = CertifiedModelArtifactAcceptance(
+            acceptance=intent.acceptance,
+            signatures=tuple(sorted(selected.values(), key=lambda s: identity(s.hotkey))),
+        )
+        verify_recovery_quorum(certificate.acceptance, certificate.signatures, self.intake.policy)
+        return ModelAcceptancePublication(certificate=certificate, inputs=intent.inputs)
 
     def _put(self, db, table, cohort, submission, body):
         raw = canonical_json_bytes(body)

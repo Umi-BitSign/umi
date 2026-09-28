@@ -89,6 +89,7 @@ def cohort_intake_bytes(db) -> int:
             "cohort_prepared_rounds",
             "cohort_preparation_progress",
             "cohort_model_acceptance_intents",
+            "cohort_model_acceptance_votes",
             "cohort_model_acceptances",
         )
         if name in tables

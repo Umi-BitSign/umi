@@ -9,6 +9,7 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_intake import CohortIntakeBinding
+from .competition_cohort_model_review import ModelReviewConfig
 from .competition_cohort_progress_signer import CohortProgressSignerConfig
 from .competition_cohort_recovery import verify_recovery_authority
 from .competition_cohort_service_review import ServiceReviewConfig
@@ -26,6 +27,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         "umi-cohort-phase-review-service/1",
         "umi-cohort-phase-review-service/2",
         "umi-cohort-phase-review-service/3",
+        "umi-cohort-phase-review-service/4",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -49,6 +51,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     review_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 1200
     service_signing: ServiceReviewConfig | None = None
     admission_signing: CohortAdmissionSignerConfig | None = None
+    model_signing: ModelReviewConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -57,6 +60,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("service_signing", None)
         if self.admission_signing is None:
             value.pop("admission_signing", None)
+        if self.model_signing is None:
+            value.pop("model_signing", None)
         return value
 
     def stores(self) -> tuple[Path, ...]:
@@ -70,20 +75,37 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.proof_import_directory,
                 *((self.service_signing.directory,) if self.service_signing else ()),
                 *((self.admission_signing.directory,) if self.admission_signing else ()),
+                *(
+                    (
+                        self.model_signing.directory,
+                        self.model_signing.approvals_directory,
+                        self.model_signing.archive_directory,
+                    )
+                    if self.model_signing
+                    else ()
+                ),
             )
         )
 
     @model_validator(mode="after")
     def selection(self):
-        if self.schema_ != "umi-cohort-phase-review-service/3" and (
+        if self.schema_ in (
+            "umi-cohort-phase-review-service/1",
+            "umi-cohort-phase-review-service/2",
+        ) and (
             (self.schema_ == "umi-cohort-phase-review-service/2")
             != (self.service_signing is not None)
         ):
             raise ValueError("service review signing requires version two host configuration")
-        if (self.schema_ == "umi-cohort-phase-review-service/3") != (
-            self.admission_signing is not None
-        ):
+        if (
+            self.schema_
+            in ("umi-cohort-phase-review-service/3", "umi-cohort-phase-review-service/4")
+        ) != (self.admission_signing is not None):
             raise ValueError("admission signing requires version three host configuration")
+        if (self.schema_ == "umi-cohort-phase-review-service/4") != (
+            self.model_signing is not None
+        ):
+            raise ValueError("model signing requires version four host configuration")
         private_path(self.chain.state_directory)
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
         verify_recovery_authority(self.series.recovery, self.policy)
@@ -94,6 +116,14 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             for k in sorted(digest(p) for p in self.series.cohorts)
         )
         authorized = {identity(e.hotkey) for e in self.policy.evaluators}
+        model = self.model_signing
+        if model is not None and (
+            model.cohorts != expected
+            or model.policy_sha256 != digest(self.policy)
+            or identity(model.signer) != identity(self.signing.signer)
+            or "model" not in self.eligible_tracks
+        ):
+            raise ValueError("model review changes host signer, tracks or scope")
         admission = self.admission_signing
         if admission is not None and (
             admission.cohorts != expected

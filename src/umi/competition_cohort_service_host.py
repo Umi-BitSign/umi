@@ -16,7 +16,8 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+import httpx
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
@@ -24,6 +25,7 @@ from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_d
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_model_acceptance_store import CohortModelAcceptances
 from .competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
+from .competition_cohort_model_review_http import ModelReviewPeer, ModelReviewPeerConfig
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_recovery import ModelRewardCohortAuthority, verify_recovery_authority
@@ -31,11 +33,12 @@ from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_se
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
 from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_host_activation import _read_root_control_path
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
-from .open_competition import digest
+from .open_competition import digest, identity
 from .private_files import Directory, read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -43,7 +46,9 @@ logger = logging.getLogger(__name__)
 
 
 class ServiceAdmissionHostConfig(StrictProtocolModel):
-    schema_: Literal["umi-cohort-service-admission-host/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-cohort-service-admission-host/1", "umi-cohort-service-admission-host/2"
+    ] = Field(alias="schema")
     series: StandingRewardSeries
     manifest: RewardManifest
     queue_directory: Directory
@@ -51,9 +56,31 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     maximum_claims_per_catalog: Annotated[int, Field(ge=1, le=8192)] = 1024
     maximum_queue_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
+    model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        value = handler(self)
+        if not self.model_review_peers:
+            value.pop("model_review_peers", None)
+        return value
+
+    @model_validator(mode="after")
+    def peers(self):
+        if (self.schema_ == "umi-cohort-service-admission-host/2") != bool(self.model_review_peers):
+            raise ValueError("model peers require service admission host version two")
+        if len({identity(p.signer) for p in self.model_review_peers}) != len(
+            self.model_review_peers
+        ):
+            raise ValueError("model reviewer configuration repeats a signer")
+        return self
 
     def stores(self):
-        return (Path(self.queue_directory), Path(self.inputs_directory))
+        return (
+            Path(self.queue_directory),
+            Path(self.inputs_directory),
+            *(Path(p.token_file) for p in self.model_review_peers),
+        )
 
 
 class ServiceAdmissionHost:
@@ -84,6 +111,17 @@ class ServiceAdmissionHost:
             if isinstance(c.series.recovery.authority, ModelRewardCohortAuthority)
             else None
         )
+        if c.model_review_peers:
+            groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
+            if self.models is None or any(
+                identity(p.signer) not in groups for p in c.model_review_peers
+            ):
+                raise ValueError("model reviewer is outside model authority or policy")
+            if (
+                len({groups[identity(p.signer)] for p in c.model_review_peers})
+                < policy.required_evaluator_groups
+            ):
+                raise ValueError("configured model reviewers cannot form independent quorum")
         self.queues, self.cohorts = {}, {}
         root = Path(c.queue_directory) / digest(c.series)
         for requirement in c.manifest.cohorts:
@@ -213,6 +251,34 @@ class ServiceAdmissionHost:
         return frozenset(blocks)
 
     async def run(self, stop: asyncio.Event) -> None:
+        async with httpx.AsyncClient(
+            trust_env=False,
+            follow_redirects=False,
+            limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
+        ) as client:
+            if self.models is not None and self.config.model_review_peers:
+                peers = []
+                for p in self.config.model_review_peers:
+                    token = (
+                        _read_root_control_path(Path(p.token_file), 257, modes={0o400, 0o440})
+                        .decode("ascii")
+                        .removesuffix("\n")
+                    )
+                    peers.append(
+                        ModelReviewPeer(
+                            client,
+                            p.origin,
+                            policy=self.intake.policy,
+                            cohorts=self.intake.config.cohorts,
+                            signer=p.signer,
+                            token=token,
+                            timeout_seconds=p.timeout_seconds,
+                        )
+                    )
+                self.models.reviewers = tuple(peers)
+            await self._poll(stop)
+
+    async def _poll(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             report = await self.poll_once()
             logger.info("cohort_service_admission %s", canonical_json_bytes(report).decode("ascii"))

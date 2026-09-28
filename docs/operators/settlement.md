@@ -61,22 +61,44 @@ same condition. Legacy intake and review export bytes remain unchanged.
 The service-admission host polls private `model-reviews/<model-sha256>.json`
 inputs and publishes retained `ModelAcceptanceIntent` records under the
 competition store's `model-acceptance-proposals/<cohort>/<submission>.json`.
-The configured input directory receives independent
-`ModelAcceptancePublication` records under
-`model-acceptance-publications/<cohort>/<submission>.json`. Its worker verifies
-the original proposal, quorum, submission and model bytes before retaining
-acceptance. It exports the original review documents under `objects/` before
+Service-admission host version 2 selects `model_review_peers`, each with an
+evaluator hotkey, HTTPS origin, private `token_file` and request timeout. Its
+recurring worker collects votes at `/internal/cohorts/model-artifacts/votes`,
+retains each response in the original intake ledger and forms a certificate
+only from independent policy groups. A disconnected peer leaves that entry
+pending while other peers and entries continue. Restart reuses collected votes
+and the original proposal, including its acceptance ordinal.
+
+On each private reviewer, phase-review host version 4 adds `model_signing`
+(`ModelReviewConfig`) alongside admission signing. Select distinct private
+journal, approvals and artifact directories. The approvals directory contains
+explicitly reviewed `ModelArtifactReviewInputs` at `<model-sha256>.json`; the
+artifact directory contains native preserved bundles. Deliver and review these
+inputs before asking for a vote. The HTTP proposal supplies their hashes, never
+replacement approval documents, artifact URLs or executable code. The reviewer
+verifies its local bundle, matching approved documents, certified participant
+admission and current cohort authority. It reserves the original intent and
+ordinal before signing; a committed vote can be returned without files or RPC.
+An unfinished intent retains its documents but rechecks current authority.
+Include the model journal in the reviewer's systemd `ReadWritePaths`; approvals
+and model bytes need only read access.
+
+The worker checks the original proposal, quorum, submission and model bytes
+before retaining acceptance. It exports review documents under `objects/` before
 publishing the certificate under `model-reward-acceptances/`. Replication must
 deliver those objects to each settlement consumer's evidence source and full
 bundles to its model archive. Pending entries do not prevent siblings from
 being processed. Completed entries replay from retained state before RPC,
 reviewers or original delivery inputs are consulted.
 
-The independent rights/reconstruction review service, complete artifact
-ingestion and replication, and installed coordinator qualification remain
-required before production selection. The private input directory is an
-exchange boundary, not a replacement for those services. Current component
-tests use synthetic finality, inference and rights-review documents.
+Host version 1 retains the private certificate-delivery path:
+`model-acceptance-publications/<cohort>/<submission>.json` contains a complete
+`ModelAcceptancePublication`. Both paths perform the same quorum checks.
+Complete artifact ingestion, independent rights/reconstruction assessment,
+replication and installed coordinator qualification remain required before
+production selection. Current component tests use synthetic finality, inference
+and rights-review documents; the recurring vote service does not make those
+assessments for an operator.
 
 ## Lost coordinator outcomes
 

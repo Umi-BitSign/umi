@@ -468,7 +468,9 @@ uses `umi-cohort-phase-review-service/1` for phase votes, or
 `umi-cohort-phase-review-service/2` with
 `service_signing` for service-request and retry votes. Version three adds
 `admission_signing` (`CohortAdmissionSignerConfig`) and can also select
-`service_signing`. Versions one and two keep their original canonical bytes.
+`service_signing`. Version four adds independent model-artifact votes through
+`model_signing`; see [artifact review configuration](../operators/settlement.md#recoverable-cohort-model-awards).
+Earlier versions keep their original canonical bytes.
 Select the full standing series,
 manifest, competition policy, all cohort/authority bindings, named evaluator
 hotkey, owned chain configuration with two backup proof RPCs, allowed tracks,

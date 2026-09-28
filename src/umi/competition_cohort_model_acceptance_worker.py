@@ -19,19 +19,56 @@ from .competition_cohort_model_acceptance_store import (
     PendingModelArtifacts,
 )
 from .concurrency import run_owned_thread
-from .open_competition import digest
+from .open_competition import digest, identity
 from .private_files import publish_private_model, read_private_model
 
 
 class ModelAcceptanceWorker:
     def __init__(
-        self, owner: CohortModelAcceptances, capture, inputs: Path, output: Path, *, batch_size=16
+        self,
+        owner: CohortModelAcceptances,
+        capture,
+        inputs: Path,
+        output: Path,
+        *,
+        batch_size=16,
+        reviewers=(),
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("model acceptance batch is outside bounds")
         self.owner, self.capture = owner, capture
         self.inputs, self.output, self.batch_size = inputs, output, batch_size
         self.cursors = {}
+        self.reviewers = tuple(reviewers)
+        if (
+            len(self.reviewers) > 64
+            or any(
+                p.policy != owner.intake.policy or p.cohorts != owner.intake.config.cohorts
+                for p in self.reviewers
+            )
+            or len({identity(p.signer) for p in self.reviewers}) != len(self.reviewers)
+        ):
+            raise ValueError("model reviewers change policy, cohorts or repeat a signer")
+
+    async def _review(self, cohort, key):
+        try:
+            return await run_owned_thread(self.owner.certified_votes, cohort, key)
+        except PendingModelArtifacts:
+            pass
+        request = await run_owned_thread(self.owner.review_request, cohort, key)
+        votes = await run_owned_thread(self.owner.votes, cohort, key)
+        retained = {identity(v.signature.hotkey) for v in votes}
+        for peer in self.reviewers:
+            if identity(peer.signer) in retained:
+                continue
+            try:
+                vote = await peer.attest(request)
+                await run_owned_thread(self.owner.publish_vote, vote)
+            except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                # Persist each independent response; one unavailable reviewer
+                # cannot discard another reviewer's completed vote.
+                continue
+        return await run_owned_thread(self.owner.certified_votes, cohort, key)
 
     async def _one(self, cohort, sub):
         key = digest(sub)
@@ -59,12 +96,16 @@ class ModelAcceptanceWorker:
                     maximum_bytes=MAX_PUBLICATION_BYTES,
                 )
             )
-            approved = await run_owned_thread(
-                partial(
-                    read_private_model,
-                    self.inputs / "model-acceptance-publications" / cohort / (key + ".json"),
-                    ModelAcceptancePublication,
-                    maximum_bytes=MAX_PUBLICATION_BYTES,
+            approved = (
+                await self._review(cohort, key)
+                if self.reviewers
+                else await run_owned_thread(
+                    partial(
+                        read_private_model,
+                        self.inputs / "model-acceptance-publications" / cohort / (key + ".json"),
+                        ModelAcceptancePublication,
+                        maximum_bytes=MAX_PUBLICATION_BYTES,
+                    )
                 )
             )
             if (

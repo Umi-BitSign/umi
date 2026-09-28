@@ -13,6 +13,7 @@ from umi import competition_cohort_review_boot as boot
 from umi import competition_cohort_review_cli as cli
 from umi.competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from umi.competition_cohort_intake import CohortIntakeBinding
+from umi.competition_cohort_model_review import ModelReviewConfig
 from umi.competition_cohort_progress_signer import CohortProgressSignerConfig
 from umi.competition_cohort_review_config import PhaseReviewServiceConfig, load_phase_review_config
 from umi.competition_cohort_service_review import ServiceReviewConfig
@@ -123,11 +124,75 @@ def with_admission(config):
     )
 
 
+def with_models(config):
+    config = with_admission(config)
+    signing = ModelReviewConfig(
+        schema="umi-cohort-model-review-config/1",
+        directory=config.signing.directory + "-models",
+        approvals_directory=config.signing.directory + "-approvals",
+        archive_directory=config.signing.directory + "-artifacts",
+        policy_sha256=digest(config.policy),
+        signer=config.signing.signer,
+        cohorts=config.signing.cohorts,
+    )
+    return PhaseReviewServiceConfig.model_validate_json(
+        canonical_json_bytes(
+            config.model_copy(
+                update={
+                    "schema_": "umi-cohort-phase-review-service/4",
+                    "model_signing": signing,
+                    "eligible_tracks": ("endpoint", "model"),
+                }
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize("fault", ["missing", "version", "signer", "policy", "tracks", "overlap"])
+def test_model_review_host_preserves_signer_scope_and_private_stores(selected, fault):
+    c = with_models(selected.config)
+    if fault == "missing":
+        c = c.model_copy(update={"model_signing": None})
+    elif fault == "version":
+        c = c.model_copy(update={"schema_": "umi-cohort-phase-review-service/3"})
+    elif fault == "tracks":
+        c = c.model_copy(update={"eligible_tracks": ("endpoint",)})
+    else:
+        update = {
+            "signer": {"signer": c.owner_hotkey},
+            "policy": {"policy_sha256": "ff" * 32},
+            "overlap": {"directory": c.proof_import_directory},
+        }[fault]
+        c = c.model_copy(update={"model_signing": c.model_signing.model_copy(update=update)})
+    with pytest.raises(ValueError):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+async def test_configured_model_review_route_survives_host_restart(selected, providers):
+    c = with_models(selected.config)
+    for _ in range(2):
+        async with (
+            boot.phase_review_app(c) as app,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://review.example"
+            ) as client,
+        ):
+            url = "/internal/cohorts/model-artifacts/votes"
+            assert (await client.post(url, json={})).status_code == 401
+            assert (
+                await client.post(
+                    url, json={}, headers={"authorization": "Bearer " + "vote-token" * 4}
+                )
+            ).status_code == 422
+    assert providers.events.count("started") == providers.events.count("closed") == 2
+
+
 @pytest.mark.parametrize("version", [1, 2])
 def test_older_host_canonical_bytes_omit_admission_configuration(selected, version):
     c = selected.config if version == 1 else with_service(selected.config)
     raw = canonical_json_bytes(c)
     assert "admission_signing" not in json.loads(raw)
+    assert "model_signing" not in json.loads(raw)
     assert canonical_json_bytes(PhaseReviewServiceConfig.model_validate_json(raw)) == raw
 
 
@@ -320,6 +385,9 @@ def providers(selected, monkeypatch):
 
         async def start(self):
             events.append("started")
+
+        async def collect(self):
+            raise AssertionError("unauthenticated host probes must not collect chain state")
 
         def ensure_observer_running(self):
             pass

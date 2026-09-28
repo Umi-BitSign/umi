@@ -17,6 +17,8 @@ from .competition_cohort_admission_http import (
 )
 from .competition_cohort_admission_journal import CohortAdmissionJournal
 from .competition_cohort_admission_signer import CohortAdmissionSigner
+from .competition_cohort_model_review import ModelArtifactReviewer
+from .competition_cohort_model_review_http import model_review_routes
 from .competition_cohort_phase_vote_http import phase_vote_routes
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_review_config import PhaseReviewServiceConfig
@@ -145,6 +147,24 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                     timeout_seconds=config.review_timeout_seconds,
                 )
             )
+            if config.model_signing is not None:
+                models = ModelArtifactReviewer(
+                    config.model_signing, config.policy, provider.collect, history, sign
+                )
+                await run_owned_thread(
+                    models.journal.put,
+                    "model_review_host",
+                    "selection",
+                    {
+                        "series_sha256": digest(config.series),
+                        "owner": identity(config.owner_hotkey),
+                    },
+                )
+                app.include_router(
+                    model_review_routes(
+                        models, token=vote_token, timeout_seconds=config.review_timeout_seconds
+                    )
+                )
         app.state.finality_provider = provider
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))
