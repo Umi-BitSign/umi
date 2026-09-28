@@ -313,6 +313,25 @@ class StoppedUpgradeObserver:
             finally:
                 await provider.aclose()
 
+    @asynccontextmanager
+    async def owned_provider(self):
+        """Keep the authenticated observer alive across a consented recovery.
+
+        This context remains read-only. The separately consented publisher
+        owns any marker transaction, its fee budget and retained bytes.
+        """
+        _issued(self)
+        async with self._lock:
+            self._recheck()
+            selected = parse_successor_host_observer_config(self._observer.payload)
+            provider = FinalizedCompetitionWeightProvider(selected.chain, selected.policy)
+            try:
+                await provider.start()
+                yield provider
+                self._recheck()
+            finally:
+                await provider.aclose()
+
     async def observe_bridge(
         self,
         audit: BridgeHistoryAudit,
