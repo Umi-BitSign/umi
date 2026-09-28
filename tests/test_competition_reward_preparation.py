@@ -706,7 +706,7 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     await configure_eligibility(item, monkeypatch, tmp_path)
     await item.provider.aclose()
     variant = getattr(request, "param", "matching")
-    if variant in {"opportunity", "signing_admission"}:
+    if variant in {"opportunity", "signing_admission", "coordinator"}:
         from umi.competition_reward_manifest import (
             RewardOpportunityTerms,
             StandingRewardOpportunityManifest,
@@ -726,7 +726,7 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
             )
         )
         series = series.model_copy(update={"manifest_sha256": digest(p.manifest)})
-    if variant == "control_publication":
+    if variant in {"control_publication", "coordinator"}:
         item.config = item.config.model_copy(
             update={
                 "proof_rpc_fallback_urls": (
@@ -839,6 +839,8 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     )
     if variant == "signing_admission":
         writes[first] = ()
+    elif variant == "coordinator":
+        writes[first + 1], writes[first] = writes[first], ()
     elif variant == "control_publication":
         writes[activation_block + 1] = writes[activation_block]
         writes[activation_block] = ()
@@ -864,21 +866,55 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         await item.provider.aclose()
 
 
+def current_control_finality(h, height):
+    import json
+
+    from umi.chain_evidence import FinalizedSnapshotRef
+    from umi.finalized_ancestry import encode_rpc_header
+
+    # Synthetic finality boundary; production proof, nonce, archive and
+    # complete history consumers remain unpatched.
+    w = h.source.w
+    header = w.headers[w.heights[height]]
+    ref = FinalizedSnapshotRef(height, w.heights[height], header["parentHash"], header["stateRoot"])
+    timestamp = w.original.timestamp_ms + (height - h.old.height) * 12000
+    evidence = canonical_json_bytes(
+        json.loads(h.old.finality_evidence)
+        | {
+            "block": {"scale_header": encode_rpc_header(header)},
+        }
+    )
+    h.blocks[height] = replace(
+        h.old,
+        height=height,
+        block_hash=ref.block_hash,
+        state_root=ref.state_root,
+        timestamp_ms=timestamp,
+        finality_evidence=evidence,
+        finality_evidence_sha256=hashlib.sha256(evidence).hexdigest(),
+    )
+
+    async def after(requested_height, *, maximum_distance):
+        assert requested_height <= height and maximum_distance is None
+        return h.blocks[height]
+
+    h.item.finality.verified_block_after = after
+    h.item.finality.ref = ref
+    h.item.clock.now = timestamp + 1000
+    h.item.provider._startup_floor = h.old.height - 1
+    if h.item.provider._task is None:
+        h.item.provider._task = asyncio.create_task(asyncio.Event().wait())
+
+
 @pytest.mark.parametrize("preparation_case", [8], indirect=True)
 @pytest.mark.parametrize("complete_preparation_case", ["control_publication"], indirect=True)
 async def test_native_control_publisher_recovers_original_proofs_and_finalized_history(
     complete_preparation_case, tmp_path
 ):
-    import asyncio
-    import hashlib
-    import json
-
-    from umi.chain_evidence import FinalizedSnapshotRef
     from umi.competition_reward_control_journal import RewardControlTransactionJournal
     from umi.competition_reward_control_publisher import StandingControlPublisher
     from umi.competition_reward_control_signing import collect_control_signing_state
     from umi.competition_reward_files import StandingRewardFiles
-    from umi.finalized_ancestry import encode_rpc_header
     from umi.private_files import publish_private_model
 
     h, c, p = (
@@ -905,54 +941,18 @@ async def test_native_control_publisher_recovers_original_proofs_and_finalized_h
         maximum_bytes=8 * 1024**2,
     )
 
-    def current(height):
-        # Synthetic finality boundary; production proof, nonce, archive and
-        # complete history consumers remain unpatched.
-        w = h.source.w
-        header = w.headers[w.heights[height]]
-        ref = FinalizedSnapshotRef(
-            height, w.heights[height], header["parentHash"], header["stateRoot"]
-        )
-        timestamp = w.original.timestamp_ms + (height - h.old.height) * 12000
-        evidence = canonical_json_bytes(
-            json.loads(h.old.finality_evidence)
-            | {
-                "block": {"scale_header": encode_rpc_header(header)},
-            }
-        )
-        h.blocks[height] = replace(
-            h.old,
-            height=height,
-            block_hash=ref.block_hash,
-            state_root=ref.state_root,
-            timestamp_ms=timestamp,
-            finality_evidence=evidence,
-            finality_evidence_sha256=hashlib.sha256(evidence).hexdigest(),
-        )
-
-        async def after(requested_height, *, maximum_distance):
-            assert requested_height <= height and maximum_distance is None
-            return h.blocks[height]
-
-        h.item.finality.verified_block_after = after
-        h.item.finality.ref = ref
-        h.item.clock.now = timestamp + 1000
-        h.item.provider._startup_floor = h.old.height - 1
-        if h.item.provider._task is None:
-            h.item.provider._task = asyncio.create_task(asyncio.Event().wait())
-
-    current(c.active.decision.observed_at_block)
+    current_control_finality(h, c.active.decision.observed_at_block)
     # Retain original nonce proofs before the later finality observation.
     original = await collect_control_signing_state(h.item.provider, h.item.hotkey)
     reserved = journal.reserve(c.active, original, mortality_period=8)
     from umi.competition_reward_control_signing import review_control_signing_state
 
-    current(h.end)
+    current_control_finality(h, h.end)
     files_before = tuple(files.root.rglob("*.json"))
     for restart in (False, True):
         if restart:
             c.reader, h.reader = c.reopen(), await h.restart()
-            current(h.end)
+            current_control_finality(h, h.end)
             h.offline_through = h.end - 1
         recovered = await review_control_signing_state(
             h.item.provider,
@@ -988,6 +988,162 @@ async def test_native_control_publisher_recovers_original_proofs_and_finalized_h
                 await publisher.step((c.genesis,))
         assert journal.pending() == reserved
         assert tuple(files.root.rglob("*.json")) == files_before
+
+
+@pytest.mark.parametrize("preparation_case", [8], indirect=True)
+@pytest.mark.parametrize("complete_preparation_case", ["coordinator"], indirect=True)
+async def test_native_coordinator_recovers_admission_then_certifies_first_activation(
+    complete_preparation_case, tmp_path
+):
+    from umi.competition_reward_control_journal import RewardControlTransactionJournal
+    from umi.competition_reward_control_publisher import StandingControlPublisher
+    from umi.competition_reward_coordinator import (
+        StandingRewardCoordinator,
+        StandingRewardDecisionReviewer,
+    )
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
+    from umi.competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
+    from umi.private_files import publish_private_model
+
+    h = complete_preparation_case
+    c, p = h.c, h.package_case
+    first = c.series.recovery.authority.issued_at_block
+    current_control_finality(h, first)
+    primary, readback = (
+        StandingRewardFiles(
+            tmp_path / name,
+            maximum_package_bytes=8 * 1024**2,
+            maximum_witness_bytes=8 * 1024**2,
+        )
+        for name in ("coordinator-delivery", "independent-readback")
+    )
+    publish_private_model(
+        primary.root / "packages" / (digest(p.package) + ".json"),
+        p.package,
+        maximum_bytes=primary.maximum_package_bytes,
+    )
+    handoff = LegacyRewardHandoffPlan(
+        schema="umi-legacy-reward-handoff-plan/1",
+        series_sha256=digest(c.series),
+        cohort_sha256=digest(c.series.cohorts[0]),
+        legacy_policy_sha256="11" * 32,
+        legacy_round_sha256="22" * 32,
+        legacy_package_sha256="33" * 32,
+    )
+    offer, unavailable, local_calls, peer_calls = None, True, [], []
+
+    async def no_opportunity(_):
+        pytest.fail("initial activation uses the approved legacy handoff")
+
+    def build():
+        publisher = StandingControlPublisher(
+            reader=c.reader,
+            provider=h.item.provider,
+            history=h.reader,
+            journal=RewardControlTransactionJournal(
+                tmp_path / "coordinator-transactions",
+                c.series,
+                config_sha256=digest(h.item.config),
+                maximum_bytes=8 * 1024**2,
+            ),
+            files=primary,
+            signer=wallet("Ferdie").hotkey,
+            mortality_period=8,
+            maximum_history_blocks=4096,
+        )
+        reviewer = StandingRewardDecisionReviewer(
+            publisher=publisher,
+            manifest=p.manifest,
+            promotion_store=p.store,
+            handoff=handoff,
+            opportunity=no_opportunity,
+            maximum_promotion_bytes=1_000_000,
+        )
+
+        def signer(name, calls):
+            async def sign(body):
+                calls.append(body)
+                return sign_object(body, wallet(name))
+
+            return RewardDecisionSigner(
+                RewardDecisionJournal(
+                    tmp_path / ("decision-signer-" + name),
+                    c.series,
+                    h.item.policy,
+                    wallet(name).hotkey.ss58_address,
+                    expected_chain_config_sha256=digest(h.item.config),
+                    maximum_bytes=8 * 1024**2,
+                ),
+                sign,
+            )
+
+        peer = signer("Dave", peer_calls)
+
+        async def vote(body, prefix):
+            if unavailable:
+                raise ConnectionError("remote evaluator offline")
+            # Separate signing journal and real native replay, but shared fixture
+            # transport/proof owners; this is not independent-host qualification.
+            return await peer.attest(await reviewer.review(body, prefix))
+
+        return StandingRewardCoordinator(
+            reviewer=reviewer,
+            signer=signer("Charlie", local_calls),
+            readback=readback,
+            offers=lambda _: offer,
+            voters=(vote,),
+        )
+
+    async def converge(coordinator):
+        with coordinator.publisher.hold_writer():
+            for _ in range(100):
+                try:
+                    result = await coordinator.step()
+                except HistoricalHeaderRecoveryPending:
+                    continue
+                if result.status not in {"history_pending", "review_pending"}:
+                    return result
+        pytest.fail("native recurring coordinator did not converge")
+
+    coordinator = build()
+    assert (await converge(coordinator)).status == "quorum_pending"
+    intent = coordinator.signer.journal.load(0)
+    assert intent.decision == c.genesis.decision and len(local_calls) == 1
+    # Restart and remove original historical state/body access. The same reviewed
+    # intent and local signature recover while the peer supplies its missing vote.
+    c.reader, h.reader = c.reopen(), await h.restart()
+    h.reader = h.new_reader(maximum_bytes=64 * 1024**2)
+    current_control_finality(h, first)
+    h.offline_through = first
+    coordinator, unavailable = build(), False
+    assert (await converge(coordinator)).status == "certified_delivery_pending"
+    assert coordinator.signer.journal.load(0) == intent
+    assert len(local_calls) == 1 and len(peer_calls) == 1
+    assert (await converge(coordinator)).status == "delivery_pending"
+    assert coordinator.publisher.journal.pending() is None
+    admission = coordinator.signer.journal.prefix(1)[0]
+    # This synthetic finalized chain includes that exact admission on the next
+    # block. The native publisher must recognize it without submitting again.
+    readback.retain_decision(admission)
+    # Collecting a previously unseen block needs its parent's runtime proof.
+    # The old-state outage above qualifies replay of the already retained prefix.
+    h.offline_through = first - 1
+    current_control_finality(h, first + 1)
+    assert (await converge(coordinator)).status == "allocation_pending"
+    assert coordinator.publisher.journal.pending() is None
+
+    current_control_finality(h, c.active.decision.observed_at_block - 1)
+    offer = c.active.decision.activation.model_copy(
+        update={"prior_opportunity_sha256": digest(handoff)}
+    )
+    assert (await converge(coordinator)).status == "certified_delivery_pending"
+    certificate = coordinator.signer.journal.prefix(2)[1]
+    assert certificate.decision.activation == offer
+    assert primary.package(offer.package_sha256) == p.package
+    assert len(local_calls) == 2 and len(peer_calls) == 2
+    assert (await converge(coordinator)).status == "delivery_pending"
+    assert coordinator.publisher.journal.pending() is None
 
 
 async def test_boot_reconstructs_initial_package_from_native_retained_history(

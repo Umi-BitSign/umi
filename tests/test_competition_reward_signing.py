@@ -197,3 +197,29 @@ async def test_later_prefix_does_not_enable_new_ancestor_votes(signing_case):
     with pytest.raises(ValueError, match="roll back"):
         await owner.attest(c.review())
     assert len(c.sign_calls) == 1
+
+
+async def test_recovered_prefix_can_be_delivered_without_inventing_ancestor_votes(
+    signing_case, tmp_path
+):
+    from umi.competition_reward_files import StandingRewardFiles
+
+    c = signing_case
+    first = c.decision(c.genesis, 5, observed=162)
+    owner = RewardDecisionSigner(c.signing_journal(), c.sign)
+    await owner.attest(c.review(first.decision, (c.genesis,)))
+    assert owner.journal.load(0) is None
+    files = StandingRewardFiles(
+        tmp_path / "recovered-prefix",
+        maximum_package_bytes=1_000_000,
+        maximum_witness_bytes=1_000_000,
+    )
+
+    def no_package(_):
+        pytest.fail("series admission requires no package")
+
+    assert await owner.publish(0, files, no_package) == digest(c.genesis.decision)
+    assert await owner.certify(0) == c.genesis
+    assert len(c.sign_calls) == 1
+    with pytest.raises(ValueError, match="roll back"):
+        await owner.attest(c.review())

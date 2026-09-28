@@ -332,9 +332,20 @@ admission still needs timely approval before intake opens; subsequent certified
 cohorts have no processing expiry. The local process lock excludes another
 publisher using the same state root. Installed host ownership must also prevent
 another host or state root from using the reserved hotkey during migration.
-The publisher core is not installed. Recurring coordinator wiring, independent
-remote artifact readback, wallet provisioning, migration ownership and combined
-service restart/effect qualification remain required before deployment.
+`StandingRewardCoordinator` selects the next admitted cohort, performs native
+review, retains its decision before requesting signatures, collects independent
+votes and waits for separate delivery readback before using the publisher.
+Invalid unreviewed offers cannot reserve a sequence. Once reviewed, an unfinished
+decision retains its original block and signatures across retries and restarts.
+While waiting for votes, the process reuses its completed review; after restart
+it reconstructs the review from retained proofs. Certified ancestor decisions
+can be delivered after migration without inventing new ancestor votes.
+
+Both cores remain uninstalled. The coordinator's separate readback directory
+must be populated by the independently authenticated receiver; distinct local
+paths alone do not prove remote availability. Installed offer/evaluator wiring,
+wallet provisioning, migration ownership, independent artifact readback and
+combined service restart/effect qualification remain required before deployment.
 
 The timer retries failed copies indefinitely. `copy --immutable --checksum`
 retains existing destination files and refuses conflicting bytes; it does not

@@ -36,6 +36,10 @@ from .open_competition import CompetitionPolicy, Signature, digest, identity, ve
 from .protocol import canonical_json_bytes
 
 
+class RewardQuorumPending(ValueError):
+    """More independent evaluator votes are needed; retained votes remain valid."""
+
+
 class RewardDecisionJournal:
     """One series and signer; directory/capacity changes do not change authority."""
 
@@ -209,14 +213,14 @@ class RewardDecisionJournal:
 
     def certify(self, sequence: int) -> SignedRewardControlDecision:
         intent = self.load(sequence)
-        if intent is None:
-            raise FileNotFoundError("reward certificate has no retained intent")
         raw = self.journal.get("reward_certificate", self._slot(sequence))
         if raw is not None:
             result = SignedRewardControlDecision.model_validate_json(canonical_json_bytes(raw))
-            if result.decision != intent.decision:
+            if intent is not None and result.decision != intent.decision:
                 raise ValueError("reward certificate differs from retained intent")
         else:
+            if intent is None:
+                raise FileNotFoundError("reward certificate has no retained intent")
             groups, votes = set(), []
             for _account, evaluator in sorted(self.reviewers.items()):
                 vote = self.vote(sequence, evaluator.hotkey)
@@ -224,7 +228,7 @@ class RewardDecisionJournal:
                     groups.add(evaluator.control_group)
                     votes.append(vote)
             if len(groups) < self.policy.required_evaluator_groups:
-                raise ValueError("reward decision awaits independent evaluator quorum")
+                raise RewardQuorumPending("reward decision awaits independent evaluator quorum")
             result = SignedRewardControlDecision(decision=intent.decision, signatures=tuple(votes))
         verify_reward_decisions(self.series, self.policy, (*self.prefix(sequence), result))
         self.journal.put("reward_certificate", self._slot(sequence), result)
