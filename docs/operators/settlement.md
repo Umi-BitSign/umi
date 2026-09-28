@@ -1028,3 +1028,28 @@ Archival must retain authenticated certificates, control/admission bindings,
 unresolved effects, nonce/finality high-water marks, adopted allocation and
 policy holds, and hash-linked durable evidence. An ordinary log rotation cannot
 replace native recovery qualification.
+
+## Model delivery before recoverable enrollment
+
+`umi-cohort-service-admission-host/3` adds `model_uploads` to the existing
+service admission host and independent model-review peers. Configure a private
+`directory` disjoint from intake and the model archive, and an explicit
+`maximum_reserved_bytes`. Reservations account for two copies of each declared
+bundle, covering delivery staging and the verified archive. Increase capacity
+without changing accepted manifests or clearing journals. Other bounds are
+`maximum_models`, `maximum_metadata_bytes`, `maximum_concurrent_uploads` and
+`idle_timeout_seconds`.
+
+The public routes described in the [model guide](../miners/model.md#model-files-for-recoverable-cohorts)
+retain signed chunks. The recurring host finalizes complete files and archives;
+its `model_delivery` report gives preserved/pending counts and a bounded error
+type. Verification retries after process exit, and the archive copy reuses one
+per-manifest scratch directory. Accepted original bytes remain unchanged.
+An unfinished model delivery is not admitted to the cohort roster.
+
+Keep the upload journal, retained file prefixes and model archive across service
+restart or host migration. Configure durable replication of original model
+artifacts and provenance before production launch. A local preservation receipt
+does not establish an R2 copy, independent backup, rights approval or reward
+certification. Older host configuration versions retain their existing bytes
+and behavior; version 3 enables this delivery requirement explicitly.

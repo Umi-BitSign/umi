@@ -15,6 +15,7 @@ from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_intake_records import read_participation
+from .competition_cohort_model_upload import CohortModelUploads
 from .competition_cohort_participation import CohortAdmissionStatus, CohortParticipationRequest
 from .competition_cohort_readiness import intake_readiness
 from .competition_execution import ExecutionBoundary
@@ -29,6 +30,7 @@ def cohort_routes(
     *,
     maximum_body_bytes: int,
     archive: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]] | None = None,
+    models: CohortModelUploads | None = None,
 ) -> APIRouter:
     router = APIRouter()
     queue = CohortAdmissionQueue(intake)
@@ -54,6 +56,11 @@ def cohort_routes(
                     "history_url": f"/v1/competition/cohorts/{cohort}/history",
                     "participation_url": f"/v1/competition/cohorts/{cohort}/participation",
                     "admissions_url": f"/v1/competition/cohorts/{cohort}/admissions",
+                    **(
+                        {"model_upload_url": f"/v1/competition/cohorts/{cohort}/model-uploads"}
+                        if models is not None
+                        else {}
+                    ),
                 }
             )
         return {"schema": "umi-public-cohorts/1", "cohorts": entries}
@@ -167,6 +174,8 @@ def cohort_routes(
                 503, "registration observation unavailable; retry unchanged"
             ) from error
         try:
+            if models is not None:
+                await run_owned_thread(models.require_payload, signed)
             receipt = await run_owned_thread(intake.retain, signed, current)
         except (AdmissionCapacityError, OSError, sqlite3.Error) as error:
             raise HTTPException(503, "cohort intake unavailable; retry unchanged") from error

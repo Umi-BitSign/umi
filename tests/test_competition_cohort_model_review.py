@@ -291,9 +291,13 @@ async def test_cancelled_signing_keeps_process_lock_until_owned_key_work_drains(
     assert (await r.create("Charlie").attest(r.request)).acceptance == r.request.acceptance
 
 
-async def test_configured_owner_service_collects_model_votes(reviews, tmp_path, monkeypatch):
+@pytest.mark.parametrize("delivery", [False, True])
+async def test_configured_owner_service_collects_model_votes(
+    reviews, tmp_path, monkeypatch, delivery
+):
     from umi import competition_cohort_service_host as host_module
     from umi.competition_cohort_model_review_http import ModelReviewPeerConfig
+    from umi.competition_cohort_model_upload import ModelUploadConfig
 
     r = reviews
     history = r.owner.intake.history(r.cohort)
@@ -355,12 +359,19 @@ async def test_configured_owner_service_collects_model_votes(reviews, tmp_path, 
         host_module, "_read_root_control_path", lambda path, *_args, **_kw: path.read_bytes()
     )
     cfg = ServiceAdmissionHostConfig(
-        schema="umi-cohort-service-admission-host/2",
+        schema="umi-cohort-service-admission-host/3"
+        if delivery
+        else "umi-cohort-service-admission-host/2",
         series=series,
         manifest=manifest,
         queue_directory=str(tmp_path / "queues"),
         inputs_directory=str(tmp_path / "input-delivery"),
         model_review_peers=tuple(configs),
+        model_uploads=ModelUploadConfig(
+            directory=str(tmp_path / "uploads"), maximum_reserved_bytes=1024**3
+        )
+        if delivery
+        else None,
     )
     store = CompetitionStore(tmp_path / "promotion", r.owner.intake.policy)
     r.owner.archive.rename(store.directory / "model-reward-artifacts")
@@ -375,6 +386,9 @@ async def test_configured_owner_service_collects_model_votes(reviews, tmp_path, 
     async def one_cycle():
         report = await original()
         assert report["model_acceptance"]["entries_exported"] == 1
+        assert (report["model_delivery"] is not None) == delivery
+        if delivery:
+            assert report["model_delivery"]["models_pending"] == 0
         stop.set()
         return report
 

@@ -15,6 +15,35 @@ checks endpoint health without replaying pilot evidence; it does not run fresh
 translation challenges. The integration below is for a miner that serves actual
 translation requests under the corresponding release and policy.
 
+### Model files for recoverable cohorts
+
+When the public cohort index advertises `model_upload_url`, deliver a model
+bundle before submitting model-track participation. POST the same signed
+`CohortParticipationRequest` to that URL to reserve delivery. A reservation
+alone does not enroll the miner, certify rights or award rewards.
+
+The response identifies `upload_sha256`, the model manifest digest,
+`file_offsets` in manifest order, and `complete_files`. Send raw file chunks to
+`PUT /v1/competition/model-uploads/{upload_sha256}/files/{index}?offset=N`.
+Each request is at most 8 MiB, uses `application/octet-stream` with an exact
+`Content-Length`, and includes `X-UMI-Chunk-SHA256` and `X-UMI-Signature`.
+The latter is the canonical `Signature` JSON for a
+`umi-cohort-model-upload-chunk/1` body containing `upload_sha256`, `file_index`,
+`offset`, `size_bytes` and `sha256`, signed by the submitting hotkey.
+
+GET `/v1/competition/model-uploads/{upload_sha256}` to resume from retained
+byte offsets after an interruption. Identical chunks and matching overlaps are
+idempotent. The service worker checks complete-file hashes and preserves the
+native bundle outside the HTTP request. A full byte count does not establish
+verification; wait for `payload_preserved: true` before POSTing the original
+participation request to its `participation_url`. Rights, reconstruction and
+independent artifact acceptance remain separate checks.
+
+Delivery reservations have no elapsed-time expiry. New enrollment still requires
+open certified intake; finishing an upload cannot reopen a closed cohort or
+change its original consent. The ordinary endpoint track does not upload model
+files through this route.
+
 <a id="miner-model-integration--successor-assignment-discovery-rehearsal"></a>
 
 ### Successor assignment discovery rehearsal

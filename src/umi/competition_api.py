@@ -20,6 +20,7 @@ from starlette.types import Lifespan
 from .competition_chain import RegistrationCapture
 from .competition_cohort_api import cohort_routes
 from .competition_cohort_intake import CohortIntake
+from .competition_cohort_model_upload import CohortModelUploads
 from .competition_execution import ExecutionBoundary
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
@@ -71,6 +72,7 @@ def create_app(
     cohort_capture_provider: Callable[[], Awaitable[RegistrationCapture]] | None = None,
     cohort_archive_provider: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]]
     | None = None,
+    cohort_model_uploads: CohortModelUploads | None = None,
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
@@ -119,6 +121,7 @@ def create_app(
                 cohort_capture_provider,
                 maximum_body_bytes=MAX_SUBMISSION_BYTES,
                 archive=cohort_archive_provider,
+                models=cohort_model_uploads,
             )
         )
     public_results_sources = tuple(
@@ -136,6 +139,11 @@ def create_app(
         "submission": asyncio.Semaphore(limits.maximum_concurrent_submissions),
         "read": asyncio.Semaphore(limits.maximum_concurrent_reads),
         "readiness": asyncio.Semaphore(limits.maximum_concurrent_readiness),
+        "model_upload": asyncio.Semaphore(
+            1
+            if cohort_model_uploads is None
+            else cohort_model_uploads.config.maximum_concurrent_uploads
+        ),
     }
 
     @app.middleware("http")
@@ -147,6 +155,10 @@ def create_app(
             and request.url.path.endswith("/readiness")
         ):
             capacity = capacities["readiness"]
+        elif request.method == "PUT" and request.url.path.startswith(
+            "/v1/competition/model-uploads/"
+        ):
+            capacity = capacities["model_upload"]
         elif request.method == "POST" and (
             request.url.path == "/v1/competition/submissions"
             or request.url.path.startswith("/v1/competition/cohorts/")

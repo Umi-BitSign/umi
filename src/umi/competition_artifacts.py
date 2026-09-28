@@ -10,7 +10,6 @@ import hashlib
 import os
 import shutil
 import stat
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -22,6 +21,7 @@ from .open_competition import (
     digest,
     validate_bundle_policy,
 )
+from .private_files import lock_private_file
 from .protocol import canonical_json_bytes
 
 
@@ -136,11 +136,29 @@ def preserve_bundle(
     archive.mkdir(mode=0o700, parents=True, exist_ok=True)
     if archive.stat().st_mode & 0o022:
         raise ValueError("archive must not be writable by other users")
-    final = archive / digest(bundle)
+    key = digest(bundle)
+    lease = lock_private_file(archive / (".preserve-" + key + ".lock"))
+    try:
+        return _preserve_locked(bundle, source, archive, policy)
+    finally:
+        os.close(lease)
+
+
+def _preserve_locked(bundle, source, archive, policy):
+    key = digest(bundle)
+    final = archive / key
+    # This exact, per-manifest scratch directory is exclusively owned by the
+    # lock above. A killed copy can be retried without accumulating orphan data.
+    stage = archive / (".pending-" + key)
+    if stage.exists() or stage.is_symlink():
+        info = stage.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe interrupted artifact directory")
+        shutil.rmtree(stage)
     if final.exists() or final.is_symlink():
         verify_preserved_bundle(bundle, archive, policy)
         return final
-    stage = Path(tempfile.mkdtemp(prefix=".pending-", dir=archive))
+    stage.mkdir(mode=0o700)
     try:
         model_root = stage / "model"
         model_root.mkdir(mode=0o700)

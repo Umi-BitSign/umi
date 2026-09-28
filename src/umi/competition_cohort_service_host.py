@@ -26,6 +26,7 @@ from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_model_acceptance_store import CohortModelAcceptances
 from .competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
 from .competition_cohort_model_review_http import ModelReviewPeer, ModelReviewPeerConfig
+from .competition_cohort_model_upload import CohortModelUploads, ModelUploadConfig
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_recovery import ModelRewardCohortAuthority, verify_recovery_authority
@@ -47,7 +48,9 @@ logger = logging.getLogger(__name__)
 
 class ServiceAdmissionHostConfig(StrictProtocolModel):
     schema_: Literal[
-        "umi-cohort-service-admission-host/1", "umi-cohort-service-admission-host/2"
+        "umi-cohort-service-admission-host/1",
+        "umi-cohort-service-admission-host/2",
+        "umi-cohort-service-admission-host/3",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     manifest: RewardManifest
@@ -57,18 +60,25 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     maximum_queue_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
+    model_uploads: ModelUploadConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
         if not self.model_review_peers:
             value.pop("model_review_peers", None)
+        if self.model_uploads is None:
+            value.pop("model_uploads", None)
         return value
 
     @model_validator(mode="after")
     def peers(self):
-        if (self.schema_ == "umi-cohort-service-admission-host/2") != bool(self.model_review_peers):
+        if (self.schema_ != "umi-cohort-service-admission-host/1") != bool(self.model_review_peers):
             raise ValueError("model peers require service admission host version two")
+        if (self.schema_ == "umi-cohort-service-admission-host/3") != (
+            self.model_uploads is not None
+        ):
+            raise ValueError("model delivery requires service admission host version three")
         if len({identity(p.signer) for p in self.model_review_peers}) != len(
             self.model_review_peers
         ):
@@ -80,6 +90,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             Path(self.queue_directory),
             Path(self.inputs_directory),
             *(Path(p.token_file) for p in self.model_review_peers),
+            *((Path(self.model_uploads.directory),) if self.model_uploads else ()),
         )
 
 
@@ -109,6 +120,13 @@ class ServiceAdmissionHost:
                 promotion.directory,
             )
             if isinstance(c.series.recovery.authority, ModelRewardCohortAuthority)
+            else None
+        )
+        if c.model_uploads and self.models is None:
+            raise ValueError("model delivery requires model reward authority")
+        self.uploads = (
+            CohortModelUploads(c.model_uploads, intake, self.models.owner.archive)
+            if c.model_uploads
             else None
         )
         if c.model_review_peers:
@@ -188,6 +206,7 @@ class ServiceAdmissionHost:
             )
 
     async def poll_once(self) -> dict:
+        uploads = None if self.uploads is None else await run_owned_thread(self.uploads.poll_once)
         models = None if self.models is None else await self.models.poll_once()
         ready = pending = 0
         last_error = ""
@@ -234,6 +253,7 @@ class ServiceAdmissionHost:
             "catalogs_pending": pending,
             "last_error_type": last_error,
             "model_acceptance": models,
+            "model_delivery": uploads,
             "dispatch_authorized": False,
             "chain_submission_authorized": False,
         }
