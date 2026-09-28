@@ -440,6 +440,56 @@ the owner advances or disconnects. Transport timeouts cancel and drain the reque
 they do not expire its cohort or authorize a different decision. These routes
 are explicit host components, not default public API endpoints.
 
+Run a private reviewer with `umi-cohort-phase-review run --config CONFIG.json`.
+The `check` action validates the selection without opening the signer or proving
+runtime readiness. The configuration is canonical, root-owned mode `0444` and
+uses `umi-cohort-phase-review-service/1`. Select the full standing series,
+manifest, competition policy, all cohort/authority bindings, named evaluator
+hotkey, owned chain configuration with two backup proof RPCs, allowed tracks,
+trusted owner hotkey and HTTPS origin. Configure explicit resource capacities
+and separate signing, chain, promotion, input and proof-import directories.
+Keep the key and both credentials outside those directories.
+
+The service loads the named unlocked hotkey using the existing mode-`0400`
+key-file reader. `owner_token_file` and `vote_token_file` are distinct, root-owned
+mode-`0400` or `0440` files containing a 32–256 character bearer token, optionally
+followed by one newline. Grant the service account read access through its
+private group when using `0440`. The listener binds only to `127.0.0.1` or `::1`
+on the selected port. Put it behind the deployment's private HTTPS proxy and
+configure the coordinator's `PhaseVotePeer` with the vote credential. Keep the
+owner export credential separate. The HTTP client verifies TLS, disables
+environment proxies and never follows redirects.
+
+Deliver these canonical private files under `inputs_directory`:
+
+| Path | Native model and selection |
+| --- | --- |
+| `rosters/COHORT_SHA.json` | `RecoverableRosterEvidence`, including the certified prepared round |
+| `terms/TERMS_SHA.json` | `ServiceTerms` selected by the series manifest |
+| `catalogs/CATALOG_SHA.json` | `SignedServiceWorkCatalog`; the filename hashes its catalog body |
+| `transport/POLICY_SHA.json` | `ScoringPolicy` selected by the service terms |
+
+Use the original registration-proof archive format in `proof_import_directory`
+and populate the reviewer's own native promotion store with preserved model and
+promotion evidence. Requests load their selections only when needed. Missing
+future cohort files therefore do not prevent startup; missing or invalid
+evidence returns a retryable unavailable response without signing. Native replay
+compares the round with certified preparation and verifies completed work.
+Replicated bytes do not establish authority by themselves.
+
+All three phase routes share one `CohortProgressSigner` and process lease. Its
+journal retains the series, trusted owner, allowed tracks and service-sampling
+rule along with native signing intents and votes. Restart may change capacities,
+credentials or network placement while preserving those selections. Committed
+votes remain available after owner disconnection or loss of replicated inputs.
+The host monitors its finality observer, drains HTTP/signing work before closing
+the key/provider lifetime and then releases the lease. Native phase diagnostics
+report start, completion and bounded failure details without request bodies or
+credentials. The systemd template is
+[`umi-cohort-phase-review@.service.in`](../../deploy/standing-reward-coordinator/umi-cohort-phase-review@.service.in).
+This reviewer still requires coordinator export routes and evidence replication;
+it does not start admission, dispatch, inference or chain submission workers.
+
 `CohortLifecycleService` runs intake, preparation and request control through the
 same durable controller. Its configured factories create the native phase
 observer and independent signers only when that phase is needed. Progress and

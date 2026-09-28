@@ -83,7 +83,7 @@ def phase_review_routes(
             return Response(
                 output, media_type="application/json", headers={"cache-control": "no-store"}
             )
-        except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as error:
             raise HTTPException(503, "phase review unavailable; retry unchanged") from error
         finally:
             if acquired:
@@ -124,6 +124,12 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
         self.maximum_request_bytes = maximum_request_bytes
 
     async def __call__(self, request: RequestT) -> bytes:
+        try:
+            return await self._receive(request)
+        except httpx.TransportError as error:
+            raise OSError("phase review transport unavailable; retry unchanged") from error
+
+    async def _receive(self, request: RequestT) -> bytes:
         raw = canonical_json_bytes(request)
         if len(raw) > self.maximum_request_bytes:
             raise ValueError("phase review request exceeds its byte bound")

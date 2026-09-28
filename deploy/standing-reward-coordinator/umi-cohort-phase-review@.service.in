@@ -1,0 +1,26 @@
+[Unit]
+Description=UMI private native cohort phase reviewer (%i)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+UMask=0077
+ExecStart=@PYTHON@ -I -B -m umi.competition_cohort_review_cli run --config @CONFIG_DIRECTORY@/%i.json
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=infinity
+KillSignal=SIGTERM
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@SIGNING_ROOT@ @CHAIN_STATE@ @PROMOTION_ROOT@ @INPUTS_ROOT@ @PROOF_IMPORT@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -189,6 +189,13 @@ def replay_request_export(
         current_block=progress.observed_at_block,
     )
     opened = view.closure("preparation")
+    selected = next((d for d in exported.decisions if digest(d) == opened.evidence_sha256), None)
+    if (
+        selected is None
+        or selected.progress is None
+        or selected.progress.progress.phase_result_sha256 != digest(roster.round)
+    ):
+        raise ValueError("request roster differs from certified preparation")
     started = opened.observed_at_block
     first = next(i for i, t in enumerate(history.transitions) if t.transition == opened)
     tips = {digest(t.transition) for t in history.transitions[first:]}

@@ -150,6 +150,197 @@ async def test_remote_request_export_matches_native_owner(remote, completion):
     assert len(h.remote_calls) == 1
 
 
+def test_pending_request_rejects_roster_not_certified_by_preparation(remote):
+    h = remote
+    value = h.exporter.export(h.sample())
+    changed = h.source.roster.model_copy(
+        update={
+            "round": h.source.roster.round.model_copy(
+                update={"prepared_at_block": h.source.roster.round.prepared_at_block + 1}
+            )
+        }
+    )
+    value = value.model_copy(update={"roster_sha256": digest(changed)})
+    with pytest.raises(ValueError, match="certified preparation"):
+        replay_request_export(
+            value,
+            h.intake.policy,
+            roster=changed,
+            catalogs=h.source.catalogs,
+            transport=h.source.transport,
+            maximum_sample_gap_blocks=300,
+            maximum_bytes=64 * 1024**2,
+        )
+
+
+@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vote(
+    remote, chain_config, tmp_path, monkeypatch
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from umi import competition_cohort_review_boot as boot
+    from umi import competition_host_activation as activation
+    from umi.competition_reward_decisions import StandingRewardSeries
+    from umi.competition_reward_manifest import RewardReplayRequirement, StandingRewardManifest
+    from umi.competition_reward_proof_archive import RewardProofArchive
+    from umi.grandpa_finality import FINNEY_GENESIS_HASH
+    from umi.policy import scoring_policy_hash
+    from umi.private_files import publish_private_model
+
+    from .test_competition_cohort_review_boot import config_for
+
+    h = remote
+    progress = h.window()
+    exported = h.exporter.export(progress)
+    terms = h.c.terms
+    assert terms is not None
+    policy, history = h.intake.policy, exported.history
+    manifest = StandingRewardManifest(
+        schema="umi-standing-reward-manifest/1",
+        policy_sha256=digest(policy),
+        cohorts=(
+            RewardReplayRequirement(
+                cohort_sha256=h.cohort,
+                terms_sha256=digest(terms),
+                catalog_sha256s=exported.catalogs,
+            ),
+        ),
+    )
+    series = StandingRewardSeries(
+        schema="umi-standing-reward-series/1",
+        genesis_hash=FINNEY_GENESIS_HASH,
+        netuid=78,
+        policy_sha256=digest(policy),
+        policy_epoch=1,
+        manifest_sha256=digest(manifest),
+        control_hotkey=h.owner_identity,
+        recovery=history.authority,
+        cohorts=(history.plan,),
+        validators=(wallet("Alice").hotkey.ss58_address,),
+        maximum_proof_lag_blocks=32,
+        maximum_transaction_lifetime_blocks=128,
+        lifetime="until_superseded_or_revoked",
+    )
+    root = tmp_path / "configured-reviewer"
+    chain = chain_config.model_copy(
+        update={
+            "state_directory": str(root / "chain"),
+            "policy_sha256": digest(policy),
+            "proof_rpc_fallback_urls": ("wss://backup-one.example", "wss://backup-two.example"),
+        }
+    )
+    config = config_for(
+        SimpleNamespace(series=series, policy=policy, manifest=manifest, chain=chain), root
+    )
+    config = config.model_copy(
+        update={
+            "maximum_sample_gap_blocks": 300,
+            "eligible_tracks": h.source.roster.round.eligible_tracks,
+        }
+    )
+    Path(config.owner_token_file).parent.mkdir(parents=True)
+    for path, token in (
+        (config.owner_token_file, "owner-private-token" * 3),
+        (config.vote_token_file, "reviewer-private-token" * 3),
+    ):
+        Path(path).write_text(token)
+        Path(path).chmod(0o440)
+    monkeypatch.setattr(
+        activation, "_root_owner_uid", lambda: Path(config.owner_token_file).stat().st_uid
+    )
+    monkeypatch.setattr(boot, "load_named_hotkey", lambda path, key: wallet("Dave"))
+    events, signatures = [], []
+
+    async def start():
+        events.append("started")
+
+    async def close():
+        events.append("closed")
+
+    def signing(body, key):
+        signatures.append(digest(body))
+        return sign_object(body, key)
+
+    h.provider.start, h.provider.aclose = start, close
+    monkeypatch.setattr(boot, "HistoricalRegistrationProvider", lambda *args: h.provider)
+    monkeypatch.setattr(boot, "sign_object", signing)
+    owner = FastAPI()
+    owner.include_router(request_review_routes(h.exporter, token="owner-private-token" * 3))
+    client_type = httpx.AsyncClient
+
+    def client_factory(**kwargs):
+        kwargs.setdefault("transport", httpx.ASGITransport(app=owner))
+        return client_type(**kwargs)
+
+    monkeypatch.setattr(boot.httpx, "AsyncClient", client_factory)
+    observations = [
+        exported.record.service.observation,
+        exported.record.fence.observation,
+        h.source.roster.intake_seal.observation,
+        *(d.observation for d in exported.decisions),
+        *(r.observation for r in exported.records),
+        *(s.observation for s in exported.seals),
+    ]
+    proofs = RewardProofArchive(Path(config.proof_import_directory))
+    for observation in {digest(o): o for o in observations}.values():
+        proofs.write(
+            "registration",
+            digest(observation),
+            context=observation.model_dump(mode="json", by_alias=True),
+            fields={"proof": b"proof", "metadata": b"metadata"},
+        )
+
+    def peer(client):
+        return PhaseVotePeer(
+            client,
+            "https://reviewer.example",
+            policy=policy,
+            cohorts=config.signing.cohorts,
+            signer=config.signing.signer,
+            phase="requests",
+            token="reviewer-private-token" * 3,
+        )
+
+    async with (
+        boot.phase_review_app(config) as app,
+        client_type(transport=httpx.ASGITransport(app=app)) as client,
+    ):
+        with pytest.raises(OSError):
+            await peer(client).attest(progress)  # Later cohorts need not exist at boot.
+        inputs = Path(config.inputs_directory)
+        selections = [
+            ("rosters", h.cohort, h.source.roster),
+            ("terms", digest(terms), terms),
+            ("transport", scoring_policy_hash(h.source.transport), h.source.transport),
+            *(("catalogs", digest(c.catalog), c) for c in h.source.catalogs),
+        ]
+        for folder, key, value in selections:
+            publish_private_model(inputs / folder / (key + ".json"), value)
+        terms_path = inputs / "terms" / (digest(terms) + ".json")
+        terms_path.write_bytes(
+            canonical_json_bytes(terms.model_copy(update={"service_pool_bps": 0}))
+        )
+        with pytest.raises(OSError):
+            await peer(client).attest(progress)
+        assert signatures == []
+        terms_path.write_bytes(canonical_json_bytes(terms))
+        vote = await peer(client).attest(progress)
+    assert signatures == [digest(progress)]
+    h.offline = True
+    h.block += 100_000
+    for folder, key, _ in selections:
+        (inputs / folder / (key + ".json")).unlink()
+    async with (
+        boot.phase_review_app(config) as app,
+        client_type(transport=httpx.ASGITransport(app=app)) as client,
+    ):
+        assert await peer(client).attest(progress) == vote
+    assert signatures == [digest(progress)]
+    assert events == ["started", "closed", "started", "closed"]
+
+
 @pytest.mark.parametrize(
     "damage",
     [
