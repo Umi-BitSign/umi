@@ -341,16 +341,42 @@ While waiting for votes, the process reuses its completed review; after restart
 it reconstructs the review from retained proofs. Certified ancestor decisions
 can be delivered after migration without inventing new ancestor votes.
 
-Both cores remain uninstalled. The coordinator's separate readback directory
-must be populated by the independently authenticated receiver; distinct local
-paths alone do not prove remote availability. Installed offer/evaluator wiring,
-wallet provisioning, migration ownership, independent artifact readback and
-combined service restart/effect qualification remain required before deployment.
+`umi-reward-coordinator check --config /etc/umi/reward-coordinator/NAME.json`
+validates the root-owned, mode `0444`, canonical
+`umi-reward-coordinator-config/1` document without loading keys or starting a
+provider. `run` assembles native proof readers, durable journals and the selected
+`coordinator` or `reviewer` role. Configuration binds the approved series, policy,
+opportunity terms, handoff and chain context, explicit storage capacities and
+the primary RPC plus two fallbacks. Each mutable store must have a distinct
+private directory; named hotkey files must remain outside those stores.
+
+The coordinator loads its evaluator key and the reserved control key. Reviewers
+load only their evaluator key and independently replay the original proposal
+before signing. The proposer retains its vote before exporting
+`requests/SERIES/SEQUENCE.json`; peers export signed replies as
+`votes/SERIES/SEQUENCE/ACCOUNT.json`. These paths carry approved fixed sequence
+slots, authenticated canonical data and no executable callbacks. Missing delivery
+retries indefinitely; a restart reuses the original intent and signature.
+
+The coordinator reads canonical `RewardActivation` offers from
+`COHORT_SHA256.json` files in its configured offer directory. Its separate
+readback directory must be populated by the independently authenticated receiver;
+distinct local paths alone do not prove remote availability. Precreate input
+directories as the service user with mode `0700`, and deliver private regular
+files with mode `0600`. The systemd template in
+`deploy/standing-reward-coordinator/` owns provider startup, retries and orderly
+shutdown. It must select the qualified installed Python environment.
+
+These services remain uninstalled. Automatic offer production, independent peer
+and artifact delivery, key provisioning, migration ownership and combined Linux
+restart/effect qualification remain required before deployment. Configuration
+validation is not runtime qualification.
 
 The timer retries failed copies indefinitely. `copy --immutable --checksum`
 retains existing destination files and refuses conflicting bytes; it does not
-delete objects absent from the source. The filters copy only the named proof
-and reward-input directories, excluding lock and temporary files. Transfers can arrive out of order;
+delete objects absent from the source. The filters copy only the named proof,
+reward-input and signed review-message directories, excluding lock and temporary
+files. Transfers can arrive out of order;
 missing referenced objects remain pending. Reading R2 uses the receiver's own
 credential, so already uploaded proofs remain available when the coordinator is
 offline. A copied file or successful transfer grants no reward authority.

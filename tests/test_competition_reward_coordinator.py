@@ -48,7 +48,8 @@ def coordinator_case(publisher_case, tmp_path, monkeypatch):
     def reopen():
         # Substitute only the already separately qualified native reviewer.
         reviewer = object.__new__(StandingRewardDecisionReviewer)
-        reviewer.publisher = h.publisher
+        reviewer.reader, reviewer.provider = h.publisher.reader, h.publisher.provider
+        reviewer.history, reviewer.files = h.publisher.history, h.publisher.files
 
         async def review(body, prefix):
             h.reviews.append(body)
@@ -90,6 +91,7 @@ def coordinator_case(publisher_case, tmp_path, monkeypatch):
         h.owner = RewardDecisionSigner(journal, sign)
         return StandingRewardCoordinator(
             reviewer=reviewer,
+            publisher=h.publisher,
             signer=h.owner,
             readback=h.readback,
             offers=lambda _: h.offer,

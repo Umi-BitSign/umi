@@ -995,12 +995,15 @@ async def test_native_control_publisher_recovers_original_proofs_and_finalized_h
 async def test_native_coordinator_recovers_admission_then_certifies_first_activation(
     complete_preparation_case, tmp_path
 ):
+    import shutil
+
     from umi.competition_reward_control_journal import RewardControlTransactionJournal
     from umi.competition_reward_control_publisher import StandingControlPublisher
     from umi.competition_reward_coordinator import (
         StandingRewardCoordinator,
         StandingRewardDecisionReviewer,
     )
+    from umi.competition_reward_exchange import RewardReviewExchange
     from umi.competition_reward_files import StandingRewardFiles
     from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
     from umi.competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
@@ -1053,7 +1056,11 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
             maximum_history_blocks=4096,
         )
         reviewer = StandingRewardDecisionReviewer(
-            publisher=publisher,
+            reader=publisher.reader,
+            provider=publisher.provider,
+            history=publisher.history,
+            files=publisher.files,
+            maximum_history_blocks=4096,
             manifest=p.manifest,
             promotion_store=p.store,
             handoff=handoff,
@@ -1078,18 +1085,51 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
                 sign,
             )
 
+        local = signer("Charlie", local_calls)
         peer = signer("Dave", peer_calls)
+        leader_box = RewardReviewExchange(
+            signer=local,
+            proposer=wallet("Charlie").hotkey.ss58_address,
+            inbox=tmp_path / "leader-inbox",
+            outbox=tmp_path / "leader-outbox",
+        )
+        peer_box = RewardReviewExchange(
+            signer=peer,
+            proposer=wallet("Charlie").hotkey.ss58_address,
+            inbox=tmp_path / "peer-inbox",
+            outbox=tmp_path / "peer-outbox",
+        )
+        port = leader_box.vote_port(wallet("Dave").hotkey.ss58_address)
+
+        def copy(source, target):
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copy2(source, target)
 
         async def vote(body, prefix):
-            if unavailable:
-                raise ConnectionError("remote evaluator offline")
-            # Separate signing journal and real native replay, but shared fixture
-            # transport/proof owners; this is not independent-host qualification.
-            return await peer.attest(await reviewer.review(body, prefix))
+            try:
+                return await port(body, prefix)
+            except FileNotFoundError:
+                if unavailable:
+                    raise ConnectionError("remote evaluator offline") from None
+            sequence = body.sequence
+            copy(
+                leader_box._request_path(leader_box.outbox, sequence),
+                peer_box._request_path(peer_box.inbox, sequence),
+            )
+            # Native message validation and separate signer journal; file copying
+            # and shared fixture proof owners are not remote-host qualification.
+            await peer_box.review(peer_box.request(sequence), reviewer)
+            hotkey = wallet("Dave").hotkey.ss58_address
+            copy(
+                peer_box._vote_path(peer_box.outbox, sequence, hotkey),
+                leader_box._vote_path(leader_box.inbox, sequence, hotkey),
+            )
+            return await port(body, prefix)
 
         return StandingRewardCoordinator(
             reviewer=reviewer,
-            signer=signer("Charlie", local_calls),
+            publisher=publisher,
+            signer=local,
             readback=readback,
             offers=lambda _: offer,
             voters=(vote,),

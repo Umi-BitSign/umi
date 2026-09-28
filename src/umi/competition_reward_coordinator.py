@@ -15,15 +15,19 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 
+from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_publisher import StandingControlPublisher
 from .competition_reward_decision_review import ReviewedRewardDecision, review_reward_decision
 from .competition_reward_decisions import (
     RewardActivation,
     RewardControlDecision,
     SignedRewardControlDecision,
+    StandingRewardControlReader,
+    verify_reward_decision_proposal,
 )
 from .competition_reward_files import StandingRewardFiles
 from .competition_reward_handoff_models import LegacyRewardHandoffPlan
+from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import VerifiedRewardOpportunity
 from .competition_reward_signing import RewardDecisionSigner, RewardQuorumPending
@@ -52,17 +56,37 @@ class StandingRewardDecisionReviewer:
     def __init__(
         self,
         *,
-        publisher: StandingControlPublisher,
+        reader: StandingRewardControlReader,
+        provider: HistoricalRewardControlProvider,
+        history: RewardControlHistoryReader,
+        files: StandingRewardFiles,
         manifest: StandingRewardOpportunityManifest,
         promotion_store: CompetitionStore,
         handoff: LegacyRewardHandoffPlan,
         opportunity: Callable[[RewardActivation], Awaitable[VerifiedRewardOpportunity]],
         maximum_promotion_bytes: int,
+        maximum_history_blocks: int = 64,
     ):
-        if type(publisher) is not StandingControlPublisher:
-            raise TypeError("reward review requires the native control owners")
+        if (
+            type(reader) is not StandingRewardControlReader
+            or not isinstance(provider, HistoricalRewardControlProvider)
+            or type(history) is not RewardControlHistoryReader
+            or type(files) is not StandingRewardFiles
+        ):
+            raise TypeError("reward review requires native proof owners")
+        if (
+            reader.chain_config_sha256 != digest(provider.config)
+            or reader.admission_chain_config_sha256 != digest(provider.config)
+            or digest(reader.policy) != digest(provider.policy)
+            or history.config_sha256 != digest(provider.config)
+            or history.hotkey != reader.series.control_hotkey
+            or history.first_block != reader.series.recovery.authority.issued_at_block
+            or type(maximum_history_blocks) is not int
+            or not 1 <= maximum_history_blocks <= 4096
+        ):
+            raise ValueError("reward review owners differ from the approved context")
         self.manifest = verify_reward_manifest(
-            canonical_json_bytes(manifest), publisher.series, publisher.reader.policy
+            canonical_json_bytes(manifest), reader.series, reader.policy
         )
         if not isinstance(self.manifest, StandingRewardOpportunityManifest):
             raise ValueError("coordinator requires approved reward opportunity terms")
@@ -71,11 +95,14 @@ class StandingRewardDecisionReviewer:
             or not 1024 <= maximum_promotion_bytes <= 16 * 1024**3
         ):
             raise ValueError("reward review requires explicit model replay capacity")
-        self.publisher, self.store, self.handoff = publisher, promotion_store, handoff
+        self.reader, self.provider, self.history, self.files = reader, provider, history, files
+        self.store, self.handoff = promotion_store, handoff
+        self.maximum_history_blocks = maximum_history_blocks
         self.opportunity, self.maximum_promotion_bytes = opportunity, maximum_promotion_bytes
 
     async def review(self, body: RewardControlDecision, prefix: Prefix) -> ReviewedRewardDecision:
-        p = self.publisher
+        p = self
+        body = verify_reward_decision_proposal(p.reader.series, p.reader.policy, prefix, body)
         height = body.observed_at_block
         try:
             history = await p.history.verified_prefix(height)
@@ -91,6 +118,14 @@ class StandingRewardDecisionReviewer:
         if body.activation is not None:
             package = await run_owned_thread(p.files.package, body.activation.package_sha256)
             if body.sequence > 1:
+                # A peer can first join at a later cohort. Recover its selected
+                # predecessor before the opportunity reader looks it up locally.
+                objects = {digest(item.decision): canonical_json_bytes(item) for item in prefix}
+                selected = await run_owned_thread(
+                    p.reader.review_history, control, objects.__getitem__, history
+                )
+                if selected.selection.decision_sha256 != body.predecessor_sha256:
+                    raise ValueError("reward opportunity does not extend the proved predecessor")
                 opportunity = await self.opportunity(body.activation)
         return await run_owned_thread(
             partial(
@@ -118,6 +153,7 @@ class StandingRewardCoordinator:
         self,
         *,
         reviewer: StandingRewardDecisionReviewer,
+        publisher: StandingControlPublisher,
         signer: RewardDecisionSigner,
         readback: StandingRewardFiles,
         offers: Callable[[str], RewardActivation | None],
@@ -127,11 +163,16 @@ class StandingRewardCoordinator:
         if (
             type(reviewer) is not StandingRewardDecisionReviewer
             or type(signer) is not RewardDecisionSigner
+            or type(publisher) is not StandingControlPublisher
         ):
             raise TypeError("reward coordinator requires native review and signing owners")
-        p, j = reviewer.publisher, signer.journal
+        p, j = publisher, signer.journal
         if (
-            digest(j.series) != digest(p.series)
+            reviewer.reader is not p.reader
+            or reviewer.provider is not p.provider
+            or reviewer.history is not p.history
+            or reviewer.files is not p.files
+            or digest(j.series) != digest(p.series)
             or digest(j.policy) != digest(p.reader.policy)
             or j.chain_config_sha256 != p.config_sha256
             or type(readback) is not StandingRewardFiles
