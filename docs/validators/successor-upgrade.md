@@ -314,10 +314,27 @@ The signer's `publish` operation retains quorum before calling
 `retain_standing_reward_inputs`. That delivery boundary checks the complete
 signed prefix and package identities, retains packages before decisions and
 preserves the first valid signature envelope. Interrupted export retries the
-original bytes; completed packages need no source fetch. These components do
-not commit control on-chain. Recurring coordinator integration, verified remote
-availability and the control transaction owner remain required.
+original bytes; completed packages need no source fetch.
 Model/promotion assets use their separate preservation and native import path.
+
+`StandingControlPublisher` consumes that complete certified prefix and local
+delivery readback. It proves the current reserved control slot and every write
+since authority issuance, then retains the exact mortal transaction and its
+original nonce, control and runtime evidence before transmission. A lost reply
+holds the attempt until fresh finalized evidence consumes its nonce or passes
+its mortality period. Recovery verifies retained proofs and signed bytes;
+it cannot overwrite a different predecessor. `control_finalized` requires the
+intended decision in the complete finalized history and does not assert weight
+submission or miner payment.
+
+Its recurring loop retries without renewing cohort authority. Initial series
+admission still needs timely approval before intake opens; subsequent certified
+cohorts have no processing expiry. The local process lock excludes another
+publisher using the same state root. Installed host ownership must also prevent
+another host or state root from using the reserved hotkey during migration.
+The publisher core is not installed. Recurring coordinator wiring, independent
+remote artifact readback, wallet provisioning, migration ownership and combined
+service restart/effect qualification remain required before deployment.
 
 The timer retries failed copies indefinitely. `copy --immutable --checksum`
 retains existing destination files and refuses conflicting bytes; it does not

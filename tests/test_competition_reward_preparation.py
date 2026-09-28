@@ -726,6 +726,16 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
             )
         )
         series = series.model_copy(update={"manifest_sha256": digest(p.manifest)})
+    if variant == "control_publication":
+        item.config = item.config.model_copy(
+            update={
+                "proof_rpc_fallback_urls": (
+                    "wss://backup1.example.org",
+                    "wss://backup2.example.org",
+                ),
+            }
+        )
+        item.rpc.values[("System", "Account", (series.control_hotkey,))] = {"nonce": 7}
     original_verify = type(item.verifier).__call__
 
     def verify_code(self, **kw):
@@ -829,6 +839,9 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     )
     if variant == "signing_admission":
         writes[first] = ()
+    elif variant == "control_publication":
+        writes[activation_block + 1] = writes[activation_block]
+        writes[activation_block] = ()
     c = SimpleNamespace(
         control=item,
         series=series,
@@ -849,6 +862,132 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         yield h
     finally:
         await item.provider.aclose()
+
+
+@pytest.mark.parametrize("preparation_case", [8], indirect=True)
+@pytest.mark.parametrize("complete_preparation_case", ["control_publication"], indirect=True)
+async def test_native_control_publisher_recovers_original_proofs_and_finalized_history(
+    complete_preparation_case, tmp_path
+):
+    import asyncio
+    import hashlib
+    import json
+
+    from umi.chain_evidence import FinalizedSnapshotRef
+    from umi.competition_reward_control_journal import RewardControlTransactionJournal
+    from umi.competition_reward_control_publisher import StandingControlPublisher
+    from umi.competition_reward_control_signing import collect_control_signing_state
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.finalized_ancestry import encode_rpc_header
+    from umi.private_files import publish_private_model
+
+    h, c, p = (
+        complete_preparation_case,
+        complete_preparation_case.c,
+        complete_preparation_case.package_case,
+    )
+    files = StandingRewardFiles(
+        tmp_path / "native-publisher-files",
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=8 * 1024**2,
+    )
+    for decision in (c.genesis, c.active):
+        files.retain_decision(decision)
+    publish_private_model(
+        files.root / "packages" / (digest(p.package) + ".json"),
+        p.package,
+        maximum_bytes=files.maximum_package_bytes,
+    )
+    journal = RewardControlTransactionJournal(
+        tmp_path / "native-control-transactions",
+        c.series,
+        config_sha256=digest(h.item.config),
+        maximum_bytes=8 * 1024**2,
+    )
+
+    def current(height):
+        # Synthetic finality boundary; production proof, nonce, archive and
+        # complete history consumers remain unpatched.
+        w = h.source.w
+        header = w.headers[w.heights[height]]
+        ref = FinalizedSnapshotRef(
+            height, w.heights[height], header["parentHash"], header["stateRoot"]
+        )
+        timestamp = w.original.timestamp_ms + (height - h.old.height) * 12000
+        evidence = canonical_json_bytes(
+            json.loads(h.old.finality_evidence)
+            | {
+                "block": {"scale_header": encode_rpc_header(header)},
+            }
+        )
+        h.blocks[height] = replace(
+            h.old,
+            height=height,
+            block_hash=ref.block_hash,
+            state_root=ref.state_root,
+            timestamp_ms=timestamp,
+            finality_evidence=evidence,
+            finality_evidence_sha256=hashlib.sha256(evidence).hexdigest(),
+        )
+
+        async def after(requested_height, *, maximum_distance):
+            assert requested_height <= height and maximum_distance is None
+            return h.blocks[height]
+
+        h.item.finality.verified_block_after = after
+        h.item.finality.ref = ref
+        h.item.clock.now = timestamp + 1000
+        h.item.provider._startup_floor = h.old.height - 1
+        if h.item.provider._task is None:
+            h.item.provider._task = asyncio.create_task(asyncio.Event().wait())
+
+    current(c.active.decision.observed_at_block)
+    # Retain original nonce proofs before the later finality observation.
+    original = await collect_control_signing_state(h.item.provider, h.item.hotkey)
+    reserved = journal.reserve(c.active, original, mortality_period=8)
+    from umi.competition_reward_control_signing import review_control_signing_state
+
+    current(h.end)
+    files_before = tuple(files.root.rglob("*.json"))
+    for restart in (False, True):
+        if restart:
+            c.reader, h.reader = c.reopen(), await h.restart()
+            current(h.end)
+            h.offline_through = h.end - 1
+        recovered = await review_control_signing_state(
+            h.item.provider,
+            hotkey=h.item.hotkey,
+            control_evidence=original.control.evidence,
+            nonce_evidence=original.nonce_evidence,
+            metadata=original.runtime.metadata_bytes,
+        )
+        assert recovered.nonce == 7 and recovered.control.snapshot == original.control.snapshot
+        publisher = StandingControlPublisher(
+            reader=c.reader,
+            provider=h.item.provider,
+            history=h.reader,
+            journal=journal,
+            files=files,
+            signer=wallet("Ferdie").hotkey,
+            mortality_period=8,
+            maximum_history_blocks=4096,
+        )
+        with publisher.hold_writer():
+            for _ in range(100):
+                try:
+                    result = await publisher.step((c.genesis, c.active))
+                except HistoricalHeaderRecoveryPending:
+                    continue
+                if result.status != "history_pending":
+                    break
+            else:
+                pytest.fail("native control publication recovery did not converge")
+            assert result.status == "control_finalized"
+            assert result.decision_sha256 == digest(c.active.decision)
+            with pytest.raises(ValueError, match="selected prefix"):
+                await publisher.step((c.genesis,))
+        assert journal.pending() == reserved
+        assert tuple(files.root.rglob("*.json")) == files_before
 
 
 async def test_boot_reconstructs_initial_package_from_native_retained_history(
