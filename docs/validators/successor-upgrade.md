@@ -296,14 +296,27 @@ for all archive and delivery roots
 in addition to the native journals; do not point replication at a journal,
 wallet, model store or general home directory.
 
-The coordinator's `retain_standing_reward_inputs` publication boundary checks
-the complete signed decision prefix and its package identities, retains packages
-before decisions and preserves the first valid signature envelope for each
-decision body. An interrupted export retries the original bytes; completed
-packages need no source fetch on restart. This is content delivery, not score
-verification, a decision signer or a chain publisher. Consumers independently
-replay all native evidence. The coordinator still needs to wire certified
-decision production and verified remote availability before publishing control.
+`review_reward_decision` checks the proposed admission or activation against
+original native control history and the approved manifest. Admission requires
+the reserved empty control history. Activation replays the reward package and
+model evidence; successor activation also requires the preceding cohort's
+natively verified minimum opportunity. The first activation binds the approved
+legacy handoff plan; each validator still drains its own writer at execution.
+
+`RewardDecisionSigner` retains that exact reviewed intent and reserves result
+capacity before signing. Partial independent votes and the first valid quorum
+survive restart. A retry cannot replace an unfinished decision or sign a fork;
+cancellation drains signing and persistence before releasing the process lock.
+Original proofs, packages and model assets must remain in their durable stores
+so an unsigned intent can be reviewed again at its original block after restart.
+
+The signer's `publish` operation retains quorum before calling
+`retain_standing_reward_inputs`. That delivery boundary checks the complete
+signed prefix and package identities, retains packages before decisions and
+preserves the first valid signature envelope. Interrupted export retries the
+original bytes; completed packages need no source fetch. These components do
+not commit control on-chain. Recurring coordinator integration, verified remote
+availability and the control transaction owner remain required.
 Model/promotion assets use their separate preservation and native import path.
 
 The timer retries failed copies indefinitely. `copy --immutable --checksum`

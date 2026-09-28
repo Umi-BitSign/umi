@@ -109,6 +109,18 @@ def _issue_opportunity(certificate: RewardOpportunityCertificate) -> VerifiedRew
     return VerifiedRewardOpportunity(checked, _issuer=_ISSUER, _binding=digest(checked))
 
 
+def validate_opportunity(value: VerifiedRewardOpportunity) -> RewardOpportunityCertificate:
+    """Require original native replay, including after reconstructing archived evidence."""
+    if (
+        type(value) is not VerifiedRewardOpportunity
+        or value._issuer is not _ISSUER
+        or value._binding != digest(value.certificate)
+        or value.chain_submission_authorized is not False
+    ):
+        raise ValueError("reward opportunity lacks native replay provenance")
+    return value.certificate
+
+
 def check_opportunity_claim(
     certificate: RewardOpportunityCertificate,
     *,
@@ -181,13 +193,7 @@ def require_previous_opportunity(
             block=current_block,
         )
         return
-    if (
-        type(value) is not VerifiedRewardOpportunity
-        or value._issuer is not _ISSUER
-        or value._binding != digest(value.certificate)
-        or value.chain_submission_authorized is not False
-    ):
-        raise ValueError("reward opportunity lacks native replay provenance")
+    validate_opportunity(value)
     prior = SignedRewardControlDecision.model_validate_json(
         canonical_json_bytes(reader.journal.get("reward_control_decision", f"{index:04d}"))
     ).decision

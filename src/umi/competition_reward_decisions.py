@@ -184,38 +184,68 @@ def verify_reward_decisions(
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if series.policy_sha256 != digest(policy):
         raise ValueError("standing series policy differs from selected policy")
-    authority = verify_recovery_authority(series.recovery, policy)
+    verify_recovery_authority(series.recovery, policy)
     if not 1 <= len(decisions) <= len(series.cohorts) + 2:
         raise ValueError("reward history is empty or exceeds the admitted series")
     selected, previous, activated = [], None, 0
     for index, raw in enumerate(decisions):
         item = SignedRewardControlDecision.model_validate_json(canonical_json_bytes(raw))
         body = item.decision
-        if (
-            body.series_sha256 != digest(series)
-            or body.sequence != index
-            or body.predecessor_sha256 != (digest(previous) if previous else None)
-            or (previous is not None and body.observed_at_block < previous.observed_at_block)
-            or (previous is not None and previous.kind == "revoke")
-        ):
-            raise ValueError("reward history changed authority, order, parent or a revoked series")
+        _decision_body(series, policy, index, previous, activated, body)
         verify_recovery_quorum(body, item.signatures, policy)
-        if index == 0:
-            if (
-                not authority.issued_at_block
-                <= body.observed_at_block
-                <= policy.valid_through_block
-            ):
-                raise ValueError("series genesis was not signed under timely recovery authority")
-        elif body.kind == "activate":
-            if activated >= len(series.cohorts) or body.activation.cohort_sha256 != digest(
-                series.cohorts[activated]
-            ):
-                raise ValueError("reward history skipped, repeated or reordered an admitted cohort")
-            activated += 1
-        previous = body
         selected.append(item)
+        previous = body
+        activated += body.kind == "activate"
     return tuple(selected)
+
+
+def _decision_body(series, policy, index, previous, activated, body):
+    if (
+        body.series_sha256 != digest(series)
+        or body.sequence != index
+        or body.predecessor_sha256 != (digest(previous) if previous else None)
+        or (previous is not None and body.observed_at_block < previous.observed_at_block)
+        or (previous is not None and previous.kind == "revoke")
+        or body.sequence >= len(series.cohorts) + 2
+    ):
+        raise ValueError("reward history changed authority, order, parent or a revoked series")
+    if previous is None:
+        if not (
+            series.recovery.authority.issued_at_block
+            <= body.observed_at_block
+            <= policy.valid_through_block
+        ):
+            raise ValueError("series genesis was not signed under timely recovery authority")
+    elif body.kind == "activate" and (
+        activated >= len(series.cohorts)
+        or body.activation.cohort_sha256 != digest(series.cohorts[activated])
+    ):
+        raise ValueError("reward history skipped, repeated or reordered an admitted cohort")
+    return body
+
+
+def verify_reward_decision_proposal(
+    series: StandingRewardSeries,
+    policy: CompetitionPolicy,
+    preceding: tuple[SignedRewardControlDecision, ...],
+    decision: RewardControlDecision,
+) -> RewardControlDecision:
+    """Check unsigned ordering; native evidence review must precede signing."""
+    series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
+    policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
+    if series.policy_sha256 != digest(policy):
+        raise ValueError("standing series policy differs from selected policy")
+    verify_recovery_authority(series.recovery, policy)
+    prefix = verify_reward_decisions(series, policy, preceding) if preceding else ()
+    body = RewardControlDecision.model_validate_json(canonical_json_bytes(decision))
+    return _decision_body(
+        series,
+        policy,
+        len(prefix),
+        prefix[-1].decision if prefix else None,
+        sum(v.decision.kind == "activate" for v in prefix),
+        body,
+    )
 
 
 class StandingRewardControlReader:

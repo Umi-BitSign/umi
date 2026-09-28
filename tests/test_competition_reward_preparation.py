@@ -706,7 +706,7 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     await configure_eligibility(item, monkeypatch, tmp_path)
     await item.provider.aclose()
     variant = getattr(request, "param", "matching")
-    if variant == "opportunity":
+    if variant in {"opportunity", "signing_admission"}:
         from umi.competition_reward_manifest import (
             RewardOpportunityTerms,
             StandingRewardOpportunityManifest,
@@ -827,6 +827,8 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         (digest(genesis.decision),),
         (digest(active.decision),),
     )
+    if variant == "signing_admission":
+        writes[first] = ()
     c = SimpleNamespace(
         control=item,
         series=series,
@@ -888,6 +890,199 @@ async def test_boot_reconstructs_initial_package_from_native_retained_history(
     after = await boot(owner())
     assert after.activation == before.activation and after.allocation == before.allocation
     assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_native_pending_activation_signs_recovers_and_delivers_after_restart(
+    complete_preparation_case, tmp_path
+):
+    from umi.competition_reward_decision_review import review_reward_decision
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
+    from umi.competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
+
+    h = complete_preparation_case
+    c, p = h.c, h.package_case
+    # Review before the synthetic existing activation. Its genesis is already
+    # finalized; our candidate has not been published or committed anywhere.
+    observed = c.active.decision.observed_at_block - 1
+    handoff = LegacyRewardHandoffPlan(
+        schema="umi-legacy-reward-handoff-plan/1",
+        series_sha256=digest(c.series),
+        cohort_sha256=digest(c.series.cohorts[0]),
+        legacy_policy_sha256="11" * 32,
+        legacy_round_sha256="22" * 32,
+        legacy_package_sha256="33" * 32,
+    )
+    body = c.active.decision.model_copy(
+        update={
+            "observed_at_block": observed,
+            "activation": c.active.decision.activation.model_copy(
+                update={
+                    "prior_opportunity_sha256": digest(handoff),
+                }
+            ),
+        }
+    )
+
+    async def history():
+        for _ in range(100):
+            try:
+                part = await h.reader.advance(
+                    h.item.provider, through_block=observed, maximum_blocks=4096
+                )
+            except HistoricalHeaderRecoveryPending:
+                continue
+            if part.history is not None:
+                return part.history
+        pytest.fail("native signing history did not converge")
+
+    retained = await history()
+    control = h.reader._tip.slot
+    inputs = dict(
+        control=control,
+        history=retained,
+        package=p.package,
+        promotion_store=p.store,
+        approved_handoff=handoff,
+        maximum_promotion_bytes=1_000_000,
+    )
+
+    def review(decision=body, **changes):
+        return review_reward_decision(
+            c.reader, p.manifest, (c.genesis,), decision, **(inputs | changes)
+        )
+
+    with pytest.raises(ValueError, match="original finalized"):
+        review(body.model_copy(update={"observed_at_block": observed + 1}))
+    with pytest.raises(ValueError, match="approved legacy handoff"):
+        review(approved_handoff=None)
+    with pytest.raises(ValueError, match="native package"):
+        review(package=None)
+    with pytest.raises(ValueError, match="native interval"):
+        review(history=replace(retained, _issuer=None))
+    wrong = body.model_copy(
+        update={
+            "activation": body.activation.model_copy(
+                update={
+                    "allocation_sha256": "ff" * 32,
+                }
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="allocation differs"):
+        review(wrong)
+    accepted = review()
+    assert not accepted.chain_submission_authorized
+
+    def journal():
+        return RewardDecisionJournal(
+            tmp_path / "native-signing",
+            c.series,
+            c.control.policy,
+            wallet("Charlie").hotkey.ss58_address,
+            expected_chain_config_sha256=c.reader.admission_chain_config_sha256,
+            maximum_bytes=16 * 1024**2,
+        )
+
+    async def unavailable(_):
+        raise ConnectionError("signer temporarily unavailable")
+
+    with pytest.raises(ConnectionError):
+        await RewardDecisionSigner(journal(), unavailable).attest(accepted)
+    intent = journal().load(1)
+    # Restart native readers and reconstruct original evidence with historical
+    # body/state RPC unavailable. Retained intent selects the original cutoff.
+    h.reader = await h.restart()
+    c.reader = c.reopen()
+    h.offline_through = observed
+    h.rpc_calls.clear()
+    inputs["history"] = await history()
+    inputs["control"] = await h.reader.review_control(h.item.provider, observed)
+    resumed = review()
+    assert resumed.intent == intent
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+
+    calls = []
+
+    async def sign(decision):
+        calls.append(decision)
+        return sign_object(decision, wallet("Charlie"))
+
+    owner = RewardDecisionSigner(journal(), sign)
+    vote = await owner.attest(resumed)
+    owner = RewardDecisionSigner(journal(), unavailable)
+    assert await owner.attest(resumed) == vote
+    with pytest.raises(ValueError, match="quorum"):
+        await owner.certify(1)
+    await owner.collect(1, sign_object(body, wallet("Dave")))
+    certificate = await owner.certify(1)
+    files = StandingRewardFiles(
+        tmp_path / "signed-inputs",
+        maximum_package_bytes=16 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+
+    def absent(_):
+        raise FileNotFoundError("package source unavailable")
+
+    with pytest.raises(FileNotFoundError):
+        await owner.publish(1, files, absent)
+    assert journal().certify(1) == certificate
+    owner = RewardDecisionSigner(journal(), unavailable)
+    assert await owner.publish(1, files, lambda _: p.package) == digest(body)
+    # An interrupted reply can be retried even after the source is gone.
+    assert await owner.publish(1, files, absent) == digest(body)
+    assert files.package(body.activation.package_sha256) == p.package
+    assert files.decision(digest(body)) == canonical_json_bytes(certificate)
+    assert calls == [body]
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["signing_admission"], indirect=True)
+async def test_native_admission_signs_only_an_empty_reserved_control_history(
+    complete_preparation_case, tmp_path
+):
+    from umi.competition_reward_decision_review import review_reward_decision
+    from umi.competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
+
+    h = complete_preparation_case
+    c, p = h.c, h.package_case
+    first = c.series.recovery.authority.issued_at_block
+    for _ in range(100):
+        try:
+            part = await h.reader.advance(h.item.provider, through_block=first, maximum_blocks=1)
+        except HistoricalHeaderRecoveryPending:
+            continue
+        if part.history is not None:
+            break
+    else:
+        pytest.fail("native empty control history did not converge")
+    control = h.reader._tip.slot
+    assert control.control_sha256 is None and not part.history.writes
+    reviewed = review_reward_decision(
+        c.reader,
+        p.manifest,
+        (),
+        c.genesis.decision,
+        control=control,
+        history=part.history,
+        maximum_promotion_bytes=1_000_000,
+    )
+    journal = RewardDecisionJournal(
+        tmp_path / "native-admission-signing",
+        c.series,
+        c.control.policy,
+        wallet("Charlie").hotkey.ss58_address,
+        expected_chain_config_sha256=c.reader.admission_chain_config_sha256,
+        maximum_bytes=16 * 1024**2,
+    )
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    vote = await RewardDecisionSigner(journal, sign).attest(reviewed)
+    assert vote == journal.vote(0, wallet("Charlie").hotkey.ss58_address)
+    assert journal.load(0).decision == c.genesis.decision
 
 
 @pytest.mark.parametrize(
