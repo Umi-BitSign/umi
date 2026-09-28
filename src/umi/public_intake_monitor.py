@@ -17,7 +17,7 @@ from pydantic import Field, JsonValue, ValidationError, field_validator, model_v
 from typing_extensions import Self
 
 from .competition_client import AdmissionReceipt
-from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
+from .competition_launch import IntakeScheduleHold, PublicIntakeDeployment, PublicRoundSchedule
 from .competition_service import RetainedIntakeState
 from .competition_submission_checkpoint import build_submission_checkpoint
 from .observer_models import ParticipantsResponse
@@ -257,6 +257,7 @@ class CompetitionStatus(StrictProtocolModel):
     round_schedule: PublicRoundSchedule
     continuous_intake: Literal[True] | None = None
     next_intake_schedule: PublicRoundSchedule | None = None
+    intake_schedule_hold: IntakeScheduleHold | None = None
     assignment_delivery_ready: bool
     model_intake_ready: bool
     evaluation_ready: bool
@@ -277,6 +278,7 @@ class CompetitionReadiness(StrictProtocolModel):
     round_schedule: PublicRoundSchedule
     continuous_intake: Literal[True] | None = None
     next_intake_schedule: PublicRoundSchedule | None = None
+    intake_schedule_hold: IntakeScheduleHold | None = None
     retained_state: RetainedIntakeState
     retained_submission_head: RetainedSubmissionHead
     assignment_delivery_ready: bool
@@ -620,13 +622,14 @@ def _validate_status_readiness(
     expected_phase, expected_ready_for, expected_accepting = _phase(status, deployment, policy)
     continuous = deployment.round_stride_blocks is not None
     expected_next = (
-        deployment.launch_identity().next_intake_schedule(status.admission_checked_block)
+        deployment.next_intake_schedule(status.admission_checked_block)
         if continuous and status.admission_accepting_new
         else None
     )
     if any(
         value.continuous_intake != (True if continuous else None)
         or value.next_intake_schedule != expected_next
+        or value.intake_schedule_hold != deployment.intake_schedule_hold
         for value in (status, readiness)
     ):
         _fail("continuous_intake_schedule_mismatch")
