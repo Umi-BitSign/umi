@@ -25,6 +25,7 @@ from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
 from .competition_cohort_recovery import CohortRecoveryState, Phase, StandingCohortRecoveryAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
+from .competition_cohort_request_start import SeriesRequestStart
 from .competition_execution import execution_boundary
 from .open_competition import CompetitionPolicy, Signature
 
@@ -52,10 +53,17 @@ class CohortLifecycleService:
         provider: RecoveryFinality,
         publish_history: HistoryPublisher,
         phases: Mapping[Phase, Callable[[], Awaitable[CohortPhaseDriver]]],
+        *,
+        request_start: SeriesRequestStart | None = None,
     ):
         if set(phases) != set(PHASES):
             raise ValueError("cohort lifecycle requires intake, preparation and request runtimes")
         self.cohort, self.policy, self.factories = cohort, policy, dict(phases)
+        if request_start is not None and (
+            request_start.provider is not provider or cohort not in request_start.cohorts
+        ):
+            raise ValueError("request start gate differs from its lifecycle owner")
+        self.request_start = request_start
         self.publish_history = publish_history
         self.drivers: dict[Phase, CohortPhaseDriver] = {}
         self.last_report = None
@@ -77,6 +85,11 @@ class CohortLifecycleService:
         history, _, _, _ = self.controller._history()
         if not isinstance(history.authority.authority, StandingCohortRecoveryAuthority):
             raise ValueError("automatic cohort lifecycle requires standing authority")
+        if request_start is not None and (
+            history.plan != request_start.series.cohorts[request_start.cohorts.index(cohort)]
+            or history.authority != request_start.series.recovery
+        ):
+            raise ValueError("request start authority differs from its lifecycle owner")
 
     async def _driver(self, phase: Phase) -> CohortPhaseDriver:
         if phase not in PHASES:
@@ -141,6 +154,15 @@ class CohortLifecycleService:
         async with self.serial:
             history, state, _, _ = self.controller._history()
             self.phase = state.phase
+            if state.phase == "preparation" and self.request_start is not None:
+                self.stage = "request_start"
+                readiness = await self.request_start.check(self.cohort)
+                if not readiness["ready"]:
+                    self.last_report = dict(
+                        self.controller._report(state, readiness["status"]),
+                        request_start=readiness,
+                    )
+                    return self.last_report
             if state.phase in PHASES:
                 result = await self.controller.tick()
                 _, state, _, _ = self.controller._history()

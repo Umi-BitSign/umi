@@ -297,7 +297,7 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
     async def decision(cohort, key):
         return h.store.source(cohort, key, CohortDecisionInput)
 
-    def reopen():
+    def reopen(**kwargs):
         return CohortLifecycleService(
             h.store,
             h.cohort,
@@ -310,6 +310,7 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
                 "preparation": preparation_driver,
                 "requests": requests_driver,
             },
+            **kwargs,
         )
 
     h.reopen = reopen
@@ -885,3 +886,61 @@ async def test_sampling_keeps_captures_ordered_without_locking_vote_review(lifec
     assert sample["observed_at_block"] == h.block
     assert sample["unavailable_blocks"] == 40
     assert sampled.is_set()
+
+
+@pytest.mark.parametrize("lifecycle_before_intake", [precommit_service_inventory], indirect=True)
+async def test_selected_request_start_gate_survives_lifecycle_restart(lifecycle, tmp_path):
+    from umi.competition_cohort_request_start import RequestStartConfig, SeriesRequestStart
+
+    h = lifecycle
+    series = h.precommitted[2]
+    h.timestamp = 1_000_000
+    h.provider.config = SimpleNamespace(maximum_head_age_ms=120_000, maximum_future_skew_ms=30_000)
+    original = h.provider.collect
+
+    async def collect():
+        value = await original()
+        return value.__class__(value.snapshot, dict(value.provenance, timestamp_ms=h.timestamp))
+
+    h.provider.collect = collect
+    config = RequestStartConfig(
+        schema="umi-cohort-request-start-config/1",
+        directory=str(tmp_path / "request-start"),
+        first_cohort_not_before_unix_ms=2_000_000,
+    )
+
+    async def history(cohort):
+        return await run_owned_thread(h.queue.history, cohort)
+
+    def restart():
+        return h.reopen(request_start=SeriesRequestStart(config, series, h.provider, history))
+
+    service = restart()
+    for worker in h.admissions:
+        await worker.poll_once()
+    for _ in range(100):
+        if h.store.status(h.cohort)[0].phase != "intake":
+            break
+        h.block += 5
+        await service.tick()
+    assert h.store.status(h.cohort)[0].phase == "preparation"
+    signatures = dict(h.calls)
+    for _ in range(2):
+        value = await service.tick()
+        assert value["status"] == "waiting_request_rest"
+        assert h.store.status(h.cohort)[0].phase == "preparation"
+        assert not h.request_entered.is_set()
+        assert dict(h.calls) == signatures
+        service = restart()
+    h.offline = True
+    h.timestamp = config.first_cohort_not_before_unix_ms + h.provider.config.maximum_future_skew_ms
+    with pytest.raises(OSError, match="finality offline"):
+        await service.tick()
+    assert h.store.status(h.cohort)[0].phase == "preparation"
+    h.offline = False
+    await service.tick()
+    assert h.store.status(h.cohort)[0].phase == "requests"
+    with pytest.raises(FileNotFoundError, match="request execution unavailable"):
+        await service.tick()
+    assert h.request_entered.is_set()
+    assert max(h.calls.values()) == 1

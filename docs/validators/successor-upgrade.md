@@ -550,6 +550,23 @@ from the owning journal after a lost acknowledgement or a missing derived file.
 After request publication succeeds, the lifecycle returns
 `settlement_handoff_published` and the recurring settlement service takes over.
 
+For a standing series, supply `SeriesRequestStart` through the lifecycle's
+`request_start` argument before enabling dispatch. Its private
+`umi-cohort-request-start-config/1` selects a journal directory and
+`first_cohort_not_before_unix_ms`. The deployment must derive that first floor
+from the qualified preceding C4 closure and the announced launch notice. The
+gate cannot infer a legacy closure from a current score or weight row.
+
+Later cohorts remain in preparation until the preceding cohort has a verified
+request-closing certificate and at least five hours have passed. The gate samples
+fresh verified chain time after reading that certificate, preserving its first
+observation in the journal. It adds the provider's maximum head age and subtracts
+its allowed future skew when checking elapsed time; delayed certification cannot
+backdate the rest to an old signing intent. Missing or revoked history, unavailable
+finality and regressed observations hold the next request phase. Retry, restart
+and a migration preserving this journal reuse the same boundary without renewal.
+This gate does not change current reward execution or its separate coverage rule.
+
 The enclosing host owns process locks, finality lifetimes, admission and execution
 workers, readiness probes and authenticated reviewer delivery. Configure all
 three phase factories; a missing dependency remains a retry. Intake and requests
