@@ -25,6 +25,7 @@ from .competition_cohort_coordinator import (
 )
 from .competition_cohort_intake import CohortIntake, cohort_intake_bytes, history_tip
 from .competition_cohort_intake_seal import CohortIntakeSeal, EmptyCohortIntake, build_intake_seal
+from .competition_cohort_recovery import CohortRecoveryState
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacityError
 from .open_competition import digest
@@ -49,6 +50,45 @@ class CohortIntakePhaseObserver:
         self.intake = intake
         self.epoch = CohortServiceEpoch()
         self.gap, self.maximum_bytes = maximum_sample_gap_blocks, maximum_observation_bytes
+
+    def _availability(self, store):
+        return CohortServiceAvailability(
+            store,
+            self.intake.policy,
+            maximum_sample_gap_blocks=self.gap,
+            maximum_bytes=self.maximum_bytes,
+            epoch=self.epoch,
+        )
+
+    def sample_service(
+        self, state: CohortRecoveryState, capture: RegistrationCapture, *, serving: bool
+    ) -> CohortAvailabilityObservation | None:
+        """Retain readiness while progress reviewers work; never seal or sign."""
+        self.epoch.identity()
+        if type(serving) is not bool:
+            raise ValueError("intake readiness must be an actual boolean")
+        cohort = state.cohort_sha256
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, store):
+            history = store.published_history(cohort)
+            if store.status(cohort)[0] != state or state.phase != "intake":
+                raise ValueError("intake sampling requires its current owned phase")
+            # A completed fence is immutable. Sampling cannot reopen admission
+            # or extend the service receipt used to certify that fence.
+            if db.execute(
+                "SELECT 1 FROM cohort_intake_seals WHERE cohort=? AND tip=?",
+                (cohort, state.tip_sha256),
+            ).fetchone():
+                return
+            ready = (
+                serving
+                and db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0]
+                < self.intake.capacity.maximum_records
+                and cohort_intake_bytes(db) < self.intake.capacity.maximum_bytes
+            )
+            return self._availability(store).observe(
+                cohort, capture, serving=ready, genesis_signatures=history.genesis_signatures
+            )
 
     def observe(
         self,
@@ -76,13 +116,7 @@ class CohortIntakePhaseObserver:
             )
             if state.phase != "intake" or observation.block < state.observed_at_block:
                 raise ValueError("intake phase is closed or observation regressed")
-            availability = CohortServiceAvailability(
-                store,
-                self.intake.policy,
-                maximum_sample_gap_blocks=self.gap,
-                maximum_bytes=self.maximum_bytes,
-                epoch=self.epoch,
-            )
+            availability = self._availability(store)
             db.execute("""CREATE TABLE IF NOT EXISTS cohort_intake_service_seals (
                 cohort TEXT NOT NULL, tip TEXT NOT NULL, body BLOB NOT NULL,
                 PRIMARY KEY(cohort,tip))""")

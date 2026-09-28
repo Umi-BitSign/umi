@@ -199,6 +199,22 @@ class NativeRequestProgressSource:
             raise ValueError("request queue was fenced before restoring unavailable service")
         return value
 
+    def sample_service(
+        self, state, capture: RegistrationCapture, *, serving: bool
+    ) -> CohortAvailabilityObservation | None:
+        """Record dispatch readiness without replaying requests or sealing queues."""
+        self.epoch.identity()
+        if type(serving) is not bool:
+            raise ValueError("request readiness must be an actual boolean")
+        with self.intake._connection() as (db, store):
+            history, _, _, restored, prior = self._state(store, state)
+            availability = self._availability(store)
+            if self._fence(db, availability, state, restored, prior) is not None:
+                return
+            return availability.observe(
+                self.cohort, capture, serving=serving, genesis_signatures=history.genesis_signatures
+            )
+
     def observe(self, state, capture: RegistrationCapture, *, serving: bool) -> CohortPhaseProgress:
         """Called by the owned runtime after probing admission/dispatch readiness."""
         self.epoch.identity()

@@ -391,13 +391,23 @@ After request publication succeeds, the lifecycle returns
 
 The enclosing host owns process locks, finality lifetimes, admission and execution
 workers, readiness probes and authenticated reviewer delivery. Configure all
-three phase factories; a missing dependency remains a retry. The lifecycle logs
-the cohort, phase and failed stage without including request contents. Shutdown
-drains pending phase work before the host closes its stores. Keep service
-sampling independent of slow certification so healthy intervals can be observed
-within the configured gap; unknown intervals receive no inferred service credit.
-Qualify the actual host composition and restart behavior before enabling cohort
-launch.
+three phase factories; a missing dependency remains a retry. Intake and requests
+also require a `sample_service` port on `CohortPhaseDriver`. Bind it to the same
+native phase owner used by its progress observer, preserving one process epoch.
+`LiveIntakePhaseObserver.sample_service` probes HTTPS readiness and records the
+native receipt. Request hosts probe their actual dispatch/admission path before
+calling `NativeRequestProgressSource.sample_service`; it neither enumerates
+execution nor seals queues.
+
+`CohortLifecycleService.run` owns a separate sampling task, with a five-second
+default interval, so slow certification does not stop readiness observations.
+Only initialized phase drivers can sample; prior result publication still gates
+their startup. A completed fence stops new observations. Reports distinguish
+retained samples, fenced windows and retries, and include the observed block,
+readiness and unavailable time. Sampling failures or gaps never receive inferred
+service credit. Shutdown drains both certification and sampling before the host
+closes its stores. Qualify actual readiness, RPC load, host composition and
+restart behavior before enabling cohort launch.
 
 Use `CohortRequestSettlementPublisher` as the request controller's publication
 port to deliver certified requests into the recurring settlement service. It

@@ -3429,7 +3429,14 @@ async def test_native_request_certification_starts_recurring_settlement(
                 return CohortPhaseDriver(control.observer(), already_published)
 
             async def request_driver():
-                return CohortPhaseDriver(control.observer(), control.publisher)
+                async def sample_service(state, capture):
+                    from umi.concurrency import run_owned_thread
+
+                    return await run_owned_thread(
+                        lambda: owner.source.sample_service(state, capture, serving=True)
+                    )
+
+                return CohortPhaseDriver(control.observer(), control.publisher, sample_service)
 
             lifecycle = CohortLifecycleService(
                 control.store,

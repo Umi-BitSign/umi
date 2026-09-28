@@ -101,6 +101,7 @@ def lifecycle(intake, scenario, tmp_path):
         offline=False,
         calls=Counter(),
         fail=set(),
+        paused_signers={},
         prepared=None,
         factories=[],
         request_entered=asyncio.Event(),
@@ -187,6 +188,10 @@ def lifecycle(intake, scenario, tmp_path):
         phase = getattr(body, "phase", "admission")
         if (name, phase) in h.fail:
             raise OSError("peer unavailable")
+        if (name, phase) in h.paused_signers:
+            entered, release = h.paused_signers[(name, phase)]
+            entered.set()
+            await release.wait()
         h.calls[(name, digest(body))] += 1
         return sign_object(body, wallet(name))
 
@@ -228,8 +233,10 @@ def lifecycle(intake, scenario, tmp_path):
             "https://intake.example",
             transport=httpx.MockTransport(ready),
         )
+        h.live = live
         return CohortPhaseDriver(
-            CertifiedPhaseObserver(live, phase_signers(source, IntakeProgressReviewer), policy)
+            CertifiedPhaseObserver(live, phase_signers(source, IntakeProgressReviewer), policy),
+            sample_service=live.sample_service,
         )
 
     async def preparation_driver():
@@ -468,3 +475,178 @@ async def test_recurring_lifecycle_resumes_after_long_finality_outage(lifecycle)
         t.transition.operation == "close_phase" for t in h.intake.history(h.cohort).transitions
     )
     assert max(h.calls.values()) == 1
+
+
+async def test_service_sampling_continues_while_progress_signing_is_slow(lifecycle):
+    h = lifecycle
+    for worker in h.admissions:
+        await worker.poll_once()
+    entered, release, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    h.paused_signers[("Charlie", "intake")] = entered, release
+    samples = []
+
+    def sampled(value):
+        if (
+            value["status"] == "service_sample_retained"
+            and entered.is_set()
+            and not release.is_set()
+        ):
+            samples.append(h.block)
+            h.block += 5
+            if h.block >= 360:
+                release.set()
+
+    def report(value):
+        if h.request_entered.is_set():
+            assert value["status"] == "cohort_lifecycle_retry"
+            stop.set()
+
+    service = h.reopen()
+    result = await asyncio.wait_for(
+        service.run(
+            stop, poll_seconds=0.01, sample_seconds=0.01, report=report, sample_report=sampled
+        ),
+        60,
+    )
+    assert result["status"] == "stopped"
+    assert samples[-1] - samples[0] >= 100
+    assert h.prepared.roster.intake_seal.observation.block <= 360
+    # Only the initial unobserved interval was unavailable. Delayed review
+    # did not consume the healthy service window or reset its epoch.
+    with h.intake._connection() as (_, store):
+        from umi.competition_cohort_availability import CohortServiceAvailability
+
+        last = CohortServiceAvailability(store, h.intake.policy)._last(h.cohort, "intake")
+    assert last.unavailable_blocks == 40
+    assert max(h.calls.values()) == 1
+
+
+async def test_shutdown_drains_sampler_and_blocked_signer(lifecycle):
+    h = lifecycle
+    entered, release, sampling, drained, stop = (asyncio.Event() for _ in range(5))
+    h.paused_signers[("Charlie", "intake")] = entered, release
+    service = h.reopen()
+    factory = service.factories["intake"]
+
+    async def driver():
+        native = await factory()
+
+        async def sample(state, capture):
+            sampling.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0.01)
+                drained.set()
+
+        return CohortPhaseDriver(native.observer, sample_service=sample)
+
+    service.factories["intake"] = driver
+    task = asyncio.create_task(service.run(stop, poll_seconds=0.01, sample_seconds=0.01))
+    try:
+        await asyncio.wait_for(asyncio.gather(entered.wait(), sampling.wait()), 10)
+    finally:
+        stop.set()
+        result = await asyncio.wait_for(task, 10)
+    assert result["status"] == "stopped"
+    assert drained.is_set()
+    assert not release.is_set()
+    # A cancelled in-flight vote leaves its original intent and releases the
+    # signer mutex; a host can safely close/reopen its resources after run().
+    journal = service.drivers["intake"].observer.signers[0].journal
+    with journal.locked():
+        pass
+
+
+async def test_timed_phase_without_sampler_cannot_start(lifecycle):
+    h = lifecycle
+    service = h.reopen()
+    factory = service.factories["intake"]
+
+    async def incomplete():
+        driver = await factory()
+        return CohortPhaseDriver(driver.observer)
+
+    service.factories["intake"] = incomplete
+    with pytest.raises(ValueError, match="independent service sampling"):
+        await service.tick()
+    assert not h.calls
+    assert not service.drivers
+
+
+async def test_sampler_records_readiness_failures_and_unknown_gaps(lifecycle):
+    h = lifecycle
+    service = h.reopen()
+    await service.tick()
+    calls = Counter(h.calls)
+    h.block += 5
+    healthy = await service.sample_service()
+    assert healthy["status"] == "service_sample_retained" and healthy["serving"]
+    assert healthy["observed_at_block"] == h.block
+    h.ready = False
+    h.block += 5
+    failed = await service.sample_service()
+    assert not failed["serving"]
+    assert failed["unavailable_blocks"] == healthy["unavailable_blocks"] + 5
+    h.ready = True
+    h.block += 5
+    resumed = await service.sample_service()
+    assert resumed["unavailable_blocks"] == failed["unavailable_blocks"] + 5
+    h.offline = True
+    with pytest.raises(OSError, match="finality offline"):
+        await service.sample_service()
+    h.offline = False
+    h.block += 10000
+    late = await service.sample_service()
+    assert late["unavailable_blocks"] == resumed["unavailable_blocks"] + 10000
+    assert h.calls == calls
+    assert h.store.status(h.cohort)[0].phase == "intake"
+
+
+async def test_sampling_keeps_captures_ordered_without_locking_vote_review(lifecycle):
+    h = lifecycle
+    service = h.reopen()
+    entered, release, sampled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    factory = service.factories["intake"]
+
+    async def driver():
+        native = await factory()
+        observe = native.observer.observe
+
+        async def slow_observation(state, capture):
+            entered.set()
+            await release.wait()
+            return await observe(state, capture)
+
+        async def sample(state, capture):
+            sampled.set()
+            return await native.sample_service(state, capture)
+
+        native.observer.observe = slow_observation
+        return CohortPhaseDriver(native.observer, sample_service=sample)
+
+    service.factories["intake"] = driver
+    control = asyncio.create_task(service.tick())
+    sampler = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        h.block += 5
+        sampler = asyncio.create_task(service.sample_service())
+        await asyncio.sleep(0.02)
+        # The coordinator owns an earlier capture. Recording a newer sample
+        # here would make its original observation regress native finality.
+        assert not sampled.is_set()
+        release.set()
+        progress, sample = await asyncio.wait_for(asyncio.gather(control, sampler), 10)
+    finally:
+        release.set()
+        for task in (control, sampler):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *(t for t in (control, sampler) if t is not None), return_exceptions=True
+        )
+    assert progress["status"] == "waiting_phase_progress"
+    assert sample["observed_at_block"] == h.block
+    assert sample["unavailable_blocks"] == 40
+    assert sampled.is_set()

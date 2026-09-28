@@ -243,6 +243,9 @@ class CohortRecoveryCoordinator:
             raise ValueError("cohort recovery needs an observer or durable native sampler")
         self.sample_progress, self.attest_progress = sample_progress, attest_progress
         self.serial = asyncio.Lock()
+        # A native readiness sampler may share the owner while quorum review
+        # is slow. Serialize only collection/observation, never peer voting.
+        self.sampling_lock = asyncio.Lock()
         self._history()
 
     def _history(self) -> tuple[CohortRecoveryHistory, CohortRecoveryState, int, int]:
@@ -278,12 +281,13 @@ class CohortRecoveryCoordinator:
                         self.cohort, state.tip_sha256, CohortProgressIntent
                     )
                     if intent is None:
-                        capture = await self.provider.collect()
-                        intent = CohortProgressIntent(
-                            schema="umi-cohort-progress-intent/1",
-                            progress=await self.sample_progress(state, capture),
-                            observation=execution_boundary(capture),
-                        )
+                        async with self.sampling_lock:
+                            capture = await self.provider.collect()
+                            intent = CohortProgressIntent(
+                                schema="umi-cohort-progress-intent/1",
+                                progress=await self.sample_progress(state, capture),
+                                observation=execution_boundary(capture),
+                            )
                         intent = self.store.reserve_progress(self.cohort, state.tip_sha256, intent)
                     # This observation was current when the native phase was
                     # sampled. Signing may finish arbitrarily later; preserve

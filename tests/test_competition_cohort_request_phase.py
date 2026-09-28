@@ -215,6 +215,45 @@ def test_request_window_restores_offline_time_before_sealing(request_owner):
     assert h.source.read(progress).record.fence.observation.block == h.block
 
 
+def test_request_sampler_retains_window_without_replaying_or_sealing(request_owner):
+    h = request_owner
+    first = h.sample()
+    start = h.block
+    orders = h.source.orders
+
+    def no_replay():
+        pytest.fail("readiness sampler must not enumerate execution or seal queues")
+
+    h.source.orders = no_replay
+    while h.block < start + h.duration:
+        h.block = min(h.block + 300, start + h.duration)
+        h.source.sample_service(h.state, capture(h.block), serving=True)
+    assert h.c.queue.retained_seal() is None
+    assert h.source.journal.get("request_window_fence", h.state.tip_sha256) is None
+    h.source.orders = orders
+    complete = h.sample()
+    assert complete.completion == "complete"
+    assert complete.unavailable_blocks == first.unavailable_blocks
+    original = h.source.read(complete)
+    assert h.source.sample_service(h.state, capture(h.block + 100000), serving=False) is None
+    assert h.source.read(complete) == original
+
+
+def test_request_sampler_rejects_another_phase_without_observing(request_owner):
+    h = request_owner
+    with pytest.raises(ValueError, match="active owned history"):
+        h.source.sample_service(
+            h.state.model_copy(update={"phase": "intake"}), capture(h.block), serving=True
+        )
+    with h.intake._connection() as (db, _):
+        assert (
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='cohort_service_observations'"
+            ).fetchone()
+            is None
+        )
+
+
 def test_missing_evaluator_remains_pending_after_window_and_long_outage(request_owner):
     h = request_owner
     h.withheld = True

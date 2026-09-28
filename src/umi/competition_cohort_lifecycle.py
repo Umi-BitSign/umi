@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 
+from .competition_chain import RegistrationCapture
+from .competition_cohort_availability import CohortAvailabilityObservation
 from .competition_cohort_coordinator import (
     CohortRecoveryCoordinator,
     HistoryPublisher,
@@ -21,18 +23,23 @@ from .competition_cohort_coordinator import (
 )
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
-from .competition_cohort_recovery import Phase, StandingCohortRecoveryAuthority
+from .competition_cohort_recovery import CohortRecoveryState, Phase, StandingCohortRecoveryAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
+from .competition_execution import execution_boundary
 from .open_competition import CompetitionPolicy, Signature
 
 logger = logging.getLogger(__name__)
 PHASES = ("intake", "preparation", "requests")
+ServiceSampler = Callable[
+    [CohortRecoveryState, RegistrationCapture], Awaitable[CohortAvailabilityObservation | None]
+]
 
 
 @dataclass(frozen=True)
 class CohortPhaseDriver:
     observer: CertifiedPhaseObserver
     publish_closed: HistoryPublisher | None = None
+    sample_service: ServiceSampler | None = None
 
 
 class CohortLifecycleService:
@@ -52,6 +59,7 @@ class CohortLifecycleService:
         self.publish_history = publish_history
         self.drivers: dict[Phase, CohortPhaseDriver] = {}
         self.last_report = None
+        self.last_sampling_report = None
         self.phase, self.stage = "intake", "starting"
         self.serial = asyncio.Lock()
         self.controller = CohortRecoveryCoordinator(
@@ -80,6 +88,8 @@ class CohortLifecycleService:
                 raise ValueError("cohort phase runtime has another policy")
             if phase in {"preparation", "requests"} and driver.publish_closed is None:
                 raise ValueError("cohort phase runtime requires its original result publication")
+            if phase in {"intake", "requests"} and driver.sample_service is None:
+                raise ValueError("timed cohort phase requires independent service sampling")
             self.drivers[phase] = driver
         return self.drivers[phase]
 
@@ -142,9 +152,74 @@ class CohortLifecycleService:
             self.last_report = result
             return result
 
-    async def run(self, stop: asyncio.Event, *, poll_seconds=5, report=None) -> dict:
+    async def sample_service(self) -> dict:
+        """Use the phase owner's epoch and journal, independently of voting.
+
+        Factories are created only by the controller, after prior publications.
+        A concurrent phase change is rejected by the native sampler. An outage
+        records no guessed interval; the next native receipt accounts for it.
+        """
+        async with self.controller.sampling_lock:
+            return await self._sample_service()
+
+    async def _sample_service(self) -> dict:
+        state, _ = self.controller.store.status(self.cohort)
+        driver = self.drivers.get(state.phase)
+        if state.phase not in {"intake", "requests"} or driver is None:
+            return self.controller._report(state, "service_sampling_idle")
+        capture = await self.controller.provider.collect()
+        receipt = await driver.sample_service(state, capture)
+        if receipt is None:
+            return self.controller._report(state, "service_sampling_fenced")
+        if not isinstance(receipt, CohortAvailabilityObservation) or (
+            receipt.phase != state.phase
+            or receipt.cohort_sha256 != self.cohort
+            or receipt.recovery_tip_sha256 != state.tip_sha256
+            or receipt.observation != execution_boundary(capture)
+        ):
+            raise ValueError("service sample belongs to another phase or finalized observation")
+        return dict(
+            self.controller._report(state, "service_sample_retained"),
+            observed_at_block=receipt.observation.block,
+            serving=receipt.serving,
+            unavailable_blocks=receipt.unavailable_blocks,
+        )
+
+    async def run(
+        self,
+        stop: asyncio.Event,
+        *,
+        poll_seconds=5,
+        sample_seconds=5,
+        report=None,
+        sample_report=None,
+    ) -> dict:
         if type(poll_seconds) not in (int, float) or not 0 < poll_seconds <= 60:
             raise ValueError("cohort lifecycle polling requires a bounded interval")
+        if type(sample_seconds) not in (int, float) or not 0 < sample_seconds <= 60:
+            raise ValueError("cohort sampling requires a bounded interval")
+
+        async def sampling():
+            while not stop.is_set():
+                try:
+                    result = await self.sample_service()
+                except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                    result = {
+                        "status": "service_sampling_retry",
+                        "cohort_sha256": self.cohort,
+                        "error_type": type(error).__name__,
+                        "chain_submission_authorized": False,
+                    }
+                    logger.info(
+                        "cohort_service_sampling cohort=%s error_type=%s",
+                        self.cohort,
+                        type(error).__name__,
+                    )
+                self.last_sampling_report = result
+                if sample_report is not None:
+                    sample_report(result)
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=sample_seconds)
 
         async def loop():
             while not stop.is_set():
@@ -179,9 +254,15 @@ class CohortLifecycleService:
                 "chain_submission_authorized": False,
             }
 
-        task, stopping = asyncio.create_task(loop()), asyncio.create_task(stop.wait())
+        task = asyncio.create_task(loop())
+        samples = asyncio.create_task(sampling())
+        stopping = asyncio.create_task(stop.wait())
         try:
-            done, _ = await asyncio.wait((task, stopping), return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                (task, samples, stopping), return_when=asyncio.FIRST_COMPLETED
+            )
+            if samples in done:
+                samples.result()  # Unexpected sampler failure must stop its owning host.
             if task in done:
                 return task.result()
             return {
@@ -191,5 +272,6 @@ class CohortLifecycleService:
             }
         finally:
             task.cancel()
+            samples.cancel()
             stopping.cancel()
-            await asyncio.gather(task, stopping, return_exceptions=True)
+            await asyncio.gather(task, samples, stopping, return_exceptions=True)

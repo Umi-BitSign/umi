@@ -19,6 +19,7 @@ from pydantic import Field, model_validator
 
 from .competition_chain import RegistrationCapture
 from .competition_client import validate_intake_origin
+from .competition_cohort_availability import CohortAvailabilityObservation
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_intake import CohortIntake, cohort_intake_bytes, history_tip
 from .competition_cohort_intake_phase import CohortIntakePhaseObserver, NativeIntakeProgress
@@ -199,4 +200,12 @@ class LiveIntakePhaseObserver:
                 serving=serving,
                 expected_tip_sha256=state.tip_sha256,
             )
+        )
+
+    async def sample_service(
+        self, state: CohortRecoveryState, capture: RegistrationCapture
+    ) -> CohortAvailabilityObservation | None:
+        serving = await self._ready(state, capture)
+        return await run_owned_thread(
+            partial(self.phase.sample_service, state, capture, serving=serving)
         )
