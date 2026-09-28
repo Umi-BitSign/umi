@@ -445,8 +445,10 @@ The `check` action validates the selection without opening the signer or proving
 runtime readiness. The configuration is canonical, root-owned mode `0444` and
 uses `umi-cohort-phase-review-service/1` for phase votes, or
 `umi-cohort-phase-review-service/2` with
-`service_signing` for service-request and retry votes. Version one keeps its
-original canonical bytes. Select the full standing series,
+`service_signing` for service-request and retry votes. Version three adds
+`admission_signing` (`CohortAdmissionSignerConfig`) and can also select
+`service_signing`. Versions one and two keep their original canonical bytes.
+Select the full standing series,
 manifest, competition policy, all cohort/authority bindings, named evaluator
 hotkey, owned chain configuration with two backup proof RPCs, allowed tracks,
 trusted owner hotkey and HTTPS origin. Configure explicit resource capacities
@@ -491,7 +493,26 @@ report start, completion and bounded failure details without request bodies or
 credentials. The systemd template is
 [`umi-cohort-phase-review@.service.in`](../../deploy/standing-reward-coordinator/umi-cohort-phase-review@.service.in).
 This reviewer still requires coordinator export routes and evidence replication;
-it does not start admission, dispatch, inference or chain submission workers.
+it does not start coordinator polling, dispatch, inference or chain submission workers.
+
+For remote admission, mount `admission_history_routes(AdmissionHistoryExporter(...))`
+on the private coordinator listener using its original `CohortAdmissionQueue`
+and the owner credential. The `/internal/cohorts/admission-history` export binds
+each challenge to the current published history and original certified intake
+seal. The reviewer checks its owner signature, then independently checks cohort
+authority, registration proofs, consent and selection before signing. Put the
+original registration proofs in the same private proof inbox used by phase
+review; callers cannot supply proof URLs or select a different authority source.
+
+The reviewer's `/internal/cohorts/admission/votes` route uses its separate
+admission journal. Configure `AdmissionVotePeer` on the coordinator and pass it
+to `CohortAdmissionWorker` with the coordinator's own finality provider. The
+worker retains each vote in the original intake queue and publishes a certificate
+only after native quorum and current-selection checks pass. Missing peers or
+proofs leave the original record pending. A committed vote can be returned after
+restart without the owner, inbox or RPC; an unfinished intent resumes with its
+retained original proof and rechecks current authority. Elapsed target blocks do
+not expire standing admission. The local admission-worker CLI remains available.
 
 `CohortLifecycleService` runs intake, preparation and request control through the
 same durable controller. Its configured factories create the native phase

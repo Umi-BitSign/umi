@@ -75,10 +75,13 @@ class CohortAdmissionSigner:
         provider: HistoricalRegistrationProvider,
         history: Callable[[str], Awaitable[AdmissionHistory]],
         sign: Callable[[CohortParticipantAdmission], Awaitable[Signature]],
+        *,
+        archive=None,
     ):
         if provider.policy != journal.policy:
             raise ValueError("admission signer finality belongs to another policy")
         self.journal, self.provider, self.history, self.sign = journal, provider, history, sign
+        self.archive = provider.retained_archive if archive is None else archive
         self.serial = asyncio.Lock()
 
     async def recover(self, slot: str) -> CohortAdmissionVote:
@@ -118,7 +121,7 @@ class CohortAdmissionSigner:
                         return saved[4]
                     registration_archive = saved[2:4]
                 if registration_archive is None:
-                    registration_archive = await self.provider.retained_archive(record.observation)
+                    registration_archive = await self.archive(record.observation)
                 source = await self.history(cohort)
                 result = await review_cohort_participation(
                     raw,

@@ -11,6 +11,7 @@ import pytest
 
 from umi import competition_cohort_review_boot as boot
 from umi import competition_cohort_review_cli as cli
+from umi.competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from umi.competition_cohort_intake import CohortIntakeBinding
 from umi.competition_cohort_progress_signer import CohortProgressSignerConfig
 from umi.competition_cohort_review_config import PhaseReviewServiceConfig, load_phase_review_config
@@ -100,6 +101,83 @@ def with_service(config):
             )
         )
     )
+
+
+def with_admission(config):
+    signing = CohortAdmissionSignerConfig(
+        schema="umi-cohort-admission-signer-config/1",
+        directory=config.signing.directory + "-admission",
+        policy_sha256=digest(config.policy),
+        signer=config.signing.signer,
+        cohorts=config.signing.cohorts,
+    )
+    return PhaseReviewServiceConfig.model_validate_json(
+        canonical_json_bytes(
+            config.model_copy(
+                update={
+                    "schema_": "umi-cohort-phase-review-service/3",
+                    "admission_signing": signing,
+                },
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_older_host_canonical_bytes_omit_admission_configuration(selected, version):
+    c = selected.config if version == 1 else with_service(selected.config)
+    raw = canonical_json_bytes(c)
+    assert "admission_signing" not in json.loads(raw)
+    assert canonical_json_bytes(PhaseReviewServiceConfig.model_validate_json(raw)) == raw
+
+
+@pytest.mark.parametrize(
+    "failure", ["version", "missing", "signer", "cohorts", "policy", "overlap"]
+)
+def test_admission_host_rejects_changed_authority_and_shared_state(selected, failure):
+    c = with_admission(selected.config)
+    if failure == "version":
+        c = c.model_copy(update={"schema_": "umi-cohort-phase-review-service/1"})
+    elif failure == "missing":
+        c = c.model_copy(update={"admission_signing": None})
+    else:
+        changes = {
+            "signer": {"signer": c.owner_hotkey},
+            "cohorts": {"cohorts": c.signing.cohorts[:1]},
+            "policy": {"policy_sha256": "ff" * 32},
+            "overlap": {"directory": c.proof_import_directory},
+        }
+        c = c.model_copy(
+            update={"admission_signing": c.admission_signing.model_copy(update=changes[failure])}
+        )
+    with pytest.raises(ValueError):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+@pytest.mark.parametrize("service", [False, True])
+async def test_admission_host_mounts_private_route_and_preserves_selection(
+    selected, providers, service
+):
+    c = with_admission(with_service(selected.config) if service else selected.config)
+    for _ in range(2):
+        async with (
+            boot.phase_review_app(c) as app,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://local",
+            ) as client,
+        ):
+            assert (
+                await client.post("/internal/cohorts/admission/votes", json={})
+            ).status_code == 401
+            assert (
+                await client.post(
+                    "/internal/cohorts/admission/votes",
+                    json={},
+                    headers={"authorization": "Bearer " + "vote-token" * 4},
+                )
+            ).status_code == 422
+    assert providers.events.count("started") == providers.events.count("closed") == 2
 
 
 def test_v1_canonical_bytes_omit_new_optional_service_configuration(selected):

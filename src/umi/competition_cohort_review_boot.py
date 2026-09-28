@@ -10,6 +10,13 @@ import httpx
 import uvicorn
 from fastapi import FastAPI
 
+from .competition_cohort_admission_http import (
+    AdmissionHistoryHTTPClient,
+    AdmissionHistoryReader,
+    admission_vote_routes,
+)
+from .competition_cohort_admission_journal import CohortAdmissionJournal
+from .competition_cohort_admission_signer import CohortAdmissionSigner
 from .competition_cohort_phase_vote_http import phase_vote_routes
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_review_config import PhaseReviewServiceConfig
@@ -109,6 +116,31 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             app.include_router(
                 service_vote_routes(
                     SelectedServiceReviewer(config, provider, client, owner_token, archive, sign),
+                    token=vote_token,
+                    timeout_seconds=config.review_timeout_seconds,
+                )
+            )
+        if config.admission_signing is not None:
+            admission = CohortAdmissionJournal(config.admission_signing, config.policy)
+            await run_owned_thread(
+                admission.journal.put,
+                "admission_review_host",
+                "selection",
+                {"series_sha256": digest(config.series), "owner": identity(config.owner_hotkey)},
+            )
+            history = AdmissionHistoryReader(
+                config.owner_hotkey,
+                AdmissionHistoryHTTPClient(
+                    client,
+                    config.owner_origin,
+                    token=owner_token,
+                    timeout_seconds=config.review_timeout_seconds,
+                ),
+                timeout_seconds=config.review_timeout_seconds,
+            )
+            app.include_router(
+                admission_vote_routes(
+                    CohortAdmissionSigner(admission, provider, history, sign, archive=archive),
                     token=vote_token,
                     timeout_seconds=config.review_timeout_seconds,
                 )

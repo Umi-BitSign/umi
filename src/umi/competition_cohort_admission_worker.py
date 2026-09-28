@@ -8,7 +8,7 @@ import signal
 import sqlite3
 from contextlib import suppress
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 from pydantic import Field, model_validator
 
@@ -16,11 +16,13 @@ from .competition_chain import CompetitionChainConfig
 from .competition_cohort_admission_journal import (
     CohortAdmissionJournal,
     CohortAdmissionSignerConfig,
+    CohortAdmissionVote,
     admission_slot,
 )
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_admission_signer import CohortAdmissionSigner
-from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
+from .competition_cohort_intake import CohortIntake, CohortIntakeBinding, CohortIntakeConfig
+from .competition_cohort_intake_records import read_participation
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_preparation_publisher import (
     CohortPreparationPublicationConfig,
@@ -87,29 +89,71 @@ class CohortAdmissionWorkerConfig(StrictProtocolModel):
         return self
 
 
+class AdmissionVotePort(Protocol):
+    policy: CompetitionPolicy
+    cohorts: tuple[CohortIntakeBinding, ...]
+    signer: str
+
+    async def attest(self, raw: bytes) -> CohortAdmissionVote: ...
+
+
+class _LocalVotes:
+    def __init__(self, queue: CohortAdmissionQueue, signer: CohortAdmissionSigner):
+        self.queue, self.native = queue, signer
+        self.policy, self.cohorts = signer.journal.policy, signer.journal.config.cohorts
+        self.signer = signer.journal.config.signer
+
+    async def attest(self, raw: bytes) -> CohortAdmissionVote:
+        admission = read_participation(raw).proposed_admission
+        cohort, consent = admission.cohort_sha256, admission.consent_sha256
+        try:
+            _, evidence, metadata = await run_owned_thread(self.queue.evidence, cohort, consent)
+        except FileNotFoundError:
+            # Restore only the original proof already retained by this signer.
+            saved = await run_owned_thread(self.native.journal.load, admission_slot(raw))
+            if saved is None or saved[1] != raw:
+                raise
+            evidence, metadata = saved[2:4]
+            await run_owned_thread(self.queue.attach_evidence, cohort, consent, evidence, metadata)
+        return await self.native.attest(raw, registration_archive=(evidence, metadata))
+
+
 class CohortAdmissionWorker:
     def __init__(
-        self, queue: CohortAdmissionQueue, signer: CohortAdmissionSigner, *, batch_size=16
+        self,
+        queue: CohortAdmissionQueue,
+        signer: CohortAdmissionSigner | AdmissionVotePort,
+        *,
+        provider=None,
+        batch_size=16,
     ):
+        votes = _LocalVotes(queue, signer) if isinstance(signer, CohortAdmissionSigner) else signer
+        if provider is None and isinstance(signer, CohortAdmissionSigner):
+            provider = signer.provider
         if (
-            queue.policy != signer.journal.policy
-            or queue.intake.config.cohorts != signer.journal.config.cohorts
+            queue.policy != votes.policy
+            or queue.intake.config.cohorts != votes.cohorts
+            or provider is None
+            or provider.policy != queue.policy
+            or identity(votes.signer) not in queue.groups
         ):
             raise ValueError("admission queue and signer use different policies or authorities")
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("admission worker batch is outside bounds")
         self.queue, self.signer, self.batch_size = queue, signer, batch_size
+        self.votes, self.provider = votes, provider
         self.cursors = {}
 
     async def poll_once(self):
         published = certified = retried = 0
-        for cohort in self.signer.journal.cohorts:
+        for binding in self.votes.cohorts:
+            cohort = binding.cohort_sha256
             after = self.cursors.get(cohort, "")
             try:
                 pending = await run_owned_thread(
                     lambda cohort=cohort, after=after: self.queue.pending(
                         cohort,
-                        self.signer.journal.config.signer,
+                        self.votes.signer,
                         after=after,
                         limit=self.batch_size,
                     )
@@ -120,28 +164,12 @@ class CohortAdmissionWorker:
             for consent in pending:
                 try:
                     raw = await run_owned_thread(self.queue.record, cohort, consent)
-                    try:
-                        _, evidence, metadata = await run_owned_thread(
-                            self.queue.evidence, cohort, consent
-                        )
-                    except FileNotFoundError:
-                        # A reviewer that already retained an intent can restore
-                        # missing relay bytes without asking a miner to resubmit.
-                        saved = await run_owned_thread(
-                            self.signer.journal.load, admission_slot(raw)
-                        )
-                        if saved is None or saved[1] != raw:
-                            raise
-                        evidence, metadata = saved[2:4]
-                        await run_owned_thread(
-                            self.queue.attach_evidence, cohort, consent, evidence, metadata
-                        )
-                    vote = await self.signer.attest(raw, registration_archive=(evidence, metadata))
-                    capture = await self.signer.provider.collect()
+                    vote = await self.votes.attest(raw)
+                    capture = await self.provider.collect()
                     certificate = await run_owned_thread(self.queue.publish_vote, vote, capture)
                     published += 1
                     certified += certificate is not None
-                except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError):
                     # One unavailable proof or participant cannot starve later
                     # records. The next scan retries every still-pending entry.
                     retried += 1
