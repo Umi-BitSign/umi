@@ -510,6 +510,28 @@ native receipt. Request hosts probe their actual dispatch/admission path before
 calling `NativeRequestProgressSource.sample_service`; it neither enumerates
 execution nor seals queues.
 
+Run `ServiceWorkWorker` for each selected service catalog alongside benchmark
+dispatch. It rotates the original FIFO admission journal in bounded batches,
+serializes work for each miner and holds a process lease until active work has
+drained. Bind its `ServiceWorkTransport` to the designated evaluator key, owned
+finalized blocks and an origin provider that independently authenticates current
+cohort authority, registration and the submitted HTTPS origin. Supply renewable
+media/window inputs, authenticated history/registration observations, independent
+request-review ports, a certified retry-review port and terminal signing. These
+ports require production host wiring and qualification; the worker alone does
+not provide remote reviewers or prove installed unattended operation.
+
+Selected requests, reviewer votes, signed miner receipts, original responses and
+terminal signing intents remain in the owning queue. Dispatch records its intent
+before calling inference. After an uncertain send, it uses response recovery and
+signed retirement; an empty response or transport timeout cannot authorize a
+replacement. A replacement requires the original miner fence, independent quorum
+and a fresh transport window. Signing and offline restart resume original work
+without repeating inference. Poll reports contain bounded counts and failure
+types. Independent request closure and quality replay still determine completion
+and service credit. Preserve the queue and its worker binding across restart;
+changing the evaluator requires an authorized migration, not a configuration edit.
+
 `CohortLifecycleService.run` owns a separate sampling task, with a five-second
 default interval, so slow certification does not stop readiness observations.
 Only initialized phase drivers can sample; prior result publication still gates

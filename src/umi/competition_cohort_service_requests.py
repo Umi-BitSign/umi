@@ -38,6 +38,28 @@ class ServiceWorkRequests:
         self.queue, self.journal, self.policy = queue, queue.journal, queue.policy
         self.transport = ScoringPolicy.model_validate_json(canonical_json_bytes(transport))
 
+    def latest(self, claim: SignedServiceWorkClaim, evaluator: str) -> ServiceRequestBody | None:
+        """Recover selected ancestry before consulting any fresh execution source."""
+        assignment = self.queue.assignment(claim)
+        selected = self.journal.get("service_work_evaluator", assignment.admission.work_sha256)
+        if selected is not None and selected != {
+            "evaluator": identity(evaluator),
+            "transport": scoring_policy_hash(self.transport),
+        }:
+            raise ValueError("service work already has another evaluator or transport")
+        obligation = service_obligation(assignment, evaluator)
+        latest, number = None, 1
+        while True:
+            slot = digest(["umi-cohort-service-request-slot/1", obligation, number])
+            if self.journal.get("service_request", slot) is None:
+                if selected is not None and latest is None:
+                    raise ValueError("service work lost its original selected request")
+                return latest
+            latest = self._body(slot)
+            if latest.assignment != assignment:
+                raise ValueError("service request changed the original assignment")
+            number += 1
+
     def _body(self, slot):
         raw = self.journal.get("service_request", slot)
         if raw is None:
