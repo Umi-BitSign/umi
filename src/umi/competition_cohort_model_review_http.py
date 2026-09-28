@@ -1,46 +1,23 @@
 """Private model artifact votes; payload files and approval documents stay local."""
 
-from typing import Annotated
-
-import httpx
-from pydantic import Field, model_validator
-
 from .competition_cohort_model_acceptance import (
     ModelArtifactVote,
     ModelReviewRequest,
     check_model_vote,
 )
 from .competition_cohort_review_export import review_export_limits, review_selection
-from .competition_cohort_review_http import PhaseReviewHTTPClient, phase_review_routes
+from .competition_cohort_review_http import (
+    CohortReviewPeerConfig,
+    PhaseReviewHTTPClient,
+    phase_review_routes,
+)
 from .concurrency import wait_for_owned
-from .open_competition import Hotkey
-from .private_files import Directory
-from .protocol import StrictProtocolModel, canonical_json_bytes
+from .protocol import canonical_json_bytes
 
 VOTE_PATH = "/internal/cohorts/model-artifacts/votes"
 MAX_REQUEST_BYTES = 5 * 1024**2
 MAX_VOTE_BYTES = 16 * 1024
-
-
-class ModelReviewPeerConfig(StrictProtocolModel):
-    signer: Hotkey
-    origin: Annotated[str, Field(min_length=1, max_length=2048)]
-    token_file: Directory
-    timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 1200
-
-    @model_validator(mode="after")
-    def endpoint(self):
-        url = httpx.URL(self.origin)
-        if (
-            url.scheme != "https"
-            or not url.host
-            or url.userinfo
-            or url.query
-            or url.fragment
-            or url.path not in ("", "/")
-        ):
-            raise ValueError("model reviewer must be a configured HTTPS origin")
-        return self
+ModelReviewPeerConfig = CohortReviewPeerConfig
 
 
 class _VoteResponder:

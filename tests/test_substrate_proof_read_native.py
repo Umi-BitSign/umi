@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ FIXTURE = ROOT / "rust/substrate-proof-verifier/fixtures/finney-state-v1.json"
 
 
 @pytest.fixture(scope="module")
-def native_verifier():
+def native_verifier(tmp_path_factory):
     configured = os.environ.get("UMI_TEST_PROOF_BINARY")
     path = (
         Path(configured)
@@ -32,9 +33,14 @@ def native_verifier():
         if configured:
             pytest.fail("configured native proof binary is missing")
         pytest.skip("native proof binary is not built")
+    # Cargo may hardlink its release executable to a build output. Test the
+    # same singly linked executable boundary used by deployed installations.
+    binary = tmp_path_factory.mktemp("proof-read-binary") / path.name
+    shutil.copyfile(path, binary)
+    binary.chmod(0o700)
     return SubprocessStorageProofVerifier(
-        binary_path=path.resolve(),
-        expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        binary_path=binary,
+        expected_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
         timeout_seconds=10,
     )
 

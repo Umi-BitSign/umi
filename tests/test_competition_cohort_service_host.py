@@ -1,11 +1,14 @@
 """Actual intake startup and native preparation; synthetic registration proofs."""
 
 import asyncio
+import socket
 from pathlib import Path
 
 import httpx
 import pytest
 
+import umi.competition_cohort_admission_host as admission_boot
+from umi.competition_cohort_review_http import CohortReviewPeerConfig
 from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
 from umi.competition_cohort_service_work import ServiceWorkClaim, SignedServiceWorkClaim
 from umi.competition_finality_cache import VerifiedRegistrationCache
@@ -107,11 +110,44 @@ async def test_host_waits_for_certified_preparation_then_recovers_original_queue
     assert h.precommitted_bytes == tuple(canonical_json_bytes(v) for v in h.precommitted)
 
 
+@pytest.mark.parametrize("automatic_admission", [False, True])
 async def test_intake_startup_installs_catalog_and_serves_claims_without_another_process(
-    lifecycle, config, tmp_path
+    lifecycle, config, tmp_path, monkeypatch, automatic_admission
 ):
     h = lifecycle
     cfg = host_config(h, tmp_path / "host")
+    if automatic_admission:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        owner = admission_boot.AdmissionOwnerConfig(
+            schema="umi-cohort-admission-owner/1",
+            directory=str(tmp_path / "private-owner"),
+            owner_hotkey=wallet("Charlie").hotkey.ss58_address,
+            owner_key_file=str(tmp_path / "owner-key"),
+            export_token_file=str(tmp_path / "export-token"),
+            listen_port=port,
+            reviewers=tuple(
+                CohortReviewPeerConfig(
+                    signer=wallet(name).hotkey.ss58_address,
+                    origin=f"https://{name.lower()}.example",
+                    token_file=str(tmp_path / f"{name}-token"),
+                )
+                for name in ("Charlie", "Dave")
+            ),
+        )
+        cfg = cfg.model_copy(
+            update={
+                "schema_": "umi-cohort-service-admission-host/4",
+                "admission_owner": owner,
+            }
+        )
+        monkeypatch.setattr(admission_boot, "load_named_hotkey", lambda *_: wallet("Charlie"))
+        monkeypatch.setattr(
+            admission_boot,
+            "_token",
+            lambda p: "export-" * 10 if p == owner.export_token_file else "vote-" * 10,
+        )
     config = config.model_copy(
         update={
             "schema_": "umi-competition-service-config/3",
@@ -132,6 +168,8 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
         return h.capture(h.block)
 
     provider.collect = capture
+    provider.policy = h.intake.policy
+    provider.ensure_observer_running = lambda: None  # Synthetic finality provider.
     provider.retained_archive = h.provider.retained_archive
     app = create_intake_app(config, h.intake.policy, provider_factory=lambda *_: provider)
     async with app.router.lifespan_context(app):
@@ -142,6 +180,22 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
                 await asyncio.sleep(0.01)
 
         await asyncio.wait_for(installed(), timeout=10)
+        if automatic_admission:
+
+            async def private_started():
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    while True:
+                        try:
+                            response = await client.post(
+                                f"http://127.0.0.1:{port}/internal/cohorts/admission-history",
+                                json={},
+                            )
+                            assert response.status_code == 401
+                            return
+                        except httpx.ConnectError:
+                            await asyncio.sleep(0.02)
+
+            await asyncio.wait_for(private_started(), timeout=10)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="https://intake.example"
         ) as client:

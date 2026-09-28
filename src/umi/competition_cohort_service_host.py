@@ -20,6 +20,7 @@ import httpx
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import RegistrationCapture
+from .competition_cohort_admission_host import AdmissionOwnerConfig, run_admission_owner
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_intake import CohortIntake, history_tip
@@ -37,6 +38,7 @@ from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
+from .competition_reward_service import _stop_task
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
 from .open_competition import digest, identity
@@ -51,6 +53,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         "umi-cohort-service-admission-host/1",
         "umi-cohort-service-admission-host/2",
         "umi-cohort-service-admission-host/3",
+        "umi-cohort-service-admission-host/4",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     manifest: RewardManifest
@@ -61,6 +64,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
     model_uploads: ModelUploadConfig | None = None
+    admission_owner: AdmissionOwnerConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -69,16 +73,27 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("model_review_peers", None)
         if self.model_uploads is None:
             value.pop("model_uploads", None)
+        if self.admission_owner is None:
+            value.pop("admission_owner", None)
         return value
 
     @model_validator(mode="after")
     def peers(self):
-        if (self.schema_ != "umi-cohort-service-admission-host/1") != bool(self.model_review_peers):
+        if self.schema_ != "umi-cohort-service-admission-host/4" and (
+            (self.schema_ != "umi-cohort-service-admission-host/1") != bool(self.model_review_peers)
+        ):
             raise ValueError("model peers require service admission host version two")
-        if (self.schema_ == "umi-cohort-service-admission-host/3") != (
-            self.model_uploads is not None
+        if self.schema_ != "umi-cohort-service-admission-host/4" and (
+            (self.schema_ == "umi-cohort-service-admission-host/3")
+            != (self.model_uploads is not None)
         ):
             raise ValueError("model delivery requires service admission host version three")
+        if self.model_uploads is not None and not self.model_review_peers:
+            raise ValueError("model delivery requires configured reviewers")
+        if (self.schema_ == "umi-cohort-service-admission-host/4") != (
+            self.admission_owner is not None
+        ):
+            raise ValueError("automatic admission requires service admission host version four")
         if len({identity(p.signer) for p in self.model_review_peers}) != len(
             self.model_review_peers
         ):
@@ -86,11 +101,32 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         return self
 
     def stores(self):
+        # The same private reviewer serves admission and model votes. Reuse its
+        # credential file, but never alias a credential to a mutable state root
+        # or to an unrelated reviewer identity/origin.
+        tokens = {}
+        for peer in (
+            *self.model_review_peers,
+            *(self.admission_owner.reviewers if self.admission_owner else ()),
+        ):
+            path, binding = Path(peer.token_file), (identity(peer.signer), peer.origin)
+            if path in tokens and tokens[path] != binding:
+                raise ValueError("reviewer credential path has conflicting identities or origins")
+            tokens[path] = binding
         return (
             Path(self.queue_directory),
             Path(self.inputs_directory),
-            *(Path(p.token_file) for p in self.model_review_peers),
+            *tokens,
             *((Path(self.model_uploads.directory),) if self.model_uploads else ()),
+            *(
+                (
+                    Path(self.admission_owner.directory),
+                    Path(self.admission_owner.owner_key_file),
+                    Path(self.admission_owner.export_token_file),
+                )
+                if self.admission_owner
+                else ()
+            ),
         )
 
 
@@ -102,6 +138,8 @@ class ServiceAdmissionHost:
         promotion: CompetitionStore,
         capture: Callable[[], Awaitable[RegistrationCapture]],
         archive: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]],
+        *,
+        provider=None,
     ):
         self.config = ServiceAdmissionHostConfig.model_validate_json(canonical_json_bytes(config))
         c, policy = self.config, intake.policy
@@ -111,6 +149,11 @@ class ServiceAdmissionHost:
         if intake.bindings != expected:
             raise ValueError("service admission series differs from owned intake")
         self.intake, self.capture = intake, capture
+        self.provider = provider
+        if c.admission_owner is not None:
+            c.admission_owner.check_policy(policy)
+            if provider is None or provider.policy != policy:
+                raise ValueError("automatic admission requires the owned finality provider")
         self.preparation = CohortPreparation(CohortAdmissionQueue(intake), promotion)
         self.models = (
             ModelAcceptanceWorker(
@@ -296,7 +339,30 @@ class ServiceAdmissionHost:
                         )
                     )
                 self.models.reviewers = tuple(peers)
-            await self._poll(stop)
+            if self.config.admission_owner is None:
+                await self._poll(stop)
+                return
+            owner = asyncio.create_task(
+                run_admission_owner(
+                    self.config.admission_owner,
+                    self.preparation,
+                    self.provider,
+                    stop,
+                )
+            )
+            polling = asyncio.create_task(self._poll(stop))
+            try:
+                await asyncio.wait((owner, polling), return_when=asyncio.FIRST_COMPLETED)
+                for task in (owner, polling):
+                    if task.done():
+                        task.result()
+                        if not stop.is_set():
+                            raise RuntimeError("service admission worker exited before shutdown")
+            finally:
+                try:
+                    await _stop_task(owner)
+                finally:
+                    await _stop_task(polling)
 
     async def _poll(self, stop: asyncio.Event) -> None:
         while not stop.is_set():

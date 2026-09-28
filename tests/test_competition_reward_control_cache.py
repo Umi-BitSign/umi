@@ -66,7 +66,10 @@ async def test_physical_exhaustion_preserves_hints_and_current_control_then_resu
     usage = _cache_usage(provider._cache_root, h.item.config.maximum_cache_bytes)
     with pytest.raises(HistoricalHeaderRecoveryPending, match="database needs capacity") as full:
         await provider.review_control(walk.raw, walk.metadata)
-    assert full.value.__cause__.sqlite_errorcode == sqlite3.SQLITE_FULL
+    # Python 3.10 exposes the database error text, but not sqlite_errorcode.
+    assert isinstance(full.value.__cause__, sqlite3.OperationalError)
+    assert str(full.value.__cause__) == "database or disk is full"
+    assert getattr(full.value.__cause__, "sqlite_errorcode", 13) == 13  # SQLITE_FULL
     retained = _hints(provider)
     cursor = dict(provider._historical_headers.progress)
     assert 0 < len(retained) < 80
@@ -288,9 +291,7 @@ async def test_owner_lock_is_held_until_cancelled_write_drains(historical, monke
     check(h, await h.item.provider.review_control(walk.raw, walk.metadata))
 
 
-@pytest.mark.parametrize(
-    "code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_IOERR, sqlite3.SQLITE_CORRUPT]
-)
+@pytest.mark.parametrize("code", [5, 10, 11], ids=["SQLITE_BUSY", "SQLITE_IOERR", "SQLITE_CORRUPT"])
 async def test_non_capacity_sqlite_errors_are_not_translated(historical, monkeypatch, code):
     h = historical
     walk = await _linked_history(h, monkeypatch, 4)

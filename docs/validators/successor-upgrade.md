@@ -603,6 +603,31 @@ claims and ordinary reads use separate configured request limits. The applicatio
 owns queue polling and drains it before closing finality resources. Version-two
 intake configuration without service admission retains its original bytes.
 
+For automatic admission review, select `umi-cohort-service-admission-host/4`
+and its `admission_owner` configuration (`umi-cohort-admission-owner/1`). Set a
+private process-lock `directory`, `owner_hotkey`, `owner_key_file`,
+`export_token_file`, and loopback `listen_host`/`listen_port`. Each `reviewers`
+entry supplies an authorized signer, an explicit HTTPS origin, a private
+`token_file` and a bounded request timeout. The reviewer set must cover the
+policy's independent control-group quorum. Keep all these paths disjoint from
+the intake, finality, queue and model stores; owner-export and reviewer-vote
+credentials must differ. Retain existing model-review and upload configuration
+when model participation is enabled.
+
+The intake service starts the private listener and one recurring admission
+worker per reviewer, and drains them before closing its finality provider.
+Expose only the authenticated admission-history, intake-review and
+preparation-review routes to the selected reviewers through the private HTTPS
+proxy. The listener never binds a public interface. Reviewers independently
+verify the original registration proofs in their configured proof inboxes.
+Configure proof replication separately; a signed owner export does not replace
+those proofs. An unavailable peer cannot stop another peer's loop. Restart
+reuses retained votes and certificates without operator resubmission.
+
+These workers certify enrollment. Cohort phase progression, dispatch and
+settlement still require their configured lifecycle workers; admission
+readiness alone does not establish an operational request phase.
+
 Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
 own finality/history and registration archive sources, pinned cohort authorities,
 transport policy, named signer and trusted owner. `ServiceWorkReader` authenticates

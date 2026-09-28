@@ -298,6 +298,7 @@ def create_intake_app(
             store,
             finality_cache.collect_for_cohort_recovery,
             provider.retained_archive,
+            provider=provider,
         )
 
     @asynccontextmanager

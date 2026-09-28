@@ -10,17 +10,41 @@ from __future__ import annotations
 import asyncio
 import hmac
 import sqlite3
-from typing import Generic, Protocol, TypeVar
+from typing import Annotated, Generic, Protocol, TypeVar
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import Field, model_validator
 
 from .competition_cohort_review_export import MAX_EXPORT_BYTES, review_export_limits
 from .concurrency import wait_for_owned
+from .open_competition import Hotkey
+from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 MAX_REQUEST_BYTES = 16384
 RequestT = TypeVar("RequestT", bound=StrictProtocolModel, contravariant=True)
+
+
+class CohortReviewPeerConfig(StrictProtocolModel):
+    signer: Hotkey
+    origin: Annotated[str, Field(min_length=1, max_length=2048)]
+    token_file: Directory
+    timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 1200
+
+    @model_validator(mode="after")
+    def endpoint(self):
+        url = httpx.URL(self.origin)
+        if (
+            url.scheme != "https"
+            or not url.host
+            or url.userinfo
+            or url.query
+            or url.fragment
+            or url.path not in ("", "/")
+        ):
+            raise ValueError("cohort reviewer must be a configured HTTPS origin")
+        return self
 
 
 class PhaseReviewExporter(Protocol[RequestT]):
