@@ -86,14 +86,19 @@ def publish_original_intake(config, b):
     return intake
 
 
-def publish_original_sources(sources, b):
-    intake = publish_original_intake(sources.intake, b)
+def publish_original_sources(sources, b, *, intake=None):
+    native_requests = intake is not None
+    intake = intake or publish_original_intake(sources.intake, b)
     cohort = digest(b["history"].plan)
     objects = SettlementEvidenceFiles(Path(sources.objects_directory))
     values = dict(b["objects"])
     c = b["service_case"]
     for v in (b["closure"], b["reveal"], b["suite"], b["transport"], c.terms):
         values[digest(v)] = canonical_json_bytes(v)
+    if native_requests:
+        # These must be built and delivered by the request/settlement owners.
+        for v in (b["closure"], b["reveal"]):
+            values.pop(digest(v), None)
     for key in values:
         objects.publish(key, values.__getitem__)
     prepared = PreparedCohortRound(

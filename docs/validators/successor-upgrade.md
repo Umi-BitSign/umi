@@ -379,6 +379,26 @@ readiness probes. Remote deployments still need authenticated owner exports;
 do not point a reviewer at another process's live SQLite files. Preserve the
 intake, request-completion, queue and signing journals together on migration.
 
+Use `CohortRequestSettlementPublisher` as the request controller's publication
+port to deliver certified requests into the recurring settlement service. It
+commits the intake owner's certified history, replays the original service
+window, queue seals and complete request closure, then publishes their immutable
+objects and original decision proofs. It publishes
+`history_directory/COHORT_SHA256.json` last. Interrupted delivery resumes from
+retained evidence without collecting another request, rerunning inference or
+signing another certificate. The handoff always contains the original
+request-closing prefix, including when publication resumes after later phases.
+Revocation or a changed owner history prevents new publication.
+
+Select the same `SettlementOriginalSources` for the request publisher and
+settlement coordinator. Prepared rounds, selected catalogs, terms, suite and
+transport still come from their original owning publications. Deliver the
+initial history file to reviewers and replicate the original proof exports into
+each consumer's proof inbox. The existing settlement loop waits for this handoff;
+no manually constructed closure or history file is required. Production runtime
+selection, readiness probes and authenticated replication must still be
+configured and qualified together.
+
 `CohortSettlement.advance` assembles native settlement from retained execution
 evidence and independent evaluator votes. It retains partial votes, derives the
 benchmark and service certificates, fixes the promotion attribution once, and

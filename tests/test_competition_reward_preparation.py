@@ -2987,6 +2987,8 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
         provider=provider,
         assemble_inputs=False,
         reference_start=reference_start,
+        original_sources=None,
+        seed_handoff=True,
     )
 
     def config(name):
@@ -3014,7 +3016,7 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
         from .cohort_settlement_original_fixture import select_original_sources
 
         sources = (
-            select_original_sources(root / "originals", history)
+            (result.original_sources or select_original_sources(root / "originals", history))
             if result.assemble_inputs and name == "Charlie"
             else None
         )
@@ -3075,19 +3077,22 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
         elif conf.original_sources is not None and name not in result.nodes:
             from .cohort_settlement_original_fixture import publish_original_sources
 
-            result.intake = publish_original_sources(conf.original_sources, b)
-        publish_private_model(
-            Path(conf.history_directory) / (digest(history.plan) + ".json"),
-            CohortOrderHistory(
-                history=history,
-                decisions=tuple(
-                    b["decisions"][t.transition.evidence_sha256]
-                    for t in history.transitions
-                    if t.transition.operation != "revoke"
+            result.intake = publish_original_sources(
+                conf.original_sources, b, intake=getattr(result, "intake", None)
+            )
+        if result.seed_handoff:
+            publish_private_model(
+                Path(conf.history_directory) / (digest(history.plan) + ".json"),
+                CohortOrderHistory(
+                    history=history,
+                    decisions=tuple(
+                        b["decisions"][t.transition.evidence_sha256]
+                        for t in history.transitions
+                        if t.transition.operation != "revoke"
+                    ),
                 ),
-            ),
-            maximum_bytes=8 * 1024**2,
-        )
+                maximum_bytes=8 * 1024**2,
+            )
         promotion = CompetitionStore(Path(conf.promotion_directory), b["policy"])
         if name not in result.nodes:
             root = tmp_path / ("native-model-" + name)
@@ -3131,10 +3136,12 @@ async def recurring_settlement_case(original_settlement_inputs, registered_case,
     def deliver():
         for sender, receiver in (("Charlie", "Dave"), ("Dave", "Charlie")):
             a, z = result.configs[sender], result.configs[receiver]
+            copy(Path(a.proof_export_directory), Path(a.proof_import_directory))
             copy(Path(a.exchange_outbox), Path(z.exchange_inbox))
             copy(Path(a.proof_export_directory), Path(z.proof_import_directory))
             if a.role == "coordinator":
                 copy(Path(a.exchange_outbox) / "inputs", Path(z.inputs_directory))
+                copy(Path(a.history_directory), Path(z.history_directory))
 
     result.start, result.deliver = start, deliver
     try:
@@ -3354,6 +3361,100 @@ async def test_recurring_settlement_loops_publish_with_automatic_file_delivery(
     assert a.last_report == "package_published"
     assert max(h.calls.values()) == 1
     assert h.b["service_case"].p.model.calls == 1
+
+
+@pytest.mark.parametrize("recurring_settlement_case", [True], indirect=True)
+async def test_native_request_certification_starts_recurring_settlement(
+    recurring_settlement_case, tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    from umi.competition_cohort_recovery import StandingCohortRecoveryAuthority
+    from umi.competition_cohort_request_publication import CohortRequestSettlementPublisher
+
+    from .test_competition_cohort_request_phase import make_request_owner, request_controller
+
+    h = recurring_settlement_case
+    if not isinstance(h.b["history"].authority.authority, StandingCohortRecoveryAuthority):
+        pytest.skip("automatic request runtime requires standing authority")
+    original = h.b["history"]
+    index = next(
+        i
+        for i, t in enumerate(original.transitions)
+        if t.transition.phase == "requests" and t.transition.operation == "close_phase"
+    )
+    b = dict(h.b, history=original.model_copy(update={"transitions": original.transitions[:index]}))
+    owner = make_request_owner(b, tmp_path / "request-owner", monkeypatch)
+    h.assemble_inputs, h.seed_handoff = True, False
+    h.original_sources, h.intake = owner.sources, owner.intake
+    a, z = await h.start("Charlie"), await h.start("Dave")
+    handoff = Path(a.config.history_directory) / (owner.cohort + ".json")
+    assert not handoff.exists()
+    for node in (a, z):
+        node.config = node.config.model_copy(update={"poll_seconds": 1})
+    stop = asyncio.Event()
+    tasks = [asyncio.create_task(n.run(stop)) for n in (a, z)]
+    output = Path(a.config.settlement_directory) / (a.cohort + ".json")
+
+    def publication(decisions):
+        return CohortRequestSettlementPublisher(
+            owner.source,
+            owner.provider.collect,
+            decisions,
+            a.proofs.publish,
+            sources=owner.sources,
+            history_directory=handoff.parent,
+        )
+
+    try:
+        # Settlement is already waiting. Completion and discovery require no
+        # hand-authored closure or phase history file.
+        await asyncio.sleep(0.1)
+        assert not output.exists()
+        owner.window()
+        h.clock.block = owner.block + 100
+        with request_controller(owner, tmp_path, publication) as control:
+            await control.reopen().tick()
+        assert handoff.exists()
+        request_signatures = tuple(owner.calls)
+
+        async def replicate_and_wait():
+            while not output.exists():
+                h.deliver()
+                for task in tasks:
+                    if task.done():
+                        task.result()
+                        pytest.fail("settlement loop stopped unexpectedly")
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(replicate_and_wait(), timeout=180)
+        assert tuple(owner.calls) == request_signatures
+    finally:
+        stop.set()
+        await asyncio.gather(*tasks)
+    assert a.last_report == "package_published"
+    assert max(h.calls.values()) == 1
+    assert h.b["service_case"].p.model.calls == 1
+    assert digest(a.data.inputs.closure) != digest(h.b["closure"])
+    original_handoff, signatures = handoff.read_bytes(), dict(h.calls)
+
+    async def settled_decision(cohort, key):
+        from umi.competition_cohort_coordinator import CohortDecisionInput
+
+        return a.store.source(cohort, key, CohortDecisionInput)
+
+    late = CohortRequestSettlementPublisher(
+        owner.reopen(),
+        a.provider.collect,
+        settled_decision,
+        a.proofs.publish,
+        sources=owner.sources,
+        history_directory=handoff.parent,
+    )
+    h.clock.block += 100000
+    await late(a.store.published_history(a.cohort))
+    assert handoff.read_bytes() == original_handoff
+    assert dict(h.calls) == signatures
 
 
 @pytest.mark.parametrize("recurring_settlement_case", [False, True], indirect=True)

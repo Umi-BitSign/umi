@@ -1,6 +1,7 @@
 """Native request closure/controller recovery; synthetic finality and inference."""
 
 import sqlite3
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -76,6 +77,7 @@ def make_request_owner(service_closed, tmp_path, monkeypatch):
         fail=False,
         bad_proof=False,
         offline=False,
+        sources=config,
     )
     with intake._connection() as (_, store):
         h.state, _ = store.status(digest(b["history"].plan))
@@ -313,11 +315,8 @@ def test_interrupted_request_closure_resumes_native_work(request_owner, monkeypa
     assert h.source.read(recovered).record.fence.observation.block == seal.observation.block
 
 
-async def test_request_controller_recovers_original_certificate_after_peer_outage(
-    request_owner, tmp_path
-):
-    h = request_owner
-    progress = h.window()
+@contextmanager
+def request_controller(h, tmp_path, publication=None):
     db = sqlite3.connect(tmp_path / "controller.sqlite3")
     store = CohortRecoveryStore(db)
     history, policy = h.b["history"], h.b["policy"]
@@ -333,7 +332,11 @@ async def test_request_controller_recovers_original_certificate_after_peer_outag
 
         return store.source(cohort, key, CohortDecisionInput)
 
-    publisher = CohortIntakePublisher(h.intake, h.provider.collect, decision)
+    publisher = (
+        publication(decision)
+        if publication
+        else CohortIntakePublisher(h.intake, h.provider.collect, decision)
+    )
 
     async def sample(state, observed):
         return await run_owned_thread(lambda: h.source.observe(state, observed, serving=True))
@@ -355,21 +358,152 @@ async def test_request_controller_recovers_original_certificate_after_peer_outag
             attest_progress=ports.attest,
         )
 
-    h.fail = True
-    with pytest.raises(ValueError, match="evaluator quorum"):
-        await controller().tick()
-    assert len(h.calls) == 1
-    h.source = h.reopen()
-    h.block += 100000
-    h.fail = False
-    await controller().tick()
-    state, _ = store.status(h.cohort)
-    assert state.phase == "reference_reveal"
-    assert state.observed_at_block == progress.observed_at_block
-    assert len(h.calls) == 4
-    assert len(set(h.calls)) == 4
-    assert (
-        h.intake.history(h.cohort).transitions[-1].transition.observed_at_block
-        == progress.observed_at_block
-    )
-    db.close()
+    try:
+        yield SimpleNamespace(reopen=controller, store=store, publisher=publisher)
+    finally:
+        db.close()
+
+
+async def test_request_controller_recovers_original_certificate_after_peer_outage(
+    request_owner, tmp_path
+):
+    h = request_owner
+    progress = h.window()
+    with request_controller(h, tmp_path) as control:
+        h.fail = True
+        with pytest.raises(ValueError, match="evaluator quorum"):
+            await control.reopen().tick()
+        assert len(h.calls) == 1
+        h.source = h.reopen()
+        h.block += 100000
+        h.fail = False
+        await control.reopen().tick()
+        state, _ = control.store.status(h.cohort)
+        assert state.phase == "reference_reveal"
+        assert state.observed_at_block == progress.observed_at_block
+        assert len(h.calls) == 4
+        assert len(set(h.calls)) == 4
+        assert (
+            h.intake.history(h.cohort).transitions[-1].transition.observed_at_block
+            == progress.observed_at_block
+        )
+
+
+@pytest.mark.parametrize("failure", ["objects", "proof", "history_ack"])
+async def test_request_publication_recovers_after_certification(
+    request_owner, tmp_path, monkeypatch, failure
+):
+    from umi import competition_cohort_request_publication as module
+    from umi.competition_cohort_order_signer import CohortOrderHistory
+    from umi.private_files import read_private_model
+
+    h = request_owner
+    h.window()
+    handoff = tmp_path / "handoff" / (h.cohort + ".json")
+    failed, proofs = [], []
+
+    async def proof(observation):
+        if failure == "proof" and not failed:
+            failed.append(True)
+            raise OSError("proof delivery interrupted")
+        proofs.append(observation)
+
+    def publication(decisions):
+        return module.CohortRequestSettlementPublisher(
+            h.source,
+            h.provider.collect,
+            decisions,
+            proof,
+            sources=h.sources,
+            history_directory=handoff.parent,
+        )
+
+    original_publish = module.publish_private_model
+
+    def publish(*args, **kwargs):
+        original_publish(*args, **kwargs)
+        if failure == "history_ack" and not failed:
+            failed.append(True)
+            raise OSError("handoff acknowledgement lost")
+
+    monkeypatch.setattr(module, "publish_private_model", publish)
+    with request_controller(h, tmp_path, publication) as control:
+        original_object = control.publisher.files.publish
+
+        def object_publish(*args):
+            original_object(*args)
+            if failure == "objects" and not failed:
+                failed.append(True)
+                raise OSError("object publication interrupted")
+
+        monkeypatch.setattr(control.publisher.files, "publish", object_publish)
+        with pytest.raises(OSError, match=r"interrupted|acknowledgement lost"):
+            await control.reopen().tick()
+        assert control.store.status(h.cohort)[0].phase == "reference_reveal"
+        assert handoff.exists() == (failure == "history_ack")
+        calls = tuple(h.calls)
+        h.block += 100000
+        h.source = h.reopen()
+        h.source.external = lambda _: pytest.fail("delivery must use retained originals")
+        control.publisher.source = h.source
+        await control.publisher(h.intake.history(h.cohort))
+        first = handoff.read_bytes()
+        await control.publisher(h.intake.history(h.cohort))
+        assert handoff.read_bytes() == first
+        assert tuple(h.calls) == calls
+        delivered = read_private_model(handoff, CohortOrderHistory, maximum_bytes=8 * 1024**2)
+        assert delivered.history == h.intake.history(h.cohort)
+        assert set(map(digest, proofs)) == set(digest(d.observation) for d in delivered.decisions)
+        exported = control.publisher._export(h.block)
+        assert all(control.publisher.files(k) == raw for k, raw in exported.objects.items())
+
+
+@pytest.mark.parametrize("failure", ["missing_seal", "revoked_during_delivery"])
+async def test_request_publication_rechecks_native_authority_and_evidence(
+    request_owner, tmp_path, failure
+):
+    from umi.competition_cohort_request_publication import CohortRequestSettlementPublisher
+
+    from .test_competition_cohort_consumers import transition
+
+    h = request_owner
+    h.window()
+    handoff = tmp_path / "handoff" / (h.cohort + ".json")
+    interrupted = []
+
+    async def proof(observation):
+        if not interrupted:
+            interrupted.append(True)
+            raise OSError("delivery interrupted after certification")
+        if failure == "revoked_during_delivery":
+            current = h.intake.history(h.cohort)
+            if current.transitions[-1].transition.operation != "revoke":
+                with h.intake._connection() as (_, store):
+                    revoked = transition(current, h.b["policy"], "revoke", h.block)
+                    store.publish_history(revoked, h.b["policy"], current_block=h.block)
+
+    def publication(decisions):
+        return CohortRequestSettlementPublisher(
+            h.source,
+            h.provider.collect,
+            decisions,
+            proof,
+            sources=h.sources,
+            history_directory=handoff.parent,
+        )
+
+    with request_controller(h, tmp_path, publication) as control:
+        with pytest.raises(OSError, match="delivery interrupted after certification"):
+            await control.reopen().tick()
+        current = h.intake.history(h.cohort)
+        calls = tuple(h.calls)
+        if failure == "missing_seal":
+            with h.c.queue.journal.transaction() as db:
+                db.execute("DELETE FROM records WHERE kind='service_work_seal'")
+            expected = "owner queue fence"
+        else:
+            expected = "authority changed during delivery"
+        with pytest.raises(ValueError, match=expected):
+            await control.publisher(current)
+        assert tuple(h.calls) == calls
+        assert not handoff.exists()
