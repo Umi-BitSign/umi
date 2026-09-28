@@ -282,29 +282,42 @@ proof before populating a recovery journal or crediting time. An imported block
 number cannot choose the history target before its chain proof is verified.
 Restart requires native replay even when all archive files are already present.
 
-Private R2 replication uses the [copy service and timer templates](../../deploy/standing-reward-proof-replication/)
+Private R2 replication uses the [copy service and timer templates](../../deploy/standing-reward-replication/)
 with [rclone's R2 backend](https://developers.cloudflare.com/r2/examples/rclone/).
 Stage a verified rclone executable and replace the template paths and service
 account. Each upload/download job has its own root-owned environment file and
 private credential file supplied through `LoadCredential`. Use a private bucket,
 separate bucket-scoped publisher/read-only receiver credentials, and a distinct
-series/producer prefix. Configure filesystem capacity for both archive roots
+series/producer prefix. Use separate jobs for `reward-proofs/v1/` and
+`reward-inputs/v1/`. The latter carries packages, signed decisions, opportunity
+certificates and witnesses into the configured `delivery_directory`; it is
+separate from proof imports and native journals. Configure filesystem capacity
+for all archive and delivery roots
 in addition to the native journals; do not point replication at a journal,
 wallet, model store or general home directory.
 
+The coordinator's `retain_standing_reward_inputs` publication boundary checks
+the complete signed decision prefix and its package identities, retains packages
+before decisions and preserves the first valid signature envelope for each
+decision body. An interrupted export retries the original bytes; completed
+packages need no source fetch on restart. This is content delivery, not score
+verification, a decision signer or a chain publisher. Consumers independently
+replay all native evidence. The coordinator still needs to wire certified
+decision production and verified remote availability before publishing control.
+Model/promotion assets use their separate preservation and native import path.
+
 The timer retries failed copies indefinitely. `copy --immutable --checksum`
 retains existing destination files and refuses conflicting bytes; it does not
-delete objects absent from the source. The filters copy only proof objects and
-frames, excluding lock and temporary files. Transfers can arrive out of order;
+delete objects absent from the source. The filters copy only the named proof
+and reward-input directories, excluding lock and temporary files. Transfers can arrive out of order;
 missing referenced objects remain pending. Reading R2 uses the receiver's own
 credential, so already uploaded proofs remain available when the coordinator is
 offline. A copied file or successful transfer grants no reward authority.
 
-These templates are uninstalled. Private bucket/credential provisioning, real
-R2 upload and restore, retention controls, installed timer/restart qualification,
-artifact/decision delivery, and the full series simulation remain required
-before deployment. Local archive checks do not establish remote durability or
-unattended readiness.
+These templates are uninstalled. Scoped S3 credentials, complete remote
+publication/readback, model/promotion delivery, installed timer/restart
+qualification and the full series simulation remain required before deployment.
+Local archive checks do not establish remote durability or unattended readiness.
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;

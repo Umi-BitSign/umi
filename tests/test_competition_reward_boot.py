@@ -268,6 +268,20 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
     assert events[-len(providers) :] == [("closed", digest(p.config)) for p in reversed(providers)]
 
 
+def test_content_reader_creates_private_root_before_delivery(tmp_path):
+    import stat
+
+    root = tmp_path / "new-delivery"
+    files = StandingRewardFiles(root, maximum_package_bytes=4096, maximum_witness_bytes=4096)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    with pytest.raises(FileNotFoundError):
+        files.decision("aa" * 32)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    root.chmod(0o755)
+    with pytest.raises(ValueError, match="owned and private"):
+        StandingRewardFiles(root, maximum_package_bytes=4096, maximum_witness_bytes=4096)
+
+
 def test_content_reader_does_not_confuse_signed_envelope_with_decision_identity(inputs, tmp_path):
     decision = inputs.c.genesis
     root = tmp_path / "content"

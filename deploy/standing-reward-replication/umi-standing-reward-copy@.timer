@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry UMI standing reward evidence replication (%i)
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=umi-standing-reward-copy@%i.service
+
+[Install]
+WantedBy=timers.target

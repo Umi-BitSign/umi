@@ -1529,7 +1529,7 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
     from umi.competition_reward_decisions import SignedRewardControlDecision
     from umi.competition_reward_files import StandingRewardFiles
     from umi.competition_reward_opportunity import opportunity_rule
-    from umi.private_files import publish_private_model
+    from umi.competition_reward_publication import retain_standing_reward_inputs
 
     h = complete_preparation_case
     p, c = h.package_case, h.c
@@ -1539,16 +1539,21 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
         maximum_package_bytes=8 * 1024**2,
         maximum_witness_bytes=1024 * 1024,
     )
-    publish_private_model(
-        files.root / "packages" / (digest(p.package) + ".json"),
-        p.package,
-        maximum_bytes=files.maximum_package_bytes,
+    retain_standing_reward_inputs(
+        files,
+        c.series,
+        c.reader.policy,
+        tuple(
+            sorted(
+                (
+                    SignedRewardControlDecision.model_validate_json(raw)
+                    for raw in c.objects.values()
+                ),
+                key=lambda value: value.decision.sequence,
+            )
+        ),
+        lambda _: p.package,
     )
-    for sha, raw in c.objects.items():
-        publish_private_model(
-            files.root / "decisions" / (sha + ".json"),
-            SignedRewardControlDecision.model_validate_json(raw),
-        )
     root = tmp_path / "installed-coverage"
 
     async def fresh_height(_hotkey):
@@ -1700,10 +1705,12 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
         CoverageHistoryPending,
         NativeRewardCoverageSource,
     )
+    from umi.competition_reward_files import StandingRewardFiles
     from umi.competition_reward_history import RewardControlHistoryReader
     from umi.competition_reward_opportunity import opportunity_rule
     from umi.competition_reward_opportunity_review import review_opportunity_certificate
     from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
+    from umi.competition_reward_publication import retain_standing_reward_inputs
 
     h = complete_preparation_case
     p, c = h.package_case, h.c
@@ -1776,6 +1783,33 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
         for contribution in certificate.contributions
     }
 
+    # Produce the actual private delivery layout rather than giving the new
+    # reader direct callbacks into the coordinator's package/decision objects.
+    delivery = StandingRewardFiles(
+        tmp_path / "input-export",
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    retain_standing_reward_inputs(
+        delivery,
+        c.series,
+        c.reader.policy,
+        (c.genesis, c.active),
+        lambda sha: p.package if sha == digest(p.package) else pytest.fail("unexpected package"),
+    )
+    delivery.retain_completion(certificate, witness_bytes.__getitem__)
+    received_root = tmp_path / "input-import"
+    shutil.copytree(delivery.root, received_root)
+    shutil.rmtree(delivery.root)
+    received = StandingRewardFiles(
+        received_root,
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    restored_package = received.package(digest(p.package))
+    certificate_bytes = received.certificate(digest(certificate))
+    witness_bytes.clear()
+
     # File transfer substitutes only the network port. No live SQLite file,
     # verification flag, aggregate total or provider cache moves to the receiver.
     remote_root = tmp_path / "proof-import"
@@ -1811,8 +1845,8 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
         expected_rule_sha256=digest(rule),
         archive=imported,
     )
-    # The immutable package, model/promotion assets and signed decisions are
-    # supplied separately. This test qualifies original proof portability.
+    # Model/promotion assets still use the separately supplied native store.
+    # Packages, signed decisions, witnesses and certificates use restored files.
     reader = StandingRewardControlReader(
         tmp_path / "receiver-control",
         c.series,
@@ -1829,8 +1863,8 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
         journal=receiver,
         history=history,
         preparation=owner,
-        package=p.package,
-        decisions=c.source,
+        package=restored_package,
+        decisions=received.decision,
         profile=h.item.profile,
         maximum_history_blocks=4096,
     )
@@ -1880,10 +1914,10 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
 
     async def review():
         return await review_opportunity_certificate(
-            canonical_json_bytes(certificate),
+            certificate_bytes,
             expected_sha256=digest(certificate),
             journal=receiver,
-            witness_source=witness_bytes.__getitem__,
+            witness_source=received.witness,
             review_endpoint=source.replay,
             **terms,
         )
@@ -1919,3 +1953,117 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
     assert receiver.journal.get("coverage_interval", interval_key) is not None
     assert coverage_point(await source.replay(interval.left), rule).key() == interval.left
     assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+
+
+@pytest.mark.parametrize("interrupt_after", ["packages", "decisions"])
+async def test_reward_input_publication_recovers_original_bytes_and_offline_source(
+    preparation_case, tmp_path, monkeypatch, interrupt_after
+):
+    from umi import competition_reward_files as file_module
+    from umi import competition_reward_publication as module
+    from umi.competition_reward_decisions import SignedRewardControlDecision
+    from umi.competition_reward_files import StandingRewardFiles
+
+    p = preparation_case
+    prefix = tuple(
+        sorted(
+            (SignedRewardControlDecision.model_validate_json(v) for v in p.objects.values()),
+            key=lambda v: v.decision.sequence,
+        )
+    )
+    files = StandingRewardFiles(
+        tmp_path / "publication",
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    original = module.publish_private_model
+    interrupted = False
+
+    def lost_reply(path, *args, **kwargs):
+        nonlocal interrupted
+        original(path, *args, **kwargs)
+        if path.parent.name == interrupt_after and not interrupted:
+            interrupted = True
+            raise OSError("publication reply lost")
+
+    monkeypatch.setattr(module, "publish_private_model", lost_reply)
+    monkeypatch.setattr(file_module, "publish_private_model", lost_reply)
+    with pytest.raises(OSError, match="reply lost"):
+        module.retain_standing_reward_inputs(
+            files,
+            p.reader.series,
+            p.reader.policy,
+            prefix,
+            lambda _: p.package,
+        )
+    before = {path: path.read_bytes() for path in files.root.rglob("*.json")}
+    reopened = StandingRewardFiles(
+        files.root,
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    head = module.retain_standing_reward_inputs(
+        reopened,
+        p.reader.series,
+        p.reader.policy,
+        prefix,
+        lambda _: pytest.fail("completed package fetched after restart"),
+    )
+    assert head == digest(p.active.decision)
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+    complete = {path: path.read_bytes() for path in files.root.rglob("*.json")}
+    variants = tuple(signed(item.decision) for item in prefix)
+    module.retain_standing_reward_inputs(
+        reopened,
+        p.reader.series,
+        p.reader.policy,
+        variants,
+        lambda _: pytest.fail("immutable retry fetched a package"),
+    )
+    assert all(path.read_bytes() == raw for path, raw in complete.items())
+
+
+@pytest.mark.parametrize("fault", ["missing", "wrong_package", "wrong_allocation", "unsigned"])
+async def test_reward_input_publication_holds_incomplete_or_conflicting_inputs(
+    preparation_case, tmp_path, fault
+):
+    from umi.competition_reward_decisions import SignedRewardControlDecision
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_reward_publication import retain_standing_reward_inputs
+
+    p = preparation_case
+    prefix = tuple(
+        sorted(
+            (SignedRewardControlDecision.model_validate_json(v) for v in p.objects.values()),
+            key=lambda v: v.decision.sequence,
+        )
+    )
+    files = StandingRewardFiles(
+        tmp_path / "publication",
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+
+    def source(_):
+        if fault == "missing":
+            raise FileNotFoundError("package pending")
+        return (
+            p.package.model_copy(update={"policy_sha256": "00" * 32})
+            if fault == "wrong_package"
+            else p.package
+        )
+
+    if fault == "wrong_allocation":
+        decision = prefix[-1].decision.model_copy(
+            update={
+                "activation": p.active.decision.activation.model_copy(
+                    update={"allocation_sha256": "00" * 32}
+                ),
+            }
+        )
+        prefix = (*prefix[:-1], signed(decision))
+    elif fault == "unsigned":
+        prefix = (*prefix[:-1], prefix[-1].model_copy(update={"signatures": ()}))
+    with pytest.raises((ValueError, FileNotFoundError)):
+        retain_standing_reward_inputs(files, p.reader.series, p.reader.policy, prefix, source)
+    assert not tuple((files.root / "decisions").glob("*.json"))

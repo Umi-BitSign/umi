@@ -13,7 +13,12 @@ from .competition_reward_decisions import MAX_DECISION_BYTES, SignedRewardContro
 from .competition_reward_opportunity import RewardOpportunityCertificate, RewardOpportunityWitness
 from .competition_reward_opportunity_review import MAX_CERTIFICATE_BYTES
 from .open_competition import digest
-from .private_files import private_path, publish_private_model, read_private_model
+from .private_files import (
+    ensure_private_directory,
+    private_path,
+    publish_private_model,
+    read_private_model,
+)
 from .protocol import canonical_json_bytes
 
 
@@ -22,6 +27,7 @@ class StandingRewardFiles:
         self.root = Path(private_path(str(root)))
         self.maximum_package_bytes = maximum_package_bytes
         self.maximum_witness_bytes = maximum_witness_bytes
+        ensure_private_directory(self.root)
 
     def _read(self, kind, sha, model, maximum):
         checked_digest(sha)
@@ -39,6 +45,14 @@ class StandingRewardFiles:
     def decision(self, sha: str) -> bytes:
         return canonical_json_bytes(
             self._read("decisions", sha, SignedRewardControlDecision, MAX_DECISION_BYTES)
+        )
+
+    def retain_decision(self, value: SignedRewardControlDecision) -> None:
+        """Retain exact delivery bytes; signature and chain review are separate."""
+        publish_private_model(
+            self.root / "decisions" / (digest(value.decision) + ".json"),
+            value,
+            maximum_bytes=MAX_DECISION_BYTES,
         )
 
     def certificate(self, sha: str) -> bytes:
