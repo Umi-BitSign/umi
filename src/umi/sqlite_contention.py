@@ -1,9 +1,16 @@
-"""Identify retryable SQLite contention across supported Python versions."""
+"""Identify SQLite contention and storage exhaustion across Python versions."""
 
 import sqlite3
 import sys
 
 _ERROR_CODES_AVAILABLE = sys.version_info >= (3, 11)
+
+
+def is_sqlite_full(error: sqlite3.Error) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF == 13  # SQLITE_FULL
+    return not _ERROR_CODES_AVAILABLE and str(error) == "database or disk is full"
 
 
 def is_sqlite_contention(error: sqlite3.OperationalError) -> bool:

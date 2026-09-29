@@ -40,6 +40,7 @@ from .historical_header_recovery import HistoricalHeaderRecovery, HistoricalHead
 from .open_competition import digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import collect_executed_runtime
+from .sqlite_contention import is_sqlite_full
 from .validator_chain import StorageReadSpec, VerifiedStorageBatch
 from .validator_plans import VerifiedFinalizedBlock
 
@@ -470,7 +471,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                     anchor, ref, self._registration_rpc.request
                 )
             except sqlite3.Error as error:
-                if getattr(error, "sqlite_errorcode", None) != sqlite3.SQLITE_FULL:
+                if not is_sqlite_full(error):
                     raise
                 raise HistoricalHeaderRecoveryPending(
                     "historical header database needs capacity"
