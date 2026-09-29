@@ -27,7 +27,11 @@ from .competition_cohort_settlement import CohortSettlement
 from .competition_cohort_settlement_assembly import assemble_settlement_inputs
 from .competition_cohort_settlement_config import SettlementServiceConfig
 from .competition_cohort_settlement_controller import CohortSettlementPhases, SettlementInputBatch
-from .competition_cohort_settlement_delivery import SettlementEvidenceFiles, SettlementResultVotes
+from .competition_cohort_settlement_delivery import (
+    ModelReviewEvidenceFiles,
+    SettlementEvidenceFiles,
+    SettlementResultVotes,
+)
 from .competition_cohort_settlement_exchange import PHASES, SettlementReviewExchange
 from .competition_cohort_settlement_inputs import (
     SettlementInputPackage,
@@ -306,12 +310,16 @@ class CohortSettlementService:
         self.journal.put(kind, "original", {"sha256": digest(package)})
         self.package = package
         delivered = SettlementEvidenceFiles(Path(self.config.exchange_inbox) / "objects")
+        model_documents = ModelReviewEvidenceFiles(self.promotion.directory / "objects")
 
         def objects(key):
             try:
                 return self.data.objects(key)
             except (FileNotFoundError, KeyError):
-                return delivered(key)
+                try:
+                    return delivered(key)
+                except FileNotFoundError:
+                    return model_documents(key)
 
         owner = CohortSettlement(
             plan=self.plan,

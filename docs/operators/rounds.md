@@ -1590,8 +1590,8 @@ Wrangler session.
 | `settlement` | Settlement `exchange_outbox` | Other reviewers' `exchange_inbox` |
 | `documents` | Coordinator settlement `exchange_outbox/inputs` | Reviewers' `inputs_directory` |
 | `documents` | Certified request handoff `history_directory` | Settlement reviewers' `history_directory` |
-| `models` | Native preserved model archive | Evaluator model-review and benchmark archive |
-| `model-evidence` | Model acceptance worker outbox | Retained artifact evidence for replay |
+| `models` | Native preserved model archive | Evaluator model-review/benchmark archive and settlement `promotion_directory/model-reward-artifacts` |
+| `model-evidence` | Model acceptance worker outbox | Settlement `promotion_directory` and other configured acceptance readers |
 | `videos` | Content-addressed video directory | Configured benchmark/clip video directory |
 | `documents` | One selected immutable policy, catalog or approved model-review document directory | Its corresponding configured input directory |
 
@@ -1601,6 +1601,15 @@ evidence bucket. Keep native journals, keys, scratch space and the unrevealed
 source suite outside these roots. The `documents` profile copies top-level JSON
 files; it does not inspect their contents or decide whether labels may be
 released. Configure only the explicit immutable directory listed above.
+
+Model acceptance exports retain `objects/DIGEST.json` and
+`model-reward-acceptances/COHORT/SUBMISSION.json` beneath their producer root.
+Copy this layout unchanged into each settlement owner's `promotion_directory`.
+The `objects` files are the original canonical rights and reconstruction
+documents; they use no settlement wrapper. Settlement checks their private file
+modes, size and digest before including them in the reward package. Missing
+documents or preserved model files keep the award pending. A corrupt delivered
+object fails verification; a second source cannot replace it.
 
 The request publisher first verifies the complete certified request closure and
 publishes its handoff. Settlement replays that history before assembling the

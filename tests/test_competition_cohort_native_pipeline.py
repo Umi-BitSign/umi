@@ -1,7 +1,7 @@
-"""Public model delivery through artifact review and certified request handoff.
+"""Public model delivery through artifact review and certified reward publication.
 
 Finality, readiness, reviewed rights documents and sandbox inference are fixtures.
-No prepared round, order, execution receipt or completion signature is supplied.
+No prepared round, order, execution receipt, score or settlement vote is supplied.
 This model-only cohort does not qualify paid service work or installed rewards.
 """
 
@@ -53,7 +53,7 @@ from umi.competition_cohort_request_files import RequestCompletionFiles
 from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver
 from umi.competition_cohort_request_review import RequestProgressReviewer
 from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
-from umi.competition_cohort_service_quality import ServiceTerms
+from umi.competition_cohort_service_quality import ServiceReference, ServiceTerms
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from umi.competition_execution import execution_boundary
 from umi.open_competition import digest, identity, sign_object
@@ -61,6 +61,7 @@ from umi.policy import scoring_policy_hash
 from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 
+from .cohort_native_settlement_fixture import run_settlement
 from .test_competition_cohort_executor import output
 from .test_competition_cohort_intake import capture_at
 from .test_competition_cohort_lifecycle_host import host as host
@@ -102,7 +103,17 @@ def precommit_model_inventory(h):
         service_pool_bps=5000,
         stratum_weights={"fingerspelling": 3, "continuous": 10},
     )
-    precommit_service_inventory(h, service_terms_sha256=digest(h.terms))
+    h.reference = ServiceReference(
+        schema="umi-cohort-service-reference/1",
+        case_id="91" * 32,
+        video_sha256="92" * 32,
+        stratum="fingerspelling",
+        salt="41" * 32,
+        reference="hello",
+    )
+    precommit_service_inventory(
+        h, service_terms_sha256=digest(h.terms), service_reference_sha256=digest(h.reference)
+    )
     h.model = bundle_at(Path(h.intake.config.directory).parent / "model-submission")
     h.request_for = lambda scenario, **kwargs: model_request(scenario, h.model, **kwargs)
 
@@ -264,6 +275,9 @@ def configure_owner(o, orders, chain_config, root, monkeypatch):
     )
     SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory)).publish(
         digest(o.h.terms), lambda _: canonical_json_bytes(o.h.terms)
+    )
+    SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory)).publish(
+        digest(o.h.reference), lambda _: canonical_json_bytes(o.h.reference)
     )
     o.open = lambda: admission_module.admission_owner_app(
         config.admission_owner, o.service.preparation, o.h.provider, service_host=o.service
@@ -446,7 +460,7 @@ def deliver_exports(nodes, target):
 
 
 @pytest.mark.parametrize("interrupt", [False, True], ids=["normal", "outage-restart"])
-async def test_accepted_model_reaches_complete_original_request_closure(
+async def test_accepted_model_reaches_native_reward_package(
     host, scenario, runtime, tmp_path, monkeypatch, chain_config, interrupt
 ):
     o, h = host, host.h
@@ -652,6 +666,8 @@ async def test_accepted_model_reaches_complete_original_request_closure(
             assert sum(inference.values()) == 12
             await certify_requests(o, app, tmp_path / "request-review", monkeypatch, signatures)
             assert max(signatures.values()) == 1
+            await run_settlement(o, nodes, tmp_path / "native-settlement", signatures, interrupt)
+            assert max(inference.values()) == max(signatures.values()) == 1
             # Reopened workers can recover all completed originals offline.
             h.offline = True
             o.outages.add("owner.example")

@@ -11,6 +11,8 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
 
+from pydantic import JsonValue, RootModel
+
 from .competition_cohort_endpoint_archive import MAX_ARCHIVE_OBJECT_BYTES, read_endpoint_object
 from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_order_signer import order_slot
@@ -52,6 +54,28 @@ class SettlementEvidenceFiles:
             RewardPackageObject(sha256=key, value=json.loads(raw)),
             maximum_bytes=MAX_DELIVERY_BYTES,
         )
+
+
+class ModelReviewEvidenceFiles:
+    """Read unchanged private documents exported by ModelAcceptanceWorker.
+
+    Those originals are plain canonical JSON, unlike wrapped settlement objects.
+    Their accepted digest, private file checks and byte bound are all enforced.
+    """
+
+    def __init__(self, root: Path):
+        self.root = Path(private_path(str(root)))
+
+    def __call__(self, key: str) -> bytes:
+        def source(sha):
+            value = read(
+                self.root / (sha + ".json"),
+                RootModel[dict[str, JsonValue]],
+                maximum_bytes=MAX_ARCHIVE_OBJECT_BYTES,
+            )
+            return canonical_json_bytes(value)
+
+        return read_endpoint_object(source, key)
 
 
 class SettlementResultVotes:
