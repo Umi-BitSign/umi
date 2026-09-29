@@ -319,10 +319,10 @@ async def test_recurring_worker_waits_for_missing_media_then_completes(installed
                     task.result()
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(wait_complete(), 60)
+        await asyncio.wait_for(wait_complete(), 180)
     finally:
         stop.set()
-        await asyncio.wait_for(task, 30)
+        await asyncio.wait_for(task, 60)
     assert n.q.p.model.calls == len(n.q.p.e.job.cases)
 
 

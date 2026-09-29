@@ -177,7 +177,13 @@ class CohortEndpointRetirement:
 
             try:
                 raw = await asyncio.wait_for(exchange(), timeout)
-            except (OSError, httpx.HTTPError, TimeoutError, ComponentResponseError):
+            except (
+                OSError,
+                httpx.HTTPError,
+                asyncio.TimeoutError,
+                TimeoutError,
+                ComponentResponseError,
+            ):
                 return CohortRetirementOutcome("pending", "retirement_transport_unavailable")
             if raw is None:
                 return CohortRetirementOutcome("pending", "retirement_not_acknowledged")

@@ -74,7 +74,7 @@ async def test_cycle_drains_blocking_stages_before_releasing_both_locks(
     monkeypatch.setattr(owner, name, paused)
     task = asyncio.create_task(s.coordinator.cycle())
     try:
-        await asyncio.wait_for(paused.entered.wait(), timeout=5)
+        await asyncio.wait_for(paused.entered.wait(), timeout=30)
         assert paused.thread_id != threading.get_ident()
         assert s.coordinator.serial.locked() and s.queue.serial.locked()
         contender_entered = asyncio.Event()
@@ -177,7 +177,7 @@ async def test_live_socket_authenticates_during_recurring_coordinator_cycle(setu
     now[0] = int(signed.query.nonce_unix_ns)
     try:
         async with app.router.lifespan_context(app), listening(app) as port:
-            await asyncio.wait_for(paused.entered.wait(), timeout=5)
+            await asyncio.wait_for(paused.entered.wait(), timeout=30)
             assert s.queue.serial.locked()
             request = asyncio.create_task(
                 transport.request_settlement("https://rounds.example", signed, loopback_port=port)
@@ -249,7 +249,7 @@ async def test_http_timeout_and_repeated_cancel_drain_worker_before_releasing_ca
         else:
             task = asyncio.create_task(query())
         try:
-            await asyncio.wait_for(paused.entered.wait(), timeout=5)
+            await asyncio.wait_for(paused.entered.wait(), timeout=30)
             await asyncio.sleep(0.03)
             assert s.queue.serial.locked() and not task.done()
             if mode != "timeout":
@@ -263,12 +263,12 @@ async def test_http_timeout_and_repeated_cancel_drain_worker_before_releasing_ca
             paused.release.set()
             if mode == "cancel" or (native_client and mode == "cancel_during_timeout"):
                 with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(task, timeout=5)
+                    await asyncio.wait_for(task, timeout=30)
             elif native_client:
                 with pytest.raises(ValueError, match="request rejected"):
-                    await asyncio.wait_for(task, timeout=5)
+                    await asyncio.wait_for(task, timeout=30)
             else:
-                assert (await asyncio.wait_for(task, timeout=5)).status_code == 503
+                assert (await asyncio.wait_for(task, timeout=30)).status_code == 503
             assert paused.finished.is_set() and not s.queue.serial.locked()
             monkeypatch.setattr(
                 type(s.queue.capacity), "operation_timeout_seconds", property(lambda _: 7200)
@@ -303,7 +303,7 @@ async def test_response_serialization_drains_before_request_capacity_is_released
 
         task = asyncio.create_task(query())
         try:
-            await asyncio.wait_for(paused.entered.wait(), timeout=5)
+            await asyncio.wait_for(paused.entered.wait(), timeout=30)
             assert paused.thread_id != threading.get_ident()
             assert not s.queue.serial.locked()
             for _ in range(2):

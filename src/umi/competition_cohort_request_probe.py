@@ -46,7 +46,16 @@ def nearby(left, right, gap):
 
 
 def tasks_running(tasks):
-    return bool(tasks) and all(not t.done() and not t.cancelling() for t in tasks)
+    tasks = tuple(tasks)
+
+    def cancelling(task):
+        # Task.cancelling() was added after Python 3.10. A 3.10 task whose
+        # cancellation has been delivered is already done/cancelled; before
+        # delivery it remains conservatively available for this liveness probe.
+        value = getattr(task, "cancelling", None)
+        return value() if value is not None else task.cancelled()
+
+    return bool(tasks) and all(not task.done() and not cancelling(task) for task in tasks)
 
 
 def journal_stamp(journal):

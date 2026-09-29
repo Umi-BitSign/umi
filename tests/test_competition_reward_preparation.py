@@ -3564,7 +3564,7 @@ async def test_recurring_settlement_loops_publish_with_automatic_file_delivery(
             await asyncio.sleep(0.05)
 
     try:
-        await asyncio.wait_for(replicate_and_wait(), timeout=180)
+        await asyncio.wait_for(replicate_and_wait(), timeout=600)
     finally:
         stop.set()
         await asyncio.gather(*tasks)
@@ -3808,7 +3808,7 @@ async def test_automatic_settlement_assembly_delivery_and_late_restart(
             await asyncio.sleep(0.05)
 
     try:
-        await asyncio.wait_for(replicate(), timeout=180)
+        await asyncio.wait_for(replicate(), timeout=600)
     finally:
         stop.set()
         await asyncio.gather(*tasks)

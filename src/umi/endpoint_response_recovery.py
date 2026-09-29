@@ -169,7 +169,7 @@ async def retrieve_endpoint_response(
 
     try:
         status, raw, signature, received = await asyncio.wait_for(exchange(), timeout_seconds)
-    except (OSError, httpx.HTTPError, TimeoutError, ComponentResponseError):
+    except (OSError, httpx.HTTPError, asyncio.TimeoutError, TimeoutError, ComponentResponseError):
         return EndpointRecoveryOutcome("pending", "recovery_transport_unavailable")
     if status != 200:
         return EndpointRecoveryOutcome("pending", "recovery_response_unavailable", status)

@@ -34,7 +34,7 @@ async def test_owned_timeout_drains_cleanup_despite_repeated_cancellation(times_
         await asyncio.sleep(0)
         assert not waiter.done() and not finished.is_set()
         finish.set()
-        with pytest.raises(asyncio.TimeoutError if times_out else asyncio.CancelledError):
+        with pytest.raises(TimeoutError if times_out else asyncio.CancelledError):
             await waiter
         assert finished.is_set()
     finally:
@@ -55,6 +55,15 @@ async def test_owned_timeout_returns_result_and_original_error():
     with pytest.raises(ValueError) as caught:
         await wait_for_owned(fail(), timeout=1)
     assert caught.value is error
+
+
+async def test_owned_timeout_normalizes_legacy_asyncio_timeout():
+    async def fail():
+        raise asyncio.TimeoutError
+
+    with pytest.raises(TimeoutError) as caught:
+        await wait_for_owned(fail(), timeout=1)
+    assert type(caught.value) is TimeoutError
 
 
 async def test_owned_task_returns_result():

@@ -1,4 +1,4 @@
-"""One configured C5-C10 series through native intake, rest and settlement.
+"""One configured mixed C5-C10 series through native intake, rest and settlement.
 
 Reuses original owner/evaluator journals across cohorts. Finality, inference,
 rights review and HTTP remain the explicit ports of the connected pipeline.
@@ -134,7 +134,7 @@ async def test_six_cohorts_reuse_owners_and_recover_without_extensions(
             monkeypatch,
             chain_config,
             interrupt=index % 2 == 1,
-            mixed=False,
+            mixed=True,
             cohort_index=index,
             activate=False,
         )

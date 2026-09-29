@@ -126,7 +126,13 @@ class CohortEndpointGrantDelivery:
 
             try:
                 raw = await asyncio.wait_for(exchange(), timeout)
-            except (OSError, httpx.HTTPError, TimeoutError, ComponentResponseError):
+            except (
+                OSError,
+                httpx.HTTPError,
+                asyncio.TimeoutError,
+                TimeoutError,
+                ComponentResponseError,
+            ):
                 return CohortGrantDeliveryOutcome("pending", "miner_grant_delivery_unavailable")
             if raw is None:
                 return CohortGrantDeliveryOutcome("pending", "miner_grant_not_acknowledged")

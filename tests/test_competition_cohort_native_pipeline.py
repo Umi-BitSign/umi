@@ -765,7 +765,7 @@ async def run_pipeline(
 
                 try:
                     await asyncio.wait_for(complete(), 180 if mixed else 60)
-                except TimeoutError as error:
+                except asyncio.TimeoutError as error:
                     raise AssertionError(
                         {
                             "evaluators": {name: n.last_reports for name, n in nodes.items()},

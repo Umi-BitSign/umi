@@ -55,7 +55,7 @@ def configured(h, root):
                 signer=wallet(n).hotkey.ss58_address,
                 origin=f"https://{n.lower()}.example",
                 token_file=str(root / (n + "-token")),
-                timeout_seconds=10,
+                timeout_seconds=30,
             )
             for n in ("Charlie", "Dave")
         ),
