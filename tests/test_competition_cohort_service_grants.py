@@ -276,7 +276,7 @@ async def service_owner(granted, tmp_path, monkeypatch, service_catalog_inputs):
             schema="umi-cohort-service-terms/1",
             policy_sha256=digest(p.c.policy),
             transport_policy_sha256=scoring_policy_hash(p.transport_policy),
-            service_pool_bps=7000,
+            service_pool_bps=5000 if service_catalog_inputs == "equal_pools" else 7000,
             stratum_weights={"fingerspelling": 3, "continuous": 10},
         )
         references = tuple(
@@ -1807,16 +1807,21 @@ async def test_service_terminal_stops_fresh_attempts_and_rejects_changed_selecte
         )
 
 
-@pytest.mark.parametrize("service_catalog_inputs", [True], indirect=True)
+@pytest.mark.parametrize("service_catalog_inputs", [True, "equal_pools"], indirect=True)
 def test_native_service_allocation_requires_the_complete_replayed_work(service_quality_inputs):
     b = service_quality_inputs
     result = service_quality(b, allocation=True)
-    assert result.service_budget == 45874
-    assert result.model_budget == 19661
-    assert result.stratum_budgets == {"continuous": 35288, "fingerspelling": 10586}
+    expected = {
+        5000: (32767, 32768, 7562, 25205),
+        7000: (45874, 19661, 10586, 35288),
+    }[b["service_case"].terms.service_pool_bps]
+    service, model, fingerspelling, continuous = expected
+    assert result.service_budget == service
+    assert result.model_budget == model
+    assert result.stratum_budgets == {"continuous": continuous, "fingerspelling": fingerspelling}
     assert len(result.recipients) == 1
-    assert result.recipients[0].raw_weight == 10586
-    assert result.burn_weight == 35288
+    assert result.recipients[0].raw_weight == fingerspelling
+    assert result.burn_weight == continuous
     assert not result.chain_submission_authorized
     key = b["service_terminal"].terminal.response_sha256
     raw = b["objects"].pop(key)

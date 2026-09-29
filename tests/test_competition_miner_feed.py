@@ -249,7 +249,7 @@ async def test_terminal_feed_task_stops_serving(feed, tmp_path, monkeypatch, out
 
 
 def test_mutually_exclusive_sources_fail_before_wallet_access():
-    with pytest.raises(ValueError, match="either"):
+    with pytest.raises(ValueError, match="choose"):
         build_runtime(
             SimpleNamespace(
                 competition_feed="https://feed.example",

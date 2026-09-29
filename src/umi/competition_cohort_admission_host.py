@@ -153,9 +153,8 @@ async def admission_owner_app(
                 token=token,
             )
         )
-        app.include_router(
-            cohort_history_routes(CohortHistoryExporter(intake, c.owner_hotkey, sign), token=token)
-        )
+        app.state.history_exporter = CohortHistoryExporter(intake, c.owner_hotkey, sign)
+        app.include_router(cohort_history_routes(app.state.history_exporter, token=token))
         app.include_router(
             intake_review_routes(
                 IntakeReviewExporter(
@@ -187,9 +186,11 @@ async def admission_owner_app(
         app.state.dispatch = None
         app.state.orders = None
         app.state.request_readiness = None
-        if service_host is not None:
-            if service_host.preparation is not preparation or service_host.provider is not provider:
-                raise ValueError("phase control requires the same owned admission and finality")
+        if service_host is not None and (
+            service_host.preparation is not preparation or service_host.provider is not provider
+        ):
+            raise ValueError("phase control requires the same owned admission and finality")
+        if service_host is not None and service_host.config.lifecycle is not None:
             app.state.lifecycle = LifecycleHost(service_host, resources, client, credentials, sign)
             app.include_router(request_review_routes(app.state.lifecycle, token=token))
             if service_host.config.dispatch is not None:
@@ -277,6 +278,8 @@ async def run_admission_owner(
             while not server.started and not serving.done() and not stop.is_set():
                 await asyncio.wait((serving, stopping), timeout=0.05)
             if not stop.is_set() and server.started:
+                if service_host is not None:
+                    service_host.history_exporter = app.state.history_exporter
                 workers = [asyncio.create_task(poll(w)) for w in app.state.admission_workers]
                 if app.state.lifecycle is not None:
                     workers.append(asyncio.create_task(app.state.lifecycle.run(stop)))
@@ -299,6 +302,7 @@ async def run_admission_owner(
         finally:
             if service_host is not None:
                 service_host.request_readiness = None
+                service_host.history_exporter = None
             server.should_exit = True
 
             async def drain_workers():

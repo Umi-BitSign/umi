@@ -251,7 +251,7 @@ def test_signed_review_digest_without_original_evidence_remains_pending(model_ca
     assert award(model_case).recipient_hotkey is not None
 
 
-def service_boundary(c):
+def service_boundary(c, service_pool_bps):
     """Fixed service result fixture; these tests cover model integration only.
 
     Paid service execution has separate encrypted-response integration coverage.
@@ -266,6 +266,10 @@ def service_boundary(c):
     from umi.open_competition import identity
 
     b, _, manifest, _, _ = c
+    service, model, fingerspelling, continuous = {
+        5000: (32767, 32768, 7562, 25205),
+        7000: (45874, 19661, 10586, 35288),
+    }[service_pool_bps]
     review = object.__new__(ServiceAllocationReview)
     review.policy = b["policy"]
     review.statement = ServiceAllocationStatement(
@@ -277,11 +281,11 @@ def service_boundary(c):
             terms_sha256="f1" * 32,
             request_closure_sha256=manifest.request_closure_sha256,
             quality_sha256="f2" * 32,
-            service_budget=45874,
-            model_budget=19661,
-            stratum_budgets={"fingerspelling": 10586, "continuous": 35288},
+            service_budget=service,
+            model_budget=model,
+            stratum_budgets={"fingerspelling": fingerspelling, "continuous": continuous},
             recipients=(),
-            burn_weight=45874,
+            burn_weight=service,
         ),
     )
     review.slot = digest(
@@ -298,8 +302,9 @@ def service_boundary(c):
 
 
 @pytest.mark.parametrize("model_case", [("baseline", 1), ("below", 1)], indirect=True)
+@pytest.mark.parametrize("service_pool_bps", [5000, 7000])
 async def test_full_model_pool_retained_and_independently_replayed_after_lost_reply(
-    model_case, tmp_path, monkeypatch
+    model_case, tmp_path, monkeypatch, service_pool_bps
 ):
     import shutil
 
@@ -317,7 +322,7 @@ async def test_full_model_pool_retained_and_independently_replayed_after_lost_re
     from .test_open_competition import wallet
 
     b, br, benchmark, accepted, archive = model_case
-    sr, service = service_boundary(model_case)
+    sr, service = service_boundary(model_case, service_pool_bps)
     store = CompetitionStore(tmp_path / "native-model-store", b["policy"])
     shutil.copytree(archive, store.directory / "model-reward-artifacts")
     acceptance_path = (
@@ -355,8 +360,9 @@ async def test_full_model_pool_retained_and_independently_replayed_after_lost_re
     if result.model_award.recipient_hotkey is None:
         assert result.recipients == () and result.burn_weight == 65535
     else:
-        assert len(result.recipients) == 1 and result.recipients[0].raw_weight == 19661
-        assert result.burn_weight == 45874
+        assert len(result.recipients) == 1
+        assert result.recipients[0].raw_weight == service.statement.allocation.model_budget
+        assert result.burn_weight == service.statement.allocation.service_budget
 
     def replay(value=result):
         return replay_reward_allocation(

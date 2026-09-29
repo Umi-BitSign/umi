@@ -1391,16 +1391,31 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     if len(predecessors) > 8:
         raise ValueError("competition policy lineage exceeds eight predecessors")
     feed_origin = getattr(args, "competition_feed", None)
-    if feed_origin is not None and getattr(args, "competition_authorization", None) is not None:
-        raise ValueError("choose either a competition feed or a static authorization")
+    cohort_path = getattr(args, "competition_cohort_config", None)
+    if (
+        sum(
+            value is not None
+            for value in (
+                feed_origin,
+                cohort_path,
+                getattr(args, "competition_authorization", None),
+            )
+        )
+        > 1
+    ):
+        raise ValueError(
+            "choose one competition feed, cohort configuration or static authorization"
+        )
+    cohort_startup = None
     competition_inputs = (
         getattr(args, "competition_policy", None),
-        getattr(args, "competition_authorization", None) or feed_origin,
+        getattr(args, "competition_authorization", None) or feed_origin or cohort_path,
         getattr(args, "serving_origin", None),
     )
     if any(competition_inputs) and not all(competition_inputs):
         raise ValueError(
-            "competition mode requires policy, authorization or feed, and serving origin together"
+            "competition mode requires policy, authorization, feed or cohort configuration, "
+            "and serving origin together"
         )
     competition_policy = None
     publication = None
@@ -1423,7 +1438,15 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             validate_operational_successor(current, prior)
             current = prior
         register_lineage(competition_policy, prior_policies)
-        if feed_origin is not None:
+        if cohort_path is not None:
+            from .competition_cohort_miner_startup import CohortMinerStartupConfig
+
+            cohort_startup = CohortMinerStartupConfig.model_validate_json(
+                _read_startup_file(cohort_path, label="cohort miner configuration")
+            )
+            if getattr(args, "max_recovery_assignments", 0) <= 0:
+                raise ValueError("cohort serving requires durable response recovery capacity")
+        elif feed_origin is not None:
             from .competition_client import validate_intake_origin
 
             validate_intake_origin(feed_origin)
@@ -1442,6 +1465,15 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         raise ValueError("single-evaluator transport requires competition mode")
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path)
     hotkey_ss58, scheme = _identity(wallet)
+    if cohort_startup is not None:
+        cohort_startup.check(
+            policy=competition_policy,
+            transport=policy,
+            miner_hotkey=hotkey_ss58,
+            model_revision=args.model_revision,
+            serving_origin=competition_inputs[2],
+            state_files=(args.nonce_db, args.assignment_db, args.finality_state),
+        )
     policy_hash = scoring_policy_hash(policy)
     allowed_validator_hotkeys = frozenset(
         item.validator_hotkey for item in policy.validator_registry
@@ -1535,7 +1567,16 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             model_revision=args.model_revision,
             serving_origin=competition_inputs[2],
         )
-        if feed_origin is None:
+        if cohort_startup is not None:
+            from .competition_cohort_miner_startup import cohort_miner_authority
+
+            competition_authority = cohort_miner_authority(
+                cohort_startup,
+                policy=competition_policy,
+                transport=policy,
+                finalized_blocks=finality,
+            )
+        elif feed_origin is None:
             competition_authority = EndpointAuthorizationAuthority(
                 **authority_inputs, publication=publication
             )
@@ -1780,6 +1821,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     assignment_source.add_argument(
         "--competition-feed", help="HTTPS assignment feed for ongoing weight-disabled requests"
+    )
+    assignment_source.add_argument(
+        "--competition-cohort-config",
+        help="canonical cohort grant and public history configuration",
     )
     parser.add_argument(
         "--serving-origin", help="local HTTPS origin matching the miner-signed submission"

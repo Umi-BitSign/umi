@@ -204,6 +204,7 @@ class ServiceAdmissionHost:
             raise ValueError("service admission series differs from owned intake")
         self.intake, self.capture = intake, capture
         self.runtime_tasks, self.request_readiness = (), None
+        self.history_exporter = None
         self.provider = provider
         if c.admission_owner is not None:
             c.admission_owner.check_policy(policy)
@@ -403,7 +404,7 @@ class ServiceAdmissionHost:
                     self.preparation,
                     self.provider,
                     stop,
-                    service_host=self if self.config.lifecycle else None,
+                    service_host=self,
                 )
             )
             polling = asyncio.create_task(self._poll(stop))

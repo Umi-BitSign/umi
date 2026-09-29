@@ -8,6 +8,9 @@ import httpx
 import pytest
 
 import umi.competition_cohort_admission_host as admission_boot
+from umi.competition_cohort_history_http import CohortHistoryReader
+from umi.competition_cohort_intake import history_tip
+from umi.competition_cohort_public_history import PublicCohortHistoryClient
 from umi.competition_cohort_review_http import CohortReviewPeerConfig
 from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
 from umi.competition_cohort_service_work import ServiceWorkClaim, SignedServiceWorkClaim
@@ -199,6 +202,27 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="https://intake.example"
         ) as client:
+            authority_url = f"/v1/competition/cohorts/{h.cohort}/authority"
+            if automatic_admission:
+
+                async def public_started():
+                    while host.history_exporter is None:
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(public_started(), timeout=10)
+                reader = CohortHistoryReader(
+                    owner.owner_hotkey,
+                    PublicCohortHistoryClient(
+                        "https://intake.example",
+                        timeout_seconds=10,
+                        transport=httpx.ASGITransport(app=app),
+                    ),
+                )
+                history = await reader(h.cohort)
+                assert history_tip(history.history) == h.store.status(h.cohort)[0].tip_sha256
+            else:
+                response = await client.get(authority_url, params={"challenge": "01" * 32})
+                assert response.status_code == 503
             index = await client.get("/v1/competition/service-work")
             assert index.status_code == 200, index.text
             assert len(index.json()["catalogs"]) == 1
@@ -220,6 +244,7 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
             )
             assert again.json() == receipt
     assert provider.closed
+    assert host.history_exporter is None
 
 
 @pytest.mark.parametrize("cache_error", [False, True])

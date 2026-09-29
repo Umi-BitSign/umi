@@ -31,7 +31,7 @@ def terms(**changes):
         schema="umi-cohort-service-terms/1",
         policy_sha256="aa" * 32,
         transport_policy_sha256="bb" * 32,
-        service_pool_bps=7000,
+        service_pool_bps=5000,
         stratum_weights={"fingerspelling": 3, "continuous": 10},
     ).model_copy(update=changes)
 
@@ -110,17 +110,17 @@ def test_work_identity_breaks_ties_without_recipient_or_input_order():
     assert first == allocate(reversed(jobs)).model_copy(
         update={"quality_sha256": first.quality_sha256}
     )
-    assert amounts(first)[identity(hotkey(1))] == 3529
-    assert amounts(first)[identity(hotkey(2))] == 3529
-    assert amounts(first)[identity(hotkey(3))] == 3528
+    assert amounts(first)[identity(hotkey(1))] == 2521
+    assert amounts(first)[identity(hotkey(2))] == 2521
+    assert amounts(first)[identity(hotkey(3))] == 2520
 
 
 def test_zero_credit_stratum_burns_its_fixed_budget():
     result = allocate([work(1, hotkey(1), Fraction(0)), work(2, hotkey(2), stratum="continuous")])
-    assert amounts(result) == {identity(hotkey(2)): 35288}
-    assert result.burn_weight == 10586
+    assert amounts(result) == {identity(hotkey(2)): 25205}
+    assert result.burn_weight == 7562
     empty = allocate([])
-    assert amounts(empty) == {} and empty.burn_weight == 45874
+    assert amounts(empty) == {} and empty.burn_weight == 32767
 
 
 def test_linear_quality_does_not_reward_variance_or_uid_average():
@@ -133,7 +133,17 @@ def test_linear_quality_does_not_reward_variance_or_uid_average():
             work(4, b, Fraction(1, 2)),
         ]
     )
-    assert amounts(result) == {identity(a): 5293, identity(b): 5293}
+    assert amounts(result) == {identity(a): 3781, identity(b): 3781}
+
+
+@pytest.mark.parametrize("bps,service,model", [(5000, 32767, 32768), (7000, 45874, 19661)])
+def test_selected_pools_conserve_budget_with_deterministic_rounding(bps, service, model):
+    selected = terms(service_pool_bps=bps)
+    result = allocate([work(1, hotkey(1)), work(2, hotkey(2), stratum="continuous")], selected)
+    assert result.terms_sha256 == digest(selected)
+    assert (result.service_budget, result.model_budget) == (service, model)
+    assert result.burn_weight == 0
+    amounts(result)
 
 
 @pytest.mark.parametrize(

@@ -355,6 +355,9 @@ def create_intake_app(
     app.state.cohort_intake = cohort_intake
     app.state.service_admission_host = service_host
     if service_host is not None:
+        from .competition_cohort_public_history import public_history_routes
+
+        app.include_router(public_history_routes(lambda: service_host.history_exporter))
         app.include_router(service_admission_routes(service_host.api))
         app.include_router(request_readiness_routes(service_host))
         if service_host.uploads is not None:

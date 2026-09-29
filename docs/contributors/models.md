@@ -8,16 +8,15 @@
 
 ## Model contributions: prepare before spending compute
 
-Public first-round endpoint intake is live; model-artifact intake, model
-evaluation and competition rewards are not. The exact canonical model runtime
-and its immutable, reconstructible environment have not been published. This
-checklist explains what to prepare for a future rights and reconstruction
-review. It is not a license grant or approval of a particular model. The
-[historical version 1 terms](../MODEL_CONTRIBUTION_TERMS.md) and prospective
-[version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) publish the 70/30 allocation
-and the accepted identifiers for review: `MIT`, `Apache-2.0`, `CC-BY-4.0`, and
-`CC-BY-SA-4.0`. An identifier match still requires source-stack review and a
-qualifying promotion.
+Public intake is held on C5 preparation. Model enrollment under the new C5+
+policy has not opened. This checklist describes artifact, rights and
+reconstruction requirements; it does not approve a model or grant a license.
+The selected future split is 50% service and 50% model rewards. Its exact runtime,
+immutable policy and submission opening still need publication.
+
+The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for C4
+verification. Their 70/30 split and promotion rule do not define C5+'s new model
+award. Each submission must use the exact terms named by its signed policy.
 
 The prospective
 [version 3 terms draft](../competition/TERMS_V3_DRAFT.md) adds the
@@ -25,12 +24,9 @@ continuous-video dependence gate. It is not adopted and cannot be accepted by a
 submission until UMI publishes its final immutable file and successor-policy
 digest.
 
-The current endpoint-only intake is a no-weight intake. Version 1 says both
-tracks launch together. Version 2 permits the endpoint track to activate at 70%
-while the unallocated 30% is burned. The sequence 5 successor policy binds that
-version, but each affected miner must sign a fresh successor submission before
-it can govern a reward roster. Version 1 acceptance cannot be carried forward by
-an operator.
+Keep original submissions and acceptance receipts. Enrollment under a different
+reward policy requires fresh miner consent; an operator cannot carry old
+signatures into the new rules.
 
 <a id="model-contribution-review--what-must-be-published-before-intake-opens"></a>
 
@@ -151,20 +147,20 @@ It still requires acceptance of the applicable published terms and lawful use
 of the model and data for the service offered. Keeping weights private does not
 remove privacy, consent, access-agreement or commercial-use restrictions.
 
-Contributors seeking the 30% model track additionally need a preserved,
-reconstructible, rights-reviewed artifact that qualifies for promotion. Endpoint
-scores compete for the 70% service track. The current live origin accepts
-endpoint submissions only. The
+Model-track participation additionally requires a preserved, reconstructible,
+rights-reviewed artifact and explicit enrollment. The
 [manifest preparation notes](../reference/commands.md#live-first-round-model-contribution)
-do not open model intake. A future model submission will register a signed
-manifest and provide its bytes from an immutable source through the restricted
-review route, where every declared file is rehashed before execution.
-
-Until that future opening and a qualifying promotion, the 30% share remains
-burned. It does not accrue for retroactive payment. If two new candidates are
-exactly tied for the highest qualifying result, neither is promoted in that
-round.
+do not open model intake. A model submission registers a signed manifest and
+provides the complete bytes through the published delivery route, where every
+declared file is rehashed before execution.
 
 Both tracks use the same signed policy. Rewards begin only after the
 [activation gates](../competition/launch.md) pass and the competition row is
 confirmed on chain.
+
+For C5+, the selected split is 50% service and 50% model rewards. The model
+quality floor is equality with the frozen baseline, and a sole eligible entrant
+receives the full model pool. Complete submission, artifact preservation and
+rights checks remain required. This future model reward is separate from
+promotion of the reference model. The new policy and activation are still being
+prepared; current signed allocations retain their existing rules.

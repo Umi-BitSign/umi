@@ -740,6 +740,16 @@ owned registration observer through `CompetitionTransportFinality` only when
 transport and registration select identical chain and verifier pins. The view
 preserves proof bytes and never rewrites the finality database.
 
+While the admission owner runs, the public intake exposes that same signed
+history at `GET /v1/competition/cohorts/{cohort_sha256}/authority` with a fresh
+64-character lowercase hexadecimal `challenge`. The reply binds that challenge
+to the current history and original phase decisions. It contains no reference
+packages, clips or model artifacts. Public signing has a separate two-operation
+limit; unavailable, saturated or stopped owners return HTTP 503. Replies are
+not cached. Miners independently verify the response using their pinned owner
+and replay phase authority. Their startup configuration is documented in the
+[miner model guide](../miners/model.md).
+
 Configure `ServiceVotePeer` for each independent reviewer's HTTPS origin and vote
 credential. Pass `ServiceWorkPeerReviews.reviewers` and `.retry` to the recurring
 service worker. Request votes remain in its original queue; partial retry votes

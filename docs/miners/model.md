@@ -165,21 +165,55 @@ served. Cross-policy retrieval, replacement-key authorization, durable attempt
 selection and certified archive retirement still require C5 integration. Keep
 the database and its recovery records until that retirement is qualified.
 
-The candidate also provides an opt-in `CohortMinerAuthorizationAuthority` for
-recoverable cohort grants. Host composition must bind the miner's policy, model,
-serving origin and admitted cohort authorities, and supply authenticated current
-history and owned finality. The standard miner CLI does not configure it yet.
+For a deployment using recoverable cohorts, select
+`--competition-cohort-config /absolute/path/cohort-miner.json` with
+`--competition-policy`, `--serving-origin`, `--model-revision` and a positive
+`--max-recovery-assignments`. This replaces `--competition-feed` or
+`--competition-authorization` in the normal miner command. The same translator,
+transport policy, owned finality observer and durable state arguments still
+apply. Enabling this mode does not enroll the miner or activate rewards.
+
+The startup file uses `umi-cohort-miner-startup/1` and these fields:
+
+| Field | Value |
+|---|---|
+| `history_origin` | Reviewed HTTPS intake origin |
+| `history_owner_hotkey` | Pinned intake owner's evaluator hotkey |
+| `authority` | `umi-cohort-miner-config/1`, or `umi-cohort-service-miner-config/1` for service grants |
+
+The nested authority contains the competition `policy_sha256`,
+`transport_policy_sha256`, `miner_hotkey`, `model_revision`, `serving_origin`,
+a dedicated absolute `directory`, and sorted unique `cohorts` entries with
+`cohort_sha256` and `authority_sha256`. Service mode also pins
+`service_terms_sha256`. Obtain these bindings from the reviewed cohort deployment;
+startup checks them against the miner's selected policy and identity. The grant
+directory must be separate from the assignment, nonce and finality state paths.
+Its defaults allow 4,096 grants and 1 GiB of grant records; durable response
+capacity is configured separately with `--max-recovery-assignments`.
+
+Write the startup file with `canonical_json_bytes` from `umi.protocol`, then keep
+it and its parent owned by the miner user without group or other write permission.
+The file is limited to 1 MiB. Preserve its authority bindings with the existing
+grant journal; changing the cohort list or identity is not an in-place migration.
+
+The miner reads challenge-bound signed history from the intake's public
+`GET /v1/competition/cohorts/{cohort_sha256}/authority` route. No private
+coordinator credential is needed. It checks the configured owner signature,
+certified phase history and local finalized transport window. An unavailable
+owner prevents new inference until a retry succeeds; stored response recovery
+remains available independently.
+
 Its authenticated `POST /v1/competition/cohorts/assignments` route retains an exact
-quorum-signed first-attempt grant and returns a signed storage receipt. Retrying
-that grant returns the same receipt after restart or phase closure. An altered
-grant cannot replace the retained selection.
+quorum-signed grant and returns a signed storage receipt. Retrying that grant
+returns the same receipt after restart or phase closure. An altered grant cannot
+replace the retained selection.
 
 Storage acknowledgement permits no inference by itself. Each translation still
 requires an open certified request phase and the miner's own transport-window
 checks. A delayed cohort can use a fresh transport window after its original
 target, while an expired individual request requires recovery and certified
-replacement. Replacement attempts and cross-policy/key archive access remain
-integration work. Keep the grant journal, assignment database and nonce database
+replacement. Cross-policy/key archive access and installed cohort qualification
+remain open. Keep the grant journal, assignment database and nonce database
 together through restart; a fresh empty journal is not recovery.
 
 The assigned evaluator can retire an old request through authenticated

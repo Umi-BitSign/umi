@@ -20,7 +20,7 @@ into successive public baselines.
 ## Documentation
 
 - [All documentation](docs/README.md)
-- [Competition and the 70/30 allocation](docs/OPEN_COMPETITION.md)
+- [Competition and reward allocation](docs/OPEN_COMPETITION.md)
 - [Public results API and pending round discovery](docs/reference/competition-results-api.md)
 - [Model contributions](docs/contributors/models.md)
 - [Whitepaper](whitepaper/README.md) and [PDF](whitepaper/UMI-Whitepaper.pdf)
