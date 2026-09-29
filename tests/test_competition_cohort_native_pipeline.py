@@ -1,8 +1,8 @@
-"""Accepted submissions through owned preparation, delivery and original terminals.
+"""Public model delivery through artifact review and certified request handoff.
 
-Finality and sandbox inference are deterministic ports. No prepared round, order,
-execution receipt or completion signature is supplied to the pipeline. This is
-not an installed-host or chain-effects qualification.
+Finality, readiness, reviewed rights documents and sandbox inference are fixtures.
+No prepared round, order, execution receipt or completion signature is supplied.
+This model-only cohort does not qualify paid service work or installed rewards.
 """
 
 import asyncio
@@ -12,16 +12,31 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
+from umi import competition_cohort_admission_host as admission_module
 from umi import competition_cohort_benchmark_host as benchmark_module
+from umi import competition_cohort_dispatch_host as dispatch_module
+from umi.competition_artifacts import preserve_bundle, verify_preserved_bundle
+from umi.competition_cohort_api import cohort_routes
 from umi.competition_cohort_benchmark_host import BenchmarkHost, BenchmarkHostConfig
+from umi.competition_cohort_clip_delivery import ClipDeliveryConfig
+from umi.competition_cohort_dispatch_host import ServiceDispatchConfig
 from umi.competition_cohort_execution_journal import CohortExecutionConfig
+from umi.competition_cohort_history import CohortRecoveryHistory
 from umi.competition_cohort_intake import (
     CohortIntake,
     CohortIntakeBinding,
     CohortIntakeConfig,
     history_tip,
 )
+from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from umi.competition_cohort_model_acceptance_store import PendingModelArtifacts
+from umi.competition_cohort_model_client import submit_cohort_model
+from umi.competition_cohort_model_review import ModelArtifactReviewer, ModelReviewConfig
+from umi.competition_cohort_model_review_http import ModelReviewPeer, model_review_routes
+from umi.competition_cohort_model_upload import ModelUploadConfig
+from umi.competition_cohort_model_upload_http import model_upload_routes
 from umi.competition_cohort_order_host import OrderHostConfig
 from umi.competition_cohort_order_inbox import CohortOrderInboxConfig
 from umi.competition_cohort_order_queue import CohortOrderQueueConfig
@@ -31,11 +46,19 @@ from umi.competition_cohort_participation import (
     CohortParticipationRequest,
     SignedCohortParticipationConsent,
 )
+from umi.competition_cohort_phase_vote_http import phase_vote_routes
+from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
 from umi.competition_cohort_request_closure import PendingRequestClosure, build_request_closure
 from umi.competition_cohort_request_files import RequestCompletionFiles
+from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver
+from umi.competition_cohort_request_review import RequestProgressReviewer
+from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
+from umi.competition_cohort_service_quality import ServiceTerms
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from umi.competition_execution import execution_boundary
 from umi.open_competition import digest, identity, sign_object
+from umi.policy import scoring_policy_hash
+from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_executor import output
@@ -48,10 +71,13 @@ from .test_competition_cohort_lifecycle_host import (
 )
 from .test_competition_cohort_lifecycle_host import precommit_service_inventory
 from .test_competition_cohort_lifecycle_host import recovery as recovery
-from .test_competition_cohort_lifecycle_host import scenario as scenario
+from .test_competition_cohort_recovery import signatures as quorum_signatures
+from .test_competition_cohort_standing_phases import standing
 from .test_competition_runner import runtime as runtime
+from .test_competition_service import chain_config as chain_config
 from .test_open_competition import bundle_at, submission, wallet
 from .test_open_competition import policy as base_policy  # noqa: F401
+from .test_policy import make_policy
 
 
 def model_request(scenario, model, *, sequence, block):
@@ -68,7 +94,15 @@ def model_request(scenario, model, *, sequence, block):
 
 
 def precommit_model_inventory(h):
-    precommit_service_inventory(h)
+    h.transport = make_policy()
+    h.terms = ServiceTerms(
+        schema="umi-cohort-service-terms/1",
+        policy_sha256=digest(h.intake.policy),
+        transport_policy_sha256=scoring_policy_hash(h.transport),
+        service_pool_bps=5000,
+        stratum_weights={"fingerspelling": 3, "continuous": 10},
+    )
+    precommit_service_inventory(h, service_terms_sha256=digest(h.terms))
     h.model = bundle_at(Path(h.intake.config.directory).parent / "model-submission")
     h.request_for = lambda scenario, **kwargs: model_request(scenario, h.model, **kwargs)
 
@@ -76,6 +110,30 @@ def precommit_model_inventory(h):
 pytestmark = pytest.mark.parametrize(
     "lifecycle_before_intake", [precommit_model_inventory], indirect=True
 )
+
+
+@pytest.fixture
+def scenario(legacy_scenario, policy):
+    old = legacy_scenario["intake_history"]
+    authority, genesis, _ = standing(old.plan, policy, model_rewards=True)
+    history = CohortRecoveryHistory(
+        schema="umi-cohort-recovery-history/1",
+        plan=old.plan,
+        authority=authority,
+        genesis=genesis,
+        genesis_signatures=quorum_signatures(genesis),
+        transitions=(),
+    )
+    consent = legacy_scenario["consent"].consent.model_copy(
+        update={"authority_sha256": digest(authority.authority)}
+    )
+    return dict(
+        legacy_scenario,
+        intake_history=history,
+        consent=SignedCohortParticipationConsent(
+            consent=consent, signature=sign_object(consent, wallet("Alice"))
+        ),
+    )
 
 
 @pytest.fixture
@@ -108,21 +166,231 @@ def intake(tmp_path, scenario):
     return service
 
 
-async def accept_model(h, scenario):
+async def accept_model(o, scenario):
     # A newer explicitly signed model submission supersedes the two model
     # submissions retained by the lifecycle fixture, before intake closes.
+    h = o.h
     h.block += 5
     request = model_request(scenario, h.model, sequence=3, block=h.block)
+    public = FastAPI()
+    public.include_router(
+        cohort_routes(
+            h.intake, o.service.capture, maximum_body_bytes=4 * 1024**2, models=o.service.uploads
+        )
+    )
+    public.include_router(model_upload_routes(o.service.uploads, o.service.capture))
+    stop = asyncio.Event()
+    polling = asyncio.create_task(o.service._poll(stop))
+    try:
+        receipt = await asyncio.wait_for(
+            submit_cohort_model(
+                origin="https://intake.example",
+                policy=h.intake.policy,
+                request=request,
+                source=Path(h.intake.config.directory).parent / "model-submission",
+                wallet=wallet("Alice"),
+                retry_seconds=0.01,
+                transport=httpx.ASGITransport(public),
+            ),
+            20,
+        )
+    finally:
+        stop.set()
+        await asyncio.wait_for(polling, 10)
+    assert receipt.status == "pending_attestation"
+    assert verify_preserved_bundle(
+        h.model, o.service.models.owner.archive, h.intake.policy
+    ) == digest(h.model)
     capture = h.capture(h.block)
-    receipt = h.intake.retain(request, capture)
     h.queue.attach_evidence(
         h.cohort,
-        receipt["proposed_admission"]["consent_sha256"],
+        digest(request.consent.consent),
         *await h.provider.retained_archive(execution_boundary(capture)),
     )
     for worker in h.admissions:
         await worker.poll_once()
     return h.model, request
+
+
+def configure_owner(o, orders, chain_config, root, monkeypatch):
+    dispatch = ServiceDispatchConfig(
+        schema="umi-cohort-service-dispatch-config/1",
+        origins=chain_config.model_copy(
+            update={
+                "proof_rpc_fallback_urls": ("wss://backup-one.example", "wss://backup-two.example")
+            }
+        ),
+        clips=ClipDeliveryConfig(
+            schema="umi-cohort-clip-delivery-config/1",
+            directory=str(root / "clips"),
+            videos_directory=str(root / "videos"),
+            origin="https://clips.example",
+            upload_token_file=str(root / "clip-token"),
+        ),
+        poll_seconds=1,
+    )
+    config = ServiceAdmissionHostConfig.model_validate(
+        {
+            **o.config.model_dump(by_alias=True),
+            "schema": "umi-cohort-service-admission-host/7",
+            "orders": orders,
+            "dispatch": dispatch,
+            "model_review_peers": o.config.admission_owner.reviewers,
+            "model_uploads": ModelUploadConfig(
+                directory=str(root / "uploads"), maximum_reserved_bytes=1024**2
+            ),
+            "poll_seconds": 1,
+        }
+    )
+    previous = o.service
+    # Construct the actual service through its validating startup boundary.
+    o.service = ServiceAdmissionHost(
+        config,
+        o.h.intake,
+        o.h.owner.promotion,
+        previous.capture,
+        o.h.provider.retained_archive,
+        provider=o.h.provider,
+    )
+    o.config = config
+    catalog = o.h.precommitted[0]
+    publish_private_model(
+        Path(config.inputs_directory) / "catalogs" / (digest(catalog.catalog) + ".json"), catalog
+    )
+    publish_private_model(
+        Path(config.lifecycle.sources.transport_directory)
+        / (scoring_policy_hash(o.h.transport) + ".json"),
+        o.h.transport,
+    )
+    SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory)).publish(
+        digest(o.h.terms), lambda _: canonical_json_bytes(o.h.terms)
+    )
+    o.open = lambda: admission_module.admission_owner_app(
+        config.admission_owner, o.service.preparation, o.h.provider, service_host=o.service
+    )
+    old_token = admission_module._token
+    monkeypatch.setattr(
+        admission_module,
+        "_token",
+        lambda path: "a" * 64 if path == dispatch.clips.upload_token_file else old_token(path),
+    )
+
+    class Origins:
+        # Retain real dispatch startup and its policy/provider checks. Only the
+        # external finality process is replaced; this cohort has no endpoints.
+        def __init__(self, config, policy):
+            self.config, self.policy = config, policy
+
+        async def start(self):
+            pass
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(dispatch_module, "CohortEndpointFinalityProvider", Origins)
+
+
+def configure_model_reviews(o, root, client, signatures):
+    inputs = ModelArtifactReviewInputs(
+        model_sha256=digest(o.h.model),
+        rights_evidence={"fixture": "inert bundle with retained license and provenance"},
+        reconstruction_evidence={"fixture": "independently preserved inert baseline bundle"},
+    )
+    publish_private_model(
+        Path(o.config.inputs_directory) / "model-reviews" / (inputs.model_sha256 + ".json"), inputs
+    )
+    peers = []
+    for name in ("Charlie", "Dave"):
+        selected = root / name
+        archive = selected / "artifacts"
+        preserve_bundle(
+            o.h.model,
+            Path(o.h.intake.config.directory).parent / "model-submission",
+            archive,
+            o.h.intake.policy,
+        )
+        publish_private_model(selected / "approvals" / (inputs.model_sha256 + ".json"), inputs)
+
+        async def sign(body, name=name):
+            signatures[(name, digest(body))] += 1
+            return sign_object(body, wallet(name))
+
+        reviewer = ModelArtifactReviewer(
+            ModelReviewConfig(
+                schema="umi-cohort-model-review-config/1",
+                directory=str(selected / "journal"),
+                approvals_directory=str(selected / "approvals"),
+                archive_directory=str(archive),
+                policy_sha256=digest(o.h.intake.policy),
+                signer=wallet(name).hotkey.ss58_address,
+                cohorts=o.h.intake.config.cohorts,
+            ),
+            o.h.intake.policy,
+            o.service.capture,
+            o.service.history,
+            sign,
+        )
+        o.apps[name.lower() + ".example"].include_router(
+            model_review_routes(reviewer, token="v" * 32)
+        )
+        peers.append(
+            ModelReviewPeer(
+                client,
+                f"https://{name.lower()}.example",
+                policy=o.h.intake.policy,
+                cohorts=o.h.intake.config.cohorts,
+                signer=wallet(name).hotkey.ss58_address,
+                token="v" * 32,
+                timeout_seconds=10,
+            )
+        )
+    o.service.models.reviewers = tuple(peers)
+
+
+async def certify_requests(o, app, root, monkeypatch, signatures):
+    """Use native request observation, review and handoff with synthetic readiness.
+
+    This model-only cohort has no service claims. It still must fence its real
+    catalog, preserve the completed benchmark work and certify request closure.
+    """
+    h = o.h
+    assert (await o.service.poll_once())["catalogs_installed"] == 1
+    node = await app.state.lifecycle.node(h.cohort)
+    await node._driver("requests")
+    source = app.state.lifecycle.requests[h.cohort]
+
+    async def ready(self, state, capture):
+        return h.ready
+
+    monkeypatch.setattr(LiveRequestPhaseObserver, "_ready", ready)
+    for name in ("Charlie", "Dave"):
+        config = CohortProgressSignerConfig(
+            schema="umi-cohort-progress-signer-config/1",
+            directory=str(root / name),
+            policy_sha256=digest(h.intake.policy),
+            signer=wallet(name).hotkey.ss58_address,
+            cohorts=h.intake.config.cohorts,
+        )
+
+        async def sign(body, name=name):
+            signatures[(name, digest(body))] += 1
+            return sign_object(body, wallet(name))
+
+        reviewer = RequestProgressReviewer(source, h.provider, h.provider.retained_archive)
+        signer = CohortProgressSigner(config, reviewer, sign)
+        o.apps[name.lower() + ".example"].include_router(
+            phase_vote_routes(signer, phase="requests", token="v" * 32)
+        )
+    for _ in range(100):
+        h.block += 5
+        await node.tick()
+        if node.controller.store.status(h.cohort)[0].phase == "reference_reveal":
+            break
+    assert node.controller.store.status(h.cohort)[0].phase == "reference_reveal", node.last_report
+    assert Path(o.config.lifecycle.settlement_history_directory, h.cohort + ".json").is_file()
+    history = h.intake.history(h.cohort)
+    assert history.transitions[-1].transition.phase == "requests"
+    assert history.transitions[-1].transition.operation == "close_phase"
 
 
 def evaluator_config(o, name, root):
@@ -179,13 +447,9 @@ def deliver_exports(nodes, target):
 
 @pytest.mark.parametrize("interrupt", [False, True], ids=["normal", "outage-restart"])
 async def test_accepted_model_reaches_complete_original_request_closure(
-    host, scenario, runtime, tmp_path, monkeypatch, interrupt
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config, interrupt
 ):
     o, h = host, host.h
-    model, submitted = await accept_model(h, scenario)
-    inputs = SettlementEvidenceFiles(Path(o.config.lifecycle.sources.objects_directory))
-    for value in (scenario["suite"], runtime, model):
-        inputs.publish(digest(value), lambda _, value=value: canonical_json_bytes(value))
     orders = OrderHostConfig(
         schema="umi-cohort-order-host/1",
         queue=CohortOrderQueueConfig(
@@ -199,9 +463,11 @@ async def test_accepted_model_reaches_complete_original_request_closure(
         ),
         poll_seconds=1,
     )
-    o.service.config = o.config.model_copy(
-        update={"schema_": "umi-cohort-service-admission-host/7", "orders": orders}
-    )
+    configure_owner(o, orders, chain_config, tmp_path / "native-owner", monkeypatch)
+    model, submitted = await accept_model(o, scenario)
+    inputs = SettlementEvidenceFiles(Path(o.config.lifecycle.sources.objects_directory))
+    for value in (scenario["suite"], runtime, model):
+        inputs.publish(digest(value), lambda _, value=value: canonical_json_bytes(value))
     inference, signatures = Counter(), Counter()
 
     async def invoke(job, attempt):
@@ -218,6 +484,33 @@ async def test_accepted_model_reaches_complete_original_request_closure(
     )
     configs = {n: evaluator_config(o, n, tmp_path / n) for n in ("Charlie", "Dave")}
     async with httpx.AsyncClient() as client:
+        configure_model_reviews(o, tmp_path / "artifact-review", client, signatures)
+
+        # Independent artifact acceptance is required even for a baseline copy.
+        o.outages.add("dave.example")
+        assert (await o.service.models.poll_once())["entries_pending"] == 3
+        with pytest.raises(PendingModelArtifacts):
+            o.service.models.owner.retained(
+                h.cohort, digest(submitted.signed_submission.submission)
+            )
+        assert len(signatures) == 3
+        o.outages.clear()
+        async with o.open() as app:
+            lifecycle = await app.state.lifecycle.node(h.cohort)
+            for _ in range(15):
+                h.block += 5
+                await lifecycle.tick()
+            assert lifecycle.controller.store.status(h.cohort)[0].phase == "intake"
+        original_votes = dict(signatures)
+        o.outages.clear()
+        o.outages.add("charlie.example")
+        assert (await o.service.models.poll_once())["entries_exported"] == 3
+        assert all(signatures[k] == count for k, count in original_votes.items())
+        accepted_artifact = o.service.models.owner.retained(
+            h.cohort, digest(submitted.signed_submission.submission)
+        )
+        assert len(accepted_artifact.certificate.signatures) == 2
+        o.outages.clear()
 
         def evaluator(name):
             async def sign(body):
@@ -357,6 +650,8 @@ async def test_accepted_model_reaches_complete_original_request_closure(
             assert len(closure.participants[0].evaluators) == 2
             assert max(inference.values()) == max(signatures.values()) == 1
             assert sum(inference.values()) == 12
+            await certify_requests(o, app, tmp_path / "request-review", monkeypatch, signatures)
+            assert max(signatures.values()) == 1
             # Reopened workers can recover all completed originals offline.
             h.offline = True
             o.outages.add("owner.example")
