@@ -48,6 +48,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.12", "3.14"]
+        shard: [0, 1, 2, 3]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,26 +74,67 @@ jobs:
           uv sync --locked --extra dev
 
       - name: Check pinned Bittensor CLI startup
+        if: matrix.shard == 0
         run: .venv/bin/btcli --version
 
       - name: Check installed dependency compatibility
+        if: matrix.shard == 0
         run: uv pip check --python .venv/bin/python
 
       - name: Lint
+        if: matrix.shard == 0
         run: uv run --locked ruff check src tests neurons tools
 
       - name: Check formatting
+        if: matrix.shard == 0
         run: uv run --locked ruff format --check src tests neurons tools
 
       - name: Test
-        run: uv run --locked pytest --basetemp="${RUNNER_TEMP}/pytest"
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+          TEST_SHARDS: "4"
+        run: |
+          uv run --locked python - <<'PY'
+          import hashlib
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          shard, count = int(os.environ["TEST_SHARD"]), int(os.environ["TEST_SHARDS"])
+          assert 0 <= shard < count
+          # Match pytest's default file patterns; each file runs exactly once
+          # per Python version. Stable hashing keeps new files on one shard.
+          files = sorted({p for pattern in ("test_*.py", "*_test.py")
+                          for p in Path("tests").rglob(pattern)})
+          selected = [str(p) for p in files
+                      if hashlib.sha256(p.as_posix().encode()).digest()[0] % count == shard]
+          assert selected, "empty test shard"
+          result = subprocess.run([
+              sys.executable, "-m", "pytest", *selected,
+              "--basetemp=" + os.environ["RUNNER_TEMP"] + "/pytest",
+              "--junitxml=test-results.xml", "--durations=20",
+          ])
+          raise SystemExit(result.returncode)
+          PY
+
+      - name: Retain test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-python-${{ matrix.python-version }}-shard-${{ matrix.shard }}
+          path: test-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build wheel
+        if: matrix.shard == 0
         run: |
           uv build --wheel --out-dir dist
           uv pip install --python .venv/bin/python --force-reinstall --no-deps dist/*.whl
 
       - name: Check console entry points
+        if: matrix.shard == 0
         run: |
           .venv/bin/umi-competition --help
           .venv/bin/umi-competition-store-migrate --help

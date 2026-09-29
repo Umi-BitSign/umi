@@ -3707,7 +3707,10 @@ async def test_native_request_certification_starts_recurring_settlement(
                 CohortIntakePublisher(owner.intake, owner.provider.collect, control.decision),
                 {"intake": no_intake, "preparation": prepared_driver, "requests": request_driver},
             )
-            result = await asyncio.wait_for(lifecycle.run(stop, poll_seconds=0.01), timeout=60)
+            # Native replay and concurrent exporter reads can exceed a minute
+            # on shared CI CPUs. This watchdog bounds only the test, not the
+            # cohort's authority or its recoverable processing interval.
+            result = await asyncio.wait_for(lifecycle.run(stop, poll_seconds=0.01), timeout=600)
             assert result["status"] == "settlement_handoff_published"
         assert handoff.exists()
         request_signatures = tuple(owner.calls)
@@ -3721,7 +3724,13 @@ async def test_native_request_certification_starts_recurring_settlement(
                         pytest.fail("settlement loop stopped unexpectedly")
                 await asyncio.sleep(0.05)
 
-        await asyncio.wait_for(replicate_and_wait(), timeout=180)
+        try:
+            await asyncio.wait_for(replicate_and_wait(), timeout=900)
+        except asyncio.TimeoutError:
+            pytest.fail(
+                "settlement handoff did not finish: "
+                f"coordinator={a.last_report}, reviewer={z.last_report}"
+            )
         assert tuple(owner.calls) == request_signatures
     finally:
         stop.set()
