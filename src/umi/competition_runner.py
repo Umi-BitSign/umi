@@ -251,7 +251,9 @@ async def verify_runtime(runtime: OfflineRuntime, policy: CompetitionPolicy) -> 
     if digest(runtime) != policy.evaluation_runtime_sha256:
         raise EvaluationInfrastructureError("offline runtime does not match the signed policy")
     try:
-        code, output = await _small_command(("/usr/bin/podman", "info", "--format=json"))
+        code, output = await _small_command(
+            ("/usr/bin/podman", "info", "--format=json"), timeout=60
+        )
         info = json.loads(output)
         host = info["host"]
         if (
@@ -260,7 +262,9 @@ async def verify_runtime(runtime: OfflineRuntime, policy: CompetitionPolicy) -> 
             or str(host["cgroupVersion"]).lower() not in {"v2", "2"}
         ):
             raise EvaluationInfrastructureError("rootless Podman with cgroup v2 is required")
-        code, _ = await _small_command(("/usr/bin/podman", "image", "exists", runtime.image))
+        code, _ = await _small_command(
+            ("/usr/bin/podman", "image", "exists", runtime.image), timeout=60
+        )
         if code:
             raise EvaluationInfrastructureError("pinned offline runtime image is not installed")
     except (OSError, KeyError, TypeError, ValueError, asyncio.TimeoutError) as error:

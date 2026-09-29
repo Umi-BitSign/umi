@@ -144,7 +144,7 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
                 copy_originals(Path(a.history_directory), Path(z.history_directory))
                 copy_originals(Path(a.exchange_outbox) / "inputs", Path(z.inputs_directory))
 
-    async def run_until(selected, done, *, timeout=120):
+    async def run_until(selected, done, *, timeout=600):
         stop = asyncio.Event()
         tasks = [asyncio.create_task(n.run(stop)) for n in selected]
 

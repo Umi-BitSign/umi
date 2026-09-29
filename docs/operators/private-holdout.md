@@ -8,11 +8,13 @@
 
 ## Private holdout for automatic launch evaluation
 
-The first 70/30 competition uses automatic CER/WER scoring against fixed English
-references. It does not require a new human ASL grading panel, a person reviewing
-every miner output, or human approval of each score. Existing labeled ASL data
-can supply the references. This choice does not activate the competition or
-change the signed policy, scoring formula, evaluator quorum or bridge lifetime.
+C5 uses automatic CER/WER scoring against fixed English references. It does not
+require a new human ASL grading panel, a person reviewing every miner output, or
+human approval of each score. Existing labeled ASL data can supply the
+references. C5's separate video-dependence comparison is diagnostic only and
+cannot change its score, eligibility, reward or settlement. These data-handling
+instructions do not activate the competition or change a signed policy, scoring
+formula or evaluator quorum.
 
 <a id="open-competition-private-holdout--private-storage-and-evaluator-setup"></a>
 
@@ -74,26 +76,34 @@ contributor supplies it, disclose that access and any influence on selection.
 
 ### Approved launch input contract
 
-The approved endpoint-intake launch uses `umi-open-competition-policy/3` and
+The C5 scoring profile uses `umi-open-competition-policy/3` and
 `umi-competition-suite/2`. It uses one reference, the fingerspelling and
-continuous strata, the 3/13 and 10/13 weights, and the unallocated model-share
-burn rule. Its exact bytes and semantics remain unchanged.
+continuous strata, and the 3/13 and 10/13 weights. The signed standing reward
+authority applies C5's separate 50% service and 50% public-model pools. C4's
+signed policy keeps its original allocation and meaning.
 
 ### Prospective dependence-gated input contract
 
+This section describes a possible successor to C5. It is not the C5 payout
+policy. C5 can collect the comparison diagnostically where feasible, but a
+missing or failed diagnostic cannot hold settlement. Activating this gate in a
+future cohort requires published thresholds, qualification, a newly signed
+policy and fresh participant acceptance before intake.
+
 `EvaluationSuite` binds the policy hash and case identities. The prospective
 dependence-gated launch uses `umi-open-competition-policy/4` and
-`umi-competition-suite/3`. Version 4 retains version 3's scoring and
-[unallocated model-share burn rule](../competition/launch.md), then adds
-duration-matched continuous-video controls. It also requires fresh acceptance
-of the final form of the
-[version 3 terms draft](../competition/TERMS_V3_DRAFT.md).
+`umi-competition-suite/3`. Version 4 retains version 3's scoring, then adds
+duration-matched continuous-video controls. Its reward allocation must be
+defined by its own signed authority. It also requires fresh acceptance of the
+final form of the
+[version 3 terms](../MODEL_CONTRIBUTION_TERMS_V3.md).
 The scoring profile uses one authentic English reference per case, with
 fingerspelling and continuous signing as its two required tasks. Their exact
 score weights are 3/13 and 10/13, respectively. Each task must meet the policy's
 minimum case count, and the suite must contain at least three cases overall.
-Short utterances are not scored under this profile. It preserves the 70/30
-reward split and the 120-second launch inference deadline.
+Short utterances are not scored under this profile. The inference deadline and
+reward split are prospective policy choices and cannot be inherited silently
+from an earlier cohort.
 
 Suite version 3 pairs every scored continuous case with one control. The
 control retains the anchor's reference and uses another scored clip's video.
@@ -251,6 +261,8 @@ valid paraphrases can lose points, and small text edits can change meaning.
 Human semantic evaluation can be added later under a prospective published
 policy without being a dependency for this automatic-scoring launch.
 
-The 70/30 allocation, model preservation and contribution-rights checks remain
-unchanged. The [execution plan](../competition/launch.md) tracks the
-remaining operational activation gates.
+C5's 50/50 allocation, model preservation and contribution-rights checks are
+defined by its signed policy and version 3 terms. The
+[execution plan](../competition/launch.md) tracks the remaining operational
+activation gates. A future dependence-gated policy defines its own allocation
+prospectively; this document does not reinterpret C5.

@@ -18,11 +18,11 @@ The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for C4
 verification. Their 70/30 split and promotion rule do not define C5+'s new model
 award. Each submission must use the exact terms named by its signed policy.
 
-The prospective
-[version 3 terms draft](../competition/TERMS_V3_DRAFT.md) adds the
-continuous-video dependence gate. It is not adopted and cannot be accepted by a
-submission until UMI publishes its final immutable file and successor-policy
-digest.
+The [version 3 terms](../MODEL_CONTRIBUTION_TERMS_V3.md) define the 50% service
+and 50% public-model pools. C5's continuous-video dependence comparison is
+diagnostic only and does not affect scores, eligibility, settlement or payouts.
+The launch policy must bind the terms file's published
+[SHA-256](../MODEL_CONTRIBUTION_TERMS_V3.sha256) before enrollment opens.
 
 Keep original submissions and acceptance receipts. Enrollment under a different
 reward policy requires fresh miner consent; an operator cannot carry old
@@ -160,7 +160,10 @@ confirmed on chain.
 
 For C5+, the selected split is 50% service and 50% model rewards. The model
 quality floor is equality with the frozen baseline, and a sole eligible entrant
-receives the full model pool. Complete submission, artifact preservation and
-rights checks remain required. This future model reward is separate from
-promotion of the reference model. The new policy and activation are still being
-prepared; current signed allocations retain their existing rules.
+receives the full model pool. Multiple eligible distinct artifacts divide that
+pool in proportion to normalized benchmark score. Exact duplicate content is
+counted once, using the first complete certified acceptance for attribution.
+Complete submission, artifact preservation and rights checks remain required.
+The model award is separate from promotion of the reference model. The new
+policy and activation are still being prepared; current signed allocations
+retain their existing rules.

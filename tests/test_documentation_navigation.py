@@ -79,6 +79,14 @@ class DocumentationNavigationTests(unittest.TestCase):
             hashlib.sha256((ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V2.md").read_bytes()).hexdigest(),
             "c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b",
         )
+        version_3 = hashlib.sha256(
+            (ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V3.md").read_bytes()
+        ).hexdigest()
+        self.assertEqual(version_3, "9b6b47d8f6ff0242a2bee97a643b318491f246120841b28ba80feb3953d0fdcd")
+        self.assertEqual(
+            (ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V3.sha256").read_text(),
+            f"{version_3}  MODEL_CONTRIBUTION_TERMS_V3.md\n",
+        )
 
     def test_public_phase_and_release_boundary_are_current(self):
         readme = (ROOT / "README.md").read_text()

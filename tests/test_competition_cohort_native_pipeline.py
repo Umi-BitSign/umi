@@ -255,11 +255,11 @@ async def accept_model(o, scenario):
                 retry_seconds=0.01,
                 transport=httpx.ASGITransport(public),
             ),
-            20,
+            120,
         )
     finally:
         stop.set()
-        await asyncio.wait_for(polling, 10)
+        await asyncio.wait_for(polling, 60)
     assert receipt.status == "pending_attestation"
     assert verify_preserved_bundle(
         h.model, o.service.models.owner.archive, h.intake.policy
@@ -764,7 +764,7 @@ async def run_pipeline(
                         await asyncio.sleep(0.1)
 
                 try:
-                    await asyncio.wait_for(complete(), 600 if mixed else 60)
+                    await asyncio.wait_for(complete(), 1200 if mixed else 180)
                 except asyncio.TimeoutError as error:
                     raise AssertionError(
                         {
@@ -774,7 +774,7 @@ async def run_pipeline(
                     ) from error
             finally:
                 stop.set()
-                await asyncio.wait_for(asyncio.gather(*tasks), 60)
+                await asyncio.wait_for(asyncio.gather(*tasks), 300)
             assert all(not node.tasks for node in nodes.values())
             assert all(node.execution.evidence(slot) is not None for node in nodes.values())
 

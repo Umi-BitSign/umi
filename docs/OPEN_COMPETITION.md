@@ -74,9 +74,11 @@ For C5+, model reward eligibility requires preserved runnable artifacts,
 permitted provenance/rights and quality at least equal to the frozen baseline.
 An unchanged baseline may qualify through a complete model submission. A sole
 eligible entrant receives the model pool; incomplete competitors cannot be
-dropped to create a sole entrant. Selection among multiple entrants is defined
-by the new signed policy. Model reward eligibility and promotion of the reference
-model are separate decisions.
+dropped to create a sole entrant. Multiple eligible distinct artifacts divide
+the model pool in proportion to normalized benchmark score. Exact duplicate
+content is counted once, using the first complete certified acceptance for
+attribution. Model reward eligibility and promotion of the reference model are
+separate decisions.
 
 ## Evaluation and trust
 
@@ -96,27 +98,12 @@ Labels stay out of execution until reveal; exposed cases are retired. Text error
 rates do not establish human interpreter equivalence, clinical safety or
 unseen-training performance.
 
-The prospective version 4 policy and
-[version 3 terms draft](competition/TERMS_V3_DRAFT.md) also test whether
-continuous output depends on the video. Twelve scored continuous clips are
-paired with duration-matched controls that preserve each anchor reference while
-substituting a different real clip. Eligibility uses the correct-score minus
-swapped-score differences, not whether the returned strings merely differ. The
-policy separates the observed effect threshold from its sampling-confidence
-test. The latter
-requires a strictly positive one-sided 95% lower bound; it does not require the
-lower bound to clear the point-estimate threshold. Controls sit on top of the
-minimum scored cases and do not satisfy scored-case coverage. Byte-identical
-output frequency, reversed video, repeated frames and blank inputs are
-diagnostics only.
-
-Before settlement, a policy-pinned known-dependent control must pass the same
-protected suite and runtime with a stronger margin. The required evaluator
-groups attest that exact execution. If the control, evaluator, assignment feed
-or protected inputs fail, the round holds or voids instead of assigning miner
-failures. These controls apply only after the version 4 policy and final version
-3 terms are approved, published and freshly accepted; they do not alter existing
-intake receipts.
+The [version 3 terms](MODEL_CONTRIBUTION_TERMS_V3.md) permit a diagnostic C5
+comparison between outputs for correct videos and matched unrelated videos. It
+does not affect C5 scores, eligibility, settlement or payouts. Missing or failed
+diagnostics do not hold settlement. A future payout gate would require published
+thresholds and operating characteristics, a known-dependent positive control,
+advance notice, a successor policy and fresh participant acceptance.
 
 A candidate output that is late, oversized, invalid or returns an authenticated
 miner error scores zero for that case. A verified evaluator or dispatch
