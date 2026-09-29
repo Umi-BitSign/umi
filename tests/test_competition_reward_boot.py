@@ -163,6 +163,40 @@ def test_boot_reads_original_root_approval_and_accepts_capacity_increase(inputs)
     assert boot.load_standing_boot(i.path, i.anchor) == raised
 
 
+def test_default_selection_uses_existing_command_and_original_approval(inputs):
+    i = inputs
+    supervisor = i.path.with_name("validator-supervisor.json")
+    assert boot.select_standing_boot(supervisor, i.anchor) is None
+    i.path.rename(i.path.with_name(boot.BOOT_FILENAME))
+    assert boot.select_standing_boot(supervisor, i.anchor) == i.value
+
+
+@pytest.mark.parametrize("change", ["missing_approval", "dangling", "writable", "invalid"])
+def test_broken_default_selection_cannot_fall_back_to_legacy(inputs, change):
+    i = inputs
+    selected = i.path.with_name(boot.BOOT_FILENAME)
+    i.path.rename(selected)
+    if change == "missing_approval":
+        Path(i.value.approval_path).unlink()
+    elif change == "dangling":
+        selected.unlink()
+        selected.symlink_to(i.path)
+    elif change == "writable":
+        selected.chmod(0o644)
+    else:
+        i.save(selected, b"{}")
+    with pytest.raises((ValueError, OSError)):
+        boot.select_standing_boot(i.path.with_name("validator-supervisor.json"), i.anchor)
+
+
+def test_explicit_selection_is_required_and_overrides_default(inputs):
+    i = inputs
+    i.save(i.path.with_name(boot.BOOT_FILENAME), b"invalid default")
+    assert boot.select_standing_boot(i.path, i.anchor, explicit_path=i.path) == i.value
+    with pytest.raises(activation.HostActivationError, match="could not open"):
+        boot.select_standing_boot(i.path, i.anchor, explicit_path=i.path.with_name("missing"))
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["policy", "profile", "fallbacks", "handoff", "stores", "legacy", "mortality", "proofs"],

@@ -435,11 +435,9 @@ async def run_supervisor(
     if config_bytes != canonical_json_bytes(anchor.config):
         raise ValueError("supervisor config differs from the root-sealed anchor")
     _verify_running_host_anchor(anchor)
-    standing = None
-    if standing_config is not None:
-        from .competition_reward_boot import load_standing_boot
+    from .competition_reward_boot import select_standing_boot
 
-        standing = load_standing_boot(standing_config, anchor)
+    standing = select_standing_boot(config_path, anchor, explicit_path=standing_config)
     with hold_successor_startup_lease(anchor) as startup_lease:
         await _stop_startup_worker(config, startup_lease)
         repair_successor_source_permissions(anchor=anchor, limits=_materialization_limits())
@@ -489,7 +487,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--standing-config",
         type=Path,
-        help="root-owned standing reward configuration for this installed validator",
+        help="root-owned standing reward configuration (default: standing-reward-boot.json "
+        "beside the supervisor config, when present)",
     )
     args = parser.parse_args(argv)
     configure_progress_logging()

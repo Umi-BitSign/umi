@@ -44,6 +44,7 @@ from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 MAX_BOOT_BYTES = 8 * 1024**2
+BOOT_FILENAME = "standing-reward-boot.json"
 Capacity = Annotated[int, Field(ge=1024, le=512 * 1024**3)]
 ObjectCapacity = Annotated[int, Field(ge=1024, le=MAX_CONFIGURED_PRIVATE_BYTES)]
 
@@ -151,6 +152,27 @@ def load_standing_boot(path: Path, anchor: MaterializedSuccessorAnchor) -> Stand
         raise ValueError("standing boot validator is absent from the approved series")
     _disjoint((*value.mutable_stores(), Path(anchor.config.state_root) / "standing-rewards"))
     return value
+
+
+def select_standing_boot(
+    supervisor_config: Path,
+    anchor: MaterializedSuccessorAnchor,
+    *,
+    explicit_path: Path | None = None,
+) -> StandingRewardBootConfig | None:
+    """Select a root-approved sibling without replacing the installed command.
+
+    Only an absent default means legacy operation. A missing explicit selection,
+    dangling link, unreadable file or invalid approval must fail before startup
+    stops the existing worker. lstat avoids treating a dangling link as absence.
+    """
+    path = explicit_path or supervisor_config.with_name(BOOT_FILENAME)
+    if explicit_path is None:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+    return load_standing_boot(path, anchor)
 
 
 async def _close_provider(provider):

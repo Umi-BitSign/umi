@@ -142,17 +142,29 @@ async def test_cli_orders_seal_host_lock_recovery_and_shutdown(host):
 
 
 @pytest.mark.parametrize("reject", [False, True])
+@pytest.mark.parametrize("explicit", [False, True])
 async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
-    host, monkeypatch, reject
+    host, monkeypatch, tmp_path, reject, explicit
 ):
     from umi import competition_reward_boot as boot
 
     selection, adapter = object(), object()
+    # The installed unit has no additional argument. A root-controlled sibling
+    # selects standing operation through the same startup ordering as the flag.
+    selected_path = tmp_path / "standing-reward-boot.json"
+    selected_path.write_bytes(b"fixture selection existence")
+    original_select = boot.select_standing_boot
+
+    def select(path, anchor, *, explicit_path):
+        assert path == Path("/etc/umi/supervisor.json")
+        return original_select(tmp_path / path.name, anchor, explicit_path=explicit_path)
+
+    monkeypatch.setattr(boot, "select_standing_boot", select)
     host.runtime._require_lease = lambda: host.events.append("require-lease")
     host.runtime.adapter = cli._DeferredAdapter(lambda: adapter)
 
     def load(path, anchor):
-        assert path == Path("/etc/umi/standing.json")
+        assert path == (Path("/etc/umi/standing.json") if explicit else selected_path)
         host.events.append("standing-approval")
         if reject:
             raise ValueError("fixture denied approval")
@@ -170,14 +182,14 @@ async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
             await cli.run_supervisor(
                 Path("/etc/umi/supervisor.json"),
                 stop_event=host.stop,
-                standing_config=Path("/etc/umi/standing.json"),
+                standing_config=Path("/etc/umi/standing.json") if explicit else None,
             )
         assert "stop-startup-worker" not in host.events
     else:
         await cli.run_supervisor(
             Path("/etc/umi/supervisor.json"),
             stop_event=host.stop,
-            standing_config=Path("/etc/umi/standing.json"),
+            standing_config=Path("/etc/umi/standing.json") if explicit else None,
         )
         assert host.events.index("standing-approval") < host.events.index("stop-startup-worker")
         assert host.events.index("lock-and-recover") < host.events.index("require-lease")

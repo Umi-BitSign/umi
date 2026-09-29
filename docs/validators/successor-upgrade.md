@@ -255,13 +255,19 @@ uses the retained proofs and a fixed target block while catching up; it grants n
 current submission authority. The executor checks fresh control before signing.
 Cancellation drains owned signing work before releasing the writer locks.
 
-The supervisor CLI accepts an explicit `--standing-config` for the same installed
-service and process lock. It reads a canonical root-owned mode-0444
+The supervisor selects `standing-reward-boot.json` beside its existing supervisor
+configuration when that file is present. This works with the installed service
+command and its original process lock; no second service or command override is
+needed. `--standing-config` selects an explicit path instead. It reads a canonical
+root-owned mode-0444
 `umi-standing-reward-boot/1` configuration and its separate host approval before
 the startup stop. The configuration selects the series, replay and opportunity
 manifest, current and legacy chain configurations, eligibility runtime, handoff
 plan, private input directories and resource capacities. It supplies no callbacks
-or executable plugins. Without this option, the existing C4 path is unchanged.
+or executable plugins. An absent default file keeps the existing C4 path. A
+missing explicit file, dangling link, unreadable file or invalid approval rejects
+startup before stopping the existing worker. Install the approval and all inputs
+before publishing the default file; remove no original journals during selection.
 
 During initial history/package replay, the original supervisor continues C4
 reconciliation. The durable handoff intent stops that continuation before C5
