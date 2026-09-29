@@ -31,6 +31,7 @@ from umi.open_competition import digest
 from umi.private_files import lock_private_file
 from umi.protocol import canonical_json_bytes
 
+from .reward_service_execution_fixture import connect_executor
 from .test_competition_reward_handoff import (
     adapter_case as adapter_case,
 )
@@ -83,6 +84,7 @@ from .test_competition_reward_handoff import (
 from .test_competition_reward_handoff import (
     worker_capacity as worker_capacity,
 )
+from .test_signed_extrinsic_native import native_encoding as native_encoding
 
 
 @pytest.fixture
@@ -757,3 +759,44 @@ async def test_installed_coverage_lifecycle_drains_before_providers(
     for stopped in ("coverage-stopped", "executor-stopped"):
         assert c.events.index(stopped) < c.events.index("close-current")
         assert c.events.index(stopped) < c.events.index("close-legacy")
+
+
+async def test_service_executes_original_journal_through_restart_and_outage(
+    native_encoding, service_case, monkeypatch
+):
+    c = connect_executor(service_case, native_encoding, monkeypatch)
+    await signed_attempt(c)
+    c4_before = c.item.worker.path.read_bytes()
+    bindings, attempts = [], []
+    for attempt in range(3):
+        c.stop.clear()
+        if attempt == 2:
+            c.resolve_expired = True
+            c.execution_chain.block += 3000  # Ten hours at the fixture's 12-second cadence.
+            c.execution_chain.runtime = replace(
+                c.execution_chain.runtime,
+                snapshot=replace(
+                    c.execution_chain.runtime.snapshot, block_number=c.execution_chain.block
+                ),
+            )
+        async with c.reopen() as runtime:
+            c.current_runtime = runtime
+            await asyncio.wait_for(run_standing_reward_service(runtime, **c.service_options), 15)
+            bindings.append(host._retained_binding(runtime))
+            executor = c.native_executors[-1]
+            attempts.append(executor.journal.pending())
+            assert executor._descriptor is None
+        assert not runtime._mutex.locked()
+        assert c.item.worker.path.read_bytes() == c4_before
+    assert bindings[0] == bindings[1] == bindings[2]
+    assert attempts[0] == attempts[1]
+    assert attempts[2].intent.block == attempts[0].intent.block + 3000
+    assert len(c.native_executors) == 3
+    assert len(c.signed) == len(c.sent) == 2
+    assert c.sent[0] != c.sent[1]
+    assert c.recoveries == [attempts[0], attempts[0]]
+    journal = c.native_executors[-1].journal.journal
+    assert len(journal.keys("standing_weight_intent")) == 2
+    assert len(journal.keys("standing_weight_signed")) == 2
+    for name in ("current", "legacy"):
+        assert c.events.count("start-" + name) == c.events.count("close-" + name) == 3
