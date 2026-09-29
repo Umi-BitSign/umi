@@ -59,11 +59,16 @@ from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdm
 from umi.competition_cohort_service_quality import ServiceReference, ServiceTerms
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from umi.competition_execution import execution_boundary
+from umi.competition_reward_manifest import (
+    RewardOpportunityTerms,
+    StandingRewardOpportunityManifest,
+)
 from umi.open_competition import digest, identity, sign_object
 from umi.policy import scoring_policy_hash
 from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 
+from .cohort_native_reward_fixture import run_activation
 from .cohort_native_service_fixture import (
     SERVICE_SHA,
     NativeService,
@@ -126,6 +131,23 @@ def precommit_model_inventory(h):
         service_reference_sha256=digest(h.reference),
         service_video_sha256=SERVICE_SHA,
     )
+    catalog, manifest, series = h.precommitted
+    manifest = StandingRewardOpportunityManifest(
+        **(
+            manifest.model_dump(by_alias=True)
+            | {
+                "schema": "umi-standing-reward-manifest/2",
+                "opportunity": RewardOpportunityTerms(
+                    runtime_profile_sha256="81" * 32,
+                    maximum_interval_ms=12_000,
+                    minimum_validator_ms=24 * 60 * 60 * 1000,
+                ),
+            }
+        )
+    )
+    series = series.model_copy(update={"manifest_sha256": digest(manifest)})
+    h.precommitted = catalog, manifest, series
+    h.precommitted_bytes = tuple(canonical_json_bytes(v) for v in h.precommitted)
     h.model = bundle_at(Path(h.intake.config.directory).parent / "model-submission")
     h.request_for = lambda scenario, **kwargs: model_request(scenario, h.model, **kwargs)
 
@@ -752,7 +774,7 @@ async def test_accepted_model_reaches_native_reward_package(
                 service.reveal()
             await certify_requests(o, app, tmp_path / "request-review", monkeypatch, signatures)
             assert max(signatures.values()) == 1
-            await run_settlement(
+            settled = await run_settlement(
                 o, nodes, tmp_path / "native-settlement", signatures, interrupt, mixed=mixed
             )
             assert max(inference.values()) == max(signatures.values()) == 1
@@ -772,3 +794,10 @@ async def test_accepted_model_reaches_native_reward_package(
                     is not None
                 )
             assert (dict(inference), dict(signatures)) == counts
+            if mixed and not interrupt:
+                # The actual recurring settlement output feeds reward discovery.
+                # Finality/RPC remain fixtures; reward review and replay do not.
+                with monkeypatch.context() as reward_patches:
+                    await run_activation(
+                        o, settled, tmp_path / "native-rewards", reward_patches, signatures
+                    )

@@ -7,6 +7,7 @@ File delivery copies immutable native exports between separate owner stores.
 import asyncio
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -219,6 +220,7 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
         assert output.read_bytes() == original
         assert dict(signatures) == before
         assert max(signatures.values()) == 1
+        return SimpleNamespace(package=package, nodes=nodes, output=output)
     finally:
         for stack in stacks.values():
             stack.close()
