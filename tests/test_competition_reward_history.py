@@ -54,6 +54,25 @@ async def history_case(historical, monkeypatch, tmp_path):
     return await make_history_case(historical, monkeypatch, tmp_path)
 
 
+async def test_scale_fixture_captures_across_old_head_and_past_ten_hours(
+    historical, monkeypatch, tmp_path
+):
+    first = historical.old.height
+    historical.c.control_writes = {height: () for height in range(first, first + 3101)}
+    historical.c.control_writes[first] = (digest(historical.c.genesis.decision),)
+    h = await make_history_case(historical, monkeypatch, tmp_path, distance=3100)
+    try:
+        for height in (first + 3000, first + 3099):
+            captured = await h.item.provider.capture_control_at(h.item.hotkey, height)
+            assert captured.snapshot.block_number == height
+            assert captured.control_sha256 == digest(h.c.genesis.decision)
+            assert (
+                await h.item.provider.review_control(captured.evidence, captured.metadata)
+            ) == captured
+    finally:
+        await h.item.provider.aclose()
+
+
 async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
     h = historical
 

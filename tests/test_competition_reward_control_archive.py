@@ -402,6 +402,9 @@ async def test_cancelled_history_verification_finishes_before_close(historical, 
 async def _linked_history(h, monkeypatch, distance):
     item = h.item
     headers, heights = make_headers(h.old.height, h.old.height + distance)
+    # Replace the whole synthetic chain view. Keeping the previous fixture's
+    # ten-hour descendant would falsely report an unrelated header as owned.
+    h.blocks.clear()
 
     def selected(height, timestamp):
         header = headers[heights[height]]
@@ -445,7 +448,9 @@ async def _linked_history(h, monkeypatch, distance):
         return kwargs["proof"] == (b"proof",)
 
     monkeypatch.setattr(item.verifier, "verify_many", verify_original)
-    item.clock.now += 10 * 60 * 60 * 1000
+    # Long scale fixtures must not claim a descendant finalized before its
+    # own block timestamp. Individual history intervals still use 12 seconds.
+    item.clock.now += max(10 * 60 * 60 * 1000, distance * 12000)
     head = selected(h.old.height + distance, item.clock.now - 1000)
     del h.blocks[original.height]
     calls = []

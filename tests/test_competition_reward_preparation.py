@@ -8,6 +8,7 @@ signing and chain submission are not qualified here.
 
 import asyncio
 import hashlib
+import os
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -708,7 +709,9 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     await p.provider.aclose()
     await configure_eligibility(item, monkeypatch, tmp_path)
     await item.provider.aclose()
-    variant = getattr(request, "param", "matching")
+    options = getattr(request, "param", "matching")
+    scale = options if isinstance(options, dict) else {}
+    variant = scale.get("kind", options)
     if variant in {"opportunity", "signing_admission", "coordinator"}:
         from umi.competition_reward_manifest import (
             RewardOpportunityTerms,
@@ -723,12 +726,20 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
                     "opportunity": RewardOpportunityTerms(
                         runtime_profile_sha256=digest(item.profile),
                         maximum_interval_ms=12000,
-                        minimum_validator_ms=12000,
+                        minimum_validator_ms=12000 * scale.get("intervals", 1),
                     ),
                 }
             )
         )
         series = series.model_copy(update={"manifest_sha256": digest(p.manifest)})
+        if scale:
+            from umi.open_competition import identity
+
+            series = series.model_copy(
+                update={
+                    "validators": tuple(sorted((validator_hotkey, item.members[1]), key=identity))
+                }
+            )
     if variant in {"control_publication", "coordinator"}:
         item.config = item.config.model_copy(
             update={
@@ -756,7 +767,9 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         + series.maximum_proof_lag_blocks
         + series.maximum_transaction_lifetime_blocks
     )
-    variant = getattr(request, "param", "matching")
+    coverage_first = end
+    if scale:
+        end += scale["intervals"] + scale["outage_blocks"] + 256
     if variant in {"journal", "opportunity"}:
         # Both adjacent endpoints are after the activation fence. This adds
         # one block only to the retention/recovery case, not selection tests.
@@ -800,6 +813,10 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
         item.rpc.values[("SubtensorModule", "ValidatorPermit", (78,))] = [False] * len(members)
     item.rpc.values[("SubtensorModule", "Weights", (78, 3))] = row
     item.rpc.values[("SubtensorModule", "LastUpdate", (78,))] = [0, 0, 0, first]
+    if scale:
+        item.rpc.values[("SubtensorModule", "Weights", (78, 1))] = row
+        item.rpc.values[("SubtensorModule", "LastUpdate", (78,))] = [0, first, 0, first]
+        item.rpc.values[("SubtensorModule", "ValidatorPermit", (78,))] = [False, True, False, True]
     # The synthetic window spans more than the default activity cutoff.
     item.rpc.values[("SubtensorModule", "ActivityCutoffFactorMilli", (78,))] = 100_000
     item.finality.ref = replace(item.finality.ref, block_number=first)
@@ -863,6 +880,7 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     h = await make_history_case(h, monkeypatch, tmp_path, distance=end - first + 1)
     h.reader = h.new_reader(maximum_bytes=64 * 1024**2)
     h.package_case, h.validator_hotkey, h.variant = p, validator_hotkey, variant
+    h.coverage_first, h.coverage_scale = coverage_first, scale
     try:
         yield h
     finally:
@@ -2438,6 +2456,194 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
     assert "coverage_complete" in caplog.text
     await service.step()
     assert await journal.interval_keys() == interval_keys
+
+
+@pytest.mark.parametrize(
+    "complete_preparation_case",
+    [
+        {"kind": "opportunity", "intervals": 8, "outage_blocks": 150},
+        pytest.param(
+            {"kind": "opportunity", "intervals": 7200, "outage_blocks": 3000},
+            marks=pytest.mark.skipif(
+                os.environ.get("UMI_RUN_REWARD_DAY_REHEARSAL") != "1",
+                reason="full native 24-hour proof replay requires explicit scale opt-in",
+            ),
+            id="24-hours-two-validators",
+        ),
+    ],
+    indirect=True,
+)
+async def test_coverage_waits_for_both_validators_and_rebuilds_after_outage(
+    complete_preparation_case, tmp_path, monkeypatch
+):
+    """Native evidence and accounting; headers/trie/runtime remain synthetic.
+
+    The optional scale case uses all 7,200 twelve-second intervals per validator,
+    not enlarged block timestamps or fabricated pre-credited journal totals.
+    """
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_service import StandingRewardCoverageService
+    from umi.competition_reward_coverage_source import NativeRewardCoverageSource
+    from umi.competition_reward_decisions import SignedRewardControlDecision
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_reward_opportunity import opportunity_rule
+    from umi.competition_reward_publication import retain_standing_reward_inputs
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    count = h.coverage_scale["intervals"]
+    minimum = count * 12000
+    half = count // 2
+    rule = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    files = StandingRewardFiles(
+        tmp_path / "day-delivery",
+        maximum_package_bytes=8 * 1024**2,
+        maximum_witness_bytes=16 * 1024**2,
+    )
+    retain_standing_reward_inputs(
+        files,
+        c.series,
+        c.reader.policy,
+        tuple(
+            sorted(
+                (SignedRewardControlDecision.model_validate_json(v) for v in c.objects.values()),
+                key=lambda v: v.decision.sequence,
+            )
+        ),
+        lambda _: p.package,
+    )
+    key = c.active.decision.activation.cohort_sha256
+    activation_sha = digest(c.active.decision.activation)
+    head, online, slow = h.coverage_first + min(half, 32), True, True
+    slow_hotkey = h.item.members[1]
+
+    async def current_height(_):
+        if not online:
+            raise ConnectionError("coordinator and current-head discovery unavailable")
+        return SimpleNamespace(snapshot=SimpleNamespace(block_number=head))
+
+    original_capture = NativeRewardCoverageSource.capture
+
+    async def capture(source, hotkey, height):
+        if slow and hotkey == slow_hotkey:
+            raise TimeoutError("one validator proof is temporarily unavailable")
+        try:
+            return await original_capture(source, hotkey, height)
+        except ValueError as error:
+            # This isolated test has synthetic/public inputs only. Expose its
+            # actual failure instead of spinning on sanitized service reports.
+            pytest.fail(f"native capture failed at block {height}: {error}")
+
+    monkeypatch.setattr(NativeRewardCoverageSource, "capture", capture)
+
+    def setup():
+        monkeypatch.setattr(h.item.provider, "collect_control", current_height)
+        journal = RewardCoverageJournal(
+            tmp_path / "day-coverage",
+            rule,
+            expected_rule_sha256=digest(rule),
+            maximum_bytes=2 * 1024**3,
+        )
+        service = StandingRewardCoverageService(
+            provider=h.item.provider,
+            journal=journal,
+            history=h.reader,
+            preparation=StandingRewardPreparation(
+                c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+            ),
+            files=files,
+            profile=h.item.profile,
+            maximum_history_blocks=4096,
+        )
+        return journal, service
+
+    async def totals():
+        return [
+            await journal.verified_ms(activation_sha256=activation_sha, validator_hotkey=k)
+            for k in c.series.validators
+        ]
+
+    async def collect_until(target, *, initial=False):
+        nonlocal head
+        previous_state, stalled_passes = None, 0
+        for step in range(count * 4 + 2000):
+            await service.step()
+            amounts = await totals()
+            if step % 100 == 0:
+                print(
+                    {
+                        "phase": "initial" if initial else "resumed",
+                        "step": step,
+                        "head": head,
+                        "credited_ms": amounts,
+                    },
+                    flush=True,
+                )
+            if min(amounts) >= target:
+                return
+            collector = service._collector
+            state = (head, tuple(amounts), h.reader._next)
+            stalled_passes = stalled_passes + 1 if state == previous_state else 0
+            previous_state = state
+            assert stalled_passes < 100, "native collection stopped advancing"
+            if collector and all(collector._next.get(k, 0) > head for k in c.series.validators):
+                head += min(32, max(1, (target - min(amounts)) // 12000))
+                assert head <= h.end
+        pytest.fail("native coverage failed to reach the selected minimum")
+
+    journal, service = setup()
+    # A healthy validator cannot complete the obligation for its slow peer.
+    for _ in range(2000):
+        await service.step()
+        if max(await totals()) >= 12000:
+            break
+    else:
+        pytest.fail("healthy validator failed to collect coverage")
+    assert min(await totals()) == 0
+    assert journal.journal.get("coverage_completion", key) is None
+    slow = False
+    await collect_until(half * 12000, initial=True)
+    assert journal.journal.get("coverage_completion", key) is None
+    before = await totals()
+    assert all(value < minimum for value in before)
+
+    # Reopen every native owner. Stored totals do not carry native authority.
+    h.reader = await h.restart()
+    h.reader = h.new_reader(maximum_bytes=256 * 1024**2)
+    c.reader = c.reopen()
+    journal, service = setup()
+    assert await totals() == [0, 0]
+    online = False
+    for _ in range(2000):
+        await service.step()
+        if await totals() == before:
+            break
+    else:
+        pytest.fail("retained proofs did not rebuild the verified pre-outage time")
+    assert journal.journal.get("coverage_completion", key) is None
+    # The missing ten hours in the scale case cannot count as reward coverage.
+    head += h.coverage_scale["outage_blocks"] + 128
+    online = True
+    await collect_until(minimum)
+    assert await totals() == [minimum, minimum]
+    verified = service._completed[key]
+    assert len(verified.certificate.contributions) == 2
+    assert all(v.credited_ms == minimum for v in verified.certificate.contributions)
+    assert not verified.chain_submission_authorized
+    original_completion = journal.journal.get("coverage_completion", key)
+    await service.step()
+    assert await totals() == [minimum, minimum]
+    assert journal.journal.get("coverage_completion", key) == original_completion
+    print(
+        {
+            "status": "native_coverage_recovered",
+            "validators": 2,
+            "minimum_ms": minimum,
+            "outage_blocks": h.coverage_scale["outage_blocks"],
+            "certificate_sha256": digest(verified.certificate),
+        },
+        flush=True,
+    )
 
 
 @pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
