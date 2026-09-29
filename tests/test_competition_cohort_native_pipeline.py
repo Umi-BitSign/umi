@@ -754,7 +754,11 @@ async def run_pipeline(
                                 for n in nodes.values()
                             )
                         ):
-                            h.block = max(h.block, service.window_end)
+                            # Endpoint benchmark leases can outlast the paid
+                            # service window. Keep finalized fixture time moving
+                            # after all responses complete so their immutable
+                            # exports can pass the native request-interval check.
+                            h.block = max(h.block + 1, service.window_end)
                         if not service:
                             h.block += 1
                         await asyncio.sleep(0.1)

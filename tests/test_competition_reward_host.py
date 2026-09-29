@@ -541,7 +541,72 @@ async def test_service_executor_failure_reuses_journal_and_redacts_errors(servic
             await run_standing_reward_service(runtime, **c.service_options)
     assert len(attempts) == 2 and attempts[0] == attempts[1]
     assert "standing_service_retry reason=OSError" in caplog.text
+    assert "stage=execution" in caplog.text
     assert "private bearer" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "initial_control",
+        "initial_replay",
+        "legacy_handoff",
+        "journal_binding",
+        "signer_load",
+        "executor_start",
+    ],
+)
+async def test_service_reports_failed_stage_and_recovers_without_reset(
+    service_case, monkeypatch, caplog, stage
+):
+    c = service_case
+    if stage in {"initial_control", "initial_replay"}:
+        c.service_options.pop("first")
+
+        async def collect(hotkey):
+            assert hotkey == c.series.control_hotkey
+            return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
+
+        async def prepare(*args):
+            return c.prepared
+
+        c.provider.collect_control = collect
+        monkeypatch.setattr(service, "_prepare_first", prepare)
+    target, name = {
+        "initial_control": (c.provider, "collect_control"),
+        "initial_replay": (service, "_prepare_first"),
+        "legacy_handoff": (service, "hold_legacy_reward_handoff"),
+        "journal_binding": (service, "bind_standing_reward_host"),
+        "executor_start": (service, "StandingRewardExecutor"),
+        "signer_load": (None, "load_signer"),
+    }[stage]
+    operation = c.service_options[name] if target is None else getattr(target, name)
+    attempts = []
+
+    def interrupted(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("private bearer, wallet path and RPC credential")
+        return operation(*args, **kwargs)
+
+    if target is None:
+        c.service_options[name] = interrupted
+    else:
+        monkeypatch.setattr(target, name, interrupted)
+
+    async def predecessor():
+        return SimpleNamespace(status="healthy", reason="fixture_legacy_continuation")
+
+    with caplog.at_level(logging.INFO):
+        async with c.reopen() as runtime:
+            c.current_runtime = runtime
+            monkeypatch.setattr(runtime, "reconcile", predecessor)
+            await asyncio.wait_for(run_standing_reward_service(runtime, **c.service_options), 15)
+    assert len(attempts) == 2 and len(c.executors) == 1
+    assert f"standing_service_retry reason=OSError stage={stage}" in caplog.text
+    assert "private bearer" not in caplog.text and "RPC credential" not in caplog.text
+    assert c.events.count("signer") == (2 if stage == "executor_start" else 1)
+    assert c.events[-2:] == ["close-legacy", "close-current"]
 
 
 async def test_service_cancellation_drains_signer_before_unlocking(service_case):

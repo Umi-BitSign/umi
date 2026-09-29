@@ -274,6 +274,11 @@ reconciliation. The durable handoff intent stops that continuation before C5
 signing, including after restart. A failed old feed does not prevent independent
 C5 recovery. Status logs identify bootstrap progress, holds and transaction
 progress without enabling HTTP-client logging.
+`standing_service_stage` reports entry into initial control collection, replay,
+legacy handoff, journal binding and signer/executor startup. A
+`standing_service_retry` includes the failed `stage` and exception type without
+exception text or credentials. A stage entry records attempted work; use the
+retained journal and finalized chain update to confirm completion.
 
 Legacy configurations retain their original bytes and digests. Each selects
 host-local `CompetitionChainResources` for tools, chain specification, optional

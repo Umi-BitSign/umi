@@ -39,6 +39,11 @@ from .protocol import StrictProtocolModel
 logger = logging.getLogger(__name__)
 
 
+def _stage(name):
+    logger.info("standing_service_stage stage=%s", name)
+    return name
+
+
 class StandingRewardServiceLimits(StrictProtocolModel):
     """Host capacities and individual-operation bounds, never cohort deadlines."""
 
@@ -217,6 +222,7 @@ async def run_standing_reward_service(
             _check_coverage(collection, stop)
             for value in owners.values():
                 value.ensure_observer_running()
+            stage = "approval"
             try:
                 if first is None:
                     check_standing_reward_host_selection(
@@ -229,8 +235,10 @@ async def run_standing_reward_service(
                     # Keep a fixed finalized target while replay catches up.
                     # Chasing a moving head can starve slow recovery forever.
                     if bootstrap_height is None:
+                        stage = _stage("initial_control")
                         control = await provider.collect_control(history.hotkey)
                         bootstrap_height = control.snapshot.block_number
+                    stage = _stage("initial_replay")
                     first = await _prepare_first(
                         preparation,
                         provider,
@@ -246,6 +254,7 @@ async def run_standing_reward_service(
                         raise StandingHistoryPending
                     if stop.is_set():
                         break
+                stage = "approval"
                 check_standing_reward_host_selection(
                     runtime,
                     approval_path=approval_path,
@@ -253,6 +262,7 @@ async def run_standing_reward_service(
                     first=first,
                     plan=plan,
                 )
+                stage = _stage("legacy_handoff")
                 async with hold_legacy_reward_handoff(
                     runtime,
                     preparation=preparation,
@@ -260,6 +270,7 @@ async def run_standing_reward_service(
                     plan=plan,
                     providers=legacy_providers,
                 ) as handoff:
+                    stage = _stage("journal_binding")
                     host = bind_standing_reward_host(
                         runtime,
                         approval_path=approval_path,
@@ -270,7 +281,9 @@ async def run_standing_reward_service(
                     )
                     if stop.is_set():
                         break
+                    stage = _stage("signer_load")
                     signer = await run_owned_thread(load_signer)
+                    stage = _stage("executor_start")
                     executor = StandingRewardExecutor(
                         preparation=preparation,
                         provider=provider,
@@ -290,7 +303,9 @@ async def run_standing_reward_service(
                     logger.info(
                         "standing_service_running series_sha256=%s", preparation.series_sha256
                     )
+                    stage = "execution"
                     await _run_executor(executor, stop, limits, collection)
+                    stage = "handoff_release"
             except StandingHistoryPending:
                 if bootstrap_height is not None:
                     # A completed chunk made durable progress. Keep catching
@@ -298,7 +313,9 @@ async def run_standing_reward_service(
                     await asyncio.sleep(0)
                     continue
             except Exception as error:
-                logger.warning("standing_service_retry reason=%s", type(error).__name__)
+                logger.warning(
+                    "standing_service_retry reason=%s stage=%s", type(error).__name__, stage
+                )
             if not stop.is_set():
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=limits.poll_seconds)
