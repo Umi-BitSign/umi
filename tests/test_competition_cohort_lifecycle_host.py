@@ -160,7 +160,9 @@ async def host(lifecycle, tmp_path, monkeypatch):
             c.admission_owner, service.preparation, h.provider, service_host=service
         )
 
-    yield SimpleNamespace(h=h, service=service, config=c, open=open_host, outages=outages)
+    yield SimpleNamespace(
+        h=h, service=service, config=c, open=open_host, outages=outages, apps=apps
+    )
 
 
 async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(host):

@@ -204,14 +204,14 @@ sequence until its receipt is known.
 
 <a id="live-first-round-model-contribution"></a>
 
-### Model-manifest preparation; artifact intake is not open
+### Model-manifest preparation
 
-Model-artifact intake and evaluation are not operational for the first round.
-The exact canonical runtime and its immutable, reconstructible environment have
-not been published. Do not sign or submit a model-track object to the live
-endpoint-intake origin. The 30% model share remains burned, does not accrue, and
-cannot be awarded retroactively. A future opening will publish its own runtime,
-cutoffs and submission route.
+C5+ model enrollment requires publication of its selected runtime, immutable
+policy, contribution terms and submission route. Until that opening, prepare the
+bundle without signing against the existing endpoint-intake policy. The selected
+C5+ split is 50% service / 50% model rewards; a complete accepted model must match
+or beat the frozen baseline. C4 retains its signed 70/30 allocation, including
+burning its unallocated model share without a later retroactive award.
 
 The manifest below is an advance-preparation aid only. Read the
 [model preparation and rights checklist](../contributors/models.md). Do not

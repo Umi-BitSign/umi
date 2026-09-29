@@ -112,14 +112,15 @@ The open-competition endpoint path supports
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
-This cohort admits the endpoint track; model-artifact intake remains closed.
-The 30% model allocation remains burned and does not accrue for a
-later retroactive award. Before preparing a future model contribution, read the
-[provenance and rights checklist](contributors/models.md#model-contribution-review) and the approved
-[version 2 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS_V2.md).
-The live policy binds their exact version and hash.
-Published terms do not approve an individual model's rights or award it the
-contribution share. Endpoint service does not require contributing private weights.
+Public intake remains on C5 preparation; model enrollment under the new policy
+has not opened. The selected C5+ split is 50% service / 50% model rewards, with a
+baseline-or-better quality requirement for complete accepted model entries. Read
+the [model preparation checklist](contributors/models.md#model-contribution-review)
+and use the exact terms named by the eventual signed policy. C4's signed 70/30
+allocation and [version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md) remain applicable
+to C4 verification; its unallocated model share is burned and does not accrue.
+Terms alone do not approve an individual model's rights or award it a share.
+Endpoint service does not require contributing private weights.
 
 ## Reading payout dashboards
 

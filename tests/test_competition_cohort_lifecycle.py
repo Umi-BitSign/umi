@@ -132,6 +132,7 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
         factories=[],
         request_entered=asyncio.Event(),
         reports=[],
+        request_for=request_for,
     )
     metadata = b"fixture-metadata"
     archives = {}
@@ -172,7 +173,7 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
         lifecycle_before_intake(h)
     for sequence, block in ((1, 210), (2, 240)):
         receipt = intake.retain(
-            request_for(scenario, sequence=sequence, block=block), capture(block)
+            h.request_for(scenario, sequence=sequence, block=block), capture(block)
         )
         h.queue.attach_evidence(
             h.cohort, receipt["proposed_admission"]["consent_sha256"], *archives[block]

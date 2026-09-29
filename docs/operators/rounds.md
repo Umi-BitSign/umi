@@ -1646,6 +1646,11 @@ and drain before the service releases its key, finality provider and process
 locks. Polling uses bounded batches and concurrency; a slow or unavailable peer
 leaves the original work pending without a cohort deadline.
 
+CPU invocation and endpoint request preparation wait for a finalized block
+strictly after certified preparation. Observing the preparation block itself
+leaves work pending without recording an attempt; polling resumes when finality
+advances. Completed originals remain available for replay after a restart.
+
 The private `/internal/cohorts/orders/votes/{lookup,attest}` and
 `/internal/cohorts/orders/inbox/{lookup,accept}` POST routes require the reviewer
 credential. They expose bounded original votes and receipts; a lost HTTP reply

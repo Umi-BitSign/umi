@@ -30,7 +30,7 @@ from .competition_cohort_order_signer import (
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_runner import OfflineCaseExecution
 from .concurrency import run_owned_thread, wait_for_owned
-from .open_competition import identity
+from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
 
 
@@ -95,6 +95,16 @@ class CohortExecutionAuthority:
                 boundary.block,
             )
             raise OSError("cohort authority changed before execution progress")
+        preparation = next(
+            signed.transition
+            for signed in source.history.transitions
+            if digest(signed.transition) == assignment.certificate.order.preparation_closure_sha256
+        )
+        if boundary.block <= preparation.observed_at_block:
+            # Native terminal replay requires every invocation/request to begin
+            # strictly after preparation. A fast worker can observe the same
+            # head that certified preparation; retain no attempt until it moves.
+            raise OSError("waiting for finalized block after cohort preparation")
         return source, boundary
 
 
