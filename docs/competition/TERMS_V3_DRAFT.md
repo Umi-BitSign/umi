@@ -5,6 +5,14 @@ UMI must publish an approved, immutable version 3 file and its SHA-256 before a
 version 4 successor policy can bind it. Until then, the approved version 2 terms
 and all earlier signed records retain their exact bytes and meaning.
 
+C5 selects diagnostic-only video-dependence measurements where feasible. The
+gate below is not a C5 scoring or reward requirement. Diagnostic results must
+remain separate from scores and eligibility; missing or failed diagnostics must
+not delay request closure, settlement or rewards. Feasible collection and its
+sample limitations must be established before claiming diagnostic results.
+Adopting a payout gate for a later cohort requires published thresholds and
+advance notice under the prospective acceptance procedure below.
+
 This draft incorporates the approved
 [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md), SHA-256
 `c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b`,
