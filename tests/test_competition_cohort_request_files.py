@@ -5,6 +5,7 @@ Signing, journals, immutable delivery and request replay are native.
 """
 
 import asyncio
+import json
 from contextlib import ExitStack
 from functools import partial
 
@@ -130,11 +131,14 @@ async def test_lost_export_ack_reuses_terminal_and_repairs_delivery(exporting, m
     def lost_ack(*args, **kwargs):
         original(*args, **kwargs)
         if failing:
-            raise OSError("synthetic acknowledgement loss")
+            raise OSError("synthetic acknowledgement loss with private bearer URL")
 
     monkeypatch.setattr(h.files, "publish", lost_ack)
     report = await h.workers[0].poll_once()
     assert report["retry_count"] == len(h.workers[0].executions)
+    assert report["last_failure"]["reason_code"] == "os_error"
+    assert report["last_failure"]["source_frames"]
+    assert "private bearer" not in json.dumps(report)
     count = len(h.exports_signed)
     delivered = {
         digest(order): canonical_json_bytes(
@@ -165,7 +169,11 @@ async def test_missing_local_steps_or_endpoint_archive_stays_pending(exporting):
     owner = h.workers[0].executions[0]
     with owner.journal.transaction() as db:
         db.execute("DELETE FROM records WHERE kind='endpoint_replay_archive'")
-    report = await h.workers[0].poll_once()
+    # Recovery may own this lock while producing the missing endpoint archive.
+    # Pending exports must not compete with that producer for writer ownership.
+    with owner.locked(owner.journal.keys("assignment")[0]):
+        report = await h.workers[0].poll_once()
+    assert report["retry_count"] == 0
     assert report["assignments_pending"] >= 1
     assert report["request_closure_authorized"] is False
     assert h.window().completion == "pending"

@@ -901,6 +901,10 @@ missing endpoint responses and busy execution locks stay pending. Retries reuse
 the original terminal signature, and the durable scan cursor revisits pending
 work without blocking other assignments. Export reports describe the current
 batch. They do not confirm remote delivery or successful reward submission.
+Polling completed execution and waiting for missing endpoint evidence do not
+take the job writer lock. Creating execution steps and sealing terminals still
+require exclusive ownership. Export retries include a bounded `last_failure`
+with a reason code and source locations, without exception messages or clip URLs.
 The exporter runs on both coordinator and reviewer roles. Version 3 coordinators
 may also select `original_sources` for automatic settlement input assembly.
 The export directory must be separate from execution journals, service state

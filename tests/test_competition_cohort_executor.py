@@ -117,8 +117,18 @@ async def test_inbox_to_complete_replay_and_offline_restart(execution):
     original = canonical_json_bytes(evidence)
     e.r.h.fail_collect = True
     e.r.h.source = source_for(e.r.h.batch, e.r.h.batch["history"])
-    assert canonical_json_bytes(await e.executor().advance(e.assignment)) == original
+    with e.journal().locked(e.r.slot):
+        assert canonical_json_bytes(await e.executor().advance(e.assignment)) == original
     assert len(e.calls) == step_count(e.job) and not e.stops
+
+
+async def test_unfinished_execution_still_requires_the_job_writer_lock(execution):
+    from umi.private_files import PrivateStateBusyError
+
+    e = execution
+    with e.journal().locked(e.r.slot), pytest.raises(PrivateStateBusyError):
+        await e.executor().advance(e.assignment)
+    assert not e.calls and e.journal().journal.get("assignment", e.r.slot) is None
 
 
 async def test_ten_hour_outages_keep_completed_steps_and_original_order(execution):

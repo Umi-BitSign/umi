@@ -119,20 +119,31 @@ class CohortExecutor(CohortExecutionAuthority):
         super().__init__(journal, provider, history)
         self.sandbox = sandbox
 
+    async def _completed(
+        self, assignment: CohortExecutionAssignment, slot: str
+    ) -> RecoverableExecutionEvidence | None:
+        existing = await run_owned_thread(self.journal.journal.get, "assignment", slot)
+        if existing is not None:
+            if canonical_json_bytes(existing) != canonical_json_bytes(assignment):
+                raise ValueError("execution slot already contains another assignment")
+            return await run_owned_thread(self.journal.evidence, slot)
+        return None
+
     async def advance(
         self, assignment: CohortExecutionAssignment
     ) -> RecoverableExecutionEvidence | None:
         """Finish at most one unfinished case/role, retaining every completed step."""
         assignment = CohortExecutionAssignment.model_validate_json(canonical_json_bytes(assignment))
         slot = order_slot(assignment.certificate.order)
+        # Completed evidence is immutable. Recurring readers must not compete
+        # with endpoint recovery or terminal signing for the execution lock.
+        evidence = await self._completed(assignment, slot)
+        if evidence is not None:
+            return evidence
         with self.journal.locked(slot):
-            existing = await run_owned_thread(self.journal.journal.get, "assignment", slot)
-            if existing is not None:
-                if canonical_json_bytes(existing) != canonical_json_bytes(assignment):
-                    raise ValueError("execution slot already contains another assignment")
-                evidence = await run_owned_thread(self.journal.evidence, slot)
-                if evidence is not None:
-                    return evidence
+            evidence = await self._completed(assignment, slot)
+            if evidence is not None:
+                return evidence
             source, started = await self.current(assignment)
             job = await run_owned_thread(self.journal.retain, assignment, source, started.block)
             for index in range(step_count(job)):

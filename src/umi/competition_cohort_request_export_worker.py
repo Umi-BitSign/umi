@@ -21,6 +21,7 @@ from .competition_cohort_request_terminal import (
     SignedRequestTerminal,
     seal_request_terminal,
 )
+from .competition_progress import _failure_details
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
 from .open_competition import Signature, digest, identity
@@ -98,6 +99,16 @@ class RequestExportWorker:
         objects = JournalEndpointObjects(owner.journal)
         retained = await run_owned_thread(owner.journal.get, "request_terminal", slot)
         if retained is None:
+            # Waiting for execution/endpoint work needs no writer lock. Taking
+            # that lock on every pending poll can starve the producer we await.
+            evidence = await run_owned_thread(owner.evidence, slot)
+            if evidence is None:
+                return False
+            if evidence.job.mode == "endpoint_incumbent":
+                archive = await run_owned_thread(owner.journal.get, "endpoint_replay_archive", slot)
+                intent = await run_owned_thread(owner.journal.get, "request_terminal_intent", slot)
+                if archive is None and intent is None:
+                    return False
             # Only creation needs the execution writer lock. Once sealed, the
             # immutable terminal can be exported while settlement reads the job.
             with owner.locked(slot):
@@ -156,12 +167,14 @@ class RequestExportWorker:
             capture = await self.provider.collect()
             considered = complete = pending = retries = 0
             last_error = ""
+            last_failure = None
             for owner in self.executions:
                 try:
                     slots = await run_owned_thread(self._page, owner)
                 except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                     retries += 1
                     last_error = type(error).__name__
+                    last_failure = _failure_details(error)[0]
                     continue
                 for slot in slots:
                     considered += 1
@@ -173,6 +186,7 @@ class RequestExportWorker:
                     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                         retries += 1
                         last_error = type(error).__name__
+                        last_failure = _failure_details(error)[0]
             return {
                 "status": "request_exports_pending"
                 if pending or retries
@@ -182,6 +196,7 @@ class RequestExportWorker:
                 "assignments_pending": pending,
                 "retry_count": retries,
                 "last_error_type": last_error,
+                "last_failure": last_failure,
                 "request_closure_authorized": False,
                 "chain_submission_authorized": False,
             }
