@@ -17,6 +17,29 @@ translation requests under the corresponding release and policy.
 
 ### Model files for recoverable cohorts
 
+For an open cohort that advertises model uploads, use the model participation
+request produced by `sign-cohort-consent` and the exact directory declared by
+its bundle manifest:
+
+```sh
+umi-competition --policy competition-policy.json submit-cohort-model \
+  --request model-participation.json --source /absolute/path/to/model \
+  --origin https://REVIEWED_INTAKE_HOST \
+  --wallet-name miner --hotkey-name hotkey --wallet-path /absolute/path/to/wallets
+```
+
+The command checks local hashes, uploads bounded signed chunks, waits for the
+server to preserve the complete bundle, then submits the original consent.
+Progress goes to stderr; stdout contains the pending-attestation receipt.
+Interrupted connections, throttling and temporary server failures retry
+automatically. After stopping the command or restarting the machine, rerun it
+with the same request, source files and hotkey to resume retained offsets.
+Keep the source unchanged while uploading. Permanent rejection or a changed
+source stops the command; it does not silently replace your submission.
+
+Upload completion is not admission certification, artifact acceptance or reward
+activation. Use `query-cohort-admission` with the same request to check admission.
+
 When the public cohort index advertises `model_upload_url`, deliver a model
 bundle before submitting model-track participation. POST the same signed
 `CohortParticipationRequest` to that URL to reserve delivery. A reservation

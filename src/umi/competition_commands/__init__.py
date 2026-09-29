@@ -61,6 +61,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "status": store.status,
     "submit": submissions.submit,
     "submit-cohort-consent": cohorts.submit_consent,
+    "submit-cohort-model": cohorts.submit_model,
     "verify-bundle": models.verify_bundle,
     "verify-cutoff-publication": evidence.verify_cutoff_publication,
     "verify-miner-feed-profile": submissions.verify_miner_feed_profile,

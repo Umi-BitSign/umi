@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
+from pathlib import Path
 
 from ..competition_cohort_client import fetch_cohort_admission, submit_cohort_participation
 from ..competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
@@ -82,6 +84,28 @@ def submit_consent(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
             origin=args.origin,
             policy=policy,
             request=load_json(args.request, CohortParticipationRequest),
+        )
+    )
+    return receipt.model_dump(mode="json", by_alias=True)
+
+
+def submit_model(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
+    import bittensor as bt
+
+    from ..competition_cohort_model_client import submit_cohort_model
+
+    request = load_json(args.request, CohortParticipationRequest)
+    wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey_name, path=args.wallet_path)
+    receipt = asyncio.run(
+        submit_cohort_model(
+            origin=args.origin,
+            policy=policy,
+            request=request,
+            source=Path(args.source),
+            wallet=wallet,
+            report=lambda value: print(
+                canonical_json_bytes(value).decode(), file=sys.stderr, flush=True
+            ),
         )
     )
     return receipt.model_dump(mode="json", by_alias=True)

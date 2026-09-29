@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     participation = commands.add_parser("submit-cohort-consent")
     participation.add_argument("--request", required=True)
     participation.add_argument("--origin", required=True)
+    model = commands.add_parser("submit-cohort-model")
+    for name in ("request", "source", "origin", "wallet-name", "hotkey-name", "wallet-path"):
+        model.add_argument("--" + name, required=True)
     admission = commands.add_parser("query-cohort-admission")
     admission.add_argument("--request", required=True)
     admission.add_argument("--origin", required=True)

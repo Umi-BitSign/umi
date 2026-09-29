@@ -73,6 +73,7 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
         "initialize-cohort-intake",
         "sign-cohort-consent",
         "submit-cohort-consent",
+        "submit-cohort-model",
         "query-cohort-admission",
         "run-cohort-admission-worker",
     ):
