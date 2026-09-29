@@ -373,16 +373,27 @@ def precommit_service_inventory(
         selection_rule="global_fifo_no_identity_quota",
         credit_rule="verified_terminal_work_only",
     )
-    catalog = SignedServiceWorkCatalog(catalog=body, signatures=signatures(body))
+    histories = sorted(
+        (h.intake.history(b.cohort_sha256) for b in h.intake.config.cohorts),
+        key=lambda value: value.plan.sequence,
+    )
+    catalogs = tuple(
+        SignedServiceWorkCatalog(catalog=value, signatures=signatures(value))
+        for value in (
+            body.model_copy(update={"cohort_sha256": digest(history.plan)}) for history in histories
+        )
+    )
+    catalog = catalogs[0]
     manifest = StandingRewardManifest(
         schema="umi-standing-reward-manifest/1",
         policy_sha256=digest(policy),
-        cohorts=(
+        cohorts=tuple(
             RewardReplayRequirement(
-                cohort_sha256=h.cohort,
+                cohort_sha256=value.catalog.cohort_sha256,
                 terms_sha256=body.service_terms_sha256,
-                catalog_sha256s=(digest(body),),
-            ),
+                catalog_sha256s=(digest(value.catalog),),
+            )
+            for value in catalogs
         ),
     )
     series = StandingRewardSeries(
@@ -394,13 +405,14 @@ def precommit_service_inventory(
         manifest_sha256=digest(manifest),
         control_hotkey=wallet("Ferdie").hotkey.ss58_address,
         recovery=h.history.authority,
-        cohorts=(h.history.plan,),
+        cohorts=tuple(history.plan for history in histories),
         validators=(wallet("Charlie").hotkey.ss58_address,),
         maximum_proof_lag_blocks=2,
         maximum_transaction_lifetime_blocks=128,
         lifetime="until_superseded_or_revoked",
     )
     h.precommitted = catalog, manifest, series
+    h.catalogs = catalogs
     h.precommitted_bytes = tuple(canonical_json_bytes(v) for v in h.precommitted)
     assert verify_reward_manifest(h.precommitted_bytes[1], series, policy) == manifest
 

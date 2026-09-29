@@ -37,7 +37,14 @@ def scenario(legacy_scenario, request):
         return s
     p = s["policy"]
     old = s["intake_history"]
-    authority, genesis, _ = standing(old.plan, p, model_rewards=request.param == "model-awards")
+    authority, genesis, _ = standing(
+        old.plan,
+        p,
+        model_rewards=request.param in {"model-awards", "proportional-model-awards"},
+        model_rule="baseline_or_better_proportional_score_first_complete/1"
+        if request.param == "proportional-model-awards"
+        else "baseline_or_better_best_score_first_complete/1",
+    )
     h = CohortRecoveryHistory(
         schema="umi-cohort-recovery-history/1",
         plan=old.plan,

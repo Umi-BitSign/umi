@@ -42,7 +42,11 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
     mode, count = getattr(request, "param", ("equal", 1))
     source = tmp_path / "model-source"
     s = setup_scenario(receipt_scenario, source, runtime, baseline_entry=mode == "baseline")
-    alternate = bundle_at(source / "alternate", "alternate") if mode == "best" else None
+    alternate = (
+        bundle_at(source / "alternate", "alternate")
+        if mode in {"best", "proportional", "distinct-zero"}
+        else None
+    )
     b = make_round(
         s,
         include_outcomes=False,
@@ -56,7 +60,7 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
             for step in a.steps:
                 text = (
                     ""
-                    if mode == "zero"
+                    if mode in {"zero", "distinct-zero"}
                     or (mode == "below" and step.role == "candidate")
                     or (mode == "above" and step.role == "incumbent")
                     else "hello"
@@ -68,6 +72,14 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
                         and scenario["signed"].submission.hotkey
                         == wallet("Bob").hotkey.ss58_address
                         else ""
+                    )
+                if mode == "proportional":
+                    text = (
+                        ""
+                        if step.role == "incumbent"
+                        else "hello"
+                        if scenario["signed"].submission.hotkey == wallet("Bob").hotkey.ss58_address
+                        else "hell"
                     )
                 execution = step.execution.model_copy(
                     update={

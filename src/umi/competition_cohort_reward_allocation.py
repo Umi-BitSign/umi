@@ -1,12 +1,13 @@
 """Immutable service/model amounts and fresh registration projection.
 
-Version 1 uses a verified promotion; version 2 uses the cohort's model award.
-Both need a settlement certificate and standing authority before a transaction.
+Version 1 uses promotion attribution, version 2 a single model award, and
+version 3 proportional model awards. All require certification before submission.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from fractions import Fraction
 from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
@@ -17,14 +18,21 @@ from .competition_chain_state import (
     validate_owned_weight_observation,
 )
 from .competition_cohort_model_award import (
+    MODEL_AWARD_ADAPTER,
     CohortModelAward,
+    ModelAward,
+    ProportionalModelAward,
     build_model_award,
     read_model_acceptances,
 )
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_quality_signing import CohortQualityManifest, review_quality_manifest
 from .competition_cohort_recovery import ModelRewardCohortAuthority
-from .competition_cohort_service_allocation import RawWeight, ServiceRecipientAmount
+from .competition_cohort_service_allocation import (
+    RawWeight,
+    ServiceRecipientAmount,
+    apportion_work_budget,
+)
 from .competition_cohort_service_certification import (
     CertifiedServiceAllocation,
     ServiceAllocationReview,
@@ -38,15 +46,17 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_h
 
 
 class CohortRewardAllocation(StrictProtocolModel):
-    schema_: Literal["umi-cohort-reward-allocation/1", "umi-cohort-reward-allocation/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-cohort-reward-allocation/1",
+        "umi-cohort-reward-allocation/2",
+        "umi-cohort-reward-allocation/3",
+    ] = Field(alias="schema")
     policy_sha256: Hex32
     round_sha256: Hex32
     service_certificate_sha256: Hex32
     quality_manifest_sha256: Hex32
     promotion_head: PromotionHeadBinding | None = None
-    model_award: CohortModelAward | None = None
+    model_award: ModelAward | None = None
     recipients: Annotated[tuple[ServiceRecipientAmount, ...], Field(max_length=65535)]
     burn_weight: RawWeight
     recipient_rule: Literal["fixed_hotkey_absence_to_burn"] = "fixed_hotkey_absence_to_burn"
@@ -67,6 +77,10 @@ class CohortRewardAllocation(StrictProtocolModel):
                 raise ValueError("legacy reward allocation requires only promotion attribution")
         elif self.model_award is None or self.promotion_head is not None:
             raise ValueError("model award allocation requires only the cohort model decision")
+        elif (self.schema_ == "umi-cohort-reward-allocation/3") != isinstance(
+            self.model_award, ProportionalModelAward
+        ):
+            raise ValueError("reward allocation version differs from its model award")
         keys = [identity(r.hotkey) for r in self.recipients]
         if keys != sorted(set(keys)) or any(r.raw_weight == 0 for r in self.recipients):
             raise ValueError("reward recipients must be positive, unique and canonically ordered")
@@ -82,7 +96,7 @@ def build_reward_allocation(
     benchmark_review: ClosedQualityReview,
     promotion: PromotionHeadBinding | None,
     *,
-    model_award: CohortModelAward | None = None,
+    model_award: CohortModelAward | ProportionalModelAward | None = None,
 ) -> CohortRewardAllocation:
     """Assemble replayed evidence using the owner's selected model decision.
 
@@ -98,19 +112,43 @@ def build_reward_allocation(
         raise ValueError("model reward allocation must follow the pre-intake signed authority")
     if model_award is None:
         promotion = PromotionHeadBinding.model_validate_json(canonical_json_bytes(promotion))
-        model_recipient = promotion.contributor_hotkey
+        model_recipients = (
+            {}
+            if promotion.contributor_hotkey is None
+            else {"promotion": promotion.contributor_hotkey}
+        )
+        model_credits = {key: Fraction(1) for key in model_recipients}
     else:
         if promotion is not None:
             raise ValueError("model payout is independent of promotion attribution")
-        model_award = CohortModelAward.model_validate_json(canonical_json_bytes(model_award))
+        model_award = MODEL_AWARD_ADAPTER.validate_json(canonical_json_bytes(model_award))
         if (
             model_award.policy_sha256 != digest(benchmark_review.policy)
             or model_award.round_sha256 != digest(benchmark_review.roster.round)
             or model_award.quality_manifest_sha256 != digest(benchmark)
             or model_award.authority_sha256 != digest(benchmark_review.history.authority.authority)
+            or model_award.rule != benchmark_review.history.authority.authority.model_reward_rule
         ):
             raise ValueError("model award belongs to different quality or authority")
-        model_recipient = model_award.recipient_hotkey
+        if isinstance(model_award, ProportionalModelAward):
+            model_recipients = {c.content_sha256: c.recipient_hotkey for c in model_award.credits}
+            if len(model_recipients) != len(model_award.credits):
+                raise ValueError("model allocation contains duplicate content credit")
+            model_credits = {
+                c.content_sha256: Fraction(int(c.score.numerator), int(c.score.denominator))
+                for c in model_award.credits
+            }
+            if any(not 0 <= score <= 1 for score in model_credits.values()):
+                raise ValueError("model allocation requires normalized quality")
+            if model_credits and not any(model_credits.values()):
+                model_credits = {key: Fraction(1) for key in model_credits}
+        else:
+            model_recipients = (
+                {}
+                if model_award.recipient_hotkey is None
+                else {"winner": model_award.recipient_hotkey}
+            )
+            model_credits = {key: Fraction(1) for key in model_recipients}
     statement = service_review.statement
     if (
         statement.policy_sha256 != digest(benchmark_review.policy)
@@ -124,14 +162,19 @@ def build_reward_allocation(
         amounts[who] += item.raw_weight
         hotkeys[who] = item.hotkey
     burn = service_amounts.burn_weight
-    if model_recipient is None:
+    if not model_recipients:
         burn += service_amounts.model_budget
-    elif service_amounts.model_budget:
+    for content, amount in apportion_work_budget(
+        service_amounts.model_budget if model_recipients else 0, model_credits
+    ).items():
+        model_recipient = model_recipients[content]
         key = identity(model_recipient)
-        amounts[key] += service_amounts.model_budget
+        amounts[key] += amount
         hotkeys[key] = min(hotkeys.get(key, model_recipient), model_recipient)
     return CohortRewardAllocation(
-        schema="umi-cohort-reward-allocation/2"
+        schema="umi-cohort-reward-allocation/3"
+        if isinstance(model_award, ProportionalModelAward)
+        else "umi-cohort-reward-allocation/2"
         if model_award is not None
         else "umi-cohort-reward-allocation/1",
         policy_sha256=statement.policy_sha256,

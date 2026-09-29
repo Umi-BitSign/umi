@@ -33,7 +33,13 @@ from .test_open_competition import wallet
 legacy_scenario = consumers.scenario
 
 
-def standing(plan, policy, *, model_rewards=False):
+def standing(
+    plan,
+    policy,
+    *,
+    model_rewards=False,
+    model_rule="baseline_or_better_best_score_first_complete/1",
+):
     selected = ModelRewardCohortAuthority if model_rewards else StandingCohortRecoveryAuthority
     body = selected(
         schema="umi-cohort-recovery-authority/3"
@@ -45,11 +51,7 @@ def standing(plan, policy, *, model_rewards=False):
         lifetime="until_completed_or_revoked",
         closure_rule="quorum_certified_phase_completion",
         timing_rule="targets_without_extension_signatures",
-        **(
-            {"model_reward_rule": "baseline_or_better_best_score_first_complete/1"}
-            if model_rewards
-            else {}
-        ),
+        **({"model_reward_rule": model_rule} if model_rewards else {}),
     )
     signed = SignedCohortRecoveryAuthority(authority=body, signatures=signatures(body))
     genesis, state = admit_recoverable_cohort(plan, signed, policy, admitted_at_block=160)

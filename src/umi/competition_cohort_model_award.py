@@ -11,7 +11,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_endpoint_archive import read_endpoint_object
@@ -41,8 +41,7 @@ class ModelAwardCandidate(StrictProtocolModel):
     eligible: bool
 
 
-class CohortModelAward(StrictProtocolModel):
-    schema_: Literal["umi-cohort-model-award/1"] = Field(alias="schema")
+class ModelAwardEvidence(StrictProtocolModel):
     policy_sha256: Hex32
     authority_sha256: Hex32
     round_sha256: Hex32
@@ -51,13 +50,37 @@ class CohortModelAward(StrictProtocolModel):
     baseline_model_sha256: Hex32
     runtime_sha256: Hex32
     suite_sha256: Hex32
-    rule: Literal["baseline_or_better_best_score_first_complete/1"]
     acceptances: Annotated[tuple[CertifiedModelArtifactAcceptance, ...], Field(max_length=512)]
     candidates: Annotated[tuple[ModelAwardCandidate, ...], Field(max_length=512)]
-    winner_submission_sha256: Hex32 | None
-    recipient_hotkey: Hotkey | None
     reference_promotion_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
+
+
+class CohortModelAward(ModelAwardEvidence):
+    schema_: Literal["umi-cohort-model-award/1"] = Field(alias="schema")
+    rule: Literal["baseline_or_better_best_score_first_complete/1"]
+    winner_submission_sha256: Hex32 | None
+    recipient_hotkey: Hotkey | None
+
+
+class ModelScoreCredit(StrictProtocolModel):
+    content_sha256: Hex32
+    submission_sha256: Hex32
+    recipient_hotkey: Hotkey
+    score: ExactQuality
+
+
+class ProportionalModelAward(ModelAwardEvidence):
+    schema_: Literal["umi-cohort-model-award/2"] = Field(alias="schema")
+    rule: Literal["baseline_or_better_proportional_score_first_complete/1"]
+    credits: Annotated[tuple[ModelScoreCredit, ...], Field(max_length=512)]
+    zero_total_rule: Literal["equal_per_distinct_eligible_content"] = (
+        "equal_per_distinct_eligible_content"
+    )
+
+
+ModelAward = Annotated[CohortModelAward | ProportionalModelAward, Field(discriminator="schema_")]
+MODEL_AWARD_ADAPTER = TypeAdapter(ModelAward)
 
 
 class PendingModelAward(ValueError):
@@ -76,8 +99,8 @@ def build_model_award(
     review: ClosedQualityReview,
     acceptances: tuple[CertifiedModelArtifactAcceptance, ...],
     archive: Path,
-) -> CohortModelAward:
-    """Replay every model before choosing one recipient for the whole model pool.
+) -> CohortModelAward | ProportionalModelAward:
+    """Replay every model and apply the rule selected before intake.
 
     The archive is selected by the host, never by a submission or package path.
     All bundle bytes are checked locally. The signed acceptance binds the
@@ -174,9 +197,7 @@ def build_model_award(
         )
         if score >= reference:
             choices.append((-score, a.accepted_ordinal, result.submission_sha256, sub.hotkey))
-    winner = min(choices) if choices else None
-    return CohortModelAward(
-        schema="umi-cohort-model-award/1",
+    evidence = dict(
         policy_sha256=digest(review.policy),
         authority_sha256=digest(authority),
         round_sha256=digest(review.roster.round),
@@ -188,8 +209,35 @@ def build_model_award(
         rule=authority.model_reward_rule,
         acceptances=accepted,
         candidates=tuple(candidates),
-        winner_submission_sha256=winner[2] if winner else None,
-        recipient_hotkey=winner[3] if winner else None,
+    )
+    if authority.model_reward_rule == "baseline_or_better_best_score_first_complete/1":
+        winner = min(choices) if choices else None
+        return CohortModelAward(
+            schema="umi-cohort-model-award/1",
+            **evidence,
+            winner_submission_sha256=winner[2] if winner else None,
+            recipient_hotkey=winner[3] if winner else None,
+        )
+    # One paid identity per canonical content. Preserve the first complete
+    # acceptance's attribution; aliases cannot steal or multiply its credit.
+    by_submission = {c.submission_sha256: c for c in candidates}
+    distinct = {}
+    for certificate in ordered:
+        candidate = by_submission[certificate.acceptance.submission_sha256]
+        if candidate.eligible:
+            distinct.setdefault(candidate.content_sha256, candidate)
+    return ProportionalModelAward(
+        schema="umi-cohort-model-award/2",
+        **evidence,
+        credits=tuple(
+            ModelScoreCredit(
+                content_sha256=content,
+                submission_sha256=candidate.submission_sha256,
+                recipient_hotkey=candidate.recipient_hotkey,
+                score=candidate.aggregate,
+            )
+            for content, candidate in sorted(distinct.items())
+        ),
     )
 
 

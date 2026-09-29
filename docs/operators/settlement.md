@@ -13,18 +13,25 @@
 The candidate recoverable cohort implementation separates model payout from
 reference-model promotion. It requires explicit pre-intake consent through
 `umi-cohort-recovery-authority/3` and the rule
-`baseline_or_better_best_score_first_complete/1`. Existing authorities retain
+`baseline_or_better_proportional_score_first_complete/1`. Existing authorities retain
 their original allocation behavior. This format is not a public launch notice.
 
 The complete sealed model roster must have independently certified quality,
 complete preserved bundles and signed rights/reconstruction acceptances. Model
 quality version 2 compares both sides with the same normalized baseline metric
 on the frozen suite and runtime. Equality qualifies, including an unchanged
-baseline or a baseline below the promotion threshold. Higher exact aggregate
-quality wins; exact ties use the earliest certified complete-artifact acceptance
-ordinal. Duplicate content cannot multiply the model pool or present inconsistent
-quality. A sole eligible entrant receives the entire policy-selected model pool.
-With no eligible entrant, that pool is burned. Missing evidence remains pending.
+baseline or a baseline below the promotion threshold. Each eligible distinct
+model receives `model budget * score / sum(eligible distinct model scores)`.
+Apportion integer weights by largest remainder, breaking exact ties by content
+digest, before summing by recipient. Service earnings are added independently.
+A sole eligible entrant receives the whole model pool. If every eligible score
+is zero, divide equally among distinct contents; no eligible content burns the
+pool. Missing evidence remains pending and cannot be removed from the roster.
+
+Duplicate content retains one share and the earliest certified complete-artifact
+acceptance's recipient. Its evaluations must agree. The content digest ignores
+paths and license/provenance-only changes; it does not detect semantic copies
+with changed runnable bytes. This is not a guarantee of complete Sybil resistance.
 
 Under the configured `CompetitionStore` directory, the reward owner reads
 `model-reward-acceptances/<cohort-sha256>/<submission-sha256>.json` as private
@@ -37,12 +44,18 @@ retain the original review documents in the content-addressed evidence source.
 The signatures attest review; a file hash does not establish permission to use
 or redistribute a model.
 
-Allocation version 2 carries the complete model decision and its signed
+Allocation version 3 carries the proportional model decision and its signed
 acceptances. Portable package replay includes the original review documents,
 replays quality and selection, and checks independently retained artifact bytes.
 Recovery uses the original acceptances without selecting a newer promotion or
 assigning authorship to the reward recipient. Existing cohort certification and
 standing chain checks still apply before any weight transaction.
+
+Retained allocation versions 1 and 2 and the signed
+`baseline_or_better_best_score_first_complete/1` rule keep their original
+semantics for historical package replay. Selecting the proportional rule changes
+the authority digest and requires fresh pre-intake consent. Never reinterpret
+an existing certified allocation under new distribution rules.
 
 The intake owner reserves artifact-acceptance proposals under its existing lock,
 after admission certification and verification of all model bytes. It retains

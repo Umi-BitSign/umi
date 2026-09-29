@@ -169,7 +169,12 @@ def scenario(legacy_scenario, policy):
         }
     )
     plan = old.plan.model_copy(update={"suite_sha256": digest(suite)})
-    authority, genesis, _ = standing(plan, policy, model_rewards=True)
+    authority, genesis, _ = standing(
+        plan,
+        policy,
+        model_rewards=True,
+        model_rule="baseline_or_better_proportional_score_first_complete/1",
+    )
     history = CohortRecoveryHistory(
         schema="umi-cohort-recovery-history/1",
         plan=plan,
@@ -205,19 +210,22 @@ def policy(base_policy, runtime):  # noqa: F811
 @pytest.fixture
 def intake(tmp_path, scenario):
     history = scenario["intake_history"]
+    histories = scenario.get("histories", (history,))
     config = CohortIntakeConfig(
         directory=str(tmp_path / "cohort-intake"),
-        cohorts=(
+        cohorts=tuple(
             CohortIntakeBinding(
-                cohort_sha256=digest(history.plan),
-                authority_sha256=digest(history.authority.authority),
-            ),
+                cohort_sha256=digest(value.plan),
+                authority_sha256=digest(value.authority.authority),
+            )
+            for value in sorted(histories, key=lambda value: digest(value.plan))
         ),
     )
     service = CohortIntake(
         config, scenario["policy"], eligible_tracks=("endpoint", "model"), initialize=True
     )
-    service.publish(history, capture_at(210))
+    for value in histories:
+        service.publish(value, capture_at(210))
     return service
 
 
@@ -308,10 +316,11 @@ def configure_owner(o, orders, chain_config, root, monkeypatch):
         provider=o.h.provider,
     )
     o.config = config
-    catalog = o.h.precommitted[0]
-    publish_private_model(
-        Path(config.inputs_directory) / "catalogs" / (digest(catalog.catalog) + ".json"), catalog
-    )
+    for catalog in o.h.catalogs:
+        publish_private_model(
+            Path(config.inputs_directory) / "catalogs" / (digest(catalog.catalog) + ".json"),
+            catalog,
+        )
     publish_private_model(
         Path(config.lifecycle.sources.transport_directory)
         / (scoring_policy_hash(o.h.transport) + ".json"),
@@ -412,7 +421,8 @@ async def certify_requests(o, app, root, monkeypatch, signatures):
     and certify the whole request closure before revealing references.
     """
     h = o.h
-    assert (await o.service.poll_once())["catalogs_installed"] == 1
+    cohort_index = tuple(digest(p) for p in o.config.series.cohorts).index(h.cohort)
+    assert (await o.service.poll_once())["catalogs_installed"] == cohort_index + 1
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
@@ -511,6 +521,31 @@ def deliver_exports(nodes, target):
 async def test_accepted_model_reaches_native_reward_package(
     host, scenario, runtime, tmp_path, monkeypatch, chain_config, interrupt, mixed
 ):
+    await run_pipeline(
+        host,
+        scenario,
+        runtime,
+        tmp_path,
+        monkeypatch,
+        chain_config,
+        interrupt=interrupt,
+        mixed=mixed,
+    )
+
+
+async def run_pipeline(
+    host,
+    scenario,
+    runtime,
+    tmp_path,
+    monkeypatch,
+    chain_config,
+    *,
+    interrupt,
+    mixed,
+    cohort_index=0,
+    activate=True,
+):
     o, h = host, host.h
     orders = OrderHostConfig(
         schema="umi-cohort-order-host/1",
@@ -575,7 +610,7 @@ async def test_accepted_model_reaches_native_reward_package(
         original_votes = dict(signatures)
         o.outages.clear()
         o.outages.add("charlie.example")
-        assert (await o.service.models.poll_once())["entries_exported"] == 3
+        assert (await o.service.models.poll_once())["entries_exported"] == 3 * (cohort_index + 1)
         assert all(signatures[k] == count for k, count in original_votes.items())
         accepted_artifact = o.service.models.owner.retained(
             h.cohort, digest(submitted.signed_submission.submission)
@@ -603,7 +638,9 @@ async def test_accepted_model_reaches_native_reward_package(
                 await lifecycle.tick()
             assert lifecycle.controller.store.status(h.cohort)[0].phase == "preparation"
             assert (await lifecycle.tick())["status"] == "waiting_request_rest"
-            h.timestamp = 2_030_000
+            gate = await app.state.lifecycle.gate.check(h.cohort)
+            assert not gate["ready"]
+            h.timestamp = gate["not_before_unix_ms"] + h.provider.config.maximum_future_skew_ms
             await lifecycle.tick()
             assert lifecycle.controller.store.status(h.cohort)[0].phase == "requests"
             source = await o.service.history(h.cohort)
@@ -784,7 +821,9 @@ async def test_accepted_model_reaches_native_reward_package(
             counts = dict(inference), dict(signatures)
             for name in nodes:
                 node = evaluator(name)
-                assert (await node.worker.poll_once())["jobs_complete"] == 1 + mixed
+                assert (await node.worker.poll_once())["jobs_complete"] == (cohort_index + 1) * (
+                    1 + mixed
+                )
                 with pytest.raises(OSError):
                     await node.exporter.poll_once()
                 # Already published immutable exports remain readable even when
@@ -794,10 +833,11 @@ async def test_accepted_model_reaches_native_reward_package(
                     is not None
                 )
             assert (dict(inference), dict(signatures)) == counts
-            if mixed and not interrupt:
+            if activate and mixed and not interrupt:
                 # The actual recurring settlement output feeds reward discovery.
                 # Finality/RPC remain fixtures; reward review and replay do not.
                 with monkeypatch.context() as reward_patches:
                     await run_activation(
                         o, settled, tmp_path / "native-rewards", reward_patches, signatures
                     )
+            return settled

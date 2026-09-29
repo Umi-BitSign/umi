@@ -38,7 +38,7 @@ def copy_originals(origin, target):
 
 async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=False):
     h, series = o.h, o.config.series
-    plan = series.cohorts[0]
+    plan = next(plan for plan in series.cohorts if digest(plan) == h.cohort)
     nodes, stacks, configs = {}, {}, {}
 
     def start(name):
@@ -92,7 +92,7 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
             outbox=Path(config.proof_export_directory),
         )
         promotion = CompetitionStore(Path(config.promotion_directory), h.intake.policy)
-        if name not in nodes:
+        if not (promotion.directory / "model-reward-artifacts" / digest(h.model)).exists():
             archive = base / "model-archive"
             preserve_bundle(
                 h.model,
@@ -206,7 +206,7 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
         assert award is not None and len(award.candidates) == 1
         candidate = award.candidates[0]
         assert candidate.eligible and candidate.aggregate == candidate.baseline_aggregate
-        assert award.winner_submission_sha256 == candidate.submission_sha256
+        assert award.credits[0].submission_sha256 == candidate.submission_sha256
         objects = {item.sha256 for item in package.objects}
         for receipt in award.acceptances:
             assert receipt.acceptance.rights_evidence_sha256 in objects
