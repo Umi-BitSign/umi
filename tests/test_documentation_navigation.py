@@ -82,7 +82,10 @@ class DocumentationNavigationTests(unittest.TestCase):
         version_3 = hashlib.sha256(
             (ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V3.md").read_bytes()
         ).hexdigest()
-        self.assertEqual(version_3, "9b6b47d8f6ff0242a2bee97a643b318491f246120841b28ba80feb3953d0fdcd")
+        self.assertEqual(
+            version_3,
+            "9b6b47d8f6ff0242a2bee97a643b318491f246120841b28ba80feb3953d0fdcd",
+        )
         self.assertEqual(
             (ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V3.sha256").read_text(),
             f"{version_3}  MODEL_CONTRIBUTION_TERMS_V3.md\n",
