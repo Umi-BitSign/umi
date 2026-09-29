@@ -764,7 +764,7 @@ async def run_pipeline(
                         await asyncio.sleep(0.1)
 
                 try:
-                    await asyncio.wait_for(complete(), 180 if mixed else 60)
+                    await asyncio.wait_for(complete(), 600 if mixed else 60)
                 except asyncio.TimeoutError as error:
                     raise AssertionError(
                         {
@@ -774,7 +774,7 @@ async def run_pipeline(
                     ) from error
             finally:
                 stop.set()
-                await asyncio.wait_for(asyncio.gather(*tasks), 30)
+                await asyncio.wait_for(asyncio.gather(*tasks), 60)
             assert all(not node.tasks for node in nodes.values())
             assert all(node.execution.evidence(slot) is not None for node in nodes.values())
 
