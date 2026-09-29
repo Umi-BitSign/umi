@@ -346,7 +346,11 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
 
 
 def precommit_service_inventory(
-    h, *, service_terms_sha256="a1" * 32, service_reference_sha256="93" * 32
+    h,
+    *,
+    service_terms_sha256="a1" * 32,
+    service_reference_sha256="93" * 32,
+    service_video_sha256="92" * 32,
 ):
     """Select fixed inventory without reading a roster, promotion or future block."""
     assert h.intake.export_records(h.cohort, maximum_bytes=1024**2, maximum_records=8) == ()
@@ -361,7 +365,7 @@ def precommit_service_inventory(
         work=(
             {
                 "case_id": "91" * 32,
-                "video_sha256": "92" * 32,
+                "video_sha256": service_video_sha256,
                 "reference_sha256": service_reference_sha256,
                 "stratum": "fingerspelling",
             },

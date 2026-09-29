@@ -195,6 +195,9 @@ class CohortExecutionWorker:
             raise ValueError("execution and inbox state must remain separate")
         self.inbox, self.executor, self.batch_size = inbox, executor, batch_size
         self.capacity = asyncio.Semaphore(concurrency)
+        # All assignments share one private inbox lock. Parallel sandbox jobs
+        # must not make their own local reads compete for that nonblocking lock.
+        self.inbox_reads = asyncio.Lock()
         self.serial = asyncio.Lock()
 
     async def poll_once(self):
@@ -228,7 +231,8 @@ class CohortExecutionWorker:
             async def one(slot):
                 async with self.capacity:
                     try:
-                        assignment = await run_owned_thread(self.inbox.assignment, slot)
+                        async with self.inbox_reads:
+                            assignment = await run_owned_thread(self.inbox.assignment, slot)
                         result = await self.executor.advance(assignment)
                         return slot, "complete" if result is not None else "progress", ""
                     except (

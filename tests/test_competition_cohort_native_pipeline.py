@@ -2,11 +2,14 @@
 
 Finality, readiness, reviewed rights documents and sandbox inference are fixtures.
 No prepared round, order, execution receipt, score or settlement vote is supplied.
-This model-only cohort does not qualify paid service work or installed rewards.
+The mixed cohort also claims paid service work and serves endpoint benchmarks.
+Neither case qualifies installed rewards or production chain effects.
 """
 
 import asyncio
+import hashlib
 from collections import Counter
+from contextlib import AsyncExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,6 +64,13 @@ from umi.policy import scoring_policy_hash
 from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 
+from .cohort_native_service_fixture import (
+    SERVICE_SHA,
+    NativeService,
+    admit_endpoint,
+    media,
+    transport_policy,
+)
 from .cohort_native_settlement_fixture import run_settlement
 from .test_competition_cohort_executor import output
 from .test_competition_cohort_intake import capture_at
@@ -78,7 +88,6 @@ from .test_competition_runner import runtime as runtime
 from .test_competition_service import chain_config as chain_config
 from .test_open_competition import bundle_at, submission, wallet
 from .test_open_competition import policy as base_policy  # noqa: F401
-from .test_policy import make_policy
 
 
 def model_request(scenario, model, *, sequence, block):
@@ -95,7 +104,7 @@ def model_request(scenario, model, *, sequence, block):
 
 
 def precommit_model_inventory(h):
-    h.transport = make_policy()
+    h.transport = transport_policy()
     h.terms = ServiceTerms(
         schema="umi-cohort-service-terms/1",
         policy_sha256=digest(h.intake.policy),
@@ -106,13 +115,16 @@ def precommit_model_inventory(h):
     h.reference = ServiceReference(
         schema="umi-cohort-service-reference/1",
         case_id="91" * 32,
-        video_sha256="92" * 32,
+        video_sha256=SERVICE_SHA,
         stratum="fingerspelling",
         salt="41" * 32,
         reference="hello",
     )
     precommit_service_inventory(
-        h, service_terms_sha256=digest(h.terms), service_reference_sha256=digest(h.reference)
+        h,
+        service_terms_sha256=digest(h.terms),
+        service_reference_sha256=digest(h.reference),
+        service_video_sha256=SERVICE_SHA,
     )
     h.model = bundle_at(Path(h.intake.config.directory).parent / "model-submission")
     h.request_for = lambda scenario, **kwargs: model_request(scenario, h.model, **kwargs)
@@ -126,21 +138,31 @@ pytestmark = pytest.mark.parametrize(
 @pytest.fixture
 def scenario(legacy_scenario, policy):
     old = legacy_scenario["intake_history"]
-    authority, genesis, _ = standing(old.plan, policy, model_rewards=True)
+    suite = legacy_scenario["suite"].model_copy(
+        update={
+            "cases": tuple(
+                c.model_copy(update={"video_sha256": hashlib.sha256(media(c)).hexdigest()})
+                for c in legacy_scenario["suite"].cases
+            )
+        }
+    )
+    plan = old.plan.model_copy(update={"suite_sha256": digest(suite)})
+    authority, genesis, _ = standing(plan, policy, model_rewards=True)
     history = CohortRecoveryHistory(
         schema="umi-cohort-recovery-history/1",
-        plan=old.plan,
+        plan=plan,
         authority=authority,
         genesis=genesis,
         genesis_signatures=quorum_signatures(genesis),
         transitions=(),
     )
     consent = legacy_scenario["consent"].consent.model_copy(
-        update={"authority_sha256": digest(authority.authority)}
+        update={"authority_sha256": digest(authority.authority), "cohort_sha256": digest(plan)}
     )
     return dict(
         legacy_scenario,
         intake_history=history,
+        suite=suite,
         consent=SignedCohortParticipationConsent(
             consent=consent, signature=sign_object(consent, wallet("Alice"))
         ),
@@ -364,8 +386,8 @@ def configure_model_reviews(o, root, client, signatures):
 async def certify_requests(o, app, root, monkeypatch, signatures):
     """Use native request observation, review and handoff with synthetic readiness.
 
-    This model-only cohort has no service claims. It still must fence its real
-    catalog, preserve the completed benchmark work and certify request closure.
+    Fence the original catalog, preserve completed benchmark and service work,
+    and certify the whole request closure before revealing references.
     """
     h = o.h
     assert (await o.service.poll_once())["catalogs_installed"] == 1
@@ -459,9 +481,13 @@ def deliver_exports(nodes, target):
                 destination.chmod(0o600)
 
 
-@pytest.mark.parametrize("interrupt", [False, True], ids=["normal", "outage-restart"])
+@pytest.mark.parametrize(
+    "interrupt,mixed",
+    [(False, False), (True, False), (False, True), (True, True)],
+    ids=["normal", "outage-restart", "mixed-service-model", "mixed-outage-lost-reply"],
+)
 async def test_accepted_model_reaches_native_reward_package(
-    host, scenario, runtime, tmp_path, monkeypatch, chain_config, interrupt
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config, interrupt, mixed
 ):
     o, h = host, host.h
     orders = OrderHostConfig(
@@ -483,9 +509,18 @@ async def test_accepted_model_reaches_native_reward_package(
     for value in (scenario["suite"], runtime, model):
         inputs.publish(digest(value), lambda _, value=value: canonical_json_bytes(value))
     inference, signatures = Counter(), Counter()
+    service = (
+        NativeService(
+            o, scenario, tmp_path / "native-service", monkeypatch, signatures, lose_reply=interrupt
+        )
+        if mixed
+        else None
+    )
+    if service:
+        endpoint_request = await admit_endpoint(o, scenario)
 
     async def invoke(job, attempt):
-        inference[(identity(job.evaluator_hotkey), attempt.step_index)] += 1
+        inference[(identity(job.evaluator_hotkey), digest(job), attempt.step_index)] += 1
         return output(job, attempt)
 
     async def reconcile(job, attempt):
@@ -497,7 +532,7 @@ async def test_accepted_model_reaches_native_reward_package(
         lambda *a, **kw: SimpleNamespace(invoke=invoke, reconcile=reconcile),
     )
     configs = {n: evaluator_config(o, n, tmp_path / n) for n in ("Charlie", "Dave")}
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as client, AsyncExitStack() as stack:
         configure_model_reviews(o, tmp_path / "artifact-review", client, signatures)
 
         # Independent artifact acceptance is required even for a baseline copy.
@@ -553,22 +588,31 @@ async def test_accepted_model_reaches_native_reward_package(
             prepared = o.service.preparation.retained(
                 h.cohort, expected_tip_sha256=history_tip(source.history), current_block=h.block
             )
-            assert prepared.roster.intake_seal.record_count == 3
-            assert len(prepared.roster.participants) == 1
-            assert prepared.roster.participants[0].record.request == submitted
-            assert await app.state.orders.select(h.cohort) == 1
-            (slot,) = app.state.orders.queue.pending(h.cohort)
+            assert prepared.roster.intake_seal.record_count == 3 + mixed
+            assert len(prepared.roster.participants) == 1 + mixed
+            assert submitted in [p.record.request for p in prepared.roster.participants]
+            assert await app.state.orders.select(h.cohort) == 1 + mixed
+            slots = app.state.orders.queue.pending(h.cohort)
             report = await app.state.orders.worker.poll_once()
-            assert report["deliveries_acknowledged"] == 2, report
+            assert report["deliveries_acknowledged"] == 2 * (1 + mixed), report
+            slot = next(
+                s
+                for s in slots
+                if nodes["Charlie"]
+                .inbox.assignment(s)
+                .certificate.order.submission.submission.track
+                == "model"
+            )
             assignments = {name: n.inbox.assignment(slot) for name, n in nodes.items()}
             frozen_order = canonical_json_bytes(assignments["Charlie"].certificate)
             for node in nodes.values():
-                assert (await node.worker.poll_once())["retry_count"] == 1
+                assert (await node.worker.poll_once())["retry_count"] == 1 + mixed
                 assert node.execution.journal.get("assignment", slot) is None
             assert not inference
             h.block += 1
             for node in nodes.values():
-                assert (await node.worker.poll_once())["retry_count"] == 0
+                report = await node.worker.poll_once()
+                assert report["retry_count"] == 0, str(report)
             first_steps = {
                 name: canonical_json_bytes(
                     node.execution.step(
@@ -587,14 +631,14 @@ async def test_accepted_model_reaches_native_reward_package(
             o.outages.add("owner.example")
             for name in nodes:
                 nodes[name] = evaluator(name)
-                assert (await nodes[name].worker.poll_once())["retry_count"] == 1
-            assert sum(inference.values()) == 2
+                assert (await nodes[name].worker.poll_once())["retry_count"] == 1 + mixed
+            assert sum(inference.values()) == 2 * (1 + mixed)
             o.outages.clear()
 
         async with o.open() as app:
             o.apps["owner.example"] = app
             selected_signatures = sum(signatures.values())
-            assert await app.state.orders.select(h.cohort) == 1
+            assert await app.state.orders.select(h.cohort) == 1 + mixed
             assert (await app.state.orders.worker.poll_once())["retry_count"] == 0
             assert sum(signatures.values()) == selected_signatures
             for name, node in nodes.items():
@@ -603,10 +647,28 @@ async def test_accepted_model_reaches_native_reward_package(
                 job = recoverable_order_job(assignment.certificate.order, node.config.orders.signer)
                 assert canonical_json_bytes(node.execution.step(job, 0)) == first_steps[name]
 
+            if service:
+                service.window()
+                service.reviewers(nodes, client)
+                await service.miner(stack)
+                catalog_key = await service.claim(endpoint_request, client)
+                service_worker = await app.state.dispatch.worker(catalog_key)
+
             # The actual recurring host owns the remaining execution and export
             # work. This loop advances only the synthetic chain, never a stage.
+            certificates = {
+                name: [node.inbox.assignment(s).certificate for s in slots]
+                for name, node in nodes.items()
+            }
+            service_reports = []
             stop = asyncio.Event()
             tasks = [asyncio.create_task(node.run(stop)) for node in nodes.values()]
+            if service:
+                tasks.append(
+                    asyncio.create_task(
+                        service_worker.run(stop, poll_seconds=0.1, report=service_reports.append)
+                    )
+                )
             try:
 
                 async def complete():
@@ -616,17 +678,37 @@ async def test_accepted_model_reaches_native_reward_package(
                                 task.result()
                                 raise AssertionError("evaluator exited before completion")
                         if all(
-                            node.files.terminal(
-                                assignments[name].certificate, node.config.orders.signer
-                            )
-                            is not None
+                            node.files.terminal(certificate, node.config.orders.signer) is not None
                             for name, node in nodes.items()
+                            for certificate in certificates[name]
+                        ) and (
+                            not service
+                            or (service_reports and service_reports[-1].get("work_complete") == 1)
                         ):
                             return
-                        h.block += 1
+                        if (
+                            service
+                            and service_reports
+                            and service_reports[-1].get("work_complete") == 1
+                            and all(
+                                n.last_reports.get("endpoints", {}).get("assignments_complete") == 1
+                                for n in nodes.values()
+                            )
+                        ):
+                            h.block = max(h.block, service.window_end)
+                        if not service:
+                            h.block += 1
                         await asyncio.sleep(0.1)
 
-                await asyncio.wait_for(complete(), 60)
+                try:
+                    await asyncio.wait_for(complete(), 180 if mixed else 60)
+                except TimeoutError as error:
+                    raise AssertionError(
+                        {
+                            "evaluators": {name: n.last_reports for name, n in nodes.items()},
+                            "service": service_reports[-1:],
+                        }
+                    ) from error
             finally:
                 stop.set()
                 await asyncio.wait_for(asyncio.gather(*tasks), 30)
@@ -660,13 +742,19 @@ async def test_accepted_model_reaches_native_reward_package(
                 close()
             deliver_exports({"Dave": nodes["Dave"]}, delivered)
             closure = close()
-            assert len(closure.participants) == 1
-            assert len(closure.participants[0].evaluators) == 2
+            assert len(closure.participants) == 1 + mixed
+            assert all(len(p.evaluators) == 2 for p in closure.participants)
             assert max(inference.values()) == max(signatures.values()) == 1
-            assert sum(inference.values()) == 12
+            assert sum(inference.values()) == 12 + 6 * mixed
+            if service:
+                assert len(service.calls) == 7 and max(service.calls.values()) == 1
+                assert service.lost_replies == int(interrupt)
+                service.reveal()
             await certify_requests(o, app, tmp_path / "request-review", monkeypatch, signatures)
             assert max(signatures.values()) == 1
-            await run_settlement(o, nodes, tmp_path / "native-settlement", signatures, interrupt)
+            await run_settlement(
+                o, nodes, tmp_path / "native-settlement", signatures, interrupt, mixed=mixed
+            )
             assert max(inference.values()) == max(signatures.values()) == 1
             # Reopened workers can recover all completed originals offline.
             h.offline = True
@@ -674,7 +762,7 @@ async def test_accepted_model_reaches_native_reward_package(
             counts = dict(inference), dict(signatures)
             for name in nodes:
                 node = evaluator(name)
-                assert (await node.worker.poll_once())["jobs_complete"] == 1
+                assert (await node.worker.poll_once())["jobs_complete"] == 1 + mixed
                 with pytest.raises(OSError):
                     await node.exporter.poll_once()
                 # Already published immutable exports remain readable even when

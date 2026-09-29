@@ -35,7 +35,7 @@ def copy_originals(origin, target):
             destination.chmod(0o600)
 
 
-async def run_settlement(o, evaluators, root, signatures, interrupt):
+async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=False):
     h, series = o.h, o.config.series
     plan = series.cohorts[0]
     nodes, stacks, configs = {}, {}, {}
@@ -195,11 +195,12 @@ async def run_settlement(o, evaluators, root, signatures, interrupt):
         package = CohortRewardPackage.model_validate_json(original)
         service, allocation = package.service.statement.allocation, package.allocation
         assert (service.service_budget, service.model_budget) == (32767, 32768)
-        assert service.recipients == ()  # This cohort claimed no paid service work.
-        assert allocation.burn_weight == 32767
-        assert [(r.hotkey, r.raw_weight) for r in allocation.recipients] == [
-            (wallet("Alice").hotkey.ss58_address, 32768)
-        ]
+        assert bool(service.recipients) == mixed
+        assert allocation.burn_weight == (25205 if mixed else 32767)
+        expected = {wallet("Alice").hotkey.ss58_address: 32768}
+        if mixed:
+            expected[wallet("Bob").hotkey.ss58_address] = 7562
+        assert {r.hotkey: r.raw_weight for r in allocation.recipients} == expected
         award = allocation.model_award
         assert award is not None and len(award.candidates) == 1
         candidate = award.candidates[0]

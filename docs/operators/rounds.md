@@ -1243,7 +1243,8 @@ and inbox transports, independently verified history/finality, and a migration
 fence. These components are not yet installed as a production cohort service.
 
 The evaluator execution worker consumes acknowledged inbox assignments without
-a signing key. Its private per-case journal reserves output capacity before
+a signing key. It serializes reads of its shared private inbox while allowing
+bounded concurrent execution. Its private per-case journal reserves output capacity before
 invocation and retains classified stdout before collecting a finish observation.
 A failed finality read therefore retries the observation without rerunning the
 model. Completed case/role steps are immutable and survive process restart;
