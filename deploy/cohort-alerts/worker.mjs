@@ -14,11 +14,13 @@ export class CohortMonitor extends DurableObject {
         `Observed (UTC): ${new Date(notice.observed_at).toISOString()}`,
         `Last heartbeat (UTC): ${new Date(notice.received_at).toISOString()}`,
         `Failed services: ${notice.failed.join(", ") || "none reported"}`,
+        `Stalled or missing progress: ${notice.stalled?.join(", ") || "none reported"}`,
         "",
-        "This monitor checks service availability only. It does not certify",
-        "cohort progress, finalized weights, or reward payments.",
+        "Observations come from the configured host. A weight update does not",
+        "by itself establish correct allocation or received reward payments.",
       ].join("\n"),
-    }), this.env.EXPECTED_SERVICES.split(","));
+    }), this.env.EXPECTED_SERVICES.split(","), Date.now,
+    JSON.parse(this.env.PROGRESS_LIMITS || "{}"));
   }
   async heartbeat(value) { return this.monitor().heartbeat(value); }
   async status() { return this.monitor().status(); }
@@ -57,7 +59,7 @@ export default {
         const { value, done } = await reader.read();
         if (done) break;
         length += value.length;
-        if (length > 4096) {
+        if (length > 16384) {
           await reader.cancel();
           return new Response("Too large", { status: 413 });
         }

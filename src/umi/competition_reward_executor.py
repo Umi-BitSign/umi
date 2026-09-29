@@ -179,6 +179,17 @@ class StandingRewardExecutor:
     async def _context(self, prepared, prior):
         control, history, _ = await self._selection()
         chain = await self.provider.collect_registered_weights(self.hotkey, at=control.snapshot)
+        # Export only the native proof owner's observation. Submission success
+        # is not a finalized update, and retries must not invent progress.
+        logger.info(
+            canonical_json_bytes(
+                {
+                    "schema": "umi-standing-chain-observation/1",
+                    "block_number": chain.block,
+                    "weight_update_block": chain.validator_last_update,
+                }
+            ).decode()
+        )
         self._fence(chain.block)
         options = dict(
             control=control,

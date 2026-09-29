@@ -7,6 +7,7 @@ has separate tests. These tests do not qualify an installed/live validator.
 
 import asyncio
 import copy
+import json
 import os
 import threading
 from dataclasses import replace
@@ -119,8 +120,9 @@ async def test_terminal_observer_exits_loop_for_service_restart(executing):
     assert e._descriptor is None and not t.signed and not t.sent
 
 
-async def test_send_once_then_recover_even_after_restart(executing):
+async def test_send_once_then_recover_even_after_restart(executing, caplog):
     t, e = executing, executing.executor
+    caplog.set_level("INFO", logger=execution.__name__)
     with e.hold_writer():
         result = await e.step()
         assert result.status == "submitted_unconfirmed"
@@ -133,6 +135,23 @@ async def test_send_once_then_recover_even_after_restart(executing):
     assert len(t.signed) == len(t.sent) == 1
     assert t.recoveries == [pending, pending]
     assert t.journal.pending() == pending
+    observations = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.name == execution.__name__ and r.message.startswith('{"block_number"')
+    ]
+    assert observations
+    assert all(
+        v
+        == {
+            "schema": "umi-standing-chain-observation/1",
+            "block_number": t.chain.block,
+            "weight_update_block": t.chain.validator_last_update,
+        }
+        for v in observations
+    )
+    # Transport success and pending recovery cannot claim a new finalized update.
+    assert observations[-1]["weight_update_block"] == pending.intent.prior_last_update
 
 
 @pytest.mark.parametrize("when", ["before_send", "after_send"])
