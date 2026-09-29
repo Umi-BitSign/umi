@@ -605,6 +605,29 @@ def test_cli_routes_initial_command_and_bounds_errors(monkeypatch, capsys):
         assert result["service_state"] == "unconfirmed"
         assert result["reason_code"] == "initial_host_upgrade_failed"
         assert result["chain_submission_authorized"] is False
+        assert result["failure_details"][0]["error_type"] == (
+            type(error).__module__ + "." + type(error).__qualname__
+        )
+        assert result["failure_details"][0]["source_frames"][-1]["function"] == "main"
+
+
+def test_child_failure_reports_native_location_without_private_exception_data(monkeypatch, capsys):
+    async def fail(controls):
+        try:
+            raise OSError("private clip capability and wallet path")
+        except OSError:
+            upgrade._sandbox_properties(b"[Service]\nUnsupported=private-value\n")
+
+    monkeypatch.setattr(upgrade, "_rehearse_child", fail)
+    assert upgrade.main(["rehearse", "--controls", "/private-controls"]) == 1
+    output = capsys.readouterr().out
+    assert "private" not in output
+    result = json.loads(output)
+    assert result["status"] == "preflight_failed"
+    details = result["failure_details"]
+    assert len(details) == 2
+    assert details[0]["source_frames"][-1]["function"] == "_sandbox_properties"
+    assert details[1]["error_type"] == "builtins.OSError"
 
 
 def test_child_refuses_root_without_wallet_or_container_calls(monkeypatch):

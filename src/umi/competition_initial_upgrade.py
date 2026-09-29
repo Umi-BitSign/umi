@@ -1110,8 +1110,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         asyncio.run(_rehearse_child(args.controls))
-    except (ValueError, OSError, RuntimeError, ValidatorSupervisorError):
-        print('{"status":"preflight_failed"}', flush=True)
+    except (ValueError, OSError, RuntimeError, ValidatorSupervisorError) as error:
+        from .competition_progress import _failure_details
+
+        print(
+            json.dumps({"status": "preflight_failed", "failure_details": _failure_details(error)}),
+            flush=True,
+        )
         return 1
     return 0
 
