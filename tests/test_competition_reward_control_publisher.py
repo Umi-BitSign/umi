@@ -177,7 +177,7 @@ async def publisher_case(native_encoding, series_case, tmp_path, monkeypatch):
 async def test_lost_reply_restart_waits_for_fence_then_recognizes_control(publisher_case):
     h, prefix = publisher_case, (publisher_case.c.genesis,)
     h.lost_reply = True
-    with h.publisher.hold_writer(), pytest.raises(TimeoutError):
+    with h.publisher.hold_writer(), pytest.raises(asyncio.TimeoutError):
         await h.publisher.step(prefix)
     original = h.publisher.journal.pending()
     h.publisher = h.reopen()

@@ -42,16 +42,33 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
     mode, count = getattr(request, "param", ("equal", 1))
     source = tmp_path / "model-source"
     s = setup_scenario(receipt_scenario, source, runtime, baseline_entry=mode == "baseline")
-    alternate = (
-        bundle_at(source / "alternate", "alternate")
-        if mode in {"best", "proportional", "distinct-zero"}
-        else None
+    names = (
+        tuple(["Alice", *(f"Sybil{index:02d}" for index in range(1, count))])
+        if count > 2
+        else ("Alice", "Bob")[:count]
+    )
+    distinct_bundles = mode in {
+        "best",
+        "proportional",
+        "distinct-zero",
+        "sybil-variants",
+    }
+    participant_bundles = (
+        {
+            name: bundle_at(source / f"alternate-{index}", f"alternate-{index}")
+            for index, name in enumerate(names[1:], start=1)
+        }
+        if distinct_bundles
+        else {}
     )
     b = make_round(
         s,
         include_outcomes=False,
-        participant_names=("Alice", "Bob")[:count],
-        participant_bundles={"Bob": alternate} if alternate else None,
+        participant_names=names,
+        participant_bundles=participant_bundles,
+    )
+    later_accepted_hotkey = (
+        b["roster"].participants[0].record.request.signed_submission.submission.hotkey
     )
     for scenario in b["scenarios"]:
         artifacts = []
@@ -71,6 +88,16 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
                         if step.role == "candidate"
                         and scenario["signed"].submission.hotkey
                         == wallet("Bob").hotkey.ss58_address
+                        else ""
+                    )
+                if mode == "duplicate-first-ineligible":
+                    text = (
+                        "hello"
+                        if step.role == "incumbent"
+                        or (
+                            step.role == "candidate"
+                            and scenario["signed"].submission.hotkey == later_accepted_hotkey
+                        )
                         else ""
                     )
                 if mode == "proportional":
@@ -102,8 +129,8 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
         s["policy"],
     )
     preserve_bundle(s["artifacts"][0].job.incumbent, source / "incumbent", archive, s["policy"])
-    if alternate:
-        preserve_bundle(alternate, source / "alternate", archive, s["policy"])
+    for index, bundle in enumerate(participant_bundles.values(), start=1):
+        preserve_bundle(bundle, source / f"alternate-{index}", archive, s["policy"])
     accepted = []
     for index, participant in enumerate(b["roster"].participants):
         sub = participant.record.request.signed_submission.submission
@@ -279,6 +306,7 @@ def service_boundary(c, service_pool_bps):
 
     b, _, manifest, _, _ = c
     service, model, fingerspelling, continuous = {
+        0: (0, 65535, 0, 0),
         5000: (32767, 32768, 7562, 25205),
         7000: (45874, 19661, 10586, 35288),
     }[service_pool_bps]
@@ -314,7 +342,7 @@ def service_boundary(c, service_pool_bps):
 
 
 @pytest.mark.parametrize("model_case", [("baseline", 1), ("below", 1)], indirect=True)
-@pytest.mark.parametrize("service_pool_bps", [5000, 7000])
+@pytest.mark.parametrize("service_pool_bps", [0, 5000, 7000])
 async def test_full_model_pool_retained_and_independently_replayed_after_lost_reply(
     model_case, tmp_path, monkeypatch, service_pool_bps
 ):

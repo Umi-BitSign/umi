@@ -7,6 +7,7 @@ from .competition_cohort_intake_export import RemoteIntakeProgressReviewer
 from .competition_cohort_intake_review_http import IntakeReviewHTTPClient
 from .competition_cohort_preparation_export import RemotePreparationProgressReviewer
 from .competition_cohort_preparation_review_http import PreparationReviewHTTPClient
+from .competition_cohort_recovery import cohort_tracks, verify_cohort_service_pool
 from .competition_cohort_request_remote_review import RemoteRequestProgressReviewer
 from .competition_cohort_request_review_http import RequestReviewHTTPClient
 from .competition_cohort_review_config import PhaseReviewServiceConfig
@@ -68,6 +69,10 @@ class SelectedPhaseReviewer:
 
     def _requests(self, cohort: str) -> RemoteRequestProgressReviewer:
         c = self.config
+        plan = next((plan for plan in c.series.cohorts if digest(plan) == cohort), None)
+        if plan is None:
+            raise ValueError("phase review cohort is absent from its standing series")
+        selected_tracks = cohort_tracks(plan, c.eligible_tracks)
         requirement = c.manifest.requirement(cohort)
         root = Path(c.inputs_directory)
         total = 0
@@ -88,10 +93,11 @@ class SelectedPhaseReviewer:
             read("catalogs", key, SignedServiceWorkCatalog) for key in requirement.catalog_sha256s
         )
         transport = read("transport", terms.transport_policy_sha256, ScoringPolicy)
+        verify_cohort_service_pool(plan, terms.service_pool_bps)
         if (
             roster.round.cohort_sha256 != cohort
             or roster.round.policy_sha256 != digest(self.policy)
-            or roster.round.eligible_tracks != c.eligible_tracks
+            or roster.round.eligible_tracks != selected_tracks
             or digest(terms) != requirement.terms_sha256
             or terms.policy_sha256 != digest(self.policy)
             or tuple(digest(v.catalog) for v in catalogs) != requirement.catalog_sha256s

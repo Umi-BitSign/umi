@@ -1,7 +1,8 @@
 """Immutable service/model amounts and fresh registration projection.
 
-Version 1 uses promotion attribution, version 2 a single model award, and
-version 3 proportional model awards. All require certification before submission.
+Version 1 uses promotion attribution, version 2 a single model award, version 3
+content-proportional model awards, and version 4 fixed quality-bucket awards.
+All require certification before submission.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ from .competition_chain_state import (
 )
 from .competition_cohort_model_award import (
     MODEL_AWARD_ADAPTER,
-    CohortModelAward,
     ModelAward,
     ProportionalModelAward,
+    QualityBucketModelAward,
     build_model_award,
     read_model_acceptances,
 )
@@ -50,6 +51,7 @@ class CohortRewardAllocation(StrictProtocolModel):
         "umi-cohort-reward-allocation/1",
         "umi-cohort-reward-allocation/2",
         "umi-cohort-reward-allocation/3",
+        "umi-cohort-reward-allocation/4",
     ] = Field(alias="schema")
     policy_sha256: Hex32
     round_sha256: Hex32
@@ -77,7 +79,9 @@ class CohortRewardAllocation(StrictProtocolModel):
                 raise ValueError("legacy reward allocation requires only promotion attribution")
         elif self.model_award is None or self.promotion_head is not None:
             raise ValueError("model award allocation requires only the cohort model decision")
-        elif (self.schema_ == "umi-cohort-reward-allocation/3") != isinstance(
+        elif (self.schema_ == "umi-cohort-reward-allocation/4") != isinstance(
+            self.model_award, QualityBucketModelAward
+        ) or (self.schema_ == "umi-cohort-reward-allocation/3") != isinstance(
             self.model_award, ProportionalModelAward
         ):
             raise ValueError("reward allocation version differs from its model award")
@@ -96,7 +100,7 @@ def build_reward_allocation(
     benchmark_review: ClosedQualityReview,
     promotion: PromotionHeadBinding | None,
     *,
-    model_award: CohortModelAward | ProportionalModelAward | None = None,
+    model_award: ModelAward | None = None,
 ) -> CohortRewardAllocation:
     """Assemble replayed evidence using the owner's selected model decision.
 
@@ -130,12 +134,18 @@ def build_reward_allocation(
             or model_award.rule != benchmark_review.history.authority.authority.model_reward_rule
         ):
             raise ValueError("model award belongs to different quality or authority")
-        if isinstance(model_award, ProportionalModelAward):
-            model_recipients = {c.content_sha256: c.recipient_hotkey for c in model_award.credits}
+        if isinstance(model_award, (ProportionalModelAward, QualityBucketModelAward)):
+            bucketed = isinstance(model_award, QualityBucketModelAward)
+            model_recipients = {
+                f"bucket:{c.bucket_index:04d}" if bucketed else c.content_sha256: c.recipient_hotkey
+                for c in model_award.credits
+            }
             if len(model_recipients) != len(model_award.credits):
-                raise ValueError("model allocation contains duplicate content credit")
+                raise ValueError("model allocation contains duplicate reward credit")
             model_credits = {
-                c.content_sha256: Fraction(int(c.score.numerator), int(c.score.denominator))
+                f"bucket:{c.bucket_index:04d}" if bucketed else c.content_sha256: Fraction(
+                    int(c.score.numerator), int(c.score.denominator)
+                )
                 for c in model_award.credits
             }
             if any(not 0 <= score <= 1 for score in model_credits.values()):
@@ -172,7 +182,9 @@ def build_reward_allocation(
         amounts[key] += amount
         hotkeys[key] = min(hotkeys.get(key, model_recipient), model_recipient)
     return CohortRewardAllocation(
-        schema="umi-cohort-reward-allocation/3"
+        schema="umi-cohort-reward-allocation/4"
+        if isinstance(model_award, QualityBucketModelAward)
+        else "umi-cohort-reward-allocation/3"
         if isinstance(model_award, ProportionalModelAward)
         else "umi-cohort-reward-allocation/2"
         if model_award is not None

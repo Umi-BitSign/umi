@@ -70,7 +70,7 @@ async def wait_for_owned(coroutine: Coroutine[Any, Any, _Result], *, timeout: fl
     try:
         done, _ = await asyncio.wait((task,), timeout=timeout)
         if not done:
-            raise TimeoutError
+            raise asyncio.TimeoutError
         return task.result()
     except asyncio.CancelledError:
         task.cancel()
@@ -84,9 +84,9 @@ async def wait_for_owned(coroutine: Coroutine[Any, Any, _Result], *, timeout: fl
         # asyncio.TimeoutError is distinct from the built-in exception on
         # Python 3.10. Keep this public boundary stable across supported
         # interpreters, including when the owned operation raises the former.
-        if type(error) is TimeoutError:
+        if type(error) is asyncio.TimeoutError:
             raise
-        raise TimeoutError from error
+        raise asyncio.TimeoutError from error
 
 
 async def kill_and_reap(process: asyncio.subprocess.Process) -> int:

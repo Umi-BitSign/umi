@@ -19,7 +19,10 @@ from umi.competition_cohort_recovery import (
     SignedCohortRecoveryTransition,
     admit_recoverable_cohort,
     apply_recovery_transition,
+    cohort_tracks,
     propose_recovery_transition,
+    verify_cohort_service_pool,
+    verify_cohort_tracks,
     verify_recovery_authority,
 )
 from umi.competition_cohort_recovery_store import CohortRecoveryStore
@@ -78,6 +81,78 @@ def advance(state, authority, policy, operation, block, extension=None):
         extension_blocks=extension,
     )
     return apply_recovery_transition(state, signed_transition(proposal), authority, policy)
+
+
+def test_version_two_plan_binds_tracks_and_reward_split(recovery):
+    legacy, _, _ = recovery
+    plan = legacy.model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/2",
+            "eligible_tracks": ("model",),
+            "service_pool_bps": 0,
+        }
+    )
+    raw = canonical_json_bytes(plan)
+    assert RecoverableCohortPlan.model_validate_json(raw) == plan
+    assert b'"eligible_tracks":["model"]' in raw
+    assert b'"service_pool_bps":0' in raw
+    verify_cohort_tracks(plan, ("model",))
+    verify_cohort_service_pool(plan, 0)
+    assert cohort_tracks(plan, ("endpoint", "model")) == ("model",)
+    with pytest.raises(ValueError, match="round tracks differ"):
+        verify_cohort_tracks(plan, ("endpoint", "model"))
+    with pytest.raises(ValueError, match="reward split differs"):
+        verify_cohort_service_pool(plan, 5000)
+    with pytest.raises(ValueError, match="unavailable"):
+        cohort_tracks(plan, ("endpoint",))
+
+
+@pytest.mark.parametrize(
+    "tracks,service_pool_bps",
+    [
+        (("endpoint", "model"), 0),
+        (("model",), 5000),
+        (("endpoint",), 5000),
+        (("endpoint", "model"), 10000),
+    ],
+)
+def test_version_two_plan_rejects_tracks_without_matching_nonzero_pool(
+    recovery, tracks, service_pool_bps
+):
+    legacy, _, _ = recovery
+    with pytest.raises(ValidationError, match="tracks differ"):
+        RecoverableCohortPlan.model_validate(
+            {
+                **legacy.model_dump(by_alias=True),
+                "schema": "umi-recoverable-cohort-plan/2",
+                "eligible_tracks": tracks,
+                "service_pool_bps": service_pool_bps,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"schema": "umi-recoverable-cohort-plan/2", "eligible_tracks": ("model",)},
+        {"schema": "umi-recoverable-cohort-plan/2", "service_pool_bps": 0},
+        {"eligible_tracks": ("model",)},
+        {"service_pool_bps": 0},
+    ],
+)
+def test_cohort_tracks_and_reward_split_are_versioned_together(recovery, update):
+    legacy, _, _ = recovery
+    with pytest.raises(ValidationError, match="tracks and reward split"):
+        RecoverableCohortPlan.model_validate(legacy.model_dump(by_alias=True) | update)
+
+
+def test_version_one_plan_preserves_exact_legacy_bytes(recovery):
+    legacy, _, _ = recovery
+    raw = canonical_json_bytes(legacy)
+    assert b"eligible_tracks" not in raw and b"service_pool_bps" not in raw
+    verify_cohort_tracks(legacy, ("endpoint", "model"))
+    verify_cohort_service_pool(legacy, 5000)
+    assert cohort_tracks(legacy, ("endpoint", "model")) == ("endpoint", "model")
 
 
 def at_phase(recovery, policy, target_phase):

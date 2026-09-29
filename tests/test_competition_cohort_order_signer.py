@@ -395,7 +395,7 @@ async def test_attempt_timeout_keeps_selection_for_a_late_retry(harness):
         await asyncio.Future()
 
     worker.sign = slow
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await worker.attest(h.order, h.participant)
     saved = worker.journal.load(order_slot(h.order))[0]
     h.block = 10**6

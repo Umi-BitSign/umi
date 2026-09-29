@@ -349,6 +349,7 @@ def precommit_service_inventory(
     h,
     *,
     service_terms_sha256="a1" * 32,
+    service_terms_sha256s=None,
     service_reference_sha256="93" * 32,
     service_video_sha256="92" * 32,
 ):
@@ -377,10 +378,19 @@ def precommit_service_inventory(
         (h.intake.history(b.cohort_sha256) for b in h.intake.config.cohorts),
         key=lambda value: value.plan.sequence,
     )
+    service_terms_sha256s = service_terms_sha256s or {}
     catalogs = tuple(
         SignedServiceWorkCatalog(catalog=value, signatures=signatures(value))
         for value in (
-            body.model_copy(update={"cohort_sha256": digest(history.plan)}) for history in histories
+            body.model_copy(
+                update={
+                    "cohort_sha256": digest(history.plan),
+                    "service_terms_sha256": service_terms_sha256s.get(
+                        digest(history.plan), service_terms_sha256
+                    ),
+                }
+            )
+            for history in histories
         )
     )
     catalog = catalogs[0]
@@ -390,7 +400,7 @@ def precommit_service_inventory(
         cohorts=tuple(
             RewardReplayRequirement(
                 cohort_sha256=value.catalog.cohort_sha256,
-                terms_sha256=body.service_terms_sha256,
+                terms_sha256=value.catalog.service_terms_sha256,
                 catalog_sha256s=(digest(value.catalog),),
             )
             for value in catalogs

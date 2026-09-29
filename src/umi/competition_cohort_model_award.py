@@ -11,7 +11,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_validator
 
 from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_endpoint_archive import read_endpoint_object
@@ -79,7 +79,152 @@ class ProportionalModelAward(ModelAwardEvidence):
     )
 
 
-ModelAward = Annotated[CohortModelAward | ProportionalModelAward, Field(discriminator="schema_")]
+class QualityBucketCredit(StrictProtocolModel):
+    bucket_index: Annotated[int, Field(ge=0, le=9999)]
+    lower_bound_bps: Annotated[int, Field(ge=0, le=9999)]
+    upper_bound_bps: Annotated[int, Field(ge=1, le=10000)]
+    member_submission_sha256s: Annotated[tuple[Hex32, ...], Field(min_length=1, max_length=512)]
+    content_sha256: Hex32
+    submission_sha256: Hex32
+    recipient_hotkey: Hotkey
+    score: ExactQuality
+
+
+class QualityBucketModelAward(ModelAwardEvidence):
+    schema_: Literal["umi-cohort-model-award/3"] = Field(alias="schema")
+    rule: Literal["baseline_or_better_quality_bucket_best_score_first_complete/1"]
+    bucket_width_bps: Annotated[int, Field(ge=1, le=10000)]
+    credits: Annotated[tuple[QualityBucketCredit, ...], Field(max_length=512)]
+    zero_total_rule: Literal["equal_per_occupied_quality_bucket"] = (
+        "equal_per_occupied_quality_bucket"
+    )
+
+    @model_validator(mode="after")
+    def canonical_buckets(self):
+        indices = [credit.bucket_index for credit in self.credits]
+        if indices != sorted(set(indices)):
+            raise ValueError("model quality bucket credits must be unique and ordered")
+        maximum_index = (10000 + self.bucket_width_bps - 1) // self.bucket_width_bps - 1
+        candidates = {candidate.submission_sha256: candidate for candidate in self.candidates}
+        certificates = {
+            certificate.acceptance.submission_sha256: certificate
+            for certificate in self.acceptances
+        }
+        ordinals = {
+            submission: certificate.acceptance.accepted_ordinal
+            for submission, certificate in certificates.items()
+        }
+        if (
+            len(candidates) != len(self.candidates)
+            or len(certificates) != len(self.acceptances)
+            or set(candidates) != set(certificates)
+            or len(set(ordinals.values())) != len(ordinals)
+        ):
+            raise ValueError("model quality bucket evidence has inconsistent roster identities")
+        ordered_blocks = [
+            certificates[submission].acceptance.accepted_at_block
+            for submission in sorted(ordinals, key=ordinals.__getitem__)
+        ]
+        if ordered_blocks != sorted(ordered_blocks):
+            raise ValueError("model quality bucket acceptance order contradicts block order")
+        baselines = {candidate.baseline_aggregate for candidate in self.candidates}
+        if len(baselines) > 1:
+            raise ValueError("model quality bucket evidence has inconsistent baselines")
+        for submission, candidate in candidates.items():
+            acceptance = certificates[submission].acceptance
+            score = Fraction(
+                int(candidate.aggregate.numerator), int(candidate.aggregate.denominator)
+            )
+            baseline = Fraction(
+                int(candidate.baseline_aggregate.numerator),
+                int(candidate.baseline_aggregate.denominator),
+            )
+            if (
+                not 0 <= score <= 1
+                or not 0 <= baseline <= 1
+                or candidate.eligible != (score >= baseline)
+                or candidate.acceptance_sha256 != digest(certificates[submission])
+                or (
+                    candidate.model_sha256,
+                    candidate.content_sha256,
+                    candidate.recipient_hotkey,
+                )
+                != (
+                    acceptance.model_sha256,
+                    acceptance.content_sha256,
+                    acceptance.recipient_hotkey,
+                )
+            ):
+                raise ValueError("model quality bucket candidate is not canonical")
+        canonical_content: dict[str, ModelAwardCandidate] = {}
+        for submission in sorted(candidates, key=ordinals.__getitem__):
+            candidate = candidates[submission]
+            canonical_content.setdefault(candidate.content_sha256, candidate)
+        expected: dict[int, list[ModelAwardCandidate]] = {}
+        for candidate in canonical_content.values():
+            if not candidate.eligible:
+                continue
+            index = quality_bucket_index(
+                Fraction(int(candidate.aggregate.numerator), int(candidate.aggregate.denominator)),
+                self.bucket_width_bps,
+            )
+            expected.setdefault(index, []).append(candidate)
+        expected_members: dict[int, list[str]] = {}
+        for candidate in candidates.values():
+            canonical = canonical_content[candidate.content_sha256]
+            if not canonical.eligible:
+                continue
+            index = quality_bucket_index(
+                Fraction(int(canonical.aggregate.numerator), int(canonical.aggregate.denominator)),
+                self.bucket_width_bps,
+            )
+            expected_members.setdefault(index, []).append(candidate.submission_sha256)
+        if indices != sorted(expected):
+            raise ValueError("model quality bucket credits omit or add an eligible band")
+        for credit in self.credits:
+            members = expected[credit.bucket_index]
+            winner = min(
+                members,
+                key=lambda candidate: (
+                    -Fraction(
+                        int(candidate.aggregate.numerator),
+                        int(candidate.aggregate.denominator),
+                    ),
+                    ordinals[candidate.submission_sha256],
+                    candidate.submission_sha256,
+                ),
+            )
+            if (
+                credit.bucket_index > maximum_index
+                or credit.lower_bound_bps != credit.bucket_index * self.bucket_width_bps
+                or credit.upper_bound_bps
+                != min((credit.bucket_index + 1) * self.bucket_width_bps, 10000)
+                or credit.member_submission_sha256s
+                != tuple(sorted(set(credit.member_submission_sha256s)))
+                or credit.submission_sha256 not in credit.member_submission_sha256s
+                or credit.member_submission_sha256s
+                != tuple(sorted(expected_members[credit.bucket_index]))
+                or (
+                    credit.content_sha256,
+                    credit.submission_sha256,
+                    credit.recipient_hotkey,
+                    credit.score,
+                )
+                != (
+                    winner.content_sha256,
+                    winner.submission_sha256,
+                    winner.recipient_hotkey,
+                    winner.aggregate,
+                )
+            ):
+                raise ValueError("model quality bucket credit is not canonical")
+        return self
+
+
+ModelAward = Annotated[
+    CohortModelAward | ProportionalModelAward | QualityBucketModelAward,
+    Field(discriminator="schema_"),
+]
 MODEL_AWARD_ADAPTER = TypeAdapter(ModelAward)
 
 
@@ -94,12 +239,20 @@ def _fraction(value: ExactQuality) -> Fraction:
     return result
 
 
+def quality_bucket_index(score: Fraction, width_bps: int) -> int:
+    """Map exact normalized quality into fixed pre-intake basis-point bands."""
+    if not 0 <= score <= 1 or not 1 <= width_bps <= 10000:
+        raise ValueError("invalid model quality bucket input")
+    bucket_count = (10000 + width_bps - 1) // width_bps
+    return min((score * 10000) // width_bps, bucket_count - 1)
+
+
 def build_model_award(
     benchmark: CohortQualityManifest,
     review: ClosedQualityReview,
     acceptances: tuple[CertifiedModelArtifactAcceptance, ...],
     archive: Path,
-) -> CohortModelAward | ProportionalModelAward:
+) -> CohortModelAward | ProportionalModelAward | QualityBucketModelAward:
     """Replay every model and apply the rule selected before intake.
 
     The archive is selected by the host, never by a submission or package path.
@@ -139,7 +292,7 @@ def build_model_award(
     }
     candidates, choices = [], []
     baseline = None
-    content_quality = {}
+    legacy_content_quality = {}
     for result, certificate in zip(models, accepted, strict=True):
         a = certificate.acceptance
         p = participants[result.submission_sha256]
@@ -179,9 +332,16 @@ def build_model_award(
         if baseline is not None and baseline != result.incumbent:
             raise PendingModelAward("paired model evaluations disagree on the frozen baseline")
         baseline = result.incumbent
-        if content in content_quality and content_quality[content] != result.candidate:
-            raise PendingModelAward("duplicate model content has inconsistent quality")
-        content_quality[content] = result.candidate
+        if (
+            authority.model_reward_rule
+            != "baseline_or_better_quality_bucket_best_score_first_complete/1"
+        ):
+            if (
+                content in legacy_content_quality
+                and legacy_content_quality[content] != result.candidate
+            ):
+                raise PendingModelAward("duplicate model content has inconsistent quality")
+            legacy_content_quality[content] = result.candidate
         candidates.append(
             ModelAwardCandidate(
                 submission_sha256=result.submission_sha256,
@@ -221,23 +381,77 @@ def build_model_award(
     # One paid identity per canonical content. Preserve the first complete
     # acceptance's attribution; aliases cannot steal or multiply its credit.
     by_submission = {c.submission_sha256: c for c in candidates}
-    distinct = {}
+    if authority.model_reward_rule == "baseline_or_better_proportional_score_first_complete/1":
+        distinct = {}
+        for certificate in ordered:
+            candidate = by_submission[certificate.acceptance.submission_sha256]
+            if candidate.eligible:
+                distinct.setdefault(candidate.content_sha256, candidate)
+        return ProportionalModelAward(
+            schema="umi-cohort-model-award/2",
+            **evidence,
+            credits=tuple(
+                ModelScoreCredit(
+                    content_sha256=content,
+                    submission_sha256=candidate.submission_sha256,
+                    recipient_hotkey=candidate.recipient_hotkey,
+                    score=candidate.aggregate,
+                )
+                for content, candidate in sorted(distinct.items())
+            ),
+        )
+    canonical_content = {}
     for certificate in ordered:
         candidate = by_submission[certificate.acceptance.submission_sha256]
-        if candidate.eligible:
-            distinct.setdefault(candidate.content_sha256, candidate)
-    return ProportionalModelAward(
-        schema="umi-cohort-model-award/2",
-        **evidence,
-        credits=tuple(
-            ModelScoreCredit(
-                content_sha256=content,
-                submission_sha256=candidate.submission_sha256,
-                recipient_hotkey=candidate.recipient_hotkey,
-                score=candidate.aggregate,
+        canonical_content.setdefault(candidate.content_sha256, candidate)
+    distinct = {
+        content: candidate for content, candidate in canonical_content.items() if candidate.eligible
+    }
+    width = authority.model_quality_bucket_width_bps
+    if width is None:
+        raise ValueError("bucketed model rewards require a signed bucket width")
+    buckets: dict[int, list[ModelAwardCandidate]] = {}
+    for candidate in distinct.values():
+        index = quality_bucket_index(_fraction(candidate.aggregate), width)
+        buckets.setdefault(index, []).append(candidate)
+    bucket_members: dict[int, list[str]] = {}
+    for candidate in candidates:
+        canonical = canonical_content[candidate.content_sha256]
+        if not canonical.eligible:
+            continue
+        index = quality_bucket_index(_fraction(canonical.aggregate), width)
+        bucket_members.setdefault(index, []).append(candidate.submission_sha256)
+    ordinals_by_submission = {
+        certificate.acceptance.submission_sha256: certificate.acceptance.accepted_ordinal
+        for certificate in ordered
+    }
+    credits = []
+    for index, members in sorted(buckets.items()):
+        winner = min(
+            members,
+            key=lambda candidate: (
+                -_fraction(candidate.aggregate),
+                ordinals_by_submission[candidate.submission_sha256],
+                candidate.submission_sha256,
+            ),
+        )
+        credits.append(
+            QualityBucketCredit(
+                bucket_index=index,
+                lower_bound_bps=index * width,
+                upper_bound_bps=min((index + 1) * width, 10000),
+                member_submission_sha256s=tuple(sorted(bucket_members[index])),
+                content_sha256=winner.content_sha256,
+                submission_sha256=winner.submission_sha256,
+                recipient_hotkey=winner.recipient_hotkey,
+                score=winner.aggregate,
             )
-            for content, candidate in sorted(distinct.items())
-        ),
+        )
+    return QualityBucketModelAward(
+        schema="umi-cohort-model-award/3",
+        **evidence,
+        bucket_width_bps=width,
+        credits=tuple(credits),
     )
 
 

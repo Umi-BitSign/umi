@@ -1143,20 +1143,27 @@ reviewer service. It requires an explicitly authorized cohort and miner consent;
 enabling these components does not change a fixed round's signed deadlines. The
 complete recovery workflow is not deployed or qualified for unattended rewards.
 
-The selected C5+ allocation is 50% service and 50% model rewards. Set
-`ServiceTerms.service_pool_bps` to `5000` and both competition-policy reward
-fields (`endpoint_reward_bps` and `model_reward_bps`) to `5000` when preparing
-the new policy. Bind the exact terms digest in every cohort's standing reward
-manifest before admission. These selections require new reviewed policy and
-authority artifacts; existing C4 artifacts retain their original allocation.
+The selected C5 and C7-C10 allocation is 50% service and 50% model rewards. C6
+is model-only and assigns 100% within the public-model track. Set
+`ServiceTerms.service_pool_bps` to `5000` for mixed cohorts and `0` for C6. Bind
+the exact terms digest, eligible tracks and split in every cohort's standing plan
+and reward manifest before admission. The series-level policy retains both track
+capabilities and cannot widen a narrower cohort plan. These selections require
+new reviewed policy and authority artifacts; existing C4 artifacts retain their
+original allocation.
 Existing submissions retain their original policy; enrollment under the new
 split requires fresh miner consent.
 
 The model pool requires a complete accepted model submission, preserved runnable
 artifacts and quality at least equal to the frozen baseline. A sole eligible
-entrant receives the full model pool. The raw weight total is 65,535; the existing
-deterministic rounding assigns 32,767 units to service and 32,768 to models.
-This is a weight-budget split, not a guarantee of exact emitted token amounts.
+quality band receives the full model pool. Exact content counts once; remaining
+eligible models enter fixed five-percentage-point bands, with one credit for the
+highest exact score in each occupied band. The first complete certified
+acceptance fixes score and eligibility for exact-content aliases, so repeated
+submissions do not create additional benchmark trials. The raw weight total is
+65,535; deterministic rounding assigns mixed cohorts 32,767 units to service and
+32,768 to models, while C6 assigns all 65,535 to models. This is a weight-budget
+split, not a guarantee of exact emitted token amounts.
 
 Phase authority `umi-cohort-recovery-authority/2` keeps a pending phase valid
 until certified completion or revocation. Passing a target does not require an

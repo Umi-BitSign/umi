@@ -79,7 +79,9 @@ contributor supplies it, disclose that access and any influence on selection.
 The C5 scoring profile uses `umi-open-competition-policy/3` and
 `umi-competition-suite/2`. It uses one reference, the fingerspelling and
 continuous strata, and the 3/13 and 10/13 weights. The signed standing reward
-authority applies C5's separate 50% service and 50% public-model pools. C4's
+authority applies C5's separate 50% service and 50% public-model pools. C6's
+signed plan permits only the public-model track and assigns it 100%; C7-C10
+return to 50/50. C4's
 signed policy keeps its original allocation and meaning.
 
 ### Prospective dependence-gated input contract
@@ -261,8 +263,8 @@ valid paraphrases can lose points, and small text edits can change meaning.
 Human semantic evaluation can be added later under a prospective published
 policy without being a dependency for this automatic-scoring launch.
 
-C5's 50/50 allocation, model preservation and contribution-rights checks are
-defined by its signed policy and version 3 terms. The
+C5's 50/50 allocation, C6's model-only allocation, model preservation and
+contribution-rights checks are defined by its signed policy and version 3 terms. The
 [execution plan](../competition/launch.md) tracks the remaining operational
 activation gates. A future dependence-gated policy defines its own allocation
 prospectively; this document does not reinterpret C5.

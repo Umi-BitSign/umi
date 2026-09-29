@@ -32,7 +32,7 @@ from .competition_cohort_preparation_phase import (
     PreparationProgressReviewRecord,
     _progress,
 )
-from .competition_cohort_recovery import CohortRecoveryTransition
+from .competition_cohort_recovery import CohortRecoveryTransition, cohort_tracks
 from .competition_cohort_review_export import (
     MAX_EXPORT_BYTES,
     review_export_limits,
@@ -183,6 +183,7 @@ def replay_preparation_export(
         raise ValueError("preparation export inventory must be unique and ordered")
     # Promotion comes from the reviewer's own preserved evidence, never from an
     # unverified binding in the owner's export. Rebuild every participant too.
+    selected_tracks = cohort_tracks(exported.history.plan, eligible_tracks)
     rebuilt = prepare_cohort_round(
         exported.history,
         policy,
@@ -190,7 +191,7 @@ def replay_preparation_export(
         original.roster.participants,
         promotion,
         original.observation,
-        eligible_tracks=eligible_tracks,
+        eligible_tracks=selected_tracks,
         decision_source=decisions.__getitem__,
         intake_records=records,
         expected_tip_sha256=progress.recovery_tip_sha256,

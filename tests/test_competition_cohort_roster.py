@@ -28,7 +28,7 @@ from umi.competition_cohort_roster import (
     replay_recoverable_roster_outcomes,
     verify_recoverable_roster,
 )
-from umi.open_competition import digest, sign_object
+from umi.open_competition import Registration, RegistrationSnapshot, digest, sign_object
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_consumers import tip, transition
@@ -79,7 +79,21 @@ def close(history, policy, decisions, block, result_hash, *, unavailable=0):
     )
 
 
-def retained(s, name, sequence, *, bundle=None):
+def _participant_snapshot(block: int, names: tuple[str, ...]) -> RegistrationSnapshot:
+    """Extend the ordinary two-miner fixture with deterministic Sybil identities."""
+    base = snapshot(block)
+    known = {registration.hotkey for registration in base.registrations}
+    extras = tuple(
+        Registration(uid=100 + index, hotkey=wallet(name).hotkey.ss58_address)
+        for index, name in enumerate(names)
+        if wallet(name).hotkey.ss58_address not in known
+    )
+    return base.model_copy(
+        update={"registrations": tuple(sorted((*base.registrations, *extras), key=lambda r: r.uid))}
+    )
+
+
+def retained(s, name, sequence, *, bundle=None, registration_snapshot=None):
     signed = submission(
         s["policy"],
         bundle=bundle or s["signed"].submission.model_bundle,
@@ -92,7 +106,7 @@ def retained(s, name, sequence, *, bundle=None):
     consent = SignedCohortParticipationConsent(
         consent=body, signature=sign_object(body, wallet(name))
     )
-    snap = snapshot(210)
+    snap = registration_snapshot or snapshot(210)
     admission = admit_recovery_participant(
         signed,
         consent,
@@ -127,11 +141,20 @@ def make_round(
     participant_names=("Alice", "Bob"),
     participant_bundles=None,
 ):
+    participant_identities = tuple(dict.fromkeys(("Alice", *participant_names)))
+    intake_snapshot = _participant_snapshot(210, participant_identities)
+    closure_snapshot = _participant_snapshot(300, participant_identities)
     # The replaced submission is still in the original inventory. A consumer
     # cannot delete it merely because the seal selects a newer submission.
-    prior = retained(s, "Alice", 1)
+    prior = retained(s, "Alice", 1, registration_snapshot=intake_snapshot)
     members = tuple(
-        retained(s, name, 2 if name == "Alice" else 1, bundle=(participant_bundles or {}).get(name))
+        retained(
+            s,
+            name,
+            2 if name == "Alice" else 1,
+            bundle=(participant_bundles or {}).get(name),
+            registration_snapshot=intake_snapshot,
+        )
         for name in participant_names
     )
     records = tuple(
@@ -143,8 +166,8 @@ def make_round(
     seal = build_intake_seal(
         s["intake_history"],
         s["policy"],
-        boundary(300).model_copy(update={"snapshot_sha256": digest(snapshot(300))}),
-        snapshot(300),
+        boundary(300).model_copy(update={"snapshot_sha256": digest(closure_snapshot)}),
+        closure_snapshot,
         records,
         expected_tip_sha256=tip(s["intake_history"]),
     )
@@ -172,8 +195,15 @@ def make_round(
     h = close(h, s["policy"], decisions, 1770, "ac" * 32)
     scenarios = []
     for p in selected:
+        participant_name = next(
+            name
+            for name in participant_names
+            if wallet(name).hotkey.ss58_address
+            == p.record.request.signed_submission.submission.hotkey
+        )
         m = s.copy()
         m.update(
+            miner_name=participant_name,
             signed=p.record.request.signed_submission,
             consent=p.record.request.consent,
             admission=p.admission,

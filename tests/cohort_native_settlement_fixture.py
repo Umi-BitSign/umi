@@ -159,7 +159,7 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
 
         try:
             await asyncio.wait_for(wait(), timeout)
-        except TimeoutError as error:
+        except asyncio.TimeoutError as error:
             raise AssertionError({name: n.last_report for name, n in nodes.items()}) from error
         finally:
             stop.set()
@@ -195,12 +195,12 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
         original = output.read_bytes()
         package = CohortRewardPackage.model_validate_json(original)
         service, allocation = package.service.statement.allocation, package.allocation
-        assert (service.service_budget, service.model_budget) == (32767, 32768)
+        expected_budgets = (0, 65535) if plan.service_pool_bps == 0 else (32767, 32768)
+        assert (service.service_budget, service.model_budget) == expected_budgets
         assert bool(service.recipients) == mixed
-        assert allocation.burn_weight == (25205 if mixed else 32767)
-        expected = {wallet("Alice").hotkey.ss58_address: 32768}
-        if mixed:
-            expected[wallet("Bob").hotkey.ss58_address] = 7562
+        assert allocation.burn_weight == service.burn_weight
+        expected = {r.hotkey: r.raw_weight for r in service.recipients}
+        expected[wallet("Alice").hotkey.ss58_address] = service.model_budget
         assert {r.hotkey: r.raw_weight for r in allocation.recipients} == expected
         award = allocation.model_award
         assert award is not None and len(award.candidates) == 1

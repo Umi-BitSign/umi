@@ -21,6 +21,7 @@ from .competition_cohort_intake_seal import (
     verify_intake_closure,
 )
 from .competition_cohort_participation import verify_participant_admission
+from .competition_cohort_recovery import verify_cohort_tracks
 from .competition_cohort_roster import (
     RecoverableRosterEvidence,
     RecoverableRosterParticipant,
@@ -70,6 +71,7 @@ def prepare_cohort_round(
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
     )
+    verify_cohort_tracks(history.plan, eligible_tracks)
     if view.state.phase in {"intake", "revoked"}:
         raise ValueError("round preparation requires certified intake and active authority")
     decisions: dict[str, CohortDecisionInput] = {}

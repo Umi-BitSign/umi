@@ -139,6 +139,10 @@ def admit_recovery_participant(
     sub, body = signed.submission, consent.consent
     if (
         sub.policy_sha256 != digest(policy)
+        or (
+            history.plan.eligible_tracks is not None
+            and sub.track not in history.plan.eligible_tracks
+        )
         or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
         or body.cohort_sha256 != view.state.cohort_sha256
         or body.authority_sha256 != view.state.authority_sha256

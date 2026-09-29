@@ -15,6 +15,7 @@ from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import read_endpoint_object
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_quality import ExactQuality, exact_quality
+from .competition_cohort_recovery import verify_cohort_service_pool
 from .competition_cohort_service_closure import verify_certified_service_request_closure
 from .competition_cohort_service_grant import ServiceMinerGrant
 from .competition_cohort_service_terminal import SignedServiceTerminal
@@ -221,6 +222,7 @@ def replay_closed_service_quality(
     A response or quality JSON by itself cannot supply a credit entitlement.
     """
     terms = ServiceTerms.model_validate_json(canonical_json_bytes(terms))
+    verify_cohort_service_pool(history.plan, terms.service_pool_bps)
     if (
         digest(terms) != expected_terms_sha256
         or terms.policy_sha256 != digest(policy)

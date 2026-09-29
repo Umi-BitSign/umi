@@ -122,7 +122,7 @@ async def closure_fixture(original, tmp_path, *, prepared=None):
         order = SignedRecoverableEvaluationOrder(order=body, signatures=signatures(body))
         orders.append(order)
         put(order)
-        miner_name = next(
+        miner_name = s.get("miner_name") or next(
             n
             for n in ("Alice", "Bob")
             if wallet(n).hotkey.ss58_address == first.submission.submission.hotkey

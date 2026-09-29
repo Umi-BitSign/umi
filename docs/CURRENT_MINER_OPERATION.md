@@ -113,14 +113,17 @@ That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
 Public intake remains on C5 preparation; model enrollment under the new policy
-has not opened. The selected C5+ split is 50% service / 50% model rewards, with a
-baseline-or-better quality requirement for complete accepted model entries. Read
-the [model preparation checklist](contributors/models.md#model-contribution-review)
-and use the exact terms named by the eventual signed policy. C4's signed 70/30
-allocation and [version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md) remain applicable
-to C4 verification; its unallocated model share is burned and does not accrue.
-Terms alone do not approve an individual model's rights or award it a share.
-Endpoint service does not require contributing private weights.
+has not opened. C5 uses 50% service / 50% model rewards; C6 accepts only complete
+public-model entries and assigns that track 100%; C7-C10 return to 50/50. All use a
+baseline-or-better quality requirement for complete accepted model entries.
+Exact copies count once; eligible models then compete for one credit in each
+occupied fixed five-percentage-point quality band. Read the [model preparation
+checklist](contributors/models.md#model-contribution-review) and use the exact
+terms named by the eventual signed policy. C4's signed 70/30 allocation and
+[version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md) remain applicable to C4
+verification; its unallocated model share is burned and does not accrue. Terms
+alone do not approve an individual model's rights or award it a share. Endpoint
+service does not require contributing private weights.
 
 ## Reading payout dashboards
 

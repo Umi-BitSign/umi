@@ -40,10 +40,18 @@ def scenario(legacy_scenario, request):
     authority, genesis, _ = standing(
         old.plan,
         p,
-        model_rewards=request.param in {"model-awards", "proportional-model-awards"},
-        model_rule="baseline_or_better_proportional_score_first_complete/1"
-        if request.param == "proportional-model-awards"
-        else "baseline_or_better_best_score_first_complete/1",
+        model_rewards=request.param
+        in {"model-awards", "proportional-model-awards", "quality-bucket-model-awards"},
+        model_rule=(
+            "baseline_or_better_quality_bucket_best_score_first_complete/1"
+            if request.param == "quality-bucket-model-awards"
+            else "baseline_or_better_proportional_score_first_complete/1"
+            if request.param == "proportional-model-awards"
+            else "baseline_or_better_best_score_first_complete/1"
+        ),
+        model_quality_bucket_width_bps=(
+            500 if request.param == "quality-bucket-model-awards" else None
+        ),
     )
     h = CohortRecoveryHistory(
         schema="umi-cohort-recovery-history/1",

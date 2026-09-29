@@ -11,15 +11,16 @@
 Public intake is held on C5 preparation. Model enrollment under the new C5+
 policy has not opened. This checklist describes artifact, rights and
 reconstruction requirements; it does not approve a model or grant a license.
-The selected future split is 50% service and 50% model rewards. Its exact runtime,
-immutable policy and submission opening still need publication.
+The selected C5 and C7-C10 split is 50% service and 50% model rewards. C6 is
+model-only and assigns 100% of its competition allocation within this public-model
+track. The exact runtime, immutable policy and submission opening still need publication.
 
 The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for C4
 verification. Their 70/30 split and promotion rule do not define C5+'s new model
 award. Each submission must use the exact terms named by its signed policy.
 
-The [version 3 terms](../MODEL_CONTRIBUTION_TERMS_V3.md) define the 50% service
-and 50% public-model pools. C5's continuous-video dependence comparison is
+The [version 3 terms](../MODEL_CONTRIBUTION_TERMS_V3.md) define the separate
+service and public-model pools. C5's continuous-video dependence comparison is
 diagnostic only and does not affect scores, eligibility, settlement or payouts.
 The launch policy must bind the terms file's published
 [SHA-256](../MODEL_CONTRIBUTION_TERMS_V3.sha256) before enrollment opens.
@@ -158,11 +159,15 @@ Both tracks use the same signed policy. Rewards begin only after the
 [activation gates](../competition/launch.md) pass and the competition row is
 confirmed on chain.
 
-For C5+, the selected split is 50% service and 50% model rewards. The model
+For C5 and C7-C10, the selected split is 50% service and 50% model rewards. C6
+has no service pool and assigns 100% within the public-model track. The model
 quality floor is equality with the frozen baseline, and a sole eligible entrant
-receives the full model pool. Multiple eligible distinct artifacts divide that
-pool in proportion to normalized benchmark score. Exact duplicate content is
-counted once, using the first complete certified acceptance for attribution.
+receives the full model pool. Exact duplicate content is counted once. Eligible
+models then enter fixed five-percentage-point quality bands, each of which
+creates one credit for its highest exact score. The pool is divided among those
+credits in proportion to their exact scores. The first complete certified
+acceptance fixes score, eligibility and attribution for exact copies; later
+aliases do not create another trial. It also breaks an exact score tie.
 Complete submission, artifact preservation and rights checks remain required.
 The model award is separate from promotion of the reference model. The new
 policy and activation are still being prepared; current signed allocations

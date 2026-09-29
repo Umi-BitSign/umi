@@ -7,7 +7,9 @@ The signed C4 allocation has two tracks. Qualifying translation endpoints share
 model's contributor receives 30%. Until the first promotion, that 30% is burned.
 The imported baseline has no contributor award or founding-model exception.
 
-C5+ is being prepared with a selected **50% service / 50% model** split. A
+C5 is being prepared with a selected **50% service / 50% model** split. C6 is
+model-only and assigns **100%** of its competition allocation within the public-model
+track; C7-C10 return to 50/50. A
 complete accepted model entry must match or beat the frozen baseline; a sole
 eligible entrant receives the entire model pool. These future rules require
 their own reviewed policy and activation. They do not change C4's signed
@@ -74,11 +76,14 @@ For C5+, model reward eligibility requires preserved runnable artifacts,
 permitted provenance/rights and quality at least equal to the frozen baseline.
 An unchanged baseline may qualify through a complete model submission. A sole
 eligible entrant receives the model pool; incomplete competitors cannot be
-dropped to create a sole entrant. Multiple eligible distinct artifacts divide
-the model pool in proportion to normalized benchmark score. Exact duplicate
-content is counted once, using the first complete certified acceptance for
-attribution. Model reward eligibility and promotion of the reference model are
-separate decisions.
+dropped to create a sole entrant. Exact duplicate content is counted once. The
+remaining eligible models enter fixed five-percentage-point quality bands; each
+occupied band creates one credit, awarded to its highest exact score. The model
+pool is divided among those credits in proportion to their exact scores. The
+first complete certified acceptance fixes score, eligibility and attribution
+for exact copies, so later aliases do not create another trial. It also breaks
+an exact score tie. Model reward eligibility and promotion of the reference
+model are separate decisions.
 
 ## Evaluation and trust
 

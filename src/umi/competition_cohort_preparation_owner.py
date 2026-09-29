@@ -8,6 +8,7 @@ from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_preparation import PreparedCohortRound, prepare_cohort_round
+from .competition_cohort_recovery import cohort_tracks
 from .competition_cohort_roster import RecoverableRosterParticipant
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_store import AdmissionCapacityError, CompetitionStore
@@ -136,7 +137,7 @@ class CohortPreparation:
                 tuple(members),
                 promotion,
                 observation if previous is None else previous.observation,
-                eligible_tracks=tuple(sorted(set(intake.tracks))),
+                eligible_tracks=cohort_tracks(history.plan, tuple(sorted(set(intake.tracks)))),
                 decision_source=lambda key: store.source(cohort, key, CohortDecisionInput),
                 intake_records=intake._records(db, history),
                 expected_tip_sha256=expected_tip_sha256,

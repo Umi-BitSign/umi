@@ -64,9 +64,10 @@ def capture(block=400):
 
 
 @pytest.fixture
-def queue_case(harness, tmp_path):
+def queue_case(harness, tmp_path, request):
     h = harness
     round_ = h.order.round
+    work_count = getattr(request, "param", 4)
     body = ServiceWorkCatalog(
         schema="umi-cohort-service-work-catalog/1",
         policy_sha256=digest(h.batch["policy"]),
@@ -82,7 +83,7 @@ def queue_case(harness, tmp_path):
                 "reference_sha256": f"{i + 20:064x}",
                 "stratum": "fingerspelling",
             }
-            for i in range(1, 5)
+            for i in range(1, work_count + 1)
         ),
         selection_rule="global_fifo_no_identity_quota",
         credit_rule="verified_terminal_work_only",
@@ -284,6 +285,19 @@ def test_global_work_order_has_no_per_identity_quota(queue_case):
     c.queue = other
     relabeled = [admit(c, name, i) for i, name in enumerate(("Bob", "Alice", "Alice"), 1)]
     assert [v.work_sha256 for v in relabeled] == [v.work_sha256 for v in values]
+
+
+@pytest.mark.parametrize("queue_case", [256], indirect=True)
+def test_full_cohort_catalog_survives_uid_mix_restart_and_backpressure(queue_case):
+    c = queue_case
+    accepted = [admit(c, "Alice" if nonce % 3 else "Bob", nonce) for nonce in range(1, 257)]
+    assert [item.ordinal for item in accepted] == list(range(1, 257))
+    assert len({item.work_sha256 for item in accepted}) == 256
+    c.queue = ServiceWorkQueue(c.cfg, c.h.batch["policy"])
+    assert c.queue.entries(limit=256) == tuple(accepted)
+    with pytest.raises(ServiceQueueBackpressure, match="no unreserved claim capacity"):
+        admit(c, nonce=257)
+    assert c.queue.entries(limit=256) == tuple(accepted)
 
 
 def test_lost_reply_restart_and_long_outage_recover_without_fresh_inputs(queue_case):

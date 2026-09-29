@@ -55,6 +55,7 @@ from umi.competition_cohort_request_closure import PendingRequestClosure, build_
 from umi.competition_cohort_request_files import RequestCompletionFiles
 from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver
 from umi.competition_cohort_request_review import RequestProgressReviewer
+from umi.competition_cohort_request_start import REST_MS
 from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
 from umi.competition_cohort_service_quality import ServiceReference, ServiceTerms
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
@@ -117,6 +118,24 @@ def precommit_model_inventory(h):
         service_pool_bps=5000,
         stratum_weights={"fingerspelling": 3, "continuous": 10},
     )
+    histories = tuple(
+        sorted(
+            (h.intake.history(binding.cohort_sha256) for binding in h.intake.config.cohorts),
+            key=lambda value: value.plan.sequence,
+        )
+    )
+    h.terms_by_cohort = {
+        digest(history.plan): h.terms.model_copy(
+            update={
+                "service_pool_bps": (
+                    history.plan.service_pool_bps
+                    if history.plan.service_pool_bps is not None
+                    else h.terms.service_pool_bps
+                )
+            }
+        )
+        for history in histories
+    }
     h.reference = ServiceReference(
         schema="umi-cohort-service-reference/1",
         case_id="91" * 32,
@@ -128,6 +147,9 @@ def precommit_model_inventory(h):
     precommit_service_inventory(
         h,
         service_terms_sha256=digest(h.terms),
+        service_terms_sha256s={
+            cohort: digest(terms) for cohort, terms in h.terms_by_cohort.items()
+        },
         service_reference_sha256=digest(h.reference),
         service_video_sha256=SERVICE_SHA,
     )
@@ -173,7 +195,8 @@ def scenario(legacy_scenario, policy):
         plan,
         policy,
         model_rewards=True,
-        model_rule="baseline_or_better_proportional_score_first_complete/1",
+        model_rule="baseline_or_better_quality_bucket_best_score_first_complete/1",
+        model_quality_bucket_width_bps=500,
     )
     history = CohortRecoveryHistory(
         schema="umi-cohort-recovery-history/1",
@@ -544,6 +567,7 @@ async def run_pipeline(
     interrupt,
     mixed,
     cohort_index=0,
+    expected_recovered_jobs=None,
     activate=True,
 ):
     o, h = host, host.h
@@ -640,6 +664,11 @@ async def run_pipeline(
             assert (await lifecycle.tick())["status"] == "waiting_request_rest"
             gate = await app.state.lifecycle.gate.check(h.cohort)
             assert not gate["ready"]
+            if cohort_index:
+                assert (
+                    gate["not_before_unix_ms"] - gate["chain_timestamp_ms"]
+                    == h.provider.config.maximum_head_age_ms + REST_MS
+                )
             h.timestamp = gate["not_before_unix_ms"] + h.provider.config.maximum_future_skew_ms
             await lifecycle.tick()
             assert lifecycle.controller.store.status(h.cohort)[0].phase == "requests"
@@ -665,13 +694,21 @@ async def run_pipeline(
             assignments = {name: n.inbox.assignment(slot) for name, n in nodes.items()}
             frozen_order = canonical_json_bytes(assignments["Charlie"].certificate)
             for node in nodes.values():
-                assert (await node.worker.poll_once())["retry_count"] == 1 + mixed
+                # A reused series cursor may begin between this cohort's slots,
+                # so one bounded pass need not visit every assignment. It must
+                # still retain at least one retry and perform no inference while
+                # the required finality observation is unavailable.
+                assert (await node.worker.poll_once())["retry_count"] >= 1
                 assert node.execution.journal.get("assignment", slot) is None
             assert not inference
             h.block += 1
-            for node in nodes.values():
-                report = await node.worker.poll_once()
-                assert report["retry_count"] == 0, str(report)
+            expected_inference = 2 * (1 + mixed)
+            for _ in range(2 * (1 + mixed)):
+                reports = [await node.worker.poll_once() for node in nodes.values()]
+                assert all(report["retry_count"] == 0 for report in reports), str(reports)
+                if sum(inference.values()) == expected_inference:
+                    break
+            assert sum(inference.values()) == expected_inference
             first_steps = {
                 name: canonical_json_bytes(
                     node.execution.step(
@@ -690,7 +727,7 @@ async def run_pipeline(
             o.outages.add("owner.example")
             for name in nodes:
                 nodes[name] = evaluator(name)
-                assert (await nodes[name].worker.poll_once())["retry_count"] == 1 + mixed
+                assert (await nodes[name].worker.poll_once())["retry_count"] >= 1
             assert sum(inference.values()) == 2 * (1 + mixed)
             o.outages.clear()
 
@@ -823,11 +860,14 @@ async def run_pipeline(
             h.offline = True
             o.outages.add("owner.example")
             counts = dict(inference), dict(signatures)
+            recovered_jobs = (
+                expected_recovered_jobs
+                if expected_recovered_jobs is not None
+                else (cohort_index + 1) * (1 + mixed)
+            )
             for name in nodes:
                 node = evaluator(name)
-                assert (await node.worker.poll_once())["jobs_complete"] == (cohort_index + 1) * (
-                    1 + mixed
-                )
+                assert (await node.worker.poll_once())["jobs_complete"] == recovered_jobs
                 with pytest.raises(OSError):
                     await node.exporter.poll_once()
                 # Already published immutable exports remain readable even when

@@ -99,6 +99,28 @@ def test_work_is_rounded_before_recipients_across_random_alias_partitions():
         assert divided.get(identity(other), 0) == original.get(identity(other), 0)
 
 
+def test_full_c5_service_inventory_cannot_gain_credit_from_uid_splitting():
+    aliases = [hotkey(n) for n in range(1, 175)]
+    jobs = [
+        work(
+            n,
+            aliases[0],
+            Fraction(1),
+            "continuous" if n % 4 else "fingerspelling",
+        )
+        for n in range(1, 1537)
+    ]
+    single = amounts(allocate(jobs))
+    split = amounts(
+        allocate(
+            item.model_copy(update={"recipient_hotkey": aliases[index % len(aliases)]})
+            for index, item in enumerate(jobs)
+        )
+    )
+    assert len(split) == len(aliases)
+    assert sum(split.values()) == single[identity(aliases[0])]
+
+
 def test_work_identity_breaks_ties_without_recipient_or_input_order():
     assert apportion_work_budget(2, {"c": Fraction(1), "b": Fraction(1), "a": Fraction(1)}) == {
         "a": 1,

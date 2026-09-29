@@ -1242,7 +1242,7 @@ def create_app(
                         receipt = await runtime.competition_authority.accept(
                             grant, validator_hotkey=validator_hotkey, wallet=runtime.wallet
                         )
-                    except (OSError, TimeoutError, sqlite3.Error) as error:
+                    except (OSError, asyncio.TimeoutError, TimeoutError, sqlite3.Error) as error:
                         raise HTTPException(
                             status_code=503, detail="cohort_grant_unavailable"
                         ) from error

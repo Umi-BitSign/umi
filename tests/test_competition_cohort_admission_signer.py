@@ -543,7 +543,7 @@ async def test_signing_timeout_leaves_original_intent_retryable(harness):
             cancelled.set()
 
     worker.sign = slow
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await worker.attest(h.raw)
     assert cancelled.is_set()
     assert worker.journal.load(admission_slot(h.raw))[4] is None

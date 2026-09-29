@@ -45,6 +45,7 @@ from .test_competition_cohort_recovery import (
 )
 from .test_open_competition import (
     attested,
+    bundle_at,
     result_for,
     round_for,
     snapshot,
@@ -168,6 +169,71 @@ def replay(scenario, **updates):
     values.update(expected_tip_sha256=tip(scenario["history"]), current_block=5000)
     values.update(updates)
     return replay_recoverable_evaluation(**values)
+
+
+def model_only_intake(scenario, signed):
+    old = scenario["intake_history"]
+    plan = old.plan.model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/2",
+            "eligible_tracks": ("model",),
+            "service_pool_bps": 0,
+        }
+    )
+    body = old.authority.authority.model_copy(update={"cohort_sha256s": (digest(plan),)})
+    authority = SignedCohortRecoveryAuthority(authority=body, signatures=signatures(body))
+    genesis, _ = admit_recoverable_cohort(
+        plan, authority, scenario["policy"], admitted_at_block=160
+    )
+    history = CohortRecoveryHistory(
+        schema="umi-cohort-recovery-history/1",
+        plan=plan,
+        authority=authority,
+        genesis=genesis,
+        genesis_signatures=signatures(genesis),
+        transitions=(),
+    )
+    consent_body = scenario["consent"].consent.model_copy(
+        update={
+            "cohort_sha256": digest(plan),
+            "authority_sha256": digest(body),
+            "submission_sha256": digest(signed.submission),
+            "hotkey": signed.submission.hotkey,
+        }
+    )
+    consent = SignedCohortParticipationConsent(
+        consent=consent_body, signature=sign_object(consent_body, wallet("Alice"))
+    )
+    return history, consent
+
+
+def test_model_only_cohort_rejects_endpoint_participation(scenario):
+    history, consent = model_only_intake(scenario, scenario["signed"])
+    with pytest.raises(ValueError, match="consent does not cover"):
+        admit_recovery_participant(
+            scenario["signed"],
+            consent,
+            history,
+            scenario["policy"],
+            scenario["admission_snapshot"],
+            expected_tip_sha256=tip(history),
+            current_block=210,
+        )
+
+
+def test_model_only_cohort_accepts_complete_model_participation(scenario, tmp_path):
+    signed = submission(scenario["policy"], bundle=bundle_at(tmp_path / "model"))
+    history, consent = model_only_intake(scenario, signed)
+    accepted = admit_recovery_participant(
+        signed,
+        consent,
+        history,
+        scenario["policy"],
+        scenario["admission_snapshot"],
+        expected_tip_sha256=tip(history),
+        current_block=210,
+    )
+    assert accepted.submission_sha256 == digest(signed.submission)
 
 
 def test_native_score_replay_survives_expired_original_policy_and_submission(scenario):

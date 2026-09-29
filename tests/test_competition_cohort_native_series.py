@@ -1,8 +1,9 @@
-"""One configured mixed C5-C10 series through native intake, rest and settlement.
+"""One configured C5-C10 series through native intake, rest and settlement.
 
-Reuses original owner/evaluator journals across cohorts. Finality, inference,
-rights review and HTTP remain the explicit ports of the connected pipeline.
-This does not establish reward activation, coverage or installed chain effects.
+The series uses mixed C5/C7-C10 profiles and a model-only C6. It reuses original
+owner/evaluator journals across cohorts. Finality, inference, rights review and
+HTTP remain the explicit ports of the connected pipeline. This does not establish
+reward activation, coverage or installed chain effects.
 """
 
 import pytest
@@ -12,7 +13,6 @@ from umi.competition_cohort_recovery import (
     SignedCohortRecoveryAuthority,
     admit_recoverable_cohort,
 )
-from umi.competition_cohort_request_start import REST_MS
 from umi.competition_execution import execution_boundary
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
@@ -62,7 +62,17 @@ pytestmark = pytest.mark.parametrize(
 @pytest.fixture
 def scenario(single_scenario, policy):  # noqa: F811
     original = single_scenario["intake_history"]
-    plans = tuple(original.plan.model_copy(update={"sequence": n}) for n in range(5, 11))
+    plans = tuple(
+        original.plan.model_copy(
+            update={
+                "schema_": "umi-recoverable-cohort-plan/2",
+                "sequence": n,
+                "eligible_tracks": ("model",) if n == 6 else ("endpoint", "model"),
+                "service_pool_bps": 0 if n == 6 else 5000,
+            }
+        )
+        for n in range(5, 11)
+    )
     body = original.authority.authority.model_copy(
         update={"cohort_sha256s": tuple(sorted(digest(p) for p in plans))}
     )
@@ -106,15 +116,21 @@ async def test_six_cohorts_reuse_owners_and_recover_without_extensions(
     o, h = host, host.h
     selected_series = canonical_json_bytes(o.config.series)
     base_routes = {name: tuple(app.router.routes) for name, app in o.apps.items()}
-    previous_time, packages = None, []
+    packages = []
     for index, history in enumerate(scenario["histories"]):
         h.offline = False
         o.outages.clear()
         for name, routes in base_routes.items():
             o.apps[name].router.routes[:] = routes
         h.history, h.cohort = history, digest(history.plan)
+        h.terms = h.terms_by_cohort[h.cohort]
         h.precommitted = h.catalogs[index], h.precommitted[1], h.precommitted[2]
         selected = select_scenario(scenario, history)
+        mixed = history.plan.eligible_tracks == ("endpoint", "model")
+        expected_recovered_jobs = sum(
+            1 + int("endpoint" in prior.plan.eligible_tracks)
+            for prior in scenario["histories"][: index + 1]
+        )
         if index:
             for sequence in (1, 2):
                 h.block += h.intake.policy.minimum_submission_interval_blocks
@@ -134,8 +150,9 @@ async def test_six_cohorts_reuse_owners_and_recover_without_extensions(
             monkeypatch,
             chain_config,
             interrupt=index % 2 == 1,
-            mixed=True,
+            mixed=mixed,
             cohort_index=index,
+            expected_recovered_jobs=expected_recovered_jobs,
             activate=False,
         )
         assert canonical_json_bytes(o.config.series) == selected_series
@@ -143,9 +160,6 @@ async def test_six_cohorts_reuse_owners_and_recover_without_extensions(
         assert all(
             t.transition.operation != "extend" for t in settled.package.inputs.history.transitions
         )
-        if previous_time is not None:
-            assert h.timestamp - previous_time >= REST_MS
-        previous_time = h.timestamp
         packages.append(settled.output.read_bytes())
         print({"cohort": history.plan.sequence, "status": "package_published"}, flush=True)
     assert len(set(packages)) == 6

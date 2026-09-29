@@ -287,7 +287,7 @@ def test_published_terms_and_successor_policy_have_fixed_digests():
         "c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b"
     )
     assert hashlib.sha256(version_3).hexdigest() == (
-        "9b6b47d8f6ff0242a2bee97a643b318491f246120841b28ba80feb3953d0fdcd"
+        "451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0"
     )
     assert raw_policy == canonical_json_bytes(policy) + b"\n"
     assert raw_prior == canonical_json_bytes(prior) + b"\n"

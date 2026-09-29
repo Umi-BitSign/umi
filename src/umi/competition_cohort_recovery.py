@@ -10,10 +10,18 @@ from __future__ import annotations
 from itertools import pairwise
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import Field, TypeAdapter, model_serializer, model_validator
 from typing_extensions import Self
 
-from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
+from .open_competition import (
+    Bps,
+    CompetitionPolicy,
+    Signature,
+    Track,
+    digest,
+    identity,
+    verify_signature,
+)
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
@@ -58,20 +66,86 @@ def _targets(values: tuple[PhaseTarget, ...]) -> None:
 class RecoverableCohortPlan(StrictProtocolModel):
     """Stable identity created before intake; target revisions keep this digest."""
 
-    schema_: Literal["umi-recoverable-cohort-plan/1"] = Field(alias="schema")
+    schema_: Literal["umi-recoverable-cohort-plan/1", "umi-recoverable-cohort-plan/2"] = Field(
+        alias="schema"
+    )
     policy_sha256: Hex32
     launch_sha256: Hex32
     sequence: Annotated[int, Field(ge=1, le=2**32 - 1)]
     suite_sha256: Hex32
     not_before_block: Block
     initial_targets: Targets
+    eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)] | None = None
+    service_pool_bps: Bps | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.eligible_tracks is None:
+            value.pop("eligible_tracks", None)
+        if self.service_pool_bps is None:
+            value.pop("service_pool_bps", None)
+        return value
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
         _targets(self.initial_targets)
         if self.not_before_block >= self.initial_targets[0].target_block:
             raise ValueError("cohort starts before its first phase target")
+        has_tracks = self.eligible_tracks is not None
+        has_pool = self.service_pool_bps is not None
+        if has_tracks != has_pool:
+            raise ValueError("cohort-specific tracks and reward split must be selected together")
+        selected = has_tracks and has_pool
+        if (self.schema_ == "umi-recoverable-cohort-plan/2") != selected:
+            raise ValueError("cohort-specific tracks and reward split require plan version 2")
+        if selected:
+            expected = tuple(
+                track
+                for track, enabled in (
+                    ("endpoint", self.service_pool_bps > 0),
+                    ("model", self.service_pool_bps < 10_000),
+                )
+                if enabled
+            )
+            if self.eligible_tracks != expected:
+                raise ValueError("cohort tracks differ from its nonzero reward pools")
         return self
+
+
+def verify_cohort_tracks(plan: RecoverableCohortPlan, tracks: tuple[Track, ...]) -> None:
+    """Bind cohort-specific eligibility while preserving version-1 plans."""
+
+    plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
+    if plan.eligible_tracks is not None and tracks != plan.eligible_tracks:
+        raise ValueError("round tracks differ from the cohort-specific plan")
+
+
+def cohort_tracks(
+    plan: RecoverableCohortPlan, available_tracks: tuple[Track, ...]
+) -> tuple[Track, ...]:
+    """Select the signed cohort tracks from the host's configured capabilities."""
+
+    plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
+    available_tracks = tuple(available_tracks)
+    if (
+        not available_tracks
+        or available_tracks != tuple(sorted(set(available_tracks)))
+        or any(track not in ("endpoint", "model") for track in available_tracks)
+    ):
+        raise ValueError("available cohort tracks must be unique and ordered")
+    selected = plan.eligible_tracks or available_tracks
+    if not set(selected).issubset(available_tracks):
+        raise ValueError("cohort-specific tracks are unavailable on this host")
+    return selected
+
+
+def verify_cohort_service_pool(plan: RecoverableCohortPlan, service_pool_bps: int) -> None:
+    """Bind a cohort-specific service/model split before intake."""
+
+    plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
+    if plan.service_pool_bps is not None and service_pool_bps != plan.service_pool_bps:
+        raise ValueError("service reward split differs from the cohort-specific plan")
 
 
 class CohortRecoveryAuthority(StrictProtocolModel):
@@ -129,7 +203,26 @@ class ModelRewardCohortAuthority(StandingCohortRecoveryAuthority):
     model_reward_rule: Literal[
         "baseline_or_better_best_score_first_complete/1",
         "baseline_or_better_proportional_score_first_complete/1",
+        "baseline_or_better_quality_bucket_best_score_first_complete/1",
     ]
+    model_quality_bucket_width_bps: Annotated[int, Field(ge=1, le=10000)] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_versions(self, handler):
+        value = handler(self)
+        if self.model_quality_bucket_width_bps is None:
+            value.pop("model_quality_bucket_width_bps", None)
+        return value
+
+    @model_validator(mode="after")
+    def selected_model_reward_parameters(self) -> Self:
+        bucketed = (
+            self.model_reward_rule
+            == "baseline_or_better_quality_bucket_best_score_first_complete/1"
+        )
+        if bucketed != (self.model_quality_bucket_width_bps is not None):
+            raise ValueError("quality bucket width must be selected exactly for bucketed rewards")
+        return self
 
 
 RecoveryAuthority = Annotated[

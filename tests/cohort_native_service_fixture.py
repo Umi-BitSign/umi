@@ -179,8 +179,13 @@ class NativeService:
     def window(self):
         """Place fixture finality inside a window with a verifiable reveal pulse."""
         h, transport = self.h, self.h.transport
+        cohort_index = tuple(digest(plan) for plan in self.o.config.series.cohorts).index(h.cohort)
         index = (h.block - transport.activation_block) // transport.clock.window_stride_blocks + 2
-        announcement = _block(transport, index, block_byte="31")
+        # Every production cohort reaches a different timelock window. Retain
+        # that property while reusing the one signed fixture pulse; otherwise
+        # the miner correctly treats later-cohort requests as duplicate
+        # transmissions of the first cohort's assignments.
+        announcement = _block(transport, index, block_byte=f"{0x31 + cohort_index:02x}")
         clock = _clock(transport)
 
         def derive(block):
@@ -200,7 +205,7 @@ class NativeService:
             transport,
             0,
             height=schedule.closing_block + 1,
-            block_byte="41",
+            block_byte=f"{0x41 + cohort_index:02x}",
             timestamp_ms=QUICKNET_GENESIS_MS + (schedule.selection_round - 1) * QUICKNET_PERIOD_MS,
         )
         self.blocks = FinalizedPort(
@@ -299,6 +304,13 @@ class NativeService:
         self.monkeypatch.setattr(miner, "_build_translator", lambda *a, **kw: Translator())
         self.monkeypatch.setattr(miner, "HttpVideoFetcher", lambda **kw: Fetcher())
         runtime = miner.build_runtime(args)
+        # The fixture reuses one signed Drand pulse for every cohort, so
+        # window() moves its synthetic round back to the new selection round.
+        # Production time never moves backwards: record_request() prunes the
+        # preceding closed window before admitting the next one. Reproduce that
+        # transition explicitly before the shared fixture database handles the
+        # next cohort, while preserving reserved response-recovery records.
+        runtime.resource_ledger.prune_closed_windows(ROUND)
         stack.callback(runtime.resource_ledger.close)
         app = miner.create_app(runtime)
         await stack.enter_async_context(app.router.lifespan_context(app))
@@ -419,7 +431,10 @@ class NativeService:
             )
 
     async def claim(self, request, client):
-        assert (await self.o.service.poll_once())["catalogs_installed"] == 1
+        cohort_index = tuple(digest(plan) for plan in self.o.config.series.cohorts).index(
+            self.h.cohort
+        )
+        assert (await self.o.service.poll_once())["catalogs_installed"] == cohort_index + 1
         key = digest(self.h.precommitted[0].catalog)
         body = ServiceWorkClaim(
             schema="umi-cohort-service-work-claim/1",

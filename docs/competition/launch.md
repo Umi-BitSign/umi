@@ -18,21 +18,40 @@ C5 uses separate service and public-model pools:
 
 - **50% service:** distributed across certified service work. Each job's credit
   is its certified work units multiplied by its normalized quality score.
-- **50% public models:** distributed in proportion to exact benchmark score
-  among distinct eligible public-model artifacts that match or beat the frozen
-  baseline.
+- **50% public models:** eligible artifacts that match or beat the frozen
+  baseline are placed in fixed 500-bps aggregate-quality bands. Each occupied
+  band receives one credit, and the pool is distributed across those credits in
+  proportion to their exact benchmark scores.
 
-Duplicate model content counts once. The earliest certified complete acceptance
-selects that content's recipient. A sole eligible model receives the complete
-model pool. If no model qualifies, that pool goes to the policy's proved burn
+Duplicate model content counts once. The highest-scoring eligible artifact in a
+band supplies its credit; an exact score tie is resolved by the earliest
+certified complete acceptance. Small score variations within one band do not
+create extra credits. A sole occupied band receives the complete model pool. If
+all band-credit scores are zero, the pool is divided equally among occupied
+bands. If no model qualifies, the pool goes to the policy's proved burn
 destination. A participant may qualify independently for both pools.
+
+C6 is model-only. Its signed cohort plan disables endpoint/service participation
+and assigns all 65,535 raw competition units within the eligible public-model
+population using the same baseline floor, deduplication and quality buckets.
+C7-C10 return to the C5 50/50 profile unless a different signed plan is published
+before their intake opens.
 
 The governing submission must bind
 [version 3 contribution terms](../MODEL_CONTRIBUTION_TERMS_V3.md), SHA-256
-`9b6b47d8f6ff0242a2bee97a643b318491f246120841b28ba80feb3953d0fdcd`,
+`451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0`,
 and the exact signed C5 policy. Earlier acceptances do not imply version 3
 acceptance. See [model contributions](../contributors/models.md) for artifact,
 rights, provenance and reconstruction requirements.
+
+The planned frozen comparator is CPU-derived model bundle
+`6fe8df59ec11ba89f4dfe0474a673fe757e378cd9184449965861c5a7c59b641`
+with runtime
+`f025ceb38cacc5c71873d94b8f2010aae10a0193a0e410e410a202f4def3b7b0`.
+Its native parent already contains the Community v0.2 RGB crop correction. These
+digests remain preparatory until the signed C5 policy and launch are published;
+the original Community source archive is provenance, not the executable
+comparator identity.
 
 ## Scoring and video-dependence diagnostics
 

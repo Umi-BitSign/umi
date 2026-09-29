@@ -84,7 +84,7 @@ class DocumentationNavigationTests(unittest.TestCase):
         ).hexdigest()
         self.assertEqual(
             version_3,
-            "9b6b47d8f6ff0242a2bee97a643b318491f246120841b28ba80feb3953d0fdcd",
+            "451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0",
         )
         self.assertEqual(
             (ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V3.sha256").read_text(),

@@ -10,10 +10,12 @@ This document is not a legal opinion or a third-party rights warranty.
 
 ## 1. Separate service and public-model tracks
 
-The miner allocation is divided equally between two tracks:
-
-- 50% is the service pool for certified endpoint work.
-- 50% is the public-model pool for complete eligible model contributions.
+The signed cohort plan fixes the enabled tracks and their pools before intake.
+For C5 and C7-C10, the miner allocation is divided equally: 50% for certified
+endpoint service work and 50% for complete eligible public-model contributions.
+C6 enables only the public-model track and assigns it 100% of the miner
+allocation. A series-level policy that supports both tracks cannot widen a
+narrower signed cohort plan.
 
 The service pool is allocated among certified jobs within each published
 stratum. A job's credit is its certified work units multiplied by its normalized
@@ -22,30 +24,47 @@ invalid evaluator evidence remains pending or becomes an infrastructure void
 under the governing protocol; it cannot be converted into a miner failure.
 Leaderboard rank alone does not determine the service allocation.
 
-The public-model pool is allocated among distinct eligible model artifacts in
-proportion to their normalized benchmark scores. An artifact is eligible only
-if its complete accepted submission, preserved runnable files, reconstruction
-review and rights review are present and its score matches or exceeds the frozen
-baseline on the same suite and runtime. If the eligible scores sum to zero, the
-pool is divided equally among the eligible distinct artifacts. If there is one
-eligible artifact, it receives the complete public-model pool. If there are no
-eligible artifacts, the pool goes to the proved burn destination named by the
-policy.
+An artifact is eligible for the public-model pool only if its complete accepted
+submission, preserved runnable files, reconstruction review and rights review
+are present and its score matches or exceeds the frozen baseline on the same
+suite and runtime.
+
+Eligible artifacts are placed into fixed quality bands using the aggregate
+normalized benchmark score and the exact band width bound by the signed cohort
+authority. For C5-C10, the width is 500 basis points. Each occupied band receives
+one model credit. Band boundaries are lower-inclusive and upper-exclusive in
+basis points, except that the final band includes an exact score of 10,000 basis
+points. The highest-scoring eligible artifact in a band supplies that credit; an
+exact score tie is resolved by the earliest complete certified acceptance. The
+public-model pool is divided among the occupied band credits in proportion to
+their exact benchmark scores. If those scores sum to zero, the pool is divided
+equally among the occupied bands. If there is one occupied band, it receives the
+complete public-model pool. If there are no eligible artifacts, the pool goes to
+the proved burn destination named by the policy.
 
 Canonical model content is counted once. When multiple accepted submissions
 contain the same canonical model content, the first complete certified
-acceptance supplies its attribution and later aliases receive no additional
-model credit. Minor metadata or packaging changes do not create a second model
-when the protocol computes the same canonical content digest.
+acceptance fixes that content's score, eligibility and attribution. Later
+aliases remain visible in the evidence but receive no additional trial or model
+credit, even if their observed outputs differ. Minor metadata or packaging
+changes do not create a second model when the protocol computes the same
+canonical content digest.
+
+Small output or score variations that remain within one quality band do not
+create additional model credits. A distinct artifact that crosses a signed band
+boundary can create another credit. Quality bands limit reward multiplication;
+they do not prove that differently packaged or behaviorally similar models have
+independent operators or training lineages.
 
 A participant may qualify independently in both tracks through separate valid
-submissions. Running a public reference model at an endpoint does not create a
-public-model award without complete model-track enrollment. Offering service
+submissions when both tracks are enabled. Running a public reference model at
+an endpoint does not create a public-model award without complete model-track
+enrollment. Offering service
 from the same model through several endpoints does not multiply one certified
 job; every service credit must correspond to distinct certified work.
 
-These percentages describe the miner allocation. They do not describe total
-subnet emission or guarantee payment. A signed submission is an application for
+These per-cohort percentages describe the miner allocation. They do not
+describe total subnet emission or guarantee payment. A signed submission is an application for
 evaluation, not a promise of inclusion, score, consensus, incentive or reward.
 
 ## 2. Model-contribution delivery and rights

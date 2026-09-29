@@ -13,25 +13,33 @@
 The candidate recoverable cohort implementation separates model payout from
 reference-model promotion. It requires explicit pre-intake consent through
 `umi-cohort-recovery-authority/3` and the rule
-`baseline_or_better_proportional_score_first_complete/1`. Existing authorities retain
-their original allocation behavior. This format is not a public launch notice.
+`baseline_or_better_quality_bucket_best_score_first_complete/1`, with a signed
+500-basis-point bucket width. Existing authorities retain their original
+allocation behavior. This format is not a public launch notice.
 
 The complete sealed model roster must have independently certified quality,
 complete preserved bundles and signed rights/reconstruction acceptances. Model
 quality version 2 compares both sides with the same normalized baseline metric
 on the frozen suite and runtime. Equality qualifies, including an unchanged
-baseline or a baseline below the promotion threshold. Each eligible distinct
-model receives `model budget * score / sum(eligible distinct model scores)`.
-Apportion integer weights by largest remainder, breaking exact ties by content
-digest, before summing by recipient. Service earnings are added independently.
-A sole eligible entrant receives the whole model pool. If every eligible score
-is zero, divide equally among distinct contents; no eligible content burns the
-pool. Missing evidence remains pending and cannot be removed from the roster.
+baseline or a baseline below the promotion threshold. Exact-content
+deduplication uses the first complete certified acceptance's score and
+eligibility; later aliases cannot create another benchmark trial. Each eligible
+distinct model then enters its fixed quality band. Each
+occupied band creates one credit for the model with the highest exact score in
+that band. The pool assigns `model budget * credit score / sum(credit scores)`
+to those band credits. Apportion integer weights by largest remainder, breaking
+rounding ties by band index, before summing by recipient. Service earnings are
+added independently. A sole occupied eligible band receives the whole model
+pool. If every occupied credit is zero, divide equally among occupied bands; no
+eligible band burns the pool. Missing evidence remains pending and cannot be
+removed from the roster.
 
-Duplicate content retains one share and the earliest certified complete-artifact
-acceptance's recipient. Its evaluations must agree. The content digest ignores
-paths and license/provenance-only changes; it does not detect semantic copies
-with changed runnable bytes. This is not a guarantee of complete Sybil resistance.
+Duplicate content retains one representative and the earliest certified
+complete-artifact acceptance's recipient. Its evaluations must agree. Tiny
+runnable changes remain one credit while their score stays in the same fixed
+band. The content digest ignores paths and license/provenance-only changes; it
+does not detect semantic copies with changed runnable bytes. A variant can still
+cross a published band boundary, so this is not complete Sybil resistance.
 
 Under the configured `CompetitionStore` directory, the reward owner reads
 `model-reward-acceptances/<cohort-sha256>/<submission-sha256>.json` as private
@@ -44,10 +52,11 @@ retain the original review documents in the content-addressed evidence source.
 The signatures attest review; a file hash does not establish permission to use
 or redistribute a model.
 
-Allocation version 3 carries the proportional model decision and its signed
+Allocation version 4 carries the bucketed model decision and its signed
 acceptances. Portable package replay includes the original review documents,
-replays quality and selection, and checks independently retained artifact bytes.
-Recovery uses the original acceptances without selecting a newer promotion or
+replays quality, deduplication, band selection and allocation, and checks
+independently retained artifact bytes. Recovery uses the original acceptances
+without selecting a newer promotion or
 assigning authorship to the reward recipient. Existing cohort certification and
 standing chain checks still apply before any weight transaction.
 

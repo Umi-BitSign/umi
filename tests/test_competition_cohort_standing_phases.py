@@ -39,6 +39,7 @@ def standing(
     *,
     model_rewards=False,
     model_rule="baseline_or_better_best_score_first_complete/1",
+    model_quality_bucket_width_bps=None,
 ):
     selected = ModelRewardCohortAuthority if model_rewards else StandingCohortRecoveryAuthority
     body = selected(
@@ -51,7 +52,14 @@ def standing(
         lifetime="until_completed_or_revoked",
         closure_rule="quorum_certified_phase_completion",
         timing_rule="targets_without_extension_signatures",
-        **({"model_reward_rule": model_rule} if model_rewards else {}),
+        **(
+            {
+                "model_reward_rule": model_rule,
+                "model_quality_bucket_width_bps": model_quality_bucket_width_bps,
+            }
+            if model_rewards
+            else {}
+        ),
     )
     signed = SignedCohortRecoveryAuthority(authority=body, signatures=signatures(body))
     genesis, state = admit_recoverable_cohort(plan, signed, policy, admitted_at_block=160)

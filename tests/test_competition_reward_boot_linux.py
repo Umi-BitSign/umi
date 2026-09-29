@@ -11,6 +11,7 @@ import os
 import secrets
 import subprocess
 import sys
+import sysconfig
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -48,7 +49,7 @@ PROBE = """
 import json, sys
 from pathlib import Path
 from types import SimpleNamespace
-sys.path.insert(0, sys.argv[1])
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
 from umi.competition_reward_boot import select_standing_boot
 from umi.open_competition import digest
 from umi.validator_supervisor import ValidatorSupervisorConfig
@@ -101,9 +102,9 @@ def test_rooted_service_selects_same_inputs_after_restart_and_rejects_invalid_ap
         ),
     )
     source = Path(__file__).resolve().parents[1]
-    # The interpreter may be in the checkout's venv or a separate test venv.
-    environment = Path(sys.prefix)
-    binds = {source, environment, Path(sys.base_prefix)}
+    interpreter = Path("/usr/bin/python3")
+    site_packages = Path(sysconfig.get_path("purelib"))
+    binds = {source}
     binds.update(p for p in (Path("/usr"), Path("/lib"), Path("/lib64")) if p.exists())
     assert all(p.is_absolute() and p.exists() and p != Path("/") for p in binds)
     name = "umi-c5-boot-selection-" + secrets.token_hex(8) + ".service"
@@ -130,12 +131,13 @@ def test_rooted_service_selects_same_inputs_after_restart_and_rejects_invalid_ap
             "--property=BindReadOnlyPaths=" + " ".join(sorted(map(str, binds))),
             "--property=ReadOnlyPaths=+/etc/umi",
             "--",
-            sys.executable,
+            str(interpreter),
             "-I",
             "-B",
             "-c",
             PROBE,
             str(source / "src"),
+            str(site_packages),
         ]
         result = subprocess.run(command, capture_output=True, text=True, timeout=45)
         assert result.returncode in {0, 2}, result.stderr
@@ -181,13 +183,15 @@ def test_rooted_service_runs_native_handoff_executor_and_restart(tmp_path):
     # Change ownership only inside this disposable service root.
     os.chown(work, 65534, 65534)
     source = Path(__file__).resolve().parents[1]
-    binds = {source, Path(sys.prefix), Path(sys.base_prefix)}
+    interpreter = Path("/usr/bin/python3")
+    site_packages = Path(sysconfig.get_path("purelib"))
+    binds = {source}
     binds.update(p for p in (Path("/usr"), Path("/lib"), Path("/lib64")) if p.exists())
     assert all(p.is_absolute() and p.exists() and p != Path("/") for p in binds)
     name = "umi-c5-reward-execution-" + secrets.token_hex(8) + ".service"
     script = """
 import sys
-sys.path[:0] = [sys.argv[1] + '/src', sys.argv[1]]
+sys.path[:0] = [sys.argv[1] + '/src', sys.argv[1], sys.argv[2]]
 import pytest
 raise SystemExit(pytest.main([
     sys.argv[1] + '/tests/test_competition_reward_host.py',
@@ -220,12 +224,13 @@ raise SystemExit(pytest.main([
         "--property=BindReadOnlyPaths=" + " ".join(sorted(map(str, binds))),
         "--property=ReadWritePaths=+/work",
         "--",
-        sys.executable,
+        str(interpreter),
         "-I",
         "-B",
         "-c",
         script,
         str(source),
+        str(site_packages),
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=105)

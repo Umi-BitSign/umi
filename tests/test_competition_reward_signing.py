@@ -132,7 +132,7 @@ async def test_timeout_keeps_intent_retryable_and_does_not_publish_a_certificate
         await asyncio.Event().wait()
 
     owner = RewardDecisionSigner(c.signing_journal(), stalled, signing_timeout_seconds=1)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await owner.attest(c.review())
     assert owner.journal.load(0)
     with pytest.raises(FileNotFoundError):

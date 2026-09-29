@@ -454,7 +454,7 @@ class CohortMinerAuthorizationAuthority:
                     return admission
         except MinerAdmissionError:
             raise
-        except (OSError, TimeoutError) as error:
+        except (OSError, asyncio.TimeoutError, TimeoutError) as error:
             raise MinerAdmissionError("cohort_authority_unavailable", retryable=True) from error
         except ValueError as error:
             if str(error) in _CAPACITY_ERRORS:

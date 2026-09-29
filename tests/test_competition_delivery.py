@@ -166,7 +166,7 @@ async def test_initial_history_timeout_cancels_pending_fetch(initial_history_cas
             cancelled.append(True)
 
     monkeypatch.setattr(case.fetcher, "fetch_directive_page", stall)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await case.fetcher.fetch_initial_history(**case.arguments, timeout_seconds=1)
     assert cancelled == [True]
 
