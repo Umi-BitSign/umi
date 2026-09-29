@@ -1,0 +1,3 @@
+# Content-addressed inputs only; native consumers still check the SHA-256.
++ /{{[0-9a-f]{64}}}.mp4
+- **

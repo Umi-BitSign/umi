@@ -1556,6 +1556,60 @@ the configured phase controllers, rest gate and accepted-service dispatch.
 Installed private replication and complete cohort
 qualification remain required before launch.
 
+### Private cohort delivery
+
+The shared [copy service and timer](../../deploy/standing-reward-replication/)
+transfer immutable exports using rclone. Select a separate job for each row
+below and each producer. Install its root-owned `JOB.env`, private
+`JOB.rclone.conf` and selected `JOB.filters` in the configured directory. The
+service receives the credential and filter through `LoadCredential`; filters
+are shipped under `profiles/`. Use a publisher credential for uploads and a
+read-only credential for receiver downloads. Neither role needs an interactive
+Wrangler session.
+
+| Profile | Producer root | Consumer root |
+| --- | --- | --- |
+| `reward` | Proof export directory | Proof import directory, including the producer's own import |
+| `reward` | Standing reward delivery outbox | Validator/coordinator delivery directory |
+| `requests` | Evaluator request export directory | Request phase reader's completion directory |
+| `settlement` | Settlement `exchange_outbox` | Other reviewers' `exchange_inbox` |
+| `documents` | Coordinator settlement `exchange_outbox/inputs` | Reviewers' `inputs_directory` |
+| `documents` | Certified request handoff `history_directory` | Settlement reviewers' `history_directory` |
+| `models` | Native preserved model archive | Evaluator model-review and benchmark archive |
+| `model-evidence` | Model acceptance worker outbox | Retained artifact evidence for replay |
+| `videos` | Content-addressed video directory | Configured benchmark/clip video directory |
+| `documents` | One selected immutable policy, catalog or approved model-review document directory | Its corresponding configured input directory |
+
+Each job uses a distinct private series/producer/role prefix in R2. Model bundles
+and acceptance evidence use the model-artifact bucket; other exports use the
+evidence bucket. Keep native journals, keys, scratch space and the unrevealed
+source suite outside these roots. The `documents` profile copies top-level JSON
+files; it does not inspect their contents or decide whether labels may be
+released. Configure only the explicit immutable directory listed above.
+
+The request publisher first verifies the complete certified request closure and
+publishes its handoff. Settlement replays that history before assembling the
+reference package. Only the resulting `exchange_outbox/inputs` is replicated to
+reviewers. Never copy `original_sources.objects_directory`, its suite or the
+coordinator's mixed private source directory to evaluator inputs. Scoring inputs
+are published separately after reference certification. Retained reference and
+scoring packages remain private even after certification.
+
+The copy command preserves exact retries and refuses conflicting destination
+bytes. Source deletion does not delete the replica. A failed job retries through
+the timer, without an overall cohort expiry. Partial model/video delivery keeps
+native readers pending until the complete original bytes verify. Model manifests
+and content files retain their existing layout; declared hidden model files are
+included, while unpublished `.pending-*` archive directories are excluded.
+Consumers still verify native signatures, manifests, hashes and history before
+using any delivered data. Copy success alone cannot certify a cohort or prove
+reward submission.
+
+Enable the matching upload/download timers at boot after selecting and checking
+their exact directories. Keep each producer's prefix single-writer; recover its
+original immutable exports when moving hosts. Qualify disk capacity, sustained
+transfer load and independent backup separately before launch.
+
 Service admission configuration version 7 adds `orders`, an
 `umi-cohort-order-host/1` selection. Its queue binds the same policy, cohorts and
 independent reviewers as the admission owner. After certified preparation it

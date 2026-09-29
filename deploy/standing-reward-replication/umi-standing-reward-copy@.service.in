@@ -10,7 +10,8 @@ Group=@SERVICE_GROUP@
 UMask=0077
 EnvironmentFile=@CONFIG_DIRECTORY@/%i.env
 LoadCredential=rclone.conf:@CONFIG_DIRECTORY@/%i.rclone.conf
-ExecStart=@RCLONE@ copy ${SOURCE} ${DESTINATION} --config %d/rclone.conf --immutable --checksum --no-update-modtime --filter "- **/.*" --filter "+ /objects/*.json" --filter "+ /history/*.json" --filter "+ /endpoint/*.json" --filter "+ /interval/*.json" --filter "+ /packages/*.json" --filter "+ /decisions/*.json" --filter "+ /opportunities/*.json" --filter "+ /witnesses/*.json" --filter "+ /requests/*/*.json" --filter "+ /votes/*/*/*.json" --filter "- **" --transfers 16 --checkers 8 --retries 3 --low-level-retries 3 --contimeout 30s --timeout 2m --stats 0 --log-level ERROR
+LoadCredential=filters:@CONFIG_DIRECTORY@/%i.filters
+ExecStart=@RCLONE@ copy ${SOURCE} ${DESTINATION} --config %d/rclone.conf --filter-from %d/filters --immutable --checksum --no-update-modtime --transfers 16 --checkers 8 --retries 3 --low-level-retries 3 --contimeout 30s --timeout 2m --stats 0 --log-level ERROR
 # Per-request timeouts retry work; elapsed wall time never expires the archive.
 TimeoutStartSec=infinity
 NoNewPrivileges=yes

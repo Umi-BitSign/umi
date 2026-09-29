@@ -1,0 +1,7 @@
+# Native ModelAcceptanceWorker output, including reviewed provenance.
+- .*
+- **/.*
++ /objects/*.json
++ /model-acceptance-proposals/*/*.json
++ /model-reward-acceptances/*/*.json
+- **

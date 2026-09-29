@@ -1,0 +1,12 @@
+# CohortSettlementService.exchange_outbox, not its private source store.
+# Inputs appear here only after native certified request closure replay.
+- .*
+- **/.*
++ /objects/*.json
++ /history/*/*.json
++ /inputs/*.json
++ /requests/*/*.json
++ /votes/*/*/*.json
++ /quality/*/*/*.json
++ /service/*/*.json
+- **

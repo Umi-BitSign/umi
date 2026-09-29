@@ -1,0 +1,7 @@
+# RequestCompletionFiles only, including both original indexes.
+- .*
+- **/.*
++ /objects/*.json
++ /orders/*/*.json
++ /terminals/*/*.json
+- **

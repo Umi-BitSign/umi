@@ -320,6 +320,13 @@ for all archive and delivery roots
 in addition to the native journals; do not point replication at a journal,
 wallet, model store or general home directory.
 
+Install the selected `profiles/reward.filters` as `JOB.filters` alongside each
+`JOB.env` and `JOB.rclone.conf`. The unit loads this file through `LoadCredential`
+too; it must exist before starting the updated unit. This profile includes
+registration frames as well as their content objects. Additional cohort transfer
+profiles and the exact producer/consumer mapping are documented in the
+[round operator guide](../operators/rounds.md#private-cohort-delivery).
+
 `review_reward_decision` checks the proposed admission or activation against
 original native control history and the approved manifest. Admission requires
 the reserved empty control history. Activation replays the reward package and

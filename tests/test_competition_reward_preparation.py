@@ -3368,8 +3368,9 @@ async def test_recurring_settlement_loops_publish_with_automatic_file_delivery(
 
 
 @pytest.mark.parametrize("recurring_settlement_case", [True], indirect=True)
+@pytest.mark.parametrize("replication", ["files", "rclone"])
 async def test_native_request_certification_starts_recurring_settlement(
-    recurring_settlement_case, tmp_path, monkeypatch
+    recurring_settlement_case, tmp_path, monkeypatch, replication
 ):
     from pathlib import Path
 
@@ -3385,6 +3386,12 @@ async def test_native_request_certification_starts_recurring_settlement(
     from .test_competition_cohort_request_phase import make_request_owner, request_controller
 
     h = recurring_settlement_case
+    replica = None
+    if replication == "rclone":
+        from .cohort_replication_support import Replica
+
+        replica = Replica(tmp_path / "rclone-command")
+        replica.settlement(h)
     if not isinstance(h.b["history"].authority.authority, StandingCohortRecoveryAuthority):
         pytest.skip("automatic request runtime requires standing authority")
     original = h.b["history"]
@@ -3412,9 +3419,12 @@ async def test_native_request_certification_starts_recurring_settlement(
                 "endpoint_replay_archive", order_slot(order.order), endpoint_archive
             )
     completed = RequestCompletionFiles(tmp_path / "request-exports")
-    owner.source.orders = lambda: completed.orders(b["roster"])
-    owner.source.terminals = completed.terminal
-    owner.source.external = completed.objects
+    imported = (
+        RequestCompletionFiles(tmp_path / "request-imports") if replica is not None else completed
+    )
+    owner.source.orders = lambda: imported.orders(b["roster"])
+    owner.source.terminals = imported.terminal
+    owner.source.external = imported.objects
     exporters = tuple(
         RequestExportWorker(
             node.executions,
@@ -3448,6 +3458,10 @@ async def test_native_request_certification_starts_recurring_settlement(
         # hand-authored closure or phase history file.
         await asyncio.sleep(0.1)
         assert not output.exists()
+        h.deliver()
+        for node in (a, z):
+            assert not list(Path(node.config.inputs_directory).glob("*.json"))
+            assert not list((Path(node.config.exchange_outbox) / "inputs").glob("*.json"))
         assert owner.window().completion == "pending"
         h.clock.block = owner.block + 100
         tasks.extend(asyncio.create_task(e.run(stop, poll_seconds=1)) for e in exporters)
@@ -3468,6 +3482,10 @@ async def test_native_request_certification_starts_recurring_settlement(
                 async def sample_service(state, capture):
                     from umi.concurrency import run_owned_thread
 
+                    if replica is not None:
+                        await run_owned_thread(
+                            replica.copy, completed.root, imported.root, "requests"
+                        )
                     return await run_owned_thread(
                         lambda: owner.source.sample_service(state, capture, serving=True)
                     )
