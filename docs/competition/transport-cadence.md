@@ -70,6 +70,17 @@ prepared or active cohort and retains prior rounds, receipts, checkpoint history
 and evidence. A quiesced migration fences stale writers. Version-1 amendments
 retain their existing bytes and first-cohort scope.
 
+A terms-changing successor policy uses a version-3 launch amendment with reason
+`start_successor_policy_series`. The predecessor intake archive retains the
+exact prior public launch body as well as its digest. The successor evaluator
+quorum signs the prior policy digest, prior launch digest, new launch identity
+and effective block together. The transition may change eligible tracks and
+the intake opening, but the prior launch must already be retired and the new
+schedule must remain inside the successor policy interval. Apply it only to a
+fresh successor ledger bound to that one immediate predecessor archive. The
+ledger retains the two launch identities and signed transition; archived
+admissions remain read-only and are not copied into the current submission log.
+
 Before signing, project the full intended miner count with measured costs,
 publication/signing delays, faster block progress, slower operations and recovery.
 Require explicit reserve against issue, response and block deadlines. Then run

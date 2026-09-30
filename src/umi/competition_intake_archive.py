@@ -16,6 +16,7 @@ from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_client import AdmissionReceipt
+from .competition_launch import PublicLaunchIdentity
 from .competition_policy_lineage import PolicyLineage
 from .competition_store import CompetitionStore
 from .competition_submission_checkpoint import (
@@ -54,11 +55,14 @@ class IntakeArchiveRecordReference(StrictProtocolModel):
 
 class IntakeArchiveManifest(StrictProtocolModel):
     schema_: Literal[
-        "umi-competition-intake-archive/1", "umi-competition-intake-archive/2"
+        "umi-competition-intake-archive/1",
+        "umi-competition-intake-archive/2",
+        "umi-competition-intake-archive/3",
     ] = Field(alias="schema")
     policy: CompetitionPolicy
     predecessor_policies: Annotated[tuple[CompetitionPolicy, ...], Field(max_length=64)] = ()
     public_launch_sha256: Hex32
+    public_launch: PublicLaunchIdentity | None = None
     submission_set_sha256: Hex32
     source_head_sha256: Hex32
     source_checkpoint_sha256: Hex32
@@ -68,17 +72,36 @@ class IntakeArchiveManifest(StrictProtocolModel):
     ]
 
     @model_serializer(mode="wrap")
-    def preserve_v1_bytes(self, handler):
+    def preserve_legacy_bytes(self, handler):
         value = handler(self)
         if not self.predecessor_policies:
             value.pop("predecessor_policies", None)
+        if self.public_launch is None:
+            value.pop("public_launch", None)
         return value
 
     @model_validator(mode="after")
     def canonical_records(self) -> Self:
-        if (self.schema_ == "umi-competition-intake-archive/2") != bool(
-            self.predecessor_policies
+        if self.schema_ == "umi-competition-intake-archive/1" and (
+            self.predecessor_policies or self.public_launch is not None
         ):
+            raise ValueError("archive version differs from its retained context")
+        if self.schema_ == "umi-competition-intake-archive/2" and (
+            not self.predecessor_policies or self.public_launch is not None
+        ):
+            raise ValueError("archive version differs from its retained context")
+        if self.schema_ == "umi-competition-intake-archive/3" and self.public_launch is None:
+            raise ValueError("archive version differs from its retained context")
+        if (
+            self.public_launch is not None
+            and digest(self.public_launch) != self.public_launch_sha256
+        ):
+            raise ValueError("archived public launch differs from its digest")
+        if self.schema_ not in {
+            "umi-competition-intake-archive/1",
+            "umi-competition-intake-archive/2",
+            "umi-competition-intake-archive/3",
+        }:
             raise ValueError("archive version differs from its policy lineage")
         lineage = PolicyLineage(self.policy, self.predecessor_policies)
         if len(lineage.admitted_policy_sha256s) != 1 + len(self.predecessor_policies):
@@ -301,17 +324,13 @@ def export_intake_archive(
     ):
         raise ValueError("retained submission checkpoint differs from the export")
     manifest = IntakeArchiveManifest(
-        schema=(
-            "umi-competition-intake-archive/2"
-            if len(lineage.admitted_policy_sha256s) > 1
-            else "umi-competition-intake-archive/1"
-        ),
+        schema="umi-competition-intake-archive/3",
         policy=store.policy,
         predecessor_policies=tuple(
-            lineage.policy(policy_sha256)
-            for policy_sha256 in lineage.admitted_policy_sha256s[1:]
+            lineage.policy(policy_sha256) for policy_sha256 in lineage.admitted_policy_sha256s[1:]
         ),
         public_launch_sha256=store.public_launch_id,
+        public_launch=store.public_launch,
         submission_set_sha256=submission_set_sha256,
         source_head_sha256=head["head_sha256"],
         source_checkpoint_sha256=checkpoint_sha256,

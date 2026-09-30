@@ -21,28 +21,45 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 
 
 class LaunchAmendment(StrictProtocolModel):
-    schema_: Literal["umi-competition-launch-amendment/1", "umi-competition-launch-amendment/2"] = (
-        Field(alias="schema")
-    )
+    schema_: Literal[
+        "umi-competition-launch-amendment/1",
+        "umi-competition-launch-amendment/2",
+        "umi-competition-launch-amendment/3",
+    ] = Field(alias="schema")
     policy_sha256: Hex32
+    predecessor_policy_sha256: Hex32 | None = None
     previous_launch_sha256: Hex32
     replacement: PublicLaunchIdentity
     effective_block: Annotated[int, Field(ge=0, le=2**53 - 1)]
-    reason: Literal["accelerate_first_cohort_continuous_intake", "extend_future_cohort_windows"]
+    reason: Literal[
+        "accelerate_first_cohort_continuous_intake",
+        "extend_future_cohort_windows",
+        "start_successor_policy_series",
+    ]
     first_replaced_cycle: Annotated[int, Field(ge=1, le=2**53 - 1)] | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
         value = handler(self)
+        if self.predecessor_policy_sha256 is None:
+            value.pop("predecessor_policy_sha256", None)
         if self.first_replaced_cycle is None:
             value.pop("first_replaced_cycle", None)
         return value
 
     @model_validator(mode="after")
     def version_scope(self):
-        future = self.schema_ == "umi-competition-launch-amendment/2"
-        if future != (self.reason == "extend_future_cohort_windows") or future != (
-            self.first_replaced_cycle is not None
+        expected = {
+            "umi-competition-launch-amendment/1": "accelerate_first_cohort_continuous_intake",
+            "umi-competition-launch-amendment/2": "extend_future_cohort_windows",
+            "umi-competition-launch-amendment/3": "start_successor_policy_series",
+        }[self.schema_]
+        if self.reason != expected:
+            raise ValueError("launch amendment version differs from its scope")
+        successor = self.schema_ == "umi-competition-launch-amendment/3"
+        if successor != (self.predecessor_policy_sha256 is not None) or (
+            (self.schema_ == "umi-competition-launch-amendment/2")
+            != (self.first_replaced_cycle is not None)
         ):
             raise ValueError("launch amendment version differs from its scope")
         return self
@@ -136,15 +153,42 @@ def verify_launch_amendment(
     # A schedule amendment signed under a deal-preserving predecessor stays valid: the
     # signature is over the amendment bytes, and every scope clause below is re-checked
     # against the live policy on each open.
+    successor = amendment.reason == "start_successor_policy_series"
     if (
-        not submission_policy_admitted(policy, amendment.policy_sha256)
+        (
+            amendment.policy_sha256 != digest(policy)
+            if successor
+            else not submission_policy_admitted(policy, amendment.policy_sha256)
+        )
         or amendment.previous_launch_sha256 != digest(previous)
         or amendment.replacement != replacement
-        or previous.eligible_tracks != replacement.eligible_tracks
-        or old.intake_opened_block != new.intake_opened_block
+        or (
+            successor
+            and (
+                policy.predecessor_sha256 is None
+                or amendment.predecessor_policy_sha256 != policy.predecessor_sha256
+            )
+        )
+        or (
+            not successor
+            and (
+                previous.eligible_tracks != replacement.eligible_tracks
+                or old.intake_opened_block != new.intake_opened_block
+            )
+        )
     ):
         raise ValueError("launch amendment changes unauthorized semantics")
-    if amendment.reason == "extend_future_cohort_windows":
+    if successor:
+        if not (
+            old.round_valid_through_block
+            < amendment.effective_block
+            <= new.intake_opened_block
+            < new.roster_close_earliest_block
+            and policy.valid_from_block <= amendment.effective_block
+            and new.round_valid_through_block <= policy.valid_through_block
+        ):
+            raise ValueError("successor launch must retire the predecessor before new intake")
+    elif amendment.reason == "extend_future_cohort_windows":
         _verify_future_windows(amendment, previous, replacement, policy)
     elif (
         previous.round_stride_blocks is not None

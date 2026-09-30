@@ -198,9 +198,7 @@ def test_archive_preserves_deal_preserving_predecessor_admissions(tmp_path: Path
         migrate_writer_generation=True,
         submission_head_checkpoint_directory=checkpoint,
         initial_checkpoint_submission_sha256s=(digest(signed.submission),),
-        initial_checkpoint_baseline_promotion_sha256=store.baseline_summary()[
-            "promotion_sha256"
-        ],
+        initial_checkpoint_baseline_promotion_sha256=store.baseline_summary()["promotion_sha256"],
         initialize_submission_checkpoint=True,
     )
     store = CompetitionStore(
@@ -215,9 +213,10 @@ def test_archive_preserves_deal_preserving_predecessor_admissions(tmp_path: Path
     manifest = IntakeArchiveManifest.model_validate_json(
         (destination / "manifest.json").read_bytes()
     )
-    assert manifest.schema_ == "umi-competition-intake-archive/2"
+    assert manifest.schema_ == "umi-competition-intake-archive/3"
     assert manifest.policy == live
     assert manifest.predecessor_policies == (prior,)
+    assert manifest.public_launch == public_deployment.launch_identity()
     changed_terms = lineage_successor(prior, contribution_terms_sha256="c" * 64)
     rejected = manifest.model_copy(update={"policy": changed_terms})
     with pytest.raises(ValueError, match="changes submission terms"):
@@ -233,6 +232,147 @@ def test_archive_preserves_deal_preserving_predecessor_admissions(tmp_path: Path
         "signed_submission": json.loads(canonical_json_bytes(signed)),
         "receipt": saved,
     }
+
+
+def test_fresh_successor_ledger_retains_signed_archive_launch_transition(
+    chain_config, tmp_path: Path
+):
+    from umi.competition_launch import (
+        PublicIntakeDeployment,
+        PublicLaunchIdentity,
+        PublicRoundSchedule,
+    )
+    from umi.competition_launch_amendment import LaunchAmendment, SignedLaunchAmendment
+
+    prior, successor, public_deployment, _signed, _saved, archive_config = archived_v1(tmp_path)
+    archive = load_intake_archive(archive_config)
+    previous = public_deployment.launch_identity()
+    replacement = PublicLaunchIdentity(
+        schema="umi-competition-public-launch/2",
+        round_schedule=PublicRoundSchedule(
+            schema="umi-public-round-schedule/1",
+            intake_opened_block=700,
+            roster_close_earliest_block=800,
+            roster_close_latest_block=801,
+            work_signing_close_block=810,
+            evaluation_close_block=850,
+            protected_reference_reveal_block=860,
+            evidence_cutoff_block=870,
+            round_valid_through_block=900,
+        ),
+        eligible_tracks=("endpoint", "model"),
+        round_stride_blocks=100,
+    )
+    amendment = LaunchAmendment(
+        schema="umi-competition-launch-amendment/3",
+        policy_sha256=digest(successor),
+        predecessor_policy_sha256=digest(prior),
+        previous_launch_sha256=digest(previous),
+        replacement=replacement,
+        effective_block=650,
+        reason="start_successor_policy_series",
+    )
+    signed = SignedLaunchAmendment(
+        amendment=amendment,
+        signatures=(sign_object(amendment, wallet("Charlie")),),
+    )
+    binding = HistoricalIntakeArchiveBinding(
+        schema="umi-historical-intake-archive-binding/1",
+        policy_sha256=digest(prior),
+        manifest_sha256=archive.manifest_sha256,
+    )
+    state = tmp_path / "successor-state"
+    store = CompetitionStore(
+        state,
+        successor,
+        public_launch=replacement,
+        launch_amendment=signed,
+        amendment_observed_block=650,
+        migrate_writer_generation=True,
+        historical_intake_archive_bindings=(binding,),
+        historical_public_launch=archive.manifest.public_launch,
+    )
+    assert store.public_launch_amendments() == [json.loads(canonical_json_bytes(signed))]
+    with store._connection() as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='public_launch_identity'"
+        ).fetchone() == (digest(replacement),)
+
+    restarted = CompetitionStore(
+        state,
+        successor,
+        public_launch=replacement,
+        historical_intake_archive_bindings=(binding,),
+        historical_public_launch=archive.manifest.public_launch,
+    )
+    assert restarted.public_launch_amendments() == [json.loads(canonical_json_bytes(signed))]
+
+    source, preserved = tmp_path / "successor-baseline-source", tmp_path / "successor-baseline"
+    baseline = bundle_at(source).model_copy(update={"license_id": "MIT"})
+    preserve_bundle(baseline, source, preserved, successor)
+    restarted.initialize_baseline(baseline, preserved)
+    checkpoint = tmp_path / "successor-checkpoint"
+    checkpoint.mkdir(mode=0o700)
+    baseline_sha256 = restarted.baseline_summary()["promotion_sha256"]
+    CompetitionStore(
+        state,
+        successor,
+        public_launch=replacement,
+        submission_head_checkpoint_directory=checkpoint,
+        initial_checkpoint_submission_sha256s=(),
+        initial_checkpoint_baseline_promotion_sha256=baseline_sha256,
+        initialize_submission_checkpoint=True,
+        historical_intake_archive_bindings=(binding,),
+        historical_public_launch=archive.manifest.public_launch,
+    )
+    deployment = PublicIntakeDeployment(
+        schema="umi-competition-intake-deployment/3",
+        repository="https://github.com/Umi-BitSign/umi",
+        umi_git_revision="01" * 20,
+        umi_source_tree_sha256=umi_source_tree_sha256(),
+        deployed_at_utc="2026-09-29T00:00:00Z",
+        round_schedule=replacement.round_schedule,
+        eligible_tracks=replacement.eligible_tracks,
+        assignment_delivery_ready=True,
+        model_intake_ready=True,
+        evaluation_ready=True,
+        round_stride_blocks=replacement.round_stride_blocks,
+    )
+    config = CompetitionServiceConfig(
+        schema="umi-competition-service-config/2",
+        mode="intake_no_weight",
+        policy_sha256=digest(successor),
+        public_deployment=deployment,
+        retained_state=RetainedIntakeState(
+            schema="umi-competition-retained-intake-state/1",
+            baseline_promotion_sha256=baseline_sha256,
+            required_submission_sha256s=(),
+        ),
+        state_directory=str(state),
+        submission_head_checkpoint_directory=str(checkpoint),
+        chain=chain_config.model_copy(update={"policy_sha256": digest(successor)}),
+        historical_archives=(archive_config,),
+    )
+    app = create_intake_app(config, successor, provider_factory=Provider)
+    with TestClient(app) as client:
+        status = client.get("/v1/competition/status")
+        assert status.status_code == 200
+        assert status.json()["historical_intake_archives"] == [archive.summary()]
+
+    for update, message in (
+        ({"predecessor_policy_sha256": "ff" * 32}, "unauthorized semantics"),
+        ({"previous_launch_sha256": "ff" * 32}, "unauthorized semantics"),
+        ({"effective_block": 600}, "retire the predecessor"),
+    ):
+        changed = amendment.model_copy(update=update)
+        changed_signed = SignedLaunchAmendment(
+            amendment=changed,
+            signatures=(sign_object(changed, wallet("Charlie")),),
+        )
+        with pytest.raises(ValueError, match=message):
+            from umi.competition_launch_amendment import verify_launch_amendment
+
+            verify_launch_amendment(changed_signed, previous, replacement, successor)
 
 
 def test_public_archive_requires_the_ledger_bound_manifest(tmp_path: Path):
@@ -294,6 +434,24 @@ def test_archive_loader_recomputes_the_claimed_external_checkpoint(tmp_path: Pat
 
     with pytest.raises(ValueError, match="differs from its durable checkpoint"):
         load_intake_archive(changed)
+
+
+def test_archive_manifest_rejects_a_launch_body_outside_its_commitment(tmp_path: Path):
+    _prior, _successor, _deployment, _signed, _saved, config = archived_v1(tmp_path)
+    manifest = IntakeArchiveManifest.model_validate_json(
+        (Path(config.directory) / "manifest.json").read_bytes()
+    )
+    launch = manifest.public_launch
+    assert launch is not None
+    altered = launch.model_copy(
+        update={
+            "eligible_tracks": ("endpoint", "model"),
+        }
+    )
+    with pytest.raises(ValueError, match="archived public launch differs"):
+        IntakeArchiveManifest.model_validate_json(
+            canonical_json_bytes(manifest.model_copy(update={"public_launch": altered}))
+        )
 
 
 def test_published_staged_policy_cannot_start_without_its_v1_archive(chain_config, tmp_path: Path):

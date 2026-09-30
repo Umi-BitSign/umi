@@ -219,6 +219,7 @@ class CompetitionStore(VoidEvidenceRetention):
         historical_intake_archive_bindings: (
             tuple[HistoricalIntakeArchiveBinding, ...] | None
         ) = None,
+        historical_public_launch: PublicLaunchIdentity | None = None,
         predecessor_policies: tuple[CompetitionPolicy, ...] = (),
     ):
         if not directory.is_absolute() or directory.is_symlink():
@@ -269,6 +270,17 @@ class CompetitionStore(VoidEvidenceRetention):
             ):
                 raise ValueError("historical intake archive bindings must be unique and sorted")
             self.historical_intake_archive_bindings = archive_bindings
+        self.historical_public_launch = (
+            PublicLaunchIdentity.model_validate_json(canonical_json_bytes(historical_public_launch))
+            if historical_public_launch is not None
+            else None
+        )
+        if self.historical_public_launch is not None and (
+            role != "intake"
+            or self.historical_intake_archive_bindings is None
+            or len(self.historical_intake_archive_bindings) != 1
+        ):
+            raise ValueError("historical public launch requires one predecessor archive")
         if role not in {"intake", "evaluator_review"}:
             raise ValueError("unknown competition store role")
         self.role = role
@@ -991,7 +1003,30 @@ class CompetitionStore(VoidEvidenceRetention):
         ).fetchone()
         history = self._public_launch_history(connection)
         if self.launch_amendment is not None and (bound is None or not history):
-            raise ValueError("launch amendment requires an existing public launch history")
+            historical = self.historical_public_launch
+            if (
+                bound is not None
+                or history
+                or historical is None
+                or self.launch_amendment.amendment.reason != "start_successor_policy_series"
+                or digest(historical) != self.launch_amendment.amendment.previous_launch_sha256
+            ):
+                raise ValueError("launch amendment requires an existing public launch history")
+            historical_id = digest(historical)
+            connection.execute(
+                "INSERT INTO public_launch_history VALUES (1, ?, ?, ?)",
+                (
+                    historical_id,
+                    digest(historical.round_schedule),
+                    canonical_json_bytes(historical),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO metadata VALUES ('public_launch_identity', ?)",
+                (historical_id,),
+            )
+            bound = (historical_id,)
+            history = self._public_launch_history(connection)
         if supplied is None:
             if bound is not None or history:
                 raise ValueError("state directory requires its public launch identity")
@@ -1152,7 +1187,29 @@ class CompetitionStore(VoidEvidenceRetention):
             "round_conflicts",
             "settlement_disputes",
         )
-        if signed.amendment.reason == "extend_future_cohort_windows":
+        if signed.amendment.reason == "start_successor_policy_series":
+            bindings = self.historical_intake_archive_bindings
+            if (
+                self.historical_public_launch != current
+                or bindings is None
+                or len(bindings) != 1
+                or bindings[0].policy_sha256 != signed.amendment.predecessor_policy_sha256
+            ):
+                raise ValueError("successor launch differs from its predecessor archive")
+            successor_unused_tables = tuple(
+                table
+                for table in self._WRITER_FENCED_TABLES
+                if table
+                not in {
+                    "metadata",
+                    "public_launch_history",
+                    "public_launch_amendments",
+                }
+            )
+            for table in successor_unused_tables:
+                if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                    raise ValueError("successor launch requires a fresh current-policy ledger")
+        elif signed.amendment.reason == "extend_future_cohort_windows":
             if (
                 observed
                 >= current.schedule_for_cycle(

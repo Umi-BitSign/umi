@@ -227,11 +227,17 @@ def create_intake_app(
         public_launch=config.public_deployment.launch_identity(),
         submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
         historical_intake_archive_bindings=archive_bindings,
+        historical_public_launch=(
+            historical_archives[0].manifest.public_launch if historical_archives else None
+        ),
         predecessor_policies=predecessor_policies,
     )
     if historical_archives:
         launch = config.public_deployment.launch_identity()
-        archived_launch = historical_archives[0].manifest.public_launch_sha256
+        archive_manifest = historical_archives[0].manifest
+        archived_launch = archive_manifest.public_launch_sha256
+        if archive_manifest.public_launch is None:
+            raise ValueError("historical archive lacks its retained public launch identity")
         # The store authenticates every link against immutable launch history.
         # Walk back from the current launch; an older or disconnected path cannot
         # establish continuity with the archive after another amendment.
