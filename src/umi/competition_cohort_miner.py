@@ -61,7 +61,7 @@ from .open_competition import (
     sign_object,
     verify_signature,
 )
-from .policy import ScoringPolicy, scoring_policy_hash
+from .policy import SINGLE_EVALUATOR_TRANSPORT_SCHEMA, ScoringPolicy, scoring_policy_hash
 from .protocol import (
     Hex32,
     TranslationRequest,
@@ -159,6 +159,8 @@ class CohortMinerAuthorizationAuthority:
 
     @property
     def allowed_validator_hotkeys(self):
+        if self.transport.schema_ == SINGLE_EVALUATOR_TRANSPORT_SCHEMA:
+            return frozenset(e.validator_hotkey for e in self.transport.validator_registry)
         return frozenset(e.hotkey for e in self.policy.evaluators)
 
     def validate_runtime(self, **runtime):

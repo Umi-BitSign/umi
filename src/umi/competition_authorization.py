@@ -63,17 +63,17 @@ MAX_AUTHORIZATION_BYTES = 16 * 1024**2
 
 
 def validate_transport_cohort(policy: CompetitionPolicy, transport: ScoringPolicy) -> None:
-    """Bind the explicit single-evaluator transport to the same competition signer."""
+    """Bind the request transport signer to an evaluator in the cohort policy.
+
+    Additional competition evaluators may review and certify the request
+    without authenticating directly to the miner.
+    """
     if transport.schema_ != SINGLE_EVALUATOR_TRANSPORT_SCHEMA:
         return
-    if (
-        len(transport.validator_registry) != 1
-        or len(policy.evaluators) != 1
-        or policy.required_evaluator_groups != 1
-        or identity(transport.validator_registry[0].validator_hotkey)
-        != identity(policy.evaluators[0].hotkey)
-    ):
-        raise ValueError("single-evaluator transport and competition cohort must match")
+    if len(transport.validator_registry) != 1 or identity(
+        transport.validator_registry[0].validator_hotkey
+    ) not in {identity(evaluator.hotkey) for evaluator in policy.evaluators}:
+        raise ValueError("single-evaluator transport signer must belong to competition cohort")
 
 
 class EndpointAuthorizationCase(StrictProtocolModel):

@@ -449,20 +449,30 @@ async def test_extended_transport_uses_signed_schedule_and_fresh_request_auth(
         )
 
 
-@pytest.mark.parametrize("mutation", ["different_signer", "extra_evaluator", "larger_quorum"])
-def test_single_evaluator_transport_rejects_a_different_competition_cohort(policy, mutation):
+def test_single_evaluator_transport_rejects_a_signer_outside_competition_cohort(policy):
     fixture = build_authorization_fixture(policy, single_evaluator=True)
     validate_transport_cohort(fixture.policy, fixture.legacy_policy)
     evaluator = Evaluator(hotkey=wallet("Validator1").hotkey.ss58_address, control_group="other")
-    updates = {
-        "different_signer": {"evaluators": (evaluator,)},
-        "extra_evaluator": {"evaluators": (*fixture.policy.evaluators, evaluator)},
-        "larger_quorum": {"required_evaluator_groups": 2},
-    }
-    with pytest.raises(ValueError, match="cohort must match"):
+    with pytest.raises(ValueError, match="signer must belong"):
         validate_transport_cohort(
-            fixture.policy.model_copy(update=updates[mutation]), fixture.legacy_policy
+            fixture.policy.model_copy(update={"evaluators": (evaluator,)}),
+            fixture.legacy_policy,
         )
+
+
+def test_single_evaluator_transport_allows_independent_cohort_reviewers(policy):
+    fixture = build_authorization_fixture(policy, single_evaluator=True)
+    evaluator = Evaluator(
+        hotkey=wallet("Validator1").hotkey.ss58_address,
+        control_group="other",
+    )
+    reviewed = fixture.policy.model_copy(
+        update={
+            "evaluators": (*fixture.policy.evaluators, evaluator),
+            "required_evaluator_groups": 2,
+        }
+    )
+    validate_transport_cohort(reviewed, fixture.legacy_policy)
 
 
 def test_single_evaluator_publication_still_requires_the_selected_signature(policy):

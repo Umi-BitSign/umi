@@ -22,7 +22,7 @@ from umi.competition_cohort_miner import (
 from umi.endpoint_protocol import COHORT_GRANT_PATH, RESPONSE_RECOVERY_PATH, TRANSLATE_PATH
 from umi.miner import create_app
 from umi.open_competition import digest, identity, verify_signature
-from umi.policy import scoring_policy_hash
+from umi.policy import ScoringPolicy, scoring_policy_hash
 from umi.protocol import canonical_json_bytes
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
@@ -165,11 +165,45 @@ def granted(recovery_case, tmp_path):
             maximum_hypothesis_utf8_bytes=p.c.policy.maximum_output_bytes,
             maximum_inference_concurrency=len(p.c.policy.evaluators),
         ),
-        allowed_validator_hotkeys=frozenset(e.hotkey for e in p.c.policy.evaluators),
+        allowed_validator_hotkeys=p.authority(**kw).allowed_validator_hotkeys,
         competition_authority=p.authority(**kw),
     )
     p.miner = p.rebuild()
     return p
+
+
+def test_single_transport_exposes_only_the_miner_facing_evaluator(granted, tmp_path):
+    p = granted
+    evaluator = p.e.job.evaluator_hotkey
+    registry = next(
+        entry
+        for entry in p.transport_policy.validator_registry
+        if identity(entry.validator_hotkey) == identity(evaluator)
+    )
+    transport = ScoringPolicy.competition_transport(
+        activation_block=p.transport_policy.activation_block,
+        implementation_pins=p.transport_policy.implementation_pins,
+        validator=registry,
+    )
+    config = CohortMinerConfig(
+        schema="umi-cohort-miner-config/1",
+        directory=str(tmp_path / "single-transport-miner"),
+        cohorts=p.e.cfg.cohorts,
+        policy_sha256=digest(p.c.policy),
+        transport_policy_sha256=scoring_policy_hash(transport),
+        miner_hotkey=p.miner.hotkey_ss58,
+        model_revision=p.miner.model_revision,
+        serving_origin=p.e.job.submission.submission.endpoint_url,
+    )
+    authority = CohortMinerAuthorizationAuthority(
+        config,
+        p.c.policy,
+        transport,
+        p.finality,
+        p.e.box.history,
+    )
+    assert authority.allowed_validator_hotkeys == frozenset({evaluator})
+    assert len(p.c.policy.evaluators) > len(authority.allowed_validator_hotkeys)
 
 
 async def request(p, path, value, *, caller=None, raw=None):
