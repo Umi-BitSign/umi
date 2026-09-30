@@ -80,8 +80,11 @@ class CohortOrderHost:
         ):
             raise ValueError("benchmark order queue differs from owned intake and reviewers")
         groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
-        if len({groups[identity(k)] for k in c.queue.reviewers}) != len(c.queue.reviewers):
-            raise ValueError("benchmark execution requires independent configured evaluators")
+        if (
+            len({groups[identity(k)] for k in c.queue.reviewers})
+            < policy.required_evaluator_groups
+        ):
+            raise ValueError("benchmark execution cannot form the policy evaluator quorum")
         self.queue = CohortOrderQueue(c.queue, policy)
         self.service, self.last_reports, self.selected = service, {}, {}
         self.files = SettlementEvidenceFiles(

@@ -1054,19 +1054,18 @@ def test_serve_intake_uses_one_loopback_worker_without_proxy_trust(config, polic
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
     serve_intake(config, policy)
-    assert calls == [
-        (
-            (app,),
-            {
-                "host": "127.0.0.1",
-                "port": 8098,
-                "workers": 1,
-                "proxy_headers": False,
-                "access_log": False,
-                "backlog": 128,
-            },
-        )
-    ]
+    assert len(calls) == 1
+    args, options = calls[0]
+    liveness = options.pop("liveness_tasks")
+    assert args == (app,) and callable(liveness)
+    assert options == {
+        "host": "127.0.0.1",
+        "port": 8098,
+        "workers": 1,
+        "proxy_headers": False,
+        "access_log": False,
+        "backlog": 128,
+    }
 
 
 async def test_client_verified_service_retries_without_personal_credentials(config, policy):

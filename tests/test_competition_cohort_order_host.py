@@ -44,7 +44,13 @@ async def owner(network, tmp_path):
         )
         for who in cfg.queue.reviewers
     )
-    o = SimpleNamespace(network=n, files=files, prepared_reads=0, fail_after=None)
+    o = SimpleNamespace(
+        network=n,
+        files=files,
+        prepared_reads=0,
+        fail_after=None,
+        shared_queue=tmp_path / "shared-control-group-orders",
+    )
 
     def retained(cohort, *, expected_tip_sha256, current_block):
         o.prepared_reads += 1
@@ -64,6 +70,7 @@ async def owner(network, tmp_path):
         history=r.h.worker().history,
         preparation=SimpleNamespace(retained=retained),
     )
+    o.service = service
 
     class Route(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -74,6 +81,50 @@ async def owner(network, tmp_path):
     async with httpx.AsyncClient(transport=Route()) as client:
         o.host = lambda: CohortOrderHost(service, client, ("private-order-token" * 3,) * len(peers))
         yield o
+
+
+async def test_redundant_reviewers_in_one_control_group_form_one_group_quorum(owner):
+    o = owner
+    original = o.service.intake.policy
+    shared = original.model_copy(
+        update={
+            "required_evaluator_groups": 1,
+            "evaluators": tuple(
+                item.model_copy(update={"control_group": "shared-operator"})
+                for item in original.evaluators
+            ),
+        }
+    )
+    queue = o.service.config.orders.queue.model_copy(
+        update={"directory": str(o.shared_queue), "policy_sha256": digest(shared)}
+    )
+    o.service.intake.policy = shared
+    o.service.provider.policy = shared
+    o.service.config.orders = o.service.config.orders.model_copy(update={"queue": queue})
+    host = o.host()
+    assert host.queue.policy.required_evaluator_groups == 1
+
+
+async def test_redundant_reviewers_cannot_claim_two_group_quorum(owner):
+    o = owner
+    original = o.service.intake.policy
+    shared = original.model_copy(
+        update={
+            "required_evaluator_groups": 2,
+            "evaluators": tuple(
+                item.model_copy(update={"control_group": "shared-operator"})
+                for item in original.evaluators
+            ),
+        }
+    )
+    queue = o.service.config.orders.queue.model_copy(
+        update={"directory": str(o.shared_queue), "policy_sha256": digest(shared)}
+    )
+    o.service.intake.policy = shared
+    o.service.provider.policy = shared
+    o.service.config.orders = o.service.config.orders.model_copy(update={"queue": queue})
+    with pytest.raises(ValueError, match="cannot form the policy evaluator quorum"):
+        o.host()
 
 
 async def test_complete_roster_selected_and_delivered_without_manual_orders(owner):

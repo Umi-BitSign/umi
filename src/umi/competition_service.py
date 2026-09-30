@@ -317,7 +317,10 @@ def create_intake_app(
             await provider.start()
             await finality_cache.start()
             if service_host is not None:
-                service_task = asyncio.create_task(service_host.run(service_stop))
+                service_task = asyncio.create_task(
+                    service_host.run(service_stop), name="competition-service-admission"
+                )
+                _app.state.service_liveness_task = service_task
             yield
         finally:
             service_stop.set()
@@ -325,6 +328,7 @@ def create_intake_app(
                 if service_task is not None:
                     await _stop_task(service_task)
             finally:
+                _app.state.service_liveness_task = None
                 try:
                     await finality_cache.aclose()
                 finally:
@@ -486,6 +490,11 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
             proxy_headers=False,
             access_log=False,
             backlog=config.api_limits.socket_backlog,
+            liveness_tasks=lambda: tuple(
+                task
+                for task in (getattr(app.state, "service_liveness_task", None),)
+                if task is not None
+            ),
         )
     finally:
         for logger, level, propagate in loggers:
