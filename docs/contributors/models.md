@@ -8,12 +8,13 @@
 
 ## Model contributions: prepare before spending compute
 
-Public intake is held on C5 preparation. Model enrollment under the new C5+
-policy has not opened. This checklist describes artifact, rights and
+Public C5 model intake is open under the signed C5+ policy. This checklist
+describes artifact, rights and
 reconstruction requirements; it does not approve a model or grant a license.
 The selected C5 and C7-C10 split is 50% service and 50% model rewards. C6 is
 model-only and assigns 100% of its competition allocation within this public-model
-track. The exact runtime, immutable policy and submission opening still need publication.
+track. Use the runtime, immutable policy and upload route published by the live
+C5 status and cohort history.
 
 The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for C4
 verification. Their 70/30 split and promotion rule do not define C5+'s new model
@@ -22,8 +23,8 @@ award. Each submission must use the exact terms named by its signed policy.
 The [version 3 terms](../MODEL_CONTRIBUTION_TERMS_V3.md) define the separate
 service and public-model pools. C5's continuous-video dependence comparison is
 diagnostic only and does not affect scores, eligibility, settlement or payouts.
-The launch policy must bind the terms file's published
-[SHA-256](../MODEL_CONTRIBUTION_TERMS_V3.sha256) before enrollment opens.
+The C5 policy binds the terms file's published
+[SHA-256](../MODEL_CONTRIBUTION_TERMS_V3.sha256).
 
 Keep original submissions and acceptance receipts. Enrollment under a different
 reward policy requires fresh miner consent; an operator cannot carry old
@@ -36,9 +37,9 @@ signatures into the new rules.
 The signed launch policy names the accepted model-license identifiers and binds
 the exact contribution terms by SHA-256. The current policy, endpoint cutoffs and
 public status are linked from the
-[launch configuration](../competition/launch.md). The model-artifact track will
-not open until UMI publishes its exact runtime, immutable environment, cutoffs
-and submission route. Sam's preliminary review route is published below.
+[launch configuration](../competition/launch.md). Submit only against the exact
+runtime, immutable environment and route published for the live cohort. Sam's
+preliminary review route is published below.
 
 The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its
 weights and portable bundle. The separate
@@ -151,8 +152,8 @@ remove privacy, consent, access-agreement or commercial-use restrictions.
 Model-track participation additionally requires a preserved, reconstructible,
 rights-reviewed artifact and explicit enrollment. The
 [manifest preparation notes](../reference/commands.md#live-first-round-model-contribution)
-do not open model intake. A model submission registers a signed manifest and
-provides the complete bytes through the published delivery route, where every
+describe the live submission path. A model submission registers a signed manifest
+and provides the complete bytes through the published delivery route, where every
 declared file is rehashed before execution.
 
 Both tracks use the same signed policy. Rewards begin only after the
@@ -169,6 +170,6 @@ credits in proportion to their exact scores. The first complete certified
 acceptance fixes score, eligibility and attribution for exact copies; later
 aliases do not create another trial. It also breaks an exact score tie.
 Complete submission, artifact preservation and rights checks remain required.
-The model award is separate from promotion of the reference model. The new
-policy and activation are still being prepared; current signed allocations
-retain their existing rules.
+The model award is separate from promotion of the reference model. C4's certified
+allocation retains its existing rules until the certified C5 successor row takes
+over.

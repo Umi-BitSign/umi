@@ -1,17 +1,33 @@
 // Each public hostname can reach only its fixed loopback VPC service.
-const MAX_BODY = 64 * 1024;
+const MAX_JSON_BODY = 64 * 1024;
+const MAX_COHORT_GRANT_BODY = 16 * 1024 * 1024;
 const MAX_HEADERS = 16 * 1024;
 const MINER_HOST = 'studio-miner.sam-sn78.workers.dev';
 const COMPETITION_HOST = 'api.umi.vision';
 const ROUTES = new Map([
   [`${MINER_HOST}\n/healthz`, {
     method: 'GET', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    requestMaxBytes: 0, responseMaxBytes: MAX_JSON_BODY,
   }],
   [`${MINER_HOST}\n/v1/translate`, {
     method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
+  }],
+  [`${MINER_HOST}\n/v1/translate/response`, {
+    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
+  }],
+  [`${MINER_HOST}\n/v1/competition/cohorts/assignments`, {
+    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    requestMaxBytes: MAX_COHORT_GRANT_BODY, responseMaxBytes: MAX_JSON_BODY,
+  }],
+  [`${MINER_HOST}\n/v1/competition/cohorts/assignments/retire`, {
+    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
   }],
   [`${COMPETITION_HOST}\n/v1/competition/assignments/query`, {
     method: 'POST', binding: 'ASSIGNMENT_ORIGIN', origin: 'http://127.0.0.1:8129', timeoutMs: 30_000,
+    requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
   }],
 ]);
 const HOP_HEADERS = [
@@ -42,8 +58,9 @@ function cleanHeaders(input) {
  * Preserve their exact bytes because the miner authenticates the body digest.
  * @param {ReadableStream<Uint8Array> | null} stream
  * @param {AbortSignal} signal
+ * @param {number} maximumBytes
  */
-async function readBody(stream, signal) {
+async function readBody(stream, signal, maximumBytes) {
   if (!stream) return new Uint8Array();
   const reader = stream.getReader();
   const cancel = () => { void reader.cancel().catch(() => {}); };
@@ -57,7 +74,7 @@ async function readBody(stream, signal) {
       signal.throwIfAborted();
       if (done) break;
       length += value.byteLength;
-      if (length > MAX_BODY) throw new BodyLimitError();
+      if (length > maximumBytes) throw new BodyLimitError();
       chunks.push(value);
     }
     const bytes = new Uint8Array(length);
@@ -89,7 +106,9 @@ export default {
     const encoding = request.headers.get('content-encoding');
     if (encoding && encoding !== 'identity') return failure(415, 'content_encoding_not_supported');
     const length = request.headers.get('content-length');
-    if (length !== null && (!/^(0|[1-9][0-9]*)$/.test(length) || Number(length) > MAX_BODY)) {
+    if (length !== null && (
+      !/^(0|[1-9][0-9]*)$/.test(length) || Number(length) > route.requestMaxBytes
+    )) {
       return failure(413, 'body_too_large');
     }
 
@@ -100,7 +119,7 @@ export default {
     const timer = setTimeout(() => controller.abort(new Error('deadline_exceeded')), route.timeoutMs);
     let stage = 'request';
     try {
-      const body = await readBody(request.body, controller.signal);
+      const body = await readBody(request.body, controller.signal, route.requestMaxBytes);
       const headers = cleanHeaders(request.headers);
       for (const name of ['host', 'content-length', 'cookie', 'forwarded', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-for']) headers.delete(name);
       headers.set('accept-encoding', 'identity');
@@ -118,7 +137,9 @@ export default {
         return failure(502, 'origin_redirect_rejected');
       }
       stage = 'response';
-      const responseBody = await readBody(upstream.body, controller.signal);
+      const responseBody = await readBody(
+        upstream.body, controller.signal, route.responseMaxBytes,
+      );
       const responseHeaders = cleanHeaders(upstream.headers);
       for (const name of ['content-length', 'content-encoding', 'set-cookie', 'server']) responseHeaders.delete(name);
       responseHeaders.set('cache-control', 'no-store');

@@ -16,10 +16,10 @@ independent evaluators. It produces the existing `IndependentEvaluationEvidence`
 used by settlement replay. Optional settlement signing returns endorsements to
 the coordinator. The worker does not submit weights.
 
-The imported baseline still has no contributor attribution. The approved
-[70/30 launch rule](../competition/launch.md) burns the unallocated
-model share until a model qualifies. Running this worker does not activate
-weights or satisfy the launch profile's evaluation and review requirements.
+The imported baseline still has no contributor attribution. C5 assigns 50% to
+service work and 50% to eligible public models; C6 is model-only. Running this
+worker does not activate weights or satisfy the launch profile's evaluation and
+review requirements.
 
 Scoring is automatic; no human ASL judge is part of the work-order path.
 The [private holdout](private-holdout.md#open-competition-private-holdout) supplies committed
@@ -398,8 +398,8 @@ mounted into it.
 
 This path prepares unsigned evaluation evidence. It does not activate the
 competition, award contributor attribution to the imported baseline, or submit
-chain weights. The [execution-plan launch gates](../competition/launch.md)
-still apply, including the approved simultaneous 70/30 policy.
+chain weights. The [execution-plan gates](../competition/launch.md) still apply,
+including the signed allocation for the active cohort.
 
 <a id="open-competition-endpoint-evaluation--before-reference-reveal"></a>
 

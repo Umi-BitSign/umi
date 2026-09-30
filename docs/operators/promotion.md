@@ -72,16 +72,15 @@ changed decisions, parent/round/submission bindings, restart, missing receipts,
 bounded signing reads and legacy compatibility. The combined service test uses
 different local promotion blocks before its predeclared evidence cutoff.
 
-These tests use synthetic model and rights inputs. Launch still requires real
+These tests use synthetic model and rights inputs. Production decisions require
 protected-data execution, reviewed launch inputs and signed activation. A
 qualifying contributed model and its specific rights and provenance review are
-required before awarding the model share. Until then, version 3 burns the
-unallocated 30% under the [allocation rule](../competition/launch.md).
-The approved
-[initial evaluator profile](../competition/launch.md) uses UID 0 alone,
-with one disclosed operator group and a quorum of one. UID 54 operated by us
-does not supply an independent vote. Additional evaluator groups require a
-later signed policy. No live reward policy changes through this API.
+required before awarding a model share. The C5
+[evaluator profile](../competition/launch.md) uses required UID 54 and optional
+UID 0 in one disclosed operator control group with a quorum of one. UID 0's
+absence does not block approval, and their two signatures do not supply two
+independent votes. Additional evaluator groups require a later signed policy. No
+live reward policy changes through this API.
 
 
 <a id="open-competition-promotion-delivery"></a>

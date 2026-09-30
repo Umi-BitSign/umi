@@ -11,8 +11,8 @@
 This is the no-weight endpoint execution path for the open competition. It
 consumes quorum-signed publications, sends their exact requests to miners and
 retains responses for later replay. It neither generates protected challenges
-nor signs evaluation results, promotions or chain weights. Production enrollment
-and the simultaneous 70/30 activation still require the gates in the
+nor signs evaluation results, promotions or chain weights. Enrollment and reward
+activation remain subject to the gates in the
 [execution plan](../competition/launch.md).
 
 <a id="open-competition-dispatch--required-inputs"></a>

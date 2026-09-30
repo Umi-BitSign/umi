@@ -236,9 +236,9 @@ documented operational claims, not properties a hash or signature proves.
    requests, model mounts, logs and public APIs until the committed reveal.
    Models must produce and retain their outputs before reference disclosure.
 3. Have the policy-selected evaluators execute and sign the result evidence.
-   The initial [UID 0 launch profile](../competition/launch.md) uses one
-   operator and one signed run. It provides no independent second evaluation.
-   UID 54 does not supply another vote. A later multi-group policy requires
+   The initial [UID 54 launch profile](../competition/launch.md) uses one
+   operator and one required signed run. Optional UID 0 review does not provide
+   an independent second evaluation. A later multi-group policy requires
    reproduction by its independently administered groups.
 4. Reveal evidence only to the audience allowed by the data policy. Restricted
    clips require access-controlled verification; a public digest alone is not

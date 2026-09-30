@@ -27,8 +27,7 @@ proposals to independent signers and publishes verified replay packages.
 Optional [reviewed promotion delivery](promotion.md#open-competition-promotion-delivery)
 applies explicitly approved model reviews to retained independent evidence and
 delivers those decisions to evaluators through the same authenticated connection.
-The service does not activate the 70/30 policy, change bridge weights or extend
-the bridge sunset.
+The service does not activate competition rewards or change bridge weights.
 
 <a id="open-competition-round-coordinator--operator-inputs"></a>
 
@@ -290,7 +289,7 @@ shutdown cleanup. They use synthetic keys and an in-process HTTP transport.
 The connected two-round rehearsal completes a promotion, restarts the coordinator
 and both evaluators from their retained journals, and executes the next planned
 window against the promoted incumbent. Its miner keeps running and discovers
-the new assignments. Both 70/30 settlement packages and the original round's
+the new assignments. Both legacy 70/30 settlement packages and the original round's
 frozen incumbent remain unchanged on retry. Production still requires a supply
 of reviewed plans and protected suites; the coordinator does not create these
 inputs or retime missed windows.
@@ -594,8 +593,8 @@ Tests exercise both tracks through authenticated in-process HTTP, real synthetic
 hotkey signatures, exact retries, conflicts, expired publication, lost delivery,
 owned-provider disagreement, capacity guards and shutdown failure. They do not
 establish public TLS deployment, protected ASL quality or independent production
-operators. Settlement publication and the reviewed simultaneous 70/30 activation
-remain on the [execution plan](../competition/launch.md).
+operators. Settlement publication and reward activation remain on the
+[execution plan](../competition/launch.md).
 
 ## Recoverable cohort admission
 
