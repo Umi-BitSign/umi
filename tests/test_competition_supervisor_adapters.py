@@ -30,6 +30,7 @@ from umi.competition_worker_cli import (
     SuccessorWorkerExecutionConfig,
 )
 from umi.protocol import canonical_json_bytes
+from umi.validator_supervisor import ValidatorSupervisorError
 
 from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
@@ -94,7 +95,7 @@ class Container:
 
 @pytest.fixture
 def adapter_case(
-    weight_case, successor_case, worker_capacity, package_limits, tmp_path, monkeypatch
+    weight_case, successor_case, worker_capacity, package_limits, tmp_path, monkeypatch, request
 ):
     item, source = weight_case, successor_case
     config = source.predecessor.config.model_copy(
@@ -123,6 +124,7 @@ def adapter_case(
         checkpoint_finalized_block=160,
         operator_consent=consent,
         worker_execution_limits=ceiling,
+        _receipt=SimpleNamespace(evidence_migration=None),
         valid=True,
     )
 
@@ -197,7 +199,7 @@ def adapter_case(
         materializer=result.materializer,
         observer=result.observer,
         container=container,
-        limits=adapters.SuccessorAdapterLimits(20, 4 * 1024**2),
+        limits=adapters.SuccessorAdapterLimits(*getattr(request, "param", (20, 4 * 1024**2))),
     )
     new_weight_root = Path(config.worker_state_root) / "competition" / "weights"
     new_weight_root.parent.mkdir(parents=True, mode=0o700)
@@ -309,6 +311,245 @@ async def _stopped(case):
     observation = await case.item.provider.collect_weights(case.item.hotkey, case.item.recipients)
     await case.adapter.recover_stopped_transactions(observation)
     return observation
+
+
+def _candidate_storage(case, backend):
+    if backend == "legacy":
+        return
+    from umi.competition_evidence_worker import ContentAddressedWeightWorker
+
+    from .test_competition_evidence_config import storage_config
+
+    storage = storage_config()
+    old = case.item.worker
+    # This fixture journal is empty. Keep even that original file separately;
+    # no production migration or retained-authority exception is modeled here.
+    old.state_root.rename(old.state_root.with_name("empty-legacy-fixture"))
+    case.item.worker = ContentAddressedWeightWorker(
+        old.state_root,
+        package_limits=old.package_limits,
+        replay_worker=old.replay_worker,
+        maximum_attempts=old.maximum_attempts,
+        maximum_evidence_bytes=old.maximum_evidence_bytes,
+        submission_timeout_seconds=old.submission_timeout_seconds,
+        **storage.worker_options(),
+    )
+    case.installation.worker_execution_limits = (
+        case.installation.worker_execution_limits.model_copy(
+            update={
+                "schema_": "umi-successor-worker-execution-limits/2",
+                "weight_evidence_storage": storage,
+            }
+        )
+    )
+    select = case.select
+
+    def selected(mode="competition_replay"):
+        result = select(mode)
+        execution = SuccessorWorkerExecutionConfig.model_validate_json(
+            case.files.worker_execution_bytes
+        )
+        execution = execution.model_copy(
+            update={
+                "schema_": "umi-successor-worker-execution-config/2",
+                "weights": None
+                if execution.weights is None
+                else execution.weights.model_copy(update={"evidence_storage": storage}),
+            }
+        )
+        case.files = replace(case.files, worker_execution_bytes=canonical_json_bytes(execution))
+        return result
+
+    case.select = selected
+
+
+async def test_legacy_history_is_not_silently_reinterpreted_as_new_storage(adapter_case):
+    from .test_competition_evidence_config import storage_config
+
+    case = adapter_case
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    case.adapter._retain(case.adapter._staged[case.selection.directive_sha256])
+    await _run(case.item)
+    before = case.item.worker.path.read_bytes()
+    case.installation.worker_execution_limits = (
+        case.installation.worker_execution_limits.model_copy(
+            update={
+                "schema_": "umi-successor-worker-execution-limits/2",
+                "weight_evidence_storage": storage_config(),
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="sealed installation"):
+        case.adapter._verify(case.selection, case.files)
+    with pytest.raises(ValueError, match="stopped migration"):
+        case.adapter._attempts()
+    assert before == case.item.worker.path.read_bytes()
+
+
+@pytest.mark.parametrize("backend", ["legacy", "content_addressed"])
+async def test_host_audits_unreferenced_evidence_before_reading_attempts(adapter_case, backend):
+    case = adapter_case
+    _candidate_storage(case, backend)
+    case.select("competition_weights")
+    await _run(case.item)
+    with case.item.worker._db() as db:
+        if backend == "legacy":
+            db.execute("INSERT INTO evidence VALUES (?,?)", ("ff" * 32, b"corrupt unreferenced"))
+        else:
+            db.execute(
+                "INSERT INTO weight_proof_objects VALUES (?,?)",
+                ("ff" * 32, b"corrupt unreferenced"),
+            )
+    with pytest.raises(ValueError):
+        case.adapter._attempts()
+
+
+def _retain_weight_renewals(case, count=12, *, bad_authorization=False):
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    case.select("competition_weights")
+    anchor = case.selection.signed
+    case.adapter._retain(case.adapter._verify(case.selection, case.files))
+    previous, records = anchor, []
+    for index in range(count):
+        body = case.item.body.model_copy(
+            update={
+                "authorization_id": f"{index + 500:064x}",
+                "predecessor_directive_sha256": previous.directive_sha256,
+            }
+        )
+        authorization = sign_competition_weight_authorization(body, authority_wallets()[0])
+        directive = previous.directive.model_copy(
+            update={
+                "sequence": previous.directive.sequence + 1,
+                "predecessor_version": 4,
+                "previous_directive_sha256": previous.directive_sha256,
+                "chain_authorization": _signed_authorization_target(authorization),
+            }
+        )
+        signed = _signed(directive)
+        records.append(signed)
+        files = replace(
+            case.files,
+            current_directive_page_bytes=successor_continuation_bytes(anchor, records),
+            authorization_bytes=canonical_json_bytes(
+                case.item.signed if bad_authorization and index == count - 1 else authorization
+            ),
+        )
+        case.adapter._retain(
+            SimpleNamespace(
+                selection=SuccessorWorkerSelection(signed),
+                files=files,
+            )
+        )
+        previous = signed
+
+
+async def test_recovery_replays_unchanged_package_once_but_checks_every_renewal(
+    adapter_case, monkeypatch
+):
+    from umi import competition_recovery_packages as recovery
+
+    case = adapter_case
+    _retain_weight_renewals(case)
+    replay, authorize = (
+        recovery.load_bound_successor_replay_package,
+        (adapters.verify_bound_successor_chain_authorization),
+    )
+    calls = {"replay": 0, "authorize": 0}
+
+    def replayed(*args, **kwargs):
+        calls["replay"] += 1
+        return replay(*args, **kwargs)
+
+    def authorized(*args, **kwargs):
+        calls["authorize"] += 1
+        return authorize(*args, **kwargs)
+
+    monkeypatch.setattr(recovery, "load_bound_successor_replay_package", replayed)
+    monkeypatch.setattr(adapters, "verify_bound_successor_chain_authorization", authorized)
+    await _stopped(case)
+    assert calls == {"replay": 1, "authorize": 13}
+    assert case.adapter._recovered is not None
+    await _stopped(case)
+    assert calls == {"replay": 2, "authorize": 26}  # No reuse across audits.
+    assert not case.item.encoded
+
+
+async def test_recovery_reused_package_does_not_accept_wrong_renewal_authority(
+    adapter_case,
+):
+    case = adapter_case
+    _retain_weight_renewals(case, count=2, bad_authorization=True)
+    with pytest.raises(
+        ValidatorSupervisorError, match="successor_chain_authorization_digest_mismatch"
+    ):
+        await _stopped(case)
+    assert case.adapter._recovered is None
+    assert not case.item.encoded
+
+
+async def test_recovery_reuse_detects_sealed_package_change_between_authorizations(
+    adapter_case, monkeypatch
+):
+    case = adapter_case
+    _retain_weight_renewals(case, count=2)
+    original = adapters.verify_bound_successor_chain_authorization
+    touched = []
+
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not touched:
+            path = case.files.package_path / "manifest.json"
+            raw = path.read_bytes()
+            path.chmod(0o600)
+            path.write_bytes(raw)  # Even equal bytes cannot hide a new file identity.
+            path.chmod(0o400)
+            touched.append(True)
+        return result
+
+    monkeypatch.setattr(adapters, "verify_bound_successor_chain_authorization", changed)
+    with pytest.raises(ValueError, match="package changed"):
+        await _stopped(case)
+    assert case.adapter._recovered is None
+    assert not case.item.encoded
+
+
+@pytest.mark.parametrize("changed", ["target", "release"])
+def test_recovery_reuse_rechecks_changed_binding_with_the_same_package_path(adapter_case, changed):
+    from umi.competition_recovery_packages import RecoveryPackageReplay
+
+    case = adapter_case
+    cache = RecoveryPackageReplay()
+    directive = case.selection.signed.directive
+    cache.load(case.files.package_path, directive=directive)
+    if changed == "target":
+        directive = directive.model_copy(
+            update={
+                "replay_package": directive.replay_package.model_copy(
+                    update={
+                        "projection_sha256": "ff" * 32,
+                    }
+                ),
+            }
+        )
+    else:
+        replay_identity = directive.release.replay_release_identity
+        directive = directive.model_copy(
+            update={
+                "release": directive.release.model_copy(
+                    update={
+                        "umi_git_revision": "f" * 40,
+                        "replay_release_identity": replay_identity.model_copy(
+                            update={"umi_revision": "f" * 40}
+                        ),
+                    }
+                ),
+            }
+        )
+    with pytest.raises((ValueError, ValidatorSupervisorError)):
+        cache.load(case.files.package_path, directive=directive)
 
 
 async def test_staging_full_replay_does_not_select_current_or_load_image(adapter_case):
@@ -496,8 +737,12 @@ async def test_failed_stop_cannot_mint_recovery_or_start(adapter_case):
 
 
 @pytest.mark.parametrize("fault", ["unknown", "expired", "consumed_other_row", "applied"])
-async def test_wallet_free_stopped_recovery_uses_real_attempt_and_owned_proof(adapter_case, fault):
+@pytest.mark.parametrize("backend", ["legacy", "content_addressed"])
+async def test_wallet_free_stopped_recovery_uses_real_attempt_and_owned_proof(
+    adapter_case, fault, backend
+):
     case = adapter_case
+    _candidate_storage(case, backend)
     case.select("competition_weights")
     await case.adapter.stage(case.selection)
     case.adapter._retain(case.adapter._staged[case.selection.directive_sha256])
@@ -535,13 +780,15 @@ async def test_wallet_free_stopped_recovery_uses_real_attempt_and_owned_proof(ad
         ("pending", "attempt_audit"),
     ],
 )
+@pytest.mark.parametrize("backend", ["legacy", "content_addressed"])
 async def test_stopped_recovery_refreshes_after_slow_retained_history(
-    adapter_case, monkeypatch, history, slow_phase
+    adapter_case, monkeypatch, history, slow_phase, backend
 ):
     from umi import competition_weights as weights
     from umi.competition_chain_state import validate_owned_weight_observation
 
     case = adapter_case
+    _candidate_storage(case, backend)
     if history != "empty":
         case.select("competition_weights")
         await case.adapter.stage(case.selection)
@@ -562,7 +809,7 @@ async def test_stopped_recovery_refreshes_after_slow_retained_history(
         "attempt_audit": (case.adapter, "_attempts"),
         "target": (case.adapter, "_verify"),
         "worker_package": (weights, "load_competition_package"),
-        "worker_journal": (weights.CompetitionWeightWorker, "_audit_evidence"),
+        "worker_journal": (type(case.item.worker), "_audit_evidence"),
     }[slow_phase]
     original = getattr(target, name)
 
@@ -919,3 +1166,32 @@ def test_adapter_limits_reject_noninteger_unbounded_values(field, value):
 def test_artifact_controls_require_execution_bytes(adapter_case):
     with pytest.raises(ValueError):
         replace(adapter_case.files, worker_execution_bytes=None)
+
+
+async def test_slow_start_verification_precedes_fresh_weight_proof(adapter_case, monkeypatch):
+    from umi.competition_chain_state import validate_owned_weight_observation
+
+    case = adapter_case
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    initial = await _stopped(case)
+    original_verify = case.adapter._verify
+    monotonic_ns = time.monotonic_ns
+    shift = [0]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: monotonic_ns() + shift[0])
+
+    def slow_verify(*args, **kwargs):
+        result = original_verify(*args, **kwargs)
+        shift[0] += 121_000_000_000
+        return result
+
+    monkeypatch.setattr(case.adapter, "_verify", slow_verify)
+    await case.adapter.start_weights(case.selection)
+    assert case.container.current.phase == "running"
+    assert case.container.events.count("launch") == 1
+    assert case.container.current.directive_sha256 == case.selection.directive_sha256
+    with pytest.raises(ValueError, match="owned proof"):
+        validate_owned_weight_observation(initial)
+    fresh = case.adapter._preflight[case.selection.directive_sha256]
+    validate_owned_weight_observation(fresh)
+    assert fresh.captured_monotonic_ns > initial.expires_monotonic_ns

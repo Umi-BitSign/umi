@@ -18,12 +18,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_evidence_config import EvidenceStorageConfig
+from .competition_evidence_migration_models import EvidenceMigrationSeal
+from .competition_history_compatibility import (
+    original_consent_digest,
+    validate_consent_transition,
+    verify_history_compatibility,
+)
 from .competition_package import (
     CompetitionReleaseIdentity,
 )
+from .competition_receipt_store import publish_installation_receipt
 from .competition_recovery import (
     RecoveryCheckpointBody,
     RecoveryLimits,
@@ -42,9 +50,11 @@ from .competition_supervisor import (
     SuccessorSupervisorOperatorConsent,
     advance_successor_supervisor_directive_history_state,
     advance_successor_supervisor_directive_state,
+    consent_for_retained_directive,
     load_bound_successor_replay_package,
     parse_canonical_successor_operator_consent,
     parse_canonical_successor_supervisor_directive_history,
+    retained_directive_observation_block,
     successor_operator_consent_sha256,
     successor_source_config_sha256,
     verify_bound_successor_chain_authorization,
@@ -131,17 +141,46 @@ class HostActivationError(ValueError):
 class SuccessorWorkerExecutionLimits(StrictProtocolModel):
     """Immutable operator ceilings for rolling per-directive worker inputs."""
 
-    schema_: Literal["umi-successor-worker-execution-limits/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-successor-worker-execution-limits/1", "umi-successor-worker-execution-limits/2"
+    ] = Field(alias="schema")
     replay_capacity_ceiling: CompetitionWorkerCapacity
     maximum_weight_attempts: Annotated[int, Field(ge=1, le=65_536)]
     maximum_weight_evidence_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)]
     maximum_submission_timeout_seconds: Annotated[int, Field(ge=1, le=3_600)]
+    weight_evidence_storage: EvidenceStorageConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.weight_evidence_storage is None:
+            value.pop("weight_evidence_storage", None)
+        return value
+
+    @model_validator(mode="after")
+    def storage_version(self) -> Self:
+        if (self.weight_evidence_storage is not None) != (
+            self.schema_ == "umi-successor-worker-execution-limits/2"
+        ):
+            raise ValueError("evidence storage requires versioned installed limits")
+        return self
 
 
 class SuccessorInstallationReceipt(StrictProtocolModel):
     """Root-owned seal of one stopped legacy-to-successor installation boundary."""
 
-    schema_: Literal[SUCCESSOR_INSTALLATION_RECEIPT_SCHEMA] = Field(alias="schema")
+    schema_: Literal[
+        SUCCESSOR_INSTALLATION_RECEIPT_SCHEMA, "umi-successor-installation-receipt/2"
+    ] = Field(alias="schema")
+    evidence_migration: EvidenceMigrationSeal | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_receipt(self, handler):
+        value = handler(self)
+        if self.evidence_migration is None:
+            value.pop("evidence_migration", None)
+        return value
+
     channel_id: Hex32
     validator_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
     target_platform: Literal["linux/amd64", "linux/arm64"]
@@ -195,6 +234,10 @@ class SuccessorInstallationReceipt(StrictProtocolModel):
 
     @model_validator(mode="after")
     def validate_receipt(self) -> Self:
+        if (self.evidence_migration is not None) != (
+            self.schema_ == "umi-successor-installation-receipt/2"
+        ):
+            raise ValueError("migration requires version2 installation receipt")
         if self.checkpoint_finalized_block < self.legacy_predecessor_accepted_at_finalized_block:
             raise ValueError("installation checkpoint predates the legacy high-water mark")
         if (self.legacy_predecessor_mode == "hold") != (
@@ -696,6 +739,26 @@ def load_successor_worker_inputs() -> AuthenticatedSuccessorWorkerInputs:
     current_page = parse_canonical_successor_supervisor_directive_history(
         control[CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME]
     )
+    if consent.history_compatibility is not None:
+        boundary = consent.history_compatibility.body
+        retained = [
+            item
+            for item in [*initial_page.directives, *current_page.directives]
+            if item.directive.sequence <= boundary.predecessor_sequence
+        ]
+        if (
+            not retained
+            or retained[-1].directive_sha256 != boundary.predecessor_directive_sha256
+            or hashlib.sha256(
+                canonical_json_bytes(
+                    [item.model_dump(mode="json", by_alias=True) for item in retained]
+                )
+            ).hexdigest()
+            != boundary.retained_history_sha256
+        ):
+            raise HostActivationError(
+                "retained signed history differs from migration authorization"
+            )
     v3_state = _legacy_state(config, consent, legacy_signed)
     initial_state = _verify_initial_successor_history(
         initial_page,
@@ -1019,6 +1082,8 @@ def _validate_checkpoint_capability(
     config: ValidatorSupervisorConfig,
     consent: SuccessorSupervisorOperatorConsent,
 ) -> VerifiedRecoveryCheckpoint:
+    if consent.history_compatibility is not None:
+        raise HostActivationError("history migration requires its own stopped v4 seal")
     if type(checkpoint) is not VerifiedRecoveryCheckpoint:
         raise HostActivationError("installation requires a verified recovery checkpoint")
     if (
@@ -1099,7 +1164,7 @@ def _verify_initial_successor_history(
     for index, signed in enumerate(page.directives):
         function = (
             advance_successor_supervisor_directive_state
-            if index == final_index
+            if index == final_index and consent.history_compatibility is None
             else advance_successor_supervisor_directive_history_state
         )
         state = function(
@@ -1131,12 +1196,7 @@ def _verify_staged_current_history(
     state = initial_state
     for signed in page.directives:
         directive = signed.directive
-        logical_block = max(
-            state.accepted_at_finalized_block,
-            consent.authorized_at_finalized_block,
-            directive.issued_at_block,
-            directive.valid_from_block,
-        )
+        logical_block = retained_directive_observation_block(consent, directive, state)
         state = advance_successor_supervisor_directive_history_state(
             signed,
             config=config,
@@ -1157,6 +1217,26 @@ def _advance_active_successor_history(
     legacy_signed_bytes: bytes,
     finalized_block: int,
 ) -> SuccessorSupervisorDirectiveState:
+    if consent.history_compatibility is not None:
+        state = v3_state
+        for index, signed in enumerate([*initial_page.directives, *current_page.directives]):
+            state = advance_successor_supervisor_directive_history_state(
+                signed,
+                config=config,
+                operator_consent=consent,
+                finalized_block=retained_directive_observation_block(
+                    consent, signed.directive, state
+                ),
+                prior_state=state,
+                prior_v3_signed_bytes=legacy_signed_bytes if index == 0 else None,
+            )
+        return advance_successor_supervisor_directive_state(
+            signed,
+            config=config,
+            operator_consent=consent,
+            finalized_block=finalized_block,
+            prior_state=state,
+        )
     state: SupervisorDirectiveState | SuccessorSupervisorDirectiveState = v3_state
     directives = [*initial_page.directives, *current_page.directives]
     final_index = len(directives) - 1
@@ -1240,6 +1320,9 @@ def _verify_receipt_controls(
     )
     if observed != expected:
         raise HostActivationError("mounted controls differ from installation receipt")
+    validate_evidence_migration_receipt(
+        receipt, config=config, consent=consent, worker_limits_bytes=worker_limits_bytes
+    )
 
 
 def _verify_retained_recovery_body(
@@ -1458,6 +1541,8 @@ def _validate_worker_execution_bindings(
         raise HostActivationError("worker execution config expands the selected profile")
     if weights is None:
         return
+    if weights.evidence_storage != limits.weight_evidence_storage:
+        raise HostActivationError("worker evidence storage differs from sealed installation")
     if (
         weights.maximum_attempts > limits.maximum_weight_attempts
         or weights.maximum_evidence_bytes > limits.maximum_weight_evidence_bytes
@@ -1605,43 +1690,15 @@ def _write_root_receipt_once(path: Path, payload: bytes) -> None:
         raise HostActivationError("installation receipt has the wrong fixed filename")
     parent = _open_absolute_directory(target.parent)
     try:
-        info = os.fstat(parent)
-        if (
-            info.st_uid != _root_owner_uid()
-            or not stat.S_ISDIR(info.st_mode)
-            or stat.S_IMODE(info.st_mode) & 0o022
-        ):
-            raise HostActivationError("installation receipt parent is not root controlled")
-        try:
-            descriptor = os.open(
-                target.name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o444,
-                dir_fd=parent,
-            )
-        except FileExistsError as error:
-            existing = _read_root_control_at(
-                parent,
-                target.name,
-                MAX_SUCCESSOR_INSTALLATION_RECEIPT_BYTES,
-            )
-            if existing != payload:
-                raise HostActivationError(
-                    "installation receipt already exists with other bytes"
-                ) from error
-            return
-        try:
-            offset = 0
-            while offset < len(payload):
-                count = os.write(descriptor, payload[offset:])
-                if count <= 0:
-                    raise HostActivationError("installation receipt write made no progress")
-                offset += count
-            os.fchmod(descriptor, 0o444)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.fsync(parent)
+        publish_installation_receipt(
+            parent,
+            target.name,
+            payload,
+            owner=_root_owner_uid(),
+            maximum_bytes=MAX_SUCCESSOR_INSTALLATION_RECEIPT_BYTES,
+        )
+    except (ValueError, OSError) as error:
+        raise HostActivationError(str(error)) from error
     finally:
         os.close(parent)
 
@@ -2041,3 +2098,145 @@ __all__ = [
     "validate_authenticated_successor_installation",
     "validate_authenticated_successor_worker_inputs",
 ]
+
+
+def validate_evidence_migration_receipt(receipt, *, config, consent, worker_limits_bytes):
+    """Validate both root records and the quorum-signed forward mapping.
+
+    No source receipt, checkpoint, retained highwater or old limits are rewritten.
+    The root seal records copy verification; it does not certify chain effects.
+    """
+    migration = receipt.evidence_migration
+    if (migration is None) != (consent.history_compatibility is None):
+        raise HostActivationError("history consent requires its root-sealed migration receipt")
+    if migration is None:
+        return
+    body = verify_history_compatibility(consent.history_compatibility, config=config)
+    validate_consent_transition(consent, consent.historical_consent, body)
+    if (
+        receipt.operator_consent_sha256 != successor_operator_consent_sha256(consent)
+        or receipt.operator_consent_size_bytes != len(canonical_json_bytes(consent))
+        or receipt.worker_limits_size_bytes != len(worker_limits_bytes)
+    ):
+        raise HostActivationError("migration root controls differ from the selected consent/limits")
+    original_bytes = bytes.fromhex(migration.original_receipt_hex)
+    original = parse_canonical_successor_installation_receipt(original_bytes)
+    original_limits_bytes = bytes.fromhex(migration.original_worker_limits_hex)
+    old_limits = _parse_worker_execution_limits(original_limits_bytes)
+    new_limits = _parse_worker_execution_limits(worker_limits_bytes)
+    if original.evidence_migration is not None or old_limits.weight_evidence_storage is not None:
+        raise HostActivationError("only one explicit legacy-to-CAS transition is supported")
+    storage = new_limits.weight_evidence_storage
+    if storage is None:
+        raise HostActivationError("migration target lacks evidence storage profile")
+    identities = (
+        (hashlib.sha256(original_bytes).hexdigest(), body.original_installation_receipt_sha256),
+        (
+            hashlib.sha256(canonical_json_bytes(consent.history_compatibility)).hexdigest(),
+            migration.compatibility_sha256,
+        ),
+        (original.operator_consent_sha256, body.original_consent_sha256),
+        (original_consent_digest(consent.historical_consent), body.original_consent_sha256),
+        (original.host_manifest_sha256, body.original_host_manifest_sha256),
+        (receipt.host_manifest_sha256, body.target_host_manifest_sha256),
+        (original.worker_limits_sha256, body.original_worker_limits_sha256),
+        (hashlib.sha256(original_limits_bytes).hexdigest(), body.original_worker_limits_sha256),
+        (receipt.worker_limits_sha256, body.target_worker_limits_sha256),
+        (hashlib.sha256(worker_limits_bytes).hexdigest(), body.target_worker_limits_sha256),
+        (
+            hashlib.sha256(canonical_json_bytes(storage)).hexdigest(),
+            body.target_storage_config_sha256,
+        ),
+        (original.checkpoint_sha256, body.original_checkpoint_sha256),
+        (migration.retained_history_sha256, body.retained_history_sha256),
+        (
+            hashlib.sha256(bytes.fromhex(migration.predecessor_state_hex)).hexdigest(),
+            body.predecessor_state_sha256,
+        ),
+    )
+    if any(a != b for a, b in identities):
+        raise HostActivationError("migration receipt differs from signed compatibility")
+    # Only these fields may differ in the new root-owned receipt. All original
+    # observer/chain/checkpoint/v3/initial-history fields must be byte-identical.
+    changed = {
+        "schema",
+        "evidence_migration",
+        "operator_consent_sha256",
+        "operator_consent_size_bytes",
+        "signed_host_artifact_sha256",
+        "signed_host_artifact_size_bytes",
+        "host_manifest_sha256",
+        "host_umi_git_revision",
+        "worker_limits_sha256",
+        "worker_limits_size_bytes",
+    }
+    old_values, new_values = original.model_dump(by_alias=True), receipt.model_dump(by_alias=True)
+    if {k: v for k, v in old_values.items() if k not in changed} != {
+        k: v for k, v in new_values.items() if k not in changed
+    }:
+        raise HostActivationError("migration rewrites original installation history")
+    if (
+        new_limits.maximum_weight_attempts != old_limits.maximum_weight_attempts
+        or new_limits.maximum_weight_evidence_bytes != old_limits.maximum_weight_evidence_bytes
+        or not body.migration_valid_from_block
+        <= migration.migration_finalized_block
+        <= body.migration_valid_through_block
+        or migration.migration_finalized_block < body.predecessor_accepted_at_finalized_block
+    ):
+        raise HostActivationError("migration changes legacy owner binding or has invalid block")
+    prior_raw = bytes.fromhex(migration.predecessor_state_hex)
+    prior = SuccessorSupervisorDirectiveState.model_validate_json(prior_raw, strict=True)
+    if (
+        canonical_json_bytes(prior) != prior_raw
+        or prior.accepted_sequence != body.predecessor_sequence
+        or prior.accepted_directive_sha256 != body.predecessor_directive_sha256
+        or prior.accepted_at_finalized_block != body.predecessor_accepted_at_finalized_block
+        or prior.operator_consent_sha256 != body.original_consent_sha256
+        or prior.source_config_sha256 != body.source_config_sha256
+    ):
+        raise HostActivationError("migration predecessor state binding differs")
+    preparation_raw = bytes.fromhex(migration.preparation_receipt_hex)
+    preparation = json.loads(preparation_raw)
+    if (
+        canonical_json_bytes(preparation) != preparation_raw
+        or preparation.get("schema") != "umi-weight-evidence-preparation/1"
+    ):
+        raise HostActivationError("migration preparation receipt is not canonical")
+    expected = {
+        "source_root": migration.source_root,
+        "candidate_root": migration.candidate_root,
+        "source_database_sha256": migration.source_database_sha256,
+        "candidate_database_sha256": migration.candidate_database_sha256,
+        "maximum_database_bytes": storage.maximum_database_bytes,
+        "worker_profile_sha256": hashlib.sha256(storage.profile().encoded()).hexdigest(),
+        "source_selection_changed": False,
+        "activation_authorized": False,
+        "root_sealed": False,
+    }
+    if any(preparation.get(k) != v for k, v in expected.items()):
+        raise HostActivationError("migration preparation differs from selected profile or database")
+
+
+def retained_execution_limits(installation, directive):
+    """Old limits apply only to authenticated history, never new execution."""
+    consent = installation.operator_consent
+    selected = consent_for_retained_directive(
+        consent, directive, config=installation.config, historical=True
+    )
+    if (
+        selected.schema_ == "umi-validator-supervisor-operator-consent/1"
+        and consent.history_compatibility is not None
+    ):
+        migration = installation._receipt.evidence_migration
+        if migration is None:
+            raise HostActivationError("retained history lacks root-sealed original limits")
+        return _parse_worker_execution_limits(bytes.fromhex(migration.original_worker_limits_hex))
+    return installation.worker_execution_limits
+
+
+def selected_weight_state_root(installation):
+    """Physical host store selected by the immutable installation receipt."""
+    migration = installation._receipt.evidence_migration
+    if migration is None:
+        return Path(installation.config.worker_state_root) / "competition" / "weights"
+    return Path(migration.candidate_root)

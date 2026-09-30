@@ -170,6 +170,55 @@ def setup(work, tmp_path, monkeypatch, chain_config):
 
 
 @pytest.mark.asyncio
+async def test_separate_signing_limits_survive_reopen_and_refuse_underprovisioning(setup):
+    from umi.competition_evaluator import EvaluatorJournalLimits
+    from umi.competition_rounds import RoundSigningClient
+
+    worker, original = setup.workers[0], setup.signers[0]
+    worker.config = worker.config.model_copy(
+        update={
+            "maximum_journal_bytes": 12 * 1024**3,
+            "journal_limits": EvaluatorJournalLimits(
+                execution=2 * 1024**3,
+                round_signing=1024**3,
+                work_signing=1024**3,
+                work_admission=1024**3,
+            ),
+        }
+    )
+    assert RoundSigningClient(worker, "https://rounds.example").journal.maximum_bytes == 1024**3
+
+    def reopen():
+        return signing.IndependentWorkSigner(
+            worker,
+            original.cutoffs,
+            minimum_issue_ms=original.minimum_issue_ms,
+            transport_provider=original.transport_provider,
+            legacy=original.legacy,
+        )
+
+    signer = reopen()
+    vote = await signer.endorse(setup.authorization)
+    assert signer.journal.maximum_bytes == signer.admission.journal.maximum_bytes == 1024**3
+    assert await reopen().endorse(setup.authorization) == vote
+    worker.config = worker.config.model_copy(
+        update={
+            "journal_limits": worker.config.journal_limits.model_copy(update={"work_signing": 1024})
+        }
+    )
+    with pytest.raises(ValueError, match="capacity"):
+        reopen().journal.put("diagnostic", "over-capacity", {"value": "bounded"})
+    worker.config = worker.config.model_copy(
+        update={
+            "journal_limits": worker.config.journal_limits.model_copy(
+                update={"work_signing": 1024**3}
+            )
+        }
+    )
+    assert await reopen().endorse(setup.authorization) == vote
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", [None, "snapshot", "unowned", "elapsed", "reservation"])
 async def test_work_signer_records_only_its_independently_checked_cutoff(setup, tmp_path, fault):
     s = setup

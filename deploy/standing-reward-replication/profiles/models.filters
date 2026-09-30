@@ -1,0 +1,5 @@
+# The native preserved archive publishes each digest directory atomically.
+# Include declared hidden model files too; .pending-* roots cannot match.
++ /{{[0-9a-f]{64}}}/manifest.json
++ /{{[0-9a-f]{64}}}/model/**
+- **

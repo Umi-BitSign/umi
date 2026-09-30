@@ -31,7 +31,7 @@ def test_whitepaper_status_matches_typeset_cover() -> None:
         "docs/operators/private-holdout.md",
     ],
 )
-def test_approved_launch_uses_burn_policy_with_single_reference_suite(path):
+def test_current_launch_uses_single_reference_suite(path):
     text = (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
     assert "umi-open-competition-policy/3" in text
     assert "umi-competition-suite/2" in text

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 
 import pytest
 
@@ -70,6 +71,32 @@ def test_window_schedule_reproduces_the_binary_protocol_formula() -> None:
     assert schedule.response_deadline_blocks == (61 + 62 + 11) // 12
     assert schedule.reveal_round == reveal
     assert schedule.window_id == expected_id
+
+
+def test_future_response_window_leaves_time_for_last_request_and_moves_reveal():
+    original = replace(
+        _clock(),
+        window_stride_blocks=7200,
+        issue_allowance_seconds=64800,
+        response_window_seconds=300,
+    )
+    future = replace(original, response_window_seconds=900)
+    arguments = dict(
+        netuid=78,
+        announcement_block_hash="0x" + "11" * 32,
+        announcement_timestamp_ms=QUICKNET_GENESIS_MS + 10_000_000,
+        scoring_policy_hash="22" * 32,
+    )
+    before = original.derive(0, **arguments)
+    after = future.derive(0, **arguments)
+    assert after.selection_round == before.selection_round
+    assert after.issue_close_round == before.issue_close_round
+    assert (after.response_close_round - after.issue_close_round) * 3 == 900
+    assert (after.response_close_round - before.response_close_round) * 3 == 600
+    assert (after.reveal_round - before.reveal_round) * 3 == 600
+    assert after.response_deadline_blocks == before.response_deadline_blocks + 50 == 5475
+    assert after.window_id != before.window_id
+    assert (after.response_close_round - after.issue_close_round) * 3 > 615 > 600
 
 
 @pytest.mark.parametrize(

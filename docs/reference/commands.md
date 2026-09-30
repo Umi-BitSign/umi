@@ -204,14 +204,17 @@ sequence until its receipt is known.
 
 <a id="live-first-round-model-contribution"></a>
 
-### Model-manifest preparation; artifact intake is not open
+### Model-manifest preparation
 
-Model-artifact intake and evaluation are not operational for the first round.
-The exact canonical runtime and its immutable, reconstructible environment have
-not been published. Do not sign or submit a model-track object to the live
-endpoint-intake origin. The 30% model share remains burned, does not accrue, and
-cannot be awarded retroactively. A future opening will publish its own runtime,
-cutoffs and submission route.
+C5+ model enrollment requires publication of its selected runtime, immutable
+policy, contribution terms and submission route. Until that opening, prepare the
+bundle without signing against the existing endpoint-intake policy. C5 uses 50%
+service / 50% model rewards; C6 is model-only and assigns 100% of its competition
+allocation within the public-model track. A complete accepted model must match
+or beat the frozen baseline. Exact copies count once, and the remaining eligible
+models receive one credit per occupied fixed five-percentage-point quality band.
+C4 retains its signed 70/30 allocation, including burning its unallocated model
+share without a later retroactive award.
 
 The manifest below is an advance-preparation aid only. Read the
 [model preparation and rights checklist](../contributors/models.md). Do not
@@ -428,6 +431,14 @@ single-link regular files, canonical bytes, size/hash bounds and semantic
 bindings. It refuses extra files, path traversal, links and mismatched expected
 identities. The retained settlement must agree with its signed certificate and
 pass full replay. Agreement does not establish independent custody or execution.
+
+When preparing a package containing carried submissions, supply the operational
+predecessors with the global `--predecessor-policy` option, newest first. The
+package retains their exact policies in roster version 2. A fresh replay worker
+validates the contiguous chain and unchanged submission terms from those bytes;
+it does not need separately installed predecessor files. Replay uses only the
+package's declared lineage and leaves the service's admission configuration
+unchanged. Rosters without predecessors retain their version-1 bytes.
 
 Preparation claims a digest-named directory exclusively. An interrupted write
 leaves a mode-0700 partial directory that the loader refuses. The operator must
@@ -909,6 +920,11 @@ HTTP routes:
 | `GET /v1/competition/archives/{policy_digest}/submissions/{submission_digest}` | Canonical archived submission and receipt bytes |
 | `GET /v1/competition/rounds/{digest}?offset=0&limit=20` | Bounded result identities, conflict status and recorded group equivocations |
 | `GET /v1/competition/settlements/{round_digest}` | Immutable settlement and separate current dispute status, or 404 |
+
+See the [results API reference](competition-results-api.md) for allocation
+semantics and the new `GET /v1/competition/rounds/index` discovery contract.
+The index is pending deployment; existing detail URLs still require a known
+round digest. A computed settlement is not certification or a paid reward.
 
 List and status responses contain bounded summaries; they do not embed every
 model manifest or the complete evaluation history in each page.

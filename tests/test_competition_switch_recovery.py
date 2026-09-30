@@ -472,6 +472,7 @@ def test_cli_selects_explicit_recovery_operation_without_printing_private_errors
     output = capsys.readouterr().out
     assert "private-content" not in output
     assert json.loads(output)["reason_code"] == "host_switch_recovery_failed"
+    assert json.loads(output)["failure_details"][0]["error_type"] == "builtins.OSError"
     assert json.loads(output)["service_state"] == (
         "unconfirmed" if command == "resume-start" else "unchanged"
     )

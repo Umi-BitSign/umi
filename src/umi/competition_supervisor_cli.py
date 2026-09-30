@@ -10,13 +10,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
+import logging
 import os
 import platform
 import signal
 import stat
 import sys
 from collections.abc import Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 
@@ -36,10 +38,13 @@ from .competition_host_artifacts import (
     parse_signed_host_artifact,
     verify_host_artifact_authority,
 )
+from .competition_host_maintenance import verify_host_maintenance
 from .competition_materialization import (
     SuccessorCurrentMaterializationLimits,
     repair_successor_source_permissions,
 )
+from .competition_package_reuse import package_verification_session
+from .competition_progress import configure_progress_logging, log_phase, progress_phase
 from .competition_supervisor_runtime import (
     SuccessorStartupLease,
     SuccessorSupervisorRuntime,
@@ -47,6 +52,7 @@ from .competition_supervisor_runtime import (
 )
 from .competition_upgrade import _fingerprint, _open_without_links
 from .protocol import canonical_json_bytes
+from .rpc_transport import transport_config_path
 from .validator_supervisor import (
     MAX_SUPERVISOR_DOCUMENT_BYTES,
     parse_canonical_validator_supervisor_config,
@@ -107,6 +113,17 @@ def _running_executable_identity(expected: Path) -> tuple[int, ...]:
 
 def _verify_running_host_values(config, receipt, host_manifest_sha256):
     root = _HOST_PARENT / receipt.host_umi_git_revision
+    maintenance = Path(__file__).parent.parent.parent != root
+    if maintenance:
+        signed = verify_host_maintenance(
+            _root_control(
+                Path("/etc/umi/validator-supervisor-maintenance.json"),
+                MAX_HOST_MANIFEST_BYTES,
+            ),
+            config=config,
+            receipt=receipt,
+        )
+        root = _HOST_PARENT / signed.manifest.umi_git_revision
     source = root / "src/umi/competition_supervisor_cli.py"
     interpreter = root / ".venv/bin/python"
     if (
@@ -126,17 +143,19 @@ def _verify_running_host_values(config, receipt, host_manifest_sha256):
     )
     if hashlib.sha256(payload).hexdigest() != receipt.signed_host_artifact_sha256:
         raise ValueError("running host manifest differs from root receipt")
-    signed = parse_signed_host_artifact(payload)
+    original_signed = parse_signed_host_artifact(payload)
     verify_host_artifact_authority(
-        signed,
+        original_signed,
         config=config,
         expected_manifest_sha256=host_manifest_sha256,
     )
     if (
-        signed.manifest.umi_git_revision != receipt.host_umi_git_revision
-        or signed.manifest.target_platform != expected_platform
+        original_signed.manifest.umi_git_revision != receipt.host_umi_git_revision
+        or original_signed.manifest.target_platform != expected_platform
     ):
         raise ValueError("running host manifest identity differs")
+    if not maintenance:
+        signed = original_signed
     source_identity = _stable_file_identity(source)
     interpreter_identity = _running_executable_identity(interpreter)
     ancestors = {path: _ancestor_identity(path) for path in _ancestor_paths(root)}
@@ -148,6 +167,19 @@ def _verify_running_host_values(config, receipt, host_manifest_sha256):
         raise ValueError("running source or interpreter is absent from the signed host tree")
     if any(_ancestor_identity(path) != identity for path, identity in ancestors.items()):
         raise ValueError("running host parent changed while verifying")
+    if maintenance:
+        print(
+            json.dumps(
+                {
+                    "schema": "umi-supervisor-host-maintenance-status/1",
+                    "status": "verified",
+                    "host_manifest_sha256": signed.manifest_sha256,
+                    "host_revision": signed.manifest.umi_git_revision,
+                    "original_host_manifest_sha256": receipt.host_manifest_sha256,
+                }
+            ),
+            flush=True,
+        )
 
 
 def _verify_running_host(installation):
@@ -241,6 +273,52 @@ async def _stop_startup_worker(config, lease: SuccessorStartupLease) -> None:
         raise
 
 
+def _installed_signed_host(installation):
+    host_payload = _root_control(
+        ACTIVATION_MOUNT_ROOT / ANCHOR_DIRECTORY_NAME / SIGNED_HOST_ARTIFACT_FILENAME,
+        MAX_HOST_MANIFEST_BYTES,
+    )
+    if (
+        hashlib.sha256(host_payload).hexdigest()
+        != installation._receipt.signed_host_artifact_sha256
+    ):
+        raise ValueError("host manifest differs from installed receipt")
+    return parse_signed_host_artifact(host_payload)
+
+
+def _delivery_client(installation):
+    from .competition_delivery_config import successor_delivery_client
+
+    return successor_delivery_client(
+        installation.config,
+        _installed_signed_host(installation),
+        expected_manifest_sha256=installation.host_manifest_sha256,
+    )
+
+
+def _worker_source_overlay(installation):
+    from .competition_worker_maintenance import (
+        approved_initial_worker_source_overlay,
+        approved_worker_source_overlay,
+    )
+
+    maintenance_path = Path("/etc/umi/validator-supervisor-maintenance.json")
+    if maintenance_path.exists():
+        overlay = approved_worker_source_overlay(
+            _root_control(maintenance_path, MAX_HOST_MANIFEST_BYTES),
+            installation=installation,
+            running_root=Path(__file__).parent.parent.parent,
+        )
+        if overlay is not None:
+            return overlay
+    if installation.operator_consent.worker_source_overlay is not None:
+        return approved_initial_worker_source_overlay(
+            installation=installation,
+            signed_host=_installed_signed_host(installation),
+        )
+    return None
+
+
 def _build_runtime(installation, config_path, *, startup_lease):
     # These are fixed host-code imports, not operator-selectable plugins.
     from .competition_delivery import (
@@ -258,6 +336,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
 
     config = installation.config
     observer = OwnedSuccessorHostObserver(installation=installation)
+    client = _delivery_client(installation)
 
     def adapter():
         # Operational ceilings are fixed in the signed host source; directives
@@ -271,6 +350,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
                 maximum_cache_bytes=16 * 1024**3,
                 total_fetch_timeout_seconds=1800,
             ),
+            client=client,
         )
         materializer = AuthenticatedSuccessorArtifactMaterializer(
             installation=installation,
@@ -280,6 +360,9 @@ def _build_runtime(installation, config_path, *, startup_lease):
             limits=_materialization_limits(),
         )
         container = _new_container(config)
+        rpc_config = transport_config_path()
+        container.rpc_transport_directory = None if rpc_config is None else rpc_config.parent
+        container.source_overlay = _worker_source_overlay(installation)
         return ProductionSuccessorRuntimeAdapter(
             installation=installation,
             materializer=materializer,
@@ -295,7 +378,7 @@ def _build_runtime(installation, config_path, *, startup_lease):
     runtime = SuccessorSupervisorRuntime(
         installation=installation,
         worker_adapter=_DeferredAdapter(adapter),
-        directive_fetcher=HTTPSSuccessorDirectiveFetcher(config),
+        directive_fetcher=HTTPSSuccessorDirectiveFetcher(config, client=client),
         observation_reader=observer,
         limits=SuccessorRuntimeLimits(
             maximum_history_records=65536, maximum_history_bytes=64 * 1024**2
@@ -313,20 +396,54 @@ def _emit(result):
     )
 
 
-async def run_supervisor(config_path: Path, *, stop_event=None):
+@contextmanager
+def _standing_logs():
+    # These modules emit bounded status/identity fields and exception classes.
+    # Do not enable HTTP/SDK debug logging, which can contain credentials.
+    handler = logging.StreamHandler()
+    selected = []
+    for name in (
+        "umi.competition_reward_service",
+        "umi.competition_reward_executor",
+        "umi.competition_reward_coverage_service",
+    ):
+        logger = logging.getLogger(name)
+        selected.append((logger, logger.level, logger.propagate))
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        for logger, level, propagate in selected:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            logger.propagate = propagate
+        handler.close()
+
+
+@log_phase("host_service")
+async def run_supervisor(
+    config_path: Path, *, stop_event=None, standing_config: Path | None = None
+):
     if sys.platform != "linux" or os.geteuid() == 0:
         raise ValueError("successor supervisor requires the installed non-root Linux service")
     config_bytes = _root_control(config_path, MAX_SUPERVISOR_DOCUMENT_BYTES)
     config = parse_canonical_validator_supervisor_config(config_bytes)
-    anchor = load_materialized_successor_anchor_for_repair(config_path)
+    with progress_phase("host_anchor"):
+        anchor = load_materialized_successor_anchor_for_repair(config_path)
     if config_bytes != canonical_json_bytes(anchor.config):
         raise ValueError("supervisor config differs from the root-sealed anchor")
     _verify_running_host_anchor(anchor)
+    from .competition_reward_boot import select_standing_boot
+
+    standing = select_standing_boot(config_path, anchor, explicit_path=standing_config)
     with hold_successor_startup_lease(anchor) as startup_lease:
         await _stop_startup_worker(config, startup_lease)
         repair_successor_source_permissions(anchor=anchor, limits=_materialization_limits())
         anchor.recheck()
-        installation = load_successor_worker_inputs()
+        with progress_phase("worker_inputs"):
+            installation = load_successor_worker_inputs()
         if config_bytes != canonical_json_bytes(installation.config):
             raise ValueError("supervisor config differs from sealed installation")
         _verify_running_host(installation)
@@ -339,6 +456,16 @@ async def run_supervisor(config_path: Path, *, stop_event=None):
                     loop.add_signal_handler(signum, stop.set)
                     handlers.append(signum)
             async with runtime:
+                if standing is not None:
+                    from .competition_reward_boot import run_installed_standing_rewards
+
+                    runtime._require_lease()
+                    if type(runtime.adapter) is not _DeferredAdapter:
+                        raise TypeError("standing startup requires the native adapter factory")
+                    runtime.adapter = runtime.adapter._get()
+                    with _standing_logs():
+                        await run_installed_standing_rewards(runtime, standing, stop)
+                    return
                 while not stop.is_set():
                     result = await runtime.reconcile()
                     _emit(result)
@@ -357,9 +484,18 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--config", type=Path, required=True, help="existing root-owned supervisor config"
     )
+    parser.add_argument(
+        "--standing-config",
+        type=Path,
+        help="root-owned standing reward configuration (default: standing-reward-boot.json "
+        "beside the supervisor config, when present)",
+    )
     args = parser.parse_args(argv)
+    configure_progress_logging()
     try:
-        asyncio.run(run_supervisor(args.config))
+        options = {} if args.standing_config is None else {"standing_config": args.standing_config}
+        with package_verification_session():
+            asyncio.run(run_supervisor(args.config, **options))
     except KeyboardInterrupt:
         return 130
     except Exception:

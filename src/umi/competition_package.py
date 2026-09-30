@@ -17,12 +17,16 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Literal, TypeVar
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_outcomes import OutcomeEvidence, parse_outcome
+from .competition_package_reuse import current_package_reuse
+from .competition_policy_lineage import registered_lineage, replay_lineage
 from .competition_publication import (
+    CutoffPublication,
     PublicationReplayLimits,
+    SettlementPublication,
     SignedCutoffPublication,
     SignedSettlementPublication,
     authenticated_roster_digest,
@@ -160,11 +164,23 @@ class CompetitionPackageManifest(StrictProtocolModel):
 
 
 class CompetitionPackageRoster(StrictProtocolModel):
-    schema_: Literal["umi-competition-replay-roster/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-replay-roster/1", "umi-competition-replay-roster/2"] = Field(
+        alias="schema"
+    )
     submissions: Annotated[tuple[SignedSubmission, ...], Field(min_length=1, max_length=512)]
+    predecessor_policies: Annotated[tuple[CompetitionPolicy, ...], Field(max_length=8)] = ()
+
+    @model_serializer(mode="wrap")
+    def versioned_fields(self, handler):
+        result = handler(self)
+        if self.schema_ == "umi-competition-replay-roster/1":
+            result.pop("predecessor_policies", None)
+        return result
 
     @model_validator(mode="after")
     def canonical_order(self) -> Self:
+        if bool(self.predecessor_policies) != (self.schema_ == "umi-competition-replay-roster/2"):
+            raise ValueError("declared predecessor policies require roster version 2")
         ids = tuple(digest(item.submission) for item in self.submissions)
         if ids != tuple(sorted(ids)) or len(set(ids)) != len(ids):
             raise ValueError("package roster must be sorted and unique")
@@ -261,24 +277,20 @@ def prepare_competition_package(
     replay_limits = _canonical(PublicationReplayLimits, replay_limits)
     release_identity = _canonical(CompetitionReleaseIdentity, release_identity)
     limits = _canonical(CompetitionPackageLimits, limits)
-    normalized_roster = _roster(roster)
+    normalized_roster = _roster(roster, policy)
     normalized_evidence = _evidence(evidence)
 
-    cutoff = verify_cutoff_publication(
+    cutoff, settlement = _verify_publications(
+        policy,
+        normalized_roster,
         cutoff_certificate,
-        policy=policy,
-        submissions=normalized_roster.submissions,
-        limits=replay_limits,
-    )
-    settlement = verify_settlement_publication(
         settlement_certificate,
-        cutoff_certificate=cutoff_certificate,
-        policy=policy,
-        submissions=normalized_roster.submissions,
-        evidence=_evidence_pairs(normalized_evidence),
-        retained_settlement=retained_settlement,
-        limits=replay_limits,
+        normalized_evidence,
+        retained_settlement,
+        replay_limits,
     )
+
+    _verify_repair_release(normalized_evidence, release_identity)
 
     objects: dict[str, StrictProtocolModel] = {
         "cutoff-certificate.json": cutoff_certificate,
@@ -420,6 +432,84 @@ def load_competition_package(
 ) -> VerifiedCompetitionPackage:
     """Strictly load and replay a sealed package under caller-supplied bounds."""
 
+    reuse = current_package_reuse()
+    arguments = dict(
+        expected_package_sha256=expected_package_sha256,
+        expected_policy_sha256=expected_policy_sha256,
+        observed_release=observed_release,
+        limits=limits,
+    )
+    if reuse is None:
+        return _load_competition_package(package_path, **arguments)
+    key, input_bytes = _package_reuse_key(package_path, **arguments)
+    cached = reuse.lookup(key)
+    if cached is not None:
+        return cached
+    verified = _load_competition_package(package_path, **arguments)
+    # Verification can be slow. Retain it only if the complete input bytes
+    # still match, independently of pathname or file metadata.
+    if _package_reuse_key(package_path, **arguments) != (key, input_bytes):
+        raise ValueError("package changed during verification")
+    reuse.remember(key, verified, input_bytes)
+    return verified
+
+
+def _package_reuse_key(
+    package_path, *, expected_package_sha256, expected_policy_sha256, observed_release, limits
+):
+    """Hash every byte under the same ownership, type, size and seal checks."""
+    _require_hex32(expected_package_sha256, "expected package digest")
+    _require_hex32(expected_policy_sha256, "expected policy digest")
+    release = _canonical(CompetitionReleaseIdentity, observed_release)
+    limits = _canonical(CompetitionPackageLimits, limits)
+    path = _canonical_absolute_path(package_path, "package")
+    with _opened_sealed_directory(path) as root_fd:
+        before = _directory_identity(root_fd)
+        _check_exact_tree(root_fd)
+        body = _read_sealed_file(
+            root_fd, "manifest.json", maximum_bytes=limits.maximum_manifest_bytes
+        )
+        manifest = _parse_canonical(CompetitionPackageManifest, body, "package manifest")
+        if competition_package_digest(manifest) != expected_package_sha256:
+            raise ValueError("package digest differs from the caller's expected digest")
+        if manifest.policy_sha256 != expected_policy_sha256:
+            raise ValueError("package policy differs from the caller's expected policy")
+        declared = {item.name: item for item in manifest.files}
+        _preflight_declared_sizes(root_fd, declared, limits, len(body))
+        fingerprints = [("manifest.json", len(body), hashlib.sha256(body).hexdigest())]
+        total = len(body)
+        for name in _PAYLOAD_NAMES:
+            item = declared[name]
+            body = _read_sealed_file(
+                root_fd,
+                name,
+                maximum_bytes=_limit_for(name, limits),
+                expected_size=item.size_bytes,
+                expected_sha256=item.sha256,
+            )
+            fingerprints.append((name, len(body), item.sha256))
+            total += len(body)
+        _check_exact_tree(root_fd)
+        if before != _directory_identity(root_fd):
+            raise ValueError("package directory changed while it was read")
+    return (
+        expected_package_sha256,
+        expected_policy_sha256,
+        canonical_json_bytes(release),
+        canonical_json_bytes(limits),
+        tuple(fingerprints),
+    ), total
+
+
+def _load_competition_package(
+    package_path: Path,
+    *,
+    expected_package_sha256: str,
+    expected_policy_sha256: str,
+    observed_release: CompetitionReleaseIdentity,
+    limits: CompetitionPackageLimits,
+) -> VerifiedCompetitionPackage:
+
     _require_hex32(expected_package_sha256, "expected package digest")
     _require_hex32(expected_policy_sha256, "expected policy digest")
     observed_release = _canonical(CompetitionReleaseIdentity, observed_release)
@@ -511,21 +601,16 @@ def load_competition_package(
     if release_identity != observed_release:
         raise ValueError("package release identity differs from the observed release")
 
-    cutoff = verify_cutoff_publication(
+    cutoff, settlement = _verify_publications(
+        policy,
+        roster,
         cutoff_certificate,
-        policy=policy,
-        submissions=roster.submissions,
-        limits=replay_limits,
-    )
-    settlement = verify_settlement_publication(
         settlement_certificate,
-        cutoff_certificate=cutoff_certificate,
-        policy=policy,
-        submissions=roster.submissions,
-        evidence=_evidence_pairs(evidence),
-        retained_settlement=retained_settlement,
-        limits=replay_limits,
+        evidence,
+        retained_settlement,
+        replay_limits,
     )
+    _verify_repair_release(evidence, release_identity)
     expected = {
         "policy_sha256": digest(policy),
         "round_sha256": cutoff.round_sha256,
@@ -570,7 +655,56 @@ def load_competition_package(
     )
 
 
-def _roster(submissions: Sequence[SignedSubmission]) -> CompetitionPackageRoster:
+def _verify_repair_release(evidence, release_identity):
+    from .competition_dispatch_repair import EndpointUnavailableEvidence
+    from .competition_void import VoidEvaluationEvidence
+
+    target = competition_release_identity_digest(release_identity)
+    for entry in evidence.entries:
+        if isinstance(entry.evidence, VoidEvaluationEvidence):
+            for signed in entry.evidence.certificate.void.observations:
+                obs = signed.announcement.evidence
+                if isinstance(obs, EndpointUnavailableEvidence) and (
+                    obs.repair.amendment.successor_release_identity_sha256 != target
+                ):
+                    raise ValueError("repair package requires its authorized successor release")
+
+
+def _verify_publications(
+    policy: CompetitionPolicy,
+    roster: CompetitionPackageRoster,
+    cutoff_certificate: SignedCutoffPublication,
+    settlement_certificate: SignedSettlementPublication,
+    evidence: CompetitionPackageEvidence,
+    retained_settlement: CompetitionSettlement,
+    replay_limits: PublicationReplayLimits,
+) -> tuple[CutoffPublication, SettlementPublication]:
+    with replay_lineage(policy, roster.predecessor_policies) as lineage:
+        if len(lineage.admitted_policy_sha256s) != len(roster.predecessor_policies) + 1:
+            raise ValueError("package predecessor changes submission terms")
+        cutoff = verify_cutoff_publication(
+            cutoff_certificate,
+            policy=policy,
+            submissions=roster.submissions,
+            limits=replay_limits,
+        )
+        settlement = verify_settlement_publication(
+            settlement_certificate,
+            cutoff_certificate=cutoff_certificate,
+            policy=policy,
+            submissions=roster.submissions,
+            evidence=_evidence_pairs(evidence),
+            retained_settlement=retained_settlement,
+            limits=replay_limits,
+        )
+        return cutoff, settlement
+
+
+def _roster(
+    submissions: Sequence[SignedSubmission], policy: CompetitionPolicy
+) -> CompetitionPackageRoster:
+    lineage = registered_lineage(policy)
+    predecessors = tuple(lineage.policy(key) for key in lineage.admitted_policy_sha256s[1:])
     normalized = tuple(
         sorted(
             (_canonical(SignedSubmission, item) for item in submissions),
@@ -578,7 +712,10 @@ def _roster(submissions: Sequence[SignedSubmission]) -> CompetitionPackageRoster
         )
     )
     return CompetitionPackageRoster(
-        schema="umi-competition-replay-roster/1",
+        schema="umi-competition-replay-roster/2"
+        if predecessors
+        else "umi-competition-replay-roster/1",
+        predecessor_policies=predecessors,
         submissions=normalized,
     )
 

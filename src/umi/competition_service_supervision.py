@@ -5,13 +5,19 @@ from __future__ import annotations
 import asyncio
 
 
-async def run_supervised_server(server, providers, *, poll_seconds=1.0):
+async def run_supervised_server(server, providers, *, liveness_tasks=lambda: (), poll_seconds=1.0):
     serving = asyncio.create_task(server.serve())
     try:
         while not serving.done():
             if server.started and not server.should_exit:
                 for provider in providers:
                     provider.ensure_observer_running()
+                for task in liveness_tasks():
+                    if task.done():
+                        if task.cancelled():
+                            raise RuntimeError("owned_service_task_stopped")
+                        task.result()
+                        raise RuntimeError("owned_service_task_stopped")
             await asyncio.wait((serving,), timeout=poll_seconds)
         await serving
     finally:
@@ -24,10 +30,16 @@ async def run_supervised_server(server, providers, *, poll_seconds=1.0):
             await asyncio.gather(serving, return_exceptions=True)
 
 
-def serve_with_finality_supervision(app, **options):
+def serve_with_finality_supervision(app, *, liveness_tasks=lambda: (), **options):
     import uvicorn
 
     # Request draining is bounded; lifespan shutdown still closes the providers
     # and retains their journals. The external service manager owns restart.
     config = uvicorn.Config(app, timeout_graceful_shutdown=15, **options)
-    asyncio.run(run_supervised_server(uvicorn.Server(config), app.state.finality_providers))
+    asyncio.run(
+        run_supervised_server(
+            uvicorn.Server(config),
+            app.state.finality_providers,
+            liveness_tasks=liveness_tasks,
+        )
+    )

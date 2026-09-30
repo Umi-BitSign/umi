@@ -78,6 +78,32 @@ async def test_failure_of_second_observer_stops_service():
         await asyncio.gather(live, return_exceptions=True)
 
 
+@pytest.mark.parametrize("termination", ["exception", "return", "cancel"])
+async def test_terminal_owned_service_task_stops_http_service(termination):
+    async def worker():
+        if termination == "exception":
+            raise ValueError("owned service failed")
+        if termination == "cancel":
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(worker())
+    if termination == "cancel":
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    server = Server()
+    expected = (
+        "owned service failed" if termination == "exception" else "owned_service_task_stopped"
+    )
+    with pytest.raises((ValueError, RuntimeError), match=expected):
+        await run_supervised_server(
+            server,
+            (),
+            liveness_tasks=lambda: (task,),
+            poll_seconds=0.001,
+        )
+    assert server.closed and server.should_exit
+
+
 def test_observer_must_have_started_and_not_be_closed():
     with pytest.raises(RuntimeError, match="observer_stopped"):
         provider(None).ensure_observer_running()

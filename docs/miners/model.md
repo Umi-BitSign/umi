@@ -15,14 +15,65 @@ checks endpoint health without replaying pilot evidence; it does not run fresh
 translation challenges. The integration below is for a miner that serves actual
 translation requests under the corresponding release and policy.
 
+### Model files for recoverable cohorts
+
+For an open cohort that advertises model uploads, use the model participation
+request produced by `sign-cohort-consent` and the exact directory declared by
+its bundle manifest:
+
+```sh
+umi-competition --policy competition-policy.json submit-cohort-model \
+  --request model-participation.json --source /absolute/path/to/model \
+  --origin https://REVIEWED_INTAKE_HOST \
+  --wallet-name miner --hotkey-name hotkey --wallet-path /absolute/path/to/wallets
+```
+
+The command checks local hashes, uploads bounded signed chunks, waits for the
+server to preserve the complete bundle, then submits the original consent.
+Progress goes to stderr; stdout contains the pending-attestation receipt.
+Interrupted connections, throttling and temporary server failures retry
+automatically. After stopping the command or restarting the machine, rerun it
+with the same request, source files and hotkey to resume retained offsets.
+Keep the source unchanged while uploading. Permanent rejection or a changed
+source stops the command; it does not silently replace your submission.
+
+Upload completion is not admission certification, artifact acceptance or reward
+activation. Use `query-cohort-admission` with the same request to check admission.
+
+When the public cohort index advertises `model_upload_url`, deliver a model
+bundle before submitting model-track participation. POST the same signed
+`CohortParticipationRequest` to that URL to reserve delivery. A reservation
+alone does not enroll the miner, certify rights or award rewards.
+
+The response identifies `upload_sha256`, the model manifest digest,
+`file_offsets` in manifest order, and `complete_files`. Send raw file chunks to
+`PUT /v1/competition/model-uploads/{upload_sha256}/files/{index}?offset=N`.
+Each request is at most 8 MiB, uses `application/octet-stream` with an exact
+`Content-Length`, and includes `X-UMI-Chunk-SHA256` and `X-UMI-Signature`.
+The latter is the canonical `Signature` JSON for a
+`umi-cohort-model-upload-chunk/1` body containing `upload_sha256`, `file_index`,
+`offset`, `size_bytes` and `sha256`, signed by the submitting hotkey.
+
+GET `/v1/competition/model-uploads/{upload_sha256}` to resume from retained
+byte offsets after an interruption. Identical chunks and matching overlaps are
+idempotent. The service worker checks complete-file hashes and preserves the
+native bundle outside the HTTP request. A full byte count does not establish
+verification; wait for `payload_preserved: true` before POSTing the original
+participation request to its `participation_url`. Rights, reconstruction and
+independent artifact acceptance remain separate checks.
+
+Delivery reservations have no elapsed-time expiry. New enrollment still requires
+open certified intake; finishing an upload cannot reopen a closed cohort or
+change its original consent. The ordinary endpoint track does not upload model
+files through this route.
+
 <a id="miner-model-integration--successor-assignment-discovery-rehearsal"></a>
 
 ### Successor assignment discovery rehearsal
 
-Endpoint intake is live. The [current connection guide](connection.md) provides the
-reviewed policy-8 connection inputs and restart instructions. Coordinator service
-cutover and reward-path verification remain in progress; check live readiness
-through that guide. The placeholders below are generic rehearsal
+The [current connection guide](connection.md) provides the reviewed policy inputs
+and restart instructions. Check [public status](https://api.umi.vision/v1/competition/status)
+for readiness and intake availability. The placeholders below are generic rehearsal
 examples. A coordinator, feed or evaluator infrastructure delay cannot be scored
 as miner failure.
 
@@ -46,7 +97,9 @@ current policy. If that policy carries earlier submissions forward, also pass
 The miner checks every link and rejects changes to contribution terms or reward
 allocations. This preserves the original signed submission; it does not authorize
 an assignment without the current policy's signatures and finality checks.
-Keep the existing nonce, assignment and response databases across the restart.
+Keep the existing nonce database. Preserve prior assignment and response
+databases; a transport-policy change may require a new state namespace, as the
+current connection guide specifies.
 Up to eight predecessor files are supported. With none supplied, only submissions
 under the configured current policy are accepted.
 
@@ -75,10 +128,109 @@ sealing its response, using the remaining signed video-fetch budget. Each attemp
 is recorded in the existing assignment database and reserves its bytes before
 network access. The response deadline still applies. A rejected origin, malformed
 response, digest mismatch or HTTP error does not trigger this transport retry.
-Once a response is sealed, retransmitting the assignment returns those same
-signed bytes; it does not repeat fetching or inference. Keep the assignment
-database across upgrades and restarts so these counters and cached responses
-remain intact.
+During its valid request window, retransmitting a sealed assignment returns the
+same signed bytes without repeating fetching or inference. Keep the assignment
+database across upgrades and restarts. The ordinary transport cache is pruned
+after the window closes.
+
+For durable response retrieval, start the candidate miner with
+`--max-recovery-assignments N`, where `N` reserves space in the admission count
+for that many original assignments. Reservation and request admission commit
+together, as do the sealed response and its recovery record. Each retained
+response remains bounded by the transport policy's response-byte ceiling. Keep
+disk headroom for those bytes, SQLite overhead and the normal video cache.
+Capacity exhaustion rejects new assignments before video fetching or inference;
+it never evicts accepted recovery records. Increase `N` and restart the same
+database to admit more work. The default `0` disables new reservations, while
+existing recovery records remain readable and pending reservations can finish.
+Enabling retention cannot restore responses already pruned by an older process.
+
+The original validator retrieves a retained response with
+`POST /v1/translate/response`: send the original canonical `TranslationRequest`
+body with a fresh `btauth/1` signature over this recovery path and the receiving
+miner hotkey. The TLS proxy must forward this route unchanged. HTTP 200 carries
+the original encrypted body and `X-UMI-Signature`, verified again before sending.
+This includes signed error responses. Retrieval uses bounded authenticated
+ingress and durable nonce checks; it does not spend another inference attempt
+or require the old request window or assignment feed to remain open.
+
+HTTP 202 means the reservation has no sealed response; HTTP 404 means no recovery
+record is available. Neither establishes whether remote work ran or authorizes
+replacement work. HTTP 409 rejects a changed request for the same assignment.
+Clients must preserve recovered bytes and independently verify their signatures;
+recovery does not establish timely original receipt or settlement eligibility.
+The current recovery route requires the original validator to remain in the
+runtime's allowlist and the original policy-bound assignment database to remain
+served. Cross-policy retrieval, replacement-key authorization, durable attempt
+selection and certified archive retirement still require C5 integration. Keep
+the database and its recovery records until that retirement is qualified.
+
+For a deployment using recoverable cohorts, select
+`--competition-cohort-config /absolute/path/cohort-miner.json` with
+`--competition-policy`, `--serving-origin`, `--model-revision` and a positive
+`--max-recovery-assignments`. This replaces `--competition-feed` or
+`--competition-authorization` in the normal miner command. The same translator,
+transport policy, owned finality observer and durable state arguments still
+apply. Enabling this mode does not enroll the miner or activate rewards.
+
+The startup file uses `umi-cohort-miner-startup/1` and these fields:
+
+| Field | Value |
+|---|---|
+| `history_origin` | Reviewed HTTPS intake origin |
+| `history_owner_hotkey` | Pinned intake owner's evaluator hotkey |
+| `authority` | `umi-cohort-miner-config/1`, or `umi-cohort-service-miner-config/1` for service grants |
+
+The nested authority contains the competition `policy_sha256`,
+`transport_policy_sha256`, `miner_hotkey`, `model_revision`, `serving_origin`,
+a dedicated absolute `directory`, and sorted unique `cohorts` entries with
+`cohort_sha256` and `authority_sha256`. Service mode also pins
+`service_terms_sha256`. Obtain these bindings from the reviewed cohort deployment;
+startup checks them against the miner's selected policy and identity. The grant
+directory must be separate from the assignment, nonce and finality state paths.
+Its defaults allow 4,096 grants and 1 GiB of grant records; durable response
+capacity is configured separately with `--max-recovery-assignments`.
+
+Write the startup file with `canonical_json_bytes` from `umi.protocol`, then keep
+it and its parent owned by the miner user without group or other write permission.
+The file is limited to 1 MiB. Preserve its authority bindings with the existing
+grant journal; changing the cohort list or identity is not an in-place migration.
+
+The miner reads challenge-bound signed history from the intake's public
+`GET /v1/competition/cohorts/{cohort_sha256}/authority` route. No private
+coordinator credential is needed. It checks the configured owner signature,
+certified phase history and local finalized transport window. An unavailable
+owner prevents new inference until a retry succeeds; stored response recovery
+remains available independently.
+
+Its authenticated `POST /v1/competition/cohorts/assignments` route retains an exact
+quorum-signed grant and returns a signed storage receipt. Retrying that grant
+returns the same receipt after restart or phase closure. An altered grant cannot
+replace the retained selection.
+
+Storage acknowledgement permits no inference by itself. Each translation still
+requires an open certified request phase and the miner's own transport-window
+checks. A delayed cohort can use a fresh transport window after its original
+target, while an expired individual request requires recovery and certified
+replacement. Cross-policy/key archive access and installed cohort qualification
+remain open. Keep the grant journal, assignment database and nonce database
+together through restart; a fresh empty journal is not recovery.
+
+The assigned evaluator can retire an old request through authenticated
+`POST /v1/competition/cohorts/assignments/retire`. The miner preserves any sealed
+response, including a signed failure. Without one, it waits until both the
+finalized block deadline and response-close round have passed. It records a
+durable execution fence, lets active protocol work finish, and signs the exact
+retained response hash or a `no_response_retained` receipt. Queued or later
+requests cannot start that assignment. Pending work returns HTTP 202.
+
+The first retirement upgrades the assignment ledger to schema 2. Older miners
+reject that ledger; do not erase it or downgrade its metadata to bypass the
+fence. Retained responses and retirement receipts survive cache pruning and
+restart. Preserve the grant, resource and nonce databases together. A retirement
+receipt fences protocol execution, but does not prove that inference never ran
+or that a detached model process stopped. Host migration must fence the old
+writer and its model processes separately.
 
 Use the Unix socket when the model needs a Torch, Core ML, Python, or native
 library stack that cannot share UMI's pinned environment. UMI supports Python

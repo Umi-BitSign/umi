@@ -1,0 +1,432 @@
+"""Native inbox-to-terminal scheduling with fixture network/finality and inference.
+
+Real signed assignments, miner HTTP handlers, request votes, journals and
+retirement certificates are exercised. No installed service or reward is claimed.
+"""
+
+import asyncio
+import json
+from itertools import pairwise
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from umi.competition_cohort_attempt_worker import CohortEndpointAttemptWorker
+from umi.competition_cohort_endpoint_archive import (
+    EndpointReplayArchive,
+    JournalEndpointObjects,
+    endpoint_archive_cases,
+)
+from umi.competition_cohort_endpoint_recovery import CohortEndpointResponseRecovery
+from umi.competition_cohort_endpoint_retirement import CohortEndpointRetirement
+from umi.competition_cohort_endpoint_selection import selected_request, selection_grant
+from umi.competition_cohort_endpoint_worker import CohortEndpointWorker
+from umi.competition_cohort_execution_journal import CohortExecutionJournal
+from umi.miner import create_app
+from umi.open_competition import digest
+from umi.protocol import canonical_json_bytes
+
+from .test_competition_cohort_attempt_pipeline import expire_child
+from .test_competition_cohort_endpoint_decision import coordinator
+from .test_competition_cohort_miner_case import next_grant
+from .test_competition_cohort_request_signer import base_policy as base_policy
+from .test_competition_cohort_request_signer import chain as chain
+from .test_competition_cohort_request_signer import chain_config as chain_config
+from .test_competition_cohort_request_signer import decisions as decisions
+from .test_competition_cohort_request_signer import delivery as delivery
+from .test_competition_cohort_request_signer import endpoint as endpoint
+from .test_competition_cohort_request_signer import execution as execution
+from .test_competition_cohort_request_signer import granted as granted
+from .test_competition_cohort_request_signer import harness as harness
+from .test_competition_cohort_request_signer import known_video_bytes as known_video_bytes
+from .test_competition_cohort_request_signer import legacy_scenario as legacy_scenario
+from .test_competition_cohort_request_signer import policy as policy
+from .test_competition_cohort_request_signer import receipt_scenario as receipt_scenario
+from .test_competition_cohort_request_signer import recovery as recovery
+from .test_competition_cohort_request_signer import recovery_case as recovery_case
+from .test_competition_cohort_request_signer import relay as relay
+from .test_competition_cohort_request_signer import retiring as retiring
+from .test_competition_cohort_request_signer import runtime as runtime
+from .test_competition_cohort_request_signer import scenario as scenario
+from .test_competition_cohort_request_signer import signing as signing
+
+
+@pytest.fixture
+def scheduled(signing, tmp_path):
+    s, p = signing, signing.p
+    # Give the scheduler empty evaluator and miner grant journals. The earlier
+    # fixture's manual grant is not used by this actual construction/delivery run.
+    p.e.journal = lambda **kw: CohortExecutionJournal(
+        p.e.cfg.model_copy(update={"directory": str(tmp_path / "scheduler-evaluator"), **kw}),
+        p.c.policy,
+    )
+    p.miner = p.rebuild(directory=str(tmp_path / "scheduler-miner"))
+    p.paths = []
+    inner = httpx.ASGITransport(app=create_app(p.miner))
+
+    class Trace(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            p.paths.append(request.url.path)
+            return await inner.handle_async_request(request)
+
+    p.delivery_recovery = CohortEndpointResponseRecovery(
+        p.service(), p.validator, transport=Trace()
+    )
+    p.retirement = CohortEndpointRetirement(p.delivery_recovery)
+    q = SimpleNamespace(
+        s=s,
+        p=p,
+        media_calls=[],
+        policy_calls=0,
+        media_fail=False,
+        policy_fail=False,
+        media_suffix="",
+    )
+
+    async def video(job, case):
+        if job != p.e.job:
+            raise OSError("other miner unavailable")
+        q.media_calls.append(case.case_id)
+        if q.media_fail:
+            raise OSError("https://private.example/clip/bearer-secret")
+        index = next(i for i, item in enumerate(job.cases) if item.case_id == case.case_id)
+        video = p.requests[index].video
+        return video.model_copy(update={"url": video.url + q.media_suffix})
+
+    async def transport(assignment):
+        q.policy_calls += 1
+        if q.policy_fail:
+            raise OSError("policy source unavailable")
+        return p.transport_policy
+
+    def worker(**kwargs):
+        requests = s.worker()
+        requests.video_source = video
+        attempts = CohortEndpointAttemptWorker(requests, coordinator(s.d))
+        return CohortEndpointWorker(p.e.box, attempts, transport, **kwargs)
+
+    q.worker = worker
+    q.slot = p.retire_slot
+    return q
+
+
+async def finish(q, *, maximum_polls=12, **kwargs):
+    reports = []
+    for _ in range(maximum_polls):
+        worker = q.worker(**kwargs)
+        reports.append(await worker.poll_once())
+        terminal = worker.schedule.complete(q.slot)
+        if terminal is not None and worker.schedule.journal.get("endpoint_replay_archive", q.slot):
+            return terminal, reports
+    raise AssertionError(reports)
+
+
+async def test_inbox_to_complete_terminal_selection_and_offline_restart(scheduled):
+    q, p = scheduled, scheduled.p
+    terminal, reports = await finish(q)
+    assert len(terminal.cases) == len(p.e.job.cases)
+    assert p.model.calls == len(p.e.job.cases)
+    assert q.policy_calls == 1 and len(q.media_calls) == len(p.e.job.cases)
+    assert all(
+        not r["chain_submission_authorized"] and not r["request_closure_authorized"]
+        for r in reports
+    )
+    calls = list(p.paths), len(q.s.calls), p.model.calls
+    p.c.finality.fail = True
+    p.finality.blocks.clear()
+    q.s.peers_offline = q.media_fail = q.policy_fail = True
+    worker = q.worker()
+    report = await worker.poll_once()
+    assert report["assignments_complete"] == 1 and report["cases_considered"] == 0
+    assert worker.schedule.complete(q.slot) == terminal
+    assert (list(p.paths), len(q.s.calls), p.model.calls) == calls
+    archive = EndpointReplayArchive.model_validate_json(
+        canonical_json_bytes(worker.schedule.journal.get("endpoint_replay_archive", q.slot))
+    )
+    # An independent consumer needs only the immutable content objects.
+    with worker.schedule.journal.transaction() as db:
+        objects = dict(
+            db.execute("SELECT id,body FROM records WHERE kind='endpoint_replay_object'")
+        )
+    reviews = tuple(endpoint_archive_cases(archive, objects.__getitem__, p.c.policy))
+    assert [r.retirement.case_id for r in reviews] == [c.case_id for c in terminal.cases]
+    assert all(r.recovered is not None for r in reviews)
+
+
+async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
+    q = scheduled
+    q.media_fail = True
+    report = await q.worker().poll_once()
+    assert report["retry_count"] > 0 and "bearer-secret" not in repr(report)
+    assert q.p.model.calls == 0 and not q.s.calls
+    assert q.worker().schedule.load(q.slot) is not None
+    assert q.worker().schedule.complete(q.slot) is None
+    q.media_fail = False
+    terminal, _ = await finish(q)
+    assert terminal.job_sha256 == digest(q.p.e.job)
+    assert q.policy_calls == 1
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "endpoint_schedule_assignment",
+        "endpoint_terminal_case",
+        "endpoint_terminal_selection",
+        "endpoint_replay_object",
+        "endpoint_replay_archive",
+    ],
+)
+@pytest.mark.parametrize("after", [False, True])
+async def test_interrupted_schedule_and_terminal_commits_resume(
+    scheduled, monkeypatch, kind, after
+):
+    q, p = scheduled, scheduled.p
+    db = p.delivery_recovery.journal.journal
+    real_many, real_put = db.put_many, db.put
+    fired = False
+
+    def many(items, **kw):
+        nonlocal fired
+        items = tuple(items)
+        if kind == "endpoint_schedule_assignment" and any(item[0] == kind for item in items):
+            fired = True
+            if after:
+                real_many(items, **kw)
+            raise OSError("commit reply lost")
+        return real_many(items, **kw)
+
+    def put(record_kind, key, value):
+        nonlocal fired
+        if record_kind == kind and kind != "endpoint_schedule_assignment":
+            fired = True
+            if after:
+                real_put(record_kind, key, value)
+            raise OSError("commit reply lost")
+        return real_put(record_kind, key, value)
+
+    with monkeypatch.context() as m:
+        m.setattr(db, "put_many", many)
+        m.setattr(db, "put", put)
+        for _ in range(8):
+            report = await q.worker().poll_once()
+            if fired:
+                assert report["retry_count"] > 0
+                break
+        assert fired
+    terminal, _ = await finish(q)
+    assert len(terminal.cases) == len(p.e.job.cases)
+    assert p.model.calls == len(p.e.job.cases)
+
+
+async def add_second_assignment(q):
+    from umi.competition_cohort_order_signer import CohortOrderParticipant
+
+    from .test_competition_cohort_disposition import order as signed_order
+
+    r, b = q.p.e.r, q.p.e.r.h.batch
+    member = b["roster"].participants[1]
+    order = signed_order(b["scenarios"][1]).order
+    r.queue().select(
+        order,
+        CohortOrderParticipant(
+            consent=member.record.request.consent,
+            admission=member.admission,
+            admission_snapshot=member.record.snapshot,
+        ),
+        r.h.source,
+        await r.capture(),
+    )
+    await r.worker().poll_once()
+    assert len(q.p.e.box.assignments()) == 2
+    return next(slot for slot in q.p.e.box.assignments() if slot != q.slot)
+
+
+async def test_unavailable_miner_does_not_starve_peer_after_restart(scheduled):
+    q = scheduled
+    other = await add_second_assignment(q)
+    terminal, reports = await finish(q, maximum_polls=16, batch_size=1, concurrency=1)
+    assert terminal is not None and any(r["retry_count"] for r in reports)
+    assert q.worker().schedule.complete(other) is None
+    assert q.p.model.calls == len(q.p.e.job.cases)
+    # Once both inventories are known, one scan never assigns all parallel
+    # slots to a single unavailable miner's cases.
+    for _ in range(3):
+        await q.worker(batch_size=2).poll_once()
+    rows = q.worker().schedule.pending(2)
+    assert rows and {row[1] for row in rows} == {other}
+    assert len(rows) == 1
+
+
+async def test_queue_selects_one_case_per_assignment_and_rotates_durably(scheduled):
+    q = scheduled
+    other = await add_second_assignment(q)
+    schedule = q.worker().schedule
+    for slot in q.p.e.box.assignments():
+        schedule.register(q.p.e.box.assignment(slot), q.p.transport_policy)
+    first = schedule.pending(2)
+    second = q.worker().schedule.pending(2)
+    assert {r[1] for r in first} == {q.slot, other}
+    assert {r[1] for r in second} == {q.slot, other}
+    assert {r[0] for r in first}.isdisjoint({r[0] for r in second})
+    third = q.worker().schedule.pending(2)
+    assert len({r[0] for r in (*first, *second, *third)}) == 6
+    # Smaller batches must rotate assignments too, with both cursor levels
+    # surviving reconstruction of the worker between every poll.
+    single = [q.worker().schedule.pending(1)[0] for _ in range(6)]
+    assert len({r[0] for r in single}) == 6
+    assert all(a[1] != b[1] for a, b in pairwise(single))
+
+
+async def test_capacity_growth_preserves_inventory_and_reserved_results(scheduled):
+    q = scheduled
+    small = q.worker(maximum_cases=1)
+    report = await small.poll_once()
+    assert report["retry_count"] > 0 and q.p.model.calls == 0
+    with small.schedule.journal.transaction() as db:
+        assert db.execute("SELECT COUNT(*) FROM endpoint_schedule_queue").fetchone()[0] == 0
+    assert small.schedule.load(q.slot) is None
+    terminal, _ = await finish(q, maximum_cases=len(q.p.e.job.cases))
+    assert terminal is not None and q.p.model.calls == len(q.p.e.job.cases)
+
+
+async def test_scheduler_stop_cancels_owned_read_and_recovers_inventory(scheduled, monkeypatch):
+    q = scheduled
+    entered, stop = asyncio.Event(), asyncio.Event()
+
+    async def waiting(job, case):
+        entered.set()
+        await asyncio.Event().wait()
+
+    worker = q.worker()
+    worker.attempts.requests.video_source = waiting
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01))
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    stop.set()
+    await asyncio.wait_for(task, timeout=10)
+    assert q.p.model.calls == 0 and worker.schedule.load(q.slot) is not None
+    assert (await finish(q))[0] is not None
+
+
+async def test_partial_quorum_recovers_same_request_without_reloading_media(scheduled):
+    q = scheduled
+    q.s.peers_offline = True
+    assert (await q.worker().poll_once())["batch_pending"] > 0
+    calls = len(q.media_calls)
+    q.media_fail = q.policy_fail = True
+    q.s.peers_offline = False
+    terminal, _ = await finish(q)
+    assert terminal is not None and len(q.media_calls) == calls
+
+
+async def test_terminal_selection_rejects_changed_evidence(scheduled):
+    q = scheduled
+    terminal, _ = await finish(q)
+    schedule = q.worker().schedule
+    with schedule.journal.transaction() as db:
+        raw = db.execute(
+            "SELECT id,body FROM records WHERE kind='endpoint_terminal_case'"
+        ).fetchone()
+        assert raw is not None
+    for field in (
+        "selection_slot",
+        "selection_sha256",
+        "review_sha256",
+        "decision_sha256",
+        "case_id",
+    ):
+        damaged = json.loads(raw[1])
+        damaged[field] = "ff" * 32
+        with schedule.journal.transaction() as db:
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='endpoint_terminal_case' AND id=?",
+                (canonical_json_bytes(damaged), raw[0]),
+            )
+        with pytest.raises(ValueError, match="terminal case"):
+            schedule.complete(q.slot)
+        with schedule.journal.transaction() as db:
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='endpoint_terminal_case' AND id=?",
+                (raw[1], raw[0]),
+            )
+    assert schedule.complete(q.slot) == terminal
+    with schedule.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='endpoint_terminal_case' AND id=?", (raw[0],))
+    with pytest.raises(ValueError, match="missing a terminal case"):
+        schedule.complete(q.slot)
+
+
+async def test_single_writer_lock_prevents_second_scheduler_effects(scheduled):
+    q = scheduled
+    worker = q.worker()
+    with (
+        worker.schedule.owner.locked(digest(["umi-cohort-endpoint-scheduler/1"])),
+        pytest.raises(BlockingIOError),
+    ):
+        await q.worker().poll_once()
+    assert not q.media_calls and not q.s.calls and q.p.model.calls == 0
+
+
+async def test_outage_keeps_completed_case_and_refreshes_only_missing_requests(
+    scheduled, monkeypatch
+):
+    q, p = scheduled, scheduled.p
+    first = q.worker()
+    # A signed miner failure is also a completed response; it cannot be retried
+    # for a better score when a different case needs a fresh transport window.
+    p.model.fail = True
+    assert (await first.poll_once())["cases_completed"] == 1
+    p.model.fail = False
+    completed = [
+        c for c in p.e.job.cases if first.schedule.reference(q.slot, c.case_id) is not None
+    ]
+    assert len(completed) == 1
+    saved = first.schedule.reference(q.slot, completed[0].case_id)
+    selected, assignment, _ = p.delivery_recovery.selection(q.slot)
+    original = canonical_json_bytes(selected)
+    grant = selection_grant(selected, assignment)
+    expire_child(p, grant, monkeypatch)
+    missing = next(c for c in p.e.job.cases if c != completed[0])
+    decisions = coordinator(q.s.d)
+    certificate = (await decisions.advance(q.slot, missing.case_id)).certificate
+    assert certificate.decision.disposition == "retry_required"
+    review = decisions._review(q.slot, missing.case_id)
+    # Fixture only advances chain/timelock clocks. The actual worker must build
+    # and certify the replacement using the renewable media source itself.
+    next_grant(q.s.d, grant, review, certificate, monkeypatch)
+    q.media_fail = True
+    report = await q.worker().poll_once()
+    assert report["retry_count"] > 0 and p.model.calls == 1
+    assert first.schedule.complete(q.slot) is None
+    q.media_fail = False
+    q.media_suffix = "?renewed=1"
+    terminal, _ = await finish(q, maximum_polls=16)
+    assert p.model.calls == len(p.e.job.cases)
+    assert canonical_json_bytes(p.delivery_recovery.selection(q.slot)[0]) == original
+    assert first.schedule.reference(q.slot, completed[0].case_id) == saved
+    assert len({c.selection_slot for c in terminal.cases}) == len(p.e.job.cases)
+    for case in terminal.cases:
+        slot, chosen, _, _ = q.worker().attempts.current(q.slot, case.case_id)
+        if case.case_id == completed[0].case_id:
+            assert slot == q.slot
+        else:
+            assert chosen.grant.attempt.order.attempt_number == 2
+            assert selected_request(chosen, case.case_id).video.url.endswith("?renewed=1")
+    schedule = q.worker().schedule
+    archive = EndpointReplayArchive.model_validate_json(
+        canonical_json_bytes(schedule.journal.get("endpoint_replay_archive", q.slot))
+    )
+    objects = JournalEndpointObjects(schedule.journal)
+    reviews = tuple(endpoint_archive_cases(archive, objects, p.c.policy))
+    assert len(reviews) == len(terminal.cases)
+    missing_review = next(r for r in reviews if r.retirement.case_id != completed[0].case_id)
+    parent_sha = missing_review.selection.order.order.prior_decision.decision.review_sha256
+
+    def missing_parent(sha):
+        if sha == parent_sha:
+            raise FileNotFoundError("parent evidence unavailable")
+        return objects(sha)
+
+    with pytest.raises(FileNotFoundError):
+        tuple(endpoint_archive_cases(archive, missing_parent, p.c.policy))

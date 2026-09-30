@@ -64,6 +64,26 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
     # This additive command has its own parser/handler tests. Preserve the
     # original digest so changes to any pre-existing command still fail here.
     commands.pop("verify-miner-feed-profile")
+    # The runtime-port command exercises the real parser and owned-provider
+    # handler separately, while existing argument contracts remain unchanged.
+    commands.pop("apply-runtime-port")
+    # Cohort admission has separate parser and handler qualification. Its new
+    # commands must not change the existing operator interface.
+    for command in (
+        "initialize-cohort-intake",
+        "sign-cohort-consent",
+        "submit-cohort-consent",
+        "submit-cohort-model",
+        "query-cohort-admission",
+        "run-cohort-admission-worker",
+    ):
+        commands.pop(command)
+    actions = commands["fetch-initial-successor-history"]["actions"]
+    host = next(action for action in actions if action["dest"] == "signed_host_artifact")
+    assert host["option_strings"] == ["--signed-host-artifact"]
+    assert host["default"] is None
+    assert host["required"] is False
+    actions.remove(host)
     # Capacity is an optional operational addition, not a signed protocol field.
     # Check its defaults explicitly, then preserve the historical argument hash.
     for command in ("serve-assignment-feed", "assemble-endpoint-execution"):
@@ -73,6 +93,15 @@ def test_public_command_arguments_match_pre_refactor_contract() -> None:
         assert added["default"] is None
         assert added["required"] is False
         actions.remove(added)
+    # Deal-preserving predecessor policies are an optional operator input, not a
+    # signed protocol field. Check the flag's shape, then preserve the historical hash.
+    predecessor = next(
+        action for action in current["actions"] if action["dest"] == "predecessor_policy"
+    )
+    assert predecessor["option_strings"] == ["--predecessor-policy"]
+    assert predecessor["default"] == []
+    assert predecessor["required"] is False
+    current["actions"].remove(predecessor)
     assert json_sha256(current) == contracts["competition_cli_sha256"]
 
 
@@ -104,6 +133,31 @@ def test_published_schemas_match_pre_refactor_contracts() -> None:
             extension = pins["properties"].pop("scoring_by_target")
             assert extension["default"] is None
             assert "scoring_by_target" not in pins["required"]
+        definitions = schema.get("$defs", {})
+        if "EndpointUnavailableEvidence" in definitions:
+            # C4's retained repair evidence is an explicit versioned extension.
+            # Pin its additions and preserve every original field's contract.
+            additions = {
+                name: definitions.pop(name)
+                for name in (
+                    "DispatchRepairAmendment",
+                    "EndpointUnavailableEvidence",
+                    "SignedDispatchRepair",
+                    "UnavailableDispatchClaim",
+                )
+            }
+            assert json_sha256(additions) == contracts["dispatch_repair_definitions_sha256"]
+            for name, legacy in (
+                ("EvaluationVoid", "umi-competition-evaluation-void/1"),
+                ("VoidEvaluationEvidence", "umi-competition-void-evidence/1"),
+            ):
+                tag = definitions[name]["properties"]["schema"]
+                assert tag.pop("enum") == [legacy, legacy[:-1] + "2"]
+                tag["const"] = legacy
+            reasons = definitions["EvaluationVoid"]["properties"]["reason"]["enum"]
+            assert reasons.pop() == "coordinator_outcome_unavailable"
+            variants = definitions["ExecutionAnnouncement"]["properties"]["evidence"]["anyOf"]
+            assert variants.pop() == {"$ref": "#/$defs/EndpointUnavailableEvidence"}
         assert json_sha256(schema) == expected, reference
 
 

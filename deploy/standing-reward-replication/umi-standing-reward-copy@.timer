@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry UMI standing reward evidence replication (%i)
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

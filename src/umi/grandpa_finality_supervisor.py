@@ -298,6 +298,7 @@ class DurableGrandpaFinalityPort:
         finality_verifier_sha256: str,
         initial_minimum_finalized_block: int,
         startup_timeout_seconds: int = 600,
+        accepted_predecessor_policy_digests: tuple[str, ...] = (),
         limits: GrandpaFinalitySupervisorLimits | None = None,
         busy_timeout_ms: int = 5_000,
     ) -> None:
@@ -306,6 +307,12 @@ class DurableGrandpaFinalityPort:
         self._observer = observer
         self._limits = limits or GrandpaFinalitySupervisorLimits()
         self._scoring_policy_digest = _sha256(scoring_policy_digest, "scoring policy digest")
+        # Deal-preserving predecessors of the scoring policy: a store bound under one of
+        # these carries the same verified chain evidence and is rebound on initialize.
+        self._accepted_predecessor_policy_digests = tuple(
+            _sha256(item, "predecessor scoring policy digest")
+            for item in accepted_predecessor_policy_digests
+        )
         if not isinstance(chain_observation, LiveChainObservationPin):
             raise TypeError("chain_observation must be a LiveChainObservationPin")
         self._chain_observation = chain_observation
@@ -445,20 +452,30 @@ class DurableGrandpaFinalityPort:
         return self._plan_block(stored)
 
     async def verified_block_after(
-        self, height: int, *, maximum_distance: int
+        self, height: int, *, maximum_distance: int | None
     ) -> VerifiedFinalizedBlock | None:
-        """Nearest retained original observer header for bounded ancestry recovery."""
+        """Nearest retained observer header; None permits resumable historical walks.
+
+        The query always returns at most one owned record. Callers using None
+        must bound their own header recovery batches rather than the total age.
+        """
         height = _positive_uint(height, "historical header height")
-        maximum_distance = _positive_uint(maximum_distance, "historical header distance")
-        if maximum_distance > 2048:
-            raise ValueError("historical header distance exceeds bound")
+        if maximum_distance is not None:
+            maximum_distance = _positive_uint(maximum_distance, "historical header distance")
+            if maximum_distance > 2048:
+                raise ValueError("historical header distance exceeds bound")
 
         def nearest():
             with self._connect(read_only=True) as db:
                 row = db.execute(
                     "SELECT height FROM finalized_headers WHERE height>? AND height<=? "
                     "ORDER BY height LIMIT 1",
-                    (height, height + maximum_distance),
+                    (
+                        height,
+                        _MAX_CANONICAL_INTEGER
+                        if maximum_distance is None
+                        else height + maximum_distance,
+                    ),
                 ).fetchone()
             return None if row is None else row[0]
 
@@ -895,6 +912,8 @@ class DurableGrandpaFinalityPort:
                     STORE_SCHEMA_VERSION,
                 ):
                     raise GrandpaFinalityStoreConflict("store_schema_mismatch")
+                else:
+                    self._rebind_predecessor_policy(connection)
                 if user_version == 2:
                     # Audit and backfill under the same write lock. Old opened
                     # connections automatically execute the installed triggers.
@@ -1250,11 +1269,30 @@ class DurableGrandpaFinalityPort:
             finality_evidence_sha256=stored.head.evidence_sha256,
         )
 
-    def _config_bytes(self) -> bytes:
+    def _rebind_predecessor_policy(self, connection: sqlite3.Connection) -> None:
+        """Move a store bound under a deal-preserving predecessor scoring policy to
+        the live one. The verified chain evidence does not depend on the policy;
+        only the binding row changes, under the initialize write lock."""
+        stored = connection.execute("SELECT value FROM store_meta WHERE key = 'config'").fetchone()
+        if stored is None or stored[0] == self._config_bytes():
+            return
+        for predecessor in self._accepted_predecessor_policy_digests:
+            if stored[0] == self._config_bytes(predecessor):
+                config = self._config_bytes()
+                connection.execute(
+                    "UPDATE store_meta SET value = ? WHERE key = 'config'", (config,)
+                )
+                connection.execute(
+                    "UPDATE store_meta SET value = ? WHERE key = 'config_sha256'",
+                    (hashlib.sha256(config).digest(),),
+                )
+                return
+
+    def _config_bytes(self, scoring_policy_digest: str | None = None) -> bytes:
         return canonical_json_bytes(
             {
                 "schema": STORE_SCHEMA,
-                "scoring_policy_hash": self._scoring_policy_digest,
+                "scoring_policy_hash": scoring_policy_digest or self._scoring_policy_digest,
                 "chain_observation": self._chain_observation.model_dump(mode="json", by_alias=True),
                 "finality_verifier_sha256": self._finality_verifier_sha256,
                 "observer": {

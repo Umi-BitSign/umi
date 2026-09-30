@@ -5,6 +5,7 @@ from __future__ import annotations
 from .competition_void import (
     MAX_VOID_BYTES,
     authenticate_void_evidence,
+    validate_void_receipt,
     void_decision_digest,
     void_evidence_digest,
 )
@@ -44,6 +45,7 @@ class VoidEvidenceRetention:
             order.round.reveal_block <= observed_block <= 2**53 - 1
         ):
             raise ValueError("void observation must be at or after reveal in a valid block")
+        validate_void_receipt(evidence, observed_block)
         body = canonical_json_bytes(evidence)
         if len(body) > MAX_VOID_BYTES:
             raise ValueError("void evidence exceeds its byte bound")

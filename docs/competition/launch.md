@@ -2,325 +2,168 @@
 
 # Competition launch configuration
 
-This is the single launch checklist. It replaces the rolling execution diary
-and separate launch-profile and allocation notes. Public endpoint intake is
-live, but an admission receipt does not activate rewards. Assignment delivery
-and model-artifact intake are not yet open. The registration bridge remains
-separate until a signed successor is installed.
+C5 is the next cohort. Intake is held open while its signed policy, protected
+suite, installed services and recovery behavior are qualified. The hold has no
+submission deadline and does not advance automatically to C6. Public status
+must continue to show C5 as preparing until the launch owner installs and
+publishes the complete qualified configuration.
 
-## Live first-round schedule
+SN78 registration and a competition acceptance are separate. An intake receipt
+does not promise selection, a score or a reward. C4 keeps its signed allocation
+and remains the effective reward cohort until C5 has a certified successor row.
 
-The authoritative cutoffs are blocks, not wall-clock estimates:
+## C5 reward policy
 
-| Event | Block |
-|---|---:|
-| Public intake observed live | `9,085,463` |
-| Guaranteed participant submission/replacement deadline | `9,135,843` |
-| Latest operator roster close | `9,135,903` |
-| Work-signing close | `9,135,963` |
-| Evaluation close | `9,156,243` |
-| Protected-reference reveal | `9,156,263` |
-| Evidence cutoff | `9,156,383` |
-| Round validity end | `9,156,983` |
+C5 uses separate service and public-model pools:
 
-Version 2 intake is live under the sequence 5 policy published as
-[`FIRST_ROUND_STAGED_POLICY.json`](FIRST_ROUND_STAGED_POLICY.json), with protocol
-digest `eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56`.
-It binds [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md), SHA-256
-`c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b`,
-and names version 1 policy
-`81c118c5b45527650d7f304a6574d04223de30fbad76c69df09e7f2ae4897fa0`
-as its predecessor. Version 1 accepted terms
-`61f333f6105c8e8a06db9d51a7a47a3cf0c5c0c72d7794fe1e5e6744eafcca62`.
-Its submissions and receipts remain available through the read-only archive
-listed in public status. They do not count as version 2 acceptance. Existing
-participants must [sign and submit a version 2 replacement](../reference/commands.md#required-version-1-to-version-2-acceptance)
-by the same guaranteed deadline. The immutable version 1 policy is retained as
-[`FIRST_ROUND_INTAKE_POLICY_V1.json`](FIRST_ROUND_INTAKE_POLICY_V1.json).
-The live intake and bounded status API use `https://api.umi.vision`. The endpoint
-has been publicly reachable since block `9,085,463`, and its accepted-submission
-log is public. A first-round submission or replacement must be accepted at block
-`9,085,463` or later and no later than block `9,135,843` to guarantee
-consideration, and it
-must remain valid through at least block
-`9,156,243`. The coordinator may poll and close the roster at any later block
-through `9,135,903`; acceptance in that interval is not guaranteed first-round
-inclusion. The submitted hotkey must still be registered on SN78 in the
-finalized roster-close snapshot. A higher-sequence replacement must satisfy the policy's 360-block
-replacement interval. The intake receipt remains `accepted_no_weight` until
-evaluation, settlement, signed release and finalized-row checks complete.
+- **50% service:** distributed across certified service work. Each job's credit
+  is its certified work units multiplied by its normalized quality score.
+- **50% public models:** eligible artifacts that match or beat the frozen
+  baseline are placed in fixed 500-bps aggregate-quality bands. Each occupied
+  band receives one credit, and the pool is distributed across those credits in
+  proportion to their exact benchmark scores.
 
-The [public status](https://api.umi.vision/v1/competition/status) is the
-authoritative public record of the live intake policy. Its deployment object
-names an operator-declared repository revision and the UMI source-tree digest.
-The intake service refuses to start when that digest differs from its running
-modules. The deployment procedure must separately verify that the declared
-revision produced that exact tree. A commit is not live merely because it was
-merged. Do not publish launch-facing claims on `main` until the exact revision
-is installed, or label and gate the unfinished behavior explicitly. Coordinator
-and evaluator behavior changes only after their reviewed artifacts are installed;
-validator behavior changes only through the signed release channel; incentives
-change only after a valid row is finalized on chain.
+Duplicate model content counts once. The highest-scoring eligible artifact in a
+band supplies its credit; an exact score tie is resolved by the earliest
+certified complete acceptance. Small score variations within one band do not
+create extra credits. A sole occupied band receives the complete model pool. If
+all band-credit scores are zero, the pool is divided equally among occupied
+bands. If no model qualifies, the pool goes to the policy's proved burn
+destination. A participant may qualify independently for both pools.
 
-## Approved policy
+C6 is model-only. Its signed cohort plan disables endpoint/service participation
+and assigns all 65,535 raw competition units within the eligible public-model
+population using the same baseline floor, deduplication and quality buckets.
+C7-C10 return to the C5 50/50 profile unless a different signed plan is published
+before their intake opens.
 
-Use `umi-open-competition-policy/3` with `umi-competition-suite/2`.
-The required evaluator entry is:
+The governing submission must bind
+[version 3 contribution terms](../MODEL_CONTRIBUTION_TERMS_V3.md), SHA-256
+`451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0`,
+and the exact signed C5 policy. Earlier acceptances do not imply version 3
+acceptance. See [model contributions](../contributors/models.md) for artifact,
+rights, provenance and reconstruction requirements.
 
-```json
-{
-  "evaluators": [
-    {
-      "hotkey": "5Fk765B4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDWsuk",
-      "control_group": "umi-operated"
-    }
-  ],
-  "required_evaluator_groups": 1,
-  "endpoint_reward_bps": 7000,
-  "model_reward_bps": 3000,
-  "maximum_inference_ms": 120000
-}
-```
+The planned frozen comparator is CPU-derived model bundle
+`6fe8df59ec11ba89f4dfe0474a673fe757e378cd9184449965861c5a7c59b641`
+with runtime
+`f025ceb38cacc5c71873d94b8f2010aae10a0193a0e410e410a202f4def3b7b0`.
+Its native parent already contains the Community v0.2 RGB crop correction. These
+digests remain preparatory until the signed C5 policy and launch are published;
+the original Community source archive is provenance, not the executable
+comparator identity.
 
-This is an excerpt, not a complete signed policy. UID 0 is the sole initial
-evaluator. UID 54 shares its administration and does not count as an independent
-vote. Disclose the single-operator trust model in the launch announcement.
-Additional evaluators or a different quorum require a later signed policy.
+## Scoring and video-dependence diagnostics
 
-The initial baseline is Michael's supplied model, preserved without a contributor
-reward recipient. Score one authentic reference per clip: fingerspelling CER
-weighted 3/13 and continuous-signing WER weighted 10/13. Meet the policy's minimum
-case counts and resource limits. Do not invent labels or score a full source
-video against a cropped interval's reference. See [private data](../operators/private-holdout.md).
+The C5 scoring profile uses `umi-open-competition-policy/3` with
+`umi-competition-suite/2`. The frozen suite and runtime determine the automatic
+CER/WER benchmark scores.
+C5 may also compare a continuous-signing output for its correct video with the
+same model's output for a matched unrelated video. That comparison is diagnostic
+only. It cannot change a C5 score, rank, eligibility decision, reward, settlement
+or activation time. A missing or unreliable diagnostic cannot hold settlement.
 
-Use `umi-competition-single-evaluator-transport/1` with the same evaluator hotkey
-and actual administrator identity. `ScoringPolicy.competition_transport(...)`
-leaves the retired publisher collateral, soak start, capacity-set root and cost
-schedule absent together; publisher registries are empty. Do not fabricate
-publishers or independent operators to satisfy the legacy calibration profile.
-Old signed policies retain their original bytes and meaning.
+Any future video-dependence payout gate requires published thresholds, a
+qualified positive control, a newly signed successor policy and fresh participant
+acceptance before its intake opens. The prospective policy version 4 procedure
+in [private holdout operation](../operators/private-holdout.md) is not the C5
+policy.
 
-## Rewards and first contribution round
+## Timing and recovery
 
-Qualifying endpoints share 70%, proportional to their exact quality scores.
-The unallocated 30% goes to the proved burn destination until a model qualifies.
-It must remain in the full row; omitting it would redistribute it through
-normalization. This does not burn validator dividends or the separate owner cut.
-The chain and other validators determine the eventual economic outcome.
+Published cohort dates are operating targets. Liveness failures do not expire a
+cohort or authorize its evidence to be discarded.
 
-The exact first-round admission and evaluation cutoffs are published above.
-Future rounds must publish their signed cutoffs before their intake windows.
-The first round opens endpoint intake only. Assignment delivery is not yet
-public, and model-artifact intake and evaluation remain closed until UMI
-publishes the exact canonical runtime and an immutable, reconstructible
-environment. Review a future round's strongest qualifying contributed artifact
-with preservation, reconstruction, paired improvement, minimum quality and
-rights checks. An endpoint result alone cannot promote a model. The imported
-baseline has no founding-model exception.
+- Every phase is journaled and replayable. A coordinator, evaluator or validator
+  outage leaves unfinished work pending and resumes it from retained evidence.
+- The previous certified reward row remains effective until a newer cohort is
+  certified and activated.
+- A five-hour rest starts after request closure is certified. The next cohort
+  cannot start requests earlier.
+- Each designated validator must receive at least 24 hours of verified
+  opportunity to submit the certified row. Offline time does not count toward
+  that opportunity.
+- Moving a service to another host preserves its journal, signed inputs and
+  content-addressed evidence. Migration does not create a new cohort identity.
+- Operation timeouts and retries are bounded to detect a stuck attempt, but a
+  timeout does not become a terminal cohort deadline. Recovery schedules another
+  attempt with the original evidence.
 
-Version 1 of the accepted contribution terms says that both reward tracks launch
-together. That intake is now read-only. Version 2 permits staged endpoint
-activation with the model share burned, and the live sequence 5 intake policy
-binds it. Each affected miner must sign and receive acceptance for a new
-submission under that exact policy and terms before the round's admission
-deadline. Version 1 signatures and receipts
-stay immutable and cannot be counted as version 2 acceptance. No row may pay a
-model contributor until a model round passes the published reconstruction,
-preservation, improvement, quality, and rights gates.
+Standing cohort authority carries these rules without periodic coordinator
+renewal. A coordinator may be offline for longer than a nominal phase window;
+recovery delays the cohort instead of losing it. Conflicting signed histories,
+invalid signatures, changed immutable inputs and missing original evidence still
+fail closed and require repair. Eventual completion does not weaken integrity
+checks.
 
-If no model qualifies, continue burning the unallocated share. There is no
-retroactive award. After promotion, fresh evaluation and recipient eligibility
-remain required. An awarded contributor becoming ineligible, or a round without
-qualifying endpoint evidence, retains the existing hold; no silent fallback or
-redistribution is authorized. Preserve both the
-[version 1 terms](../MODEL_CONTRIBUTION_TERMS.md) and
-[version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) byte-for-byte. Every
-submission and policy must bind the version it actually accepted.
-An exact tie between the highest qualifying new model candidates promotes
-neither candidate; the share remains burned for that round.
+## Trust and evaluator profile
 
-### Version 1 to version 2 intake transition
+The initial C5 profile lists UID 0 and UID 54 as evaluators in the same
+`umi-operated` control group, with one required evaluator group. Either can
+continue the group's retained work after a state-preserving handoff, but their
+signatures do not count as independent operator votes. This remains a
+single-operator trust model. Adding another control group or increasing quorum
+requires a successor policy and qualification of that exact profile.
 
-Do not replace the version 1 intake database or reopen it with the sequence 5
-policy. The store, baseline, retained submissions, checkpoint, and finality
-cache are policy-bound. Opening those files under another digest either fails
-closed or risks losing the distinction between the two acceptances.
+## Protected inputs
 
-Before advertising sequence 5, the operator must:
+Before intake leaves its hold, fix and sign the exact:
 
-1. Quiesce writes long enough to take a consistent snapshot of the version 1
-   ledger, write-ahead log, checkpoint, baseline, public deployment record, and
-   finality cache. Retain the snapshot and its hashes off host.
-2. Keep every version 1 signed submission and receipt retrievable at a stable,
-   read-only archive route. Do not rewrite their policy or terms fields.
-3. Initialize a separate version 2 intake state with the same launch identity
-   and a separately recorded baseline under the sequence 5 policy. Its retained
-   submission list is empty until the first version 2 acceptance; the external
-   checkpoint must commit that exact empty head before the service starts.
-4. Change public status and the writable intake route together so they expose
-   `eae2a709bd54468d7ea42c370867be77144115ec709c22e976320828a0e90e56`
-   and the version 2 terms digest before accepting successor submissions.
-5. Give affected miners time to use the documented transition command, sign
-   with the same hotkey, and receive a new receipt by block `9,135,843`. Build
-   the reward roster only from accepted version 2 submissions. The version 1
-   archive remains evidence, not implied consent or a reward roster.
+- C5 policy, version 3 terms digest and standing cohort authority;
+- protected suite, references, strata and case provenance;
+- frozen baseline and execution runtime;
+- participant and model-artifact intake limits;
+- evaluator set, control groups and chain/RPC configuration;
+- service and model allocation rules; and
+- publication, evidence-retention and recovery destinations.
 
-With every version 1 writer stopped and its backup verified, export the
-content-addressed public archive before starting the sequence 5 service:
-
-```sh
-umi-competition --policy /ABSOLUTE/PRIVATE/version-1-policy.json \
-  export-intake-archive \
-  --state /ABSOLUTE/PRIVATE/version-1-intake \
-  --submission-head-checkpoint-directory /ABSOLUTE/PRIVATE/version-1-checkpoint \
-  --deployment /ABSOLUTE/PRIVATE/version-1-deployment.json \
-  --destination /ABSOLUTE/PRIVATE/version-1-public-archive \
-  --confirm-quiesced-backup
-```
-
-Put the printed `manifest_sha256` and archive directory in the sequence 5
-service configuration's `historical_archives` list. The service refuses an
-archive that is not the policy's immediate predecessor, lacks the durable
-external checkpoint commitment, belongs to another launch, or differs from the
-pinned manifest. The sequence 5 service also refuses to start without exactly
-one such archive. On first startup it writes the predecessor policy and manifest
-digests into the successor ledger; later startups reject configuration drift.
-Confirm the archived list, canonical manifest, and exact-record routes before
-changing the writable intake route. Hash the response bytes from the manifest
-and exact-record routes against their respective manifest commitments.
-
-Create the successor ledger while both public routes still point at version 1.
-Use the already preserved baseline archive; do not copy the old intake
-database:
-
-```sh
-v2_policy=/ABSOLUTE/PRIVATE/version-2-policy.json
-v2_state=/ABSOLUTE/PRIVATE/version-2-intake
-v2_checkpoint=/ABSOLUTE/PRIVATE/version-2-checkpoint
-v2_config=/ABSOLUTE/PRIVATE/version-2-service.json
-
-test ! -e "$v2_state"
-test ! -e "$v2_checkpoint"
-install -d -m 0700 "$v2_checkpoint"
-umi-competition --policy "$v2_policy" initialize-baseline \
-  --state "$v2_state" \
-  --manifest /ABSOLUTE/PRIVATE/baseline-manifest.json \
-  --archive /ABSOLUTE/PRIVATE/preserved-baseline
-umi-competition --policy "$v2_policy" status --state "$v2_state" \
-  > /ABSOLUTE/PRIVATE/version-2-initial-status.json
-```
-
-Build `v2_config` with the printed baseline promotion digest,
-`required_submission_sha256s: []`, the new checkpoint directory, and the pinned
-version 1 archive. Back up the new database, verify that configuration, then
-initialize its external empty-head commitment through the existing stopped-store
-migration command:
-
-```sh
-umi-competition-store-migrate \
-  --policy "$v2_policy" --state "$v2_state" \
-  --service-config "$v2_config" --confirm-quiesced-backup \
-  > /ABSOLUTE/PRIVATE/version-2-checkpoint-initialization.json
-jq -e '
-  .restart_services_without_migration == true and
-  .retained_submission_head.record_count == 0 and
-  .retained_submission_head.external_checkpoint_durable == true
-' /ABSOLUTE/PRIVATE/version-2-checkpoint-initialization.json >/dev/null
-```
-
-Before the first version 2 acceptance, rollback may restore the version 1
-service and its exact snapshot. Once version 2 has accepted anything, never
-discard that ledger or reopen version 1 for writes; preserve both histories and
-repair the successor deployment forward. Version 2 submissions cannot be copied
-into version 1. If the public archive, atomic route switch, or retained-state
-snapshot is not ready, keep version 1 intake live and do not advertise the
-successor policy.
-
-## Intake proof-cache retention
-
-The intake collector keeps the complete registration proof for each accepted
-submission, including replaced submissions. It also keeps all snapshots within
-the policy's `maximum_snapshot_age_blocks` window. Older background-poll
-snapshots with no admission receipt are pruned in the same transaction that
-retains a new proof. The finalized high-water mark, runtime artifacts, accepted
-submissions, receipts and their external checkpoint remain intact. SQLite
-reuses freed pages; the file need not shrink.
-
-This retention is specific to the intake service. Evaluator, endpoint and
-validator evidence stores keep their existing retention rules. In intake,
-`maximum_cache_bytes` covers runtime artifacts and unreferenced polling proofs;
-receipt-bound proofs are a durable archive outside that working-cache budget.
-The archive is limited by the admission ledger's record/byte bounds, individual
-proof-size bounds, and available disk. Provision disk for the expected accepted
-proof volume as well as the ledger and backups. A typical 220 KiB proof for
-each of 65,536 distinct admission snapshots needs about 14 GiB before overhead.
-The operational cache budget supports up to 20 GiB (`21474836480` bytes).
-Existing serialized defaults stay unchanged. Set the budget explicitly; changing
-it requires a stopped-service, backed-up cache-binding migration that verifies
-the old configuration and preserves proofs and the finalized high-water mark.
-
-Private logs report `registration_storage_pressure` when working-cache usage
-reaches 80%, or free disk falls below 20% or 1 GiB. Warnings repeat on pressure
-state changes, not every poll; recovery is logged separately. Monitor these
-warnings and public readiness. If the working window itself exhausts its
-budget, logs report `registration_refresh_failed error_type=RegistrationCacheFull`;
-`registration_refresh_recovered` reports recovery. A real storage failure still
-fails closed: readiness remains HTTP 503 once no fresh verified snapshot is
-available. No unchecked registration is admitted to conceal a storage failure.
-
-Back up the intake ledger, checkpoint and chain state before an upgrade. Do not
-delete the ledger, weaken finality checks or edit signed submissions to clear a
-cache error.
-
-## Burn proof
-
-The policy's `unallocated_model_burn` binds the destination UID, hotkey and
-`mode: Burn`. Prove `SubnetOwnerHotkey`, `RecycleOrBurn` and both directions of
-the UID/hotkey mapping at one owned finalized state root. Recheck before each
-weight submission. The destination cannot also receive endpoint or model rewards.
-
-An absent `RecycleOrBurn` requires a verified non-membership proof and a `Burn`
-default decoded from the bound runtime metadata. Missing RPC data alone is
-insufficient. A changed owner, mapping or unsupported mode holds submission.
+Keep protected labels and private clips outside public storage and execution
+requests. Candidate and baseline outputs use the same committed suite and
+runtime. Do not repair labels, replace cases or alter scoring after candidate
+outputs are known. See [private holdout operation](../operators/private-holdout.md).
 
 ## Activation checklist
 
-Record evidence for each item against the exact deployed artifacts. Unit tests,
-demo videos and private preparations do not substitute for these checks.
+Launch requires one retained evidence package for the exact production
+configuration. Complete these checks in order:
 
-1. Publish the policy, accepted terms, baseline, supported workload, resource
-   limits and contribution cutoffs. Check the evaluator hotkey's current permit.
-2. Verify protected-suite provenance, split integrity and private backups.
-   Keep labels out of execution and public storage until the committed reveal.
-   Retire exposed cases; stop new rounds when the unused pool is exhausted.
-3. Verify public intake, authenticated assignment discovery, actual model
-   responses inside 120 seconds, deadline handling and retained evidence.
-   Capacity must support the admitted roster. Missing work needs certified void
-   evidence or a hold, never invented results or coordinator-caused miner faults.
-4. Complete cutoff signing, reveal, settlement replay and signed publication.
-   Preserve original windows and evidence across retries. Rehearse restart and
-   interrupted delivery with the actual host and container sandbox.
-5. Verify immutable release downloads, the signed feed and the stopped-state
-   recovery preflight. Upgrade each validator separately, preserving keys,
-   journals, directive history and unresolved transaction evidence.
-6. Confirm the exact finalized competition row, then check consensus and
-   incentive before announcing that miners are earning competition rewards.
+1. **Policy and inputs:** Verify signatures, digests, baseline reconstruction,
+   model-rights requirements, protected-suite integrity and available unused
+   cases. Publish the miner-facing rules and tested commands.
+2. **Installed C4-to-C5 handoff:** Install C5 services beside C4 without selecting
+   them. Rehearse the signed handoff and prove a failed C5 boot leaves C4 active.
+3. **Mixed six-cohort recovery:** Run C5 through C10 with service and model tracks,
+   alternating coordinator/evaluator outages, restart replay, five-hour rests,
+   24-hour validator opportunities and previous-row continuity.
+4. **Capacity:** Run the intended host and container runtime with production-size
+   evidence and generous test watchdogs. Test watchdogs may detect harness stalls;
+   they must not define cohort expiry.
+5. **Storage and publication:** Restore evidence and model artifacts from the
+   private R2 copies, verify every digest, and publish bounded public discovery
+   records without exposing private clips or credentials.
+6. **Validator path:** Verify UID 0 and UID 54 independently consume the certified
+   row, survive restart and RPC failover, and retain uncertain transaction state.
+7. **Studio enrollment:** Submit the Studio baseline artifact to the public-model
+   track under the exact C5 policy and confirm its complete acceptance and durable
+   R2 copy.
+8. **Selection:** Publish the canonical standing boot selector only after all
+   preceding evidence passes. Verify the selected services, public status and
+   retained C4 rollback boundary.
+9. **Chain proof:** After settlement, confirm each intended validator's fresh
+   finalized row and the resulting incentive before announcing reward activation.
 
-Publication is part of each gate. Do not describe a source commit, local build,
-staged service or unfinalized transaction as live. When source and production
-differ, document the difference and treat the active signed policy, release and
-chain row as authoritative until the deployment is completed and checked.
+Source tests, a merged commit, staged files, a running service and a submitted
+transaction are intermediate evidence. None alone proves a live reward row.
 
-Until the exact signed feed configuration and a tested miner command are
-published, assignment delivery remains unavailable. Placeholder examples are
-not production configuration. Give miners operating lead time after publication;
-a coordinator, feed or evaluator infrastructure delay cannot be scored as miner
-failure. Follow the [incident and score-challenge rules](../OPEN_COMPETITION.md#incidents-and-score-challenges)
-for objective defects.
+## Operational references
 
-The process runs recurring reviewed rounds. The coordinator does not invent
-protected suites or move missed deadlines. Settled-row renewal has a bounded
-lifetime and needs fresh recipient and burn checks; it is not permission to use
-one benchmark forever. See [round operations](../operators/rounds.md),
-[publication and renewal](../operators/settlement.md) and
-[host upgrades](../validators/successor-upgrade.md).
+- [Current miner operation](../CURRENT_MINER_OPERATION.md)
+- [Submission commands](../reference/commands.md)
+- [Round coordination](../operators/rounds.md)
+- [Settlement and publication](../operators/settlement.md)
+- [Validator successor handoff](../validators/successor-upgrade.md)
+- [Public results API](../reference/competition-results-api.md)
+
+Retain C4's signed artifacts and evidence for replay. Remove obsolete migration
+instructions after no installed service or recovery consumer depends on them;
+Git history is the record of superseded launch plans.

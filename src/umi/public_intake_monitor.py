@@ -17,7 +17,7 @@ from pydantic import Field, JsonValue, ValidationError, field_validator, model_v
 from typing_extensions import Self
 
 from .competition_client import AdmissionReceipt
-from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
+from .competition_launch import IntakeScheduleHold, PublicIntakeDeployment, PublicRoundSchedule
 from .competition_service import RetainedIntakeState
 from .competition_submission_checkpoint import build_submission_checkpoint
 from .observer_models import ParticipantsResponse
@@ -249,12 +249,15 @@ class CompetitionStatus(StrictProtocolModel):
     admission_phase: Literal["not_open", "open", "closed", "capacity_exhausted", "unverified"]
     admission_checked_block: Annotated[int, Field(ge=0, le=2**53 - 1)]
     chain_submission_authorized: Literal[False]
+    # Deal-preserving predecessors whose signed submissions the intake still admits
+    # (competition_policy_lineage). Absent from statuses published before this field.
     honored_policy_sha256s: Annotated[tuple[Hex32, ...], Field(max_length=16)] | None = None
     deal_sha256: Hex32 | None = None
     deployment: dict[str, JsonValue]
     round_schedule: PublicRoundSchedule
     continuous_intake: Literal[True] | None = None
     next_intake_schedule: PublicRoundSchedule | None = None
+    intake_schedule_hold: IntakeScheduleHold | None = None
     assignment_delivery_ready: bool
     model_intake_ready: bool
     evaluation_ready: bool
@@ -275,6 +278,7 @@ class CompetitionReadiness(StrictProtocolModel):
     round_schedule: PublicRoundSchedule
     continuous_intake: Literal[True] | None = None
     next_intake_schedule: PublicRoundSchedule | None = None
+    intake_schedule_hold: IntakeScheduleHold | None = None
     retained_state: RetainedIntakeState
     retained_submission_head: RetainedSubmissionHead
     assignment_delivery_ready: bool
@@ -618,13 +622,14 @@ def _validate_status_readiness(
     expected_phase, expected_ready_for, expected_accepting = _phase(status, deployment, policy)
     continuous = deployment.round_stride_blocks is not None
     expected_next = (
-        deployment.launch_identity().next_intake_schedule(status.admission_checked_block)
+        deployment.next_intake_schedule(status.admission_checked_block)
         if continuous and status.admission_accepting_new
         else None
     )
     if any(
         value.continuous_intake != (True if continuous else None)
         or value.next_intake_schedule != expected_next
+        or value.intake_schedule_hold != deployment.intake_schedule_hold
         for value in (status, readiness)
     ):
         _fail("continuous_intake_schedule_mismatch")

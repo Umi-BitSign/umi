@@ -10,13 +10,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_chain import CompetitionChainConfig
@@ -24,7 +23,11 @@ from .competition_chain_state import (
     FinalizedCompetitionWeightProvider,
     validate_owned_weight_observation,
 )
+from .competition_evidence_config import EvidenceStorageConfig
+from .competition_evidence_worker import ContentAddressedWeightWorker
 from .competition_package import load_competition_package
+from .competition_package_reuse import package_verification_session
+from .competition_reward_continuity import authorized_reward_row
 from .competition_weights import (
     BittensorCompetitionWeightTransport,
     CompetitionWeightWorker,
@@ -33,7 +36,6 @@ from .competition_weights import (
     verify_competition_weight_authorization,
 )
 from .competition_worker import CompetitionReplayWorker, CompetitionWorkerCapacity
-from .encoding import account_id32
 from .open_competition import Registration
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -46,7 +48,6 @@ WORKER_FINALITY_BINARY = Path("/opt/umi/bin/umi-grandpa-finality-observer")
 WORKER_PROOF_BINARY = Path("/opt/umi/bin/umi-substrate-proof-verifier")
 WORKER_RUNTIME_METADATA_BINARY = Path("/opt/umi/bin/umi-runtime-metadata")
 WORKER_CHAIN_SPEC = Path("/opt/umi/raw_spec_finney.json")
-_MAX_KEYFILE_BYTES = 128 * 1024
 _MAX_STDOUT_BYTES = 128 * 1024
 
 
@@ -55,6 +56,14 @@ class SuccessorWeightExecutionConfig(StrictProtocolModel):
     maximum_evidence_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)]
     submission_timeout_seconds: Annotated[int, Field(ge=1, le=3600)]
     chain: CompetitionChainConfig
+    evidence_storage: EvidenceStorageConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.evidence_storage is None:
+            value.pop("evidence_storage", None)
+        return value
 
     @model_validator(mode="after")
     def fixed_paths_and_target(self) -> Self:
@@ -86,56 +95,28 @@ class SuccessorWeightExecutionConfig(StrictProtocolModel):
 class SuccessorWorkerExecutionConfig(StrictProtocolModel):
     """Per-run settings authenticated by the host within installed quota ceilings."""
 
-    schema_: Literal["umi-successor-worker-execution-config/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-successor-worker-execution-config/1", "umi-successor-worker-execution-config/2"
+    ] = Field(alias="schema")
     replay_capacity: CompetitionWorkerCapacity
     weights: SuccessorWeightExecutionConfig | None
 
+    @model_validator(mode="after")
+    def storage_version(self) -> Self:
+        if self.weights is not None and (
+            (self.weights.evidence_storage is not None)
+            != (self.schema_ == "umi-successor-worker-execution-config/2")
+        ):
+            raise ValueError(
+                "evidence storage requires an explicit execution configuration version"
+            )
+        return self
+
 
 def _load_hotkey(expected_hotkey: str):
-    # No Wallet constructor, coldkey lookup, password environment or prompt.
-    # Only the already-approved hotkey file is mounted into this worker.
-    from bittensor.keyfiles import (
-        deserialize_keypair_from_keyfile_data,
-        keyfile_data_is_encrypted,
-    )
+    from .named_hotkey import load_named_hotkey
 
-    from .competition_upgrade import _fingerprint, _open_without_links
-
-    descriptor = _open_without_links(WORKER_HOTKEY_FILE)
-    try:
-        before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_uid not in {0, os.geteuid()}
-            or stat.S_IMODE(before.st_mode) != 0o400
-            or not 0 < before.st_size <= _MAX_KEYFILE_BYTES
-        ):
-            raise ValueError("successor hotkey mount is unsafe")
-        body = bytearray()
-        while chunk := os.read(descriptor, min(8192, _MAX_KEYFILE_BYTES + 1 - len(body))):
-            body.extend(chunk)
-            if len(body) > _MAX_KEYFILE_BYTES:
-                raise ValueError("successor hotkey mount exceeds its bound")
-        if len(body) != before.st_size or _fingerprint(os.fstat(descriptor)) != _fingerprint(
-            before
-        ):
-            raise ValueError("successor hotkey mount changed while reading")
-    finally:
-        os.close(descriptor)
-    try:
-        if keyfile_data_is_encrypted(bytes(body)):
-            raise ValueError("successor hotkey must be unlocked by its operator before staging")
-        signer = deserialize_keypair_from_keyfile_data(bytes(body))
-        if account_id32(signer.ss58_address) != account_id32(expected_hotkey):
-            raise ValueError("successor hotkey differs from its installed identity")
-        if signer.crypto_type not in {0, 1}:
-            raise ValueError("successor hotkey has an unsupported signing scheme")
-        return signer
-    finally:
-        # Best-effort cleanup of this mutable read buffer, not a claim that
-        # Python or the SDK can erase all private-key copies from memory.
-        body[:] = b"\x00" * len(body)
+    return load_named_hotkey(WORKER_HOTKEY_FILE, expected_hotkey)
 
 
 def _load_inputs():
@@ -212,7 +193,7 @@ async def run_worker(mode: Literal["competition_replay", "competition_weights"])
         await chain.start()
         recipients = tuple(
             Registration(uid=item.uid, hotkey=item.hotkey)
-            for item in package.retained_settlement.projection.allocations
+            for item in authorized_reward_row(package, body).allocations
         )
         observation = await chain.wait_weights_ready(inputs.validator_hotkey, recipients)
         validate_owned_weight_observation(observation)
@@ -230,13 +211,16 @@ async def run_worker(mode: Literal["competition_replay", "competition_weights"])
             raise ValueError("successor activation changed during observer startup")
         signer = _load_hotkey(inputs.validator_hotkey)
         inputs.recheck()
-        worker = CompetitionWeightWorker(
+        storage = config.weights.evidence_storage
+        worker_type = CompetitionWeightWorker if storage is None else ContentAddressedWeightWorker
+        worker = worker_type(
             WORKER_WEIGHTS_STATE_ROOT,
             package_limits=target.limits,
             replay_worker=replay,
             maximum_attempts=config.weights.maximum_attempts,
             maximum_evidence_bytes=config.weights.maximum_evidence_bytes,
             submission_timeout_seconds=config.weights.submission_timeout_seconds,
+            **({} if storage is None else storage.worker_options()),
         )
         return await worker.run(
             WORKER_PACKAGE_ROOT,
@@ -244,7 +228,10 @@ async def run_worker(mode: Literal["competition_replay", "competition_weights"])
             activation=activation,
             wallet=signer,
             chain=chain,
-            transport=BittensorCompetitionWeightTransport(endpoint=chain_config.rpc_url),
+            transport=BittensorCompetitionWeightTransport(
+                endpoint=chain_config.rpc_url,
+                fallback_endpoints=chain_config.proof_rpc_fallback_urls,
+            ),
         )
     finally:
         await chain.aclose()
@@ -260,7 +247,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     os.umask(0o077)
     try:
-        result = asyncio.run(run_worker(args.mode))
+        with package_verification_session():
+            result = asyncio.run(run_worker(args.mode))
         encoded = canonical_json_bytes(result)
         if len(encoded) > _MAX_STDOUT_BYTES:
             raise ValueError("successor worker result exceeds its output bound")

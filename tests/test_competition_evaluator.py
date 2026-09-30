@@ -526,6 +526,30 @@ def test_evaluator_opener_uses_shared_scheduling_capacity(paired_setup, chain_co
         )
 
 
+def test_separate_execution_limit_preserves_history_and_legacy_binding(setup):
+    first = setup.drivers[0]
+    first.journal.admit(setup.order, execution_key(setup.job))
+    with first.journal.transaction() as db:
+        original = bytes(db.execute("SELECT body FROM binding").fetchone()[0])
+    assert b'"journal_limits"' not in original
+    config = first.config.model_copy(
+        update={
+            "maximum_journal_bytes": 12 * 1024**3,
+            "journal_limits": worker.EvaluatorJournalLimits(execution=2 * 1024**3),
+        }
+    )
+    reopened = worker.ContinuousEvaluator(config, first.policy, first.wallet, first.provider)
+    assert reopened.executions.maximum_bytes == 2 * 1024**3
+    assert reopened.journal.config.maximum_journal_bytes == 12 * 1024**3
+    assert reopened.journal.orders() == first.journal.orders()
+    with reopened.journal.transaction() as db:
+        assert bytes(db.execute("SELECT body FROM binding").fetchone()[0]) == original
+    legacy = worker.EvaluatorConfig.model_validate_json(
+        canonical_json_bytes(config.model_dump(by_alias=True, exclude={"journal_limits"}))
+    )
+    assert legacy.journal_limit("execution") == legacy.maximum_journal_bytes
+
+
 def test_capacity_failure_retains_history_and_does_not_execute(setup):
     first = setup.drivers[0]
     first.journal.admit(setup.order, execution_key(setup.job))

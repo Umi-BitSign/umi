@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from contextlib import suppress
 from pathlib import Path
@@ -16,6 +17,11 @@ from umi.competition_package import (
     competition_package_digest,
     load_competition_package,
     prepare_competition_package,
+)
+from umi.competition_policy_lineage import (
+    clear_lineage_registry,
+    register_lineage,
+    registered_lineage,
 )
 from umi.protocol import canonical_json_bytes
 
@@ -123,6 +129,94 @@ def _replace_payload(case, name: str, body: bytes) -> str:
     return competition_package_digest(manifest)
 
 
+@pytest.fixture(params=(1, 2))
+def carried_package(tmp_path, policy, replay_limits, package_limits, release_identity, request):
+    successor = policy.model_copy(
+        update={
+            "sequence": policy.sequence + 1,
+            "predecessor_sha256": digest(policy),
+            "maximum_inference_ms": policy.maximum_inference_ms * 2,
+        }
+    )
+    predecessors = (policy,)
+    if request.param == 2:
+        predecessors = (successor, policy)
+        successor = successor.model_copy(
+            update={
+                "sequence": successor.sequence + 1,
+                "predecessor_sha256": digest(successor),
+            }
+        )
+    scenario = _scenario(
+        policy,
+        tmp_path / "scenario",
+        replay_limits,
+        successor_policy=successor,
+        predecessor_policies=predecessors,
+    )
+    prepared = prepare_competition_package(
+        policy=successor,
+        cutoff_certificate=scenario.cutoff_certificate,
+        settlement_certificate=scenario.settlement_certificate,
+        retained_settlement=scenario.settlement,
+        roster=scenario.submissions,
+        evidence=scenario.evidence,
+        replay_limits=replay_limits,
+        release_identity=release_identity,
+        destination_root=tmp_path / "packages",
+        limits=package_limits,
+    )
+    case = SimpleNamespace(
+        prepared=prepared,
+        path=Path(prepared.package_path),
+        policy=successor,
+        predecessors=predecessors,
+    )
+    try:
+        yield case
+    finally:
+        case.path.chmod(0o700)
+
+
+def test_carried_package_replays_without_process_registry(
+    carried_package, policy, package_limits, release_identity
+):
+    case = carried_package
+    roster = json.loads((case.path / "roster.json").read_bytes())
+    assert roster["schema"] == "umi-competition-replay-roster/2"
+    assert roster["predecessor_policies"] == [
+        p.model_dump(mode="json", by_alias=True) for p in case.predecessors
+    ]
+    clear_lineage_registry()
+    loaded = _load(case, case.policy, package_limits, release_identity)
+    assert loaded.roster.predecessor_policies == case.predecessors
+    assert registered_lineage(case.policy).admitted_policy_sha256s == (digest(case.policy),)
+
+
+@pytest.mark.parametrize("mutation", ["omitted", "different", "reversed_version"])
+def test_package_cannot_borrow_undeclared_lineage(
+    carried_package, policy, package_limits, release_identity, mutation
+):
+    case = carried_package
+    # A warm service process must not make an incomplete package appear valid.
+    register_lineage(case.policy, case.predecessors)
+    before = registered_lineage(case.policy).admitted_policy_sha256s
+    roster = json.loads((case.path / "roster.json").read_bytes())
+    if mutation == "omitted":
+        roster["schema"] = "umi-competition-replay-roster/1"
+        roster.pop("predecessor_policies")
+    elif mutation == "different":
+        roster["predecessor_policies"][0]["maximum_inference_ms"] += 1
+    else:
+        roster["schema"] = "umi-competition-replay-roster/1"
+    package_id = _replace_payload(case, "roster.json", canonical_json_bytes(roster))
+    with pytest.raises(ValueError):
+        _load(
+            case, case.policy, package_limits, release_identity, expected_package_sha256=package_id
+        )
+    assert registered_lineage(case.policy).admitted_policy_sha256s == before
+
+
 def test_prepare_load_and_exact_retry(
     package_case, policy, replay_limits, package_limits, release_identity
 ):
@@ -145,6 +239,7 @@ def test_prepare_load_and_exact_retry(
     assert loaded.package_sha256 == case.prepared.package_sha256
     assert loaded.manifest.policy_sha256 == digest(policy)
     assert loaded.retained_settlement == case.scenario.settlement
+    assert set(json.loads((case.path / "roster.json").read_bytes())) == {"schema", "submissions"}
     assert {entry.name for entry in case.path.iterdir()} == {
         "manifest.json",
         "cutoff-certificate.json",

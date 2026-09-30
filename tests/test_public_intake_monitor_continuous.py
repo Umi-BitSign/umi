@@ -125,3 +125,51 @@ def test_deal_fields_parse_but_unknown_fields_still_fail(intake_scenario):
     capture.status["unreviewed_field"] = True
     with pytest.raises(PublicIntakeMonitorError, match="invalid_competition_status"):
         parse_status(capture.status)
+
+
+def held_capture(scenario):
+    capture, deployment = continuous(scenario)
+    hold = {
+        "schema": "umi-competition-intake-schedule-hold/1",
+        "cohort_number": 5,
+    }
+    deployment = PublicIntakeDeployment.model_validate(
+        {
+            **deployment.model_dump(by_alias=True),
+            "evaluation_ready": False,
+            "intake_schedule_hold": hold,
+        }
+    )
+    for value in (
+        capture.status_before,
+        capture.status,
+        capture.readiness_before,
+        capture.readiness,
+    ):
+        value.update(
+            deployment=deployment.model_dump(mode="json", by_alias=True),
+            evaluation_ready=False,
+            next_intake_schedule=None,
+            intake_schedule_hold=deployment.intake_schedule_hold.model_dump(
+                mode="json", by_alias=True
+            ),
+        )
+    return capture, deployment
+
+
+def test_monitor_accepts_deployment_bound_hold_without_cutoff(intake_scenario):
+    capture, deployment = held_capture(intake_scenario)
+    assert validate(intake_scenario, capture, deployment) == []
+
+
+@pytest.mark.parametrize("fault", ["missing_hold", "wrong_cohort", "invented_cutoff"])
+def test_monitor_rejects_hold_mismatch(intake_scenario, fault):
+    capture, deployment = held_capture(intake_scenario)
+    if fault == "missing_hold":
+        capture.readiness.pop("intake_schedule_hold")
+    elif fault == "wrong_cohort":
+        capture.status["intake_schedule_hold"]["cohort_number"] = 6
+    else:
+        capture.status["next_intake_schedule"] = capture.status["round_schedule"]
+    with pytest.raises(PublicIntakeMonitorError, match="continuous_intake_schedule_mismatch"):
+        validate(intake_scenario, capture, deployment)

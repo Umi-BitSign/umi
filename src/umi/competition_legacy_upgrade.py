@@ -19,7 +19,8 @@ from .competition_legacy_marker import (
     PriorMarkerPending,
     hold_marker_publisher,
 )
-from .competition_recovery import prepare_recovery_checkpoint, verify_recovery_checkpoint
+from .competition_recovery import manifest_anchor_for_snapshot
+from .competition_recovery_capture import prepare_recovery_checkpoint, verify_recovery_checkpoint
 from .competition_upgrade import _fingerprint, _open_without_links
 from .competition_weights import BittensorCompetitionWeightTransport
 from .concurrency import wait_for_owned
@@ -149,7 +150,10 @@ async def recover_legacy_checkpoint(
                         observation = await provider.wait_weights_ready(
                             stopped.validator_hotkey, ()
                         )
-                transport = BittensorCompetitionWeightTransport(endpoint=provider.config.rpc_url)
+                transport = BittensorCompetitionWeightTransport(
+                    endpoint=provider.config.rpc_url,
+                    fallback_endpoints=provider.config.proof_rpc_fallback_urls,
+                )
                 try:
                     await wait_for_owned(publisher.submit(transport, signer), timeout=120)
                 except Exception as exc:
@@ -163,11 +167,19 @@ async def recover_legacy_checkpoint(
                         break
                     _LOG.info("legacy_marker_waiting_for_finalized_drain")
                     await asyncio.sleep(10)
-                observation = await provider.wait_weights_ready(stopped.validator_hotkey, ())
+
+                async def observe(snapshot):
+                    observation = await provider.wait_weights_ready(
+                        stopped.validator_hotkey,
+                        (),
+                        manifest_anchor_sha256=manifest_anchor_for_snapshot(snapshot),
+                    )
+                    return observation, None
+
                 if retained_checkpoint is None:
-                    prepared = prepare_recovery_checkpoint(
+                    prepared = await prepare_recovery_checkpoint(
                         stopped,
-                        observation,
+                        observe=observe,
                         destination_root=recovery_root,
                         limits=limits,
                         historical_manifests=historical_manifests,
@@ -177,12 +189,11 @@ async def recover_legacy_checkpoint(
                     path, sha = Path(prepared.checkpoint_path), prepared.checkpoint_sha256
                 else:
                     path, sha = retained_checkpoint
-                observation = await provider.wait_weights_ready(stopped.validator_hotkey, ())
-                verified = verify_recovery_checkpoint(
+                verified = await verify_recovery_checkpoint(
                     path,
                     expected_checkpoint_sha256=sha,
                     stopped=stopped,
-                    observation=observation,
+                    observe=observe,
                     limits=limits,
                     legacy_drain=proof,
                 )

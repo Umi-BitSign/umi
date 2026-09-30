@@ -147,12 +147,13 @@ def configure_dispatch(
             return
         if old is not None:
             states = _states(db)
+            retired = journal.retired_claims(db)
             for body in _bodies(db, evaluator).values():
                 for assignment in body.assignments:
                     if identity(assignment.evaluator_hotkey) != evaluator:
                         continue
                     key_ = capacity_job(body, assignment, journal.legacy_policy).assignment_key
-                    if states.get(key_) not in {"completed", "expired"}:
+                    if states.get(key_) not in {"completed", "expired"} and key_ not in retired:
                         raise ValueError("dispatch timing profile has unfinished assigned work")
         db.execute(
             "INSERT INTO metadata VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -162,7 +163,13 @@ def configure_dispatch(
 
 
 def recover_dispatch_qualification(
-    db: sqlite3.Connection, batch_id: str, evaluator_hotkey: str, now: int
+    journal: AssignmentPublicationJournal,
+    db: sqlite3.Connection,
+    batch_id: str,
+    evaluator_hotkey: str,
+    now: int,
+    *,
+    requalify: bool = True,
 ) -> dict[str, Any]:
     """Continue the same admitted cohort without admitting its work twice.
 
@@ -172,8 +179,14 @@ def recover_dispatch_qualification(
     still checks the original window and finality; new cohorts requalify fully.
 
     The caller owns the active write transaction and supplies Unix milliseconds
-    in ``now``. This function reads the retained receipt without extending it
-    or changing the transaction boundary.
+    in ``now``. The original receipt and its identity remain unchanged. If its
+    delivery assumption was missed, continuing requires a fresh conservative
+    check of all remaining work with 20 percent deadline reserve. Unknown
+    dispatch outcomes block that check; no claim is retried or deadline moved.
+
+    Receipt verification for an already admitted evaluation order may omit the
+    renewed timing calculation. It still checks the original receipt, profile,
+    clock and fresh owned finality; it grants no new dispatch commitment.
     """
     evaluator = identity(evaluator_hotkey)
     row = db.execute(
@@ -209,7 +222,37 @@ def recover_dispatch_qualification(
             (batch_id, delivery_close),
         ).fetchone()
     ):
-        raise ValueError("reserved cohort publication delivery allowance elapsed")
+        highwater = dict(db.execute("SELECT key,value FROM metadata"))
+        observed = journal._retained_block(db, int(highwater["last_observed_height"]))
+        if not (
+            now - journal.maximum_observation_age_seconds * 1000
+            <= observed.timestamp_ms
+            <= now + journal.maximum_future_skew_seconds * 1000
+        ):
+            raise ValueError("late delivery recovery requires fresh owned finality")
+        if not requalify:
+            return receipt
+        publications = tuple(
+            EndpointAuthorizationPublication.model_validate_json(bytes(raw))
+            for (raw,) in db.execute(
+                "SELECT body FROM reservation_publications WHERE batch_id=? ORDER BY id",
+                (batch_id,),
+            )
+        )
+        if not publications:
+            raise ValueError("late delivery recovery lost its reserved publications")
+        # Recheck current workload in the same transaction. Charge the complete
+        # configured publication allowance again, plus all remaining work. Do
+        # not reset qualified_at, replace the original receipt or drop a job.
+        qualify_dispatch(
+            journal,
+            db,
+            publications,
+            observed,
+            now,
+            evaluator_hotkey,
+            minimum_margin_bps=2000,
+        )
     return receipt
 
 
@@ -220,6 +263,8 @@ def qualify_dispatch(
     observed: VerifiedFinalizedBlock,
     now: int,
     evaluator_hotkey: str,
+    *,
+    minimum_margin_bps: int = 0,
 ) -> dict[str, Any]:
     """Check all local pending work before a new endorsement, in one snapshot.
 
@@ -251,6 +296,7 @@ def qualify_dispatch(
     for body in publications:
         bodies[digest(body)] = body
     states = _states(db)
+    retired = journal.retired_claims(db)
     jobs = []
     for body_id, body in bodies.items():
         for assignment in body.assignments:
@@ -258,6 +304,8 @@ def qualify_dispatch(
                 continue
             job = capacity_job(body, assignment, journal.legacy_policy)
             state = states.get(job.assignment_key)
+            if job.assignment_key in retired:
+                continue
             if state == "dispatched":
                 raise ValueError("dispatch capacity awaits the prior claim outcome")
             if state in {"completed", "expired"}:
@@ -272,7 +320,7 @@ def qualify_dispatch(
     try:
         # Retained history is not the inbox. Count only files actually present,
         # plus active bodies whose signed files are still to be delivered.
-        names = publication_names(fd)
+        names = publication_names(fd, maximum_files=journal.maximum_publications)
     finally:
         os.close(fd)
     expected_files = {key + ".json" for key in active_publications}
@@ -284,7 +332,25 @@ def qualify_dispatch(
         now_ms=now,
         observed_block=observed.height,
         additional_inbox_publications=additional,
+        maximum_inbox_files=journal.maximum_publications,
     )
+    if minimum_margin_bps:
+        for job in jobs:
+            margins = (
+                (job.issue_close_ms - result.last_start_upper_bound_ms, job.issue_close_ms - now),
+                (
+                    job.response_close_ms - result.last_finish_upper_bound_ms,
+                    job.response_close_ms - now,
+                ),
+                (
+                    job.deadline_block - result.finish_block_upper_bound,
+                    job.deadline_block - observed.height,
+                ),
+            )
+            if any(
+                margin * 10000 < remaining * minimum_margin_bps for margin, remaining in margins
+            ):
+                raise ValueError("late delivery recovery lacks required deadline reserve")
     return {
         "evaluator": evaluator,
         "profile": profile,

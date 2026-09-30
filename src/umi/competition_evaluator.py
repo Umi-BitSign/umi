@@ -14,10 +14,11 @@ import signal
 import sqlite3
 import stat
 from contextlib import contextmanager, suppress
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from . import competition_evaluator_capacity as evaluator_capacity
 from .competition_authorization import (
@@ -72,6 +73,7 @@ from .competition_void import (
     verify_evaluation_void,
     void_evidence_digest,
 )
+from .concurrency import run_owned_thread
 from .drand import QuicknetClient
 from .open_competition import (
     AttestedResult,
@@ -96,6 +98,7 @@ from .private_files import private_path as _path
 from .private_files import publish_private_model as _publish
 from .private_files import read_private_model as _read
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .sqlite_contention import is_sqlite_contention
 
 if TYPE_CHECKING:
     from .competition_work_plans import WorkPlan
@@ -170,6 +173,15 @@ def _validate_observation(receipt, order, evidence_sha256, hotkey, *, model, cut
     return receipt
 
 
+class EvaluatorJournalLimits(StrictProtocolModel):
+    """Optional per-store ceilings; omitted values use maximum_journal_bytes."""
+
+    execution: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+    round_signing: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+    work_signing: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+    work_admission: Annotated[int, Field(ge=1024, le=16 * 1024**3)] | None = None
+
+
 class EvaluatorConfig(StrictProtocolModel):
     schema_: Literal["umi-evaluator-config/1"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -193,17 +205,38 @@ class EvaluatorConfig(StrictProtocolModel):
     work_minimum_issue_ms: Annotated[int, Field(ge=1, le=300_000)] | None = None
     settlement_review_directory: Directory | None = None
     settlement_replay_limits: PublicationReplayLimits | None = None
+    # Explicit local-only settlement connection; the public coordinator remains
+    # the logical source for every role. Configure before initializing journals.
+    settlement_loopback_port: Annotated[int, Field(ge=1, le=65535)] | None = None
     assignment_directory: Directory | None = None
     poll_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     maximum_orders: Annotated[int, Field(ge=1, le=65536)] = 1024
     page_size: Annotated[int, Field(ge=1, le=16)] = 4
     maximum_parallel_jobs: Annotated[int, Field(ge=1, le=4)] = 1
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    journal_limits: EvaluatorJournalLimits = Field(default_factory=EvaluatorJournalLimits)
     scheduling_capacity: SchedulingCapacity = Field(default_factory=SchedulingCapacity)
     no_weight: Literal[True] = True
 
+    @model_serializer(mode="wrap")
+    def serialize_legacy_config(self, handler):
+        value = handler(self)
+        if self.settlement_loopback_port is None:
+            value.pop("settlement_loopback_port", None)
+        return value
+
+    def journal_limit(
+        self, name: Literal["execution", "round_signing", "work_signing", "work_admission"]
+    ) -> int:
+        value = getattr(self.journal_limits, name)
+        return self.maximum_journal_bytes if value is None else value
+
     @model_validator(mode="after")
     def bindings(self):
+        if self.settlement_loopback_port is not None and self.settlement_review_directory is None:
+            raise ValueError(
+                "settlement loopback requires configured independent settlement signing"
+            )
         if (self.settlement_review_directory is None) != (
             self.settlement_replay_limits is None
         ) or (
@@ -432,6 +465,7 @@ class EvaluatorJournal:
                     exclude={
                         "maximum_orders",
                         "maximum_journal_bytes",
+                        "journal_limits",
                         "scheduling_capacity",
                         "maximum_parallel_jobs",
                         "page_size",
@@ -452,8 +486,12 @@ class EvaluatorJournal:
                     },
                 )
             )
-            if old and (len(old) != 1 or bytes(old[0][0]) != binding):
+            if old and len(old) != 1:
                 raise ValueError("evaluator journal configuration changed")
+            if old:
+                from .competition_chain_capacity import validate_evaluator_binding
+
+                validate_evaluator_binding(db, bytes(old[0][0]), binding)
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (binding,))
             db.execute(
@@ -718,7 +756,7 @@ class ContinuousEvaluator:
             Path(config.state_directory) / "executions",
             policy,
             maximum_jobs=config.maximum_orders,
-            maximum_bytes=config.maximum_journal_bytes,
+            maximum_bytes=config.journal_limit("execution"),
         )
         self.dispatch = (
             None
@@ -765,6 +803,7 @@ class ContinuousEvaluator:
                 self.round_client.journal,
                 self.review_store,
                 limits=config.settlement_replay_limits,
+                loopback_port=config.settlement_loopback_port,
             )
         if config.work_signing_chain is not None:
             from .competition_dispatch import DispatchFinalityProvider
@@ -906,20 +945,24 @@ class ContinuousEvaluator:
     async def advance(self, slot, signed, head):
         order = signed.order
         job = order_job(order, self.config.evaluator_hotkey, self.policy, self.legacy)
-        void = self.journal.get(slot, "void", VoidEvaluationEvidence)
+        void = await run_owned_thread(self.journal.get, slot, "void", VoidEvaluationEvidence)
         if void is not None:
             await self.observe_void(slot, order, void)
             self._output(order, "void", void.certificate)
             return "complete"
-        final = self.journal.get(slot, "independent", IndependentEvaluationEvidence)
+        final = await run_owned_thread(
+            self.journal.get, slot, "independent", IndependentEvaluationEvidence
+        )
         if final is not None:
             await self.observe_independent(slot, order, final)
             self._output(order, "independent", final)
             return "complete"
         if head > order.round.valid_through_block:
             return "expired"
-        state = self.executions.status(execution_key(job))
-        if state is None:
+        state = await run_owned_thread(self.executions.status, execution_key(job))
+        if state is None or (
+            state["status"] in {"failed", "authorized"} and self.executions.recovery_ready(job)
+        ):
             if head <= order.round.submission_close_block:
                 return "scheduled"
             if head > order.round.evaluation_close_block:
@@ -939,48 +982,114 @@ class ContinuousEvaluator:
             raise ValueError("revealed suite differs from the committed hash")
         own = self.journal.get(slot, "announcement", SignedExecutionAnnouncement)
         if own is None:
-            retained = self.executions.reserve(job)
-            assert retained is not None
-            if isinstance(job, EndpointIncumbentJob):
-                pulses = {}
-                for number in sorted(
-                    {
-                        a.request.reveal_round
-                        for a in order.publication.publication.assignments
-                        if identity(a.evaluator_hotkey) == identity(job.evaluator_hotkey)
-                        and a.submission_sha256 == digest(job.submission.submission)
-                    }
-                ):
-                    key = "pulse:" + str(number)
-                    pulse = self.journal.get(slot, key, RetainedRevealPulse)
-                    if pulse is None:
-                        fetched = await self.pulses.fetch(number)
-                        pulse = RetainedRevealPulse(
-                            round=fetched.round,
-                            randomness=fetched.randomness,
-                            signature=fetched.signature,
+            announcement = self.journal.get(slot, "announcement_intent", ExecutionAnnouncement)
+            if announcement is None:
+                retained = self.executions.reserve(job)
+                assert retained is not None
+                if isinstance(job, EndpointIncumbentJob):
+                    pulses = {}
+                    for number in sorted(
+                        {
+                            a.request.reveal_round
+                            for a in order.publication.publication.assignments
+                            if identity(a.evaluator_hotkey) == identity(job.evaluator_hotkey)
+                            and a.submission_sha256 == digest(job.submission.submission)
+                        }
+                    ):
+                        key = "pulse:" + str(number)
+                        pulse = self.journal.get(slot, key, RetainedRevealPulse)
+                        if pulse is None:
+                            fetched = await self.pulses.fetch(number)
+                            pulse = RetainedRevealPulse(
+                                round=fetched.round,
+                                randomness=fetched.randomness,
+                                signature=fetched.signature,
+                            )
+                            pulse.verified()
+                            if pulse.round != number:
+                                raise ValueError("wrong reveal pulse")
+                            self.journal.put(slot, key, pulse)
+                        pulses[number] = pulse
+                    # An explicit quorum-signed amendment is an additional input;
+                    # absent it, the historical complete-transcript rule is unchanged.
+                    from .competition_dispatch_repair import (
+                        SignedDispatchRepair,
+                        assemble_unavailable_observations,
+                    )
+
+                    repair_path = (
+                        Path(self.config.state_directory)
+                        / "dispatch-repairs"
+                        / (digest(order) + ".json")
+                    )
+                    repair = (
+                        _read(repair_path, SignedDispatchRepair) if repair_path.exists() else None
+                    )
+                    own_repair_claims = (
+                        ()
+                        if repair is None
+                        else tuple(
+                            c
+                            for c in repair.amendment.unavailable
+                            if identity(c.evaluator_hotkey) == identity(job.evaluator_hotkey)
                         )
-                        pulse.verified()
-                        if pulse.round != number:
-                            raise ValueError("wrong reveal pulse")
-                        self.journal.put(slot, key, pulse)
-                    pulses[number] = pulse
-                retained = assemble_endpoint_observations(
-                    incumbent=retained,
+                    )
+                    recovered = own_repair_claims and all(
+                        (self.dispatch.status(c.assignment_key) or {}).get("state") == "completed"
+                        for c in own_repair_claims
+                    )
+                    if own_repair_claims and not recovered:
+                        retained = assemble_unavailable_observations(
+                            incumbent=retained,
+                            journal=self.dispatch,
+                            signed_order=signed,
+                            repair=repair,
+                            suite=suite,
+                            pulses=pulses,
+                            current_block=head,
+                        )
+                    else:
+                        retained = assemble_endpoint_observations(
+                            incumbent=retained,
+                            journal=self.dispatch,
+                            publication_sha256=digest(order.publication.publication),
+                            suite=suite,
+                            pulses=pulses,
+                            current_block=head,
+                        )
+                execution_observations(retained, suite, self.policy, current_block=head)
+                announcement = ExecutionAnnouncement(
+                    schema="umi-execution-announcement/1",
+                    order_sha256=digest(order),
+                    evaluator_hotkey=job.evaluator_hotkey,
+                    evidence=retained,
+                )
+                self.journal.put(slot, "announcement_intent", announcement)
+            if announcement.order_sha256 != digest(order) or identity(
+                announcement.evaluator_hotkey
+            ) != identity(job.evaluator_hotkey):
+                raise ValueError("retained announcement intent differs from its order or evaluator")
+            view = execution_observations(
+                announcement.evidence, suite, self.policy, current_block=head
+            )
+            if view["job"] != job:
+                raise ValueError("retained announcement intent differs from its execution job")
+            from .competition_dispatch_repair import (
+                EndpointUnavailableEvidence,
+                validate_local_repair,
+            )
+
+            if isinstance(announcement.evidence, EndpointUnavailableEvidence):
+                validate_local_repair(
+                    announcement.evidence.repair,
                     journal=self.dispatch,
-                    publication_sha256=digest(order.publication.publication),
-                    suite=suite,
-                    pulses=pulses,
+                    evaluator_hotkey=job.evaluator_hotkey,
+                    retained_intent=(self.journal, slot),
+                    signed_order=signed,
+                    policy=self.policy,
+                    legacy=self.legacy,
                     current_block=head,
                 )
-            execution_observations(retained, suite, self.policy, current_block=head)
-            announcement = ExecutionAnnouncement(
-                schema="umi-execution-announcement/1",
-                order_sha256=digest(order),
-                evaluator_hotkey=job.evaluator_hotkey,
-                evidence=retained,
-            )
-            self.journal.put(slot, "announcement_intent", announcement)
             head = await self.signing_head(order)
             own = SignedExecutionAnnouncement(
                 announcement=announcement, signature=sign_object(announcement, self.wallet)
@@ -1081,6 +1190,15 @@ class ContinuousEvaluator:
         return "complete"
 
     async def observe_void(self, slot, order, evidence):
+        if evidence.certificate.void.reason == "coordinator_outcome_unavailable":
+            suite = await run_owned_thread(
+                _read,
+                Path(self.config.reveal_directory) / (order.round.suite_sha256 + ".json"),
+                EvaluationSuite,
+            )
+            await run_owned_thread(
+                partial(self.dispatch.retire_void, evidence=evidence, suite=suite)
+            )
         receipt = self.journal.get(slot, "void_observation", VoidEvidenceObservation)
         if receipt is None:
             receipt = VoidEvidenceObservation(
@@ -1125,6 +1243,17 @@ class ContinuousEvaluator:
             current_block=head,
             **context,
         )
+        from .competition_dispatch_repair import validate_local_repair_observation
+
+        validate_local_repair_observation(
+            own,
+            journal=self.dispatch,
+            signed_order=signed,
+            policy=self.policy,
+            legacy=self.legacy,
+            current_block=head,
+            evaluator_hotkey=self.config.evaluator_hotkey,
+        )
         self.journal.put(slot, "void_intent", proposed)
         vote = self.journal.get(slot, "void_vote", EvaluationVoidVote)
         if vote is None:
@@ -1147,7 +1276,7 @@ class ContinuousEvaluator:
         certificate = AttestedEvaluationVoid(void=proposed, signatures=tuple(votes))
         verify_evaluation_void(certificate, current_block=await self.signing_head(order), **context)
         evidence = VoidEvaluationEvidence(
-            schema="umi-competition-void-evidence/1",
+            schema="umi-competition-void-evidence/" + proposed.schema_.rsplit("/", 1)[1],
             order=signed,
             certificate=certificate,
             legacy_policy=self.legacy,
@@ -1176,43 +1305,62 @@ class ContinuousEvaluator:
         return True
 
     async def poll_once(self):
+        cursors = self._cursor, self._order_cursor
+        try:
+            return await self._poll_once()
+        except sqlite3.OperationalError as error:
+            if not is_sqlite_contention(error):
+                raise
+            # A contended control journal must not shut down this worker and
+            # cancel its one-use inference tasks. Revisit the same page at the
+            # normal poll interval; retained artifacts remain authoritative.
+            self._cursor, self._order_cursor = cursors
+            return {
+                "status": "waiting_database",
+                "reason_code": "sqlite_busy",
+                "in_flight": len(self._tasks),
+                "no_weight": True,
+                "chain_submission_authorized": False,
+            }
+
+    async def _poll_once(self):
         counts = {"held": 0, "waiting": 0, "complete": 0, "expired": 0, "executing": 0}
         if self.settlement_client is not None:
             if self._settlement_task is not None and self._settlement_task.done():
+                task, self._settlement_task = self._settlement_task, None
                 try:
-                    result = self._settlement_task.result()
+                    result = task.result()
                     counts["held"] += result["held"]
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._settlement_task = None
             if self._settlement_task is None:
                 self._settlement_task = asyncio.create_task(self.settlement_client.sync_once())
         if self.work_client is not None:
             if self._work_task is not None and self._work_task.done():
+                task, self._work_task = self._work_task, None
                 try:
-                    result = self._work_task.result()
+                    result = task.result()
                     counts["held"] += result["held"]
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._work_task = None
             if self._work_task is None:
                 self._work_task = asyncio.create_task(self.work_client.sync_once())
         if self.round_client is not None:
             if self._round_task is not None and self._round_task.done():
+                task, self._round_task = self._round_task, None
                 try:
-                    self._round_task.result()
+                    task.result()
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._round_task = None
             if self._round_task is None:
                 self._round_task = asyncio.create_task(self.round_client.sync_once())
         if self.exchange is not None:
             if self._exchange_task is not None and self._exchange_task.done():
+                task, self._exchange_task = self._exchange_task, None
                 try:
-                    self._exchange_task.result()
+                    task.result()
                 except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                     counts["waiting"] += 1
-                self._exchange_task = None
             if self._exchange_task is None:
                 self._exchange_task = asyncio.create_task(self.exchange.sync_once())
         for slot, task in list(self._tasks.items()):
@@ -1222,12 +1370,19 @@ class ContinuousEvaluator:
                 del self._tasks[slot]
         for _ in range(self.config.page_size):
             try:
-                self.ingest_once()
+                await run_owned_thread(self.ingest_once)
             except (OSError, ValueError, RuntimeError):
                 counts["held"] += 1
-        orders = self.journal.orders(after=self._order_cursor, limit=self.config.page_size)
+        orders = await run_owned_thread(
+            partial(self.journal.orders, after=self._order_cursor, limit=self.config.page_size)
+        )
         head = 0
-        if any(not conflict and self._order_needs_boundary(slot) for slot, _, conflict in orders):
+        needs_boundary = await run_owned_thread(
+            lambda: any(
+                not conflict and self._order_needs_boundary(slot) for slot, _, conflict in orders
+            )
+        )
+        if needs_boundary:
             try:
                 head = (await self.boundary()).block
             except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):

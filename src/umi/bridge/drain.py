@@ -15,8 +15,9 @@ from dataclasses import dataclass
 
 from ..chain_evidence import FinalizedSnapshotRef
 from ..concurrency import await_owned_task
-from .policy import _require
-from .receipts import BridgeReceiptReader, _Header
+from ..mortal_receipts import MortalReceiptError, _Header
+from .policy import RegistrationBridgeError, _require
+from .receipts import BridgeReceiptReader
 
 MARKER_DOMAIN = b"umi-legacy-bridge-drain-v1\0"
 LEGACY_MORTALITY_BLOCKS = 8
@@ -99,7 +100,12 @@ class LegacyDrainReader:
                 self._find(marker, birth_block, birth_hash, period), self._receipts._timeout
             )
         )
-        return await await_owned_task(task, on_cancel=task.cancel)
+        try:
+            return await await_owned_task(task, on_cancel=task.cancel)
+        except MortalReceiptError as error:
+            raise RegistrationBridgeError(
+                error.reason_code.replace("mortal_", "bridge_", 1)
+            ) from error
 
     async def _find(self, marker, birth_block, birth_hash, period):
         async with self._lock:
@@ -162,7 +168,12 @@ class LegacyDrainReader:
         task = asyncio.create_task(
             asyncio.wait_for(self._read(marker, block_number, block_hash), self._receipts._timeout)
         )
-        return await await_owned_task(task, on_cancel=task.cancel)
+        try:
+            return await await_owned_task(task, on_cancel=task.cancel)
+        except MortalReceiptError as error:
+            raise RegistrationBridgeError(
+                error.reason_code.replace("mortal_", "bridge_", 1)
+            ) from error
 
     async def _read(self, marker, block_number, block_hash):
         async with self._lock:

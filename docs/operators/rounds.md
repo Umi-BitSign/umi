@@ -6,6 +6,7 @@
 - [Round preparation](#open-competition-round-preparation)
 - [Continuous cohorts and schedule amendments](#continuous-cohorts-and-schedule-amendments)
 - [Automatic work proposals and independent signing](#open-competition-work-signing)
+- [Recoverable cohort admission](#recoverable-cohort-admission)
 
 <a id="open-competition-round-coordinator"></a>
 
@@ -102,12 +103,35 @@ across cycles until it expires, is replaced, or its hotkey loses registration.
 The policy interval, admission limits and replacement rate limit still apply.
 
 Public status retains the first schedule and reports `continuous_intake` plus
-`next_intake_schedule`. The latter uses the guaranteed cutoff, not the later
-coordinator polling margin. Admission receipts remain `accepted_no_weight`:
+`next_intake_schedule`. With no scheduling hold, the latter is derived from the
+fixed block cadence; it does not establish that a round was prepared or launched.
+Actual published rounds are discoverable through `/v1/competition/rounds/index`.
+The derived schedule uses the guaranteed cutoff, not the later coordinator
+polling margin. Admission receipts remain `accepted_no_weight`:
 they do not prove scoring or finalized competition rewards. Continuous intake
 also does not create private test cases. Operators must supply each cycle's
 fresh reviewed suite, delivery assets and capacity-qualified plan before its
 window. A missing or failed coordinator cycle is not a miner failure.
+
+When the next cohort is still being prepared, configure
+`public_deployment.intake_schedule_hold` with schema
+`umi-competition-intake-schedule-hold/1` and its `cohort_number`. This requires
+continuous intake and `evaluation_ready=false`. Both status and readiness
+publish that hold and return `next_intake_schedule: null`. The cohort stays
+`preparing`, with no announced submission close or evaluation start, as blocks
+advance and the service restarts. Clients must display the held cohort and
+pending dates instead of deriving another number from the historical schedule.
+`admission_accepting_new` still reports actual policy, capacity and finality
+checks. A hold does not override them or extend a signed submission's lifetime.
+
+The hold is operator scheduling metadata. It leaves the signed launch,
+accepted receipts, frozen rosters and reward authorization unchanged; it neither
+admits a future round nor guarantees selection under a future policy. Stop or
+leave uninstalled any future launch controller before advertising a hold.
+Publish and qualify the real successor policy/schedule before clearing it.
+Updated strict intake monitors understand the hold and require matching
+deployment, status and readiness fields; pin the new deployment identity through
+the monitor's normal transition procedure.
 
 To accelerate an unused version 1 first cohort, publish a
 `umi-competition-launch-amendment/1` signed by the current policy's evaluator
@@ -572,3 +596,1152 @@ owned-provider disagreement, capacity guards and shutdown failure. They do not
 establish public TLS deployment, protected ASL quality or independent production
 operators. Settlement publication and the reviewed simultaneous 70/30 activation
 remain on the [execution plan](../competition/launch.md).
+
+## Recoverable cohort admission
+
+### Service work admission
+
+The opt-in service-work queue keeps paid work separate from benchmark quotas.
+An explicitly selected, quorum-signed catalog commits unique inputs before any
+recipient is selected. A miner signs a claim; the queue assigns the next item
+and commits the claim, original registration/history and FIFO index before
+acknowledging it. Repeating an accepted claim returns that same admission,
+including after restart or request closure. Changing its inputs is rejected.
+There is no per-hotkey quota and no timer that removes accepted claims.
+
+The queue reuses the round journal and monotonic history checks. A full queue
+rejects new claims; increasing configured capacity preserves existing work.
+For a host transfer, fence the outgoing owner and preserve the original logical
+state path on the destination; the native journal retains its namespace binding.
+`ServiceWorkRequests` retains one catalog-bound request and its evaluator before
+collecting quorum votes. Lost acknowledgements recover that exact selection.
+The service request binds one accepted item directly, including inputs outside
+the benchmark suite. It has separate wire IDs for each catalog and attempt.
+Independent reviewers must authenticate the owner's admission and its original
+proof sources before voting; an unsigned queue export is not a FIFO certificate.
+
+The native miner accepts these grants only with
+`umi-cohort-service-miner-config/1` and matching `service_terms_sha256`. It checks
+current cohort authority and its own finalized transport window for inference.
+The existing response cache and retirement endpoint preserve replies and fence
+unfinished attempts. Replacement requests require the retained parent grant,
+a quorum retry decision and the miner's signed retirement receipt. Parent
+records stay separate and are replayed iteratively. Ordinary benchmark miner
+configuration continues to reject service grants.
+
+`ServiceWorkQueue.seal` freezes the complete accepted FIFO prefix and rejects
+new claims. Duplicate accepted claims remain recoverable. A crash during export
+leaves admission open until the immutable seal commits; an acknowledgement loss
+recovers that same seal. Unused catalog items are not accepted obligations.
+
+`ServiceWorkTerminals` binds one selected request to its recovered signed
+response, signed miner retirement and separately retained retry ancestry. It
+commits the terminal intent before requesting the evaluator signature and
+blocks fresh attempts for that work. Missing responses stay pending; retrieval
+time does not establish original inference latency. The round journal reserves
+logical capacity for the seal and terminal intent/certificate. Archive growth
+and physical disk headroom still require host qualification.
+
+`umi-cohort-request-closure/2` binds the existing complete benchmark closure plus
+every authorized service catalog, its independently selected owner seal and one
+terminal per accepted work. Reviewers must authenticate the original queue
+exports and proof sources, including the complete allowed catalog set. They
+reject overlapping catalog inputs and replay every terminal and retry parent
+before reference reveal. Native phase certification binds this full manifest
+and the retained availability evidence. Late replay needs no fresh deadline;
+elapsed time or missing infrastructure evidence creates neither a zero nor a
+void. Version 1 benchmark closures keep their existing schema and checks.
+
+`build_service_request_closure` constructs this manifest from the complete
+benchmark closure, configured catalogs and original owner seals.
+`ServiceWorkTerminals.read` supplies each accepted job's verified retained
+response through the queue owner. An unsigned intent or missing response keeps
+that job pending; missing archive objects prevent completion. Restart and late
+delivery reuse the original response and benchmark observation. The builder
+replays the complete manifest before returning it and does not reveal labels.
+The recurring host still needs to publish the resulting closure and certify
+its availability evidence before advancing the phase.
+
+These library components are not a deployed service scheduler. Connect recurring
+authenticated delivery, independent review and original service measurements;
+qualify evaluator replacement, abandonment and operational storage growth.
+Admission, grant storage and a signed response do not establish earned credit.
+Installed scheduling, evidence-source authentication and complete reward
+execution remain required before activation.
+
+`umi-cohort-service-terms/1` selects exact quality-weighted work units and pool
+parameters before catalog admission. References are salted commitments in that
+catalog. After the complete request closure, the native reference-reveal phase
+certifies their full inventory and the benchmark suite. Service-quality replay
+verifies the original response envelope, decrypts with a verified reveal pulse
+and computes exact single-reference CER/WER. Signed miner errors earn zero;
+missing archives, local resource failures and unavailable pulses remain pending.
+Replaying recovered content never invents an inference duration.
+
+Service allocation rounds in this order: pool, stratum, immutable work, hotkey.
+It uses largest remainder with stable work identities for ties. A stratum with
+no positive credit sends its fixed budget to burn. No per-UID average or minimum
+quality gate changes these credits. The model budget remains separate for a
+settlement consumer to bind to independently reviewed promotion history.
+These opt-in terms require explicit future-policy selection; they do not change
+an existing cohort's signed allocation rule.
+
+Independent reviewers replay the full accepted set and reference reveal before
+signing a service allocation. Their existing round journals retain the exact
+intent, partial votes and first complete certificate. Lost acknowledgements and
+key outages recover the same statement; a different allocation for that round
+conflicts. Recipients cannot certify their own work, including scored zeros.
+Original evidence must remain available for independent certificate replay.
+
+Benchmark quality and its complete certificate manifest bind the combined
+service-plus-benchmark closure when version 2 is selected. They continue to
+report benchmark scores separately from paid service credits. Service
+certification does not select model attribution, project current registrations,
+authorize a transaction or establish live reward effects. Those settlement,
+standing-authority and installed-host consumers remain required.
+
+The reward-allocation port combines the independently replayed service certificate
+and complete benchmark-quality manifest with the local accepted promotion head.
+It retains that selection in the round journal before acknowledgement. A retry
+replays the selected historical promotion receipt, so later model promotions
+cannot change an already sealed allocation. Missing promotion history holds the
+operation; the explicit initial reference record leaves the model pool at burn.
+`reward_certification_progress` replays the owner's retained allocation for the
+existing cohort phase signer. `verify_certified_reward_allocation` requires that
+exact allocation in the quorum-certified certification closure and replays the
+native service, benchmark and selected promotion evidence. It accepts late
+consumption of the original certificate, while rejecting changed results,
+missing closure, an unrelated cohort and explicit revocation. The recurring
+host must still integrate these ports with its authenticated source and finality
+owners; current standing control and first reward admission remain separate.
+
+`prepare_reward_package` retains the original intake, phase decisions, endpoint
+archives, reveal pulses and score certificates in a private immutable package.
+`load_reward_package` reconstructs the native reviews from that replica after an
+outage, without querying the coordinator. The validator supplies its selected
+policy, cohort, terms, catalogs and current certified history independently.
+Later history may extend the retained prefix; changed evidence and revocation
+are rejected. Exact publication retries preserve the original bytes.
+
+Replicate the selected model assets and authenticated promotion store alongside
+the package. They remain required for replay and are not embedded in it. Keep
+packages private because they contain protected references and miner responses.
+Configure sufficient bounded storage before accepting work. These files do not
+authorize transactions or complete delayed first reward admission; the host
+must integrate fresh chain proofs and standing control separately.
+
+`FinalizedRewardControlProvider` reads the reserved control hotkey from an owned
+finalized snapshot and a storage multiproof for the timestamp, SN78 existence
+and commitment. It discovers the actual current digest, including a changed
+head the validator has not cached. The host selects the control account from
+its approved authority; a reward package cannot select that account.
+
+An old commitment may remain selected after a long outage. Its current proof
+must still be fresh and bound to the verified runtime and state root. Proven
+absence, malformed commitments and unavailable proofs grant no authority to
+reuse a cached allocation. The observation contains replay evidence but is a
+process-local capability; serialized records cannot recreate it. The standing
+history and admission consumer must authenticate the discovered digest and
+apply its decision before authorizing a transaction. This reader performs no
+chain writes and has no coordinator renewal dependency.
+
+`StandingRewardControlReader` authenticates the quorum-signed decision chain
+selected by that current proof. The host independently selects the series,
+policy epoch, ordered cohort plans, control hotkey and proof configuration.
+The reader retains each decision once in the existing private round journal;
+restart can resolve an unchanged commitment entirely from retained history.
+An unknown successor must be fetched by digest and authenticated. Missing
+artifacts, capacity exhaustion and a busy journal remain retryable holds.
+
+Decision replay rejects forks, rollback, skipped cohorts and continuation after
+revocation. Activation records name the exact reward package, allocation,
+certification history and prior reward-opportunity evidence. The reader derives
+the transition fence from the actual commitment block and the series bounds.
+Elapsed time does not renew a decision. Journal identity binds the series;
+a host migration can select a new proof configuration while preserving its
+history, and proofs from the former configuration are rejected.
+
+`RewardControlHistoryReader` captures or replays every block in an explicitly
+selected interval. It verifies complete block bodies, child-state events, the
+parent execution runtime and the resulting control slot. Ordered writes remain
+visible when another transaction overwrites them in the same block. Wrapped
+effects and unattributed slot changes remain unresolved. Consumers must not
+interpret an unresolved interval as permission to continue rewards.
+
+Each block's exact proof bytes commit before progress advances. Restart replays
+saved proofs against owned finality before fetching missing blocks. Interrupted
+reads, cancellation and capacity exhaustion preserve the prefix. Bounded work
+per call limits resource use without expiring the interval. Storage deduplicates
+shared runtime bytes using the existing lossless evidence recipe; the owning
+service must provision disk and RPC capacity for the complete interval. Slow
+proof verification and decoding drain in owned threads, keeping the event loop
+responsive without abandoning work during shutdown.
+
+Historical recovery reuses header links already checked against the same owned
+anchor within the process, avoiding repeated disk walks for each block in an
+interval. This cache retains at most 8 MiB of encoded headers, or the configured
+header-storage capacity if smaller. Changing the anchor or restarting requires
+checking durable hints again. Eviction repeats verification without expiring the
+requested history; cached links never replace an exact target identity check.
+
+`StandingRewardControlReader.select_history` binds that complete interval to a
+fresh control proof at the same finalized snapshot. The interval starts at the
+approved recovery authority's issuance block, including that block. The reserved
+control key must publish only this series' ordered decisions during the interval.
+The first write must be a timely genesis; subsequent writes must repeat the
+current decision or advance exactly one decision. Unknown writes, hidden
+revocations, rollback, missing transitions and unresolved effects prevent
+selection. Repeating a decision preserves its original activation block and
+drain time. Admission remains provable when another write replaced the genesis
+in the same block, or when the same genesis was published again later.
+
+The complete-history result distinguishes `selection`, the latest decision being
+prepared, from `effective_selection`, the most recent activation whose drain has
+finished. During a successor's drain the preceding activation remains effective;
+at the boundary the successor replaces it without a renewal. Before the first
+activation becomes effective, or after revocation, `effective_selection` is
+absent. This reader does not infer a legacy allocation. Unknown control effects
+prevent both selections; they never permit falling back to a cached predecessor.
+Identical allocation amounts still retain distinct cohort activation identities.
+
+`StandingRewardControlReader.review_history` performs the same decision and
+complete-write checks for an owned historical control proof. Its result describes
+the selection at that exact past root. A newer retained prefix must agree with
+the reviewed prefix; replay cannot rewind or advance the current finalized
+checkpoint. The independently selected original chain configuration authenticates
+the historical proof. Restart can reuse retained signed decisions and block
+evidence without a coordinator. This result cannot pass current-selection checks.
+
+An effective selection describes control history only. It does not prove current
+validator eligibility, minimum reward opportunity or payment, and does not permit
+signing an older allocation after a successor has been observed. Preparation can
+replay the pending package during its drain; projection requires the latest
+selection to be effective. Coverage certification and installed execution remain
+separate requirements.
+
+`collect_reward_eligibility` checks pre-consensus row eligibility at the complete
+weight observation's finalized root. It uses proof-extracted current stake,
+parent and child relations, suspension flags, activity, permit and registration
+state. It reproduces the selected epoch profile's fixed-point rounding and owner
+exceptions. Missing proofs, stale state, unsupported arithmetic and exhausted
+parent-proof capacity hold collection; they do not become ineligibility.
+
+The collector requires an independently qualified runtime code hash selected by
+the installed series. Its arithmetic profile is pinned to Subtensor revision
+`c004cebf360f4088187ee49d851dfb1a1eaaf710`; supplying a matching hash alone does
+not prove that revision produced the deployed runtime. No live runtime profile
+is qualified by these tests. The returned observation binds raw proofs to the
+original weight evidence. It does not establish that the row matches the effective
+allocation, accrue coverage, prove payment or authorize a transaction.
+
+`review_reward_eligibility` replays retained control, complete weight, eligibility
+and metadata bytes against owned historical finality. It re-executes the proved
+original runtime, checks the complete registration mapping and reuses the current
+eligibility predicates. The result also binds the original policy and proved burn
+destination; today's owner or burn mode cannot replace that evidence.
+Historical state RPCs are not needed when the finalized
+headers and proof bytes are retained. Missing ancestry remains recoverable through
+the historical provider; elapsed wall time does not expire the original evidence.
+The result is explicitly historical and cannot pass current-observation checks.
+Tampered or incomplete archives hold without rewriting their evidence. Cancellation
+drains native proof work before releasing provider ownership.
+
+`StandingRewardPreparation.prepare_historical` consumes that historical selection
+and replays the effective package against the selected series manifest. During a
+successor's drain it prepares the predecessor's package. Replaying an earlier
+block than a cached review checks the package again; later certification cannot
+be backdated through cache reuse. Preparation holds if no allocation is effective,
+control is revoked or the package identity differs. This returns immutable replay
+work only.
+
+`review_reward_coverage` joins native historical eligibility with complete control
+selection and package replay. It requires a designated validator, projects the
+fixed allocation against that root's registrations and burn destination, and
+compares every stored weight with the projected row after the pinned Subtensor
+conversion. Omitted zero entries are equivalent; missing positive recipients,
+extra weights and raw call values that differ from storage are mismatches. A
+matching row still needs eligibility. The returned endpoint binds the series,
+activation, manifest requirement, allocation, runtime profile and original proofs.
+Altered or serialized success records cannot replace native review.
+
+An endpoint describes one finalized block. `RewardCoverageJournal` retains its
+original control, metadata, weight and eligibility bytes using the existing
+lossless evidence store. Packages, promotion assets and complete control history
+remain in their respective stores. All are required for recovery.
+
+`credit` accepts two native endpoints with adjacent finalized ancestry and
+increasing chain timestamps. Both must cover the same activation, allocation,
+validator and selected proof domain. It counts the smaller of elapsed chain time
+and the explicitly selected interval cap. There is no default cap or minimum.
+Unknown or uncovered intervals cannot contribute time. A changed recipient
+projection is allowed only when both endpoints independently prove the correct
+projection for that root.
+
+Proofs and interval records commit together. Stable block identities deduplicate
+retries, including lost acknowledgements; storage exhaustion preserves existing
+records for recovery after capacity growth. On restart, totals begin unverified.
+Page through retained interval hints, replay each endpoint's original evidence
+with `review_endpoint`, then call `credit` to rebuild the verified set. Reading a
+stored total or interval cannot substitute for native replay. The selected rule
+digest must match on reopening, and damaged evidence holds without replacement.
+
+`RewardCoverageCollector` drives bounded pages of retained-interval replay and
+new capture for each designated validator. `NativeRewardCoverageSource` captures
+complete registration, stored weight and eligibility proofs at the same owned
+historical root, then passes them through the existing native consumers. Its
+control-history reader reuses only prefixes verified in the current process;
+restart replays the original blocks before those prefixes become available.
+RPC/proof operations retain their individual bounds. There is no aggregate timer
+around historical capture or immutable package replay that could repeatedly
+discard slow work. Failed attempts preserve progress and the capture cursor. The service retries
+without a cumulative deadline and logs verified totals plus error types.
+
+Unavailable retained proofs are retried on later pages while fresh capture can
+continue. A bounded catch-up window limits new historical queries; it neither
+deletes earned intervals nor credits the elapsed outage. Only adjacent proved
+endpoints contribute time. Every validator must meet the selected minimum before
+the collector retains a completion certificate and its witnesses. Successful
+retries cannot double-count an interval. Installing this collector and qualifying
+its production resource use remain part of the host integration.
+
+A `StandingRewardOpportunityManifest` (`umi-standing-reward-manifest/2`)
+binds the runtime profile, interval cap and required time for each designated
+validator before series admission. These parameters are explicit; examples and
+tests do not approve production values. The version 1 replay manifest remains
+readable but carries no minimum-opportunity terms.
+
+`prepare_opportunity_certificate` retains a completion candidate and ordered
+interval references for every designated validator. Missing or insufficient
+coverage holds completion. The certificate digest is bound by the successor's
+signed `prior_opportunity_sha256`; a later candidate cannot replace those bytes.
+`review_opportunity_certificate` replays the original native endpoint proofs,
+checks the interval order and recomputes each contribution. Stored totals,
+signatures and content hashes alone cannot establish completed opportunity.
+Restart requires replay, and unavailable evidence remains retryable without an
+age deadline. Retries cannot increase credited time.
+
+For a version 2 manifest, reward projection and transaction preparation require
+that reviewed certificate for the exact preceding activation. Evidence must end
+no later than the successor decision's observed block. The first activation
+instead requires the native legacy handoff described below. Approved runtime and
+timing parameters, installed migration and execution remain incomplete. Coverage establishes
+reward opportunity, not a particular emission amount or submission authority.
+
+The simpler `select` and `select_admitted` methods check signed ancestry and
+original admission but do not exclude overwritten control writes. Installed
+reward execution must consume the complete history check. That execution
+integration and installed outage/reward-handoff qualification remain pending.
+
+This selection still requires native replay of the referenced package, original
+series admission, prior reward opportunity and any legacy handoff before weight
+submission. The returned selection grants no transaction authority. Signer
+fencing, encoded mortality, nonce recovery and installed continuation belong
+to the execution consumer. Preserve C4's existing admission and renewal checks.
+
+Registration projection preserves fixed integer amounts by hotkey. A departed
+hotkey's share goes to the currently proved burn destination; a returning hotkey
+can recover that share at its new UID in subsequent submissions. Other recipients
+keep their original amounts, and a new occupant of an old UID inherits no credit.
+The projection checks snapshot freshness and shape. Its caller must independently
+verify current registration, burn identity and standing control; neither the
+allocation nor projection grants transaction authority.
+
+`FinalizedCompetitionWeightProvider.collect_registered_weights` discovers the
+complete current registry alongside the validator's nonce, permit and weight
+state. It proves `SubnetworkN`, every `Keys` entry in that bounded UID domain and
+each inverse `Uids` mapping against the same finalized root. Missing entries,
+duplicates, inconsistent mappings and interrupted proofs prevent a result;
+they never become inferred recipient absence. The ordinary `collect_weights`
+path still verifies only the supplied recipients.
+The optional `at` snapshot lets this collection share the control proof's block
+while the chain advances. It still requires that observer's verified block and
+all normal freshness checks; caller-supplied coordinates are not authority.
+
+`project_owned_reward_allocation` requires that complete, fresh observation and
+the host's independently selected chain configuration and policy. It rejects
+partial observations, altered evidence and observations from another proof
+configuration before projecting fixed amounts. Package certification, current
+standing control, prior opportunity and transaction authorization remain
+separate execution requirements.
+
+Proof collectors can opt into extracting values directly from a multiproof with
+`storage_evidence_many_from_proof`, or `storage_reads(..., proof_values=True)` for
+named runtime decodes. This needs a pinned helper supporting the
+[proof-read protocol](../../rust/substrate-proof-verifier/README.md). Each batch
+uses one proof RPC, checks every requested key and retains the existing evidence
+verification. Missing or invalid proofs never become absent values or a fallback
+to unverified RPC claims. `FinalizedRewardControlProvider` uses this path for
+standing control and inherited weight-state reads, including complete recipient
+discovery. The configured proof helper must support the read protocol; an older
+helper causes a hold. The existing legacy weight provider keeps its read path.
+Runtime-code and finality collection have separate requests and limits.
+Coverage accounting, measured provider budgets and installed qualification remain
+pending.
+
+`StandingRewardPreparation` connects complete-history selection to native package
+replay. Supply a `StandingRewardManifest` whose digest matches the independently
+selected series. It binds the policy and one terms/catalog selection for every
+cohort, in series order. The policy selects reward rules and evaluation runtime;
+each cohort plan selects its suite. Missing, extra, reordered or changed selections
+are rejected before replay. Package contents cannot supply these approvals.
+
+The manifest is retained in the standing reader's journal before use. Restart can
+omit the manifest argument and recover those original bytes without coordinator
+access. Missing or damaged retained data holds preparation; it never falls back
+to package-provided selections. Local storage and replay ceilings can be increased
+without changing the approved inputs. This input manifest does not certify host
+capacity, reward opportunity, legacy handoff or permission to submit.
+
+Completed replay is retained in the process even if its waiter is cancelled or the initial control
+proof expires. Projection then requires fresh control and complete registrations
+at the same finalized snapshot, the designated validator, and completed control
+drain time. A revoked or replaced selection cannot use a cached allocation.
+After restart, replay the retained private package and promotion assets again;
+serialized preparation records grant no authority. Version 2 projection requires
+native predecessor-opportunity replay as described above. Legacy handoff, signer
+fencing and transaction recovery still require execution integration and installed
+qualification. Preparation does not authorize weights.
+
+`FinalizedCompetitionWeightProvider.read_mortal_receipt` searches retained signed
+transaction bytes within an independently checked mortal era of 4–4,096 blocks.
+The shared native reader authenticates ancestry from owned finality, verifies
+block bodies and decodes proved dispatch events with the parent execution
+runtime. Interrupted polls resume in process; restart verifies ancestry again.
+Only one era is cached, regardless of outage length, and shutdown waits for
+active proof work. The bridge adapter retains its original eight-block rules
+and journal checks. A receipt proves inclusion and dispatch status; no match
+remains uncertainty. Neither result proves current weights, unused nonce or
+permission to retry.
+
+`StandingRewardPreparation.verify_transaction_bytes` checks the selected reward
+projection again before and after native decoding and signature verification.
+The encoded full row, version, signer, nonce and mortal era must match that
+snapshot and the series lifetime bound. Exact reassembly rejects altered calls,
+tips, extensions and framing. Verification reconstructs the original signing
+payload, including the genesis, checkpoint and runtime versions; an old signature
+cannot be rebound to a later era. The resulting receipt query contains checked
+search bounds only. The version 2 predecessor-opportunity gate runs before and
+after byte verification. Legacy handoff, writer fencing and submission
+authorization remain required.
+
+`reserve_transaction` records the selected allocation, original signing snapshot,
+nonce, mortality and complete registered UID row before signing. It retains the
+exact chain/control evidence and metadata, and reserves space for the signature
+in the common private journal. Permit, direct-weight mode, rate and weight limits
+must permit the call. `retain_signed_transaction` verifies the native encoded
+bytes and commits them against that reservation. Restart and lost replies reuse
+the same record; another signature cannot replace retained bytes. A slow
+commit or cancelled waiter preserves completed writes. Journal capacity can be
+increased without changing the selected series or writer.
+
+`review_standing_transaction` reopens the journal and rechecks its original control
+and signing snapshot against owned finalized history. It verifies retained storage
+proofs, runtime metadata, nonce, LastUpdate and weight version before checking the
+actual signed bytes. Executed runtimes use proved original Wasm. Historical state
+RPC data is unnecessary when the evidence and owned ancestry are available.
+Elapsed time does not invalidate this historical check; current authorization is
+still required independently. A concurrent journal change requires another review.
+
+`resolve_standing_transaction` checks the original attempt before resolving a
+live transaction through the native receipt reader. A missing receipt leaves it
+pending. An owned finalized block at or beyond the encoded mortality boundary
+instead proves that the original bytes can no longer execute. This remains
+`expired_outcome_unknown`: it does not prove non-inclusion, failure, current
+weights or rewards, and does not require historical block bodies. The same rule
+recovers an unsigned intent after its reserved window. A finality or proof failure
+preserves the attempt.
+
+Pass the process-local result as `previous` to `reserve_transaction` when creating
+a successor from fresh selection, registration and nonce proofs. Before mortality
+ends, an inclusion result also requires a larger proved nonce. Intent, recovery
+inputs, predecessor link and signature allowance commit atomically. Old inputs and
+signed bytes remain intact; interrupted writes and lost replies cannot leave a
+half-linked successor. Stored lineage selects the current attempt but grants no
+transaction authority. The journal exposes no reset or deletion operation.
+
+For the first migration, `review_legacy_weight_expiry` consumes an original C4
+attempt, weight-state evidence and metadata. It authenticates the historical
+header, runtime and storage proofs, then checks the actual encoded call, signer,
+signature, nonce and mortality. Pinned and executed original runtimes are
+supported. Replay needs no historical state RPC when the original evidence and
+owned ancestry are available, and has no cumulative age or elapsed-time cutoff.
+
+Finalized progress at or beyond the verified death block produces a native
+`LegacyWeightExpiry` for those exact bytes. A live transaction remains pending;
+missing signed bytes cannot establish a drain. Local `applied`, `unknown` or
+`expired_unconsumed_nonce` flags do not bypass this review. The result proves
+only that the original bytes cannot execute again, without claiming whether they
+landed. `validate_legacy_weight_expiry` binds it to the inventory entry, chain and
+validator. Restart replays the original evidence; a serialized result is not a
+capability.
+
+The first activation names a `LegacyRewardHandoffPlan` through
+`prior_opportunity_sha256`. The plan binds the series, first cohort and accepted
+C4 policy, round and package. Each designated validator reviews its own retained
+installation independently. The plan does not assert a C4 opportunity minimum
+or certify that another validator has stopped.
+
+`hold_legacy_reward_handoff` owns the original supervisor process lock, runtime
+mutex and complete weight-journal lock throughout migration and the caller's
+execution lifetime. It saves an installation-bound intent before stopping the
+C4 worker. Updated supervisor code honors that intent before contacting the
+feed or RPC, including after restart. A retry must retain the same first
+activation. There is no automatic reset to C4 startup.
+
+The consumer audits either selected journal format and replays the retained
+package authorities. Every signed attempt needs its exact native expiry result;
+a local terminal flag cannot skip review. An empty journal or unsigned intention
+can be handed over under the original worker's write-before-broadcast contract
+and continuously held locks. Missing journals, inconsistent authorities and
+unavailable proofs leave the intent pending. Original attempts and evidence are
+preserved. Phase logs report inventory progress without transaction bytes.
+
+The scoped result is required on every first-cohort projection and transaction
+preparation. It checks the exact activation, designated validator, proof height
+and unchanged writer ownership. Leaving the context invalidates it. Restart
+replays the inventory from retained bytes. The installed host must still select
+the approved new executable at boot and prevent an older binary from ignoring
+the new intent; this library does not install that transition. Installed signing,
+submission and outage qualification remain pending. Retain these C4 consumers
+until no deployed migration or recovery path needs them.
+
+`StandingRewardExecutor` connects these consumers to recurring signing and exact
+byte submission. Its installed caller supplies the approved version 2 manifest,
+native preparation/provider/history owners, retained transaction journal, first
+prepared activation and scoped legacy handoff. Package and decision callbacks
+supply content; the native readers verify it. A later activation also requires
+the native predecessor-opportunity result. Submission uses the configured primary
+RPC and two explicit backups.
+
+`run` holds a separate private writer lock and serializes iterations. Each
+iteration reconciles an existing transaction before reserving another. It never
+re-signs or retransmits a recovered attempt, including an unsigned intent or a
+lost commit acknowledgement. Missing inclusion evidence leaves it pending until
+native receipt or expiry review permits a successor. No cumulative timer or
+coordinator renewal limits those retries.
+
+Package replay is cached before refreshing proofs. The executor checks current
+selection and recipient state, retains the original intent, signs once and
+verifies/stores the exact bytes. Before transmission it collects fresh proofs
+and checks selection, call, nonce, LastUpdate, runtime and mortality again.
+Changed or expired context leaves the recoverable attempt intact. Individual
+submission attempts time out; cancellation drains signing and transport cleanup
+before releasing writer ownership. Status logs contain hashes and error classes,
+without raw transactions, exception details or endpoint credentials. SDK success
+is reported as `submitted_unconfirmed` until independent recovery verification.
+
+The installed host must bind the journal location, qualify series inputs and
+retain the original writer handoff throughout this loop. Boot/source switching,
+automatic coverage integration and installed outage qualification remain open.
+Actual reward coverage must be proved separately; an expired attempt never
+supplies coverage credit.
+
+### Participation admission
+
+The opt-in recoverable-cohort implementation has a durable admission queue and
+reviewer service. It requires an explicitly authorized cohort and miner consent;
+enabling these components does not change a fixed round's signed deadlines. The
+complete recovery workflow is not deployed or qualified for unattended rewards.
+
+The selected C5 and C7-C10 allocation is 50% service and 50% model rewards. C6
+is model-only and assigns 100% within the public-model track. Set
+`ServiceTerms.service_pool_bps` to `5000` for mixed cohorts and `0` for C6. Bind
+the exact terms digest, eligible tracks and split in every cohort's standing plan
+and reward manifest before admission. The series-level policy retains both track
+capabilities and cannot widen a narrower cohort plan. These selections require
+new reviewed policy and authority artifacts; existing C4 artifacts retain their
+original allocation.
+Existing submissions retain their original policy; enrollment under the new
+split requires fresh miner consent.
+
+The model pool requires a complete accepted model submission, preserved runnable
+artifacts and quality at least equal to the frozen baseline. A sole eligible
+quality band receives the full model pool. Exact content counts once; remaining
+eligible models enter fixed five-percentage-point bands, with one credit for the
+highest exact score in each occupied band. The first complete certified
+acceptance fixes score and eligibility for exact-content aliases, so repeated
+submissions do not create additional benchmark trials. The raw weight total is
+65,535; deterministic rounding assigns mixed cohorts 32,767 units to service and
+32,768 to models, while C6 assigns all 65,535 to models. This is a weight-budget
+split, not a guarantee of exact emitted token amounts.
+
+Phase authority `umi-cohort-recovery-authority/2` keeps a pending phase valid
+until certified completion or revocation. Passing a target does not require an
+extension signature. Closure still requires authenticated completion and the
+full participant opportunity, including compensation for unavailable service.
+Version 1 retains its signed extension rules; existing signatures cannot be
+reinterpreted as version 2 authority.
+
+The controller retains a `CohortProgressIntent` with its original progress and
+finalized observation before collecting signatures. An unavailable reviewer or
+restart resumes that intent. Intake and settlement use the same reservation
+mechanism, so a late signature cannot silently resample a phase's completion
+boundary. A completed transition clears only its associated progress intent.
+Signers independently replay the original evidence before signing; a retained
+timestamp alone does not establish completion.
+
+`GET /v1/competition/cohorts/{cohort_sha256}/readiness` reports native intake
+readiness for a supplied 32-character hexadecimal nonce. It uses the dedicated
+readiness queue and a bounded finality capture. Backpressure or unavailable proof
+returns an unavailable result rather than an admission promise. This diagnostic
+does not prove continuous availability over a participant's opportunity window.
+
+Recoverable score replay can also verify every common-result signer's separate
+run receipt against the certified preparation/request interval, exact outputs,
+resource eligibility and independent control groups. Delayed replay preserves
+these checks after the original policy or submission window expires. Receipt
+agreement does not establish execution.
+
+The explicit `umi-recoverable-execution-evidence/1` artifact retains the immutable
+job, preparation closure, raw sandbox outputs and original execution boundaries.
+Its consumer replays complete paired-model runs and comparator runs for endpoint
+submissions after certified reveal, without a new deadline. Receipt preparation
+checks the proposed common result against the original artifact. The complete
+model and endpoint receipt consumer requires exactly one matching artifact per
+signer; changed timing, stdout, model/runtime bindings and missing runs are
+rejected. Comparator observations alone do not supply endpoint responses.
+Failed comparators remain observations requiring review and cannot become
+scored zeros.
+
+`umi-recoverable-endpoint-paired-evidence/1` combines a comparator execution
+with a quorum-signed bounded attempt order and exact transport transcripts.
+Replay checks assignment identity, canonical request bytes, evaluator and miner
+signatures, retained response bytes and offline timelock decryption against the
+certified request/reveal closures. The immutable case obligation survives a
+retry; each attempt uses distinct wire identities. Transport failures remain
+infrastructure observations, while authenticated miner errors retain their
+original classification. Neither replay nor an attempt order authorizes live
+requests or proves original publication time.
+
+`umi-recoverable-evaluation-order/1` binds the complete assigned evaluator set
+to the participant, runtime and certified preparation. The ordered outcome
+consumer requires every assigned evaluator's receipt for a score, or every
+assigned evaluator's signed observations and decision signature for a void.
+Independent review preserves each evaluator's exact local observation, and
+repeated signing keeps a stable void decision identity. Missing observations
+remain pending; agreeing scorable observations cannot become voids. These
+benchmark outcomes do not measure serving capacity or create service credit.
+
+The order signer retains one exact selection per round and participant before
+signing, including original consent, admission, phase decisions and an owned
+finality observation. It reserves bounded vote storage first. Partial quorum,
+lost acknowledgements and interrupted signing recover that same selection after
+long delays; changed inputs and history/finality rollback are rejected. New
+signatures require the currently open request phase and the exact certified
+preparation result. A committed vote can be returned offline as historical
+evidence. This signer does not select endpoint retries, authorize delivery or
+establish one active writer across migrated hosts. Those remain dispatcher and
+control-authority requirements.
+
+The coordinator order queue retains that selection before contacting reviewers,
+collects independent-group votes and commits one exact certificate before
+publication. Each evaluator has a private inbox that retains the assignment
+before signing its delivery receipt. Lost votes, receipts and commit replies
+recover from those journals after restart. A saved scan cursor prevents stalled
+entries from repeatedly starving later work after service restarts. Pending work
+has no age limit; capacity and per-operation timeouts are retryable.
+
+New signatures and first delivery require current owned finality and an open
+request phase. Both sender and receiver check authenticated history; learned
+closure or revocation cannot be rolled back. Historical votes and receipts can
+be recovered offline after closure. A delivery receipt acknowledges storage,
+not execution or completion. The host must supply bounded authenticated reviewer
+and inbox transports, independently verified history/finality, and a migration
+fence. These components are not yet installed as a production cohort service.
+
+The evaluator execution worker consumes acknowledged inbox assignments without
+a signing key. It serializes reads of its shared private inbox while allowing
+bounded concurrent execution. Its private per-case journal reserves output capacity before
+invocation and retains classified stdout before collecting a finish observation.
+A failed finality read therefore retries the observation without rerunning the
+model. Completed case/role steps are immutable and survive process restart;
+complete evidence remains retrievable offline. Missing or interrupted work
+stays pending while the certified request phase remains open. Elapsed targets
+do not expire the job. Closure or revocation stops new execution.
+
+The CPU sandbox port uses the original pinned rootless runtime and isolated
+model/video mounts. Each retained attempt names one exact container and owns
+one private scratch directory. Recovery stops an uncertain prior container
+before selecting a replacement attempt; it never removes other containers or
+retained models, videos and journals. A crash before stdout reaches the journal
+can require repeating that computation. Only the first retained classified
+output is selected, including a valid miner failure.
+
+The process supervisor must stop and reap the previous worker's entire process
+group before recovery; container removal alone cannot fence a still-running
+launcher on another host. Host migration needs an independent writer fence.
+This port does not implement native macOS recovery. Configure journal record,
+byte and attempt capacity for the selected series and recovery reserve; capacity
+can be increased without changing accepted assignments. Logical reservations
+do not reserve physical disk space. `read_timeout_seconds` bounds individual
+history/provider calls; it is adjustable without changing retained assignments.
+Local authenticated replay has no elapsed processing deadline. Endpoint transport
+retries, installed service recovery and reward integration remain required.
+
+Endpoint origin collection consumes the same acknowledged assignment and
+current authenticated phase history. It retains the original authority scope,
+then verifies the miner's current registration, UID inverse mapping, Axon and
+DNS against owned finality. An elapsed policy/submission target does not discard
+accepted work. Closure, revocation, history rollback, invalid proofs and stale
+chain observations still prevent use. This check proves the recorded origin;
+it does not authorize a translation request.
+
+The recoverable provider uses a separate private cache. Operators can increase
+cache capacity and network timeouts without replacing assignments or cached
+proofs; chain identity, verifier pins and freshness limits remain bound. Local
+authority replay, proof verification and persistence have no overall network
+timeout. Individual RPC/finality reads and DNS remain bounded. The worker checks
+current authority and freshness again after collection. Live request/retry
+selection and installation qualification remain required.
+
+The endpoint response recovery worker preserves the original whole-attempt
+selection and each certified single-case replacement under its own immutable
+attempt key. `prepare_case` verifies retained parent grants before committing
+new work. Complete request intent and queue entries commit together before
+response reservations; interrupted reservations resume from that saved intent. A saved cursor survives restart, so an unavailable miner does
+not prevent later cases from being checked. Polling uses the original evaluator
+key, fresh route-specific authentication and a newly proved public serving origin.
+It only calls `POST /v1/translate/response`; it never retransmits inference.
+
+A verified original envelope, including a signed miner failure, is persisted
+before acknowledgement and returned offline on subsequent reads. Recovery
+records the actual retrieval time. It neither certifies original timely receipt
+nor produces a score or closes a scheduler obligation. An absent archive,
+pending response, invalid envelope or transient transport failure leaves work
+pending. An uncertain attempt requires signed retirement and an independent
+retry certificate before a replacement can be admitted. Current authority still governs new network reads; already retained evidence
+remains readable after closure. Capacity can grow without replacing selections.
+
+`CohortEndpointGrantDelivery` sends the retained exact assignment and bounded
+attempt order to `POST /v1/competition/cohorts/assignments`. It re-proves the
+current public serving origin, authenticates the route and receiving miner, and
+retains the miner's signed storage receipt before acknowledging delivery. A lost
+HTTP acknowledgement or local receipt write can retry the identical grant; a
+retained receipt is readable offline. The same worker delivers original and
+replacement grants. Delivery does not invoke inference.
+
+The opt-in `CohortMinerAuthorizationAuthority` verifies the original quorum,
+assigned evaluator, participant, policy, model and serving origin against its
+configured cohort authority. It commits the grant, request lookup and receipt
+intent together before signing. Restart resumes interrupted signing; closure
+does not remove an existing storage acknowledgement. New inference additionally
+requires current authenticated phase history and the miner's own finalized
+transport-window validation. Cohort signatures cannot override issuance hashes,
+window IDs, reveal rounds or request deadlines. Local replay has no overall
+network timeout. Temporary source or storage-capacity failures remain retryable.
+
+The evaluator's `CohortEndpointRetirement` authenticates the original request to
+`POST /v1/competition/cohorts/assignments/retire` at its freshly proved origin.
+It verifies the miner's exact request/grant receipt. A positive receipt must
+match a retrieved original response; both records commit together before
+acknowledgement. An absent response requires the evaluator's own expired block
+and round observations. Invalid or unavailable evidence remains pending. Saved
+records replay offline after restart without signing again or invoking inference.
+
+The miner persists an execution fence before draining active protocol work and
+commits its receipt intent before signing. It preserves signed failures and
+prevents admitted-but-queued requests from executing. Its resource ledger moves
+to schema 2 on first retirement so old readers cannot ignore the fence. Preserve
+that database through upgrades and migration. A `no_response_retained` receipt
+does not prove that inference never ran, stop detached sidecars or authorize a
+void. Host fencing and independently authenticated proof replay remain required.
+
+
+`CohortEndpointDecisionSigner` reviews each retired case under its own current
+finality and certified request-phase history. It retains the exact review and
+signing intent before voting. Independent policy groups certify either
+`retain_response` or `retry_required`. A signed miner failure stays selected,
+just like a successful response. An absence requires a valid miner retirement
+receipt and the reviewer's independently observed expired block and round.
+Neither a missing response nor a missing reviewer vote becomes a zero or void.
+
+`CohortEndpointCaseCoordinator` combines retirement, durable review selection
+and quorum collection. It stops requesting votes once quorum is available,
+retains partial votes across outages and archives the certificate before
+acknowledging completion. Reviews are keyed by their exact attempt and case;
+later attempts must preserve those records. Completed votes and certificates
+recover offline. An unfinished signing intent rechecks current authority, and
+its decision has no expiration or coordinator-renewal requirement.
+
+Native miner admission accepts `umi-cohort-miner-grant/2` for one certified
+unresolved case. The independently signed replacement binds its original job,
+case, next attempt number, parent grant hash and archive key, prior decision
+and miner retirement receipt. It supplies a fresh bounded transport window
+after its parent's deadline. A signed response, including a miner failure,
+cannot become a retry. Each parent remains an immutable archive record;
+iterative lineage verification avoids embedding all previous attempts in the
+next request. Restart and lost acknowledgements recover the same grant.
+Capacity can grow without changing retained grant identity.
+
+The durable decision signer also reviews replacement cases. An absent response
+requires another signed retirement and independent expiry observation before
+another attempt; a recovered signed response remains selected. Closed phases
+block new grants and inference, while retained acknowledgements and responses
+remain recoverable. A decision certificate alone supplies no transport authority.
+
+Evaluator grant delivery, response polling, retirement and decision collection
+accept both original and replacement selections. Every attempt retains its own
+response, retirement and review; a replacement cannot overwrite a completed
+case or another transport window for the same attempt. Missing or conflicting
+parents prevent delivery until the correct archive is restored.
+
+The endpoint request worker constructs initial and replacement requests from
+verifier-owned announcement and issuance blocks. Each reviewer retains the exact
+request, phase history and transport proof bytes before signing. Partial votes
+and the first independent quorum survive restart. A late signer can complete
+the original expired request; delivery still checks current authority, and
+inference requires a live bounded window. An expired attempt must be retired
+before a separately certified replacement can execute.
+
+The cohort dispatcher commits authenticated request intent before sending and
+retains the complete bounded wire result before any later chain read. Recovery
+uses the original sealed response; it never repeats an uncertain inference
+send. The attempt worker connects dispatch, retirement, decision review and
+replacement signing. Its immutable successor records let restart resume the
+latest certified attempt while preserving completed sibling cases. A host may
+supply a fresh clip capability for a new attempt; a retained request keeps its
+original URL and signature inputs.
+
+The endpoint scheduler polls the acknowledged order inbox with persistent scan
+cursors and bounded parallelism. It retains each assignment's complete case
+inventory before execution and selects at most one case per assignment in a
+batch. Unavailable miners, media and reviewers remain pending and are revisited
+after restart. A host-owned video source can refresh clip access for a new
+attempt; recovery of a retained request does not contact that source again.
+
+Each completed case retains references to its selected attempt, original review
+and quorum decision. The terminal manifest requires exactly the original job's
+cases and replays every reference against its retained evidence. It supports
+cases completed on different attempts, preserves signed miner failures and can
+recover completed work offline. It is a local aggregate, not an independent
+closure certificate, score or reward authorization.
+
+Before reporting the assignment complete, the scheduler retains an
+`umi-cohort-endpoint-replay-archive/1` root and its content-addressed objects.
+These preserve the assignment, terminal manifest, exact response reviews and
+certificates, and every predecessor attempt. Independent replay verifies the
+whole lineage and rejects missing parents, conflicting originals or incomplete
+case coverage. Each object is bounded; retry history is stored as separate
+objects without a cumulative history deadline. A storage failure keeps export
+pending and preserves the original work for retry after capacity is restored.
+
+After certified reference reveal, `replay_endpoint_archive_quality` authenticates
+the selected order, phase history, request intervals, retained responses and
+Quicknet pulses. It returns per-case content metrics in
+`umi-cohort-endpoint-content-quality/1`. Recovery duration does not change those
+metrics. Signed miner errors retain zero quality; missing evidence or pulses
+prevent a report. The output has no invented inference duration: `elapsed_ms`
+is null and original timing remains unverified. These metrics do not apply
+latency or dependence gates, rank miners, authorize service credit or establish
+that this archive was included in full-roster request closure. Keep this
+private replay output separate from certified results. Legacy timed evidence
+and its eligibility rules remain unchanged.
+
+The request-closure consumer reviews the original intake and preparation without
+reference answers. Every selected participant must have its signed order and a
+terminal seal from every assigned evaluator. Each seal binds complete local
+execution and, for endpoints, every retained response and certified predecessor.
+Missing assignments, peers or objects keep explicit obligations pending. Export
+commits the original objects before signing; restart resumes a retained intent
+from local bytes even when its former endpoint peer is unavailable.
+
+`umi-cohort-request-closure/1` commits that complete manifest. Native progress
+binds it together with the original service observation; replay checks the
+actual request-window compensation before accepting the certified closure.
+`replay_closed_endpoint_quality` requires this full closure and verifies that the
+particular miner/evaluator archive was selected by it. Its metrics still carry
+no service-credit or weight authority. Original service-clock evidence and
+reward allocation remain separate requirements.
+
+`ClosedQualityReview` consumes that certified closure after reference reveal.
+It replays each selected evaluator's local execution and endpoint archive, then
+computes exact per-stratum and aggregate quality with the policy's dependence
+gates. Endpoint candidates use content quality only; their missing original
+latency is never replaced with zero or the later retrieval duration. Local
+model and incumbent observations keep their measured resource eligibility.
+Different retained predictions, even at equal quality, cannot become one agreed
+result. Incumbent failure or evaluator disagreement has no common score; absent
+evidence remains pending. Legacy timed scoring keeps its existing rules.
+
+An evaluator can sign `umi-cohort-closed-quality/1` only after replay and binding
+its own retained terminal. The owner commits the exact intent before signing
+and the vote before acknowledging it. Archived votes recover without peers or
+another signature. Collection retains partial votes and requires every assigned
+evaluator, including the policy's independent control groups. Its
+`umi-cohort-quality-manifest/1` covers the exact complete roster; a missing
+certificate cannot silently remove a participant. Review caches completed
+calculations within one authenticated history snapshot. A new authority
+selection requires a new review.
+
+These are benchmark certificates. They do not establish paid work units,
+original service timing, promotion rights, settlement or reward authority.
+Service-credit allocation, model attribution and the native reward consumers
+must verify those separate inputs before using the quality evidence.
+
+Host composition must supply authenticated current history, owned finality, private
+state, the signer, writer fence and service lifecycle; the standard miner CLI
+does not install this authority yet.
+Recovery of an old policy's archive under a replacement evaluator key remains
+unsupported. None of these storage acknowledgements proves publication timing,
+scores or a native reward effect.
+
+`umi-recoverable-roster-evidence/1` binds the entire round to its certified
+intake seal and preparation result. The reviewer replays the original intake
+inventory, including superseded submissions, every selected admission and all
+retained phase decisions. This checks outage compensation as well as signatures.
+Reference-free membership is also used before request closure. The scored
+consumer additionally checks the revealed suite and requires one complete
+ordered outcome per selected participant. Missing
+outcomes raise `IncompleteRecoverableCohort` with the pending submission hashes;
+missing archives remain source failures. Delay alone neither erases a member nor
+creates a zero or void. Roster membership alone does not close scheduler work or
+calculate service credit; the complete request manifest and its native phase
+decision are required separately.
+
+Installed endpoint authorization and retry selection, complete roster
+settlement, delayed first reward admission and standing reward continuation
+still require integration. A reviewed void does not itself authorize closing
+an unresolved scheduler obligation. These artifacts do not invoke models, prove host
+isolation or independently verify the chain proofs referenced by their timing
+boundaries. Production reviewers must retain and authenticate those sources.
+
+Configure the intake's `recoverable_intake` with its private directory and exact
+cohort/authority bindings. Initialize it with `initialize-cohort-intake` and
+publish the certified history through `CohortIntakePublisher` before accepting
+consent. Production intake retains the original registration proof and metadata
+before acknowledging a participation request. After interrupted storage, retry
+the identical signed request. A receipt remains `pending_attestation`; use the
+admission status route for the subsequent certificate.
+
+Run one reviewer process per policy-approved evaluator hotkey:
+
+```sh
+umi-competition --policy /absolute/path/policy.json \
+  run-cohort-admission-worker --config /absolute/path/admission-worker.json
+```
+
+`CohortAdmissionWorkerConfig` uses schema `umi-cohort-admission-worker-config/1`.
+Its `intake` configuration selects the shared local queue; `signing` selects
+the reviewer hotkey, cohort authorities and private signing journal. `chain`
+selects that reviewer's own finality state and RPC providers. These three state
+directories must not overlap. Configure `wallet_name`, `hotkey_name`,
+`wallet_path` and, if required, a private `hotkey_password_file`; the service
+never prompts for credentials. The intake and reviewers must run under the
+private queue's owning OS account. Separate signer identities do not by
+themselves establish independently administered control groups.
+
+The service holds a process lock, polls all configured cohorts, retries pending
+records and drains in-flight signing before shutdown. `--once` performs one
+bounded pass; omit it under a boot-persistent service manager. A pass is bounded
+by `batch_size` (default 16, maximum 256); `poll_seconds` defaults to 5. Missing
+proofs, capacity exhaustion and unavailable finality leave work pending. Increasing
+`admission_capacity` or the signer's storage limits permits an unchanged retry.
+These byte limits cover logical records; provision separate disk headroom for
+SQLite, finality state, backups and migration.
+
+The admission worker can also prepare rounds automatically. Set its optional
+`preparation` object to select `promotion_directory` and `output_directory`.
+These directories must be disjoint from each other, the intake, signer and
+finality stores, and the wallet directory. `maximum_bytes` defaults to 64 MiB
+per prepared round; `maximum_promotion_bytes` defaults to 16 MiB per promotion
+receipt. Preparation records count toward `admission_capacity` as well.
+
+After certified intake closure, the worker waits for every selected admission
+certificate, reconstructs the full intake seal, and selects the locally reviewed
+incumbent. It commits the roster, incumbent receipt and original finalized
+observation under the intake owner's lock before publishing
+`output_directory/COHORT_SHA256.json` as a private `PreparedCohortRound`.
+Superseded intake records remain required for membership verification.
+Restart and lost publication reuse the original round bytes; they cannot select
+a newer incumbent or change the prepared block. Missing evidence or storage
+capacity leaves preparation pending, and revocation prevents republication.
+
+`NativePreparationProgressSource` samples preparation under the intake owner's
+lock and retains its original observation before signing. Its records count
+toward the shared storage allowance and pin their original registration blocks
+for archive retention. `PreparationProgressReviewer` replays the preserved
+round and promotion receipt, then checks the seal, preparation, progress,
+decision and every original consent archive against its own finality provider.
+Missing superseded consent evidence also prevents certification.
+
+`CohortProgressSigner` retains each reviewed intent and vote.
+`CertifiedPhaseObserver` connects these reviewers to
+`CohortRecoveryCoordinator` through its durable sampling and attestation ports.
+Partial progress or transition signing resumes at the original observation
+after an outage; a changed finalized boundary or round cannot replace it.
+The resulting preparation certificate binds the exact round used by the roster
+and order consumers. It contains no reference labels or weight authority.
+
+These review ports run against the intake owner's configured stores. Remote
+reviewers use authenticated original exports and their own proof archives; they
+must not inspect another host's live SQLite database. The admission owner starts
+the configured phase controllers, rest gate and accepted-service dispatch.
+Installed private replication and complete cohort
+qualification remain required before launch.
+
+### Private cohort delivery
+
+The shared [copy service and timer](../../deploy/standing-reward-replication/)
+transfer immutable exports using rclone. Select a separate job for each row
+below and each producer. Install its root-owned `JOB.env`, private
+`JOB.rclone.conf` and selected `JOB.filters` in the configured directory. The
+service receives the credential and filter through `LoadCredential`; filters
+are shipped under `profiles/`. Use a publisher credential for uploads and a
+read-only credential for receiver downloads. Neither role needs an interactive
+Wrangler session.
+
+| Profile | Producer root | Consumer root |
+| --- | --- | --- |
+| `reward` | Proof export directory | Proof import directory, including the producer's own import |
+| `reward` | Standing reward delivery outbox | Validator/coordinator delivery directory |
+| `requests` | Evaluator request export directory | Request phase reader's completion directory |
+| `settlement` | Settlement `exchange_outbox` | Other reviewers' `exchange_inbox` |
+| `documents` | Coordinator settlement `exchange_outbox/inputs` | Reviewers' `inputs_directory` |
+| `documents` | Certified request handoff `history_directory` | Settlement reviewers' `history_directory` |
+| `models` | Native preserved model archive | Evaluator model-review/benchmark archive and settlement `promotion_directory/model-reward-artifacts` |
+| `model-evidence` | Model acceptance worker outbox | Settlement `promotion_directory` and other configured acceptance readers |
+| `videos` | Content-addressed video directory | Configured benchmark/clip video directory |
+| `documents` | One selected immutable policy, catalog or approved model-review document directory | Its corresponding configured input directory |
+
+Each job uses a distinct private series/producer/role prefix in R2. Model bundles
+and acceptance evidence use the model-artifact bucket; other exports use the
+evidence bucket. Keep native journals, keys, scratch space and the unrevealed
+source suite outside these roots. The `documents` profile copies top-level JSON
+files; it does not inspect their contents or decide whether labels may be
+released. Configure only the explicit immutable directory listed above.
+
+Model acceptance exports retain `objects/DIGEST.json` and
+`model-reward-acceptances/COHORT/SUBMISSION.json` beneath their producer root.
+Copy this layout unchanged into each settlement owner's `promotion_directory`.
+The `objects` files are the original canonical rights and reconstruction
+documents; they use no settlement wrapper. Settlement checks their private file
+modes, size and digest before including them in the reward package. Missing
+documents or preserved model files keep the award pending. A corrupt delivered
+object fails verification; a second source cannot replace it.
+
+The request publisher first verifies the complete certified request closure and
+publishes its handoff. Settlement replays that history before assembling the
+reference package. Only the resulting `exchange_outbox/inputs` is replicated to
+reviewers. Never copy `original_sources.objects_directory`, its suite or the
+coordinator's mixed private source directory to evaluator inputs. Scoring inputs
+are published separately after reference certification. Retained reference and
+scoring packages remain private even after certification.
+
+The copy command preserves exact retries and refuses conflicting destination
+bytes. Source deletion does not delete the replica. A failed job retries through
+the timer, without an overall cohort expiry. Partial model/video delivery keeps
+native readers pending until the complete original bytes verify. Model manifests
+and content files retain their existing layout; declared hidden model files are
+included, while unpublished `.pending-*` archive directories are excluded.
+Consumers still verify native signatures, manifests, hashes and history before
+using any delivered data. Copy success alone cannot certify a cohort or prove
+reward submission.
+
+Enable the matching upload/download timers at boot after selecting and checking
+their exact directories. Keep each producer's prefix single-writer; recover its
+original immutable exports when moving hosts. Qualify disk capacity, sustained
+transfer load and independent backup separately before launch.
+
+Service admission configuration version 7 adds `orders`, an
+`umi-cohort-order-host/1` selection. Its queue binds the same policy, cohorts and
+independent reviewers as the admission owner. After certified preparation it
+derives one order for every accepted participant from the original incumbent,
+pinned CPU runtime and committed suite. Orders contain case IDs, video hashes
+and strata; reference labels stay in the private source store. A durable complete
+roster marker is published only after every original order is retained. Partial
+selection resumes unchanged; delivery proceeds independently through private
+reviewer HTTP routes and acknowledged evaluator inboxes.
+
+Phase review configuration version 5 adds `benchmark`, an
+`umi-cohort-benchmark-host/1` selection with order-signing, inbox and execution
+journals; model/video archives; scratch storage; and completion-export storage.
+The selected model archive may be the exact archive used by model review. All
+other state, scratch, export and credential paths remain disjoint. Configure the
+same execution selection in settlement so it verifies this evaluator's original
+runs. Native CPU execution and completion exports start after listener startup
+and drain before the service releases its key, finality provider and process
+locks. Polling uses bounded batches and concurrency; a slow or unavailable peer
+leaves the original work pending without a cohort deadline.
+
+CPU invocation and endpoint request preparation wait for a finalized block
+strictly after certified preparation. Observing the preparation block itself
+leaves work pending without recording an attempt; polling resumes when finality
+advances. Completed originals remain available for replay after a restart.
+
+The private `/internal/cohorts/orders/votes/{lookup,attest}` and
+`/internal/cohorts/orders/inbox/{lookup,accept}` POST routes require the reviewer
+credential. They expose bounded original votes and receipts; a lost HTTP reply
+can recover the same acknowledgement without signing or executing again.
+They do not publish scores or authorize weights. CPU comparator completion alone
+cannot produce an endpoint completion certificate.
+
+Phase review configuration version 6 adds `endpoint`, an
+`umi-cohort-endpoint-host/1` selection, and requires service review signing.
+Configure its request and retirement-decision journals for the same evaluator,
+policy and cohorts; its separate origin observer with two backup RPCs; renewable
+clip delivery; terms objects and transport policies; and authenticated origins
+for every other policy evaluator. The clip source may share the benchmark's
+exact immutable video directory. Other stores and credentials remain disjoint.
+The cohort's manifest selects its terms and transport hash. Peer requests cannot
+select a different transport. Each signed request and replacement uses its own
+selected transport's finalized block adapter.
+
+The endpoint worker starts alongside CPU execution and completion exports. It
+delivers requests, retrieves retained responses, obtains independent retirement
+votes and resumes certified replacements. Missing inputs or unavailable peers
+remain pending; original completed responses survive restart without another
+inference. The private `/internal/cohorts/endpoint/votes/{request,decision}` POST
+routes require the reviewer credential and validate native evidence before
+signing. Response signatures are checked against the exact submitted body.
+Both finality observers and all workers drain before releasing the host key and
+exclusive lease.
+
+The public `GET /v1/competition/cohorts/{cohort_sha256}/requests/readiness`
+route accepts a fresh 32-character hexadecimal `nonce`. The version 7 coordinator
+checks the active admission, lifecycle, order and dispatch tasks, selected complete
+roster, available service clips and current finalized observation. It probes every
+configured evaluator through the authenticated private
+`POST /internal/cohorts/requests/readiness` route. Evaluators check their active
+workers, acknowledged original orders, selected transport, readable model inputs,
+video hashes, pinned runtime and clip delivery. Model availability checks file
+shape and size; native execution still verifies all model hashes before use.
+
+Replies bind the nonce, policy, cohort, recovery tip, catalogs and assigned orders.
+An unavailable input, stopped worker, stale or mismatched reply leaves the request
+clock paused. Recovery retries the same cohort automatically. Readiness uses its
+own peer connection pool and bounded requests; it cannot wait behind a phase vote
+that needs this observation. Public replies are not cached. Shutdown clears
+readiness before draining the workers. Readiness observations authorize neither
+results nor weights, and installed cohort qualification remains required.
+
+When the original header was skipped or the reviewer was offline, admission
+review reconstructs it from that reviewer's nearest retained finalized
+descendant. Each RPC header must hash to the committed parent. The walk has no
+total age or distance cutoff; `historical_header_batch_size` bounds a pass
+(default 256, maximum 4,096). Completed downloads are retained and rechecked
+after restart. `historical_header_maximum_bytes` bounds those durable header
+hints separately from the registration cache (default 256 MiB); increase it
+when needed. Recovery continues on later passes after a timeout or storage
+failure. It still requires a fresh owned head, and a reconstructed historical
+header never becomes a new observer record or current execution observation.
+
+Reviewers verify original proof bytes against their own retained historical
+headers or verified ancestry and a fresh owned head. Each records its exact signing intent before
+signing. The queue verifies each vote and publishes a certificate only when the
+policy's independent-group quorum is met. After intake closes, it requires the
+original record selected by the certified intake seal. Public access exposes
+the certificate, not the private registration archive.
+
+Miners can inspect their retained request without signing again:
+
+```sh
+umi-competition --policy /absolute/path/policy.json \
+  query-cohort-admission --origin https://intake.example \
+  --request /absolute/path/signed-participation.json
+```
+
+This reads `GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`
+and verifies the returned policy, consent, contribution and signature quorum.
+`admission_certified` certifies participation only. It does not establish current
+registration, assignment delivery, a score or reward activation; downstream
+execution must still use the authoritative cohort history and fresh evidence.

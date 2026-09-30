@@ -10,11 +10,14 @@ use sp_trie::{LayoutV1, StorageProof, Trie, TrieConfiguration, TrieDBBuilder};
 const REQUEST_SCHEMA: &str = "umi-substrate-proof/1";
 const EXTRINSICS_ROOT_REQUEST_SCHEMA: &str = "umi-substrate-extrinsics-root/1";
 const RESPONSE_SCHEMA: &str = "umi-substrate-proof-result/1";
+const READ_REQUEST_SCHEMA: &str = "umi-substrate-proof-read/1";
+const READ_RESPONSE_SCHEMA: &str = "umi-substrate-proof-values/1";
 const MAX_LINE_BYTES: usize = 160 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_ITEMS: usize = 4_096;
 const MAX_KEY_BYTES: usize = 512;
 const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_READ_VALUES_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PROOF_NODES: usize = 4_096;
 // LayoutV1 stores large values as separate, raw proof nodes. A proof of any
 // permitted value (including :code) must fit; the total proof cap stays 32 MiB.
@@ -46,10 +49,24 @@ struct ExtrinsicsRootRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadRequest {
+    schema: String,
+    request_id: String,
+    state_version: u8,
+    state_root: String,
+    keys: Vec<String>,
+    proof: Vec<String>,
+    maximum_value_bytes: usize,
+    maximum_total_value_bytes: usize,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum VerificationRequest {
     StorageProof(ProofRequest),
     ExtrinsicsRoot(ExtrinsicsRootRequest),
+    ReadProof(ReadRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +90,21 @@ struct ProofResponse {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    values: Option<ProofValues>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofValues {
+    state_version: u8,
+    state_root: String,
+    items: Vec<ReadValue>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadValue {
+    key: String,
+    value: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +114,7 @@ enum VerificationError {
     DuplicateNode,
     InvalidProof,
     InvalidExtrinsicsRoot,
+    ValueLimit,
 }
 
 impl VerificationError {
@@ -92,6 +125,7 @@ impl VerificationError {
             Self::DuplicateNode => "duplicate_node",
             Self::InvalidProof => "invalid_proof",
             Self::InvalidExtrinsicsRoot => "invalid_extrinsics_root",
+            Self::ValueLimit => "value_limit",
         }
     }
 }
@@ -162,9 +196,28 @@ fn verify_request(request: &ProofRequest) -> Result<(), VerificationError> {
         items.push((key, value));
     }
 
+    let database = proof_database(&request.proof)?;
+    let trie = TrieDBBuilder::<LayoutV1<Blake2Hasher>>::new(&database, &root).build();
+    for (key, expected) in items {
+        let actual = trie
+            .get(&key)
+            .map_err(|_| VerificationError::InvalidProof)?;
+        if actual != expected {
+            return Err(VerificationError::InvalidProof);
+        }
+    }
+    Ok(())
+}
+
+fn proof_database(
+    encoded_nodes: &[String],
+) -> Result<sp_trie::MemoryDB<Blake2Hasher>, VerificationError> {
+    if encoded_nodes.is_empty() || encoded_nodes.len() > MAX_PROOF_NODES {
+        return Err(VerificationError::InvalidInput);
+    }
     let mut proof_bytes = 0usize;
-    let mut proof_nodes = Vec::with_capacity(request.proof.len());
-    for encoded in &request.proof {
+    let mut proof_nodes = Vec::with_capacity(encoded_nodes.len());
+    for encoded in encoded_nodes {
         let node = decode_hex(encoded, MAX_PROOF_NODE_BYTES, false)?;
         if node.is_empty() {
             return Err(VerificationError::InvalidInput);
@@ -186,17 +239,67 @@ fn verify_request(request: &ProofRequest) -> Result<(), VerificationError> {
     // the partial trie exactly as `sp_state_machine::read_proof_check` does and perform every
     // lookup against the claimed state root. A missing node makes `Trie::get` fail rather than
     // turning an incomplete proof into a false non-membership result.
-    let database = proof.into_memory_db::<Blake2Hasher>();
+    Ok(proof.into_memory_db::<Blake2Hasher>())
+}
+
+fn read_request(request: &ReadRequest) -> Result<ProofValues, VerificationError> {
+    if request.schema != READ_REQUEST_SCHEMA
+        || request.keys.is_empty()
+        || request.keys.len() > MAX_ITEMS
+        || request.maximum_value_bytes == 0
+        || request.maximum_value_bytes > MAX_VALUE_BYTES
+        || request.maximum_total_value_bytes == 0
+        || request.maximum_total_value_bytes > MAX_READ_VALUES_BYTES
+    {
+        return Err(VerificationError::InvalidInput);
+    }
+    validate_request_id(&request.request_id)?;
+    if request.state_version != 1 {
+        return Err(VerificationError::UnsupportedStateVersion);
+    }
+    let root_bytes = decode_hex(&request.state_root, 32, false)?;
+    if root_bytes.len() != 32 {
+        return Err(VerificationError::InvalidInput);
+    }
+    let root = H256::from_slice(&root_bytes);
+    let database = proof_database(&request.proof)?;
     let trie = TrieDBBuilder::<LayoutV1<Blake2Hasher>>::new(&database, &root).build();
-    for (key, expected) in items {
-        let actual = trie
+    let mut previous_key: Option<Vec<u8>> = None;
+    let mut items = Vec::with_capacity(request.keys.len());
+    let mut total_bytes = 0usize;
+    for encoded in &request.keys {
+        let key = decode_hex(encoded, MAX_KEY_BYTES, false)?;
+        if previous_key
+            .as_ref()
+            .is_some_and(|previous| previous >= &key)
+        {
+            return Err(VerificationError::InvalidInput);
+        }
+        let value = trie
             .get(&key)
             .map_err(|_| VerificationError::InvalidProof)?;
-        if actual != expected {
-            return Err(VerificationError::InvalidProof);
+        if let Some(ref value) = value {
+            total_bytes = total_bytes
+                .checked_add(value.len())
+                .ok_or(VerificationError::ValueLimit)?;
+            if value.len() > request.maximum_value_bytes
+                || total_bytes > request.maximum_total_value_bytes
+            {
+                return Err(VerificationError::ValueLimit);
+            }
         }
+        items.push(ReadValue {
+            key: encoded.clone(),
+            value: value.map(|bytes| format!("0x{}", hex::encode(bytes))),
+        });
+        previous_key = Some(key);
     }
-    Ok(())
+    // No partially checked items are emitted if any later lookup or bound fails.
+    Ok(ProofValues {
+        state_version: 1,
+        state_root: request.state_root.clone(),
+        items,
+    })
 }
 
 fn verify_extrinsics_root(request: &ExtrinsicsRootRequest) -> Result<(), VerificationError> {
@@ -238,6 +341,7 @@ fn response_for_line(line: &[u8]) -> ProofResponse {
             request_id: String::new(),
             ok: false,
             error_code: Some(VerificationError::InvalidInput.code()),
+            values: None,
         };
     };
     let (request_id, result) = match &request {
@@ -247,6 +351,24 @@ fn response_for_line(line: &[u8]) -> ProofResponse {
         VerificationRequest::ExtrinsicsRoot(value) => {
             (value.request_id.clone(), verify_extrinsics_root(value))
         }
+        VerificationRequest::ReadProof(value) => {
+            return match read_request(value) {
+                Ok(values) => ProofResponse {
+                    schema: READ_RESPONSE_SCHEMA,
+                    request_id: value.request_id.clone(),
+                    ok: true,
+                    error_code: None,
+                    values: Some(values),
+                },
+                Err(error) => ProofResponse {
+                    schema: READ_RESPONSE_SCHEMA,
+                    request_id: value.request_id.clone(),
+                    ok: false,
+                    error_code: Some(error.code()),
+                    values: None,
+                },
+            };
+        }
     };
     match result {
         Ok(()) => ProofResponse {
@@ -254,12 +376,14 @@ fn response_for_line(line: &[u8]) -> ProofResponse {
             request_id,
             ok: true,
             error_code: None,
+            values: None,
         },
         Err(error) => ProofResponse {
             schema: RESPONSE_SCHEMA,
             request_id,
             ok: false,
             error_code: Some(error.code()),
+            values: None,
         },
     }
 }
@@ -335,6 +459,7 @@ fn run<R: Read, W: Write>(input: R, output: W) -> io::Result<()> {
                     request_id: String::new(),
                     ok: false,
                     error_code: Some(VerificationError::InvalidInput.code()),
+                    values: None,
                 },
             )?,
         }
@@ -422,6 +547,169 @@ mod tests {
             "proof": fixture["proof"],
         }))
         .expect("checked-in Finney fixture must form a proof request")
+    }
+
+    fn read_from(request: &ProofRequest) -> ReadRequest {
+        ReadRequest {
+            schema: READ_REQUEST_SCHEMA.to_owned(),
+            request_id: "read-fixture".to_owned(),
+            state_version: request.state_version,
+            state_root: request.state_root.clone(),
+            keys: request.items.iter().map(|item| item.key.clone()).collect(),
+            proof: request.proof.clone(),
+            maximum_value_bytes: MAX_VALUE_BYTES,
+            maximum_total_value_bytes: MAX_READ_VALUES_BYTES,
+        }
+    }
+
+    fn read_wire(request: &ReadRequest) -> Value {
+        let raw = serde_json::to_vec(&json!({
+            "schema": request.schema, "request_id": request.request_id,
+            "state_version": request.state_version, "state_root": request.state_root,
+            "keys": request.keys, "proof": request.proof,
+            "maximum_value_bytes": request.maximum_value_bytes,
+            "maximum_total_value_bytes": request.maximum_total_value_bytes,
+        }))
+        .unwrap();
+        serde_json::to_value(response_for_line(&raw)).unwrap()
+    }
+
+    #[test]
+    fn extracts_real_finney_proof_values_without_claims() {
+        let original = finney_checkpoint_request();
+        let response = read_wire(&read_from(&original));
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["schema"], READ_RESPONSE_SCHEMA);
+        assert_eq!(response["request_id"], "read-fixture");
+        assert_eq!(response["state_root"], original.state_root);
+        assert_eq!(response["state_version"], 1);
+        for (actual, expected) in response["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(original.items)
+        {
+            assert_eq!(actual["key"], expected.key);
+            let value = match expected.value {
+                ClaimedValue::Present(encoded) => json!(encoded),
+                ClaimedValue::Absent(()) => Value::Null,
+            };
+            assert_eq!(actual["value"], value);
+        }
+    }
+
+    #[test]
+    fn extracts_absence_and_empty_values_distinctly() {
+        let (mut database, mut root) = MemoryDB::<Blake2Hasher>::default_with_root();
+        {
+            let mut trie = TrieDBMutBuilder::<Layout>::new(&mut database, &mut root).build();
+            trie.insert(b"empty", b"").unwrap();
+        }
+        let mut recorder = Recorder::<Layout>::new();
+        {
+            let trie = TrieDBBuilder::<Layout>::new(&database, &root)
+                .with_recorder(&mut recorder)
+                .build();
+            assert_eq!(trie.get(b"empty").unwrap(), Some(Vec::new()));
+            assert_eq!(trie.get(b"missing").unwrap(), None);
+        }
+        let nodes: Vec<Vec<u8>> = StorageProof::new(recorder.drain().into_iter().map(|r| r.data))
+            .into_iter_nodes()
+            .collect();
+        let mut read = read_from(&request(root, &nodes));
+        read.keys = vec![
+            format!("0x{}", hex::encode(b"empty")),
+            format!("0x{}", hex::encode(b"missing")),
+        ];
+        let response = read_wire(&read);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["items"][0]["value"], "0x");
+        assert_eq!(response["items"][1]["value"], Value::Null);
+    }
+
+    #[test]
+    fn read_failures_never_return_partial_values() {
+        let (root, proof) = fixture();
+        for change in 0..9 {
+            let mut read = read_from(&request(root, &proof));
+            match change {
+                0 => read.state_root = format!("0x{}", "00".repeat(32)),
+                1 => read.proof.push(read.proof[0].clone()),
+                2 => read.keys.push(read.keys[0].clone()),
+                3 => read.keys.reverse(),
+                4 => read.state_version = 2,
+                5 => read.maximum_value_bytes = 2,
+                6 => read.maximum_total_value_bytes = 2,
+                7 => read.keys.push("0xzz".to_owned()),
+                _ => read.maximum_total_value_bytes = MAX_READ_VALUES_BYTES + 1,
+            }
+            let response = read_wire(&read);
+            assert_eq!(response["ok"], false, "change {change}");
+            assert!(response.get("items").is_none());
+            assert!(response.get("state_root").is_none());
+            assert!(response.get("error_code").is_some());
+        }
+    }
+
+    #[test]
+    fn reads_external_values_and_rejects_missing_or_changed_nodes() {
+        let original = large_value_request(1024 * 1024);
+        let read = read_from(&original);
+        assert_eq!(
+            read_wire(&read)["items"][0]["value"],
+            format!("0x{}", "5a".repeat(1024 * 1024))
+        );
+        for missing in [false, true] {
+            let mut changed = read_from(&original);
+            let index = changed
+                .proof
+                .iter()
+                .position(|node| node.len() > 1024 * 1024)
+                .unwrap();
+            if missing {
+                changed.proof.remove(index);
+            } else {
+                changed.proof[index].replace_range(2..4, "00");
+            }
+            let response = read_wire(&changed);
+            assert_eq!(response["ok"], false);
+            assert_eq!(response["error_code"], "invalid_proof");
+            assert!(response.get("items").is_none());
+        }
+    }
+
+    #[test]
+    fn aggregate_read_limit_applies_to_repeated_value_content() {
+        let (mut database, mut root) = MemoryDB::<Blake2Hasher>::default_with_root();
+        {
+            let mut trie = TrieDBMutBuilder::<Layout>::new(&mut database, &mut root).build();
+            trie.insert(b"alpha", b"same").unwrap();
+            trie.insert(b"beta", b"same").unwrap();
+        }
+        let mut recorder = Recorder::<Layout>::new();
+        {
+            let trie = TrieDBBuilder::<Layout>::new(&database, &root)
+                .with_recorder(&mut recorder)
+                .build();
+            trie.get(b"alpha").unwrap();
+            trie.get(b"beta").unwrap();
+        }
+        let nodes: Vec<Vec<u8>> = StorageProof::new(recorder.drain().into_iter().map(|r| r.data))
+            .into_iter_nodes()
+            .collect();
+        let mut read = read_from(&request(root, &nodes));
+        read.keys = vec![
+            format!("0x{}", hex::encode(b"alpha")),
+            format!("0x{}", hex::encode(b"beta")),
+        ];
+        read.maximum_value_bytes = 4;
+        read.maximum_total_value_bytes = 7;
+        let response = read_wire(&read);
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error_code"], "value_limit");
+        assert!(response.get("items").is_none());
+        read.maximum_total_value_bytes = 8;
+        assert_eq!(read_wire(&read)["ok"], true);
     }
 
     #[test]

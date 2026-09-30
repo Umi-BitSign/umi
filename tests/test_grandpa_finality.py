@@ -214,6 +214,7 @@ def test_bootstrap_allowance_does_not_delay_idle_observer_termination(tmp_path, 
     binary_hash = _write_fixture_executable(binary, initial_delay=0.5, stall_after_output=60)
     chain_spec = tmp_path / "finney.json"
     chain_spec.write_bytes(b"{}")
+    chain_spec.chmod(0o400)
     selected = GrandpaFinalityObserver(
         binary_path=binary,
         expected_binary_sha256=binary_hash,

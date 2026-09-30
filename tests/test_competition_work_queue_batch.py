@@ -184,6 +184,44 @@ async def test_window_expiring_while_entering_retention_rolls_back_batch(batch, 
 
 
 @pytest.mark.asyncio
+async def test_slow_atomic_batch_preserves_its_fresh_initial_issuance(batch, monkeypatch):
+    original = queue_module.endpoint_proposals
+    observations = []
+
+    def slow_construction(**kwargs):
+        observations.append(kwargs["now_ms"])
+        result = original(**kwargs)
+        if len(observations) == 1:
+            batch.clock.now += 70_000
+        return result
+
+    monkeypatch.setattr(queue_module, "endpoint_proposals", slow_construction)
+    await prepare(batch)
+    assert len(entries(batch)) == 2
+    assert observations[0] == observations[1]
+    for statement in batch.statements:
+        assert batch.queue.journal.get("intent", statement_slot(statement)) == (
+            statement.model_dump(mode="json", by_alias=True)
+        )
+
+
+@pytest.mark.asyncio
+async def test_issuance_stale_before_batch_construction_is_still_rejected(batch, monkeypatch):
+    original = batch.queue.journal.put_many
+
+    def delayed_start(records, *, index=None):
+        if index is not None:
+            batch.clock.now += 70_000
+        return original(records, index=index)
+
+    monkeypatch.setattr(batch.queue.journal, "put_many", delayed_start)
+    with pytest.raises(ValueError, match="issuance is not fresh"):
+        await prepare(batch)
+    assert batch.queue.journal.keys("intent") == []
+    assert entries(batch) == []
+
+
+@pytest.mark.asyncio
 async def test_cancellation_during_issuance_releases_writer_lock(batch):
     original = batch.queue.transport_provider.verified_blocks
     started, release = asyncio.Event(), asyncio.Event()

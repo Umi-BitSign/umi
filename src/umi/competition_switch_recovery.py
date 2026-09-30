@@ -705,7 +705,9 @@ def main(argv: list[str] | None = None) -> int:
         RuntimeError,
         subprocess.SubprocessError,
         ValidatorSupervisorError,
-    ):
+    ) as error:
+        from .competition_progress import _failure_details
+
         print(
             json.dumps(
                 {
@@ -720,6 +722,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.command in {"upgrade", "resume-start"}
                     else "unchanged",
                     "chain_submission_authorized": False,
+                    "failure_details": _failure_details(error),
                 }
             )
         )

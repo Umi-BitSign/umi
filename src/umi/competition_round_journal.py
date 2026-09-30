@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import secrets
@@ -16,11 +15,12 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from .competition_round_plan import RoundPlan, RoundProposal
+from .competition_round_rpc_migration import has_transport_history, validate_rpc_binding
 from .open_competition import digest
+from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, acquire_private_mutex
+from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
 from .private_files import ensure_private_directory as _private
 from .protocol import canonical_json_bytes, is_canonical_json, sha256_hex
-
-MAX_BYTES = 16 * 1024**2
 
 # Bound reservation bodies and allowances before transferring them to Python.
 # Accounting validates key types and byte lengths separately. A rejected body
@@ -55,14 +55,20 @@ class RoundJournal:
         *,
         maximum_rounds: int = 1024,
         maximum_bytes: int = 1024**3,
+        maximum_record_bytes: int = MAX_BYTES,
     ) -> None:
         if (
             type(maximum_rounds) is not int
             or not 1 <= maximum_rounds <= 65536
             or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 16 * 1024**3)
+            or type(maximum_record_bytes) is not int
+            or not 1 <= maximum_record_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
         ):
             raise ValueError("round journal requires bounded capacity")
         self.root, self.maximum_rounds, self.maximum_bytes = root, maximum_rounds, maximum_bytes
+        # Read/write envelope only. Existing reservation allowances, manifests,
+        # bindings and total journal capacity are never enlarged by this value.
+        self.maximum_record_bytes = maximum_record_bytes
         _private(root)
         self.path = root / "rounds.sqlite3"
         self.lock_path = root / "rounds.lock"
@@ -76,11 +82,26 @@ class RoundJournal:
             if len(raw) > MAX_BYTES:
                 raise ValueError("round journal binding exceeds its byte bound")
             sizes = db.execute("SELECT LENGTH(body) FROM binding LIMIT 2").fetchall()
-            if len(sizes) > 1 or (sizes and sizes[0][0] != len(raw)):
+            if len(sizes) > 1:
                 raise ValueError("round journal configuration changed")
             old = db.execute("SELECT body FROM binding LIMIT 1").fetchall()
-            if old and (len(old) != 1 or bytes(old[0][0]) != raw):
-                raise ValueError("round journal configuration changed")
+            transport_history = has_transport_history(db)
+            if transport_history and not old:
+                raise ValueError("round RPC migration lacks original binding")
+            if old and (transport_history or bytes(old[0][0]) != raw):
+                prior = bytes(old[0][0])
+                if transport_history or (
+                    isinstance(binding, dict)
+                    and binding.get("schema") == "umi-round-coordinator-config/2"
+                    and prior not in _predecessor_bindings(binding)
+                ):
+                    validate_rpc_binding(db, prior, raw)
+                elif prior not in _predecessor_bindings(binding):
+                    raise ValueError("round journal configuration changed")
+                # Bound under a deal-preserving predecessor policy (same binding body with the
+                # predecessor's digest wherever policy_sha256 appears): move it to the live policy.
+                else:
+                    db.execute("UPDATE binding SET body = ?", (raw,))
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (raw,))
             db.execute(
@@ -186,7 +207,7 @@ class RoundJournal:
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
         )
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_private_mutex(descriptor, self.lock_path, operation="round_journal_lock")
             self._check_files()
             opened = os.fstat(descriptor)
             current = self.lock_path.stat()
@@ -487,7 +508,11 @@ class RoundJournal:
             raise ValueError("round journal capacity exhausted")
 
     def reserve_records(
-        self, batch_id: str, specs: Iterable[RecordReservation]
+        self,
+        batch_id: str,
+        specs: Iterable[RecordReservation],
+        *,
+        db: sqlite3.Connection | None = None,
     ) -> dict[str, str | int] | None:
         """Atomically enable reservations and retain a complete private batch.
 
@@ -495,6 +520,9 @@ class RoundJournal:
         value may omit its hash; its first immutable write still has to fit the
         reserved bound. No records are published and no signing occurs here.
         This reserves logical journal capacity, not disk space or other stores.
+        With ``db``, borrow this journal's active transaction. This allows a
+        ``put_many`` index callback to reserve future signature capacity in the
+        same commit as the original intent; the caller owns commit/rollback.
         """
         if type(batch_id) is not str or not 1 <= len(batch_id.encode()) <= 128:
             raise ValueError("invalid round reservation batch identity")
@@ -530,38 +558,40 @@ class RoundJournal:
         )
         if len(manifest) > min(MAX_BYTES, self.maximum_bytes):
             raise ValueError("round reservation manifest capacity exhausted")
-        with self.transaction() as db:
-            self._enable_reservations(db)
-            old = self._bounded_blob(
-                db, "record_reservation_batches", "body", where="WHERE id=?", arguments=(batch_id,)
-            )
-            if old is not None:
-                if old != manifest:
-                    raise ValueError("round reservation batch changed")
-                return self._reservation(db, batch_id)
-            for (kind, key), doc in documents.items():
-                if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
-                    raise ValueError("round journal conflict held")
-                body = canonical_json_bytes(doc)
-                prior = self._obligation(db, kind, key)
-                if prior is not None and prior != doc:
-                    raise ValueError("round reservation identity conflict")
-                retained = self._record(db, kind, key)
-                if retained is not None and (
-                    len(retained) > doc["maximum_bytes"]
-                    or (
-                        doc["value_sha256"] is not None
-                        and sha256_hex(retained) != doc["value_sha256"]
-                    )
-                ):
-                    raise ValueError("retained round record differs from reservation")
-                if prior is None:
-                    db.execute(
-                        "INSERT INTO record_reservations VALUES (?,?,?,?,?)",
-                        (kind, key, doc["maximum_bytes"], doc["value_sha256"], body),
-                    )
-            db.execute("INSERT INTO record_reservation_batches VALUES (?,?)", (batch_id, manifest))
+        if db is not None:
+            return self._reserve_records(db, batch_id, documents, manifest)
+        with self.transaction() as owned:
+            return self._reserve_records(owned, batch_id, documents, manifest)
+
+    def _reserve_records(self, db, batch_id, documents, manifest):
+        self._enable_reservations(db)
+        old = self._bounded_blob(
+            db, "record_reservation_batches", "body", where="WHERE id=?", arguments=(batch_id,)
+        )
+        if old is not None:
+            if old != manifest:
+                raise ValueError("round reservation batch changed")
             return self._reservation(db, batch_id)
+        for (kind, key), doc in documents.items():
+            if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
+                raise ValueError("round journal conflict held")
+            body = canonical_json_bytes(doc)
+            prior = self._obligation(db, kind, key)
+            if prior is not None and prior != doc:
+                raise ValueError("round reservation identity conflict")
+            retained = self._record(db, kind, key)
+            if retained is not None and (
+                len(retained) > doc["maximum_bytes"]
+                or (doc["value_sha256"] is not None and sha256_hex(retained) != doc["value_sha256"])
+            ):
+                raise ValueError("retained round record differs from reservation")
+            if prior is None:
+                db.execute(
+                    "INSERT INTO record_reservations VALUES (?,?,?,?,?)",
+                    (kind, key, doc["maximum_bytes"], doc["value_sha256"], body),
+                )
+        db.execute("INSERT INTO record_reservation_batches VALUES (?,?)", (batch_id, manifest))
+        return self._reservation(db, batch_id)
 
     def _reservation(self, db, batch_id):
         identity_raw = self._bounded_blob(db, "record_reservation_identity", "body", maximum=65536)
@@ -671,7 +701,7 @@ class RoundJournal:
                 if offset >= self.maximum_rounds * 80:
                     raise ValueError("round journal batch capacity exhausted")
                 raw = canonical_json_bytes(value)
-                if len(raw) > MAX_BYTES:
+                if len(raw) > self.maximum_record_bytes:
                     raise ValueError("round journal object exceeds its byte bound")
                 record_key = (kind, key)
                 fingerprint = (len(raw), sha256_hex(raw))
@@ -780,14 +810,13 @@ class RoundJournal:
         if conflicts:
             raise ValueError("round journal conflict retained")
 
-    @staticmethod
-    def _record(db, kind, key):
+    def _record(self, db, kind, key):
         size = db.execute(
             "SELECT length(body) FROM records WHERE kind=? AND id=?", (kind, key)
         ).fetchone()
         if size is None:
             return None
-        if type(size[0]) is not int or not 1 <= size[0] <= MAX_BYTES:
+        if type(size[0]) is not int or not 1 <= size[0] <= self.maximum_record_bytes:
             raise ValueError("retained round object exceeds its byte bound")
         row = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
         raw = bytes(row[0])
@@ -904,3 +933,29 @@ class RoundJournal:
                     raise ValueError("round settlement index differs from its retained proposal")
                 result.append(proposal)
         return result
+
+
+def _predecessor_bindings(binding: object) -> set[bytes]:
+    """Binding bodies this journal would carry under an honored predecessor policy."""
+    from .competition_policy_lineage import registered_admitted_sha256s
+
+    if not isinstance(binding, dict):
+        return set()
+    live = binding.get("policy_sha256") or binding.get("policy")
+    if not isinstance(live, str):
+        return set()
+    out = set()
+    for predecessor in registered_admitted_sha256s(live)[1:]:
+
+        def swap(o, predecessor=predecessor):
+            if isinstance(o, dict):
+                return {
+                    k: (predecessor if k in ("policy_sha256", "policy") and v == live else swap(v))
+                    for k, v in o.items()
+                }
+            if isinstance(o, list):
+                return [swap(v) for v in o]
+            return o
+
+        out.add(canonical_json_bytes(swap(binding)))
+    return out

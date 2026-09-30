@@ -121,8 +121,9 @@ async def marker_case(chain, installed, monkeypatch, tmp_path):
         return {"untrusted_receipt": True}
 
     class Client:
-        def __init__(self, endpoint, retry_forever):
+        def __init__(self, endpoint, retry_forever, fallback_endpoints, archive_endpoints):
             assert retry_forever is False
+            assert fallback_endpoints == [] and archive_endpoints == []
             self._substrate = SimpleNamespace(submit_signed=send)
 
         async def __aenter__(self):

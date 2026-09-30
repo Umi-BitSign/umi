@@ -47,6 +47,7 @@ from .grandpa_finality_supervisor import (
     GrandpaFinalitySupervisorError,
     GrandpaFinalitySupervisorLimits,
 )
+from .mortal_receipts import MortalReceiptQuery, MortalReceiptReader, VerifiedMortalReceipt
 from .open_competition import BurnDestination, Registration, digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import (
@@ -211,6 +212,7 @@ class OwnedCompetitionChainObservation:
     runtime: PinnedRuntimeContext = field(repr=False)
     evidence: bytes = field(repr=False)
     burn_destination: BurnDestination | None = None
+    registrations_complete: bool = False
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
 
@@ -339,7 +341,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 self._weight_rpc,
                 finality=self._finality,
                 verifier=SubprocessStorageProofVerifier(
-                    binary_path=self.config.proof_binary,
+                    binary_path=self.resources.proof_binary,
                     expected_sha256=self.config.proof_binary_sha256,
                 ),
                 limits=ProofCollectionLimits(
@@ -353,7 +355,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         self._runtime_proofs = None
         if self.config.runtime_metadata_binary is not None:
             self._runtime_executor = RuntimeMetadataExecutor(
-                binary_path=Path(self.config.runtime_metadata_binary),
+                binary_path=Path(self.resources.runtime_metadata_binary),
                 expected_sha256=self.config.runtime_metadata_binary_sha256,
             )
             # A separate raw-key collector prevents an enlarged :code ceiling
@@ -365,7 +367,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     self._runtime_rpc,
                     finality=self._finality,
                     verifier=SubprocessStorageProofVerifier(
-                        binary_path=self.config.proof_binary,
+                        binary_path=self.resources.proof_binary,
                         expected_sha256=self.config.proof_binary_sha256,
                     ),
                     limits=ProofCollectionLimits(
@@ -408,7 +410,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             self._cache_lease = None
 
     def _cache_directory(self, config):
-        root = _prepare_private_directory(Path(config.state_directory), "weight finality state")
+        root = _prepare_private_directory(
+            Path(self.resources.state_directory), "weight finality state"
+        )
         root_fd = _open_directory_without_links(root)
         lock = None
         try:
@@ -524,6 +528,16 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         async with self._lock:
             return await self._bridge_reader().find(journal)
 
+    async def read_mortal_receipt(self, query: MortalReceiptQuery) -> VerifiedMortalReceipt | None:
+        """Read exact bytes under owned finality without interpreting a bridge journal.
+
+        Search bounds must come from the caller's checked transaction encoding.
+        A receipt proves dispatch status, not current weights or retry authority.
+        The shared reader's work drains under the provider's shutdown lock.
+        """
+        async with self._lock:
+            return await MortalReceiptReader.find(self._bridge_reader(), query)
+
     async def read_legacy_drain(
         self, *, marker: bytes, block_number: int, block_hash: str
     ) -> VerifiedLegacyDrain:
@@ -617,7 +631,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 finality=_ReceiptFinality(self._proofs, self.config.minimum_finalized_block),
                 rpc=self._weight_rpc,
                 verifier=SubprocessStorageProofVerifier(
-                    binary_path=self.config.proof_binary,
+                    binary_path=self.resources.proof_binary,
                     expected_sha256=self.config.proof_binary_sha256,
                 ),
                 runtime_executor=self._runtime_executor,
@@ -632,6 +646,8 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         self,
         validator_hotkey: str,
         recipients: tuple[Registration, ...],
+        *,
+        manifest_anchor_sha256: str | None = None,
     ) -> OwnedCompetitionChainObservation:
         """Retry only initial observer warm-up, not proof or transport failures."""
 
@@ -640,7 +656,11 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 if self._owned and self._task is not None and self._task.done():
                     self._task.result()
                 try:
-                    return await self.collect_weights(validator_hotkey, recipients)
+                    return await self.collect_weights(
+                        validator_hotkey,
+                        recipients,
+                        manifest_anchor_sha256=manifest_anchor_sha256,
+                    )
                 except _AwaitingFinality:
                     pass
                 except ValidatorChainError as error:
@@ -683,13 +703,38 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             timeout=self.config.collection_timeout_seconds,
         )
 
-    async def _collect_weights_locked(self, hotkey, recipients, anchor):
+    async def collect_registered_weights(
+        self, validator_hotkey: str, *, at: FinalizedSnapshotRef | None = None
+    ) -> OwnedCompetitionChainObservation:
+        """Discover every current registration along with the validator's state.
+
+        Prove the bounded UID domain and both mapping directions at one root.
+        This permits a consumer to distinguish absence from an omitted recipient;
+        it does not authorize weights or select a reward allocation.
+
+        A selected snapshot lets control and recipients share the same root even
+        as finality advances. It must still match this observer's verified chain
+        and satisfy all current freshness checks.
+        """
+        if self._closed:
+            raise ValueError("weight provider is closed")
+        _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+        return await wait_for_owned(
+            self._collect_weights_locked(
+                _hotkey(validator_hotkey), (), None, complete_registrations=True, snapshot=at
+            ),
+            timeout=self.config.collection_timeout_seconds,
+        )
+
+    async def _collect_weights_locked(
+        self, hotkey, recipients, anchor, *, complete_registrations=False, snapshot=None
+    ):
         async with self._lock:
             if self._closed:
                 raise ValueError("weight provider is closed")
             if self._owned and (self._task is None or self._task.done()):
                 raise ValueError("owned finality observer is not running")
-            ref = await self._proofs.finalized_snapshot()
+            ref = snapshot if snapshot is not None else await self._proofs.finalized_snapshot()
             if not isinstance(ref, FinalizedSnapshotRef):
                 raise ValueError("weight finalized snapshot is invalid")
             if ref.block_number < self.config.minimum_finalized_block or (
@@ -760,6 +805,33 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 ):
                     raise ValueError("validator/recipient mapping collision")
                 all_registrations[item.uid] = item
+            batches = [base]
+            if complete_registrations:
+                keys = await self._weight_read(
+                    runtime,
+                    tuple(
+                        StorageReadSpec("SubtensorModule", "Keys", (78, i))
+                        for i in range(registered_uid_count)
+                    ),
+                )
+                batches.append(keys)
+                kv = {read.spec: read.decoded_value for read in keys.reads}
+                discovered = {
+                    i: Registration(
+                        uid=i,
+                        hotkey=_hotkey(kv[StorageReadSpec("SubtensorModule", "Keys", (78, i))]),
+                    )
+                    for i in range(registered_uid_count)
+                }
+                if len({account_id32(r.hotkey) for r in discovered.values()}) != len(discovered):
+                    raise ValueError("duplicate registration hotkey")
+                for required in all_registrations.values():
+                    actual = discovered.get(required.uid)
+                    if actual is None or account_id32(actual.hotkey) != account_id32(
+                        required.hotkey
+                    ):
+                        raise ValueError("recipient or validator registration changed")
+                all_registrations = discovered
             mapping_specs = tuple(
                 spec
                 for item in sorted(all_registrations.values(), key=lambda entry: entry.uid)
@@ -767,23 +839,27 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                     StorageReadSpec("SubtensorModule", "Keys", (78, item.uid)),
                     StorageReadSpec("SubtensorModule", "Uids", (78, item.hotkey)),
                 )
+                if not complete_registrations or spec.item == "Uids"
             )
             # Maximum 512 mapping keys, plus the row in a separate proof batch.
             mappings = await self._weight_read(runtime, mapping_specs)
+            batches.append(mappings)
             mv = {read.spec: read.decoded_value for read in mappings.reads}
             for item in all_registrations.values():
                 if (
-                    account_id32(
+                    not complete_registrations
+                    and account_id32(
                         _hotkey(mv[StorageReadSpec("SubtensorModule", "Keys", (78, item.uid))])
                     )
                     != account_id32(item.hotkey)
-                    or _uint(mv[StorageReadSpec("SubtensorModule", "Uids", (78, item.hotkey))], 255)
-                    != item.uid
-                ):
+                ) or _uint(
+                    mv[StorageReadSpec("SubtensorModule", "Uids", (78, item.hotkey))], 255
+                ) != item.uid:
                     raise ValueError("recipient or validator registration changed")
             row_batch = await self._weight_read(
                 runtime, (StorageReadSpec("SubtensorModule", "Weights", (78, uid)),)
             )
+            batches.append(row_batch)
             raw_row = row_batch.reads[0].decoded_value
             if not isinstance(raw_row, (list, tuple)) or len(raw_row) > 256:
                 raise ValueError("invalid proven weight row")
@@ -836,8 +912,9 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                             ],
                             "proof": ["0x" + node.hex() for node in batch.evidence.proof],
                         }
-                        for batch in (base, mappings, row_batch)
+                        for batch in batches
                     ],
+                    **({"registrations_complete": True} if complete_registrations else {}),
                     "pending_commitment_absence_proven": False,
                 }
             )
@@ -873,6 +950,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 burn_destination=verified_model_burn_destination(
                     self.policy, by_spec, tuple(all_registrations.values())
                 ),
+                registrations_complete=complete_registrations,
                 captured_monotonic_ns=time.monotonic_ns(),
                 expires_monotonic_ns=time.monotonic_ns()
                 + max(0, block.timestamp_ms + self.config.maximum_head_age_ms - self._now_ms())
@@ -882,8 +960,10 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             object.__setattr__(observation, "_binding", _binding(observation))
             return observation
 
-    async def _weight_read(self, runtime, specs) -> VerifiedStorageBatch:
-        if self._weight_rpc is None:
+    async def _weight_read(self, runtime, specs, *, proof_values=False) -> VerifiedStorageBatch:
+        if proof_values:
+            batch = await self._proofs.storage_reads(runtime, specs, proof_values=True)
+        elif self._weight_rpc is None:
             batch = await self._proofs.storage_reads(runtime, specs)
         else:
             keys = tuple(runtime.storage_key(spec.pallet, spec.item, spec.params) for spec in specs)

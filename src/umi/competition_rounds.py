@@ -8,10 +8,11 @@ signing. Cutoff certificates alone do not authorize execution or weights.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -76,6 +77,19 @@ from .private_files import read_private_model as _read
 from .protocol import Hex32, StrictProtocolModel, Video, canonical_json_bytes
 
 ROUTE = "/v1/competition/rounds"
+_LOGGER = logging.getLogger(__name__)
+
+
+def _failure_site(error: BaseException) -> str:
+    """Code location only: exception messages can contain protected payloads."""
+    trace = error.__traceback__
+    site = "unknown"
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        if Path(code.co_filename).parent.name == "umi":
+            site = f"{Path(code.co_filename).name}:{code.co_name}:{trace.tb_lineno}"
+        trace = trace.tb_next
+    return site
 
 
 class CutoffEndorsement(StrictProtocolModel):
@@ -343,6 +357,7 @@ class RoundCoordinator:
         self.work_cursor = 0
         self.settlement_cursor = 0
         self.promotion_cursor = ""
+        self._held_diagnostics: dict[str, tuple[str, str, str]] = {}
         self.settlement_queue = None
         if config.settlement_delivery is not None:
             from .competition_settlement_delivery import SettlementQueue
@@ -390,7 +405,7 @@ class RoundCoordinator:
         inputs = await run_owned_thread(self._prepare_work_inputs, proposal)
         if inputs is not None:
             plan, videos = inputs
-            await self.work_queue.prepare(plan, videos=videos)
+            await self.work_queue.maintain(plan, videos=videos)
 
     async def _publish_cutoff_and_work(self, proposal: RoundProposal) -> None:
         if self.work_queue is None:
@@ -587,15 +602,28 @@ class RoundCoordinator:
             if promotions is not None:
                 counts.update(promotions)
             for name in pending:
+                stage = "prepare_plan"
                 try:
                     prepared = await run_owned_thread(self._prepare_plan, name, capture)
                     if isinstance(prepared, str):
                         counts[prepared] += 1
                     else:
+                        stage = "prepare_work"
                         await self.prepare_work(prepared)
                         counts["prepared"] += 1
-                except (OSError, ValueError, sqlite3.Error):
+                    self._held_diagnostics.pop(name, None)
+                except (OSError, ValueError, sqlite3.Error) as error:
                     counts["held"] += 1
+                    diagnostic = (stage, type(error).__name__, _failure_site(error))
+                    if self._held_diagnostics.get(name) != diagnostic:
+                        if len(self._held_diagnostics) >= self.config.maximum_rounds:
+                            self._held_diagnostics.clear()
+                        self._held_diagnostics[name] = diagnostic
+                        _LOGGER.warning(
+                            "round_plan_held file_digest=%s stage=%s error_type=%s site=%s",
+                            digest(name),
+                            *diagnostic,
+                        )
             if self.config.settlement_directory is not None:
                 counts.update(await self.prepare_settlements(block))
             return {
@@ -675,9 +703,11 @@ class RoundCoordinator:
         from .competition_settlement_preparation import prepare_retained_settlement
         from .competition_store import SettlementNotReadyError
 
-        proposals = self.journal.settlement_entries(block, self.settlement_cursor)
+        proposals = await run_owned_thread(
+            self.journal.settlement_entries, block, self.settlement_cursor
+        )
         if not proposals:
-            proposals = self.journal.settlement_entries(block)
+            proposals = await run_owned_thread(self.journal.settlement_entries, block)
         counts = dict(settlement_prepared=0, settlement_incomplete=0, settlement_held=0)
         for proposal in proposals:
             self.settlement_cursor = proposal.cutoff.round.sequence
@@ -686,29 +716,27 @@ class RoundCoordinator:
                 if certificate is None:
                     counts["settlement_incomplete"] += 1
                     continue
-                plan = RoundPlan.model_validate_json(
-                    canonical_json_bytes(
-                        self.journal.get("plan", proposal.cutoff.round.suite_sha256)
-                    )
+                plan = await run_owned_thread(self._settlement_plan, proposal)
+                # Authenticate HTTP requests promptly while serializing all
+                # full-cohort formation/delivery replay under queue ownership.
+                ownership = (
+                    self.settlement_queue.serial
+                    if self.settlement_queue is not None
+                    else nullcontext()
                 )
-                result = await prepare_retained_settlement(
-                    store=self.store,
-                    provider=self.provider,
-                    cutoff=certificate,
-                    suite=plan.suite,
-                    dependence_calibration=plan.dependence_calibration,
-                    limits=self.config.replay_limits,
-                    output_directory=self.config.settlement_directory,
-                )
-                if result == "prepared" and self.settlement_queue is not None:
-                    from .competition_settlement_preparation import SettlementPreparation
-
-                    prepared = _read(
-                        Path(self.config.settlement_directory)
-                        / (digest(proposal.cutoff.round) + ".settlement-proposal.json"),
-                        SettlementPreparation,
+                async with ownership:
+                    result = await prepare_retained_settlement(
+                        store=self.store,
+                        provider=self.provider,
+                        cutoff=certificate,
+                        suite=plan.suite,
+                        dependence_calibration=plan.dependence_calibration,
+                        limits=self.config.replay_limits,
+                        output_directory=self.config.settlement_directory,
                     )
-                    await self.settlement_queue.prepare(prepared)
+                    if result == "prepared" and self.settlement_queue is not None:
+                        prepared = await run_owned_thread(self._settlement_prepared, proposal)
+                        await self.settlement_queue._prepare_owned(prepared)
                 counts[
                     "settlement_prepared" if result == "prepared" else "settlement_incomplete"
                 ] += 1
@@ -717,6 +745,22 @@ class RoundCoordinator:
             except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError):
                 counts["settlement_held"] += 1
         return counts
+
+    def _settlement_plan(self, proposal):
+        return RoundPlan.model_validate_json(
+            canonical_json_bytes(self.journal.get("plan", proposal.cutoff.round.suite_sha256))
+        )
+
+    def _settlement_prepared(self, proposal):
+        from .competition_settlement_capacity import settlement_capacity
+        from .competition_settlement_preparation import SettlementPreparation
+
+        return _read(
+            Path(self.config.settlement_directory)
+            / (digest(proposal.cutoff.round) + ".settlement-proposal.json"),
+            SettlementPreparation,
+            maximum_bytes=settlement_capacity(self.config.replay_limits).preparation_bytes,
+        )
 
     def proposals(self, after_sequence=0, proposal_id=None, *, block=None):
         result = []
@@ -862,8 +906,19 @@ def create_round_app(
         while True:
             try:
                 result = await coordinator.cycle()
-            except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError):
-                result = {"status": "round_poll_failed", "chain_submission_authorized": False}
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                asyncio.TimeoutError,
+            ) as error:
+                result = {
+                    "status": "round_poll_failed",
+                    "chain_submission_authorized": False,
+                    "error_type": type(error).__name__,
+                    "error_site": _failure_site(error),
+                }
             if report is not None:
                 # Never emit protected references, request bytes or exception text.
                 report(result)
@@ -1086,7 +1141,7 @@ class RoundSigningClient:
                 "origin": self.origin,
             },
             maximum_rounds=worker.config.maximum_orders,
-            maximum_bytes=worker.config.maximum_journal_bytes,
+            maximum_bytes=worker.config.journal_limit("round_signing"),
         )
         self.cursor, self.nonce = 0, 0
         self.promotion_cursor = 0
@@ -1238,6 +1293,10 @@ def serve_rounds(config, policy, *, legacy=None):
         workers=1,
         proxy_headers=False,
         access_log=False,
-        limit_concurrency=4,
-        backlog=8,
+        # Uvicorn counts idle keep-alive connections against this ceiling too.
+        # Four pooled tunnel/client connections could therefore exclude every
+        # new request even while no application operation was running. Native
+        # replay/queue locks still serialize expensive settlement operations.
+        limit_concurrency=128,
+        backlog=256,
     )

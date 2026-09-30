@@ -15,6 +15,7 @@ from umi.chain_evidence import FinalizedSnapshotRef
 from umi.competition_chain import (
     CompetitionChainConfig,
     FinalizedRegistrationProvider,
+    RegistrationProviderTimeout,
     _PrefetchRpc,
     _RegistrationRpc,
 )
@@ -221,9 +222,10 @@ class _Rpc:
 
 
 class _Verifier:
-    def __init__(self, finality):
+    def __init__(self, finality, values=None):
         self.finality = finality
         self.checked = []
+        self.values = values
 
     def __call__(self, **kwargs):
         raise AssertionError("registration collection must use multiproofs")
@@ -233,13 +235,29 @@ class _Verifier:
         assert kwargs["state_root"] == bytes.fromhex(self.finality.ref.state_root[2:])
         return kwargs["proof"] == (b"proof",)
 
+    def read_many(self, *, state_root, storage_keys, proof, **limits):
+        # Explicit synthetic trie port. The separate native proof suite uses
+        # retained Finney nodes; these provider tests exercise owned bindings.
+        if (
+            self.values is None
+            or state_root != bytes.fromhex(self.finality.ref.state_root[2:])
+            or proof != (b"proof",)
+        ):
+            raise ValueError("invalid synthetic proof")
+        values = []
+        for key in storage_keys:
+            pallet, item, params = json.loads(key)
+            value = self.values.get((pallet, item, tuple(params)))
+            values.append((key, None if value is None else canonical_json_bytes(value)))
+        return tuple(values)
+
 
 @pytest.fixture
 def chain(chain_config, policy, monkeypatch):
     monkeypatch.setattr("umi.validator_chain.bittensor_core.Runtime", _Runtime)
     finality = _Finality(chain_config, policy)
     rpc = _Rpc(finality)
-    verifier = _Verifier(finality)
+    verifier = _Verifier(finality, rpc.values)
     proofs = FinalizedProofCollector(rpc, finality=finality, verifier=verifier)
     clock = SimpleNamespace(now=_NOW)
     provider = FinalizedRegistrationProvider(
@@ -395,7 +413,7 @@ async def test_collection_timeout_is_bounded(chain, monkeypatch):
         proofs=chain.proofs,
         now_ms=lambda: _NOW,
     )
-    with pytest.raises(ValueError, match="timed out"):
+    with pytest.raises(RegistrationProviderTimeout, match="timed out"):
         await provider.collect()
     await provider.aclose()
     with pytest.raises(ValueError, match="closed"):
@@ -426,11 +444,48 @@ def test_config_rejects_wrong_genesis(chain_config):
         CompetitionChainConfig.model_validate(body)
 
 
-def test_state_cannot_be_rebound_to_a_different_policy(chain):
+def test_cache_binds_the_chain_configuration_not_the_policy(chain):
+    # The registration cache holds verified registrations and finality heads, none of
+    # which depend on the competition policy: a policy change alone reopens it, so a
+    # deal-preserving successor keeps its warm cache instead of a cold finality sync.
     policy = chain.policy.model_copy(update={"sequence": 2})
     config = chain.config.model_copy(update={"policy_sha256": digest(policy)})
+    FinalizedRegistrationProvider(config, policy, finality=chain.finality, proofs=chain.proofs)
+    # A config that names a different policy than the one supplied is still refused.
+    with pytest.raises(ValueError, match="another competition policy"):
+        FinalizedRegistrationProvider(
+            config, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
+    # Any other chain-configuration change still invalidates the cache.
+    other = chain.config.model_copy(
+        update={"minimum_finalized_block": chain.config.minimum_finalized_block + 1}
+    )
     with pytest.raises(ValueError, match="another chain configuration"):
-        FinalizedRegistrationProvider(config, policy, finality=chain.finality, proofs=chain.proofs)
+        FinalizedRegistrationProvider(
+            other, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
+
+
+def test_legacy_per_policy_cache_binding_is_upgraded_in_place(chain):
+    import sqlite3
+    from pathlib import Path
+
+    # Simulate a cache written by the previous release, whose binding was digest(config)
+    # including policy_sha256, then reopen under the same policy and under a successor.
+    path = Path(chain.config.state_directory) / "registrations.sqlite3"
+    legacy = digest(chain.config)
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE binding SET digest=?", (legacy,))
+    FinalizedRegistrationProvider(
+        chain.config, chain.policy, finality=chain.finality, proofs=chain.proofs
+    )
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT digest FROM binding").fetchone()[0] != legacy
+    successor = chain.policy.model_copy(
+        update={"sequence": 2, "predecessor_sha256": digest(chain.policy)}
+    )
+    config = chain.config.model_copy(update={"policy_sha256": digest(successor)})
+    FinalizedRegistrationProvider(config, successor, finality=chain.finality, proofs=chain.proofs)
 
 
 async def test_prefetch_cancellation_drains_bounded_child_reads():
@@ -735,7 +790,7 @@ async def test_wait_ready_has_total_startup_deadline(chain, monkeypatch):
         raise GrandpaFinalitySupervisorError("no_verified_finalized_head")
 
     monkeypatch.setattr(chain.finality, "verified_finalized_snapshot", absent)
-    with pytest.raises(ValueError, match="startup timed out"):
+    with pytest.raises(RegistrationProviderTimeout, match="startup timed out"):
         await asyncio.wait_for(provider.wait_ready(), 2)
     assert 2 <= calls <= 5
     await provider.aclose()

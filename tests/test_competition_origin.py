@@ -223,6 +223,39 @@ async def test_dispatch_provider_keeps_transport_attestations_and_origin_proofs_
     assert result.capture.submission_sha256 == digest(item.signed.submission)
     with pytest.raises(ValueError, match="not finalized"):
         await provider.verified_blocks((_HEIGHT + 1,))
+
+    # Explicit transport additions preserve authentic origin/capture history.
+    with sqlite3.connect(provider._path) as db:
+        before = {
+            name: db.execute(f"SELECT * FROM {name} ORDER BY 1").fetchall()
+            for name in ("origins", "captures", "artifacts", "observed_head")
+        }
+    replacement = config.model_copy(
+        update={"proof_rpc_fallback_urls": ("wss://backup-one.example", "wss://backup-two.example")}
+    )
+    upgraded = DispatchFinalityProvider(
+        replacement,
+        item.policy,
+        legacy,
+        finality=item.finality,
+        proofs=item.proofs,
+        now_ms=lambda: item.clock.now,
+    )
+    with sqlite3.connect(provider._path) as db:
+        assert {
+            name: db.execute(f"SELECT * FROM {name} ORDER BY 1").fetchall() for name in before
+        } == before
+    assert await upgraded.dispatch_origin(item.signed, _HEIGHT) == result
+    for invalid in (config, replacement.model_copy(update={"rpc_url": "wss://other.example"})):
+        with pytest.raises(ValueError, match="another chain configuration"):
+            DispatchFinalityProvider(
+                invalid,
+                item.policy,
+                legacy,
+                finality=item.finality,
+                proofs=item.proofs,
+                now_ms=lambda: item.clock.now,
+            )
     with pytest.raises(ValueError, match="bounded"):
         await provider.verified_blocks((True,))
     await provider.aclose()

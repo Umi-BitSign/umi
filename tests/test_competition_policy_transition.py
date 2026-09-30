@@ -274,6 +274,7 @@ def test_transition_rejects_receipt_after_observation_or_roster_close(accepted_b
 def test_published_terms_and_successor_policy_have_fixed_digests():
     version_1 = (ROOT / "docs/MODEL_CONTRIBUTION_TERMS.md").read_bytes()
     version_2 = (ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V2.md").read_bytes()
+    version_3 = (ROOT / "docs/MODEL_CONTRIBUTION_TERMS_V3.md").read_bytes()
     raw_prior = (ROOT / "docs/competition/FIRST_ROUND_INTAKE_POLICY_V1.json").read_bytes()
     raw_policy = (ROOT / "docs/competition/FIRST_ROUND_STAGED_POLICY.json").read_bytes()
     prior = CompetitionPolicy.model_validate_json(raw_prior)
@@ -284,6 +285,9 @@ def test_published_terms_and_successor_policy_have_fixed_digests():
     )
     assert hashlib.sha256(version_2).hexdigest() == (
         "c8efb288f648e26f178e2e253c9c282a7500107371866f1ab7d62a9e80ef935b"
+    )
+    assert hashlib.sha256(version_3).hexdigest() == (
+        "451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0"
     )
     assert raw_policy == canonical_json_bytes(policy) + b"\n"
     assert raw_prior == canonical_json_bytes(prior) + b"\n"

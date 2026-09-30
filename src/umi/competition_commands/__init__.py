@@ -4,11 +4,12 @@ from argparse import Namespace
 from collections.abc import Callable
 
 from ..open_competition import CompetitionPolicy
-from . import evidence, host, models, services, store, submissions
+from . import cohorts, evidence, host, models, runtime_port, services, store, submissions
 
 CommandHandler = Callable[[Namespace, CompetitionPolicy], dict]
 
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
+    "apply-runtime-port": runtime_port.activate,
     "admit": store.admit,
     "assemble-dependence-calibration": evidence.assemble_dependence_calibration,
     "assemble-endpoint-execution": evidence.assemble_endpoint_execution,
@@ -20,6 +21,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "fetch-initial-successor-history": host.fetch_initial_successor_history,
     "fix-evidence-cutoff": store.fix_evidence_cutoff,
     "initialize-baseline": store.initialize_baseline,
+    "initialize-cohort-intake": cohorts.initialize_intake,
     "inspect-host-upgrade": host.inspect_host_upgrade,
     "inspect-policy": evidence.inspect_policy,
     "prepare-endpoint-incumbent": models.prepare_endpoint_incumbent,
@@ -28,6 +30,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "prepare-settlement-package": evidence.prepare_settlement_package,
     "preserve-bundle": models.verify_bundle,
     "project-weights": store.project_weights,
+    "query-cohort-admission": cohorts.query_admission,
     "promote": store.promote,
     "propose-execution-result": evidence.propose_execution_result,
     "record-evaluation": store.record_evaluation,
@@ -37,6 +40,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "replay-settlement-package": evidence.replay_settlement_package,
     "retrieve-bundle": models.retrieve_bundle,
     "round-status": store.round_status,
+    "run-cohort-admission-worker": cohorts.run_admission_worker,
     "run-endpoint-dispatch": services.run_endpoint_dispatch,
     "run-endpoint-incumbent": models.run_model_evaluation,
     "run-dependence-calibration": models.run_dependence_calibration,
@@ -51,10 +55,13 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "settle-round": store.settle_round,
     "settlement-status": store.settlement_status,
     "sign-assignment-query": submissions.sign_assignment_query,
+    "sign-cohort-consent": cohorts.sign_consent,
     "sign-dependence-calibration": evidence.sign_dependence_calibration,
     "sign-submission": submissions.sign_submission,
     "status": store.status,
     "submit": submissions.submit,
+    "submit-cohort-consent": cohorts.submit_consent,
+    "submit-cohort-model": cohorts.submit_model,
     "verify-bundle": models.verify_bundle,
     "verify-cutoff-publication": evidence.verify_cutoff_publication,
     "verify-miner-feed-profile": submissions.verify_miner_feed_profile,

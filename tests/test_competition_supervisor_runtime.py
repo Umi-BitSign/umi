@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_supervisor_runtime as runtime
+from umi.competition_reward_handoff_models import LegacyRewardHandoffIntent, LegacyRewardHandoffPlan
 from umi.competition_supervisor import (
     SuccessorSupervisorDirectivePage,
     parse_canonical_successor_supervisor_directive_history,
@@ -515,6 +516,14 @@ async def test_inactive_successor_after_expired_current_never_resumes_legacy(cas
         assert result.status == "holding" and result.accepted_sequence == 2
         assert case.adapter.alive is None
 
+    # The held host keeps following; restart does not roll back to the bridge.
+    async with case.make() as restarted:
+        case.observation.block = 200
+        result = await restarted.reconcile()
+        assert result.status == "started" and result.accepted_sequence == 3
+        assert ("replay", future.directive_sha256) in case.adapter.events
+        assert len(restarted._load_history()[1]) == 2
+
 
 @pytest.mark.asyncio
 async def test_retained_signed_history_tampering_is_rejected_before_restart(case):
@@ -772,3 +781,87 @@ async def test_multi_page_catchup_and_restart_deliver_complete_installation_hist
         assert selections[-1].continuation_bytes == expected
         assert len(restarted._load_history()[1]) == len(records) + 1
     assert (case.root / "directive-state.json").read_bytes() == case.old
+
+
+def handoff_intent(case):
+    return LegacyRewardHandoffIntent(
+        schema="umi-legacy-reward-handoff-intent/1",
+        plan=LegacyRewardHandoffPlan(
+            schema="umi-legacy-reward-handoff-plan/1",
+            series_sha256="12" * 32,
+            cohort_sha256="13" * 32,
+            legacy_policy_sha256="14" * 32,
+            legacy_round_sha256="15" * 32,
+            legacy_package_sha256="16" * 32,
+        ),
+        activation_sha256="17" * 32,
+        installation_receipt_sha256=case.installation.receipt_sha256,
+        validator_hotkey=case.config.validator_hotkey,
+    )
+
+
+async def test_standing_handoff_intent_survives_restart_and_needs_no_feed_or_rpc(case):
+    intent = handoff_intent(case)
+    async with case.make() as engine:
+        await engine.reconcile()
+        before = engine._load_history()[:2]
+        async with engine._mutex:
+            engine._retain_standing_handoff(intent)
+            engine._retain_standing_handoff(intent)
+            await engine.stop_worker_for_handoff()
+        assert engine._load_history()[:2] == before
+    # A saved intent blocks a new C4 start even with offline finality and feed.
+    case.observation.live = False
+    case.fetcher.fail = True
+    async with case.make() as engine:
+        events = len(case.adapter.events)
+        result = await engine.reconcile()
+        assert result.status == "holding" and result.reason == "standing_reward_handoff"
+        assert case.adapter.events[events:] == [("stop", None)]
+        assert engine._standing_handoff_intent() == intent
+        assert engine._load_history()[:2] == before
+    assert (case.root / "directive-state.json").read_bytes() == case.old
+    assert (case.root / "supervisor-process.lock").read_bytes() == case.lock_bytes
+
+
+@pytest.mark.parametrize("field", ["activation_sha256", "plan"])
+async def test_standing_handoff_cannot_replace_its_original_intent(case, field):
+    intent = handoff_intent(case)
+    changed = intent.model_copy(
+        update={
+            field: "aa" * 32
+            if field == "activation_sha256"
+            else intent.plan.model_copy(update={"series_sha256": "aa" * 32})
+        }
+    )
+    async with case.make() as engine, engine._mutex:
+        engine._retain_standing_handoff(intent)
+        with pytest.raises(ValueError, match="original intent"):
+            engine._retain_standing_handoff(changed)
+        assert engine._standing_handoff_intent() == intent
+
+
+async def test_failed_stop_keeps_standing_handoff_intent_and_never_restarts_c4(case):
+    intent = handoff_intent(case)
+    async with case.make() as engine:
+        async with engine._mutex:
+            engine._retain_standing_handoff(intent)
+            case.adapter.fail_stop = True
+            try:
+                with pytest.raises(ValueError):
+                    await engine.stop_worker_for_handoff()
+                assert engine._standing_handoff_intent() == intent
+            finally:
+                case.adapter.fail_stop = False
+        assert (await engine.reconcile()).reason == "standing_reward_handoff"
+
+
+async def test_standing_handoff_requires_process_ownership_and_mutex(case):
+    intent = handoff_intent(case)
+    async with case.make() as engine:
+        with pytest.raises(ValueError, match="mutex"):
+            engine._retain_standing_handoff(intent)
+        with pytest.raises(ValueError, match="mutex"):
+            await engine.stop_worker_for_handoff()
+    with pytest.raises(ValueError, match="process lease"):
+        engine._retain_standing_handoff(intent)

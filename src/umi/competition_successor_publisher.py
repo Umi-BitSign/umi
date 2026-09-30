@@ -15,6 +15,7 @@ from pathlib import Path
 from .competition_chain import CompetitionChainConfig
 from .competition_execution import execution_boundary
 from .competition_package import PreparedCompetitionPackage
+from .competition_reward_continuity import effective_reward_row
 from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .open_competition import RegistrationSnapshot, digest
@@ -70,7 +71,9 @@ class CurrentSuccessorRoundPublisher:
         plan = self.builder.plan
         if not plan.valid_from_block <= head.block <= plan.valid_through_block:
             raise ValueError("publisher plan is not current")
-        if package is not None and plan.maximum_settlement_reuse_blocks is not None:
+        if package is not None and (
+            plan.maximum_settlement_reuse_blocks is not None or plan.continuity is not None
+        ):
             snapshot = RegistrationSnapshot.model_validate_json(
                 canonical_json_bytes(capture.snapshot)
             )
@@ -79,7 +82,8 @@ class CurrentSuccessorRoundPublisher:
             registrations = {
                 entry.uid: account_id32(entry.hotkey) for entry in snapshot.registrations
             }
-            for entry in package.retained_settlement.projection.allocations:
+            amendment = self.builder.recipient_amendment(package, block=head.block)
+            for entry in effective_reward_row(package, amendment).allocations:
                 if registrations.get(entry.uid) != account_id32(entry.hotkey):
                     raise ValueError("settlement recipient registration changed")
             burn = package.policy.unallocated_model_burn
@@ -118,6 +122,19 @@ class CurrentSuccessorRoundPublisher:
         ):
             raise ValueError("publisher package differs from current retained source")
         self.replay.verify_publication_unchanged(result)
+
+    async def revoke(self, signed):
+        """Local authorized revocation, anchored by the process-owned provider."""
+        async with self._serial:
+            head = await self._head()
+            await run_owned_thread(lambda: self.builder.revoke(signed, finalized_block=head.block))
+
+    async def amend_recipients(self, prepared, signed):
+        async with self._serial:
+            head = await self._head()
+            await run_owned_thread(
+                lambda: self.builder.amend_recipients(prepared, signed, finalized_block=head.block)
+            )
 
     async def build(self, prepared, *, authorization_wallet, directive_wallets, renew=False):
         """Return a current signed round, with durable partial-signature recovery.
@@ -158,7 +175,7 @@ class CurrentSuccessorRoundPublisher:
                             pending.cancel()
                     check_stopped()
                     self._source(package, result)
-                    return head.block
+                    return head if self.builder.plan.continuity is not None else head.block
 
                 check_stopped()
                 return self.builder.build(

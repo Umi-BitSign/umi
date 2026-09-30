@@ -90,6 +90,16 @@ def test_batch_commits_canonical_records_and_caller_index_together(journal):
     assert journal.get("intent", "a") == {"a": 2, "z": 1}
 
 
+def test_full_cohort_sized_intent_survives_restart_and_exact_retry(journal):
+    value = {"evidence": "a" * (33 * 1024**2)}
+    journal.put("intent", "large-settlement", value)
+    recovered = rounds.RoundJournal(journal.root, {"policy": "batch-test"}, maximum_rounds=2)
+    assert recovered.get("intent", "large-settlement") == value
+    recovered.put("intent", "large-settlement", value)
+    with sqlite3.connect(recovered.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM records").fetchone() == (1,)
+
+
 def test_batch_repeated_same_payload_is_idempotent_and_repairs_index(journal):
     calls = []
 
@@ -296,7 +306,7 @@ def test_batch_iterable_bound_precedes_all_mutation(tmp_path):
 
 def test_batch_object_bound_precedes_all_mutation(journal, monkeypatch):
     before = retained(journal)
-    monkeypatch.setattr(rounds, "MAX_BYTES", 64)
+    monkeypatch.setattr(journal, "maximum_record_bytes", 64)
     with pytest.raises(ValueError, match="object exceeds its byte bound"):
         journal.put_many((("work", "a", {}), ("work", "b", "x" * 64)))
     assert retained(journal) == before

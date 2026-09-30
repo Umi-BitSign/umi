@@ -31,7 +31,7 @@ def test_scheduling_capacity_preserves_journal_defaults(schedule):
     [
         ("maximum_publications", 1, 65536),
         ("maximum_assignments", 1, 262144),
-        ("maximum_bytes", 1024, 16 * 1024**3),
+        ("maximum_bytes", 1024, 64 * 1024**3),
         ("maximum_outcome_bytes", 1, 16 * 1024**2),
     ],
 )
@@ -61,7 +61,7 @@ def test_expanded_capacity_reopens_historical_journal_without_rebinding(schedule
         metadata = db.execute("SELECT key,value FROM metadata ORDER BY key").fetchall()
         signed = db.execute("SELECT id,signed FROM publications ORDER BY id").fetchall()
     capacity = SchedulingCapacity(
-        maximum_publications=2048, maximum_assignments=32768, maximum_bytes=2 * 1024**3
+        maximum_publications=2048, maximum_assignments=32768, maximum_bytes=32 * 1024**3
     )
     reopened = AssignmentPublicationJournal(
         schedule.directory,
@@ -69,7 +69,7 @@ def test_expanded_capacity_reopens_historical_journal_without_rebinding(schedule
         schedule.authorization.legacy_policy,
         **capacity.model_dump(),
     )
-    assert reopened.maximum_bytes == 2 * 1024**3
+    assert reopened.maximum_bytes == 32 * 1024**3
     with sqlite3.connect(reopened.path) as db:
         assert db.execute("SELECT key,value FROM metadata ORDER BY key").fetchall() == metadata
         assert db.execute("SELECT id,signed FROM publications ORDER BY id").fetchall() == signed

@@ -134,3 +134,55 @@ async def test_serialized_drain_cannot_authorize_retirement(
             limits=limits,
             legacy_drain={"retired": True},
         )
+
+
+async def test_late_capture_reuses_drain_locks_and_reads_archive_before_fresh_proof(
+    installed, limits, marker_case, provider, drain, tmp_path, monkeypatch
+):
+    from umi import competition_recovery_capture as capture
+
+    events = []
+    read_archive = capture._load_archive
+
+    def read(*args, **kwargs):
+        result = read_archive(*args, **kwargs)
+        events.append("archive-read")
+        return result
+
+    monkeypatch.setattr(capture, "_load_archive", read)
+    with hold(installed) as stopped, hold_legacy_drain(stopped, limits=limits) as session:
+        proof = await proof_for(session, provider, drain)
+
+        async def fresh(snapshot):
+            assert snapshot is session.snapshot
+            session.recheck()
+            events.append("fresh-proof")
+            return await observe(marker_case, installed), None
+
+        prepared = await capture.prepare_recovery_checkpoint(
+            stopped,
+            observe=fresh,
+            destination_root=tmp_path / "archive",
+            limits=limits,
+            legacy_drain=proof,
+        )
+        verified = await capture.verify_recovery_checkpoint(
+            Path(prepared.checkpoint_path),
+            expected_checkpoint_sha256=prepared.checkpoint_sha256,
+            stopped=stopped,
+            observe=fresh,
+            limits=limits,
+            legacy_drain=proof,
+        )
+        assert verified.checkpoint_sha256 == prepared.checkpoint_sha256
+        assert events == ["fresh-proof", "archive-read", "fresh-proof"]
+        with pytest.raises(ValueError, match="absent or altered"):
+            await capture.verify_recovery_checkpoint(
+                Path(prepared.checkpoint_path),
+                expected_checkpoint_sha256=prepared.checkpoint_sha256,
+                stopped=stopped,
+                observe=fresh,
+                limits=limits,
+                legacy_drain=replace(proof),
+            )
+        assert events[-1] == "archive-read"

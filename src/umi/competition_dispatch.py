@@ -12,15 +12,17 @@ import hashlib
 import json
 import os
 import signal
+import sqlite3
 import stat
 import time
 from collections import OrderedDict
 from contextlib import closing, suppress
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_authorization import (
@@ -36,20 +38,23 @@ from .competition_dispatch_capacity import (
     timing_profile_sha256,
 )
 from .competition_dispatch_inbox import publication_names
+from .competition_dispatch_spool import DispatchSpoolConfig, DispatchTranscriptSpool
 from .competition_endpoint import prepare_endpoint_case
 from .competition_origin import (
     EndpointOriginCapture,
     FinalizedEndpointProvider,
     public_https_origin,
 )
+from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_scheduling import AssignmentPublicationJournal, SchedulingCapacity, assignment_key
-from .concurrency import await_owned_task
+from .concurrency import await_owned_task, run_owned_thread
 from .config import Limits
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .sqlite_contention import is_sqlite_contention
 from .validator import prepare_request_attempt, send_prepared_request
 from .validator_chain import StorageReadSpec
 from .validator_plans import VerifiedFinalizedBlock
@@ -70,10 +75,18 @@ class EndpointDispatchConfig(StrictProtocolModel):
     discovery_grace_seconds: Annotated[int, Field(ge=5, le=60)] = 10
     maximum_concurrency: Annotated[int, Field(ge=1, le=128)] = 4
     page_size: Annotated[int, Field(ge=1, le=100)] = 32
-    request_timeout_seconds: Annotated[int, Field(ge=1, le=600)] = 180
+    request_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 180
     scheduling_capacity: SchedulingCapacity = Field(default_factory=SchedulingCapacity)
     timing_budget: DispatchTimingBudget | None = None
+    transcript_spool: DispatchSpoolConfig | None = None
     no_weight: Literal[True] = True
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_config(self, handler):
+        value = handler(self)
+        if self.transcript_spool is None:
+            value.pop("transcript_spool", None)
+        return value
 
     @field_validator("journal_directory", "publication_directory", "wallet_path")
     @classmethod
@@ -93,6 +106,8 @@ class EndpointDispatchConfig(StrictProtocolModel):
             Path(self.chain.state_directory).resolve(),
             Path(self.wallet_path).resolve(),
         ]
+        if self.transcript_spool is not None:
+            paths.append(Path(self.transcript_spool.directory).resolve())
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(paths)
@@ -155,8 +170,35 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
 
     def _cache_binding_hash(self):
         return digest(
-            {"chain": digest(self.config), "transport_policy": self._finality_policy_hash()}
+            {
+                "chain": self._config_binding_hash(self.config),
+                "transport_policy": self._finality_policy_hash(),
+            }
         )
+
+    def _acceptable_cache_bindings(self):
+        accepted = {self._cache_binding_hash()}
+        configs = [self.config]
+        if self.config.proof_rpc_fallback_urls:
+            previous = self.config.model_copy(update={"proof_rpc_fallback_urls": ()})
+            configs.append(previous)
+            accepted.add(
+                digest(
+                    {
+                        "chain": self._config_binding_hash(previous),
+                        "transport_policy": self._finality_policy_hash(),
+                    }
+                )
+            )
+        for config in configs:
+            for policy_sha256 in admitted_policy_sha256s(self.policy):
+                legacy = config.model_copy(update={"policy_sha256": policy_sha256})
+                accepted.add(
+                    digest(
+                        {"chain": digest(legacy), "transport_policy": self._finality_policy_hash()}
+                    )
+                )
+        return frozenset(accepted)
 
     async def _recover_historical_block(self, height, head):
         if not self._owned or self._registration_rpc is None:
@@ -323,6 +365,15 @@ class EndpointDispatcher:
         # Always check actual runtime limits, including legacy starts with no
         # budget. Omitting the optional field cannot bypass a retained profile.
         self.journal = journal
+        self.spool = (
+            None
+            if self.config.transcript_spool is None
+            else DispatchTranscriptSpool(
+                self.config.transcript_spool,
+                journal,
+                self.config.evaluator_hotkey,
+            )
+        )
         self._configure_timing()
         self.journal, self.provider, self.wallet, self.transport = (
             journal,
@@ -371,7 +422,9 @@ class EndpointDispatcher:
         directory = Path(self.config.publication_directory)
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            names = publication_names(fd)
+            names = publication_names(
+                fd, maximum_files=self.config.scheduling_capacity.maximum_publications
+            )
             pending = sorted(
                 n for n in names if n.endswith(".json") and n not in self._publications
             )
@@ -468,6 +521,8 @@ class EndpointDispatcher:
                 raise ValueError("dispatch origin binding mismatch")
             resolver = origin.capture.transport_resolver()
             expected_profile = self._configure_timing()
+            if self.spool is not None:
+                await run_owned_thread(self.spool.reserve, key)
             claim = self.journal.claim(
                 key,
                 observed=origin.observed,
@@ -493,6 +548,16 @@ class EndpointDispatcher:
                 expected_transport_policy_sha256=self.config.legacy_policy_sha256,
                 limits=self.limits,
             )
+            if self.spool is not None:
+                await run_owned_thread(
+                    partial(
+                        self.spool.retain_intent,
+                        claim,
+                        prepared,
+                        origin_sha256=origin.capture.evidence_sha256,
+                        origin_block=origin.capture.block,
+                    ),
+                )
             started = str(time.time_ns())
             # The transport owns its deadline and retains any partial response
             # when it expires. An equal outer deadline races that retention and
@@ -535,27 +600,47 @@ class EndpointDispatcher:
                     "chain_submission_authorized": False,
                 }
             )
-            self.journal.complete(claim, evidence=evidence)
+            if self.spool is not None:
+                await run_owned_thread(self.spool.retain_outcome, key, evidence)
+            await run_owned_thread(partial(self.journal.complete, claim, evidence=evidence))
+            if self.spool is not None:
+                await run_owned_thread(self.spool.acknowledge, key)
             return "completed"
         except Exception:
             # No endpoint, wallet path, auth header or provider exception in public status.
             return "uncertain" if claimed else "held"
 
     async def poll_once(self):
-        self._configure_timing()
         for key, (task, _miner) in tuple(self._tasks.items()):
             if task.done():
                 self._counts[task.result()] += 1
                 del self._tasks[key]
         try:
-            ingestion = await self.ingest_once()
-        except Exception:
-            ingestion = "held"
-        page = self.journal.pending_dispatches(
-            evaluator_hotkey=self.config.evaluator_hotkey,
-            after=self._cursor,
-            limit=self.config.page_size,
-        )
+            # Another scheduling writer can hold BEGIN IMMEDIATE for the
+            # journal's bounded busy timeout. Keep existing HTTP/proof tasks
+            # responsive and drain these operations before shutdown releases
+            # the service lease. Every retry rechecks the actual timing binding.
+            if self.spool is not None:
+                await run_owned_thread(self.spool.recover, self.journal)
+            await run_owned_thread(self._configure_timing)
+            try:
+                ingestion = await self.ingest_once()
+            except Exception:
+                ingestion = "held"
+            page = await run_owned_thread(
+                partial(
+                    self.journal.pending_dispatches,
+                    evaluator_hotkey=self.config.evaluator_hotkey,
+                    after=self._cursor,
+                    limit=self.config.page_size,
+                )
+            )
+        except sqlite3.OperationalError as error:
+            if not is_sqlite_contention(error):
+                raise
+            # No new task or cursor advance; the normal poll interval retries.
+            # In-flight claims stay owned and are never cancelled or resent.
+            return self._poll_status("held")
         busy = {miner for _task, miner in self._tasks.values()}
         for item in page["items"]:
             if len(self._tasks) >= self.config.maximum_concurrency:
@@ -567,6 +652,9 @@ class EndpointDispatcher:
             busy.add(miner)
         # Holds cannot starve later pages. A wrapped scan revisits skipped work.
         self._cursor = page["next_cursor"]
+        return self._poll_status(ingestion)
+
+    def _poll_status(self, ingestion):
         return {
             "schema": "umi-endpoint-dispatch-status/1",
             **self._counts,

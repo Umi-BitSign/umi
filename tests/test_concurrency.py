@@ -57,6 +57,16 @@ async def test_owned_timeout_returns_result_and_original_error():
     assert caught.value is error
 
 
+@pytest.mark.parametrize("error", [asyncio.TimeoutError(), TimeoutError()])
+async def test_owned_timeout_normalizes_timeout_types(error):
+    async def fail():
+        raise error
+
+    with pytest.raises(asyncio.TimeoutError) as caught:
+        await wait_for_owned(fail(), timeout=1)
+    assert type(caught.value) is asyncio.TimeoutError
+
+
 async def test_owned_task_returns_result():
     async def work():
         return 42

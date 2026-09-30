@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from umi.competition_policy_lineage import clear_lineage_registry
 from umi.competition_store import (
     AgreedPromotionReview,
     AttestedPromotionReview,
@@ -18,6 +19,45 @@ from .test_open_competition import scenario as scenario
 from .test_open_competition import snapshot, wallet
 
 base_policy = test_open_competition.policy
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_earned_history_uses_its_original_policy_after_runtime_and_quorum_change(scenario, version):
+    s = scenario
+    original = promote(s, s.store, s.review if version == 1 else agreed_review(s), 150)
+    successor = s.policy.model_copy(
+        update={
+            "sequence": s.policy.sequence + 1,
+            "predecessor_sha256": digest(s.policy),
+            "evaluation_runtime_sha256": "df" * 32,
+            "evaluators": (
+                Evaluator(hotkey=wallet("Ferdie").hotkey.ss58_address, control_group="new"),
+            ),
+            "required_evaluator_groups": 1,
+        }
+    )
+    with s.store._connection() as connection:
+        before = {
+            table: connection.execute(f"SELECT * FROM {table}").fetchall()
+            for table in (
+                "promotions",
+                "promotion_receipts",
+                "evaluation_signatures",
+                "submissions",
+            )
+        }
+    clear_lineage_registry()
+    reopened = CompetitionStore(s.store.directory, successor, predecessor_policies=(s.policy,))
+    assert reopened.baseline() == original
+    assert (
+        reopened.reviewed_promotion_head(
+            digest(s.round), maximum_bytes=1_000_000
+        ).contributor_hotkey
+        == s.model.submission.hotkey
+    )
+    with reopened._connection() as connection:
+        after = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in before}
+    assert before == after
 
 
 @pytest.fixture

@@ -21,6 +21,7 @@ from umi.competition_worker import (
 )
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_package import carried_package as carried_package
 from .test_competition_package import package_case as package_case
 from .test_competition_package import package_limits as package_limits
 from .test_competition_package import release_identity as release_identity
@@ -57,6 +58,24 @@ def _run(worker, case, policy, release_identity):
         expected_policy_sha256=digest(policy),
         observed_release=release_identity,
     )
+
+
+def test_carried_package_worker_replays_and_restarts_without_registry(
+    carried_package, package_limits, worker_capacity, release_identity, tmp_path
+):
+    from umi.competition_policy_lineage import clear_lineage_registry, registered_lineage
+
+    case = carried_package
+    clear_lineage_registry()
+    first = _run(
+        _worker(tmp_path, package_limits, worker_capacity), case, case.policy, release_identity
+    )
+    clear_lineage_registry()
+    second = _run(
+        _worker(tmp_path, package_limits, worker_capacity), case, case.policy, release_identity
+    )
+    assert first.receipt == second.receipt
+    assert registered_lineage(case.policy).admitted_policy_sha256s == (digest(case.policy),)
 
 
 def _record_cutoff_conflict(worker, case, policy, replay_limits):
@@ -117,6 +136,56 @@ def test_first_run_and_exact_restart_return_the_same_receipt(
     assert first.current_status == second.current_status
     assert first.receipt.chain_submission_authorized is False
     assert first.receipt.runtime_identity_authenticated is False
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_completed_replay_reuses_publications_after_retry_or_restart(
+    package_case,
+    policy,
+    package_limits,
+    release_identity,
+    worker_capacity,
+    tmp_path,
+    monkeypatch,
+    restart,
+):
+    worker = _worker(tmp_path, package_limits, worker_capacity)
+    first = _run(worker, package_case, policy, release_identity)
+
+    def duplicate(*args, **kwargs):
+        raise AssertionError("completed evidence must not be replayed into the journal again")
+
+    monkeypatch.setattr(PublicationJournal, "record_cutoff", duplicate)
+    monkeypatch.setattr(PublicationJournal, "record_settlement", duplicate)
+    if restart:
+        worker = _worker(tmp_path, package_limits, worker_capacity)
+    second = _run(worker, package_case, policy, release_identity)
+    assert second == first
+    worker.verify_publication_unchanged(second)
+
+
+def test_completed_replay_still_rejects_changed_package_bytes(
+    package_case,
+    policy,
+    package_limits,
+    release_identity,
+    worker_capacity,
+    tmp_path,
+):
+    worker = _worker(tmp_path, package_limits, worker_capacity)
+    _run(worker, package_case, policy, release_identity)
+    manifest = package_case.path / "manifest.json"
+    manifest.chmod(0o600)
+    original = manifest.read_bytes()
+    try:
+        manifest.write_bytes(original + b" ")
+        manifest.chmod(0o400)
+        with pytest.raises(ValueError):
+            _run(worker, package_case, policy, release_identity)
+    finally:
+        manifest.chmod(0o600)
+        manifest.write_bytes(original)
+        manifest.chmod(0o400)
 
 
 def test_cached_receipt_gets_fresh_conflict_status_after_restart(

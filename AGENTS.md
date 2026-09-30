@@ -1,5 +1,10 @@
 # Maintenance
 
+- Prefer one consolidated PR for a coherent body of work. Include related fixes,
+  integration, tests and documentation, and batch validation before pushing to
+  avoid running slow CI for each small change. Split only when an independent
+  release or urgent fix needs to land separately.
+
 - Maintain existing public setup guides in place. Keep one authoritative page
   for current miner release, policy and download details, linked from the README
   and role index. Test changed commands and download hashes, and check internal

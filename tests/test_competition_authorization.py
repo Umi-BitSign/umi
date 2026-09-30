@@ -50,6 +50,7 @@ def build_authorization_fixture(
     incumbent_sha256=None,
     model_bundle=None,
     extra_model_bundle=None,
+    extra_endpoint_count=0,
     window_index=0,
     sequence=1,
     intake_opened_block=None,
@@ -60,6 +61,9 @@ def build_authorization_fixture(
     single_evaluator=False,
     legacy_calibration_inputs=False,
     issue_allowance_seconds=300,
+    response_window_seconds=300,
+    window_stride_blocks=None,
+    policy_valid_through_block=2000,
 ):
     """Synthetic signed publication and owned-source test port; no network/files.
 
@@ -86,11 +90,17 @@ def build_authorization_fixture(
                 implementation_pins=legacy.implementation_pins,
                 validator=legacy.validator_registry[0],
                 issue_allowance_seconds=issue_allowance_seconds,
+                response_window_seconds=response_window_seconds,
+                window_stride_blocks=window_stride_blocks,
             )
     policy = policy.model_copy(
         update={
             "valid_from_block": 1000,
-            "valid_through_block": 2000,
+            "valid_through_block": policy_valid_through_block,
+            "maximum_submission_lifetime_blocks": max(
+                policy.maximum_submission_lifetime_blocks,
+                submission_valid_through_block - submission_start_block,
+            ),
             "minimum_cases_per_stratum": 1,
             "required_evaluator_groups": 1 if single_evaluator else 2,
             "evaluators": tuple(
@@ -162,9 +172,22 @@ def build_authorization_fixture(
             end=submission_valid_through_block,
         )
     )
+    extra_endpoints = tuple(
+        submission(
+            policy,
+            name=f"Additional{i}",
+            start=submission_start_block,
+            end=submission_valid_through_block,
+        )
+        for i in range(extra_endpoint_count)
+    )
     submissions = tuple(
         sorted(
-            (s for s in (signed_sub, model_sub, extra_model_sub) if s is not None),
+            (
+                s
+                for s in (signed_sub, model_sub, extra_model_sub, *extra_endpoints)
+                if s is not None
+            ),
             key=lambda s: digest(s.submission),
         )
     )

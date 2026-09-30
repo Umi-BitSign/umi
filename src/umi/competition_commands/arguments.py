@@ -10,10 +10,53 @@ def build_parser() -> argparse.ArgumentParser:
         description="Local successor rehearsal commands. No command can submit chain weights."
     )
     parser.add_argument("--policy", required=True, help="reviewed successor policy JSON")
+    parser.add_argument(
+        "--predecessor-policy",
+        action="append",
+        default=[],
+        metavar="POLICY_JSON",
+        help=(
+            "deal-preserving predecessor policy whose signed submissions the live policy "
+            "still admits; repeat newest-first for a chain (see competition_policy_lineage)"
+        ),
+    )
     commands = parser.add_subparsers(dest="command", required=True)
+    port = commands.add_parser("apply-runtime-port")
+    port_config = port.add_mutually_exclusive_group(required=True)
+    port_config.add_argument("--intake-config")
+    port_config.add_argument("--evaluator-config")
+    for name in ("certificate", "archive", "chain-config"):
+        port.add_argument("--" + name, required=True)
+    port.add_argument("--confirm-quiesced-backup", action="store_true")
     commands.add_parser("inspect-policy")
     intake = commands.add_parser("serve-intake")
     intake.add_argument("--config", required=True)
+    recoverable = commands.add_parser("initialize-cohort-intake")
+    recoverable.add_argument("--config", required=True)
+    consent = commands.add_parser("sign-cohort-consent")
+    for name in (
+        "consent",
+        "submission",
+        "history",
+        "expected-tip-sha256",
+        "wallet-name",
+        "hotkey-name",
+        "wallet-path",
+    ):
+        consent.add_argument("--" + name, required=True)
+    consent.add_argument("--current-block", type=int, required=True)
+    participation = commands.add_parser("submit-cohort-consent")
+    participation.add_argument("--request", required=True)
+    participation.add_argument("--origin", required=True)
+    model = commands.add_parser("submit-cohort-model")
+    for name in ("request", "source", "origin", "wallet-name", "hotkey-name", "wallet-path"):
+        model.add_argument("--" + name, required=True)
+    admission = commands.add_parser("query-cohort-admission")
+    admission.add_argument("--request", required=True)
+    admission.add_argument("--origin", required=True)
+    reviewer = commands.add_parser("run-cohort-admission-worker")
+    reviewer.add_argument("--config", required=True)
+    reviewer.add_argument("--once", action="store_true")
     rounds = commands.add_parser("serve-round-coordinator")
     rounds.add_argument("--config", required=True)
     rounds.add_argument("--legacy-policy")
@@ -65,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         initial_history.add_argument("--" + name, required=True)
     initial_history.add_argument("--current-block", type=int, required=True)
     initial_history.add_argument("--timeout-seconds", type=int, default=300)
+    initial_history.add_argument("--signed-host-artifact")
     for name in ("verify-cutoff-publication", "verify-settlement-publication"):
         certificate = commands.add_parser(name)
         for param in ("certificate", "roster", "replay-limits"):

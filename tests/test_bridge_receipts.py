@@ -52,7 +52,7 @@ def journal_at(history, offset):
 
 
 @pytest.fixture
-def history(tx, monkeypatch):
+def history(tx, monkeypatch, request):
     import umi.runtime_metadata as metadata
 
     old_codec = metadata.bittensor_core.Runtime
@@ -88,8 +88,12 @@ def history(tx, monkeypatch):
         heads=0,
     )
     parent = tx.case.header["parentHash"]
-    for number in range(birth, birth + 201):
-        body = (b"inherent", ENCODED if number == birth + 2 else b"unrelated")
+    options = getattr(request, "param", {})
+    for number in range(birth, birth + options.get("distance", 200) + 1):
+        body = (
+            b"inherent",
+            ENCODED if number == birth + options.get("inclusion", 2) else b"unrelated",
+        )
         state_root = (
             tx.case.header["stateRoot"]
             if number == birth

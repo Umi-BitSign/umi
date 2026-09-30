@@ -62,6 +62,31 @@ def test_cpu_command_has_no_network_wallet_or_writable_model(runtime):
     assert temporary == [f"/tmp:rw,nosuid,nodev,noexec,size={runtime.scratch_bytes},mode=1777"]
 
 
+@pytest.mark.asyncio
+async def test_runtime_preflight_allows_slow_container_runtime_startup(
+    runtime, policy, monkeypatch
+):
+    policy = policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
+    calls = []
+
+    async def command(arguments, *, timeout):
+        calls.append((arguments, timeout))
+        if arguments[1] == "info":
+            return 0, b'{"host":{"security":{"rootless":true},"cgroupVersion":"v2"}}'
+        return 0, b""
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    monkeypatch.setattr(runner.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(runner, "_small_command", command)
+
+    await runner.verify_runtime(runtime, policy)
+
+    assert calls == [
+        (("/usr/bin/podman", "info", "--format=json"), 60),
+        (("/usr/bin/podman", "image", "exists", runtime.image), 60),
+    ]
+
+
 @pytest.mark.parametrize(
     "scratch", [1024**2, 1024**2 + 1, 16 * 1024**2, 256 * 1024**2, 512 * 1024**2]
 )

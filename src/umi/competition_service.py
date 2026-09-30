@@ -1,24 +1,37 @@
-"""Wallet-free successor intake behind an operator-managed HTTPS proxy.
+"""Successor intake behind an operator-managed HTTPS proxy.
 
 This service accepts signed submissions using the owned-finality registration
-provider. It has no scoring scheduler, signing wallet or weight-submit path.
+provider. Its opt-in cohort owner also runs admission, phase and work services
+with an explicitly selected signing key. It has no weight-submit path.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
+from .competition_cohort_model_upload_http import model_upload_routes
+from .competition_cohort_request_readiness_host import request_readiness_routes
+from .competition_cohort_service_api import service_admission_routes
+from .competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
+from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
+from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
+from .competition_policy_lineage import register_lineage
+from .competition_public_results import PublicResultsSource
+from .competition_public_results_directory import PublicResultsDirectory
+from .competition_reward_service import _stop_task
 from .competition_store import (
     AdmissionCapacity,
     CompetitionStore,
@@ -48,7 +61,9 @@ class RetainedIntakeState(StrictProtocolModel):
 
 
 class CompetitionServiceConfig(StrictProtocolModel):
-    schema_: Literal["umi-competition-service-config/2"] = Field(alias="schema")
+    schema_: Literal["umi-competition-service-config/2", "umi-competition-service-config/3"] = (
+        Field(alias="schema")
+    )
     mode: Literal["intake_no_weight"]
     policy_sha256: Hex32
     public_deployment: PublicIntakeDeployment
@@ -61,9 +76,39 @@ class CompetitionServiceConfig(StrictProtocolModel):
     admission_capacity: AdmissionCapacity = Field(default_factory=AdmissionCapacity)
     api_limits: CompetitionApiLimits = Field(default_factory=CompetitionApiLimits)
     historical_archives: Annotated[tuple[IntakeArchiveConfig, ...], Field(max_length=8)] = ()
+    public_results_sources: Annotated[tuple[PublicResultsSource, ...], Field(max_length=1024)] = ()
+    public_results_directory: PublicResultsDirectory | None = None
+    recoverable_intake: CohortIntakeConfig | None = None
+    recoverable_service: ServiceAdmissionHostConfig | None = None
+    # Deal-preserving predecessor policy files, newest first. Their signed submissions
+    # stay admitted in this same ledger (see competition_policy_lineage). Distinct from
+    # historical_archives, which is the terms-change path that archives a predecessor.
+    predecessor_policies: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...], Field(max_length=8)
+    ] = ()
+
+    @model_serializer(mode="wrap")
+    def preserve_config_without_dynamic_results(self, handler):
+        value = handler(self)
+        if self.public_results_directory is None:
+            value.pop("public_results_directory", None)
+        if self.recoverable_intake is None:
+            value.pop("recoverable_intake", None)
+        if self.recoverable_service is None:
+            value.pop("recoverable_service", None)
+        return value
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
+        if (self.schema_ == "umi-competition-service-config/3") != (
+            self.recoverable_service is not None
+        ):
+            raise ValueError("service-work admission requires configuration version three")
+        if self.recoverable_service is not None and (
+            self.recoverable_intake is None
+            or self.recoverable_service.series.policy_sha256 != self.policy_sha256
+        ):
+            raise ValueError("service-work admission requires its own configured cohort intake")
         if self.chain.policy_sha256 != self.policy_sha256:
             raise ValueError("intake and chain configuration bind different policies")
         if self.chain.collection_timeout_seconds > 15:
@@ -80,6 +125,10 @@ class CompetitionServiceConfig(StrictProtocolModel):
         # Keep SQLite, its independent rollback anchor, and the finality cache in
         # separate operator-managed directory trees and backup failure domains.
         roots = (state.resolve(), checkpoint.resolve(), chain_state.resolve())
+        if self.recoverable_intake is not None:
+            roots += (Path(self.recoverable_intake.directory).resolve(),)
+        if self.recoverable_service is not None:
+            roots += tuple(p.resolve() for p in self.recoverable_service.stores())
         if any(
             left == right or left in right.parents or right in left.parents
             for index, left in enumerate(roots)
@@ -142,12 +191,21 @@ def create_intake_app(
     ):
         raise ValueError("public round signing can outlive its registration snapshot")
     historical_archives = tuple(load_intake_archive(item) for item in config.historical_archives)
+    predecessor_policies = tuple(
+        load_json(path, CompetitionPolicy) for path in config.predecessor_policies
+    )
+    # Validates the chain and makes it visible to every policy-bound check in-process.
+    lineage = register_lineage(policy, predecessor_policies)
     if historical_archives:
         if len(historical_archives) != 1:
             raise ValueError("the first staged transition requires one predecessor archive")
         predecessor = historical_archives[0]
         predecessor_summary = predecessor.summary()
-        if policy.predecessor_sha256 != predecessor_summary["policy_sha256"]:
+        # The archived (terms-changed) policy must immediately precede the OLDEST policy
+        # this ledger still honors: the live one, or the deal-preserving predecessors
+        # behind it that carried their submissions forward.
+        oldest_honored = lineage.policy(lineage.admitted_policy_sha256s[-1])
+        if oldest_honored.predecessor_sha256 != predecessor_summary["policy_sha256"]:
             raise ValueError(
                 "historical archive is not the durable immediate predecessor for this launch"
             )
@@ -169,17 +227,32 @@ def create_intake_app(
         public_launch=config.public_deployment.launch_identity(),
         submission_head_checkpoint_directory=Path(config.submission_head_checkpoint_directory),
         historical_intake_archive_bindings=archive_bindings,
+        historical_public_launch=(
+            historical_archives[0].manifest.public_launch if historical_archives else None
+        ),
+        predecessor_policies=predecessor_policies,
     )
     if historical_archives:
         launch = config.public_deployment.launch_identity()
-        archived_launch = historical_archives[0].manifest.public_launch_sha256
-        # The archive preserves the predecessor's original schedule. Only a
-        # retained, signature-verified amendment may connect it to this launch.
-        if archived_launch != digest(launch) and not any(
-            item["amendment"]["previous_launch_sha256"] == archived_launch
-            and item["amendment"]["replacement"] == launch.model_dump(mode="json", by_alias=True)
-            for item in store.public_launch_amendments()
-        ):
+        archive_manifest = historical_archives[0].manifest
+        archived_launch = archive_manifest.public_launch_sha256
+        if archive_manifest.public_launch is None:
+            raise ValueError("historical archive lacks its retained public launch identity")
+        # The store authenticates every link against immutable launch history.
+        # Walk back from the current launch; an older or disconnected path cannot
+        # establish continuity with the archive after another amendment.
+        linked_launch = digest(launch)
+        seen = {linked_launch}
+        for item in reversed(store.public_launch_amendments()):
+            if linked_launch == archived_launch:
+                break
+            amendment = item["amendment"]
+            previous = amendment["previous_launch_sha256"]
+            if digest(amendment["replacement"]) != linked_launch or previous in seen:
+                break
+            linked_launch = previous
+            seen.add(linked_launch)
+        if linked_launch != archived_launch:
             raise ValueError(
                 "historical archive is not the durable immediate predecessor for this launch"
             )
@@ -187,10 +260,35 @@ def create_intake_app(
         baseline_promotion_sha256=config.retained_state.baseline_promotion_sha256,
         required_submission_sha256s=config.retained_state.required_submission_sha256s,
     )
-    provider = (
-        FinalizedRegistrationProvider(
-            config.chain, policy, retained_capture_blocks=store.retained_registration_blocks
+    cohort_intake = (
+        None
+        if config.recoverable_intake is None
+        else CohortIntake(
+            config.recoverable_intake,
+            policy,
+            eligible_tracks=config.public_deployment.eligible_tracks,
+            capacity=config.admission_capacity,
         )
+    )
+
+    service_host = None
+
+    def retained_registration_blocks():
+        return (
+            store.retained_registration_blocks()
+            | (
+                frozenset()
+                if cohort_intake is None
+                else cohort_intake.retained_registration_blocks()
+            )
+            | (frozenset() if service_host is None else service_host.retained_registration_blocks())
+        )
+
+    provider_type = (
+        FinalizedRegistrationProvider if cohort_intake is None else HistoricalRegistrationProvider
+    )
+    provider = (
+        provider_type(config.chain, policy, retained_capture_blocks=retained_registration_blocks)
         if provider_factory is None
         else provider_factory(config.chain, policy)
     )
@@ -202,16 +300,39 @@ def create_intake_app(
         maximum_future_skew_ms=config.chain.maximum_future_skew_ms,
         public_wait_seconds=config.chain.collection_timeout_seconds + 1,
     )
+    if config.recoverable_service is not None:
+        service_host = ServiceAdmissionHost(
+            config.recoverable_service,
+            cohort_intake,
+            store,
+            finality_cache.collect_for_cohort_recovery,
+            provider.retained_archive,
+            provider=provider,
+        )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        service_stop, service_task = asyncio.Event(), None
         try:
             await provider.start()
             await finality_cache.start()
+            if service_host is not None:
+                service_task = asyncio.create_task(
+                    service_host.run(service_stop), name="competition-service-admission"
+                )
+                _app.state.service_liveness_task = service_task
             yield
         finally:
-            await finality_cache.aclose()
-            await provider.aclose()
+            service_stop.set()
+            try:
+                if service_task is not None:
+                    await _stop_task(service_task)
+            finally:
+                _app.state.service_liveness_task = None
+                try:
+                    await finality_cache.aclose()
+                finally:
+                    await provider.aclose()
 
     async def current_snapshot() -> RegistrationSnapshot:
         return (await finality_cache.collect_fresh()).snapshot
@@ -228,7 +349,33 @@ def create_intake_app(
         limits=config.api_limits,
         public_deployment=config.public_deployment,
         historical_archives=historical_archives,
+        public_results_sources=config.public_results_sources,
+        public_results_directory=config.public_results_directory,
+        cohort_intake=cohort_intake,
+        cohort_model_uploads=None if service_host is None else service_host.uploads,
+        cohort_capture_provider=(
+            finality_cache.collect_for_cohort_recovery if cohort_intake is not None else None
+        ),
+        cohort_archive_provider=(
+            provider.retained_archive
+            if isinstance(provider, HistoricalRegistrationProvider)
+            else None
+        ),
     )
+    app.state.cohort_intake = cohort_intake
+    app.state.service_admission_host = service_host
+    if service_host is not None:
+        from .competition_cohort_public_history import public_history_routes
+
+        app.include_router(public_history_routes(lambda: service_host.history_exporter))
+        app.include_router(service_admission_routes(service_host.api))
+        app.include_router(request_readiness_routes(service_host))
+        if service_host.uploads is not None:
+            app.include_router(
+                model_upload_routes(
+                    service_host.uploads, finality_cache.collect_for_cohort_recovery
+                )
+            )
     app.state.finality_providers = (provider,)
     app.state.registration_snapshot_cache = finality_cache
     app.state.historical_intake_archives = historical_archives
@@ -291,13 +438,22 @@ def create_intake_app(
         }
         if config.public_deployment.round_stride_blocks is not None:
             result["continuous_intake"] = True
-            result["next_intake_schedule"] = (
-                config.public_deployment.launch_identity()
-                .next_intake_schedule(snapshot.block)
-                .model_dump(mode="json", by_alias=True)
+            next_schedule = (
+                config.public_deployment.next_intake_schedule(snapshot.block)
                 if result["admission_accepting_new"]
                 else None
             )
+            result["next_intake_schedule"] = (
+                next_schedule.model_dump(mode="json", by_alias=True)
+                if next_schedule is not None
+                else None
+            )
+            if config.public_deployment.intake_schedule_hold is not None:
+                result["intake_schedule_hold"] = (
+                    config.public_deployment.intake_schedule_hold.model_dump(
+                        mode="json", by_alias=True
+                    )
+                )
         return result
 
     return app
@@ -310,12 +466,39 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
     app = create_intake_app(config, policy)
     # Terminate TLS at a reviewed reverse proxy. Never trust forwarded headers or
     # accept a request-selected source of finality. One process owns this cache.
-    serve_with_finality_supervision(
-        app,
-        host=config.host,
-        port=config.port,
-        workers=1,
-        proxy_headers=False,
-        access_log=False,
-        backlog=config.api_limits.socket_backlog,
-    )
+    handler, loggers = logging.StreamHandler(), []
+    try:
+        if config.recoverable_service is not None:
+            for suffix in (
+                "admission_host",
+                "lifecycle_host",
+                "dispatch_host",
+                "order_host",
+                "service_host",
+                "request_readiness_host",
+            ):
+                logger = logging.getLogger("umi.competition_cohort_" + suffix)
+                loggers.append((logger, logger.level, logger.propagate))
+                logger.addHandler(handler)
+                logger.setLevel(logging.INFO)
+                logger.propagate = False
+        serve_with_finality_supervision(
+            app,
+            host=config.host,
+            port=config.port,
+            workers=1,
+            proxy_headers=False,
+            access_log=False,
+            backlog=config.api_limits.socket_backlog,
+            liveness_tasks=lambda: tuple(
+                task
+                for task in (getattr(app.state, "service_liveness_task", None),)
+                if task is not None
+            ),
+        )
+    finally:
+        for logger, level, propagate in loggers:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            logger.propagate = propagate
+        handler.close()

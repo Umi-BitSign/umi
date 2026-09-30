@@ -289,7 +289,7 @@ def observer_case(tmp_path, monkeypatch, installed, owned_chain):
             if behavior.result == "start_error":
                 raise ValueError("injected observer startup failure")
 
-        async def wait_weights_ready(self, hotkey, recipients):
+        async def wait_weights_ready(self, hotkey, recipients, *, manifest_anchor_sha256=None):
             assert recipients == ()
             if behavior.entered is not None:
                 behavior.entered.set()
@@ -307,7 +307,9 @@ def observer_case(tmp_path, monkeypatch, installed, owned_chain):
             owned_chain.provider.policy = self.policy
             owned_chain.finality.config = config
             owned_chain.finality.policy = self.policy
-            return await owned_chain.provider.collect_weights(hotkey, recipients)
+            return await owned_chain.provider.wait_weights_ready(
+                hotkey, recipients, manifest_anchor_sha256=manifest_anchor_sha256
+            )
 
         async def aclose(self):
             self.closed = True
@@ -440,12 +442,21 @@ async def test_bridge_collector_issues_only_after_owned_observation_and_closes_p
         raising=False,
     )
     observer = item.build()
+    anchor_sha256 = "da" * 32
+    item.chain.rpc.values[("Commitments", "CommitmentOf", (78, item.stopped.validator_hotkey))] = {
+        "block": block - 100,
+        "info": {"fields": [{"Sha256": "0x" + anchor_sha256}]},
+    }
     try:
         if failure:
             with pytest.raises(ValueError, match="bridge proof failure"):
                 await observer.observe_bridge(audit, "ab" * 32)
         else:
-            value = await observer.observe_bridge(audit, "ab" * 32)
+            value = await observer.observe_bridge(
+                audit, "ab" * 32, manifest_anchor_sha256=anchor_sha256
+            )
+            assert value.observation.manifest_anchor_sha256 == anchor_sha256
+            assert value.observation.manifest_anchor_block == block - 100
             kwargs = dict(
                 stopped=item.stopped, observation=value.observation, snapshot_sha256="ab" * 32
             )

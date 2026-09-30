@@ -1,0 +1,7 @@
+{
+  "name": "umi-cohort-alerts",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test monitor.test.mjs worker.test.mjs" },
+  "devDependencies": { "miniflare": "5.20260923.0-alpha" }
+}

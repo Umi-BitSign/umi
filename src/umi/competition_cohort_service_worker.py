@@ -1,0 +1,289 @@
+"""Recurring accepted-service work, with retained requests and terminal results.
+
+The host owns authenticated media, finality/history and independent review ports.
+Each port call is bounded; outages impose no cumulative cohort expiry. Finished
+responses and signatures recover before live inputs. The worker never grants
+credit or closes a phase; independent closure and quality replay do that.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sqlite3
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
+from dataclasses import dataclass
+from functools import partial
+
+from .competition_chain import RegistrationCapture
+from .competition_cohort_endpoint_decision_contracts import SignedCohortEndpointCaseDecision
+from .competition_cohort_order_signer import CohortOrderHistory
+from .competition_cohort_request_window import EndpointRequestWindow
+from .competition_cohort_service_grant import (
+    ServiceMinerGrant,
+    ServiceRequestBody,
+    service_grant_slot,
+)
+from .competition_cohort_service_terminal import ServiceTerminal, ServiceWorkTerminals
+from .competition_cohort_service_transport import ServiceWorkTransport
+from .competition_cohort_service_work import ServiceWorkAssignment
+from .competition_execution import execution_boundary
+from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from .endpoint_retirement import SignedEndpointRetirementReceipt
+from .open_competition import Signature, digest, identity
+from .private_files import lock_private_file
+from .protocol import Video
+
+_RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError)
+
+
+@dataclass(frozen=True)
+class ServiceRequestInputs:
+    video: Video
+    window: EndpointRequestWindow
+
+
+ServiceInputs = Callable[[ServiceWorkAssignment], Awaitable[ServiceRequestInputs]]
+ServiceObservation = Callable[
+    [ServiceWorkAssignment], Awaitable[tuple[CohortOrderHistory, RegistrationCapture]]
+]
+ServiceRequestVote = Callable[[ServiceRequestBody], Awaitable[Signature]]
+ServiceRetry = Callable[
+    [ServiceMinerGrant, SignedEndpointRetirementReceipt],
+    Awaitable[SignedCohortEndpointCaseDecision],
+]
+ServiceResultSign = Callable[[ServiceTerminal], Awaitable[Signature]]
+
+
+class ServiceWorkWorker:
+    def __init__(
+        self,
+        transport: ServiceWorkTransport,
+        inputs: ServiceInputs,
+        observation: ServiceObservation,
+        reviewers: Mapping[str, ServiceRequestVote],
+        retry: ServiceRetry,
+        sign: ServiceResultSign,
+        *,
+        batch_size: int = 16,
+        concurrency: int = 4,
+    ):
+        if (
+            type(batch_size) is not int
+            or not 1 <= batch_size <= 256
+            or type(concurrency) is not int
+            or not 1 <= concurrency <= 32
+        ):
+            raise ValueError("service worker capacity is outside bounds")
+        self.transport, self.requests = transport, transport.requests
+        self.queue, self.journal = self.requests.queue, self.requests.journal
+        self.inputs, self.observation, self.retry, self.sign = inputs, observation, retry, sign
+        self.terminals = ServiceWorkTerminals(self.requests)
+        known = {identity(e.hotkey): e.control_group for e in self.requests.policy.evaluators}
+        self.reviewers = {identity(k): v for k, v in reviewers.items()}
+        self.reviewer_keys = {identity(k): k for k in reviewers}
+        if len(self.reviewers) != len(reviewers) or not self.reviewers.keys() <= known.keys():
+            raise ValueError("service reviewer identities differ from policy")
+        self.batch_size, self.capacity = batch_size, asyncio.Semaphore(concurrency)
+        self.serial, self.vote_writes = asyncio.Lock(), asyncio.Lock()
+        with self.journal.transaction() as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS service_worker_cursor "
+                "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ordinal INTEGER NOT NULL)"
+            )
+        # Restart may change operational capacity, but never the evaluator.
+        self.journal.put(
+            "service_worker_binding",
+            digest(["umi-service-worker/1"]),
+            {
+                "evaluator": identity(transport.evaluator),
+                "transport": digest(self.requests.transport),
+            },
+        )
+
+    async def _call(self, awaitable):
+        return await wait_for_owned(awaitable, timeout=self.transport.timeout)
+
+    async def _certificate(self, body):
+        slot = service_grant_slot(body)
+        raw = await run_owned_thread(self.journal.get, "service_grant", slot)
+        if raw is not None:
+            return await run_owned_thread(self.requests.certificate, slot)
+
+        async def vote(who, port):
+            if who == identity(body.assignment.admission.submission.submission.hotkey):
+                return
+            key = self.requests._vote_key(slot, self.reviewer_keys[who])
+            raw = await run_owned_thread(self.journal.get, "service_request_vote", key)
+            try:
+                signed = (
+                    Signature.model_validate(raw)
+                    if raw is not None
+                    else await self._call(port(body))
+                )
+                if identity(signed.hotkey) != who:
+                    raise ValueError("service request vote came from another reviewer")
+                async with self.vote_writes:
+                    await run_owned_thread(self.requests.collect, slot, signed)
+            except _RETRY:
+                # Another independent quorum may be available this pass.
+                return
+
+        await self._gather(vote(who, port) for who, port in self.reviewers.items())
+        return await run_owned_thread(self.requests.certificate, slot)
+
+    async def _prepare(self, assignment, *, parent=None, decision=None, retirement=None):
+        inputs = await self._call(self.inputs(assignment))
+        source, capture = await self._call(self.observation(assignment))
+        return await run_owned_thread(
+            partial(
+                self.requests.prepare,
+                assignment.admission.claim,
+                self.transport.evaluator,
+                inputs.video,
+                inputs.window,
+                source,
+                capture,
+                parent=parent,
+                decision=decision,
+                retirement=retirement,
+            ),
+        )
+
+    async def _advance(self, admission):
+        assignment = await run_owned_thread(self.queue.assignment, admission.claim)
+        if await run_owned_thread(self.terminals.read, assignment) is not None:
+            return "completed", "original_terminal_retained"
+        body = await run_owned_thread(
+            self.requests.latest, admission.claim, self.transport.evaluator
+        )
+        if body is None:
+            body = await self._prepare(assignment)
+        slot = service_grant_slot(body)
+        # A prepared terminal survives a signing outage and needs no new media,
+        # chain observation, grant delivery, retirement or model execution.
+        intent = await run_owned_thread(
+            self.journal.get, "service_terminal_intent", admission.work_sha256
+        )
+        if intent is not None:
+            terminal = await run_owned_thread(self.terminals.prepare, slot)
+        else:
+            grant = await self._certificate(body)
+            result = await self.transport.advance(slot)
+            if result.retirement is None:
+                return "pending", result.reason
+            if result.response is None:
+                certificate = await self._call(self.retry(grant, result.retirement))
+                # Native selection verifies quorum, exact parent, signed fence,
+                # original accepted work and the new live request window.
+                await self._prepare(
+                    assignment, parent=grant, decision=certificate, retirement=result.retirement
+                )
+                return "pending", "replacement_selected"
+            source, capture = await self._call(self.observation(assignment))
+            terminal = await run_owned_thread(
+                self.terminals.prepare,
+                slot,
+                result.response,
+                result.retirement,
+                source,
+                execution_boundary(capture),
+            )
+        signature = await self._call(self.sign(terminal))
+        await run_owned_thread(self.terminals.retain, terminal, signature)
+        return "completed", "terminal_retained"
+
+    def _batch(self):
+        with self.journal.transaction() as db:
+            row = db.execute(
+                "SELECT ordinal FROM service_worker_cursor WHERE singleton=1"
+            ).fetchone()
+        after = 0 if row is None else row[0]
+        rows = self.queue.entries(after_ordinal=after, limit=self.batch_size)
+        if not rows and after:
+            rows = self.queue.entries(limit=self.batch_size)
+        if rows:
+            with self.journal.transaction() as db:
+                db.execute(
+                    "INSERT INTO service_worker_cursor VALUES (1,?) "
+                    "ON CONFLICT(singleton) DO UPDATE SET ordinal=excluded.ordinal",
+                    (rows[-1].ordinal,),
+                )
+        return rows
+
+    async def poll_once(self):
+        async with self.serial:
+            lease = lock_private_file(self.journal.root / "service-worker.lock")
+            try:
+                rows = await run_owned_thread(self._batch)
+                miners = {identity(r.claim.claim.hotkey): asyncio.Lock() for r in rows}
+
+                async def run(admission):
+                    async with miners[identity(admission.claim.claim.hotkey)], self.capacity:
+                        try:
+                            return await self._advance(admission)
+                        except _RETRY as error:
+                            return "pending", type(error).__name__
+
+                results = await self._gather(run(row) for row in rows)
+                pending = [reason for status, reason in results if status == "pending"]
+                return {
+                    "status": "cohort_service_worker",
+                    "work_considered": len(rows),
+                    "work_complete": sum(status == "completed" for status, _ in results),
+                    "work_pending": len(pending),
+                    "last_pending_reason": pending[-1] if pending else "",
+                    "request_closure_authorized": False,
+                    "chain_submission_authorized": False,
+                }
+            finally:
+                os.close(lease)
+
+    @staticmethod
+    async def _gather(coroutines):
+        tasks = [asyncio.create_task(c) for c in coroutines]
+
+        async def collected():
+            return await asyncio.gather(*tasks)
+
+        collection = asyncio.create_task(collected())
+        try:
+            return await await_owned_task(collection, on_cancel=collection.cancel)
+        finally:
+            await ServiceWorkWorker._stop_tasks(tasks)
+
+    @staticmethod
+    async def _stop_tasks(tasks):
+        for task in tasks:
+            task.cancel()
+
+        async def drained():
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Repeated shutdown signals must not release the process lease while
+        # a signing operation, response write or native transport still runs.
+        await await_owned_task(asyncio.create_task(drained()))
+
+    async def run(self, stop: asyncio.Event, *, poll_seconds: float = 5, report=None):
+        if isinstance(poll_seconds, bool) or not 0 < poll_seconds <= 60:
+            raise ValueError("service worker poll interval is outside bounds")
+        while not stop.is_set():
+            task, stopping = asyncio.create_task(self.poll_once()), asyncio.create_task(stop.wait())
+            try:
+                done, _ = await asyncio.wait((task, stopping), return_when=asyncio.FIRST_COMPLETED)
+                if stopping in done:
+                    return
+                try:
+                    result = task.result()
+                except _RETRY as error:
+                    result = {
+                        "status": "cohort_service_worker_retry",
+                        "error_type": type(error).__name__,
+                    }
+                if report is not None:
+                    report(result)
+            finally:
+                await self._stop_tasks((task, stopping))
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=poll_seconds)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -138,6 +139,75 @@ async def test_cli_orders_seal_host_lock_recovery_and_shutdown(host):
         "close-observer",
         "leave-lock-scope",
     ]
+
+
+@pytest.mark.parametrize("reject", [False, True])
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
+    host, monkeypatch, tmp_path, reject, explicit
+):
+    from umi import competition_reward_boot as boot
+
+    selection, adapter = object(), object()
+    # The installed unit has no additional argument. A root-controlled sibling
+    # selects standing operation through the same startup ordering as the flag.
+    selected_path = tmp_path / "standing-reward-boot.json"
+    selected_path.write_bytes(b"fixture selection existence")
+    original_select = boot.select_standing_boot
+
+    def select(path, anchor, *, explicit_path):
+        assert path == Path("/etc/umi/supervisor.json")
+        return original_select(tmp_path / path.name, anchor, explicit_path=explicit_path)
+
+    monkeypatch.setattr(boot, "select_standing_boot", select)
+    host.runtime._require_lease = lambda: host.events.append("require-lease")
+    host.runtime.adapter = cli._DeferredAdapter(lambda: adapter)
+
+    def load(path, anchor):
+        assert path == (Path("/etc/umi/standing.json") if explicit else selected_path)
+        host.events.append("standing-approval")
+        if reject:
+            raise ValueError("fixture denied approval")
+        return selection
+
+    async def run(runtime, config, stop):
+        assert runtime is host.runtime and runtime.adapter is adapter
+        assert config is selection and stop is host.stop
+        host.events.append("standing-service")
+
+    monkeypatch.setattr(boot, "load_standing_boot", load)
+    monkeypatch.setattr(boot, "run_installed_standing_rewards", run)
+    if reject:
+        with pytest.raises(ValueError):
+            await cli.run_supervisor(
+                Path("/etc/umi/supervisor.json"),
+                stop_event=host.stop,
+                standing_config=Path("/etc/umi/standing.json") if explicit else None,
+            )
+        assert "stop-startup-worker" not in host.events
+    else:
+        await cli.run_supervisor(
+            Path("/etc/umi/supervisor.json"),
+            stop_event=host.stop,
+            standing_config=Path("/etc/umi/standing.json") if explicit else None,
+        )
+        assert host.events.index("standing-approval") < host.events.index("stop-startup-worker")
+        assert host.events.index("lock-and-recover") < host.events.index("require-lease")
+        assert host.events.index("require-lease") < host.events.index("standing-service")
+        assert "reconcile" not in host.events
+        assert host.events[-3:] == ["stop-and-unlock", "close-observer", "leave-lock-scope"]
+
+
+@pytest.mark.parametrize("name", ["service", "executor", "coverage_service"])
+def test_standing_cli_emits_progress_without_enabling_transport_logs(capsys, name):
+    logger = logging.getLogger("umi.competition_reward_" + name)
+    http = logging.getLogger("httpx")
+    before, transport_level = (logger.level, logger.propagate, tuple(logger.handlers)), http.level
+    with cli._standing_logs():
+        logger.info("standing_boot_waiting_for_initial_activation")
+        assert http.level == transport_level
+    assert "standing_boot_waiting_for_initial_activation" in capsys.readouterr().err
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == before
 
 
 @pytest.mark.parametrize("distinct_async_timeout", [False, True])
@@ -426,10 +496,12 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
     config = SimpleNamespace(name="sealed-config")
     installation = SimpleNamespace(
         config=config,
-        operator_consent=SimpleNamespace(name="sealed-consent"),
+        operator_consent=SimpleNamespace(name="sealed-consent", worker_source_overlay=None),
         worker_execution_limits=SimpleNamespace(name="sealed-ceilings"),
     )
     config_path = Path("/etc/umi/supervisor.json")
+    delivery_client = object()
+    monkeypatch.setattr(cli, "_delivery_client", lambda value: delivery_client)
 
     class Observer:
         def __init__(self, **kwargs):
@@ -437,8 +509,10 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
             captured["observer"] = kwargs
 
     class Fetcher:
-        def __init__(self, value):
+        def __init__(self, value, *, client):
             assert value is config
+            assert client is delivery_client
+            captured["client"] = client
             events.append("fetcher")
 
     class Delivery:
@@ -490,6 +564,7 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
     assert events == ["observer", "fetcher", "runtime"]
     assert observer is captured["runtime"]["observation_reader"]
     await captured["runtime"]["worker_adapter"].stop_worker()
+    assert captured["delivery"]["client"] is captured["client"]
     assert events == [
         "observer",
         "fetcher",
@@ -512,6 +587,7 @@ async def test_runtime_factory_wires_only_fixed_ports_and_defers_mutable_state(m
     assert captured["adapter"]["installation"] is installation
     assert captured["adapter"]["observer"] is observer
     assert captured["adapter"]["container"] is captured["container_instance"]
+    assert captured["container_instance"].source_overlay is None
     assert captured["runtime"]["directive_fetcher"].__class__ is Fetcher
     assert captured["runtime"]["startup_lease"] is startup_lease
     assert captured["runtime"]["limits"].model_dump() == {

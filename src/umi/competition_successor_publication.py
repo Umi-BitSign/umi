@@ -17,10 +17,22 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_execution import ExecutionBoundary
 from .competition_package import (
     CompetitionPackageLimits,
     PreparedCompetitionPackage,
     load_competition_package,
+)
+from .competition_reward_continuity import (
+    UNTIL_SUPERSEDED_BLOCK,
+    RewardContinuation,
+    SignedCertifiedAllocationAdmission,
+    SignedRewardContinuityAuthority,
+    SignedRewardRecipientAmendment,
+    admit_certified_allocation,
+    verify_recipient_amendment,
+    verify_reward_continuity_authority,
+    verify_reward_continuity_revocation,
 )
 from .competition_round_journal import RoundJournal
 from .competition_supervisor import (
@@ -106,6 +118,7 @@ class SuccessorRoundPublicationPlan(StrictProtocolModel):
         "umi-successor-round-publication-plan/1",
         "umi-successor-round-publication-plan/2",
         "umi-successor-round-publication-plan/3",
+        "umi-successor-round-publication-plan/4",
     ] = Field(alias="schema")
     policy_sha256: Hex32
     supervisor: ValidatorSupervisorConfig
@@ -121,9 +134,13 @@ class SuccessorRoundPublicationPlan(StrictProtocolModel):
     renewal_interval_blocks: Annotated[int, Field(ge=1, le=100_000)] | None = None
     maximum_settlement_reuse_blocks: Annotated[int, Field(ge=1, le=1_000_000)] | None = None
 
+    continuity: SignedRewardContinuityAuthority | None = None
+
     @model_serializer(mode="wrap")
     def preserve_single_use_plan(self, handler):
         value = handler(self)
+        if self.continuity is None:
+            value.pop("continuity", None)
         if self.renewal_interval_blocks is None:
             value.pop("renewal_interval_blocks", None)
         if self.maximum_settlement_reuse_blocks is None:
@@ -132,6 +149,31 @@ class SuccessorRoundPublicationPlan(StrictProtocolModel):
 
     @model_validator(mode="after")
     def fixed_controls(self) -> Self:
+        if (self.schema_ == "umi-successor-round-publication-plan/4") != (
+            self.continuity is not None
+        ):
+            raise ValueError("until-superseded continuity requires explicit version 4 plan")
+        if self.continuity is not None:
+            from .competition_package import competition_release_identity_digest
+
+            body = verify_reward_continuity_authority(
+                self.continuity,
+                tuple(a.hotkey for a in self.supervisor.trusted_authorities),
+                threshold=self.supervisor.signature_threshold,
+            )
+            if (
+                self.consent.reward_continuity_sha256 != digest(self.continuity)
+                or body.policy_sha256 != self.policy_sha256
+                or body.release_identity_sha256
+                != competition_release_identity_digest(self.release.replay_release_identity)
+                or body.chain_pin != self.chain.chain_pin
+                or self.valid_from_block < body.valid_from_block
+                or self.valid_through_block != UNTIL_SUPERSEDED_BLOCK
+                or self.maximum_lifetime_blocks > body.maximum_write_authorization_blocks
+            ):
+                raise ValueError("continuity plan exceeds signed authority or local consent")
+        elif self.consent.reward_continuity_sha256 is not None:
+            raise ValueError("continuity consent cannot authorize an ordinary plan")
         interval = self.renewal_interval_blocks
         if (self.schema_ != "umi-successor-round-publication-plan/1") != (interval is not None):
             raise ValueError("renewal requires an explicit version 2 or 3 publication plan")
@@ -248,6 +290,13 @@ def publication_valid_through(plan, package, block):
         raise PublicationWindowUnavailable(
             "publication is outside its policy or precedes settlement"
         )
+    if plan.continuity is not None:
+        valid_through = min(plan.valid_through_block, block + plan.maximum_lifetime_blocks)
+        if valid_through - block < max(
+            plan.weights.mortality_period, plan.minimum_activation_headroom_blocks
+        ):
+            raise PublicationWindowUnavailable("continuity write lacks mortal headroom")
+        return valid_through
     # Snapshot freshness is checked when the settlement is produced and replayed.
     # Version 3 permits bounded reuse of that immutable result, with fresh
     # recipient checks at each publisher signing boundary and each chain write.
@@ -273,7 +322,7 @@ def publication_valid_through(plan, package, block):
     return valid_through
 
 
-def _intent(plan, package, *, sequence, predecessor_version, predecessor, block):
+def _intent(plan, package, *, sequence, predecessor_version, predecessor, block, continuation=None):
     policy = package.policy
     valid_through = publication_valid_through(plan, package, block)
     target = _package_target(package, plan.package_limits)
@@ -284,7 +333,12 @@ def _intent(plan, package, *, sequence, predecessor_version, predecessor, block)
         )
     ).hexdigest()
     body = CompetitionWeightAuthorizationBody(
-        schema="umi-competition-weight-authorization/1",
+        schema=(
+            "umi-competition-weight-authorization/2"
+            if continuation is not None
+            else "umi-competition-weight-authorization/1"
+        ),
+        continuation=continuation,
         authorization_id=identifier,
         validator_scope="any_permitted_sn78",
         policy_sha256=digest(policy),
@@ -342,6 +396,7 @@ def _directive(plan, intent, authorization):
     )
     return SuccessorSupervisorDirective(
         schema="umi-validator-supervisor-directive/4",
+        reward_continuity_sha256=digest(plan.continuity) if plan.continuity else None,
         channel_id=plan.supervisor.channel_id,
         sequence=intent.sequence,
         predecessor_version=intent.predecessor_version,
@@ -398,6 +453,7 @@ def verify_successor_round_publication(plan, publication, package=None):
             predecessor_version=intent.predecessor_version,
             predecessor=intent.authorization.predecessor_directive_sha256,
             block=intent.authorization.signed_at_block,
+            continuation=intent.authorization.continuation,
         )
         if intent != expected:
             raise ValueError("retained publication exceeds its approved signing plan")
@@ -438,6 +494,48 @@ class SuccessorRoundPublicationBuilder:
         with self.journal.locked():
             yield
 
+    def revoked(self):
+        raw = self.journal.get("continuity_revocation", "terminal")
+        if raw is None:
+            return False
+        if self.plan.continuity is None:
+            raise ValueError("unexpected continuity revocation")
+        # The journal's append-only record binds the first observed owned head.
+        verify_reward_continuity_revocation(
+            raw["signed"],
+            self.plan.continuity,
+            tuple(a.hotkey for a in self.plan.supervisor.trusted_authorities),
+            threshold=self.plan.supervisor.signature_threshold,
+            block=raw["observed_block"],
+        )
+        return True
+
+    def revoke(self, signed, *, finalized_block):
+        with self._locked():
+            if self.plan.continuity is None:
+                raise ValueError("ordinary plans have no continuity authority")
+            signed = verify_reward_continuity_revocation(
+                signed,
+                self.plan.continuity,
+                tuple(a.hotkey for a in self.plan.supervisor.trusted_authorities),
+                threshold=self.plan.supervisor.signature_threshold,
+                block=finalized_block,
+            )
+            self.journal.observe(finalized_block)
+            old = self.journal.get("continuity_revocation", "terminal")
+            if old is not None:
+                if canonical_json_bytes(old["signed"]) != canonical_json_bytes(signed):
+                    raise ValueError("continuity already revoked by a different record")
+                return
+            self.journal.put(
+                "continuity_revocation",
+                "terminal",
+                {
+                    "signed": signed.model_dump(mode="json", by_alias=True),
+                    "observed_block": finalized_block,
+                },
+            )
+
     def _load(self, prepared):
         prepared = _canonical(PreparedCompetitionPackage, prepared)
         if prepared.policy_sha256 != self.plan.policy_sha256:
@@ -452,6 +550,69 @@ class SuccessorRoundPublicationBuilder:
         if package.manifest_sha256 != prepared.manifest_sha256:
             raise ValueError("publication package manifest differs")
         return package
+
+    def recipient_amendment(self, package, *, block):
+        raw = self.journal.get("ip_grouping_amendment", package.package_sha256)
+        if raw is None:
+            raw = self.journal.get("recipient_amendment", package.package_sha256)
+        if raw is None:
+            return None
+        if self.plan.continuity is None:
+            raise ValueError("recipient amendment requires continuity authority")
+        return verify_recipient_amendment(
+            raw["signed"],
+            self.plan.continuity,
+            package,
+            tuple(a.hotkey for a in self.plan.supervisor.trusted_authorities),
+            threshold=self.plan.supervisor.signature_threshold,
+            block=block,
+        )
+
+    def amend_recipients(self, prepared, signed, *, finalized_block):
+        with self._locked():
+            if self.plan.continuity is None or self.revoked():
+                raise ValueError("recipient amendment requires active continuity authority")
+            package = self._load(prepared)
+            if self.journal.get("continuity_admission", package.package_sha256) is None:
+                raise ValueError("recipient amendment requires retained timely admission")
+            signed = verify_recipient_amendment(
+                signed,
+                self.plan.continuity,
+                package,
+                tuple(a.hotkey for a in self.plan.supervisor.trusted_authorities),
+                threshold=self.plan.supervisor.signature_threshold,
+                block=finalized_block,
+            )
+            old = self.journal.get("recipient_amendment", package.package_sha256)
+            slot = "recipient_amendment"
+            if signed.amendment.ip_groups is not None:
+                if old is None:
+                    raise ValueError("IP grouping requires its retained predecessor amendment")
+                predecessor = SignedRewardRecipientAmendment.model_validate(old["signed"])
+                before, after = predecessor.amendment, signed.amendment
+                if (
+                    after.predecessor_amendment_sha256 != digest(predecessor)
+                    or after.recipients != before.recipients
+                    or after.burn_destination != before.burn_destination
+                    or after.issued_at_block < before.issued_at_block
+                    or before.ip_groups is not None
+                ):
+                    raise ValueError("IP grouping changed its retained burn amendment")
+                slot = "ip_grouping_amendment"
+                old = self.journal.get(slot, package.package_sha256)
+            if old is not None:
+                if canonical_json_bytes(old["signed"]) != canonical_json_bytes(signed):
+                    raise ValueError("recipient amendment already retained with different bytes")
+                return
+            self.journal.observe(finalized_block)
+            self.journal.put(
+                slot,
+                package.package_sha256,
+                {
+                    "signed": signed.model_dump(mode="json", by_alias=True),
+                    "observed_block": finalized_block,
+                },
+            )
 
     def _check_signers(self, authorization_wallet, directive_wallets):
         # Reject wrong identities or an insufficient cohort before reserving an
@@ -517,10 +678,11 @@ class SuccessorRoundPublicationBuilder:
         return result
 
     @staticmethod
-    def _intent_slot(sequence, round_sequence):
+    def _intent_slot(sequence, round_sequence, block=None):
         # A directive sequence is consumed only by a complete retained publication.
         # Expired partial attempts keep separate immutable records for their round.
-        return f"{sequence}:{round_sequence}"
+        prefix = f"{sequence}:{round_sequence}"
+        return prefix if block is None else f"{prefix}:{block}"
 
     def _reserved_intent(self, *, sequence, round_sequence, predecessor, block):
         existing = None
@@ -528,9 +690,12 @@ class SuccessorRoundPublicationBuilder:
             pending = SuccessorRoundPublicationIntent.model_validate(
                 self.journal.get("intent", slot)
             )
-            if pending.plan_sha256 != self._plan_digest or slot != self._intent_slot(
-                pending.sequence, pending.round_sequence
-            ):
+            if pending.plan_sha256 != self._plan_digest or slot not in {
+                self._intent_slot(pending.sequence, pending.round_sequence),
+                self._intent_slot(
+                    pending.sequence, pending.round_sequence, pending.authorization.signed_at_block
+                ),
+            }:
                 raise ValueError("reserved publication identity differs")
             if pending.sequence < sequence:
                 continue
@@ -540,11 +705,15 @@ class SuccessorRoundPublicationBuilder:
                 raise ValueError("reserved publication predecessor differs")
             if pending.round_sequence > round_sequence:
                 raise ValueError("cannot return to a round older than a reserved publication")
-            if pending.round_sequence == round_sequence:
+            if block <= pending.authorization.valid_through_block:
+                if pending.round_sequence != round_sequence:
+                    raise ValueError(
+                        "an unfinished publication is still within its original window"
+                    )
+                if existing is not None:
+                    raise ValueError("multiple unexpired publication intents")
                 existing = pending
                 continue
-            if block <= pending.authorization.valid_through_block:
-                raise ValueError("an unfinished publication is still within its original window")
             expired = self.journal.get("expired_intent", slot)
             if expired is None:
                 self.journal.put(
@@ -581,7 +750,10 @@ class SuccessorRoundPublicationBuilder:
         with self._locked():
             if digest(_canonical(SuccessorRoundPublicationPlan, self.plan)) != self._plan_digest:
                 raise ValueError("publication plan changed")
-            if self.plan.maximum_settlement_reuse_blocks is not None and current_gate is None:
+            if (
+                self.plan.maximum_settlement_reuse_blocks is not None
+                or self.plan.continuity is not None
+            ) and current_gate is None:
                 raise ValueError("settlement reuse requires a current recipient gate")
             directive_wallets = tuple(directive_wallets)
             self._check_signers(authorization_wallet, directive_wallets)
@@ -589,10 +761,21 @@ class SuccessorRoundPublicationBuilder:
             package = self._load(prepared)
             history = self.history()
 
+            admission_boundary = None
+
             def current(authorization=None):
-                nonlocal finalized_block
+                nonlocal finalized_block, admission_boundary
+                if self.revoked():
+                    raise ValueError("continuity authority revoked")
                 if current_gate is not None:
-                    block = current_gate(package)
+                    captured = current_gate(package)
+                    if self.plan.continuity is not None:
+                        admission_boundary = ExecutionBoundary.model_validate_json(
+                            canonical_json_bytes(captured)
+                        )
+                        block = admission_boundary.block
+                    else:
+                        block = captured
                     self.journal.observe(block)
                     finalized_block = block
                     if authorization is not None and (
@@ -631,6 +814,27 @@ class SuccessorRoundPublicationBuilder:
                 raise PublicationWindowUnavailable("publication renewal is not due")
             if history and package.manifest.round_sequence < history[-1].intent.round_sequence:
                 raise ValueError("cannot publish an older round after a newer round")
+            continuation = None
+            if self.plan.continuity is not None:
+                slot = package.package_sha256
+                raw_admission = self.journal.get("continuity_admission", slot)
+                if raw_admission is None:
+                    current()
+                    admission = admit_certified_allocation(
+                        self.plan.continuity, package, admission_boundary, authorization_wallet
+                    )
+                    self.journal.put("continuity_admission", slot, admission)
+                else:
+                    admission = SignedCertifiedAllocationAdmission.model_validate(raw_admission)
+                amendment = self.recipient_amendment(package, block=finalized_block)
+                continuation = RewardContinuation(
+                    schema="umi-reward-continuation/2"
+                    if amendment
+                    else "umi-reward-continuation/1",
+                    authority=self.plan.continuity,
+                    admission=admission,
+                    recipient_amendment=amendment,
+                )
             prior = history[-1] if history else None
             sequence = (
                 prior.intent.sequence if prior else self.plan.consent.predecessor_sequence
@@ -641,16 +845,24 @@ class SuccessorRoundPublicationBuilder:
                 else self.plan.consent.predecessor_directive_sha256
             )
             self.journal.put("round", str(package.manifest.round_sequence), package.package_sha256)
-            slot = self._intent_slot(sequence, package.manifest.round_sequence)
             reserved = self._reserved_intent(
                 sequence=sequence,
                 round_sequence=package.manifest.round_sequence,
                 predecessor=predecessor,
                 block=finalized_block,
             )
+            slot = self._intent_slot(
+                sequence,
+                package.manifest.round_sequence,
+                finalized_block if reserved is None else reserved.authorization.signed_at_block,
+            )
+            legacy_slot = self._intent_slot(sequence, package.manifest.round_sequence)
+            if self.journal.get("intent", legacy_slot) is None:
+                slot = legacy_slot
             intent = _intent(
                 self.plan,
                 package,
+                continuation=continuation,
                 sequence=sequence,
                 predecessor_version=4 if prior else 3,
                 predecessor=predecessor,
@@ -658,6 +870,12 @@ class SuccessorRoundPublicationBuilder:
                     finalized_block if reserved is None else reserved.authorization.signed_at_block
                 ),
             )
+            if reserved is not None:
+                legacy_slot = self._intent_slot(sequence, package.manifest.round_sequence)
+                if self.journal.get("intent", legacy_slot) is not None and self.journal.get(
+                    "intent", legacy_slot
+                ) == reserved.model_dump(mode="json", by_alias=True):
+                    slot = legacy_slot
             self.journal.put("intent", slot, intent)
             if intent.authorization.valid_through_block - finalized_block < max(
                 self.plan.weights.mortality_period, self.plan.minimum_activation_headroom_blocks

@@ -32,10 +32,12 @@ from . import competition_scheduling_receipts as scheduling_receipts
 from .competition_authorization import (
     EndpointAssignment,
     SignedEndpointAuthorization,
+    _PublicationBodyValidator,
     scheduled_assignment_key,
     validate_publication,
     validate_publication_body,
 )
+from .competition_scheduling_retirement_cache import RetirementValidationCache
 from .competition_scheduling_timing import (
     check_dispatch_profile,
     configure_dispatch,
@@ -71,7 +73,7 @@ class SchedulingCapacity(StrictProtocolModel):
 
     maximum_publications: Annotated[int, Field(ge=1, le=65536)] = 1024
     maximum_assignments: Annotated[int, Field(ge=1, le=262144)] = 16384
-    maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    maximum_bytes: Annotated[int, Field(ge=1024, le=64 * 1024**3)] = 1024**3
     maximum_outcome_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 1024**2
 
 
@@ -180,6 +182,7 @@ class AssignmentPublicationJournal:
         self.maximum_outcome_bytes = capacity.maximum_outcome_bytes
         self.maximum_observation_age_seconds = maximum_observation_age_seconds
         self.maximum_future_skew_seconds = maximum_future_skew_seconds
+        self._retirement_validation = RetirementValidationCache()
         pins = self.legacy_policy.implementation_pins
         if (
             pins.pin_profile != "live_shadow_calibration"
@@ -319,6 +322,9 @@ class AssignmentPublicationJournal:
                 )
 
     def _capacity(self, db, *, publications=0, assignments=0, reserved=0):
+        from .competition_scheduling_retirement import retained_bytes, retired_claims
+
+        retired = retired_claims(self, db)
         count, used = db.execute(
             "SELECT COUNT(*),COALESCE(SUM(reserved),0) FROM publications"
         ).fetchone()
@@ -330,6 +336,7 @@ class AssignmentPublicationJournal:
             "WHERE key LIKE 'dispatch_profile:%'"
         ).fetchone()[0]
         assignment_count = db.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
+        used += retained_bytes(db)
         if self._reservation_enabled(db):
             pending = db.execute(
                 "SELECT COUNT(*),COALESCE(SUM(assignment_count),0),"
@@ -349,7 +356,7 @@ class AssignmentPublicationJournal:
             used += db.execute(
                 "SELECT COALESCE(SUM(LENGTH(document)),0) FROM reservation_qualifications"
             ).fetchone()[0]
-            used += self._proof_allowance(db)
+            used += self._proof_allowance(db, retired=retired)
             used += 64  # Stable private journal identity retained with native reservations.
         if (
             count + publications > self.maximum_publications
@@ -362,15 +369,18 @@ class AssignmentPublicationJournal:
     def _reservation_enabled(db):
         return db.execute("PRAGMA user_version").fetchone()[0] == 2
 
-    @staticmethod
-    def _proof_allowance(db):
+    def _proof_allowance(self, db, *, retired=None):
         """Retain future proof credit until every reserved task is known terminal.
 
         Publication consumption alone is insufficient. Unpublished bodies,
         missing assignments and uncertain dispatched claims retain the interval;
-        recorded completed/expired events release only its unobserved heights.
+        Recorded completed/expired events or an independently certified repair
+        void release only its unobserved heights. The original claim is retained.
         Historical block bytes remain charged separately.
         """
+        if retired is None:
+            retired = self.retired_claims(db)
+        db.create_function("umi_scheduling_claim_retired", 1, lambda key: key in retired)
         intervals = []
         for start, end in db.execute(
             "SELECT b.proof_start,b.proof_end FROM reservation_batches b WHERE EXISTS "
@@ -379,7 +389,8 @@ class AssignmentPublicationJournal:
             "(SELECT 1 FROM reservation_publications p JOIN reservation_assignments a "
             "ON a.publication_id=p.id WHERE p.batch_id=b.id AND COALESCE("
             "(SELECT kind FROM events e WHERE e.assignment_id=a.id ORDER BY ordinal DESC LIMIT 1),"
-            "'') NOT IN ('completed','expired')) ORDER BY b.proof_start,b.proof_end"
+            "'') NOT IN ('completed','expired') AND NOT umi_scheduling_claim_retired(a.id)) "
+            "ORDER BY b.proof_start,b.proof_end"
         ):
             if intervals and start <= intervals[-1][1] + 1:
                 intervals[-1][1] = max(end, intervals[-1][1])
@@ -393,14 +404,29 @@ class AssignmentPublicationJournal:
             missing += end - start + 1 - retained
         return missing * _BLOCK_RESERVE_BYTES
 
+    def retired_claims(self, db):
+        from .competition_scheduling_retirement import retired_claims
+
+        return retired_claims(self, db)
+
+    def retire_void(self, *, evidence, suite):
+        from .competition_scheduling_retirement import retire_void
+
+        return retire_void(self, evidence=evidence, suite=suite)
+
     def _enable_reservations(self, db):
         if self._reservation_enabled(db):
             return
-        if db.execute(
-            "SELECT 1 FROM events dispatched WHERE kind='dispatched' AND NOT EXISTS "
-            "(SELECT 1 FROM events completed WHERE completed.assignment_id="
-            "dispatched.assignment_id AND completed.kind='completed') LIMIT 1"
-        ).fetchone():
+        retired = self.retired_claims(db)
+        if any(
+            key not in retired
+            for (key,) in db.execute(
+                "SELECT dispatched.assignment_id FROM events dispatched "
+                "WHERE kind='dispatched' AND NOT EXISTS "
+                "(SELECT 1 FROM events completed WHERE completed.assignment_id="
+                "dispatched.assignment_id AND completed.kind='completed')"
+            )
+        ):
             raise ValueError("drain dispatched incomplete claims before scheduling migration")
         for row in db.execute("SELECT document,evidence FROM blocks"):
             if len(row[0]) > _BLOCK_DOCUMENT_BYTES or len(row[1]) > MAX_FINALITY_EVIDENCE_BYTES:
@@ -454,8 +480,10 @@ class AssignmentPublicationJournal:
     def _qualify_capacity(self, db, publications, observed, now, evaluator_hotkey):
         return qualify_dispatch(self, db, publications, observed, now, evaluator_hotkey)
 
-    def _recover_capacity(self, db, batch_id, evaluator_hotkey, now):
-        return recover_dispatch_qualification(db, batch_id, evaluator_hotkey, now)
+    def _recover_capacity(self, db, batch_id, evaluator_hotkey, now, *, requalify=True):
+        return recover_dispatch_qualification(
+            self, db, batch_id, evaluator_hotkey, now, requalify=requalify
+        )
 
     def configure_dispatch(self, *, evaluator_hotkey, limits, budget, publication_directory=None):
         configure_dispatch(
@@ -505,9 +533,17 @@ class AssignmentPublicationJournal:
             "SELECT document,evidence FROM blocks WHERE height=?", (block.height,)
         ).fetchone()
         if existing:
+            retained = self._retained_block(db, block.height)
+            # Independent owned observers have different attestation transcripts
+            # for the same finalized block. Compare every block/context field,
+            # while keeping the first validated proof and its digest unchanged.
             if (
-                bytes(existing["document"]) != document
-                or bytes(existing["evidence"]) != block.finality_evidence
+                replace(
+                    retained,
+                    finality_evidence=block.finality_evidence,
+                    finality_evidence_sha256=block.finality_evidence_sha256,
+                )
+                != block
             ):
                 raise ValueError("verified block changed at a retained height")
             return
@@ -746,8 +782,9 @@ class AssignmentPublicationJournal:
             raise ValueError("invalid bounded scheduling reservation cohort")
         evaluator = identity(evaluator_hotkey)
         validated, staged_bytes, assignments = [], 0, 0
+        validator = _PublicationBodyValidator(self.policy, self.legacy_policy)
         for body in publications:
-            body = validate_publication_body(body, self.policy, self.legacy_policy)
+            body = validator.validate(body)
             staged_bytes += len(canonical_json_bytes(body))
             assignments += len(body.assignments)
             if staged_bytes > self.maximum_bytes or assignments > self.maximum_assignments:
@@ -879,6 +916,18 @@ class AssignmentPublicationJournal:
                 db,
                 batch_id,
                 evaluator_hotkey,
+            )
+
+    def retained_reservation(self, batch_id, *, evaluator_hotkey):
+        """Verify native obligations without promising another dispatch workload.
+
+        Only WorkAdmission's completed, exact evaluation-order continuation uses
+        this receipt. New admission and authorization recovery use reservation().
+        The original qualification digest and all native checks remain intact.
+        """
+        with self._transaction() as db:
+            return scheduling_receipts.reservation(
+                self, db, batch_id, evaluator_hotkey, requalify=False
             )
 
     def publish(

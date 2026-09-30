@@ -47,6 +47,13 @@ Use one hotkey per worker and a dedicated configuration with schema
   Supply both, or omit both for a model-only evaluator worker.
 - `scheduling_capacity`: optional [shared scheduling limits](dispatch.md#shared-scheduling-capacity),
   matching the dispatcher, assignment feed and evidence assembler for that journal.
+- `maximum_journal_bytes` limits the evaluator journal and supplies the default
+  for each auxiliary journal separately. Optional `journal_limits` overrides
+  `execution`, `round_signing`, `work_signing`, and `work_admission` independently.
+  Every value is a byte ceiling between 1 KiB and 16 GiB. Account for all stores,
+  scheduling history, chain caches and filesystem overhead when sizing a host.
+  Changing a ceiling preserves existing evidence and reservations; it does not
+  reclaim space or make an undersized store able to accept new work.
 - `exchange_origin` enables the [authenticated exchange](exchange.md#open-competition-exchange).
   For automatic endpoint publication delivery, set `assignment_directory` to
   the dispatcher's separate `publication_directory`. No extra upload key is used.
@@ -75,6 +82,44 @@ height the signed window can require. The public
 rehearsal. Returned data remains untrusted until the local verifier checks it
 against an owned finalized state root. Keep the collection timeout and proof
 checks enabled; changing the RPC endpoint does not grant finality authority.
+
+Registration, weight-state and runtime-code proof providers can add
+`proof_rpc_fallback_urls` with exactly two ordered, credential-free `wss://`
+endpoints. Qualify independently operated providers, their genesis, current
+proofs, and the historical depth each role requires. Different hostnames alone
+do not establish provider independence. A recent-state endpoint may serve live
+intake while lacking proofs for an older roster; keep an archive-capable primary
+and qualify historical reads on a backup too.
+
+Adding the two fallbacks to an otherwise identical configuration preserves the
+existing registration namespace, captures, metadata artifacts and observed head.
+The cache records the old and new configuration bindings and the explicit
+transport list. Changing the primary endpoint, verifier pins or other fields
+is not covered by this migration. Existing configs omit the new field from
+serialization, preserving their bytes. Back up the cache before deploying a
+reviewed control release and its new config; reverting to a config without the
+fallback list is rejected after its binding has advanced.
+
+The provider tries the primary, then each backup only as needed. Connections
+are lazy and persistent, with separate method receive limits. HTTP 429 is logged
+as `competition_proof_rpc_throttled` with provider index and bounded Retry-After;
+URLs, headers and payloads are omitted. Cooldown is shared across methods and
+concurrent requests. Invalid protocol data or proof/chain checks remain terminal.
+Unavailable-state RPC errors may try the next provider with the same capture
+hash; they never move an old request to the latest block. The original overall
+collection timeout and finality freshness checks still apply.
+
+This setting affects `FinalizedRegistrationProvider` and the separate weight
+and runtime-code collectors in `FinalizedCompetitionWeightProvider`. Each keeps
+its original proof/value limits; untrusted prefetched weight values remain bound
+to the exact requested block and must pass native proof verification. It does
+not configure the Rust observer's P2P finality transport, unrelated JSON-RPC
+clients, or existing roles running another frozen source release. The weight
+worker also passes this exact endpoint list to its pinned transaction transport,
+with implicit SDK endpoint pools disabled. An unsent request can use another
+connection; a possibly sent transaction is never resent. SDK policy refusals are
+terminal, and uncertain effects still require native reconciliation. Keep those
+deployment scopes explicit.
 
 The owned observer uses `startup_timeout_seconds` for its first verified record
 (600 seconds by default, configurable up to 900). The source implementation now

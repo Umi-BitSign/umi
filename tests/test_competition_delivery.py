@@ -166,7 +166,7 @@ async def test_initial_history_timeout_cancels_pending_fetch(initial_history_cas
             cancelled.append(True)
 
     monkeypatch.setattr(case.fetcher, "fetch_directive_page", stall)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await case.fetcher.fetch_initial_history(**case.arguments, timeout_seconds=1)
     assert cancelled == [True]
 
@@ -189,7 +189,13 @@ def test_initial_history_cli_stages_exact_bytes_without_overwriting(
     from umi.competition_cli import _parser, execute
 
     case = initial_history_case
-    monkeypatch.setattr(delivery, "HTTPSSuccessorDirectiveFetcher", lambda config: case.fetcher)
+
+    def fetcher(config, *, client=None):
+        assert config == case.fetcher.config
+        assert client is None
+        return case.fetcher
+
+    monkeypatch.setattr(delivery, "HTTPSSuccessorDirectiveFetcher", fetcher)
     paths = {}
     for name, body in (
         ("config", canonical_json_bytes(case.fetcher.config)),

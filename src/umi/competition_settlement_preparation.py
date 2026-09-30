@@ -7,6 +7,7 @@ no signing or weight authority and cannot substitute for promotion review.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -26,7 +27,9 @@ from .competition_publication import (
     verify_cutoff_publication,
 )
 from .competition_settlement import CompetitionSettlement
+from .competition_settlement_capacity import settlement_capacity
 from .competition_void import VoidEvaluationEvidence
+from .concurrency import run_owned_thread
 from .open_competition import (
     DEPENDENCE_POLICY_SCHEMA,
     AttestedDependenceCalibration,
@@ -34,10 +37,14 @@ from .open_competition import (
     digest,
     validate_dependence_calibration,
 )
+from .private_files import MAX_PRIVATE_BYTES
 from .private_files import publish_private_model as _publish
 from .protocol import canonical_json_bytes
 
+# Existing publication consumers also use this smaller bound for promotion
+# history. Complete proposals include the whole cohort's evidence instead.
 MAX_BYTES = 16 * 1024**2
+MAX_PREPARATION_BYTES = MAX_PRIVATE_BYTES
 
 
 class SettlementPreparation(StrictProtocolModel):
@@ -61,9 +68,11 @@ class SettlementPreparation(StrictProtocolModel):
 
 def validate_preparation(prepared, policy, limits):
     raw = canonical_json_bytes(prepared)
-    if len(raw) > MAX_BYTES:
+    if len(raw) > settlement_capacity(limits).preparation_bytes:
         raise ValueError("settlement preparation exceeds the transport byte bound")
     prepared = SettlementPreparation.model_validate_json(raw)
+    # Replay needs the normalized model, not another complete serialized copy.
+    del raw
     calibration = prepared.publication.settlement.dependence_calibration
     if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
         if calibration is None:
@@ -100,7 +109,6 @@ async def prepare_retained_settlement(
     dependence_calibration: AttestedDependenceCalibration | None = None,
 ):
     """Publish an unsigned review package, preserving exact retries across restart."""
-    policy = store.policy
     round_ = cutoff.publication.round
     if digest(suite) != round_.suite_sha256:
         raise ValueError("settlement preparation suite differs from its closed round")
@@ -110,15 +118,7 @@ async def prepare_retained_settlement(
         return "waiting"
     if head > round_.valid_through_block:
         return "expired"
-    material = store.settlement_material(round_, limits=limits)
-    verify_cutoff_publication(
-        cutoff, policy=policy, submissions=material["submissions"], limits=limits
-    )
-    if cutoff.publication.cutoff_schedule != material["cutoff_schedule"]:
-        raise ValueError("settlement cutoff differs from the retained schedule")
-    independent_evidence_set_digest(
-        material["evidence"], maximum_bytes=limits.maximum_evidence_bytes
-    )
+    material = await run_owned_thread(_load_material, store, cutoff, limits)
     existing = material["retained_settlement"]
     # No network caller supplies this snapshot. For a new record use a fresh
     # collection after loading evidence; retries preserve the original record.
@@ -129,18 +129,55 @@ async def prepare_retained_settlement(
     if current > round_.valid_through_block:
         return "expired"
     snapshot = capture.snapshot if existing is None else existing.registration_snapshot
-    settlement = CompetitionSettlement.model_validate_json(
+    settlement = await run_owned_thread(
+        partial(
+            _settle_material,
+            store=store,
+            round_=round_,
+            suite=suite,
+            evidence=material["evidence"],
+            snapshot=snapshot,
+            current=current,
+            dependence_calibration=dependence_calibration,
+        )
+    )
+    # Drop the first complete cohort before reloading committed evidence.
+    del material
+    return await run_owned_thread(
+        _publish_preparation, store, cutoff, settlement, limits, output_directory
+    )
+
+
+def _load_material(store, cutoff, limits):
+    material = store.settlement_material(cutoff.publication.round, limits=limits)
+    verify_cutoff_publication(
+        cutoff, policy=store.policy, submissions=material["submissions"], limits=limits
+    )
+    if cutoff.publication.cutoff_schedule != material["cutoff_schedule"]:
+        raise ValueError("settlement cutoff differs from the retained schedule")
+    independent_evidence_set_digest(
+        material["evidence"], maximum_bytes=limits.maximum_evidence_bytes
+    )
+    return material
+
+
+def _settle_material(*, store, round_, suite, evidence, snapshot, current, dependence_calibration):
+    return CompetitionSettlement.model_validate_json(
         canonical_json_bytes(
             store.settle(
                 round_=round_,
                 suite=suite,
-                evidence=material["evidence"],
+                evidence=evidence,
                 snapshot=snapshot,
                 current_block=current,
                 dependence_calibration=dependence_calibration,
             )
         )
     )
+
+
+def _publish_preparation(store, cutoff, settlement, limits, output_directory):
+    policy, round_ = store.policy, cutoff.publication.round
     # Re-read conflict status and evidence bindings after the settlement commit.
     # Publishing this proposal still requires independent current review later.
     retained = store.settlement_material(round_, limits=limits)
@@ -173,5 +210,9 @@ async def prepare_retained_settlement(
         ),
     )
     validate_preparation(prepared, policy, limits)
-    _publish(Path(output_directory) / (digest(round_) + ".settlement-proposal.json"), prepared)
+    _publish(
+        Path(output_directory) / (digest(round_) + ".settlement-proposal.json"),
+        prepared,
+        maximum_bytes=settlement_capacity(limits).preparation_bytes,
+    )
     return "prepared"

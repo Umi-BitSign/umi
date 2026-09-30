@@ -23,9 +23,11 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
-from websockets.asyncio.client import connect as websocket_connect
 
 from .chain_evidence import FinalizedSnapshotRef
+from .competition_chain_resources import CompetitionChainResources
+from .competition_policy_lineage import admitted_policy_sha256s
+from .competition_proof_rpc import FailoverProofRpc
 from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
@@ -45,6 +47,7 @@ from .open_competition import (
 )
 from .policy import FinalityVerifierPin, LiveChainObservationPin
 from .protocol import canonical_json_bytes
+from .rpc_transport import websocket_connect
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
     BittensorRawJsonRpc,
@@ -95,6 +98,10 @@ def verified_model_burn_destination(policy, values, registrations):
     return BurnDestination(uid=destination.uid, hotkey=destination.hotkey, mode="Burn")
 
 
+class RegistrationProviderTimeout(ValueError):
+    """A bounded observation attempt expired; retained evidence remains usable."""
+
+
 class _AwaitingFinality(ValueError):
     """The owned source has not yet reached the configured startup head."""
 
@@ -113,6 +120,9 @@ class CompetitionChainConfig(StrictProtocolModel):
     network: Literal["finney"] = "finney"
     netuid: Literal[78] = 78
     rpc_url: Annotated[str, Field(min_length=1, max_length=2048)]
+    proof_rpc_fallback_urls: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=2048)], ...], Field(max_length=2)
+    ] = ()
     chain_pin: LiveChainObservationPin
     finality_pin: FinalityVerifierPin
     target_triple: Annotated[str, Field(min_length=1, max_length=100)]
@@ -141,6 +151,8 @@ class CompetitionChainConfig(StrictProtocolModel):
             value.pop("runtime_metadata_binary", None)
         if self.runtime_metadata_binary_sha256 is None:
             value.pop("runtime_metadata_binary_sha256", None)
+        if not self.proof_rpc_fallback_urls:
+            value.pop("proof_rpc_fallback_urls", None)
         return value
 
     @field_validator("storage_codec_metadata_path", "runtime_metadata_binary")
@@ -183,6 +195,13 @@ class CompetitionChainConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def pinned_finney(self) -> Self:
+        endpoints = (self.rpc_url, *self.proof_rpc_fallback_urls)
+        if self.proof_rpc_fallback_urls and len(self.proof_rpc_fallback_urls) != 2:
+            raise ValueError("proof RPC failover requires exactly two explicit backups")
+        for endpoint in endpoints:
+            self.read_only_rpc(endpoint)
+        if len(set(endpoints)) != len(endpoints):
+            raise ValueError("proof RPC endpoints must be unique and ordered")
         if (self.runtime_metadata_binary is None) != (self.runtime_metadata_binary_sha256 is None):
             raise ValueError("runtime metadata execution requires both an executable and its hash")
         if (
@@ -437,8 +456,15 @@ class FinalizedRegistrationProvider:
         proofs: Any = None,
         now_ms: Callable[[], int] | None = None,
         retained_capture_blocks: Callable[[], frozenset[int]] | None = None,
+        resources: CompetitionChainResources | None = None,
     ):
         self.config = CompetitionChainConfig.model_validate_json(canonical_json_bytes(config))
+        self.resources = (
+            CompetitionChainResources.from_config(self.config)
+            if resources is None
+            else CompetitionChainResources.model_validate_json(canonical_json_bytes(resources))
+        )
+        self.resources.check(self.config)
         if self.config.runtime_metadata_binary is not None and not self._supports_executed_runtime:
             raise ValueError("runtime metadata execution is only supported by the weight provider")
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -455,7 +481,7 @@ class FinalizedRegistrationProvider:
         self._close_task: asyncio.Task[None] | None = None
         self._closed = False
         self._prefetch: _PrefetchRpc | None = None
-        self._registration_rpc: _RegistrationRpc | None = None
+        self._registration_rpc: _RegistrationRpc | FailoverProofRpc | None = None
         self._latest: RegistrationCapture | None = None
         self._registration_ancestry_headers = HeaderPathCache()
         self._runtime_pin = FinalizedRuntimePin(
@@ -478,8 +504,8 @@ class FinalizedRegistrationProvider:
             observer = GrandpaFinalityObserver.from_policy_pin(
                 config.finality_pin,
                 target_triple=config.target_triple,
-                binary_path=config.finality_binary,
-                chain_spec_path=config.chain_spec,
+                binary_path=self.resources.finality_binary,
+                chain_spec_path=self.resources.chain_spec,
                 record_timeout_seconds=min(
                     _OBSERVER_RECORD_TIMEOUT_SECONDS, config.maximum_head_age_ms / 2000
                 ),
@@ -489,6 +515,7 @@ class FinalizedRegistrationProvider:
                 observer=observer,
                 state_path=directory / "finality.sqlite3",
                 scoring_policy_digest=self._finality_policy_hash(),
+                accepted_predecessor_policy_digests=self._predecessor_finality_policy_hashes(),
                 chain_observation=config.chain_pin,
                 finality_verifier_sha256=config.finality_pin.release_sha256_by_target[
                     config.target_triple
@@ -502,12 +529,25 @@ class FinalizedRegistrationProvider:
                 config.minimum_finalized_block - 1 if head is None else head.height
             )
             verifier = SubprocessStorageProofVerifier(
-                binary_path=config.proof_binary,
+                binary_path=self.resources.proof_binary,
                 expected_sha256=config.proof_binary_sha256,
             )
-            self._registration_rpc = _RegistrationRpc(
-                config, persistent=True, bulk_storage_reads=True
-            )
+            if config.proof_rpc_fallback_urls:
+                self._registration_rpc = FailoverProofRpc(
+                    tuple(
+                        _RegistrationRpc(
+                            config.model_copy(update={"rpc_url": endpoint}),
+                            persistent=True,
+                            bulk_storage_reads=True,
+                        )
+                        for endpoint in (config.rpc_url, *config.proof_rpc_fallback_urls)
+                    ),
+                    timeout_seconds=config.collection_timeout_seconds,
+                )
+            else:
+                self._registration_rpc = _RegistrationRpc(
+                    config, persistent=True, bulk_storage_reads=True
+                )
             self._prefetch = _PrefetchRpc(self._registration_rpc)
             proofs = FinalizedProofCollector(
                 self._prefetch,
@@ -524,7 +564,7 @@ class FinalizedRegistrationProvider:
         self._proofs = proofs
 
     def _load_storage_codec(self):
-        value = self.config.storage_codec_metadata_path
+        value = self.resources.storage_codec_metadata_path
         if value is None:
             return None
         path = Path(value)
@@ -554,13 +594,46 @@ class FinalizedRegistrationProvider:
         return await self._proofs.pinned_runtime(ref, self._runtime_pin)
 
     def _cache_directory(self, config: CompetitionChainConfig) -> Path:
-        return Path(config.state_directory)
+        return Path(self.resources.state_directory)
 
     def _finality_policy_hash(self) -> str:
         return digest(self.policy)
 
+    def _predecessor_finality_policy_hashes(self) -> tuple[str, ...]:
+        """Deal-preserving predecessors whose finality store this provider may adopt."""
+        return tuple(admitted_policy_sha256s(self.policy)[1:])
+
     def _cache_binding_hash(self) -> str:
-        return digest(self.config)
+        """Bind the registration cache to the chain configuration, not the policy.
+
+        The cache holds verified registrations and finality heads, none of which
+        depend on the competition policy, so a deal-preserving policy successor must
+        not invalidate it. ``policy_sha256`` is bound separately at construction.
+        """
+        return self._config_binding_hash(self.config)
+
+    @staticmethod
+    def _config_binding_hash(config: CompetitionChainConfig) -> str:
+        body = config.model_dump(mode="json", by_alias=True)
+        body.pop("policy_sha256", None)
+        return digest({"chain_config_without_policy": body})
+
+    def _acceptable_cache_bindings(self) -> frozenset[str]:
+        """The current binding, plus the legacy per-policy binding this cache would
+        have carried under the live policy or any honored predecessor."""
+        accepted = {self._cache_binding_hash()}
+        configs = [self.config]
+        if self.config.proof_rpc_fallback_urls:
+            # Explicit addition only: preserve the original primary RPC, every
+            # chain/proof pin and every other field. Never adopt another primary.
+            previous = self.config.model_copy(update={"proof_rpc_fallback_urls": ()})
+            configs.append(previous)
+            accepted.add(self._config_binding_hash(previous))
+        for config in configs:
+            for policy_sha256 in admitted_policy_sha256s(self.policy):
+                legacy = config.model_copy(update={"policy_sha256": policy_sha256})
+                accepted.add(digest(legacy))
+        return frozenset(accepted)
 
     def _finality_storage_limits(self):
         return None
@@ -595,7 +668,37 @@ class FinalizedRegistrationProvider:
             if bound is None:
                 connection.execute("INSERT INTO binding VALUES (?)", (expected,))
             elif bound[0] != expected:
-                raise ValueError("registration cache belongs to another chain configuration")
+                if bound[0] not in self._acceptable_cache_bindings():
+                    raise ValueError("registration cache belongs to another chain configuration")
+                # Legacy per-policy binding from before this release, or from a
+                # deal-preserving predecessor: move it to the policy-free binding.
+                connection.execute("UPDATE binding SET digest=?", (expected,))
+            if self.config.proof_rpc_fallback_urls:
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS proof_rpc_transport_bindings "
+                    "(digest TEXT PRIMARY KEY, previous TEXT, body BLOB NOT NULL)"
+                )
+                body = canonical_json_bytes(
+                    {
+                        "schema": "umi-registration-proof-rpc-transport/1",
+                        "configuration_sha256": expected,
+                        "rpc_url": self.config.rpc_url,
+                        "proof_rpc_fallback_urls": self.config.proof_rpc_fallback_urls,
+                    }
+                )
+                old = connection.execute(
+                    "SELECT body FROM proof_rpc_transport_bindings WHERE digest=?", (expected,)
+                ).fetchone()
+                if old is None:
+                    connection.execute(
+                        "INSERT INTO proof_rpc_transport_bindings VALUES (?,?,?)",
+                        (expected, bound[0] if bound else None, body),
+                    )
+                elif old != (body,):
+                    raise ValueError("registration proof RPC transport binding changed")
+            from .competition_chain_capacity import verify_cache_capacity_history
+
+            verify_cache_capacity_history(connection, self.config, expected_binding=expected)
             connection.commit()
         finally:
             connection.close()
@@ -649,7 +752,7 @@ class FinalizedRegistrationProvider:
                 retry_startup(), timeout=self.config.startup_timeout_seconds
             )
         except asyncio.TimeoutError as error:
-            raise ValueError("registration startup timed out") from error
+            raise RegistrationProviderTimeout("registration startup timed out") from error
 
     async def aclose(self) -> None:
         self._closed = True
@@ -701,7 +804,7 @@ class FinalizedRegistrationProvider:
                 self._collect_locked(height), self.config.collection_timeout_seconds
             )
         except asyncio.TimeoutError as error:
-            raise ValueError("registration collection timed out") from error
+            raise RegistrationProviderTimeout("registration collection timed out") from error
 
     async def _collect_locked(self, height: int | None = None) -> RegistrationCapture:
         async with self._lock:

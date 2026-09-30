@@ -202,10 +202,11 @@ async def test_concurrent_consumer_cannot_start_second_baseline(shared, tmp_path
     assert journal.status(execution.execution_key(jobs[1]))["status"] == "failed"
 
 
-async def test_248_endpoint_roster_runs_each_baseline_case_only_once(shared, tmp_path):
+@pytest.mark.parametrize("count", [248, 256])
+async def test_full_endpoint_roster_runs_each_baseline_case_only_once(shared, tmp_path, count):
     # Synthetic journal/call-count load test, not admission or wall-time evidence.
     policy, jobs, _, _, calls = shared
-    submissions = tuple(submission(policy, name=f"Miner{i}") for i in range(248))
+    submissions = tuple(submission(policy, name=f"Miner{i}") for i in range(count))
     round_ = jobs[0].round.model_copy(
         update={"roster": tuple(sorted(digest(s.submission) for s in submissions))}
     )

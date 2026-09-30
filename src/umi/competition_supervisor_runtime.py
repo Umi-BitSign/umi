@@ -25,6 +25,8 @@ from .competition_chain_state import (
     OwnedCompetitionChainObservation,
     validate_owned_weight_observation,
 )
+from .competition_progress import log_phase
+from .competition_reward_handoff_models import MAX_HANDOFF_BYTES, LegacyRewardHandoffIntent
 from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
     MAX_SUCCESSOR_HISTORY_BYTES,
@@ -671,7 +673,7 @@ class SuccessorSupervisorRuntime:
     @staticmethod
     def _bounded_row(db, table, maximum_bytes):
         # Table identifiers are fixed by this module, never supplied by a feed.
-        if table not in {"binding", "state", "worker", "finalized"}:
+        if table not in {"binding", "state", "worker", "finalized", "standing_handoff"}:
             raise SuccessorRuntimeError("invalid runtime singleton table")
         count, size = db.execute(
             f"SELECT COUNT(*), COALESCE(SUM(length(body)),0) FROM {table}"
@@ -680,6 +682,7 @@ class SuccessorSupervisorRuntime:
             raise SuccessorRuntimeError("successor singleton state exceeds its bounds")
         return db.execute(f"SELECT body FROM {table} WHERE id=1").fetchone()
 
+    @log_phase("history_load")
     def _load_history(self):
         with self._db() as db:
             if self._bounded_row(db, "binding", MAX_SUCCESSOR_DOCUMENT_BYTES) != (self._binding,):
@@ -742,6 +745,49 @@ class SuccessorSupervisorRuntime:
                 )
         return state, signed_records, worker
 
+    def _standing_handoff_intent(self):
+        """An installed migration intent is a permanent hold on C4 startup."""
+        with self._db() as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='standing_handoff'"
+            ).fetchone():
+                return None
+            row = self._bounded_row(db, "standing_handoff", MAX_HANDOFF_BYTES)
+        if row is None:
+            raise SuccessorRuntimeError("standing handoff intent is incomplete")
+        intent = _canonical(LegacyRewardHandoffIntent, row[0])
+        if intent.installation_receipt_sha256 != self.installation.receipt_sha256 or account_id32(
+            intent.validator_hotkey
+        ) != account_id32(self.config.validator_hotkey):
+            raise SuccessorRuntimeError("standing handoff intent belongs to another installation")
+        return intent
+
+    def _retain_standing_handoff(self, intent: LegacyRewardHandoffIntent):
+        """Called by the native migration owner under the runtime mutex.
+
+        Persist before stopping anything. There is no automatic reset: a retry
+        must select the same first activation, including after a lost reply.
+        """
+        self._require_lease()
+        if not self._mutex.locked():
+            raise SuccessorRuntimeError("standing handoff requires the runtime mutex")
+        intent = _canonical(LegacyRewardHandoffIntent, canonical_json_bytes(intent))
+        if intent.installation_receipt_sha256 != self.installation.receipt_sha256 or account_id32(
+            intent.validator_hotkey
+        ) != account_id32(self.config.validator_hotkey):
+            raise SuccessorRuntimeError("standing handoff selects another installation")
+        prior = self._standing_handoff_intent()
+        if prior is not None:
+            if prior != intent:
+                raise SuccessorRuntimeError("standing handoff cannot replace its original intent")
+            return
+        with self._db() as db:
+            db.execute(
+                "CREATE TABLE standing_handoff "
+                "(id INTEGER PRIMARY KEY CHECK(id=1), body BLOB NOT NULL)"
+            )
+            db.execute("INSERT INTO standing_handoff VALUES (1,?)", (canonical_json_bytes(intent),))
+
     def _store_worker(self, worker):
         payload = canonical_json_bytes(_canonical(_WorkerState, canonical_json_bytes(worker)))
         with self._db() as db:
@@ -774,6 +820,7 @@ class SuccessorSupervisorRuntime:
             )
         self._observation = observation
 
+    @log_phase("authorization_gates")
     def _current_gates(self, signed, observation, *, starting: bool):
         self._require_lease()
         validate_owned_weight_observation(observation)
@@ -800,12 +847,14 @@ class SuccessorSupervisorRuntime:
         ):
             raise SuccessorRuntimeError("successor activation headroom is insufficient")
 
+    @log_phase("chain_observation")
     async def _refresh_observation(self):
         observation = await self.observer.observe()
         self._require_lease()
         self._observe(observation)
         return observation
 
+    @log_phase("stopped_recovery")
     async def _stop_and_recover(self, observation):
         _, _, worker = self._load_history()
         if worker.phase != "idle":
@@ -825,6 +874,17 @@ class SuccessorSupervisorRuntime:
         self._store_worker(_idle())
         self._restart_checked = True
         return observation
+
+    async def stop_worker_for_handoff(self):
+        """Stop under a retained migration intent without reacquiring the mutex."""
+        self._require_lease()
+        if not self._mutex.locked() or self._standing_handoff_intent() is None:
+            raise SuccessorRuntimeError("handoff stop requires its durable intent and mutex")
+        _, _, worker = self._load_history()
+        if worker.phase != "idle":
+            self._store_worker(worker.model_copy(update={"phase": "stop_intent"}))
+        await self.adapter.stop_worker()
+        self._restart_checked = False
 
     async def stop(self):
         async with self._mutex:
@@ -883,8 +943,13 @@ class SuccessorSupervisorRuntime:
         ]
         return SuccessorWorkerSelection(signed, successor_continuation_bytes(anchor, continuation))
 
+    @log_phase("reconcile")
     async def _reconcile(self):
         self._state, history, worker = self._load_history()
+        if self._standing_handoff_intent() is not None:
+            # This is checked before RPC or feed I/O. An unavailable coordinator
+            # must not allow the predecessor to restart after a migration intent.
+            return await self._hold("standing_reward_handoff")
         observation = await self._refresh_observation()
         if not self._restart_checked:
             observation = await self._stop_and_recover(observation)

@@ -2,10 +2,172 @@
 
 # Settle rounds and publish weights
 
+- [Recoverable cohort model awards](#recoverable-cohort-model-awards)
 - [Automatic settlement preparation](#open-competition-settlement-preparation)
 - [Independent settlement signing](#open-competition-settlement-signing)
 - [Automatic settlement delivery](#open-competition-settlement-delivery)
 - [Per-round successor signing](#open-competition-round-publisher)
+
+## Recoverable cohort model awards
+
+The candidate recoverable cohort implementation separates model payout from
+reference-model promotion. It requires explicit pre-intake consent through
+`umi-cohort-recovery-authority/3` and the rule
+`baseline_or_better_quality_bucket_best_score_first_complete/1`, with a signed
+500-basis-point bucket width. Existing authorities retain their original
+allocation behavior. This format is not a public launch notice.
+
+The complete sealed model roster must have independently certified quality,
+complete preserved bundles and signed rights/reconstruction acceptances. Model
+quality version 2 compares both sides with the same normalized baseline metric
+on the frozen suite and runtime. Equality qualifies, including an unchanged
+baseline or a baseline below the promotion threshold. Exact-content
+deduplication uses the first complete certified acceptance's score and
+eligibility; later aliases cannot create another benchmark trial. Each eligible
+distinct model then enters its fixed quality band. Each
+occupied band creates one credit for the model with the highest exact score in
+that band. The pool assigns `model budget * credit score / sum(credit scores)`
+to those band credits. Apportion integer weights by largest remainder, breaking
+rounding ties by band index, before summing by recipient. Service earnings are
+added independently. A sole occupied eligible band receives the whole model
+pool. If every occupied credit is zero, divide equally among occupied bands; no
+eligible band burns the pool. Missing evidence remains pending and cannot be
+removed from the roster.
+
+Duplicate content retains one representative and the earliest certified
+complete-artifact acceptance's recipient. Its evaluations must agree. Tiny
+runnable changes remain one credit while their score stays in the same fixed
+band. The content digest ignores paths and license/provenance-only changes; it
+does not detect semantic copies with changed runnable bytes. A variant can still
+cross a published band boundary, so this is not complete Sybil resistance.
+
+Under the configured `CompetitionStore` directory, the reward owner reads
+`model-reward-acceptances/<cohort-sha256>/<submission-sha256>.json` as private
+`CertifiedModelArtifactAcceptance` records. The artifact archive is
+`model-reward-artifacts/<model-sha256>/{manifest.json,model/}`. Each consumer
+verifies all candidate and baseline bytes with the native preserved-bundle
+reader. The acceptance binds policy, authority, submission, recipient, content,
+rights/reconstruction evidence, acceptance block and ordinal. Reviewers must
+retain the original review documents in the content-addressed evidence source.
+The signatures attest review; a file hash does not establish permission to use
+or redistribute a model.
+
+Allocation version 4 carries the bucketed model decision and its signed
+acceptances. Portable package replay includes the original review documents,
+replays quality, deduplication, band selection and allocation, and checks
+independently retained artifact bytes. Recovery uses the original acceptances
+without selecting a newer promotion or
+assigning authorship to the reward recipient. Existing cohort certification and
+standing chain checks still apply before any weight transaction.
+
+Retained allocation versions 1 and 2 and the signed
+`baseline_or_better_best_score_first_complete/1` rule keep their original
+semantics for historical package replay. Selecting the proportional rule changes
+the authority digest and requires fresh pre-intake consent. Never reinterpret
+an existing certified allocation under new distribution rules.
+
+The intake owner reserves artifact-acceptance proposals under its existing lock,
+after admission certification and verification of all model bytes. It retains
+the original review documents, block and completion ordinal before requesting
+review. Independent reviewers approve that exact proposal; the intake owner
+cannot sign on their behalf. A retry preserves the reserved position. The
+ordinal records when the complete bundle and review documents were reserved,
+not when the last review response reached the coordinator.
+
+For authority version 3, intake remains open until every selected model has a
+certified artifact acceptance. Missing evidence neither drops a participant nor
+closes the phase. Private intake review export version 2 includes the full set
+of model acceptance certificates so independent closure reviewers check the
+same condition. Legacy intake and review export bytes remain unchanged.
+
+The service-admission host polls private `model-reviews/<model-sha256>.json`
+inputs and publishes retained `ModelAcceptanceIntent` records under the
+competition store's `model-acceptance-proposals/<cohort>/<submission>.json`.
+Service-admission host version 2 selects `model_review_peers`, each with an
+evaluator hotkey, HTTPS origin, private `token_file` and request timeout. Its
+recurring worker collects votes at `/internal/cohorts/model-artifacts/votes`,
+retains each response in the original intake ledger and forms a certificate
+only from independent policy groups. A disconnected peer leaves that entry
+pending while other peers and entries continue. Restart reuses collected votes
+and the original proposal, including its acceptance ordinal.
+
+On each private reviewer, phase-review host version 4 adds `model_signing`
+(`ModelReviewConfig`) alongside admission signing. Select distinct private
+journal, approvals and artifact directories. The approvals directory contains
+explicitly reviewed `ModelArtifactReviewInputs` at `<model-sha256>.json`; the
+artifact directory contains native preserved bundles. Deliver and review these
+inputs before asking for a vote. The HTTP proposal supplies their hashes, never
+replacement approval documents, artifact URLs or executable code. The reviewer
+verifies its local bundle, matching approved documents, certified participant
+admission and current cohort authority. It reserves the original intent and
+ordinal before signing; a committed vote can be returned without files or RPC.
+An unfinished intent retains its documents but rechecks current authority.
+Include the model journal in the reviewer's systemd `ReadWritePaths`; approvals
+and model bytes need only read access.
+
+The worker checks the original proposal, quorum, submission and model bytes
+before retaining acceptance. It exports review documents under `objects/` before
+publishing the certificate under `model-reward-acceptances/`. Replication must
+deliver those objects to each settlement consumer's evidence source and full
+bundles to its model archive. Pending entries do not prevent siblings from
+being processed. Completed entries replay from retained state before RPC,
+reviewers or original delivery inputs are consulted.
+
+Host version 1 retains the private certificate-delivery path:
+`model-acceptance-publications/<cohort>/<submission>.json` contains a complete
+`ModelAcceptancePublication`. Both paths perform the same quorum checks.
+Complete artifact ingestion, independent rights/reconstruction assessment,
+replication and installed coordinator qualification remain required before
+production selection. Current component tests use synthetic finality, inference
+and rights-review documents; the recurring vote service does not make those
+assessments for an operator.
+
+## Lost coordinator outcomes
+
+A dispatched claim without a durable response remains uncertain. Never resend it,
+mark it completed, or synthesize a miner failure. The ordinary paired-evidence
+path still requires every original transcript.
+
+A successor verifier can accept an explicit `umi-coordinator-outcome-repair/1`
+amendment signed by **every evaluator assigned to the original order**. This is
+a separate authorization to issue a neutral `coordinator_outcome_unavailable`
+void. It does not establish whether the request reached the miner. The amendment
+binds the unchanged policy, round (including its complete roster), order,
+publication, submission, original claim digest and times, bounded retention-search
+audit, and predecessor/successor release identity digests. It may be signed only
+after each affected request's deadline and no later than the existing evidence
+cutoff, using a fresh owned finalized capture. The normal void and settlement
+signatures and actual local receipt by cutoff remain mandatory.
+
+The affected evaluator retains the signed amendment privately at
+`<evaluator state_directory>/dispatch-repairs/<order digest>.json`. The evaluator
+checks the original uncertain claim, replays every available transcript and the
+actual incumbent execution, and signs an unavailable-evidence observation. Other
+evaluators retain their complete observations. The new void and void-evidence
+schemas use version 2. Unknown responses have no fabricated `CaseOutput` or score.
+The original dispatcher claim remains unchanged, including its reserved proof
+allowance. This path does not reclaim scheduling capacity or enlarge any window.
+
+Build and qualify a compatible worker and host before obtaining the scoped repair
+signatures. Existing workers reject the new evidence. For delivery, retain the
+original queue configuration and journal binding, then place the exact successor
+`CompetitionReleaseIdentity` at
+`<settlement delivery state_directory>/repair-releases/<round digest>.json`.
+The queue requires the amendment's predecessor to match its original configured
+release and its successor to match this file. Package preparation and loading
+also enforce the signed successor identity. No journal reset or ordinary release
+substitution is permitted. Publisher plans and follower consent must separately
+bind the new verified release; none of these files activates weights.
+
+For future dispatch, optional `transcript_spool` in the dispatcher configuration
+contains a separate absolute private `directory`, `maximum_assignments` (default
+4096), and `maximum_bytes` (default 8 GiB). Capacity is reserved before claiming.
+The dispatcher durably retains request intent before sending and the actual
+outcome before completing the scheduling journal. Restart recovery consumes only
+stored outcomes with their original claims and never contacts a miner. An intent
+without an outcome remains uncertain. The spool retains private authentication
+and response bytes, so keep it private and include it in bounded recovery searches.
+Omitting the option preserves historical configuration bytes and behavior.
 
 <a id="open-competition-settlement-preparation"></a>
 
@@ -41,6 +203,29 @@ Importing Michael's baseline alone does not establish that attribution.
 The existing private round plan supplies the committed suite and original
 windows. The coordinator's owned finality provider supplies the current
 registration snapshot; an HTTP caller cannot choose it.
+
+Settlement capacity follows the coordinator's `replay_limits` and the
+evaluator's matching `settlement_replay_limits`. Profiles with at most 64 MiB
+of evidence keep the existing 64 MiB proposal envelope and four-proposal page.
+For larger profiles, the proposal envelope includes evidence, another roster,
+two certificate allowances and 1 MiB of framing, rounded up to 64 MiB. The
+maximum envelope is 512 MiB; configurations that exceed it are rejected.
+For example, 256 MiB evidence with 4 MiB roster and certificate limits selects
+a 320 MiB proposal envelope, one proposal per reply, and one active settlement
+request through response transmission. The reply allows another 8192 bytes.
+Private proposal files and settlement journals use the same envelope.
+
+Package limits are configured separately: allow framing above the replay
+evidence allowance and increase the aggregate package budget accordingly.
+These changes do not increase native per-order reservations or total journal
+budgets. Replay limits are part of retained configuration bindings; establish
+the larger profile in newly staged state or use a separately reviewed migration.
+Do not overwrite an existing journal's bound configuration or delete its state.
+
+Byte envelopes are not process memory limits. Evidence is parsed, canonicalized
+and replayed repeatedly, and request timeouts still apply. Qualify full-sized
+structured evidence on the intended host, including concurrent model workloads,
+before relying on a larger profile for settlement timing or memory headroom.
 
 <a id="open-competition-settlement-preparation--output-and-retry-behavior"></a>
 
@@ -270,6 +455,41 @@ In each `umi-evaluator-config/1`, supply:
 - `settlement_replay_limits`: reviewed `PublicationReplayLimits` for roster,
   evidence and certificates.
 
+For an evaluator on the coordinator host, an operator may explicitly configure
+`settlement_loopback_port` (integer 1–65535) before initializing its journals.
+Only settlement discovery and vote requests then connect to
+`http://127.0.0.1:<port>/v1/competition/settlements`. The listener must be the
+native coordinator service on that host. The public HTTPS origin remains the
+logical coordinator identity and the connection used by cutoff and work signing.
+The local port is retained in both evaluator configuration and settlement source
+bindings; changing, adding or removing it on existing bound journals is rejected.
+Do not rewrite those bindings or remove journals to enable this option.
+
+This connection uses cleartext exclusively on literal IPv4 loopback. It is for
+an explicitly authorized co-located deployment, with no DNS lookup, environment
+proxy, redirect following, or fallback to the public origin. Native signed
+queries, response bindings, independent evidence checks, finality, conflicts and
+expiry still apply. Other hosts must use HTTPS and a route whose proxy deadlines
+have been qualified for the complete query and certification operations.
+
+Profiles with preparation capacity above 64 MiB allow 7,200 seconds for a server
+operation, 7,260 seconds for a client read, and 7,320 seconds for a complete client
+request. Legacy profiles retain 25/30/35 seconds. These budgets do not extend
+protocol signing windows or upstream proxy deadlines. In particular, Cloudflare
+documents a [125-second default proxy read timeout and a 30-second proxy write
+timeout](https://developers.cloudflare.com/fundamentals/reference/connection-limits/);
+increasing this client's budget alone cannot qualify that route.
+
+Blocking settlement formation, journal replay, certificate/package work and
+response serialization run in owned threads. Async finality providers and locks
+stay on the service event loop. Background formation shares the settlement
+queue lock with HTTP replay, so requests can authenticate promptly before
+waiting without allocating a second full cohort. Cancellation or an operation
+timeout drains the active worker before releasing its lock or request slot;
+shutdown may therefore take longer than the requested timeout. Signed nonce
+admission freshness, snapshot age, conflict checks and signing deadlines are
+unchanged. The generous operational budgets do not extend those deadlines.
+
 The worker polls, endorses and returns votes automatically. It uses its existing
 hotkey and owned finality provider. Each endorsement still requires the worker's
 own cutoff reservation, completed local execution for every roster member,
@@ -287,7 +507,8 @@ Independent eligible control groups must meet the policy quorum. The first
 certificate is retained before package creation; later signatures cannot alter
 its bytes. A failed write is retried by the coordinator's next preparation poll.
 
-Discovery pages contain at most four current proposals, bounded at 16 MiB each.
+Discovery page and preparation bounds follow the configured settlement capacity;
+large profiles send one proposal per page.
 The snapshot-age limit and original round expiry apply throughout collection.
 Expired proposals remain historical records; their deadlines are never shifted.
 An expired retry can acknowledge an already retained vote but cannot create a
@@ -336,6 +557,24 @@ The local command supports one supplied package or polling completed coordinator
 rounds with wallet-free feed delivery. Production HTTPS routing and the live
 host handoff still need rehearsal. Do not use this command as a launch
 announcement or a replacement for the signed initial supervisor upgrade.
+
+When the retained store carries submissions from earlier policies, pass each
+canonical private policy file with `--predecessor-policy`, from the immediate
+predecessor to the oldest admitted policy. Both supplied-package and follow
+modes accept the repeated option. The publisher checks the contiguous lineage
+and preserves the existing contribution terms before opening the store or
+loading authority wallets. A package's embedded lineage does not replace these
+operator-selected inputs. Without the option, only the current policy is
+admitted; another publisher invocation cannot supply its lineage implicitly.
+
+During follow operation, validated private-mutex contention reports
+`waiting_for_local_state` / `private_state_busy` and retries at the configured
+poll interval. The same publisher, finality provider and replay cache stay open.
+The report identifies the lock operation and a stable resource hash, without a
+private path. Retained signing and delivery history are reconciled on retry,
+including contention after signing or after delivery with a lost acknowledgement.
+Signature, journal-integrity, permission and unrelated I/O errors still fail
+validation. Do not delete journal files or remove locking to clear a busy report.
 
 <a id="open-competition-round-publisher--inputs"></a>
 
@@ -495,9 +734,14 @@ python -m umi.competition_successor_publisher_cli \
 Add `--once` to perform one tick and exit. Stdout contains bounded status records,
 not package paths or wallet material. The process owns one finalized provider;
 it closes that provider on exit and drains active signing work on cancellation.
-Invalid inputs, journal conflicts and provider failures stop the command. A
-service manager may restart it with a delay; restarting cannot clear a durable
-conflict hold. Reaching capacity stops new work without deleting history.
+Continuous following retries RPC throttling, transport failures, observation
+timeouts and stale finalized heads at the configured poll interval. It retains
+the same provider and completed package verification, reports `waiting_for_chain`
+with a fixed reason code, and rechecks fresh authority before signing. Lost
+publication acknowledgements recover the original signed record. Invalid proofs,
+changed inputs, journal conflicts and a stopped finality observer stop the command;
+the service manager can restart it without clearing durable holds. Reaching
+capacity stops new work without deleting history.
 
 Discovery accepts canonical private `<settlement-digest>.package.json`
 descriptors whose sealed manifests match the descriptor, filename, policy and
@@ -566,9 +810,8 @@ original expiry schedule are still required for ongoing operation.
 ### Reusing a settled round with current recipient checks
 
 Version 2 cannot support a reward interval longer than the original settlement
-registration snapshot's freshness window. That window is at most 360 blocks,
-regardless of how long the signed round remains valid. Renewing its authorization
-does not remove that limit.
+registration snapshot's configured freshness window, regardless of how long the
+signed round remains valid. Renewing its authorization does not remove that limit.
 
 To use a completed round for an explicitly longer reward interval, select
 `umi-successor-round-publication-plan/3` and supply both
@@ -608,6 +851,55 @@ It does not generate new evaluations or admit new miners into an already closed
 roster. Publish the next roster-close and evaluation windows so new submissions
 can enter a later round. A recipient change still requires a current settlement;
 this mode does not invent replacement recipients or an alternative weight row.
+
+<a id="open-competition-round-publisher--continuity-between-rounds"></a>
+
+### Continuity between rounds
+
+An expired round stops new authorizations. The follower reports
+`waiting_for_current_round` and keeps polling; a later completed, replayable
+package can resume publication with fresh recipient evidence and a new signature.
+Retained signed history remains unchanged. The host can follow that continuation
+after holding through expiry, including after restart. It does not automatically
+return to the registration bridge.
+
+A retained on-chain row alone does not establish reward continuity. Check the
+deployed chain runtime's activity rule: once the validator becomes inactive,
+its stored row may no longer contribute to score-directed consensus and ranks.
+Other active validators and epoch state also affect emissions. Renewal cadence
+must leave time for replay, proof collection, delivery and inclusion.
+
+For future cohorts, an evaluator-signed `umi-competition-launch-amendment/2`
+can lengthen the final round-validity window while preserving work, reveal and
+cutoff times and cadence. A round end covering the next evidence cutoff plus
+bounded delivery grace, together with a version 3 settlement-reuse limit covering
+that same interval, permits automatic refreshes until the next certified result
+arrives. Every refresh still uses current chain evidence. Missing certificates
+beyond the grace period or changed recipients cause a hold.
+
+This amendment cannot modify a prepared or active cohort. Apply it after the
+preceding round's validity and before the next unused roster, under the native
+history and checkpoint checks. Rebind future launch-dependent profiles and plans;
+the replacement launch numbers its first future cohort as cycle zero. A changed
+publication plan must be selected before journal initialization. After intake
+migration, update the publisher's launch configuration and restart its service
+with the same signing history. Longer outer consent or a configuration edit
+cannot extend an already certified round.
+
+Size retained weight evidence for the full consent horizon before initializing
+the worker journal or installing its host limits. A normal write collects evidence
+before signing, before broadcast and after submission; retries and stopped recovery
+can add more. Account for runtime metadata, proof growth and filesystem overhead.
+The worker's `maximum_evidence_bytes` must agree with its immutable journal binding
+and fit the installed `maximum_weight_evidence_bytes` ceiling. A longer renewal
+interval must still satisfy the rate limit, authorization headroom and current
+chain activity cutoff. Capacity exhaustion preserves history and stops work.
+
+During one stopped recovery audit, consecutive renewals may reuse an already
+verified package only while its complete target, release and sealed file identities
+remain unchanged. Every directive and weight authorization is checked separately.
+This reuse ends with the audit; the final chain observation is collected afterward
+and retains the usual freshness and finalized-head checks.
 
 <a id="open-competition-round-publisher--current-checks-and-recovery"></a>
 
@@ -667,3 +959,119 @@ Two further cases cover unfinished-signature priority and cancellation during
 discovery. All 46 cases in the combined publisher/feed regression passed on the
 Studio Linux VM in 567.77 seconds, with two dependency deprecation warnings.
 No live publisher service has been installed by this work.
+
+### Forward reward continuity
+
+A version 4 successor publication plan can opt into an independently signed
+`umi-reward-continuity-authority/1`. This is new authority for future weight
+writes. Original policies, rounds, evidence cutoffs, certificates and allocation
+bytes remain unchanged. Older plans retain their original expiry behavior.
+
+The control binds one policy, chain, compatible release identity, first round
+identity and an explicit range of eligible cohort sequences. Its lifetime is
+`until_superseded_or_revoked`. The last eligible certified allocation may keep
+renewing after the range's last round ends. Expanding the eligible cohort range
+requires another reviewed authority; no operator can supply a replacement row.
+
+Before the original round and policy end, the publisher must replay the complete
+certified package and retain a signed allocation admission with its current
+owned finality boundary. A certificate first presented after that deadline
+cannot be admitted for continuation, even if it claims an earlier observation.
+Admission is an explicit trusted-authority attestation, not independent proof
+of the historical wall-clock time at which every evaluator signed.
+
+Each new write still needs a fresh, short, single-use authorization, fresh
+recipient identities, validator permit, nonce, runtime and finality proofs.
+Version 2 weight authorizations carry the exact control and admission. The
+supervisor's local consent pins the control hash and final host manifest, with
+an explicit until-superseded lifetime. A longer ordinary consent cannot enable
+this mode. The host and worker retain the highest adopted round and exact
+package across restart. A newer certified allocation replaces it; older rounds
+cannot return. Pending or cryptographically invalid candidate packages confer
+no replacement authority. Corrupt discovery metadata or conflicts remain holds.
+
+The signed call retains the allocation's raw weights. Subtensor scales the
+largest submitted weight to 65,535 before storing the row. Submission checks
+and stopped-worker recovery apply that same fixed-point scaling and rounding
+when comparing finalized storage, together with the nonce, last-update and
+recipient identity checks. This lets recovery recognize an already-applied
+transaction without changing the signed allocation or submitting it again.
+
+If a recipient UID changes hotkey, the original rule holds the row. A separately
+threshold-signed `umi-reward-recipient-amendment/1` can route listed recipients'
+exact raw shares to the policy's existing burn destination. It binds the original
+continuity authority, package and projection. It cannot choose replacement
+miners, change other shares or rewrite scores. Version 2 continuations carry the
+amendment alongside the original timely admission. Current burn registration and
+mode remain mandatory at publication and submission. The publisher retains one
+immutable amendment per package; retry and restart reuse it. Older continuations
+retain their original bytes and whole-row hold behavior.
+
+Apply an approved signed amendment through the publisher's
+`--prepared-package <private-preparation.json> --recipient-amendment
+<private-signed-amendment.json>` mode, with the existing `--config` and `--policy`.
+The command retains the amendment; ordinary publication/renewal produces the new
+authorization. It does not submit weights. All consumers must support the new
+continuation before it is published. A valid newer certified package can still
+replace a held row without changing the original evidence.
+
+An explicit `umi-reward-recipient-amendment/2` can also group an endpoint-only
+allocation by the literal IP addresses in its certified, signed submissions.
+Ports do not create separate groups; IPv4-mapped IPv6 addresses use their IPv4
+identity. Each group's share uses its highest qualifying certified score, and
+the resulting group budget is divided equally among its qualifying UIDs.
+Integer rounding preserves the total endpoint budget and burn allocation.
+Current endpoint changes cannot alter the retained grouping. This amendment
+requires the model allocation to go to the policy's burn destination, preserves
+the preceding burn amendment, and binds its signed digest. The publisher retains
+both amendments and uses the grouping in subsequent renewals. Historical scores,
+certificates and payments are unchanged. Upgrade all consumers before publishing
+the new amendment; older consumers reject its schema.
+
+A threshold-signed continuity revocation durably stops new publisher leases.
+Already issued leases expire within the configured maximum write-authorization
+lifetime, normally 360 blocks. A native signed supervisor hold or local operator
+stop can stop execution sooner. The host latches a continuity hold; resuming
+requires a separately reviewed local consent transition. There is no automatic
+return to the old bridge or an older cohort allocation.
+
+Expired partial signing attempts remain immutable. A fresh owned head may
+reserve another attempt for the same round and next unconsumed directive
+sequence only after the prior lease expires. An expiry audit links the old
+intent; authorization and signature bytes are never overwritten or reused.
+
+Authority lifetime does not remove storage limits. Current weight journals are
+bounded at 16 GiB of retained evidence and 65,536 attempts. At three 12 MiB
+captures per write this permits at most 455 writes before overhead and retries,
+about 7.6 days at a 120-block interval with 12-second blocks. Capacity exhaustion
+holds without deleting history. Indefinite unattended operation additionally
+requires qualified archival or compaction; this release does not claim it.
+Archival must retain authenticated certificates, control/admission bindings,
+unresolved effects, nonce/finality high-water marks, adopted allocation and
+policy holds, and hash-linked durable evidence. An ordinary log rotation cannot
+replace native recovery qualification.
+
+## Model delivery before recoverable enrollment
+
+`umi-cohort-service-admission-host/3` adds `model_uploads` to the existing
+service admission host and independent model-review peers. Configure a private
+`directory` disjoint from intake and the model archive, and an explicit
+`maximum_reserved_bytes`. Reservations account for two copies of each declared
+bundle, covering delivery staging and the verified archive. Increase capacity
+without changing accepted manifests or clearing journals. Other bounds are
+`maximum_models`, `maximum_metadata_bytes`, `maximum_concurrent_uploads` and
+`idle_timeout_seconds`.
+
+The public routes described in the [model guide](../miners/model.md#model-files-for-recoverable-cohorts)
+retain signed chunks. The recurring host finalizes complete files and archives;
+its `model_delivery` report gives preserved/pending counts and a bounded error
+type. Verification retries after process exit, and the archive copy reuses one
+per-manifest scratch directory. Accepted original bytes remain unchanged.
+An unfinished model delivery is not admitted to the cohort roster.
+
+Keep the upload journal, retained file prefixes and model archive across service
+restart or host migration. Configure durable replication of original model
+artifacts and provenance before production launch. A local preservation receipt
+does not establish an R2 copy, independent backup, rights approval or reward
+certification. Older host configuration versions retain their existing bytes
+and behavior; version 3 enables this delivery requirement explicitly.

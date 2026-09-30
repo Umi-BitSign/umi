@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .competition_chain import OwnedFinalityStale, RegistrationProviderTimeout
 from .competition_package import (
     CompetitionPackageManifest,
     PreparedCompetitionPackage,
@@ -31,12 +32,79 @@ from .competition_successor_publication import (
 )
 from .concurrency import run_owned_thread
 from .open_competition import digest
-from .private_files import Directory
+from .private_files import Directory, PrivateStateBusyError
 from .private_files import ensure_private_directory as _private
 from .private_files import read_private_model as _read
 from .protocol import StrictProtocolModel, canonical_json_bytes
+from .validator_chain import ValidatorChainError
 
 _DESCRIPTOR = re.compile(r"([0-9a-f]{64})\.package\.json")
+
+
+def transient_chain_reason(error):
+    """Only transport availability may wait; invalid proofs still reject."""
+    if isinstance(error, (TimeoutError, RegistrationProviderTimeout)):
+        return "chain_collection_timeout"
+    if isinstance(error, OwnedFinalityStale):
+        return "owned_finality_stale"
+    if isinstance(error, ValidatorChainError) and error.reason_code in {
+        "proof_rpc_failed",
+        "proof_rpc_rate_limited",
+        "proof_rpc_error",
+    }:
+        return error.reason_code
+    return None
+
+
+def chain_retry_report(error, retry_seconds):
+    reason = transient_chain_reason(error)
+    if reason is None:
+        raise error
+    return {
+        "schema": "umi-successor-follow-status/1",
+        "status": "waiting_for_chain",
+        "reason_code": reason,
+        "retry_after_seconds": retry_seconds,
+        "round_sequence": None,
+        "validator_activation_proven": False,
+    }
+
+
+async def wait_publisher_ready(provider, *, retry_seconds, report=None):
+    """Keep the owned provider and its retained progress on transport failure."""
+    while True:
+        try:
+            return await provider.wait_ready()
+        except (
+            ValidatorChainError,
+            TimeoutError,
+            RegistrationProviderTimeout,
+            OwnedFinalityStale,
+        ) as error:
+            result = chain_retry_report(error, retry_seconds)
+            provider.ensure_observer_running()
+            if report is not None:
+                report(result)
+        await asyncio.sleep(retry_seconds)
+
+
+async def poll_successor_rounds(automatic, *, poll_seconds, once=False, report=None):
+    """Retry availability failures without reopening wallets or replay caches."""
+    while True:
+        try:
+            result = await automatic.tick()
+        except (
+            ValidatorChainError,
+            TimeoutError,
+            RegistrationProviderTimeout,
+            OwnedFinalityStale,
+        ) as error:
+            result = chain_retry_report(error, poll_seconds)
+        if report is not None:
+            report(result)
+        if once:
+            return result
+        await asyncio.sleep(poll_seconds)
 
 
 class SuccessorFollowConfig(StrictProtocolModel):
@@ -154,12 +222,63 @@ class AutomaticSuccessorPublisher:
     def _select(self, signed, block):
         builder = self.publisher.builder
         rounds = self.source.scan()
+        verified_sequences = set()
+        if builder.plan.continuity is not None:
+            latest = signed[-1].intent.round_sequence if signed else 0
+            verified_sequences.add(latest)
+            for number in sorted((n for n in rounds if n > latest), reverse=True):
+                try:
+                    # Only candidate replacements need full native validation
+                    # during selection. Existing round replay happens when due.
+                    candidate = builder._load(rounds[number])
+                except ValueError:
+                    with builder._locked():
+                        builder.journal.put(
+                            "rejected_continuity_candidate",
+                            digest(rounds[number]),
+                            {
+                                "package_sha256": rounds[number].package_sha256,
+                                "round_sequence": number,
+                                "reason": "native_package_verification_failed",
+                            },
+                        )
+                    del rounds[number]
+                    continue
+                if signed:
+                    from .competition_reward_continuity import validate_admission_candidate
+
+                    with builder._locked():
+                        admitted = builder.journal.get(
+                            "continuity_admission", candidate.package_sha256
+                        )
+                    if admitted is None:
+                        try:
+                            validate_admission_candidate(builder.plan.continuity, candidate, block)
+                        except ValueError:
+                            # An unusable replacement cannot starve the last
+                            # admitted allocation. Its original admission
+                            # deadline and authority scope remain unchanged.
+                            with builder._locked():
+                                builder.journal.put(
+                                    "unavailable_continuity_admission",
+                                    digest(rounds[number]),
+                                    {
+                                        "package_sha256": rounds[number].package_sha256,
+                                        "round_sequence": number,
+                                        "reason": "native_admission_not_available",
+                                    },
+                                )
+                            del rounds[number]
+                            continue
+                verified_sequences.add(number)
+                break
         with builder._locked():
             builder.journal.observe(block)
             # Retain discovered identities across restarts, including rounds
             # skipped after expiry. A rewritten descriptor cannot change them.
             for sequence, prepared in sorted(rounds.items()):
-                builder.journal.put("completed_round", str(sequence), prepared)
+                if builder.plan.continuity is None or sequence in verified_sequences:
+                    builder.journal.put("completed_round", str(sequence), prepared)
             last_round = signed[-1].intent.round_sequence if signed else 0
             sequence = (
                 signed[-1].intent.sequence if signed else builder.plan.consent.predecessor_sequence
@@ -195,8 +314,25 @@ class AutomaticSuccessorPublisher:
             return None
 
     async def tick(self):
+        try:
+            return await self._tick_once()
+        except PrivateStateBusyError as busy:
+            # The mutex protected the unchanged operation. Keep this publisher,
+            # provider and replay cache; the follow loop supplies the backoff.
+            # Retained signatures/delivery are reconciled before any new work.
+            return {
+                **self._status("waiting_for_local_state"),
+                "reason_code": "private_state_busy",
+                "lock_operation": busy.operation,
+                "lock_resource_sha256": busy.resource_sha256,
+                "retry_after_seconds": self.source.config.poll_interval_seconds,
+            }
+
+    async def _tick_once(self):
         async with self._serial:
             self.source.check_binding()
+            if await run_owned_thread(self.publisher.builder.revoked):
+                return self._status("continuity_revoked")
             signed, delivered = await run_owned_thread(self._histories)
             if len(delivered) < len(signed):
                 # A crash after signing never causes another signature or a

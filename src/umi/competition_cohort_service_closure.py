@@ -1,0 +1,188 @@
+"""Complete service request closure alongside the retained benchmark closure.
+
+This version binds every accepted job to its fenced response before references
+are revealed. It cannot treat missing infrastructure evidence as a zero or void.
+The configured catalog set and owner exports must be authenticated by reviewers.
+"""
+
+from typing import Annotated, Literal
+
+from pydantic import Field
+
+from .competition_cohort_endpoint_archive import EndpointObjectSource, read_endpoint_object
+from .competition_cohort_history import verify_cohort_history
+from .competition_cohort_intake import history_tip
+from .competition_cohort_order_signer import CohortOrderHistory
+from .competition_cohort_request_closure import CohortRequestClosure, review_request_closure
+from .competition_cohort_request_progress import certified_request_prefix
+from .competition_cohort_service_seal import ServiceWorkSeal, sealed_service_assignments
+from .competition_cohort_service_terminal import SignedServiceTerminal, read_service_terminal
+from .competition_cohort_service_work import SignedServiceWorkCatalog
+from .competition_execution import ExecutionBoundary
+from .open_competition import CompetitionPolicy, digest
+from .policy import ScoringPolicy
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+
+
+class ServiceCatalogClosure(StrictProtocolModel):
+    catalog_sha256: Hex32
+    seal_sha256: Hex32
+    terminals: Annotated[tuple[Hex32, ...], Field(max_length=8192)]
+
+
+class CohortServiceRequestClosure(StrictProtocolModel):
+    schema_: Literal["umi-cohort-request-closure/2"] = Field(alias="schema")
+    benchmark_closure_sha256: Hex32
+    recovery_tip_sha256: Hex32
+    observation: ExecutionBoundary
+    catalogs: Annotated[tuple[ServiceCatalogClosure, ...], Field(min_length=1, max_length=64)]
+    chain_submission_authorized: Literal[False] = False
+
+
+def review_service_request_closure(
+    closure: CohortServiceRequestClosure,
+    roster,
+    objects: EndpointObjectSource,
+    policy: CompetitionPolicy,
+    history,
+    transport: ScoringPolicy,
+    *,
+    expected_catalogs: tuple[SignedServiceWorkCatalog, ...],
+    expected_seals: tuple[ServiceWorkSeal, ...],
+    decision_source,
+    intake_records,
+    expected_tip_sha256: str,
+    current_block: int,
+):
+    closure = CohortServiceRequestClosure.model_validate_json(canonical_json_bytes(closure))
+    expected = tuple(digest(c.catalog) for c in expected_catalogs)
+    if (
+        expected != tuple(sorted(set(expected)))
+        or tuple(c.catalog_sha256 for c in closure.catalogs) != expected
+    ):
+        raise ValueError("service closure must include the complete authorized catalog set")
+    if tuple(s.catalog_sha256 for s in expected_seals) != expected or tuple(
+        digest(s) for s in expected_seals
+    ) != tuple(c.seal_sha256 for c in closure.catalogs):
+        raise ValueError("service closure differs from independently selected owner seals")
+    benchmark = CohortRequestClosure.model_validate_json(
+        read_endpoint_object(objects, closure.benchmark_closure_sha256)
+    )
+    if (
+        benchmark.observation != closure.observation
+        or benchmark.recovery_tip_sha256 != closure.recovery_tip_sha256
+    ):
+        raise ValueError("service and benchmark closure observations differ")
+    review_request_closure(
+        benchmark,
+        roster,
+        objects,
+        policy,
+        history,
+        decision_source=decision_source,
+        intake_records=intake_records,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    view = verify_cohort_history(
+        history,
+        policy,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    opened = view.closure("preparation").observed_at_block
+    # Distinct signed catalogs do not establish new useful work for one video.
+    # Reject overlapping inventory in this closure even when only one is used.
+    videos = set()
+    for ref, catalog in zip(closure.catalogs, expected_catalogs, strict=True):
+        inventory = {w.video_sha256 for w in catalog.catalog.work}
+        if videos & inventory:
+            raise ValueError("service catalogs repeat a paid input")
+        videos.update(inventory)
+        seal = ServiceWorkSeal.model_validate_json(read_endpoint_object(objects, ref.seal_sha256))
+        if seal.observation.block > closure.observation.block:
+            raise ValueError("service accepted set was sealed after request closure")
+        if len(ref.terminals) != len(seal.accepted):
+            raise ValueError("service closure omits accepted terminal work")
+        sealed_source = CohortOrderHistory.model_validate_json(
+            read_endpoint_object(objects, seal.source_sha256)
+        )
+        if (
+            sealed_source.history.authority != history.authority
+            or sealed_source.history.plan != history.plan
+            or sealed_source.history.transitions
+            != history.transitions[: len(sealed_source.history.transitions)]
+        ):
+            raise ValueError("service seal belongs to another request history")
+        assignments = sealed_service_assignments(
+            seal,
+            objects,
+            policy,
+            catalog=catalog,
+            round_=roster.round,
+        )
+        for assignment, terminal_sha in zip(assignments, ref.terminals, strict=True):
+            signed = SignedServiceTerminal.model_validate_json(
+                read_endpoint_object(objects, terminal_sha)
+            )
+            grant = read_service_terminal(
+                signed,
+                objects,
+                policy,
+                transport,
+                request_interval=(opened, closure.observation.block),
+            )
+            if grant.body.assignment != assignment:
+                raise ValueError("service closure terminal belongs to another accepted work")
+            source = CohortOrderHistory.model_validate_json(
+                read_endpoint_object(objects, signed.terminal.source_sha256)
+            )
+            if (
+                source.history.authority != history.authority
+                or source.history.plan != history.plan
+                or source.history.transitions
+                != history.transitions[: len(source.history.transitions)]
+            ):
+                raise ValueError("service terminal belongs to another request history")
+    return closure
+
+
+def verify_certified_service_request_closure(
+    closure,
+    roster,
+    objects,
+    policy,
+    history,
+    transport,
+    *,
+    expected_catalogs,
+    expected_seals,
+    decision_source,
+    intake_records,
+    expected_tip_sha256,
+    current_block,
+):
+    closure = CohortServiceRequestClosure.model_validate_json(canonical_json_bytes(closure))
+    prefix = certified_request_prefix(
+        closure,
+        objects,
+        policy,
+        history,
+        decision_source=decision_source,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    return review_service_request_closure(
+        closure,
+        roster,
+        objects,
+        policy,
+        prefix,
+        transport,
+        expected_catalogs=expected_catalogs,
+        expected_seals=expected_seals,
+        decision_source=decision_source,
+        intake_records=intake_records,
+        expected_tip_sha256=history_tip(prefix),
+        current_block=closure.observation.block,
+    )

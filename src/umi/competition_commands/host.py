@@ -13,6 +13,8 @@ def fetch_initial_successor_history(args: argparse.Namespace, policy: Competitio
     import hashlib
 
     from ..competition_delivery import HTTPSSuccessorDirectiveFetcher, write_initial_history
+    from ..competition_delivery_config import successor_delivery_client
+    from ..competition_host_artifacts import MAX_HOST_MANIFEST_BYTES, parse_signed_host_artifact
     from ..competition_supervisor import (
         MAX_SUCCESSOR_DOCUMENT_BYTES,
         parse_canonical_successor_operator_consent,
@@ -20,17 +22,27 @@ def fetch_initial_successor_history(args: argparse.Namespace, policy: Competitio
     )
     from ..validator_supervisor import parse_canonical_validator_supervisor_config
 
-    def bounded_bytes(path):
+    def bounded_bytes(path, maximum=MAX_SUCCESSOR_DOCUMENT_BYTES):
         with Path(path).open("rb") as stream:
-            result = stream.read(MAX_SUCCESSOR_DOCUMENT_BYTES + 1)
-        if len(result) > MAX_SUCCESSOR_DOCUMENT_BYTES:
+            result = stream.read(maximum + 1)
+        if len(result) > maximum:
             raise ValueError("initial history input exceeds its byte limit")
         return result
 
     config = parse_canonical_validator_supervisor_config(bounded_bytes(args.config))
     consent = parse_canonical_successor_operator_consent(bounded_bytes(args.consent))
+    host_path = getattr(args, "signed_host_artifact", None)
+    client = (
+        None
+        if host_path is None
+        else successor_delivery_client(
+            config,
+            parse_signed_host_artifact(bounded_bytes(host_path, MAX_HOST_MANIFEST_BYTES)),
+            expected_manifest_sha256=consent.approved_host_manifest_sha256,
+        )
+    )
     payload = asyncio.run(
-        HTTPSSuccessorDirectiveFetcher(config).fetch_initial_history(
+        HTTPSSuccessorDirectiveFetcher(config, client=client).fetch_initial_history(
             legacy_signed_bytes=bounded_bytes(args.accepted_directive),
             operator_consent=consent,
             finalized_block=args.current_block,

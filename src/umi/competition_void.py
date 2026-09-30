@@ -12,11 +12,21 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
+from .canonical_reuse import canonical_json_reuse
+from .competition_dispatch_repair import EndpointUnavailableEvidence, verify_dispatch_repair
 from .competition_endpoint_execution import EndpointPairedEvidence
 from .competition_evaluator_orders import SignedEvaluationOrder
 from .competition_observations import SignedExecutionAnnouncement, execution_observations
+from .competition_outcome_classification import (
+    PairedObservationOutputs,
+    VoidReason,
+    observation_void_reason,
+)
+from .competition_outcome_classification import (
+    ScorableObservations as ScorableObservations,
+)
 from .open_competition import (
     CompetitionPolicy,
     EvaluationSuite,
@@ -29,11 +39,12 @@ from .policy import ScoringPolicy
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_VOID_BYTES = 64 * 1024**2
-VoidReason = Literal["infrastructure_failure", "incumbent_failure", "observation_disagreement"]
 
 
 class EvaluationVoid(StrictProtocolModel):
-    schema_: Literal["umi-competition-evaluation-void/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-evaluation-void/1", "umi-competition-evaluation-void/2"] = (
+        Field(alias="schema")
+    )
     policy_sha256: Hex32
     round_sha256: Hex32
     order_sha256: Hex32
@@ -44,6 +55,14 @@ class EvaluationVoid(StrictProtocolModel):
         tuple[SignedExecutionAnnouncement, ...], Field(min_length=1, max_length=64)
     ]
     chain_submission_authorized: Literal[False] = False
+
+    @model_validator(mode="after")
+    def version_scope(self):
+        if (self.schema_ == "umi-competition-evaluation-void/2") != (
+            self.reason == "coordinator_outcome_unavailable"
+        ):
+            raise ValueError("unavailable outcome requires void version 2")
+        return self
 
 
 class AttestedEvaluationVoid(StrictProtocolModel):
@@ -57,14 +76,18 @@ class EvaluationVoidVote(StrictProtocolModel):
 
 
 class VoidEvaluationEvidence(StrictProtocolModel):
-    schema_: Literal["umi-competition-void-evidence/1"] = Field(alias="schema")
+    schema_: Literal["umi-competition-void-evidence/1", "umi-competition-void-evidence/2"] = Field(
+        alias="schema"
+    )
     order: SignedEvaluationOrder
     certificate: AttestedEvaluationVoid
     legacy_policy: ScoringPolicy | None
 
-
-class ScorableObservations(ValueError):
-    """Complete observations agree and must use ordinary scoring."""
+    @model_validator(mode="after")
+    def version_scope(self):
+        if self.schema_.rsplit("/", 1)[1] != self.certificate.void.schema_.rsplit("/", 1)[1]:
+            raise ValueError("void evidence version differs from its certificate")
+        return self
 
 
 def void_evidence_digest(evidence):
@@ -84,34 +107,6 @@ def void_decision_digest(void):
     return hashlib.sha256(
         b"umi-competition-void-decision-v1\0" + canonical_json_bytes(body)
     ).hexdigest()
-
-
-def _eligible(output, policy):
-    return (
-        output.status == "ok"
-        and output.elapsed_ms <= policy.maximum_inference_ms
-        and len(output.hypothesis.encode("utf-8")) <= policy.maximum_output_bytes
-    )
-
-
-def _reason(views, policy):
-    if any(
-        o.status == "infrastructure_failure"
-        for v in views
-        for role in ("candidate", "incumbent")
-        for o in v[role]
-    ):
-        return "infrastructure_failure"
-    if any(not _eligible(o, policy) for v in views for o in v["incumbent"]):
-        return "incumbent_failure"
-    for role in ("candidate", "incumbent"):
-        for outputs in zip(*(v[role] for v in views), strict=True):
-            if (
-                len({(o.case_id, o.status, o.hypothesis, _eligible(o, policy)) for o in outputs})
-                != 1
-            ):
-                return "observation_disagreement"
-    raise ScorableObservations("complete agreeing scored observations cannot be voided")
 
 
 def propose_evaluation_void(
@@ -147,22 +142,58 @@ def propose_evaluation_void(
             body.evaluator_hotkey
         ):
             raise ValueError("void observation signer or order mismatch")
-        if isinstance(body.evidence, EndpointPairedEvidence) and (
+        if isinstance(body.evidence, (EndpointPairedEvidence, EndpointUnavailableEvidence)) and (
             body.evidence.publication != order.publication or body.evidence.legacy_policy != legacy
         ):
             raise ValueError("void endpoint observation changes the exact assigned publication")
+        if isinstance(body.evidence, EndpointUnavailableEvidence):
+            verify_dispatch_repair(
+                body.evidence.repair,
+                signed_order=signed_order,
+                policy=policy,
+                legacy=legacy,
+                current_block=current_block,
+            )
         view = execution_observations(body.evidence, suite, policy, current_block=current_block)
         if view["job"] != order_job(order, body.evaluator_hotkey, policy, legacy):
             raise ValueError("void observation differs from the assigned execution")
         views.append(view)
+    repairs = [
+        o.announcement.evidence.repair
+        for o in observations
+        if isinstance(o.announcement.evidence, EndpointUnavailableEvidence)
+    ]
+    if repairs:
+        if any(r != repairs[0] for r in repairs):
+            raise ValueError("void observations disagree on the authorized repair")
+        affected = {identity(c.evaluator_hotkey) for c in repairs[0].amendment.unavailable}
+        retained = {
+            identity(o.announcement.evaluator_hotkey)
+            for o in observations
+            if isinstance(o.announcement.evidence, EndpointUnavailableEvidence)
+        }
+        if affected != retained:
+            raise ValueError("void repair does not cover exactly its affected evaluators")
     proposed = EvaluationVoid(
-        schema="umi-competition-evaluation-void/1",
+        schema="umi-competition-evaluation-void/2"
+        if repairs
+        else "umi-competition-evaluation-void/1",
         policy_sha256=digest(policy),
         round_sha256=digest(order.round),
         order_sha256=digest(order),
         submission_sha256=digest(order.submission.submission),
         suite_sha256=digest(suite),
-        reason=_reason(views, policy),
+        reason=observation_void_reason(
+            tuple(
+                PairedObservationOutputs(
+                    candidate=v["candidate"],
+                    incumbent=v["incumbent"],
+                    coordinator_outcome_unavailable=v.get("coordinator_outcome_unavailable", False),
+                )
+                for v in views
+            ),
+            policy,
+        ),
         observations=observations,
     )
     if len(canonical_json_bytes(proposed)) > MAX_VOID_BYTES:
@@ -206,19 +237,20 @@ def verify_evaluation_void(attested, **context):
 
 
 def replay_void_evidence(evidence, *, suite, policy, current_block):
-    raw = canonical_json_bytes(evidence)
-    if len(raw) > MAX_VOID_BYTES:
-        raise ValueError("void evidence exceeds its byte bound")
-    evidence = VoidEvaluationEvidence.model_validate_json(raw)
-    verify_evaluation_void(
-        evidence.certificate,
-        signed_order=evidence.order,
-        suite=suite,
-        policy=policy,
-        current_block=current_block,
-        legacy=evidence.legacy_policy,
-    )
-    return evidence
+    with canonical_json_reuse():
+        raw = canonical_json_bytes(evidence)
+        if len(raw) > MAX_VOID_BYTES:
+            raise ValueError("void evidence exceeds its byte bound")
+        evidence = VoidEvaluationEvidence.model_validate_json(raw)
+        verify_evaluation_void(
+            evidence.certificate,
+            signed_order=evidence.order,
+            suite=suite,
+            policy=policy,
+            current_block=current_block,
+            legacy=evidence.legacy_policy,
+        )
+        return evidence
 
 
 def authenticate_void_evidence(evidence, *, suite, policy):
@@ -235,3 +267,12 @@ def authenticate_void_evidence(evidence, *, suite, policy):
         policy=policy,
         current_block=evidence.order.order.round.valid_through_block,
     )
+
+
+def validate_void_receipt(evidence, first_observed_block):
+    for signed in evidence.certificate.void.observations:
+        observation = signed.announcement.evidence
+        if isinstance(observation, EndpointUnavailableEvidence) and (
+            first_observed_block < observation.repair.amendment.observed.block
+        ):
+            raise ValueError("void receipt predates its repair authorization")

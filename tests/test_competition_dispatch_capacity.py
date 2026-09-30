@@ -4,6 +4,7 @@ import asyncio
 import heapq
 import random
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -86,6 +87,26 @@ def test_empty_inventory_has_no_invented_work(limits, budget):
     assert result.finish_block_upper_bound == 10
     assert result.profile_sha256 == timing_profile_sha256(limits, budget)
     assert result.conditional_block_advance is True
+
+
+@pytest.mark.parametrize("seconds", [615, 900])
+def test_future_timeout_is_charged_in_capacity_bound(limits, budget, seconds):
+    extended = DispatchTimingLimits.model_validate(
+        {
+            **limits.model_dump(),
+            "request_timeout_seconds": seconds,
+        }
+    )
+    before = plan((job(),), limits, budget)
+    after = plan((job(),), extended, budget)
+    assert after.last_finish_upper_bound_ms - after.last_start_upper_bound_ms == seconds * 1000
+    assert after.last_finish_upper_bound_ms > before.last_finish_upper_bound_ms
+    assert after.finish_block_upper_bound > before.finish_block_upper_bound
+
+
+def test_dispatch_timing_timeout_rejects_above_900(limits):
+    with pytest.raises(ValueError):
+        DispatchTimingLimits.model_validate({**limits.model_dump(), "request_timeout_seconds": 901})
 
 
 def test_input_order_does_not_change_the_capacity_bound(limits, budget):
@@ -477,6 +498,8 @@ async def _exercise_poll_loop(jobs, limits, budget, *, extra_inbox=(), restart_a
     The pending-page adapter mirrors the journal's ordering/filtering but does not
     authenticate publications or persist SQLite state. Only a drained restart is
     modeled; interrupted in-flight work is covered by the native lifecycle tests.
+    Synthetic journal calls stay on this virtual clock. Real OS thread handoff
+    timing and SQLite contention belong to the separate lifecycle tests.
     """
     from umi.competition_dispatch import EndpointDispatcher
 
@@ -571,6 +594,7 @@ async def _exercise_poll_loop(jobs, limits, budget, *, extra_inbox=(), restart_a
             **limits.model_dump(), evaluator_hotkey="synthetic-evaluator"
         )
         driver.journal = SimpleNamespace(pending_dispatches=pending_dispatches)
+        driver.spool = None
         driver._configure_timing = lambda: None
         driver._tasks, driver._cursor = {}, None
         driver._counts = {"completed": 0, "held": 0, "uncertain": 0}
@@ -597,16 +621,20 @@ async def _exercise_poll_loop(jobs, limits, budget, *, extra_inbox=(), restart_a
                 metrics.restarts += 1
             await clock.sleep(limits.poll_seconds * 1000)
 
-    task = asyncio.create_task(run())
-    try:
-        await clock.run(
-            task,
-            maximum_events=max(20_000, len(jobs) * 8 + len(publication_order) * 32),
-        )
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        await driver.aclose()
+    async def synthetic_journal_call(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    with patch("umi.competition_dispatch.run_owned_thread", synthetic_journal_call):
+        task = asyncio.create_task(run())
+        try:
+            await clock.run(
+                task,
+                maximum_events=max(20_000, len(jobs) * 8 + len(publication_order) * 32),
+            )
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await driver.aclose()
     assert not pending and not active_miners and metrics.http == 0
     assert len(completed) == len(starts) == len(finishes) == len(jobs)
     return SimpleNamespace(

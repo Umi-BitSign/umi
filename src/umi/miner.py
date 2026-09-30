@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import re
+import sqlite3
 import stat
 import time
 from collections.abc import Callable
@@ -28,10 +29,24 @@ from .competition_authorization import (
     SignedEndpointAuthorization,
     validate_transport_cohort,
 )
+from .competition_cohort_miner import (
+    MAX_COHORT_GRANT_BYTES,
+    CohortMinerAuthorizationAuthority,
+)
+from .competition_cohort_miner_case import parse_miner_grant
 from .competition_miner_feed import FeedEndpointAuthorizationAuthority
 from .competition_miner_finality import CompetitionMinerFinality
+from .concurrency import run_owned_thread, wait_for_owned
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
+from .endpoint_protocol import (
+    COHORT_GRANT_PATH,
+    COHORT_RETIRE_PATH,
+    RESPONSE_RECOVERY_PATH,
+    RESPONSE_SIGNATURE_HEADER,
+    TRANSLATE_PATH,
+)
+from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
 from .grandpa_finality_supervisor import DurableGrandpaFinalityPort
 from .miner_admission import (
     MinerAdmissionError,
@@ -47,7 +62,8 @@ from .miner_resources import (
 )
 from .model_scheduler import WindowCoalescingTranslator
 from .nonce import NonceStoreAuthorizationError, NonceStoreCapacityError, NonceStoreError
-from .open_competition import CompetitionPolicy
+from .open_competition import CompetitionPolicy, sign_object
+from .open_competition import digest as competition_digest
 from .policy import (
     SINGLE_EVALUATOR_TRANSPORT_SCHEMA,
     ScoringPolicy,
@@ -70,8 +86,6 @@ from .protocol import (
 from .video import HttpVideoFetcher, VideoFetcher, VideoFetchError, VideoFetchResult
 
 LOGGER = logging.getLogger("umi.miner")
-TRANSLATE_PATH = "/v1/translate"
-RESPONSE_SIGNATURE_HEADER = "X-UMI-Signature"
 
 
 class BodyLimitExceeded(ValueError):
@@ -105,7 +119,10 @@ class MinerRuntime:
         "inactive_shadow"
     )
     competition_authority: (
-        EndpointAuthorizationAuthority | FeedEndpointAuthorizationAuthority | None
+        EndpointAuthorizationAuthority
+        | FeedEndpointAuthorizationAuthority
+        | CohortMinerAuthorizationAuthority
+        | None
     ) = field(
         default=None,
         repr=False,
@@ -188,7 +205,11 @@ class MinerRuntime:
         if self.competition_authority is not None:
             if not isinstance(
                 self.competition_authority,
-                (EndpointAuthorizationAuthority, FeedEndpointAuthorizationAuthority),
+                (
+                    EndpointAuthorizationAuthority,
+                    FeedEndpointAuthorizationAuthority,
+                    CohortMinerAuthorizationAuthority,
+                ),
             ):
                 raise TypeError("competition authority must verify signed endpoint assignments")
             self.competition_authority.validate_runtime(
@@ -793,6 +814,10 @@ async def _finish_recorded_request(
 ) -> Response:
     import bittensor as bt
 
+    try:
+        runtime.resource_ledger.ensure_not_retiring(binding)
+    except MinerResourceError as error:
+        raise HTTPException(status_code=409, detail=error.reason_code) from error
     current_round = bt.timelock.current_round()
     runtime.resource_ledger.prune_closed_video_cache(current_round)
     if current_round >= challenge.response_close_round:
@@ -889,6 +914,107 @@ async def _finish_recorded_request(
         media_type="application/json",
         headers={RESPONSE_SIGNATURE_HEADER: signature},
     )
+
+
+async def _retire_cohort_request(
+    runtime: MinerRuntime, request: TranslationRequest, validator_hotkey: str
+) -> Response:
+    """Persist a fence, drain protocol work, then retain a signed terminal receipt."""
+    import bittensor as bt
+
+    authority = runtime.competition_authority
+    try:
+        grant = await authority.retirement_grant(request, validator_hotkey=validator_hotkey)
+    except (MinerAdmissionError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="retirement_request_not_authorized") from error
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        raise HTTPException(status_code=503, detail="retirement_unavailable") from error
+    grant_sha256 = competition_digest(grant)
+    ledger = runtime.resource_ledger
+    binding = MinerAssignmentBinding.from_request(
+        request,
+        validator_hotkey=validator_hotkey,
+        window_index=max(
+            0,
+            (request.issued_block - authority.transport.activation_block)
+            // authority.transport.clock.window_stride_blocks,
+        ),
+    )
+
+    def pending():
+        return Response(
+            content=canonical_json_bytes({"status": "retirement_pending"}),
+            status_code=202,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def response(value):
+        value = verify_retirement_receipt(
+            value,
+            request=request,
+            grant_sha256=grant_sha256,
+            miner_hotkey=runtime.hotkey_ss58,
+            evaluator_hotkey=validator_hotkey,
+        )
+        return Response(
+            content=canonical_json_bytes(value),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    try:
+        prior = ledger.retirement_receipt(binding, grant_sha256)
+        if prior is not None:
+            return response(prior)
+        if not ledger.retirement_requested(binding, grant_sha256):
+            try:
+                cached = ledger.recovered_response(request, validator_hotkey=validator_hotkey)
+            except MinerResourceError as error:
+                if error.reason_code != "response_recovery_not_retained":
+                    raise
+                cached = None
+            if cached is None:
+                # Do not let an evaluator cancel an unexpired opportunity.
+                if bt.timelock.current_round() < request.response_close_round:
+                    return pending()
+                head = await wait_for_owned(
+                    authority.finalized_blocks.finalized_head_height(),
+                    timeout=authority.config.read_timeout_seconds,
+                )
+                if type(head) is not int or head < 0:
+                    raise ValueError("invalid finalized head")
+                if head <= request.deadline_block:
+                    return pending()
+            else:
+                _validate_cached_response(runtime, request, validator_hotkey, cached)
+            await run_owned_thread(ledger.request_retirement, binding, grant_sha256)
+        lock = _assignment_lock(runtime, binding.assignment_id)
+        if lock.locked():
+            return pending()
+        async with lock:
+            prior = ledger.retirement_receipt(binding, grant_sha256)
+            if prior is not None:
+                return response(prior)
+            # Holding this lock also stops admitted-but-queued requests from
+            # entering inference. The ledger fence survives process restart.
+            cached = ledger.recovered_response(request, validator_hotkey=validator_hotkey)
+            if cached is not None:
+                _validate_cached_response(runtime, request, validator_hotkey, cached)
+            body = await run_owned_thread(ledger.prepare_retirement, binding, grant_sha256)
+            signature = await run_owned_thread(sign_object, body, runtime.wallet)
+            value = SignedEndpointRetirementReceipt(receipt=body, signature=signature)
+            await run_owned_thread(ledger.commit_retirement_receipt, binding, value)
+            return response(value)
+    except (
+        MinerResourceError,
+        OSError,
+        TimeoutError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        raise HTTPException(status_code=503, detail="retirement_unavailable") from error
 
 
 def create_app(
@@ -1009,16 +1135,40 @@ def create_app(
                 result["assignment_discovery"] = runtime.competition_authority.status()
         return result
 
+    @app.post(RESPONSE_RECOVERY_PATH)
+    async def recover_response(request: Request) -> Response:
+        return await serve_request(request, recovering=True)
+
     @app.post(TRANSLATE_PATH)
     async def translate(request: Request) -> Response:
-        if check_background_tasks():
+        return await serve_request(request, recovering=False)
+
+    @app.post(COHORT_GRANT_PATH)
+    async def accept_cohort_grant(request: Request) -> Response:
+        if not isinstance(runtime.competition_authority, CohortMinerAuthorizationAuthority):
+            raise HTTPException(status_code=404, detail="cohort admission is not configured")
+        return await serve_request(request, recovering=False, granting=True)
+
+    @app.post(COHORT_RETIRE_PATH)
+    async def retire_cohort_request(request: Request) -> Response:
+        if not isinstance(runtime.competition_authority, CohortMinerAuthorizationAuthority):
+            raise HTTPException(status_code=404, detail="cohort admission is not configured")
+        return await serve_request(request, recovering=False, retiring=True)
+
+    async def serve_request(
+        request: Request, *, recovering: bool, granting: bool = False, retiring: bool = False
+    ) -> Response:
+        if not recovering and not granting and not retiring and check_background_tasks():
             raise HTTPException(status_code=503, detail="miner_background_service_failed")
         if _header_bytes(request) > runtime.limits.maximum_http_header_bytes:
             raise HTTPException(status_code=431, detail="request headers exceed the ceiling")
+        body_limit = (
+            MAX_COHORT_GRANT_BYTES if granting else runtime.limits.maximum_request_body_bytes
+        )
         try:
             _validate_declared_content_length(
                 request,
-                runtime.limits.maximum_request_body_bytes,
+                body_limit,
             )
         except BodyLimitExceeded as error:
             raise HTTPException(status_code=413, detail=str(error)) from error
@@ -1053,7 +1203,7 @@ def create_app(
                     body = await asyncio.wait_for(
                         _read_bounded_body(
                             request,
-                            runtime.limits.maximum_request_body_bytes,
+                            body_limit,
                         ),
                         timeout=runtime.limits.request_body_timeout_seconds,
                     )
@@ -1084,6 +1234,28 @@ def create_app(
                         raise HTTPException(status_code=401, detail=str(error)) from error
                     raise
 
+                if granting:
+                    try:
+                        grant = parse_miner_grant(body)
+                        if body != canonical_json_bytes(grant):
+                            raise ValueError("noncanonical cohort grant")
+                        receipt = await runtime.competition_authority.accept(
+                            grant, validator_hotkey=validator_hotkey, wallet=runtime.wallet
+                        )
+                    except (OSError, asyncio.TimeoutError, TimeoutError, sqlite3.Error) as error:
+                        raise HTTPException(
+                            status_code=503, detail="cohort_grant_unavailable"
+                        ) from error
+                    except ValueError as error:
+                        raise HTTPException(
+                            status_code=422, detail="cohort_grant_invalid"
+                        ) from error
+                    return Response(
+                        content=canonical_json_bytes(receipt),
+                        media_type="application/json",
+                        headers={"Cache-Control": "no-store"},
+                    )
+
                 try:
                     challenge = TranslationRequest.model_validate_json(body)
                 except ValidationError as error:
@@ -1093,6 +1265,41 @@ def create_app(
                     raise HTTPException(
                         status_code=422,
                         detail="request JSON is not RFC 8785 canonical",
+                    )
+                if retiring:
+                    return await _retire_cohort_request(runtime, challenge, validator_hotkey)
+                if recovering:
+                    try:
+                        retained = runtime.resource_ledger.recovered_response(
+                            challenge, validator_hotkey=validator_hotkey
+                        )
+                        if retained is None:
+                            return Response(
+                                content=canonical_json_bytes(
+                                    {"status": "response_recovery_pending"}
+                                ),
+                                status_code=202,
+                                media_type="application/json",
+                                headers={"Cache-Control": "no-store"},
+                            )
+                        _validate_cached_response(runtime, challenge, validator_hotkey, retained)
+                    except MinerResourceError as error:
+                        status = {
+                            "response_recovery_not_retained": 404,
+                            "response_recovery_binding_conflict": 409,
+                        }.get(error.reason_code, 503)
+                        raise HTTPException(
+                            status_code=status,
+                            detail=error.reason_code,
+                            headers={"Cache-Control": "no-store"},
+                        ) from error
+                    return Response(
+                        content=retained.body,
+                        media_type="application/json",
+                        headers={
+                            RESPONSE_SIGNATURE_HEADER: retained.signature,
+                            "Cache-Control": "no-store",
+                        },
                     )
                 if challenge.scoring_policy_hash != runtime.scoring_policy_sha256:
                     raise HTTPException(
@@ -1144,7 +1351,8 @@ def create_app(
                         current_round=bt.timelock.current_round(),
                     )
                 except MinerResourceError as error:
-                    raise HTTPException(status_code=429, detail=error.reason_code) from error
+                    status = 409 if error.reason_code == "request_retired" else 429
+                    raise HTTPException(status_code=status, detail=error.reason_code) from error
         except IngressLimitExceeded as error:
             raise HTTPException(status_code=429, detail=str(error)) from error
         async with _assignment_lock(runtime, binding.assignment_id):
@@ -1177,17 +1385,37 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     chain_config_path = getattr(args, "competition_chain_config", None)
     if chain_config_path is not None and getattr(args, "competition_policy", None) is None:
         raise ValueError("competition chain configuration requires a competition policy")
+    predecessors = getattr(args, "competition_predecessor_policy", None) or []
+    if predecessors and getattr(args, "competition_policy", None) is None:
+        raise ValueError("competition predecessors require a competition policy")
+    if len(predecessors) > 8:
+        raise ValueError("competition policy lineage exceeds eight predecessors")
     feed_origin = getattr(args, "competition_feed", None)
-    if feed_origin is not None and getattr(args, "competition_authorization", None) is not None:
-        raise ValueError("choose either a competition feed or a static authorization")
+    cohort_path = getattr(args, "competition_cohort_config", None)
+    if (
+        sum(
+            value is not None
+            for value in (
+                feed_origin,
+                cohort_path,
+                getattr(args, "competition_authorization", None),
+            )
+        )
+        > 1
+    ):
+        raise ValueError(
+            "choose one competition feed, cohort configuration or static authorization"
+        )
+    cohort_startup = None
     competition_inputs = (
         getattr(args, "competition_policy", None),
-        getattr(args, "competition_authorization", None) or feed_origin,
+        getattr(args, "competition_authorization", None) or feed_origin or cohort_path,
         getattr(args, "serving_origin", None),
     )
     if any(competition_inputs) and not all(competition_inputs):
         raise ValueError(
-            "competition mode requires policy, authorization or feed, and serving origin together"
+            "competition mode requires policy, authorization, feed or cohort configuration, "
+            "and serving origin together"
         )
     competition_policy = None
     publication = None
@@ -1197,7 +1425,28 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         competition_policy = CompetitionPolicy.model_validate_json(
             _read_startup_file(competition_inputs[0], label="competition policy")
         )
-        if feed_origin is not None:
+        from .competition_policy_lineage import register_lineage, validate_operational_successor
+
+        prior_policies = [
+            CompetitionPolicy.model_validate_json(
+                _read_startup_file(path, label="competition predecessor policy")
+            )
+            for path in predecessors
+        ]
+        current = competition_policy
+        for prior in prior_policies:
+            validate_operational_successor(current, prior)
+            current = prior
+        register_lineage(competition_policy, prior_policies)
+        if cohort_path is not None:
+            from .competition_cohort_miner_startup import CohortMinerStartupConfig
+
+            cohort_startup = CohortMinerStartupConfig.model_validate_json(
+                _read_startup_file(cohort_path, label="cohort miner configuration")
+            )
+            if getattr(args, "max_recovery_assignments", 0) <= 0:
+                raise ValueError("cohort serving requires durable response recovery capacity")
+        elif feed_origin is not None:
             from .competition_client import validate_intake_origin
 
             validate_intake_origin(feed_origin)
@@ -1216,6 +1465,15 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
         raise ValueError("single-evaluator transport requires competition mode")
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey, path=args.wallet_path)
     hotkey_ss58, scheme = _identity(wallet)
+    if cohort_startup is not None:
+        cohort_startup.check(
+            policy=competition_policy,
+            transport=policy,
+            miner_hotkey=hotkey_ss58,
+            model_revision=args.model_revision,
+            serving_origin=competition_inputs[2],
+            state_files=(args.nonce_db, args.assignment_db, args.finality_state),
+        )
     policy_hash = scoring_policy_hash(policy)
     allowed_validator_hotkeys = frozenset(
         item.validator_hotkey for item in policy.validator_registry
@@ -1309,7 +1567,16 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             model_revision=args.model_revision,
             serving_origin=competition_inputs[2],
         )
-        if feed_origin is None:
+        if cohort_startup is not None:
+            from .competition_cohort_miner_startup import cohort_miner_authority
+
+            competition_authority = cohort_miner_authority(
+                cohort_startup,
+                policy=competition_policy,
+                transport=policy,
+                finalized_blocks=finality,
+            )
+        elif feed_origin is None:
             competition_authority = EndpointAuthorizationAuthority(
                 **authority_inputs, publication=publication
             )
@@ -1345,6 +1612,7 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
             miner_hotkey=hotkey_ss58,
             scoring_policy_sha256=policy_hash,
             limits=limits,
+            maximum_recovery_assignments=getattr(args, "max_recovery_assignments", 0),
         ),
         window_authority=ProofBackedMinerWindowAuthority(
             policy=policy,
@@ -1538,6 +1806,12 @@ def _parser() -> argparse.ArgumentParser:
         "--competition-policy", help="reviewed successor policy for weight-disabled requests"
     )
     parser.add_argument(
+        "--competition-predecessor-policy",
+        action="append",
+        default=[],
+        help="reviewed policy whose submissions carry forward; repeat newest first (maximum 8)",
+    )
+    parser.add_argument(
         "--competition-chain-config",
         help="canonical owned-finality/archive-proof configuration for historical admission",
     )
@@ -1547,6 +1821,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     assignment_source.add_argument(
         "--competition-feed", help="HTTPS assignment feed for ongoing weight-disabled requests"
+    )
+    assignment_source.add_argument(
+        "--competition-cohort-config",
+        help="canonical cohort grant and public history configuration",
     )
     parser.add_argument(
         "--serving-origin", help="local HTTPS origin matching the miner-signed submission"
@@ -1615,6 +1893,15 @@ def _parser() -> argparse.ArgumentParser:
         help="durable resource-counter and encrypted-response cache database",
     )
     parser.add_argument("--listen-host", default="127.0.0.1")
+    parser.add_argument(
+        "--max-recovery-assignments",
+        type=int,
+        default=0,
+        help=(
+            "reserve durable sealed-response recovery for this many assignments; "
+            "0 disables new reservations, existing records remain retrievable"
+        ),
+    )
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--log-level", default="INFO")
     return parser

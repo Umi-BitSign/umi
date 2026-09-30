@@ -1,0 +1,6 @@
+# One dedicated immutable document directory per job. Never select a mixed
+# source directory: this filter cannot distinguish references from other JSON.
+- .*
+- **/.*
++ /*.json
+- **

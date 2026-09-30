@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from fractions import Fraction
 from pathlib import PurePosixPath
 from types import MappingProxyType
@@ -108,7 +108,10 @@ class CompetitionPolicy(StrictProtocolModel):
     maximum_bundle_files: Annotated[int, Field(ge=7, le=4096)]
     minimum_submission_interval_blocks: Annotated[int, Field(ge=1, le=100_000)]
     maximum_submission_lifetime_blocks: Annotated[int, Field(ge=1, le=1_000_000)]
-    maximum_snapshot_age_blocks: Annotated[int, Field(ge=0, le=360)]
+    # Long cohort signing windows need an explicit, bounded snapshot lifetime.
+    # Existing policies keep their signed limit; the parser allows up to one
+    # nominal day so operators can budget signing and recovery independently.
+    maximum_snapshot_age_blocks: Annotated[int, Field(ge=0, le=7200)]
     maximum_uids: Annotated[int, Field(ge=1, le=256)]
     evaluators: Annotated[tuple[Evaluator, ...], Field(min_length=1, max_length=64)]
     required_evaluator_groups: Annotated[int, Field(ge=1, le=64)]
@@ -417,11 +420,20 @@ def validate_admission(
     policy: CompetitionPolicy,
     snapshot: RegistrationSnapshot,
     current_block: int,
+    *,
+    admitted_policy_sha256s: Collection[str] | None = None,
 ) -> int:
+    """Admit a signed submission under ``policy``.
+
+    ``admitted_policy_sha256s`` widens the policy binding to deal-preserving
+    predecessors (see ``competition_policy_lineage``). It defaults to the live
+    policy alone, so every existing caller keeps exact-digest behavior.
+    """
     # Revalidate models constructed using unsafe Pydantic copy/construct helpers.
     signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
     sub = signed.submission
-    if sub.policy_sha256 != digest(policy):
+    admitted = (digest(policy),) if admitted_policy_sha256s is None else admitted_policy_sha256s
+    if sub.policy_sha256 not in admitted:
         raise ValueError("submission belongs to another policy")
     if not policy.valid_from_block <= current_block <= policy.valid_through_block:
         raise ValueError("policy is not current")
@@ -665,13 +677,8 @@ def _quality(
     *,
     incumbent: bool = False,
 ) -> dict[str, Fraction]:
-    validate_suite_profile(suite, policy)
-    expected_ids = [c.case_id for c in suite.cases]
-    if [o.case_id for o in outputs] != expected_ids:
-        raise ValueError("outputs must cover the complete suite in canonical order")
-    strata: dict[str, list[Fraction]] = defaultdict(list)
-    valid_hypotheses: dict[str, str | None] = {}
-    for case, output in zip(suite.cases, outputs, strict=True):
+    observations = []
+    for output in outputs:
         if output.status == "infrastructure_failure":
             raise ValueError("infrastructure failure voids evaluation")
         valid = (
@@ -679,10 +686,41 @@ def _quality(
             and output.elapsed_ms <= policy.maximum_inference_ms
             and len(output.hypothesis.encode("utf-8")) <= policy.maximum_output_bytes
         )
+        observations.append((output.case_id, output.hypothesis if valid else None))
+    return quality_from_hypotheses(tuple(observations), suite, policy, incumbent=incumbent)
+
+
+def quality_from_hypotheses(
+    observations: tuple[tuple[str, str | None], ...],
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+    *,
+    incumbent: bool = False,
+) -> dict[str, Fraction]:
+    """Apply content scoring and dependence gates to complete selected hypotheses.
+
+    None records an ineligible or failed observation. The caller authenticates
+    its source and eligibility: this function does not infer service timing,
+    certify execution or grant reward authority. Legacy callers supply their
+    original measured resource eligibility; untimed content callers retain that
+    distinction in their versioned result.
+    """
+    validate_suite_profile(suite, policy)
+    if [key for key, _ in observations] != [case.case_id for case in suite.cases]:
+        raise ValueError("outputs must cover the complete suite in canonical order")
+    strata: dict[str, list[Fraction]] = defaultdict(list)
+    valid_hypotheses: dict[str, str | None] = {}
+    for case, (_, hypothesis) in zip(suite.cases, observations, strict=True):
+        valid = hypothesis is not None
+        if valid and (
+            not isinstance(hypothesis, str)
+            or len(hypothesis.encode("utf-8")) > policy.maximum_output_bytes
+        ):
+            raise ValueError("quality hypothesis exceeds its declared content bound")
         if incumbent and not valid:
             raise ValueError("incumbent execution failed; evaluation is void")
         if case.stratum == "continuous" and policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
-            valid_hypotheses[case.case_id] = output.hypothesis if valid else None
+            valid_hypotheses[case.case_id] = hypothesis
         if getattr(case, "role", "scored") == "matched_swap":
             continue
         scorer = score_cer if case.stratum == "fingerspelling" else score_wer
@@ -695,11 +733,11 @@ def _quality(
         }:
             score = score_single_reference(
                 "cer" if case.stratum == "fingerspelling" else "wer",
-                output.hypothesis,
+                hypothesis,
                 case.references[0],
             )
         else:
-            score = scorer(output.hypothesis, case.references)
+            score = scorer(hypothesis, case.references)
         strata[case.stratum].append(score)
     quality = {s: sum(strata[s], Fraction(0)) / len(strata[s]) for s in policy.stratum_weights}
     if policy.schema_ == DEPENDENCE_POLICY_SCHEMA:
@@ -858,6 +896,8 @@ def authenticate_evaluation(
     A failed inference or expired replay window cannot erase proof of two
     contradictory statements. Current eligibility and scoring are separate.
     """
+    from .competition_policy_lineage import submission_policy_admitted
+
     signed = SignedSubmission.model_validate_json(canonical_json_bytes(signed))
     attested = AttestedResult.model_validate_json(canonical_json_bytes(attested))
     round_ = EvaluationRound.model_validate_json(canonical_json_bytes(round_))
@@ -870,7 +910,7 @@ def authenticate_evaluation(
     result, sub = attested.result, signed.submission
     if (
         round_.policy_sha256 != digest(policy)
-        or sub.policy_sha256 != digest(policy)
+        or not submission_policy_admitted(policy, sub.policy_sha256)
         or result.round_sha256 != digest(round_)
         or result.submission_sha256 != digest(sub)
         or digest(sub) not in round_.roster
@@ -934,9 +974,18 @@ def replay_evaluation(
     validate_evaluation_suite(attested, round_, suite, policy)
     if not round_.reveal_block <= current_block <= round_.valid_through_block:
         raise ValueError("evaluation is premature or expired")
+    return score_evaluation_outputs(attested.result, suite, policy)
+
+
+def score_evaluation_outputs(
+    result: EvaluationResult,
+    suite: EvaluationSuite,
+    policy: CompetitionPolicy,
+) -> tuple[dict[str, Fraction], dict[str, Fraction]]:
+    """Recompute quality; callers separately authenticate identity and phase authority."""
     return (
-        _quality(attested.result.candidate, suite, policy),
-        _quality(attested.result.incumbent, suite, policy, incumbent=True),
+        _quality(result.candidate, suite, policy),
+        _quality(result.incumbent, suite, policy, incumbent=True),
     )
 
 

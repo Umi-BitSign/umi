@@ -94,13 +94,20 @@ def _systemctl(verb: str, unit: str) -> None:
 
 def _process_owns_lock(pid: int, switch: StartableSwitch) -> None:
     _, lock_path, lock_identity = _installation(switch)
+    _process_owns_exact_lock(
+        pid, lock_path=lock_path, lock_identity=lock_identity, service_uid=switch.plan.service_uid
+    )
+
+
+def _process_owns_exact_lock(pid, *, lock_path, lock_identity, service_uid) -> None:
+    """Verify kernel lock ownership without granting installation authority."""
     descriptor = _open_without_links(lock_path)
     try:
         info = os.fstat(descriptor)
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
-            or info.st_uid != switch.plan.service_uid
+            or info.st_uid != service_uid
             or stat.S_IMODE(info.st_mode) != 0o600
             or (info.st_dev, info.st_ino) != lock_identity[:2]
         ):

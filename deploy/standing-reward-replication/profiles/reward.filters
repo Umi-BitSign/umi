@@ -1,0 +1,15 @@
+# Original proof archives and signed reward delivery; no journals or keys.
+- .*
+- **/.*
++ /objects/*.json
++ /history/*.json
++ /endpoint/*.json
++ /interval/*.json
++ /registration/*.json
++ /packages/*.json
++ /decisions/*.json
++ /opportunities/*.json
++ /witnesses/*.json
++ /requests/*/*.json
++ /votes/*/*/*.json
+- **

@@ -41,6 +41,12 @@ from .competition_package import (
     competition_release_identity_digest,
     load_competition_package,
 )
+from .competition_reward_continuity import (
+    RewardContinuation,
+    apply_recipient_amendment,
+    authorized_reward_row,
+    verify_reward_continuation,
+)
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -53,8 +59,10 @@ from .encoding import account_id32
 from .open_competition import Hex32, Hotkey, Registration, Signature, StrictProtocolModel, digest
 from .policy import LiveChainObservationPin
 from .protocol import canonical_json_bytes
+from .rpc_bittensor import rpc_client
 from .runtime_metadata import ExecutedRuntimeContext
 from .signed_extrinsic import encode_mortal_call, exact_signed_extrinsic
+from .weight_storage import subtensor_stored_weights
 
 Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 _AUTH_DOMAIN = b"umi-competition-weight-authorization-v1\0"
@@ -86,8 +94,13 @@ def _recovery_package_snapshot(path: Path) -> tuple:
         return before, tuple(result)
 
 
-def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -> tuple:
+def _recovery_journal_snapshot(
+    path: Path, *, allow_absent_root: bool = False, expected_owner: int | None = None
+) -> tuple:
     """Bounded metadata check for an already-audited SQLite family, not authority."""
+    owner = os.getuid() if expected_owner is None else expected_owner
+    if type(owner) is not int or owner < 0:
+        raise ValueError("stopped recovery journal owner must be a nonnegative uid")
     try:
         root = _open_directory_without_links(path.parent)
     except FileNotFoundError:
@@ -96,7 +109,7 @@ def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -
         raise
     try:
         info = os.fstat(root)
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
             raise ValueError("stopped recovery journal parent is not private")
         before = _file_identity(info)
         result = []
@@ -113,7 +126,7 @@ def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -
                 info = os.fstat(descriptor)
                 if (
                     not stat.S_ISREG(info.st_mode)
-                    or info.st_uid != os.getuid()
+                    or info.st_uid != owner
                     or info.st_nlink != 1
                     or stat.S_IMODE(info.st_mode) != 0o600
                 ):
@@ -129,7 +142,9 @@ def _recovery_journal_snapshot(path: Path, *, allow_absent_root: bool = False) -
 
 
 class CompetitionWeightAuthorizationBody(StrictProtocolModel):
-    schema_: Literal["umi-competition-weight-authorization/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-competition-weight-authorization/1", "umi-competition-weight-authorization/2"
+    ] = Field(alias="schema")
     authorization_id: Hex32
     validator_scope: Literal["any_permitted_sn78"]
     policy_sha256: Hex32
@@ -164,16 +179,23 @@ class CompetitionWeightAuthorizationBody(StrictProtocolModel):
     required_commit_reveal_enabled: Literal[False]
     mortality_period: Annotated[int, Field(ge=4, le=4096)]
     late_conflict_action: Literal["hold_no_automatic_correction"]
+    continuation: RewardContinuation | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_authorization(self, handler):
         value = handler(self)
         if self.required_runtime_metadata_executor_sha256_by_target is None:
             value.pop("required_runtime_metadata_executor_sha256_by_target", None)
+        if self.continuation is None:
+            value.pop("continuation", None)
         return value
 
     @model_validator(mode="after")
     def validate_bounds(self) -> Self:
+        if (self.schema_ == "umi-competition-weight-authorization/2") != (
+            self.continuation is not None
+        ):
+            raise ValueError("forward continuity requires explicit authorization version 2")
         pins = self.required_runtime_metadata_executor_sha256_by_target
         if pins is not None and (
             set(pins) != set(self.required_finality_verifier_sha256_by_target)
@@ -288,19 +310,22 @@ def verify_competition_weight_authorization(
     ):
         if actual != expected:
             raise ValueError("successor authorization binds different replay inputs")
-    if (
-        not policy.valid_from_block
-        <= body.valid_from_block
-        < body.valid_through_block
-        <= policy.valid_through_block
-    ):
-        raise ValueError("successor authorization exceeds policy validity")
-    if not (
-        package.retained_settlement.observed_block <= body.signed_at_block
-        and body.valid_through_block
-        <= package.settlement_certificate.publication.round.valid_through_block
-    ):
-        raise ValueError("successor authorization exceeds settlement round validity")
+    if body.continuation is not None:
+        verify_reward_continuation(body.continuation, package, body, trusted_authority_hotkeys)
+    else:
+        if (
+            not policy.valid_from_block
+            <= body.valid_from_block
+            < body.valid_through_block
+            <= policy.valid_through_block
+        ):
+            raise ValueError("successor authorization exceeds policy validity")
+        if not (
+            package.retained_settlement.observed_block <= body.signed_at_block
+            and body.valid_through_block
+            <= package.settlement_certificate.publication.round.valid_through_block
+        ):
+            raise ValueError("successor authorization exceeds settlement round validity")
     if (policy.endpoint_reward_bps, policy.model_reward_bps) != (7000, 3000):
         raise ValueError("joint launch requires the approved 70/30 reward policy")
     if package.retained_settlement.promotion_head.contributor_hotkey is None:
@@ -370,7 +395,7 @@ def validate_weight_preflight(
     package, authorization, observation, chain_config, *, submission: bool
 ):
     validate_owned_weight_observation(observation)
-    policy, row = package.policy, package.retained_settlement.projection
+    policy, row = package.policy, authorized_reward_row(package, authorization)
     if observation.chain_config_sha256 != digest(
         chain_config
     ) or chain_config.policy_sha256 != digest(policy):
@@ -450,7 +475,7 @@ def validate_weight_preflight(
 def build_competition_weight_call(
     package: VerifiedCompetitionPackage, body: CompetitionWeightAuthorizationBody
 ):
-    row = package.retained_settlement.projection
+    row = authorized_reward_row(package, body)
     call = bt.calls.SubtensorModule.set_mechanism_weights(
         netuid=78,
         mecid=0,
@@ -477,18 +502,29 @@ def build_competition_weight_call(
 class BittensorCompetitionWeightTransport:
     """Encode using the owned runtime, submit exact signed bytes via SDK 11.1.0."""
 
-    def __init__(self, *, endpoint: str, client_factory=None):
+    def __init__(
+        self, *, endpoint: str, fallback_endpoints: tuple[str, ...] = (), client_factory=None
+    ):
         if importlib.metadata.version("bittensor") != "11.1.0":
             raise ValueError("successor weight transport requires pinned Bittensor 11.1.0")
-        if not endpoint.startswith("wss://"):
-            raise ValueError("successor submission endpoint must use wss")
+        endpoints = (endpoint, *fallback_endpoints)
+        if len(endpoints) not in (1, 3) or len(set(endpoints)) != len(endpoints):
+            raise ValueError(
+                "successor submission needs a primary and zero or two explicit backups"
+            )
+        for selected in endpoints:
+            CompetitionChainConfig.read_only_rpc(selected)
         self.endpoint = endpoint
-        self.client_factory = client_factory or bt.Subtensor
+        self.fallback_endpoints = tuple(fallback_endpoints)
+        self.client_factory = client_factory or rpc_client
 
     @staticmethod
     def encode(call, body, observation, signer, *, projection) -> bytes:
         validate_owned_weight_observation(observation)
         _validate_signing_runtime(observation.runtime, body)
+        row = apply_recipient_amendment(
+            projection, body.continuation.recipient_amendment if body.continuation else None
+        )
         if digest(projection) != body.projection_sha256 or (
             call.module != "SubtensorModule"
             or call.function != "set_mechanism_weights"
@@ -496,8 +532,8 @@ class BittensorCompetitionWeightTransport:
             != {
                 "netuid": 78,
                 "mecid": 0,
-                "dests": list(projection.uids),
-                "weights": list(projection.weights),
+                "dests": list(row.uids),
+                "weights": list(row.weights),
                 "version_key": body.weights_version_key,
             }
         ):
@@ -514,8 +550,15 @@ class BittensorCompetitionWeightTransport:
 
     async def submit(self, encoded: bytes, signer):
         extrinsic = exact_signed_extrinsic(encoded)
-        async with self.client_factory(self.endpoint, retry_forever=False) as client:
+        async with self.client_factory(
+            self.endpoint,
+            fallback_endpoints=list(self.fallback_endpoints),
+            archive_endpoints=[],
+            retry_forever=False,
+        ) as client:
             # No submit_call re-composition, nonce lookup, era selection or retry.
+            # The pinned SDK marks both author submission methods non-idempotent:
+            # a frame that may have been sent is never replayed on reconnect.
             return await client._substrate.submit_signed(
                 extrinsic,
                 signer,
@@ -572,14 +615,30 @@ class CompetitionWeightWorker:
                 "CREATE TABLE IF NOT EXISTS attempts "
                 "(id TEXT PRIMARY KEY, body BLOB NOT NULL, sha256 TEXT NOT NULL)"
             )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS evidence (sha256 TEXT PRIMARY KEY, body BLOB NOT NULL)"
-            )
+            self._initialize_evidence(db)
             db.execute(
                 "CREATE TABLE IF NOT EXISTS highwater (id INTEGER PRIMARY KEY CHECK(id=1), "
                 "block INTEGER NOT NULL, hash TEXT NOT NULL)"
             )
             db.execute("CREATE TABLE IF NOT EXISTS held_policies (policy TEXT PRIMARY KEY)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS continuity_highwater "
+                "(policy TEXT PRIMARY KEY, authority TEXT NOT NULL, "
+                "round_sequence INTEGER NOT NULL, "
+                "package TEXT NOT NULL, admission TEXT NOT NULL)"
+            )
+
+    def _initialize_evidence(self, db):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='weight_proof_binding'").fetchone():
+            raise ValueError("content addressed journal requires its explicit worker profile")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS evidence (sha256 TEXT PRIMARY KEY, body BLOB NOT NULL)"
+        )
+
+    def _has_evidence(self, db, identity):
+        return (
+            db.execute("SELECT 1 FROM evidence WHERE sha256=?", (identity,)).fetchone() is not None
+        )
 
     @contextmanager
     def _lock(self):
@@ -630,6 +689,38 @@ class CompetitionWeightWorker:
             self._retain_observation(db, observation)
             return result
 
+    async def _load_fresh(self, validator_hotkey, authorization_id, observe, validate):
+        """Audit retained history before capturing a proof with a short lifetime.
+
+        The caller holds the weight lock. Keep a write transaction and bracket
+        asynchronous capture with the same audited journal snapshot. No audit
+        result is cached across transactions, worker invocations or recovery.
+        """
+        with self._db() as db:
+            self._check_journal_binding(db, validator_hotkey)
+            attempt = self._inspect_attempts(db, validator_hotkey, authorization_id)
+            self._before_capture(db, authorization_id, attempt)
+            snapshot = _recovery_journal_snapshot(self.path)
+            known, total = self._audit_evidence(db)
+            if _recovery_journal_snapshot(self.path) != snapshot:
+                raise ValueError("weight journal changed during evidence audit")
+            observation = await observe()
+            validate_owned_weight_observation(observation)
+            if _recovery_journal_snapshot(self.path) != snapshot:
+                raise ValueError("weight journal changed during fresh capture")
+            validate(observation)
+            self._record_head(db, observation)
+            self._append_observation(
+                db, observation, known, total, authorization_id=authorization_id
+            )
+            validate_owned_weight_observation(observation)
+        # A slow durable commit also consumes the fresh proof's lifetime.
+        validate_owned_weight_observation(observation)
+        return attempt, observation
+
+    def _before_capture(self, db, authorization_id, attempt):
+        """Storage backends may reserve capacity under this owned transaction."""
+
     def _check_journal_binding(self, db, validator_hotkey):
         expected = (validator_hotkey, self.maximum_attempts, self.maximum_evidence_bytes)
         binding = db.execute(
@@ -673,12 +764,7 @@ class CompetitionWeightWorker:
                 raise ValueError("successor journal is corrupt")
             if item["validator_hotkey"] != validator_hotkey:
                 raise ValueError("successor journal attempt binds another hotkey")
-            if (
-                db.execute(
-                    "SELECT 1 FROM evidence WHERE sha256=?", (item["chain_evidence_sha256"],)
-                ).fetchone()
-                is None
-            ):
+            if not self._has_evidence(db, item["chain_evidence_sha256"]):
                 raise ValueError("successor attempt lost its retained preflight evidence")
             if key != authorization_id and item["phase"] not in {
                 "applied",
@@ -711,7 +797,7 @@ class CompetitionWeightWorker:
             known.add(identity)
         return known, total
 
-    def _append_observation(self, db, observation, known, total):
+    def _append_observation(self, db, observation, known, total, *, authorization_id=None):
         for raw in (observation.evidence, observation.runtime.metadata_bytes):
             identity = hashlib.sha256(raw).hexdigest()
             if identity in known:
@@ -721,6 +807,54 @@ class CompetitionWeightWorker:
             db.execute("INSERT INTO evidence VALUES (?, ?)", (identity, raw))
             total += len(raw)
             known.add(identity)
+
+    def _record_continuity_handoff(self, db, *, activation, policy, before, after):
+        raise ValueError(
+            "continuity authority change requires explicitly authorized evidence runtime"
+        )
+
+    def _accept_continuity(self, package, body, *, activation=None):
+        """Record adoption before a new write; all replay and preflight gates ran."""
+        with self._db() as db:
+            prior = db.execute(
+                "SELECT authority, round_sequence, package, admission "
+                "FROM continuity_highwater WHERE policy=?",
+                (body.policy_sha256,),
+            ).fetchone()
+            continuation = body.continuation
+            if continuation is None:
+                if prior is not None:
+                    raise ValueError(
+                        "cannot return to ordinary authorization after continuity adoption"
+                    )
+                return
+            current = (
+                digest(continuation.authority),
+                package.manifest.round_sequence,
+                package.package_sha256,
+                digest(continuation.admission),
+            )
+            if prior is not None:
+                if current[1] < prior[1] or (current[1] == prior[1] and current != prior):
+                    raise ValueError(
+                        "continuity allocation rolls back or changes an adopted package"
+                    )
+                if prior[0] != current[0]:
+                    self._record_continuity_handoff(
+                        db,
+                        activation=activation,
+                        policy=body.policy_sha256,
+                        before=prior,
+                        after=current,
+                    )
+
+            db.execute(
+                "INSERT INTO continuity_highwater VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(policy) DO UPDATE SET "
+                "authority=excluded.authority, round_sequence=excluded.round_sequence, "
+                "package=excluded.package, admission=excluded.admission",
+                (body.policy_sha256, *current),
+            )
 
     async def run(
         self,
@@ -769,14 +903,14 @@ class CompetitionWeightWorker:
         signer = bt.resolve_signer(wallet, role="hotkey")
         if account_id32(signer.ss58_address) != account_id32(hotkey):
             raise ValueError("installed hotkey differs from successor activation")
+        effective_row = authorized_reward_row(package, body)
         recipients = tuple(
-            Registration(uid=item.uid, hotkey=item.hotkey)
-            for item in package.retained_settlement.projection.allocations
+            Registration(uid=item.uid, hotkey=item.hotkey) for item in effective_row.allocations
         )
         expected_row = tuple(
             zip(
-                package.retained_settlement.projection.uids,
-                package.retained_settlement.projection.weights,
+                effective_row.uids,
+                subtensor_stored_weights(effective_row.weights),
                 strict=True,
             )
         )
@@ -792,15 +926,20 @@ class CompetitionWeightWorker:
                 expected_policy_sha256=body.policy_sha256,
                 observed_release=release,
             )
-            observation = await chain.collect_weights(hotkey, recipients)
-            validate_weight_preflight(package, body, observation, chain.config, submission=False)
+            attempt, observation = await self._load_fresh(
+                hotkey,
+                body.authorization_id,
+                lambda: chain.collect_weights(hotkey, recipients),
+                lambda current: validate_weight_preflight(
+                    package, body, current, chain.config, submission=False
+                ),
+            )
             context = context.refresh(owned_observation=observation)
             recovery_checkpoint = context.validate_retained_recovery(
                 context.checkpoint_sha256, hotkey, body.predecessor_directive_sha256
             )
             if observation.block < recovery_checkpoint.finalized_block:
                 raise ValueError("successor observation predates historical recovery")
-            attempt = self._load(hotkey, body.authorization_id, observation)
             if attempt is not None and (
                 attempt["authorization_sha256"] != auth_digest
                 or attempt["recovery_checkpoint_sha256"] != context.checkpoint_sha256
@@ -831,6 +970,7 @@ class CompetitionWeightWorker:
             if attempt is not None:
                 return self._recover(attempt, body, hotkey, observation, expected_row)
             validate_weight_preflight(package, body, observation, chain.config, submission=True)
+            self._accept_continuity(package, body, activation=context)
             validate_authenticated_successor_activation(
                 context,
                 validator_hotkey=hotkey,
@@ -885,9 +1025,14 @@ class CompetitionWeightWorker:
                 )
             # Signing may be slow. Recheck current chain state without altering
             # the frozen nonce, era, call, or durable signed extrinsic bytes.
-            before_send = await chain.collect_weights(hotkey, recipients)
-            validate_weight_preflight(package, body, before_send, chain.config, submission=True)
-            self._load(hotkey, body.authorization_id, before_send)
+            _, before_send = await self._load_fresh(
+                hotkey,
+                body.authorization_id,
+                lambda: chain.collect_weights(hotkey, recipients),
+                lambda current: validate_weight_preflight(
+                    package, body, current, chain.config, submission=True
+                ),
+            )
             context = context.refresh(owned_observation=before_send)
             if (
                 before_send.validator_nonce != attempt["nonce"]
@@ -927,9 +1072,14 @@ class CompetitionWeightWorker:
                 self._save(attempt)
                 raise
             # Never trust an SDK success flag as finalized proof of application.
-            after = await chain.collect_weights(hotkey, recipients)
-            validate_weight_preflight(package, body, after, chain.config, submission=False)
-            self._load(hotkey, body.authorization_id, after)
+            _, after = await self._load_fresh(
+                hotkey,
+                body.authorization_id,
+                lambda: chain.collect_weights(hotkey, recipients),
+                lambda current: validate_weight_preflight(
+                    package, body, current, chain.config, submission=False
+                ),
+            )
             outcome = self._recover(attempt, body, hotkey, after, expected_row)
             return outcome.model_copy(update={"submitted_by_this_attempt": True})
 
@@ -996,18 +1146,20 @@ class CompetitionWeightWorker:
         checkpoint_block = installation.checkpoint_finalized_block
         configuration_sha256 = digest(chain_config)
         authorization_sha256 = competition_weight_authorization_digest(body)
+        effective_row = authorized_reward_row(package, body)
         row = tuple(
             zip(
-                package.retained_settlement.projection.uids,
-                package.retained_settlement.projection.weights,
+                effective_row.uids,
+                subtensor_stored_weights(effective_row.weights),
                 strict=True,
             )
         )
         with self._lock() as lock_descriptor, self._db() as db:
             lock_identity = _file_identity(os.fstat(lock_descriptor))
             self._check_journal_binding(db, hotkey)
-            journal_snapshot = _recovery_journal_snapshot(self.path)
             attempt = self._inspect_attempts(db, hotkey, body.authorization_id)
+            self._before_capture(db, body.authorization_id, attempt)
+            journal_snapshot = _recovery_journal_snapshot(self.path)
             known, total = self._audit_evidence(db)
             if _recovery_journal_snapshot(self.path) != journal_snapshot:
                 raise ValueError("stopped recovery journal changed during verification")
@@ -1048,7 +1200,9 @@ class CompetitionWeightWorker:
                 raise ValueError("stopped recovery journal changed after verification")
             validate_weight_preflight(package, body, observation, chain_config, submission=False)
             self._record_head(db, observation)
-            self._append_observation(db, observation, known, total)
+            self._append_observation(
+                db, observation, known, total, authorization_id=body.authorization_id
+            )
             validate_owned_weight_observation(observation)
             outcome = (
                 None

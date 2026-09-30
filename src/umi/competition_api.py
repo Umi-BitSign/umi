@@ -7,6 +7,7 @@ owned-finality provider; fixture CLI operation remains loopback-only rehearsal.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Literal
 
@@ -16,8 +17,16 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, Response
 from starlette.types import Lifespan
 
+from .competition_chain import RegistrationCapture
+from .competition_cohort_api import cohort_routes
+from .competition_cohort_intake import CohortIntake
+from .competition_cohort_model_upload import CohortModelUploads
+from .competition_execution import ExecutionBoundary
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
+from .competition_public_results import PublicResultsSource, public_results_page
+from .competition_public_results_directory import PublicResultsDirectory, resolve_source
+from .competition_round_discovery import MAXIMUM_ROUND_SEQUENCE, round_index
 from .competition_store import (
     AdmissionCapacityError,
     CompetitionStore,
@@ -57,6 +66,13 @@ def create_app(
     limits: CompetitionApiLimits | None = None,
     public_deployment: PublicIntakeDeployment | None = None,
     historical_archives: tuple[LoadedIntakeArchive, ...] = (),
+    public_results_sources: tuple[PublicResultsSource, ...] = (),
+    public_results_directory: PublicResultsDirectory | None = None,
+    cohort_intake: CohortIntake | None = None,
+    cohort_capture_provider: Callable[[], Awaitable[RegistrationCapture]] | None = None,
+    cohort_archive_provider: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]]
+    | None = None,
+    cohort_model_uploads: CohortModelUploads | None = None,
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
@@ -94,17 +110,60 @@ def create_app(
     )
     app = FastAPI(title=title, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.competition_store = store
+    if cohort_intake is not None:
+        if registration_source != "verifier_attested_finality" or cohort_capture_provider is None:
+            raise ValueError("recoverable intake requires its owned finality capture provider")
+        if digest(cohort_intake.policy) != digest(store.policy):
+            raise ValueError("recoverable intake and base intake use different policies")
+        app.include_router(
+            cohort_routes(
+                cohort_intake,
+                cohort_capture_provider,
+                maximum_body_bytes=MAX_SUBMISSION_BYTES,
+                archive=cohort_archive_provider,
+                models=cohort_model_uploads,
+            )
+        )
+    public_results_sources = tuple(
+        PublicResultsSource.model_validate_json(canonical_json_bytes(source))
+        for source in public_results_sources
+    )
+    results_by_round = {source.round_sha256: source for source in public_results_sources}
+    if len(results_by_round) != len(public_results_sources):
+        raise ValueError("public result sources must name unique rounds")
+    if public_results_directory is not None:
+        public_results_directory = PublicResultsDirectory.model_validate_json(
+            canonical_json_bytes(public_results_directory)
+        )
     capacities = {
         "submission": asyncio.Semaphore(limits.maximum_concurrent_submissions),
         "read": asyncio.Semaphore(limits.maximum_concurrent_reads),
         "readiness": asyncio.Semaphore(limits.maximum_concurrent_readiness),
+        "model_upload": asyncio.Semaphore(
+            1
+            if cohort_model_uploads is None
+            else cohort_model_uploads.config.maximum_concurrent_uploads
+        ),
     }
 
     @app.middleware("http")
     async def bound_public_requests(request: Request, call_next):
-        if request.url.path == "/v1/competition/readiness":
+        if request.url.path == "/v1/competition/readiness" or (
+            request.url.path.startswith(
+                ("/v1/competition/cohorts/", "/v1/competition/service-work/")
+            )
+            and request.url.path.endswith("/readiness")
+        ):
             capacity = capacities["readiness"]
-        elif request.method == "POST" and request.url.path == "/v1/competition/submissions":
+        elif request.method == "PUT" and request.url.path.startswith(
+            "/v1/competition/model-uploads/"
+        ):
+            capacity = capacities["model_upload"]
+        elif request.method == "POST" and (
+            request.url.path == "/v1/competition/submissions"
+            or request.url.path.startswith("/v1/competition/cohorts/")
+            or request.url.path.startswith("/v1/competition/service-work/")
+        ):
             capacity = capacities["submission"]
         else:
             capacity = capacities["read"]
@@ -178,6 +237,9 @@ def create_app(
             "admission_checked_block": admission_checked_block,
             "chain_submission_authorized": False,
             "historical_intake_archives": [archive.summary() for archive in historical_archives],
+            # Deal-preserving predecessors whose signed submissions this ledger still admits.
+            "honored_policy_sha256s": list(store.lineage.admitted_policy_sha256s),
+            "deal_sha256": store.lineage.deal_sha256,
         }
         if public_deployment is not None:
             result.update(
@@ -194,13 +256,22 @@ def create_app(
             )
             if public_deployment.round_stride_blocks is not None:
                 result["continuous_intake"] = True
-                result["next_intake_schedule"] = (
-                    public_deployment.launch_identity()
-                    .next_intake_schedule(admission_checked_block)
-                    .model_dump(mode="json", by_alias=True)
+                next_schedule = (
+                    public_deployment.next_intake_schedule(admission_checked_block)
                     if admission_checked_block is not None and admission_accepting_new
                     else None
                 )
+                result["next_intake_schedule"] = (
+                    next_schedule.model_dump(mode="json", by_alias=True)
+                    if next_schedule is not None
+                    else None
+                )
+                if public_deployment.intake_schedule_hold is not None:
+                    result["intake_schedule_hold"] = (
+                        public_deployment.intake_schedule_hold.model_dump(
+                            mode="json", by_alias=True
+                        )
+                    )
         return result
 
     @app.get("/v1/competition/submissions")
@@ -278,6 +349,62 @@ def create_app(
         if item is None:
             raise HTTPException(404, "archived submission not found")
         return Response(content=item, media_type="application/json")
+
+    @app.get("/v1/competition/rounds/index")
+    async def rounds(
+        before_sequence: int | None = Query(default=None, ge=1, le=MAXIMUM_ROUND_SEQUENCE),
+        limit: int = Query(
+            default=min(20, limits.maximum_page_size), ge=1, le=limits.maximum_page_size
+        ),
+    ):
+        try:
+            page = await run_in_threadpool(
+                round_index,
+                store.path,
+                policy_sha256=digest(store.policy),
+                before_sequence=before_sequence,
+                limit=limit,
+            )
+
+            def attach_results():
+                for item in page["items"]:
+                    round_id = item["round_sha256"]
+                    try:
+                        source = resolve_source(
+                            public_results_directory, results_by_round, round_id
+                        )
+                    except (OSError, ValueError):
+                        # One broken publication must not hide other rounds.
+                        source = None
+                    item["results_url"] = (
+                        f"/v1/competition/rounds/{round_id}/results" if source else None
+                    )
+                return page
+
+            page = await run_in_threadpool(attach_results)
+            return page
+        except (OSError, ValueError, sqlite3.Error) as error:
+            raise HTTPException(503, "round index unavailable") from error
+
+    @app.get("/v1/competition/rounds/{round_sha256}/results")
+    async def public_results(
+        round_sha256: str,
+        offset: int = Query(default=0, ge=0, le=limits.maximum_page_offset),
+        limit: int = Query(
+            default=min(20, limits.maximum_page_size), ge=1, le=limits.maximum_page_size
+        ),
+    ):
+        try:
+            source = await run_in_threadpool(
+                resolve_source, public_results_directory, results_by_round, round_sha256
+            )
+            if source is None:
+                raise HTTPException(404, "public results not published")
+            return await run_in_threadpool(
+                public_results_page, store.path, source, offset=offset, limit=limit
+            )
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+            raise HTTPException(503, "public results unavailable") from error
 
     @app.get("/v1/competition/rounds/{round_sha256}")
     async def round_status(

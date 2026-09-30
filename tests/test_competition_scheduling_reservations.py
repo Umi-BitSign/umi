@@ -7,12 +7,14 @@ from dataclasses import replace
 
 import pytest
 
+from umi import competition_work_plans as plans
 from umi.competition_dispatch_capacity import (
     DispatchTimingBudget,
     DispatchTimingLimits,
     timing_profile_sha256,
 )
 from umi.competition_scheduling import _BLOCK_RESERVE_BYTES, AssignmentPublicationJournal
+from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.validator_plans import MAX_FINALITY_EVIDENCE_BYTES
 
@@ -26,6 +28,8 @@ from .test_competition_scheduling import (
 from .test_competition_scheduling import (
     schedule as schedule_fixture,
 )
+from .test_competition_work_admission_full_cohort import build_work_fixture
+from .test_competition_work_plans import runtime as runtime
 from .test_open_competition import policy as policy
 
 schedule = schedule_fixture
@@ -34,7 +38,9 @@ schedule = schedule_fixture
 @pytest.fixture
 def reserved_schedule(schedule, monkeypatch):
     monkeypatch.setattr(AssignmentPublicationJournal, "_qualify_capacity", lambda *args: {})
-    monkeypatch.setattr(AssignmentPublicationJournal, "_recover_capacity", lambda *args: {})
+    monkeypatch.setattr(
+        AssignmentPublicationJournal, "_recover_capacity", lambda *args, **kwargs: {}
+    )
     return schedule
 
 
@@ -174,6 +180,139 @@ def test_one_byte_short_budget_rolls_back_first_reservation_and_migration(reserv
         reserve(fixture, journal=short)
     assert state(short) == before
     assert before[0] == 1
+
+
+@pytest.mark.parametrize("miners", [6, 256])
+@pytest.mark.parametrize(
+    "issue_seconds,stride_blocks,capacity_gib,deadline_blocks",
+    [(64800, 7200, 32, 5475), (86400, 14400, 48, 7275)],
+)
+def test_future_cohort_reserves_full_proof_span_with_explicit_capacity(
+    policy,
+    runtime,
+    tmp_path,
+    monkeypatch,
+    miners,
+    issue_seconds,
+    stride_blocks,
+    capacity_gib,
+    deadline_blocks,
+):
+    work = build_work_fixture(
+        policy.model_copy(update={"maximum_inference_ms": 600000}),
+        runtime,
+        tmp_path,
+        count=miners,
+        profile="v2",
+        issue_allowance_seconds=issue_seconds,
+        response_window_seconds=900,
+        window_stride_blocks=stride_blocks,
+        policy_valid_through_block=20000,
+        submission_valid_through_block=19900,
+    )
+    publications = plans.endpoint_proposals(**work.options)
+    observed = work.options["issuance"]
+    announcement = work.options["announcement"]
+    evaluator = work.signers[0].hotkey.ss58_address
+    now = [observed.timestamp_ms]
+    monkeypatch.setattr("umi.competition_scheduling.time.time_ns", lambda: now[0] * 1_000_000)
+    directory = tmp_path / "future-scheduling"
+    journal = AssignmentPublicationJournal(
+        directory,
+        work.policy,
+        work.item.legacy_policy,
+        maximum_bytes=16 * 1024**3,
+    )
+    inbox = tmp_path / "future-inbox"
+    inbox.mkdir(mode=0o700)
+    journal.configure_dispatch(
+        evaluator_hotkey=evaluator,
+        limits=DispatchTimingLimits(
+            maximum_concurrency=128,
+            page_size=100,
+            poll_seconds=1,
+            discovery_grace_seconds=5,
+            request_timeout_seconds=615,
+        ),
+        budget=DispatchTimingBudget(
+            proof_collection_ms=750,
+            origin_collection_ms=3900,
+            publication_ingestion_ms=5600,
+            local_cycle_ms=250,
+            publication_delay_ms=10800000 if issue_seconds == 86400 else 7200000,
+            block_advance_numerator=1,
+            block_advance_denominator_ms=10000,
+            finality_headroom_blocks=12,
+            measurement_sha256=digest({"fixture": "future-proof-capacity", "synthetic": True}),
+        ),
+        publication_directory=inbox,
+    )
+    arguments = dict(
+        batch_id=digest(work.plan),
+        publications=publications,
+        observed=observed,
+        announcements=(announcement,),
+        evaluator_hotkey=evaluator,
+    )
+    before = state(journal)
+    with pytest.raises(ValueError, match="scheduling capacity exhausted"):
+        journal.reserve_batch(**arguments)
+    assert state(journal) == before
+
+    expanded = AssignmentPublicationJournal(
+        directory,
+        work.policy,
+        work.item.legacy_policy,
+        maximum_bytes=capacity_gib * 1024**3,
+    )
+    receipt = expanded.reserve_batch(**arguments)
+    assert len(receipt["publication_sha256s"]) == miners
+    with expanded._transaction() as db:
+        start, end = db.execute("SELECT proof_start,proof_end FROM reservation_batches").fetchone()
+        retained = db.execute(
+            "SELECT COUNT(*) FROM blocks WHERE height BETWEEN ? AND ?", (start, end)
+        ).fetchone()[0]
+        assert start == announcement.height
+        assert end == observed.height + deadline_blocks
+        assert MAX_FINALITY_EVIDENCE_BYTES == 4 * 1024**2
+        assert _BLOCK_RESERVE_BYTES == MAX_FINALITY_EVIDENCE_BYTES + 64 * 1024
+        allowance = expanded._proof_allowance(db)
+        assert allowance == (end - start + 1 - retained) * _BLOCK_RESERVE_BYTES
+        assert allowance > 16 * 1024**3
+        assert (
+            db.execute("SELECT COUNT(*) FROM reservation_assignments").fetchone()[0] == miners * 6
+        )
+        assert db.execute("SELECT COUNT(*) FROM reservation_publications").fetchone()[0] == miners
+        assert db.execute("SELECT COUNT(*) FROM reservation_qualifications").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    used = logical_bytes(expanded)
+    assert 16 * 1024**3 < used <= capacity_gib * 1024**3
+    if issue_seconds == 86400:
+        assert used * 10 <= capacity_gib * 1024**3 * 7
+    before = state(expanded)
+    restarted = AssignmentPublicationJournal(
+        directory,
+        work.policy,
+        work.item.legacy_policy,
+        maximum_bytes=capacity_gib * 1024**3,
+    )
+    assert restarted.reserve_batch(**arguments) == receipt
+    assert state(restarted) == before
+    with pytest.raises(ValueError, match="scheduling capacity exhausted"):
+        AssignmentPublicationJournal(
+            directory,
+            work.policy,
+            work.item.legacy_policy,
+            maximum_bytes=16 * 1024**3,
+        )
+    assert state(restarted) == before
+    now[0] += issue_seconds * 1000 + 1
+    with restarted._transaction() as db:
+        assert restarted._proof_allowance(db) == allowance
+    print(
+        f"future cohort miners={miners}, issue_seconds={issue_seconds}: "
+        f"proof_credit_bytes={allowance}, logical_bytes={used}"
+    )
 
 
 def test_assignment_budget_covers_entire_unsigned_cohort(reserved_schedule):

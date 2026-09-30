@@ -18,6 +18,7 @@ from umi import competition_work_signing as signing
 from umi.competition_dispatch_capacity import DispatchTimingBudget, DispatchTimingLimits
 from umi.competition_evaluator import EvaluatorJournal
 from umi.competition_execution import ExecutionJournal
+from umi.competition_policy_lineage import register_lineage
 from umi.competition_publication import (
     PublicationReplayLimits,
     SignedCutoffPublication,
@@ -46,6 +47,22 @@ signing_setup = _signing_setup
 @pytest.fixture
 def work(policy, runtime, tmp_path, request):
     count, profile = request.param
+    return build_work_fixture(policy, runtime, tmp_path, count=count, profile=profile)
+
+
+def build_work_fixture(
+    policy,
+    runtime,
+    tmp_path,
+    *,
+    count,
+    profile,
+    issue_allowance_seconds=5400,
+    response_window_seconds=300,
+    window_stride_blocks=None,
+    policy_valid_through_block=2000,
+    submission_valid_through_block=1900,
+):
     incumbent = bundle_at(tmp_path / "incumbent")
     item = build_authorization_fixture(
         policy.model_copy(
@@ -57,7 +74,11 @@ def work(policy, runtime, tmp_path, request):
         incumbent_sha256=digest(incumbent),
         case_count=CASES_PER_ENDPOINT,
         single_evaluator=True,
-        issue_allowance_seconds=5400,
+        issue_allowance_seconds=issue_allowance_seconds,
+        response_window_seconds=response_window_seconds,
+        window_stride_blocks=window_stride_blocks,
+        policy_valid_through_block=policy_valid_through_block,
+        submission_valid_through_block=submission_valid_through_block,
     )
     # The existing transport fixture supplies owned block/schedule evidence. V4
     # needs a new policy, suite, submissions and cutoff, not relabelled v2 bytes.
@@ -80,11 +101,39 @@ def work(policy, runtime, tmp_path, request):
         assert sum(c.stratum == "fingerspelling" for c in item.suite.cases) == 3
         assert sum(c.stratum == "continuous" and c.role == "scored" for c in item.suite.cases) == 12
     else:
-        assert profile == "v2"
+        assert profile in {"v2", "v2-successor"}
+    submission_policy = item.policy
+    submission_policies = (submission_policy,)
+    if profile == "v2-successor":
+        intermediate = CompetitionPolicy.model_validate_json(
+            canonical_json_bytes(
+                item.policy.model_copy(
+                    update={
+                        "sequence": item.policy.sequence + 1,
+                        "predecessor_sha256": digest(submission_policy),
+                        "maximum_inference_ms": item.policy.maximum_inference_ms * 2,
+                    }
+                )
+            )
+        )
+        item.policy = intermediate.model_copy(
+            update={
+                "sequence": intermediate.sequence + 1,
+                "predecessor_sha256": digest(intermediate),
+            }
+        )
+        register_lineage(item.policy, (intermediate, submission_policy))
+        submission_policies = (submission_policy, intermediate)
+        item.suite = item.suite.model_copy(update={"policy_sha256": digest(item.policy)})
     roster = tuple(
         sorted(
             (
-                submission(item.policy, name=f"CohortMiner{index}", start=1000, end=1900)
+                submission(
+                    submission_policies[index % len(submission_policies)],
+                    name=f"CohortMiner{index}",
+                    start=1000,
+                    end=item.publication.publication.submissions[0].submission.valid_through_block,
+                )
                 for index in range(count)
             ),
             key=lambda signed: digest(signed.submission),
@@ -263,9 +312,14 @@ def reopen_native_stores(setup):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "work",
-    [(77, "v2"), (256, "v2"), (77, "v4")],
+    [(77, "v2"), (256, "v2"), (77, "v4"), (256, "v2-successor")],
     indirect=True,
-    ids=("77-endpoints-six-cases", "256-endpoints-six-cases", "77-endpoints-v4-27-cases"),
+    ids=(
+        "77-endpoints-six-cases",
+        "256-endpoints-six-cases",
+        "77-endpoints-v4-27-cases",
+        "256-carried-endpoints",
+    ),
 )
 async def test_full_cohort_reserves_before_signing_and_survives_paged_restart(cohort, monkeypatch):
     worker, signer = cohort.workers[0], cohort.signers[0]
@@ -442,3 +496,53 @@ def test_endpoint_proposals_memo_still_rejects_a_stale_caller(work) -> None:
     stale["now_ms"] = work.options["now_ms"] + 3_600_000
     with pytest.raises(ValueError):
         endpoint_proposals(**stale)
+
+
+def test_future_control_fixture_supports_18h_and_extended_validity(policy, runtime, tmp_path):
+    fixture = build_work_fixture(
+        policy,
+        runtime,
+        tmp_path,
+        count=2,
+        profile="v2-successor",
+        issue_allowance_seconds=64800,
+        response_window_seconds=900,
+        window_stride_blocks=7200,
+        policy_valid_through_block=10000,
+        submission_valid_through_block=9900,
+    )
+    publications = plans.endpoint_proposals(**fixture.options)
+    assert len(publications) == 2
+    assert fixture.policy.valid_through_block == 10000
+    assert all(s.submission.valid_through_block == 9900 for s in fixture.plan.submissions)
+    clock = fixture.item.legacy_policy.clock
+    assert clock.issue_allowance_seconds == 64800
+    assert clock.response_window_seconds == 900
+    assert clock.window_stride_blocks == 7200
+    for publication in publications:
+        for assignment in publication.assignments:
+            assert assignment.request.deadline_block - assignment.request.issued_block == 5475
+            assert assignment.request.deadline_block < publication.round.evaluation_close_block
+
+
+def test_future_control_fixture_accepts_authorization_wrapper(
+    policy, runtime, tmp_path, monkeypatch
+):
+    from . import test_competition_work_admission_full_cohort as fixtures
+
+    build = fixtures.build_authorization_fixture
+
+    def future_window(*args, **kwargs):
+        kwargs.update(
+            issue_allowance_seconds=64800,
+            response_window_seconds=900,
+            window_stride_blocks=7200,
+            policy_valid_through_block=10000,
+            submission_valid_through_block=9900,
+        )
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(fixtures, "build_authorization_fixture", future_window)
+    fixture = fixtures.build_work_fixture(policy, runtime, tmp_path, count=2, profile="v2")
+    assert all(s.submission.valid_through_block == 9900 for s in fixture.plan.submissions)
+    assert len(plans.endpoint_proposals(**fixture.options)) == 2

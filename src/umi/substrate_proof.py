@@ -12,8 +12,10 @@ import json
 import math
 import os
 import re
+import selectors
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -23,6 +25,8 @@ from .pinned_artifact import PinnedArtifact, PinnedArtifactError, staged_pinned_
 REQUEST_SCHEMA = "umi-substrate-proof/1"
 EXTRINSICS_ROOT_REQUEST_SCHEMA = "umi-substrate-extrinsics-root/1"
 RESPONSE_SCHEMA = "umi-substrate-proof-result/1"
+READ_REQUEST_SCHEMA = "umi-substrate-proof-read/1"
+READ_RESPONSE_SCHEMA = "umi-substrate-proof-values/1"
 STATE_VERSION = 1
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -33,6 +37,7 @@ _ERROR_CODES = frozenset(
         "duplicate_node",
         "invalid_proof",
         "invalid_extrinsics_root",
+        "value_limit",
     }
 )
 
@@ -62,12 +67,78 @@ class SubstrateProofLimits:
     maximum_block_body_bytes: int = 64 * 1024 * 1024
     maximum_request_bytes: int = 160 * 1024 * 1024
     maximum_response_bytes: int = 4 * 1024
+    maximum_read_values_bytes: int = 32 * 1024 * 1024
+    maximum_read_response_bytes: int = 72 * 1024 * 1024
 
     def __post_init__(self) -> None:
         for field_name in self.__dataclass_fields__:
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{field_name} must be a positive integer")
+
+
+def _communicate_bounded(
+    process: subprocess.Popen,
+    payload: bytes,
+    *,
+    maximum_response_bytes: int,
+    timeout_seconds: float,
+) -> bytes:
+    """Drain one request and bounded response without blocking either pipe."""
+    deadline = time.monotonic() + timeout_seconds
+    output = bytearray()
+    position = 0
+    try:
+        with selectors.DefaultSelector() as selector:
+            os.set_blocking(process.stdin.fileno(), False)
+            os.set_blocking(process.stdout.fileno(), False)
+            selector.register(process.stdin, selectors.EVENT_WRITE)
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+                for key, _ in selector.select(remaining):
+                    stream = key.fileobj
+                    if stream is process.stdin:
+                        try:
+                            position += os.write(
+                                stream.fileno(), payload[position : position + 65536]
+                            )
+                        except BlockingIOError:
+                            continue
+                        except BrokenPipeError:
+                            position = len(payload)
+                        if position == len(payload):
+                            selector.unregister(stream)
+                            stream.close()
+                    else:
+                        try:
+                            chunk = os.read(
+                                stream.fileno(),
+                                min(65536, maximum_response_bytes + 1 - len(output)),
+                            )
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            selector.unregister(stream)
+                            stream.close()
+                        else:
+                            output.extend(chunk)
+                            if len(output) > maximum_response_bytes:
+                                raise SubstrateProofVerifierError("invalid_sidecar_response")
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        return bytes(output)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, OSError):
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdin.close()
+        process.stdout.close()
 
 
 class SubprocessStorageProofVerifier:
@@ -253,6 +324,34 @@ class SubprocessStorageProofVerifier:
         request_bytes: bytes,
         request_id: str,
     ) -> bool:
+        response = self._exchange_staged(
+            executable, request_bytes, maximum_response_bytes=self._limits.maximum_response_bytes
+        )
+        return self._check_response(response, request_id=request_id, schema=RESPONSE_SCHEMA)
+
+    @staticmethod
+    def _check_response(response: dict, *, request_id: str, schema: str) -> bool:
+        if response.get("schema") != schema or response.get("request_id") != request_id:
+            raise SubstrateProofVerifierError("invalid_sidecar_response")
+        if response.get("ok") is True:
+            if schema == RESPONSE_SCHEMA and set(response) != {"schema", "request_id", "ok"}:
+                raise SubstrateProofVerifierError("invalid_sidecar_response")
+            return True
+        if response.get("ok") is not False or set(response) != {
+            "schema",
+            "request_id",
+            "ok",
+            "error_code",
+        }:
+            raise SubstrateProofVerifierError("invalid_sidecar_response")
+        error_code = response.get("error_code")
+        if not isinstance(error_code, str) or error_code not in _ERROR_CODES:
+            raise SubstrateProofVerifierError("invalid_sidecar_response")
+        raise SubstrateProofVerifierError(error_code)
+
+    def _exchange_staged(
+        self, executable: Path, request_bytes: bytes, *, maximum_response_bytes: int
+    ) -> dict:
 
         process: subprocess.Popen[bytes]
         try:
@@ -268,22 +367,20 @@ class SubprocessStorageProofVerifier:
         except OSError as error:
             raise SubstrateProofVerifierError("sidecar_start_failed") from error
         try:
-            stdout, _ = process.communicate(
-                input=request_bytes + b"\n", timeout=self._timeout_seconds
+            stdout = _communicate_bounded(
+                process,
+                request_bytes + b"\n",
+                maximum_response_bytes=maximum_response_bytes,
+                timeout_seconds=self._timeout_seconds,
             )
         except subprocess.TimeoutExpired as error:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (AttributeError, OSError):
-                process.kill()
-            process.communicate()
             raise SubstrateProofVerifierError("sidecar_timeout") from error
 
         if process.returncode != 0:
             raise SubstrateProofVerifierError("sidecar_failed")
         if (
             not stdout
-            or len(stdout) > self._limits.maximum_response_bytes
+            or len(stdout) > maximum_response_bytes
             or not stdout.endswith(b"\n")
             or stdout.count(b"\n") != 1
         ):
@@ -294,23 +391,108 @@ class SubprocessStorageProofVerifier:
             raise SubstrateProofVerifierError("invalid_sidecar_response") from error
         if not isinstance(response, dict):
             raise SubstrateProofVerifierError("invalid_sidecar_response")
-        if response.get("schema") != RESPONSE_SCHEMA or response.get("request_id") != request_id:
+        return response
+
+    def read_many(
+        self,
+        *,
+        state_root: bytes,
+        storage_keys: tuple[bytes, ...],
+        proof: tuple[bytes, ...],
+        maximum_value_bytes: int | None = None,
+        maximum_total_value_bytes: int | None = None,
+    ) -> tuple[tuple[bytes, bytes | None], ...]:
+        """Extract all requested values from one proof, or return no result.
+
+        Requires the explicitly pinned helper to support the read protocol.
+        There is no fallback to unverified RPC values or to an older helper.
+        Empty bytes and proved absence remain distinct. Results are key sorted.
+        Caller limits are ceilings; stricter local and native limits also apply.
+        """
+        if (
+            not isinstance(storage_keys, tuple)
+            or not 1 <= len(storage_keys) <= self._limits.maximum_items
+        ):
+            raise ValueError("storage_keys must be a bounded tuple")
+        checked = self._preflight(
+            state_root=state_root, items=tuple((key, None) for key in storage_keys), proof=proof
+        )
+        keys = tuple(key for key, _ in checked)
+        value_limit = (
+            self._limits.maximum_value_bytes if maximum_value_bytes is None else maximum_value_bytes
+        )
+        total_limit = (
+            self._limits.maximum_read_values_bytes
+            if maximum_total_value_bytes is None
+            else maximum_total_value_bytes
+        )
+        for value in (value_limit, total_limit):
+            if type(value) is not int or value <= 0:
+                raise ValueError("proof read value bounds are invalid")
+        value_limit = min(value_limit, self._limits.maximum_value_bytes, 16 * 1024**2)
+        total_limit = min(total_limit, self._limits.maximum_read_values_bytes, 32 * 1024**2)
+        request = {
+            "schema": READ_REQUEST_SCHEMA,
+            "state_version": STATE_VERSION,
+            "state_root": "0x" + state_root.hex(),
+            "keys": ["0x" + key.hex() for key in keys],
+            "proof": ["0x" + node.hex() for node in proof],
+            "maximum_value_bytes": value_limit,
+            "maximum_total_value_bytes": total_limit,
+        }
+        raw = json.dumps(request, sort_keys=True, separators=(",", ":")).encode("ascii")
+        request_id = hashlib.sha256(b"umi-substrate-proof-read-v1\0" + raw).hexdigest()
+        request["request_id"] = request_id
+        raw = json.dumps(request, sort_keys=True, separators=(",", ":")).encode("ascii")
+        if len(raw) > self._limits.maximum_request_bytes:
+            raise ValueError("encoded proof request exceeds the byte limit")
+        try:
+            with self._staged_binary() as staged:
+                response = self._exchange_staged(
+                    staged["binary"],
+                    raw,
+                    maximum_response_bytes=min(
+                        self._limits.maximum_read_response_bytes,
+                        2 * total_limit + sum(2 * len(key) + 64 for key in keys) + 1024,
+                    ),
+                )
+        except PinnedArtifactError as error:
+            raise SubstrateProofVerifierError(error.reason_code) from error
+        self._check_response(response, request_id=request_id, schema=READ_RESPONSE_SCHEMA)
+        if (
+            set(response) != {"schema", "request_id", "ok", "state_version", "state_root", "items"}
+            or type(response["state_version"]) is not int
+            or response["state_version"] != STATE_VERSION
+            or response["state_root"] != request["state_root"]
+            or not isinstance(response["items"], list)
+            or len(response["items"]) != len(keys)
+        ):
             raise SubstrateProofVerifierError("invalid_sidecar_response")
-        if response.get("ok") is True:
-            if set(response) != {"schema", "request_id", "ok"}:
+        result, total = [], 0
+        for key, item in zip(keys, response["items"], strict=True):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"key", "value"}
+                or item["key"] != "0x" + key.hex()
+            ):
                 raise SubstrateProofVerifierError("invalid_sidecar_response")
-            return True
-        if response.get("ok") is not False or set(response) != {
-            "schema",
-            "request_id",
-            "ok",
-            "error_code",
-        }:
-            raise SubstrateProofVerifierError("invalid_sidecar_response")
-        error_code = response.get("error_code")
-        if not isinstance(error_code, str) or error_code not in _ERROR_CODES:
-            raise SubstrateProofVerifierError("invalid_sidecar_response")
-        raise SubstrateProofVerifierError(error_code)
+            encoded = item["value"]
+            if encoded is None:
+                value = None
+            else:
+                if (
+                    not isinstance(encoded, str)
+                    or len(encoded) > 2 * value_limit + 2
+                    or len(encoded) % 2 != 0
+                    or re.fullmatch(r"0x[0-9a-f]*", encoded) is None
+                ):
+                    raise SubstrateProofVerifierError("invalid_sidecar_response")
+                value = bytes.fromhex(encoded[2:])
+                total += len(value)
+                if total > total_limit:
+                    raise SubstrateProofVerifierError("invalid_sidecar_response")
+            result.append((key, value))
+        return tuple(result)
 
     def verify_many(
         self,
@@ -409,6 +591,8 @@ class SubprocessStorageProofVerifier:
 
 __all__ = [
     "EXTRINSICS_ROOT_REQUEST_SCHEMA",
+    "READ_REQUEST_SCHEMA",
+    "READ_RESPONSE_SCHEMA",
     "REQUEST_SCHEMA",
     "RESPONSE_SCHEMA",
     "STATE_VERSION",

@@ -2,14 +2,26 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from umi import competition_successor_publisher_cli as cli
 from umi.competition_launch import PublicLaunchIdentity
+from umi.competition_package import load_competition_package, prepare_competition_package
+from umi.competition_policy_lineage import clear_lineage_registry, registered_lineage
+from umi.competition_successor_feed import SuccessorPublicationFeed
+from umi.competition_successor_publication import (
+    SignedSuccessorRoundPublication,
+    verify_successor_round_publication,
+)
+from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
 from .competition_checkpoint import bind_submission_checkpoint
+from .test_competition_publication import _scenario
+from .test_competition_successor_feed import feed_case as feed_case
+from .test_competition_successor_publication import authority_wallets
 from .test_competition_successor_publisher import (
     chain_config as chain_config,
 )
@@ -163,3 +175,219 @@ def test_cli_rejects_nonprivate_input_without_printing_payload(config, tmp_path,
     assert out.out == "" and "publication rejected" in out.err
     assert config.authorization_wallet.wallet_path not in out.err
     assert config.plan.policy_sha256 not in out.err
+
+
+@pytest.fixture
+def retained_successor(
+    config, guarded, policy, replay_limits, package_limits, release_identity, tmp_path, monkeypatch
+):
+    """Old signed submissions, two operational successors, real certificates/package."""
+    middle = policy.model_copy(
+        update={
+            "sequence": policy.sequence + 1,
+            "predecessor_sha256": digest(policy),
+            "maximum_inference_ms": policy.maximum_inference_ms * 2,
+        }
+    )
+    current = middle.model_copy(
+        update={"sequence": middle.sequence + 1, "predecessor_sha256": digest(middle)}
+    )
+    predecessors = (middle, policy)
+    root = tmp_path / "carried"
+    scenario = _scenario(
+        policy,
+        root / "scenario",
+        replay_limits,
+        successor_policy=current,
+        predecessor_policies=predecessors,
+    )
+    prepared = prepare_competition_package(
+        policy=current,
+        cutoff_certificate=scenario.cutoff_certificate,
+        settlement_certificate=scenario.settlement_certificate,
+        retained_settlement=scenario.settlement,
+        roster=scenario.submissions,
+        evidence=scenario.evidence,
+        replay_limits=replay_limits,
+        release_identity=release_identity,
+        destination_root=root / "packages",
+        limits=package_limits,
+    )
+    checkpoint = root / "checkpoint"
+    store = bind_submission_checkpoint(scenario.store, config.public_launch, checkpoint)
+    with store._connection() as db:
+        retained_bytes = db.execute(
+            "SELECT digest,body FROM submissions ORDER BY digest"
+        ).fetchall()
+    assert {s.submission.policy_sha256 for s in scenario.submissions} == {digest(policy)}
+    wallets = tuple(
+        config.authorization_wallet.model_copy(update={"hotkey_name": f"release{i}"})
+        for i in range(2)
+    )
+    config = config.model_copy(
+        update={
+            "plan": config.plan.model_copy(update={"policy_sha256": digest(current)}),
+            "chain": config.chain.model_copy(update={"policy_sha256": digest(current)}),
+            "intake_directory": str(store.directory),
+            "submission_head_checkpoint_directory": str(checkpoint),
+            "publication_directory": str(root / "publication"),
+            "replay_directory": str(root / "replay"),
+            "authorization_wallet": wallets[0],
+            "directive_wallets": wallets,
+        }
+    )
+    events = []
+
+    class Provider(type(guarded.provider)):
+        def __init__(self, chain, supplied_policy):
+            self.config, self.policy = chain, supplied_policy
+            events.append("provider")
+
+        async def start(self):
+            events.append("start")
+
+        async def wait_ready(self):
+            events.append("ready")
+
+        async def aclose(self):
+            events.append("close")
+
+    def load(self):
+        events.append("wallet")
+        return authority_wallets()[int(self.hotkey_name.removeprefix("release"))]
+
+    # Only chain I/O and wallet resolution are doubled. Store/checkpoint source
+    # validation, certificate/package replay and publication signatures are native.
+    monkeypatch.setattr(cli, "FinalizedRegistrationProvider", Provider)
+    monkeypatch.setattr(cli.AuthorityWallet, "load", load)
+    inputs = root / "inputs"
+    inputs.mkdir(mode=0o700)
+
+    def write(name, value):
+        path = inputs / name
+        path.write_bytes(canonical_json_bytes(value))
+        path.chmod(0o600)
+        return str(path)
+
+    argv = [
+        "--config",
+        write("config.json", config),
+        "--policy",
+        write("policy.json", current),
+        "--prepared-package",
+        write("prepared.json", prepared),
+    ]
+    predecessor_paths = [write(f"predecessor-{i}.json", p) for i, p in enumerate(predecessors)]
+    try:
+        yield SimpleNamespace(
+            argv=argv,
+            predecessor_paths=predecessor_paths,
+            current=current,
+            config=config,
+            prepared=prepared,
+            store=store,
+            retained_bytes=retained_bytes,
+            events=events,
+            release_identity=release_identity,
+            package_limits=package_limits,
+            root=root,
+            write=write,
+        )
+    finally:
+        Path(prepared.package_path).chmod(0o700)
+
+
+@pytest.mark.parametrize("mode", ["prepared", "follow"])
+def test_cli_publishes_retained_predecessor_submissions_with_explicit_lineage(
+    retained_successor, feed_case, mode, capsys
+):
+    case = retained_successor
+    clear_lineage_registry()
+    argv = case.argv + [
+        argument for path in case.predecessor_paths for argument in ("--predecessor-policy", path)
+    ]
+    if mode == "follow":
+        certificates = case.root / "completed"
+        certificates.mkdir(mode=0o700)
+        manifest = json.loads((Path(case.prepared.package_path) / "manifest.json").read_bytes())
+        descriptor = certificates / (manifest["settlement_publication_sha256"] + ".package.json")
+        descriptor.write_bytes(canonical_json_bytes(case.prepared))
+        descriptor.chmod(0o600)
+        follow = cli.SuccessorFollowConfig(
+            schema="umi-successor-follow-config/1",
+            certificate_directory=str(certificates),
+            package_directory=str(Path(case.prepared.package_path).parent),
+        )
+        execution = feed_case.config.execution
+        chain = execution.weights.chain.model_copy(update={"policy_sha256": digest(case.current)})
+        feed = feed_case.config.model_copy(
+            update={
+                "directory": str(case.root / "feed"),
+                "plan": case.config.plan,
+                "execution": execution.model_copy(
+                    update={"weights": execution.weights.model_copy(update={"chain": chain})}
+                ),
+            }
+        )
+        # Replace the supplied-package option, retaining both explicit predecessors.
+        argv = (
+            argv[:4]
+            + argv[6:]
+            + [
+                "--follow-config",
+                case.write("follow.json", follow),
+                "--feed-config",
+                case.write("feed.json", feed),
+                "--once",
+            ]
+        )
+    cli.main(argv)
+    output = capsys.readouterr().out
+    if mode == "follow":
+        assert json.loads(output)["status"] == "published"
+        history = SuccessorPublicationFeed(feed).history()
+        assert len(history) == 1
+        signed = history[0]
+    else:
+        signed = SignedSuccessorRoundPublication.model_validate_json(output)
+    package = load_competition_package(
+        Path(case.prepared.package_path),
+        expected_package_sha256=case.prepared.package_sha256,
+        expected_policy_sha256=digest(case.current),
+        observed_release=case.release_identity,
+        limits=case.package_limits,
+    )
+    verify_successor_round_publication(case.config.plan, signed, package)
+    assert signed.intent.package.package_sha256 == case.prepared.package_sha256
+    assert signed.intent.authorization.policy_sha256 == digest(case.current)
+    assert case.events == ["provider", "start", "ready", "wallet", "wallet", "wallet", "close"]
+    with case.store._connection() as db:
+        assert db.execute("SELECT digest,body FROM submissions ORDER BY digest").fetchall() == (
+            case.retained_bytes
+        )
+    assert registered_lineage(case.current).admitted_policy_sha256s == (digest(case.current),)
+
+
+@pytest.mark.parametrize("selection", [(), (0,), (1, 0)])
+def test_cli_rejects_missing_or_reordered_predecessors_before_authority_access(
+    retained_successor, selection, capsys
+):
+    case = retained_successor
+    # Leave the fixture's correct process registry in place: it must not mask
+    # missing operator inputs on this invocation.
+    before = registered_lineage(case.current).admitted_policy_sha256s
+    assert len(before) == 3
+    argv = case.argv + [
+        argument
+        for index in selection
+        for argument in ("--predecessor-policy", case.predecessor_paths[index])
+    ]
+    with pytest.raises(SystemExit) as error:
+        cli.main(argv)
+    assert error.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == "" and "publication rejected" in output.err
+    assert digest(case.current) not in output.err
+    assert not case.events
+    assert not Path(case.config.publication_directory).exists()
+    assert registered_lineage(case.current).admitted_policy_sha256s == before

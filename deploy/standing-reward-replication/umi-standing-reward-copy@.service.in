@@ -1,0 +1,26 @@
+[Unit]
+Description=UMI standing reward evidence replication (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+UMask=0077
+EnvironmentFile=@CONFIG_DIRECTORY@/%i.env
+LoadCredential=rclone.conf:@CONFIG_DIRECTORY@/%i.rclone.conf
+LoadCredential=filters:@CONFIG_DIRECTORY@/%i.filters
+ExecStart=@RCLONE@ copy ${SOURCE} ${DESTINATION} --config %d/rclone.conf --filter-from %d/filters --immutable --checksum --no-update-modtime --transfers 16 --checkers 8 --retries 3 --low-level-retries 3 --contimeout 30s --timeout 2m --stats 0 --log-level ERROR
+# Per-request timeouts retry work; elapsed wall time never expires the archive.
+TimeoutStartSec=infinity
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@LOCAL_ARCHIVE_ROOT@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# SDK/backend errors can include credentials and URLs. systemd retains the
+# numeric process exit status; native consumers log bounded retry reasons.
+StandardOutput=null
+StandardError=null

@@ -4,16 +4,61 @@
 
 - [Successor supervisor upgrade requirements](#successor-supervisor-upgrade)
 
+## Supervisor maintenance for an installed successor
+
+A supervisor fix can retain the installed worker release, reward package,
+signed directive history and original recovery journals. Stage the replacement
+under its own revision and signed host manifest. A root-owned
+`/etc/umi/validator-supervisor-maintenance.json` selects that host for the exact
+configuration and installation receipt, using `umi-supervisor-host-maintenance/1`.
+It contains their SHA-256 digests, the original host manifest digest and the new
+signed host artifact. The replacement must satisfy the installed release authority.
+
+After native stop/cleanup, select the new executable and read-only host mount in
+the existing service. Startup verifies both the original activation controls and
+the replacement's source/interpreter, and reports the effective host identity.
+Retain the original host and controls while worker or recovery consumers use them.
+Keep the maintenance approval while this executable is selected; remove it after
+a later installed transition no longer depends on the original receipt.
+
+The supervisor reuses immutable package verification within one process, checking
+all file bytes and bounds on each load. Restart verifies the package again. Reward
+authority and current chain state are checked separately for each execution.
+
+### Worker source fixes for an existing certified allocation
+
+A certified allocation can pin an older OCI release. An approved source fix
+keeps that release, package and admission unchanged, and mounts the signed host's
+`src/umi` read-only into the worker. It cannot change dependencies or native
+helpers in the image; qualification must exercise the fix with the pinned image.
+
+For an initial upgrade, include `worker_source_overlay` in the root-owned
+operator consent **before sealing the installation receipt**. Its exact scope is
+`package_sha256`, `release_bundle_sha256`, `recipient_amendment_sha256` and an
+optional `successor_recipient_amendment_sha256`. This requires consent for
+`competition_weights` and the continuing reward authority. The source is the
+original signed host selected by `approved_host_manifest_sha256`.
+
+The sealed consent survives interrupted installation and restart. Do not append
+the scope to an existing receipt. On each worker launch, the host verifies the
+source files and the allocation scope; a mismatch stops launch. Consent without
+this field keeps the original image-only behavior and serialization.
+
+For an installed successor, `umi-supervisor-host-maintenance/2` can explicitly
+authorize a replacement worker source using the same `worker_overlay` scope.
+Host-only maintenance retains an initial source approval. Keep its original host
+tree available while that approval is in use. Services using `RootDirectory`
+must retain read-only bindings for both the original and replacement host trees.
+Container labels identify the signed host supplying the worker source.
+
 <a id="successor-supervisor-upgrade"></a>
 
 ## Successor supervisor upgrade requirements
 
-Status: implemented upgrade command with synthetic native Linux migration
-coverage. This document does not approve production artifacts or a transition.
-Keep UID 0 and UID 54 on their existing bridge policy until an authorized
-transition, explicit replacement or revocation. The current ongoing bridge has
-no scheduled sunset; historical finite bridge policies keep their original
-cutoffs.
+Use the installed upgrade command only with qualified artifacts and controls
+for the specific installation. Keep its current policy until an authorized
+transition, explicit replacement or revocation. An ongoing bridge has no
+scheduled sunset; finite signed bridge policies keep their original cutoffs.
 
 <a id="successor-supervisor-upgrade--available-read-only-inspection"></a>
 
@@ -60,15 +105,6 @@ and 64 MiB, with the runtime's configured journal limits enforced separately.
 Smaller continuations keep the existing page encoding. HTTP delivery cannot
 substitute a different local continuation, including through its cache.
 
-Thirteen focused tests passed on the Studio Linux VM, covering 68-update
-catch-up, restart, host verification and HTTP delivery. They took 751.00 seconds.
-The separate Linux exchange test exposed an old page parser in the anchor
-reader. That reader and the target observer now accept the bounded local history;
-their integrated rerun passed four cases in 357.99 seconds. The broader
-adapter/materializer regression passed 102 tests in 3246.16 seconds before the
-shared-registry change below. Synthetic test authority keys are reused within
-each generated chain. No live validator was upgraded.
-
 <a id="successor-supervisor-upgrade--shared-recovery-registry-history"></a>
 
 #### Shared recovery-registry history
@@ -92,18 +128,31 @@ Stopped recovery audits each retained run, then retains only authorization
 identities between audits. It reconstructs the relevant history again when
 reconciling an unsettled transaction. No attempt or recovery source is discarded.
 
-The first shared-storage snapshot passed 11 focused tests in 245.98 seconds,
-including lossless 68-record reconstruction, prefix storage growth, legacy
-record preservation and atomic insertion failure. The expanded link-validation
-suite passed 11 tests in 476.15 seconds, including missing nodes, broken links
-with recomputed storage checksums, reference/head mismatches and depth bounds.
-The recovery regression passed 45 tests in 1391.01 seconds. The registry still
-has its configured byte and record limits. All 18 repository checks passed for
-`1448bba`, including the complete Python suites and both Linux architectures.
-
 <a id="successor-supervisor-upgrade--download-history-bindings"></a>
 
 #### Download history bindings
+
+Hosts co-located with a private delivery service can include
+`artifacts/successor-delivery.json` in their signed host artifact. The canonical
+file uses schema `umi-successor-cohost-delivery/1`, an exact `https://HOST` origin
+matching the installed directive URL, a `loopback_port` from 1024 through 65535,
+and a `timeout_seconds` bound no greater than 300. The operator consent pins
+the host manifest, which pins this root-owned, read-only file. A host without
+this signed file retains public HTTPS delivery. Worker inputs and observer
+configuration schemas remain unchanged.
+
+Only the selected origin connects to `127.0.0.1` over HTTP. Signed logical URLs,
+object sizes, hashes, signatures, continuation checks and redirect rejection
+remain enforced. Other origins still require public-address HTTPS. Bind the
+private feed to loopback, including the exact selected release archive route;
+do not publish protected evidence to a public bucket. This transport choice
+does not extend a reward authorization or a round's validity.
+
+When preparing initial history through the same local service, pass
+`fetch-initial-successor-history --signed-host-artifact PATH`. The signed
+manifest must match the consent, and its optional delivery file must match the
+staged host. Omitting the option keeps public HTTPS. Initial-history collection
+still does not authorize or perform a validator switch.
 
 When the runtime supplies its retained continuation, delivery stores only
 `history-binding.json`, a bounded hash/size/selected-head binding. The full signed
@@ -116,8 +165,7 @@ An existing `history.json` from an earlier version is preserved and checked
 against the supplied bytes on every refetch. A changed continuation for an
 already cached head, corrupt binding or differing legacy file fails closed.
 Older delivery binaries reject the new cache filename; rollback over these
-cache entries is unsupported. The focused delivery regression passed five tests
-in 264.03 seconds. Package/object capacity limits remain in effect.
+cache entries is unsupported. Package/object capacity limits remain in effect.
 
 <a id="successor-supervisor-upgrade--retiring-redundant-materialized-inputs"></a>
 
@@ -139,10 +187,7 @@ or recovery inputs stop cleanup. All traversal and accounting limits remain.
 Only exact redundant cache copies are removed; they can be reconstructed from
 the retained sources. Cleanup does not grant weight or activation authority.
 
-The initial 11-test interruption and repeated-round suite passed on the Studio
-in 346.11 seconds. Additional bounded-rescan and inode-alias checks, plus the
-surrounding materializer/adapter regression, are running. Full checks must pass
-before deployment. Older binaries do not recognize an interrupted `retiring-*`
+Older binaries do not recognize an interrupted `retiring-*`
 entry; complete recovery with this version before attempting a rollback.
 
 <a id="successor-supervisor-upgrade--initial-history-after-multiple-feed-pages"></a>
@@ -192,6 +237,802 @@ remains unperformed.
 <a id="successor-supervisor-upgrade--worker-and-host-components"></a>
 
 #### Worker and host components
+
+Standing reward execution requires a separate local approval binding the exact
+installation receipt, host manifest, validator, series, policy, replay manifest,
+chain configuration and C4 handoff plan. `competition_reward_host` reads this
+root-owned approval before stopping C4 and binds the transaction journal to the
+original supervisor database. Startup must reopen that journal; missing state
+cannot become an empty replacement. Capacity increases preserve its identity.
+
+`competition_reward_service` owns proof providers and holds the original C4
+handoff through executor shutdown. Transient failures retry with retained state;
+an exited finality observer ends the service invocation so boot supervision can
+construct a new provider. Startup reconstructs the first activation from complete
+retained control history and replays its original reward package. A successor or
+revocation in that history does not erase the initial handoff. Historical replay
+uses the retained proofs and a fixed target block while catching up; it grants no
+current submission authority. The executor checks fresh control before signing.
+Cancellation drains owned signing work before releasing the writer locks.
+
+The supervisor selects `standing-reward-boot.json` beside its existing supervisor
+configuration when that file is present. This works with the installed service
+command and its original process lock; no second service or command override is
+needed. `--standing-config` selects an explicit path instead. It reads a canonical
+root-owned mode-0444
+`umi-standing-reward-boot/1` configuration and its separate host approval before
+the startup stop. The configuration selects the series, replay and opportunity
+manifest, current and legacy chain configurations, eligibility runtime, handoff
+plan, private input directories and resource capacities. It supplies no callbacks
+or executable plugins. An absent default file keeps the existing C4 path. A
+missing explicit file, dangling link, unreadable file or invalid approval rejects
+startup before stopping the existing worker. Install the approval and all inputs
+before publishing the default file; remove no original journals during selection.
+
+During initial history/package replay, the original supervisor continues C4
+reconciliation. The durable handoff intent stops that continuation before C5
+signing, including after restart. A failed old feed does not prevent independent
+C5 recovery. Status logs identify bootstrap progress, holds and transaction
+progress without enabling HTTP-client logging.
+`standing_service_stage` reports entry into initial control collection, replay,
+legacy handoff, journal binding and signer/executor startup. A
+`standing_service_retry` includes the failed `stage` and exception type without
+exception text or credentials. A stage entry records attempted work; use the
+retained journal and finalized chain update to confirm completion.
+
+Legacy configurations retain their original bytes and digests. Each selects
+host-local `CompetitionChainResources` for tools, chain specification, optional
+metadata and a separate cache; all verification hashes still come from the
+original configuration. Mutable stores must be disjoint. Do not copy a live
+SQLite cache or rewrite old signed inputs to relocate it.
+
+The private delivery directory supplies canonical `packages/<sha>.json`,
+`decisions/<sha>.json`, `opportunities/<sha>.json` and `witnesses/<sha>.json`.
+Decisions use the signed body's digest; the other files use the complete object's
+digest. These files are content, not authority. Native consumers verify the
+signatures, original evidence, complete control history and current chain state.
+Opportunity replay also requires original interval and endpoint proofs. The
+independently populated promotion store must contain the authenticated model
+assets and lineage required by package replay.
+
+The installed service automatically discovers the effective activation from
+complete finalized control history and collects opportunity evidence for every
+designated validator. Each bounded pass retains progress; failures retry without
+expiring the cohort. Original evidence must be replayed after restart. A durable
+completion identity is retained before publishing its immutable certificate and
+witnesses into the delivery directory, so interrupted publication retries the
+same content. Collection and discovery retry independently: retained evidence
+can finish even when new head discovery or the coordinator is unavailable.
+Collection logs report pending coverage, retry causes and completion identities.
+The service supervises the collector and drains its work before closing proof
+providers. Completion establishes the configured opportunity, not a payment
+receipt.
+
+The explicit, disjoint `proof_export_directory` receives original proof objects
+and frames automatically during history replay and interval collection. An
+interrupted write retries the same bytes before advancing the local cursor or
+crediting an interval. Objects are published before their frame. The separate
+`proof_import_directory` accepts transferred frames; native readers verify every
+proof before populating a recovery journal or crediting time. An imported block
+number cannot choose the history target before its chain proof is verified.
+Restart requires native replay even when all archive files are already present.
+
+Private R2 replication uses the [copy service and timer templates](../../deploy/standing-reward-replication/)
+with [rclone's R2 backend](https://developers.cloudflare.com/r2/examples/rclone/).
+Stage a verified rclone executable and replace the template paths and service
+account. Each upload/download job has its own root-owned environment file and
+private credential file supplied through `LoadCredential`. Use a private bucket,
+separate bucket-scoped publisher/read-only receiver credentials, and a distinct
+series/producer prefix. Use separate jobs for `reward-proofs/v1/` and
+`reward-inputs/v1/`. The latter carries packages, signed decisions, opportunity
+certificates and witnesses into the configured `delivery_directory`; it is
+separate from proof imports and native journals. Configure filesystem capacity
+for all archive and delivery roots
+in addition to the native journals; do not point replication at a journal,
+wallet, model store or general home directory.
+
+Install the selected `profiles/reward.filters` as `JOB.filters` alongside each
+`JOB.env` and `JOB.rclone.conf`. The unit loads this file through `LoadCredential`
+too; it must exist before starting the updated unit. This profile includes
+registration frames as well as their content objects. Additional cohort transfer
+profiles and the exact producer/consumer mapping are documented in the
+[round operator guide](../operators/rounds.md#private-cohort-delivery).
+
+`review_reward_decision` checks the proposed admission or activation against
+original native control history and the approved manifest. Admission requires
+the reserved empty control history. Activation replays the reward package and
+model evidence; successor activation also requires the preceding cohort's
+natively verified minimum opportunity. The first activation binds the approved
+legacy handoff plan; each validator still drains its own writer at execution.
+
+`RewardDecisionSigner` retains that exact reviewed intent and reserves result
+capacity before signing. Partial independent votes and the first valid quorum
+survive restart. A retry cannot replace an unfinished decision or sign a fork;
+cancellation drains signing and persistence before releasing the process lock.
+Original proofs, packages and model assets must remain in their durable stores
+so an unsigned intent can be reviewed again at its original block after restart.
+
+The signer's `publish` operation retains quorum before calling
+`retain_standing_reward_inputs`. That delivery boundary checks the complete
+signed prefix and package identities, retains packages before decisions and
+preserves the first valid signature envelope. Interrupted export retries the
+original bytes; completed packages need no source fetch.
+Model/promotion assets use their separate preservation and native import path.
+
+`StandingControlPublisher` consumes that complete certified prefix and local
+delivery readback. It proves the current reserved control slot and every write
+since authority issuance, then retains the exact mortal transaction and its
+original nonce, control and runtime evidence before transmission. A lost reply
+holds the attempt until fresh finalized evidence consumes its nonce or passes
+its mortality period. Recovery verifies retained proofs and signed bytes;
+it cannot overwrite a different predecessor. `control_finalized` requires the
+intended decision in the complete finalized history and does not assert weight
+submission or miner payment.
+
+Its recurring loop retries without renewing cohort authority. Initial series
+admission still needs timely approval before intake opens; subsequent certified
+cohorts have no processing expiry. The local process lock excludes another
+publisher using the same state root. Installed host ownership must also prevent
+another host or state root from using the reserved hotkey during migration.
+`StandingRewardCoordinator` selects the next admitted cohort, performs native
+review, retains its decision before requesting signatures, collects independent
+votes and waits for separate delivery readback before using the publisher.
+Invalid unreviewed offers cannot reserve a sequence. Once reviewed, an unfinished
+decision retains its original block and signatures across retries and restarts.
+While waiting for votes, the process reuses its completed review; after restart
+it reconstructs the review from retained proofs. Certified ancestor decisions
+can be delivered after migration without inventing new ancestor votes.
+
+`umi-reward-coordinator check --config /etc/umi/reward-coordinator/NAME.json`
+validates the root-owned, mode `0444`, canonical
+`umi-reward-coordinator-config/1` document without loading keys or starting a
+provider. `run` assembles native proof readers, durable journals and the selected
+`coordinator` or `reviewer` role. Configuration binds the approved series, policy,
+opportunity terms, handoff and chain context, explicit storage capacities and
+the primary RPC plus two fallbacks. Each mutable store must have a distinct
+private directory; named hotkey files must remain outside those stores.
+
+The coordinator loads its evaluator key and the reserved control key. Reviewers
+load only their evaluator key and independently replay the original proposal
+before signing. The proposer retains its vote before exporting
+`requests/SERIES/SEQUENCE.json`; peers export signed replies as
+`votes/SERIES/SEQUENCE/ACCOUNT.json`. These paths carry approved fixed sequence
+slots, authenticated canonical data and no executable callbacks. Missing delivery
+retries indefinitely; a restart reuses the original intent and signature.
+
+`NativeRequestProgressSource` supplies the request phase controller with native
+queue completion. The owning runtime supplies actual admission/dispatch readiness
+and finalized observations. This runtime requires version 2 standing cohort
+authority, so missing terminal work cannot demand another signed window extension.
+Legacy closure and replay consumers retain their original contracts.
+Unknown intervals restore service time. Once the
+compensated request window is satisfied, the observer retains its window fence,
+seals each configured queue and waits for every benchmark evaluator and accepted
+service job to provide its original terminal. Missing work stays pending without
+an age cutoff. A completed observation retains the entire replay read-set before
+it becomes available for certification.
+
+`RequestProgressReviewer` reads through that owner, replays its service history,
+queue seals and complete closure, and independently checks the original phase
+and participation proofs. It plugs into `CohortProgressSigner` and
+`CertifiedPhaseObserver`; the controller retains the exact observation before
+collecting votes. These ports require a configured owning runtime and its
+readiness probes. Remote deployments still need authenticated owner exports;
+do not point a reviewer at another process's live SQLite files. Preserve the
+intake, request-completion, queue and signing journals together on migration.
+
+Intake can use `RemoteIntakeProgressReviewer` with `IntakeReviewExporter` in the
+owning process. The exporter copies the original decision inputs, service
+observation prefix and complete sealed consent inventory under the intake lock.
+The independent reviewer reconstructs the seal and outage accounting, checks
+registration archives with its own finality provider, then requests the same
+evidence again before signing. Each response signs a fresh challenge using the
+configured owner's evaluator identity. A saved response cannot satisfy a later
+challenge, and a changed history or disconnected owner delays a new vote.
+Completed signing-journal votes remain available offline.
+
+For remote delivery, explicitly install `intake_review_routes` on a private host
+API and use `IntakeReviewHTTPClient` at the reviewer. The route is
+`POST /internal/cohorts/intake-review`; it requires a private bearer credential,
+bounds request size and allows one export at a time. The client accepts a
+configured HTTPS origin, refuses redirects and bounds received bytes. Both ends
+drain cancelled operations before releasing capacity. The public intake API does
+not enable this route or load a wallet. The enclosing host must supply its
+approved export signer, private transport credential and original registration
+archive delivery. The owner's signature authenticates local service observations;
+it does not independently prove network availability.
+
+Preparation uses `PreparationReviewExporter` and
+`RemotePreparationProgressReviewer`. Its private route is
+`POST /internal/cohorts/preparation-review`. The reviewer reconstructs the exact
+prepared round from every original consent, the certified intake closure and all
+selected participant admissions. It independently checks original registration
+archives and looks up the selected promotion in its own preserved promotion
+store. Configure the allowed tracks locally. An owner's claimed promotion or a
+selected-only intake export cannot replace that evidence. Retries retain the
+original preparation and incumbent even after a newer promotion becomes current.
+Fresh owner challenges and a second local promotion replay detect changes during
+review. Supply original model/promotion evidence and archive replication before
+enabling this service.
+
+Request completion uses `RequestReviewExporter` and
+`RemoteRequestProgressReviewer` at `POST /internal/cohorts/request-review`.
+Configure the certified prepared roster, complete service catalog set and
+transport policy at the reviewer. The export cannot change those selections.
+It contains the owner's original service observations, queue seals, intake and
+exact terminal replay objects. Local and remote review use the same native
+closure verifier. Missing responses, changed objects or an incomplete accepted
+inventory prevent completion; no new inference is performed by review. The
+reviewer independently checks original registration archives and rereads the
+authenticated owner after proof verification. The owner must be explicitly
+trusted to report its service observations and complete queue inventories; its
+signature does not prove network availability. Preserve unresolved work and
+increase operational storage/transport capacity if delivery cannot fit. A
+transport timeout does not expire the cohort.
+
+`phase_vote_routes` exposes the native durable signer on private progress and
+decision routes under `/internal/cohorts/PHASE/votes/`. Configure one selected
+phase, reviewer and private bearer credential. `PhaseVotePeer` connects those
+routes to `CertifiedPhaseObserver` without a coordinator-side signing key. The
+peer verifies the returned signature against the exact requested body and
+configured reviewer identity. A successful HTTP response alone is insufficient.
+The existing signing journal preserves original intents, committed votes and
+decision exclusivity across retries. Committed votes can be redelivered after
+the owner advances or disconnects. Transport timeouts cancel and drain the request;
+they do not expire its cohort or authorize a different decision. These routes
+are explicit host components, not default public API endpoints.
+
+Run a private reviewer with `umi-cohort-phase-review run --config CONFIG.json`.
+The `check` action validates the selection without opening the signer or proving
+runtime readiness. The configuration is canonical, root-owned mode `0444` and
+uses `umi-cohort-phase-review-service/1` for phase votes, or
+`umi-cohort-phase-review-service/2` with
+`service_signing` for service-request and retry votes. Version three adds
+`admission_signing` (`CohortAdmissionSignerConfig`) and can also select
+`service_signing`. Version four adds independent model-artifact votes through
+`model_signing`; see [artifact review configuration](../operators/settlement.md#recoverable-cohort-model-awards).
+Earlier versions keep their original canonical bytes.
+Select the full standing series,
+manifest, competition policy, all cohort/authority bindings, named evaluator
+hotkey, owned chain configuration with two backup proof RPCs, allowed tracks,
+trusted owner hotkey and HTTPS origin. Configure explicit resource capacities
+and separate signing, chain, promotion, input and proof-import directories.
+Keep the key and both credentials outside those directories.
+
+The service loads the named unlocked hotkey using the existing mode-`0400`
+key-file reader. `owner_token_file` and `vote_token_file` are distinct, root-owned
+mode-`0400` or `0440` files containing a 32–256 character bearer token, optionally
+followed by one newline. Grant the service account read access through its
+private group when using `0440`. The listener binds only to `127.0.0.1` or `::1`
+on the selected port. Put it behind the deployment's private HTTPS proxy and
+configure the coordinator's `PhaseVotePeer` with the vote credential. Keep the
+owner export credential separate. The HTTP client verifies TLS, disables
+environment proxies and never follows redirects.
+
+Deliver these canonical private files under `inputs_directory`:
+
+| Path | Native model and selection |
+| --- | --- |
+| `rosters/COHORT_SHA.json` | `RecoverableRosterEvidence`, including the certified prepared round |
+| `terms/TERMS_SHA.json` | `ServiceTerms` selected by the series manifest |
+| `catalogs/CATALOG_SHA.json` | `SignedServiceWorkCatalog`; the filename hashes its catalog body |
+| `transport/POLICY_SHA.json` | `ScoringPolicy` selected by the service terms |
+
+Use the original registration-proof archive format in `proof_import_directory`
+and populate the reviewer's own native promotion store with preserved model and
+promotion evidence. Requests load their selections only when needed. Missing
+future cohort files therefore do not prevent startup; missing or invalid
+evidence returns a retryable unavailable response without signing. Native replay
+compares the round with certified preparation and verifies completed work.
+Replicated bytes do not establish authority by themselves.
+
+All three phase routes share one `CohortProgressSigner` and process lease. Its
+journal retains the series, trusted owner, allowed tracks and service-sampling
+rule along with native signing intents and votes. Restart may change capacities,
+credentials or network placement while preserving those selections. Committed
+votes remain available after owner disconnection or loss of replicated inputs.
+The host monitors its finality observer, drains HTTP/signing work before closing
+the key/provider lifetime and then releases the lease. Native phase diagnostics
+report start, completion and bounded failure details without request bodies or
+credentials. The systemd template is
+[`umi-cohort-phase-review@.service.in`](../../deploy/standing-reward-coordinator/umi-cohort-phase-review@.service.in).
+This reviewer still requires coordinator export routes and evidence replication;
+it does not start coordinator polling, dispatch, inference or chain submission workers.
+
+For remote admission, mount `admission_history_routes(AdmissionHistoryExporter(...))`
+on the private coordinator listener using its original `CohortAdmissionQueue`
+and the owner credential. The `/internal/cohorts/admission-history` export binds
+each challenge to the current published history and original certified intake
+seal. The reviewer checks its owner signature, then independently checks cohort
+authority, registration proofs, consent and selection before signing. Put the
+original registration proofs in the same private proof inbox used by phase
+review; callers cannot supply proof URLs or select a different authority source.
+
+The reviewer's `/internal/cohorts/admission/votes` route uses its separate
+admission journal. Configure `AdmissionVotePeer` on the coordinator and pass it
+to `CohortAdmissionWorker` with the coordinator's own finality provider. The
+worker retains each vote in the original intake queue and publishes a certificate
+only after native quorum and current-selection checks pass. Missing peers or
+proofs leave the original record pending. A committed vote can be returned after
+restart without the owner, inbox or RPC; an unfinished intent resumes with its
+retained original proof and rechecks current authority. Elapsed target blocks do
+not expire standing admission. The local admission-worker CLI remains available.
+
+`CohortLifecycleService` runs intake, preparation and request control through the
+same durable controller. Its configured factories create the native phase
+observer and independent signers only when that phase is needed. Progress and
+decision retries select the phase recorded in the original intent. Preparation
+and request result publications must finish before the next phase starts. The
+preparation publisher's `publish_history` port restores the original round file
+from the owning journal after a lost acknowledgement or a missing derived file.
+After request publication succeeds, the lifecycle returns
+`settlement_handoff_published` and the recurring settlement service takes over.
+
+For a standing series, the configured lifecycle host supplies `SeriesRequestStart`
+through the lifecycle's `request_start` argument before enabling dispatch. Its private
+`umi-cohort-request-start-config/1` selects a journal directory and
+`first_cohort_not_before_unix_ms`. The deployment must derive that first floor
+from the qualified preceding C4 closure and the announced launch notice. The
+gate cannot infer a legacy closure from a current score or weight row.
+
+Later cohorts remain in preparation until the preceding cohort has a verified
+request-closing certificate and at least five hours have passed. The gate samples
+fresh verified chain time after reading that certificate, preserving its first
+observation in the journal. It adds the provider's maximum head age and subtracts
+its allowed future skew when checking elapsed time; delayed certification cannot
+backdate the rest to an old signing intent. Missing or revoked history, unavailable
+finality and regressed observations hold the next request phase. Retry, restart
+and a migration preserving this journal reuse the same boundary without renewal.
+This gate does not change current reward execution or its separate coverage rule.
+
+The enclosing host owns process locks, finality lifetimes, admission and execution
+workers, readiness probes and authenticated reviewer delivery. Configure all
+three phase factories; a missing dependency remains a retry. Intake and requests
+also require a `sample_service` port on `CohortPhaseDriver`. Bind it to the same
+native phase owner used by its progress observer, preserving one process epoch.
+`LiveIntakePhaseObserver.sample_service` probes HTTPS readiness and records the
+native receipt. Request hosts probe their actual dispatch/admission path before
+calling `NativeRequestProgressSource.sample_service`; it neither enumerates
+execution nor seals queues.
+
+Run `ServiceWorkWorker` for each selected service catalog alongside benchmark
+dispatch. It rotates the original FIFO admission journal in bounded batches,
+serializes work for each miner and holds a process lease until active work has
+drained. Bind its `ServiceWorkTransport` to the designated evaluator key, owned
+finalized blocks and `ServiceWorkAuthority`. Its `observe` and `origin` ports
+recheck certified history and native registration/Axon proofs against the original
+queue assignment. A valid closure is retained before execution is refused, so a
+stale history cannot reopen work. Supply renewable media/window inputs and
+terminal signing separately.
+
+Select `umi-cohort-service-work-catalog/2` for new series before intake opens.
+It commits the fixed work, policy, cohort, authority and service terms without
+requiring the future roster, preparation block or incumbent. The series manifest
+commits the catalog body hash. Installation verifies the actual round against
+quorum-certified native preparation and retains that exact round in the queue;
+restart cannot replace it. Version-one catalogs remain readable for their signed
+round-specific selections. Do not rewrite an existing manifest or catalog to
+change versions.
+
+The public intake application supports service claims with
+`umi-competition-service-config/3`. Configure `recoverable_intake` and
+`recoverable_service`, whose `ServiceAdmissionHostConfig` selects the same policy,
+standing series and manifest, private `queue_directory` and `inputs_directory`,
+queue capacities and polling interval. These directories must be disjoint from
+each other and the intake and chain stores. Put canonical signed catalogs at
+`inputs_directory/catalogs/CATALOG_SHA256.json`. Each selected catalog waits for
+the intake owner's certified preparation; unavailable future files do not prevent
+existing queues or exact retries from being served. Original registration proofs
+are retained privately and their observation blocks remain pinned in the provider.
+
+`GET /v1/competition/service-work` discovers selected catalogs, including pending
+installation. `POST /v1/competition/service-work/CATALOG_SHA256/claims` accepts a
+bounded `SignedServiceWorkClaim` from an original prepared participant. Preserve
+the claim nonce on retry. The queue commits the accepted claim and original proof
+bytes together before acknowledging it; insufficient capacity accepts no new work.
+Accepted duplicates recover without live RPC, history or preparation calls.
+`GET /v1/competition/service-work/CATALOG_SHA256/readiness?nonce=32_HEX_DIGITS`
+checks current admission inputs and capacity. This is admission readiness only;
+the request-phase service clock must also check actual dispatch. Readiness,
+claims and ordinary reads use separate configured request limits. The application
+owns queue polling and drains it before closing finality resources. Version-two
+intake configuration without service admission retains its original bytes.
+
+For automatic admission review, select `umi-cohort-service-admission-host/4`
+and its `admission_owner` configuration (`umi-cohort-admission-owner/1`). Set a
+private process-lock `directory`, `owner_hotkey`, `owner_key_file`,
+`export_token_file`, and loopback `listen_host`/`listen_port`. Each `reviewers`
+entry supplies an authorized signer, an explicit HTTPS origin, a private
+`token_file` and a bounded request timeout. The reviewer set must cover the
+policy's independent control-group quorum. Keep all these paths disjoint from
+the intake, finality, queue and model stores; owner-export and reviewer-vote
+credentials must differ. Retain existing model-review and upload configuration
+when model participation is enabled.
+
+The intake service starts the private listener and one recurring admission
+worker per reviewer, and drains them before closing its finality provider.
+Expose only the authenticated admission-history, intake-review and
+preparation-review routes to the selected reviewers through the private HTTPS
+proxy. The listener never binds a public interface. Reviewers independently
+verify the original registration proofs in their configured proof inboxes.
+Configure proof replication separately; a signed owner export does not replace
+those proofs. An unavailable peer cannot stop another peer's loop. Restart
+reuses retained votes and certificates without operator resubmission.
+
+These workers certify enrollment. Cohort phase progression, dispatch and
+settlement still require their configured lifecycle workers; admission
+readiness alone does not establish an operational request phase.
+
+Select `umi-cohort-service-admission-host/5` to run phase control in that same
+owner process. It requires `admission_owner` and a `lifecycle` object with schema
+`umi-cohort-lifecycle-host/1`: a private `directory`, `request_start`,
+`request_completion_directory`, `settlement_history_directory`,
+`proof_export_directory`, `sources` (`SettlementOriginalSources`), and the
+serving API's HTTPS `public_origin`. Intake and catalog selections must match
+the enclosing admission host. Other state, credential and delivery roots must
+be disjoint. Keep the control journals when migrating the owner.
+
+The private listener starts native intake, preparation and request factories,
+using the configured independent reviewers for each phase. It also exposes the
+authenticated `/internal/cohorts/request-review` route. Preparation publishes
+the original round; request closure publishes its objects and registration
+proofs before the settlement history becomes visible. Pending files, proofs or
+votes retry without replacing original decisions. Each cohort has its own
+control connection and loop; a waiting cohort does not stop another cohort.
+
+Select `umi-cohort-service-admission-host/6` to also run accepted-service dispatch
+in the owner process. It requires the version-five selections and a `dispatch`
+object with schema `umi-cohort-service-dispatch-config/1`. Configure `origins`
+with the selected competition policy, a separate finality cache and two backup
+RPCs. Configure `clips` with schema `umi-cohort-clip-delivery-config/1`, a private
+journal `directory`, retained content-addressed `videos_directory`, clip Worker
+HTTPS `origin` and root-controlled `upload_token_file`. The upload credential
+must differ from reviewer and export credentials. Capacity and bounded operation
+timeouts are adjustable without replacing the cohort or its request journal.
+
+Each selected queue gets a recurring native worker. Missing future inputs retry;
+accepted work retains its original request, quorum votes, response and retirement
+receipt. Restart recovers completed work before contacting the miner or signing
+again. Reviewers read the selected originals at the authenticated
+`/internal/cohorts/history` and `/internal/cohorts/service-work` routes. Shutdown
+drains workers before releasing keys, clients and process locks.
+
+Clip delivery verifies the local digest, retains the URL before uploading, and
+verifies the downloaded bytes before request selection. Lost acknowledgements
+reuse that URL; missing objects are republished at the same URL. New requests
+after a long outage can use a fresh bounded capability for the same clip. Signed
+requests and past delivery records remain unchanged. The existing clip Worker
+must be deployed with the matching upload credential; private clip replication
+and retention remain separate deployment requirements.
+
+Benchmark evaluator startup and private evidence replication still require their
+own running services. Accepted-service dispatch alone does not establish full
+request readiness.
+The lifecycle probes
+`GET /v1/competition/cohorts/COHORT_SHA256/requests/readiness?nonce=32_HEX_DIGITS`
+at `public_origin`. A dispatch service must return `umi-cohort-request-readiness/1`
+with that nonce, exact policy, cohort, recovery tip and ordered catalog hashes,
+a fresh finalized observation, and a `ready` flag derived from its owned workers
+and admission availability. The intake host alone does not serve this combined
+dispatch readiness route. Missing, stale or mismatched responses count as
+unavailable request time. Do not substitute a static success response or ordinary
+HTTP health check. The lifecycle remains pending until native work and delivered
+terminals satisfy closure; it does not start evaluator processes itself.
+
+Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
+own finality/history and registration archive sources, pinned cohort authorities,
+transport policy, named signer and trusted owner. `ServiceWorkReader` authenticates
+the exact original claim through `ServiceWorkExporter` at the private
+`/internal/cohorts/service-work` route. Each lookup uses a fresh signed challenge;
+HTTP delivery also requires a private bearer credential. The reviewer replays
+original registration proofs and request windows independently before retaining
+its intent. A replacement review includes its exact parent grant. Retry votes
+require a signed no-response retirement receipt and independently observed
+request expiry; assemble them with `certify_service_retry`.
+
+Preserve the review journal across restarts. It binds each work item to its
+original assignment and evaluator, reserves vote space before signing, and
+recovers completed votes without live sources. Unfinished signing uses retained
+proofs while rechecking current authority and the owner's original assignment.
+The version-two private reviewer host accepts a `ServiceReviewConfig` in
+`service_signing`, with its own directory and the same signer, owner, policy and
+complete cohort bindings as phase signing. It serves
+`/internal/cohorts/service/votes/request` and `/internal/cohorts/service/votes/retry`
+using the vote credential. Requests are bounded to 32 MiB including the original
+parent grant; returned signatures are bounded to 2 KiB. Catalog hashes come from
+the selected series manifest. Terms and transport are retained before review, so
+recovery does not depend on the original input files remaining available.
+
+Install `CohortHistoryExporter` beside the original intake owner at the private
+`/internal/cohorts/history` route. Its signed challenge response contains the
+published history and original decision inputs. Reviewers replay that history;
+the owner's signature alone cannot certify a phase. The reviewer shares its
+owned registration observer through `CompetitionTransportFinality` only when
+transport and registration select identical chain and verifier pins. The view
+preserves proof bytes and never rewrites the finality database.
+
+While the admission owner runs, the public intake exposes that same signed
+history at `GET /v1/competition/cohorts/{cohort_sha256}/authority` with a fresh
+64-character lowercase hexadecimal `challenge`. The reply binds that challenge
+to the current history and original phase decisions. It contains no reference
+packages, clips or model artifacts. Public signing has a separate two-operation
+limit; unavailable, saturated or stopped owners return HTTP 503. Replies are
+not cached. Miners independently verify the response using their pinned owner
+and replay phase authority. Their startup configuration is documented in the
+[miner model guide](../miners/model.md).
+
+Configure `ServiceVotePeer` for each independent reviewer's HTTPS origin and vote
+credential. Pass `ServiceWorkPeerReviews.reviewers` and `.retry` to the recurring
+service worker. Request votes remain in its original queue; partial retry votes
+and certificates are retained there before acknowledgement. A restarted worker
+reuses those votes even while a previously responding peer is offline. The host
+reports bounded `cohort_service_vote` diagnostics without request bodies or URLs.
+Coordinator startup, readiness probes, archive replication and installed
+qualification still need to connect these components before unattended launch.
+
+Selected requests, reviewer votes, signed miner receipts, original responses and
+terminal signing intents remain in the owning queue. Dispatch records its intent
+before calling inference. After an uncertain send, it uses response recovery and
+signed retirement; an empty response or transport timeout cannot authorize a
+replacement. A replacement requires the original miner fence, independent quorum
+and a fresh transport window. Signing and offline restart resume original work
+without repeating inference. Poll reports contain bounded counts and failure
+types. Independent request closure and quality replay still determine completion
+and service credit. Preserve the queue and its worker binding across restart;
+changing the evaluator requires an authorized migration, not a configuration edit.
+
+`CohortLifecycleService.run` owns a separate sampling task, with a five-second
+default interval, so slow certification does not stop readiness observations.
+Only initialized phase drivers can sample; prior result publication still gates
+their startup. A completed fence stops new observations. Reports distinguish
+retained samples, fenced windows and retries, and include the observed block,
+readiness and unavailable time. Sampling failures or gaps never receive inferred
+service credit. Shutdown drains both certification and sampling before the host
+closes its stores. Qualify actual readiness, RPC load, host composition and
+restart behavior before enabling cohort launch.
+
+Use `CohortRequestSettlementPublisher` as the request controller's publication
+port to deliver certified requests into the recurring settlement service. It
+commits the intake owner's certified history, replays the original service
+window, queue seals and complete request closure, then publishes their immutable
+objects and original decision proofs. It publishes
+`history_directory/COHORT_SHA256.json` last. Interrupted delivery resumes from
+retained evidence without collecting another request, rerunning inference or
+signing another certificate. The handoff always contains the original
+request-closing prefix, including when publication resumes after later phases.
+Revocation or a changed owner history prevents new publication.
+
+Select the same `SettlementOriginalSources` for the request publisher and
+settlement coordinator. Prepared rounds, selected catalogs, terms, suite and
+transport still come from their original owning publications. Deliver the
+initial history file to reviewers and replicate the original proof exports into
+each consumer's proof inbox. The existing settlement loop waits for this handoff;
+no manually constructed closure or history file is required. Production runtime
+selection, readiness probes and authenticated replication must still be
+configured and qualified together.
+
+`CohortSettlement.advance` assembles native settlement from retained execution
+evidence and independent evaluator votes. It retains partial votes, derives the
+benchmark and service certificates, fixes the promotion attribution once, and
+returns native progress for the existing cohort phase controller. Independent
+phase signers replay each result. Missing votes wait; missing or
+invalid source evidence raises for retry and never creates a scored zero.
+
+After native certification, the owner publishes `CohortRewardPackage` as
+`COHORT_SHA256.json` in the configured settlement directory. Packaging uses the
+original certification prefix, so later phase advances or an arbitrarily late
+restart preserve identical bytes. Each invocation first checks the currently
+selected history, including revocation. Run it under the cohort service's
+sole-writer lock with independently selected plan, authority, scoring terms,
+catalogs and finality.
+
+For scoring, `prepare_settlement_inputs` exports a private version 1
+`SettlementInputPackage` from the original evidence-phase history. It replays
+every benchmark participant and the complete service allocation, retaining the
+exact execution objects, intake records, cohort decisions and reveal pulses
+read by those reviews. It does not require quality votes or a reward package.
+Publish the immutable package privately and replicate it alongside the original
+proof archives. Its references and responses must never be exposed by the public
+results API.
+
+`load_settlement_inputs` checks the selected package digest, owned policy and
+current history, and the manifest's cohort, service terms and catalog bindings.
+It replays the replica through native quality and service review after any delay,
+rejecting missing, changed or unreferenced evidence. Later settlement decisions
+come from the receiver's current history source; the original input bytes stay
+fixed. Evaluators still need their own retained execution journal to sign a
+quality vote. The input package provides neither finality nor signing authority.
+
+`CohortSettlementPhases` connects this owner to the recovery controller's durable
+progress intent. The intent retains the original result and finalized boundary
+before requesting signatures. `SettlementPeerReviewer` verifies the proposer's
+signature, independently replays that original proof archive and metadata, then
+replays the exact proposed result and transition. Each signer retains its intent,
+vote and first complete certificate in its own journal. Late peers reuse that
+observation; they do not resample the phase or select a newer promotion head.
+Native replay runs in an owned worker thread without sharing the controller's
+SQLite connection, and shutdown drains replay and signing before releasing
+resources.
+
+`SettlementReviewExchange` persists eight immutable request slots per standing
+cohort: progress and transition requests for reference reveal, evidence, review
+and certification.
+Only a locally reviewed, durable proposer vote can create a request. Each request
+carries its certified history and every original decision input; the receiver
+checks the configured cohort, authority, proposer and history before native
+review. Reviewers maintain separate journals and SQLite state. Their replies
+name the exact request digest and selected signer. Lost deliveries retry using
+the original observation and signature, including after a receiver advances to
+another phase.
+
+The proposer exports its original registration archive, runtime metadata and
+native result objects before publishing a request. `SettlementRegistrationFiles`
+uses bounded, immutable proof
+frames; the receiver authenticates them against its own finality provider. The
+file envelope alone supplies no verification authority. Existing exported proof
+bytes remain available when the original provider is offline. The reviewer loop
+visits only the eight selected slots, logs retry reasons without evidence payloads,
+and continues after an unavailable slot. All these stores are private.
+
+`umi-cohort-settlement check --config CONFIG.json` validates the root-owned,
+canonical mode-`0444` `umi-cohort-settlement-config/1`, `/2` or `/3` selection.
+`umi-cohort-settlement run --config CONFIG.json` starts the recurring native
+service for every selected cohort. Coordinator and reviewer roles each load
+only their named evaluator key and their own original execution journals.
+Quality votes are derived under the execution owner's lock; service votes and
+phase votes use separate retained intents. Missing evidence or votes stays
+pending, with a bounded retry reason in the service log. A new observation
+requires fresh finality; completing an existing intent uses its original
+observation without an age cutoff.
+
+Version 3 requires `request_export_directory` and starts a recurring exporter
+alongside settlement, including while request closure is still pending. Each
+evaluator seals its completed local execution and endpoint responses with its
+own key. It copies the complete native replay objects into
+`request_export_directory/objects/`, then publishes immutable order and terminal
+indexes under `orders/ROUND_DIGEST/SUBMISSION_DIGEST.json` and
+`terminals/SIGNED_ORDER_DIGEST/EVALUATOR_IDENTITY.json`. Indexes contain only the
+referenced object's competition digest. No references or model labels are added.
+
+Replicate these private files to the request owner's selected
+`RequestCompletionFiles` store. The receiver must replay the signed originals;
+neither an index nor an exporter status certifies closure. Interrupted copies,
+missing endpoint responses and busy execution locks stay pending. Retries reuse
+the original terminal signature, and the durable scan cursor revisits pending
+work without blocking other assignments. Export reports describe the current
+batch. They do not confirm remote delivery or successful reward submission.
+Polling completed execution and waiting for missing endpoint evidence do not
+take the job writer lock. Creating execution steps and sealing terminals still
+require exclusive ownership. Export retries include a bounded `last_failure`
+with a reason code and source locations, without exception messages or clip URLs.
+The exporter runs on both coordinator and reviewer roles. Version 3 coordinators
+may also select `original_sources` for automatic settlement input assembly.
+The export directory must be separate from execution journals, service state
+and the named key. Versions 1 and 2 retain their original canonical bytes.
+
+Each service retains these inputs per cohort:
+
+- `inputs_directory/COHORT_SHA256-reference.json`: version 2 `SettlementInputPackage`
+  for reference certification, containing the complete committed reference inventory
+  and original request evidence. It contains no quality results or reveal pulses.
+- `inputs_directory/COHORT_SHA256.json`: version 1 `SettlementInputPackage` after
+  reference certification, including the original pulses needed to score responses.
+  The first native replay pins its digest in local state.
+- `history_directory/COHORT_SHA256.json`: the host's current
+  `CohortOrderHistory` handoff, including every original decision input.
+  The upstream history owner publishes this atomically. It must cover certified
+  request closure before reference certification can begin and deliver later
+  revocation or recovery
+  history. It cannot be inferred from the input package or an arbitrary replica.
+
+Coordinator configuration version 2 adds `original_sources` for automatic input
+assembly. It names the existing `intake` configuration and its exact
+`eligible_tracks`, plus private directories:
+
+- `round_directory/COHORT_SHA256.json`: the admission worker's
+  `PreparedCohortRound` publication.
+- `objects_directory/COMPETITION_DIGEST.json`: `RewardPackageObject` wrappers
+  for the suite, service terms, certified request closure,
+  queue seals, original responses, references and all replay dependencies.
+- `catalogs_directory/CATALOG_BODY_DIGEST.json`: original `SignedServiceWorkCatalog`
+  envelopes for every catalog selected by the approved reward manifest.
+- `transport_directory/POLICY_SHA256.json`: the original `ScoringPolicy`, keyed
+  by its plain canonical SHA-256 rather than the competition object digest.
+- `pulses_directory/ROUND.json`: original `RetainedRevealPulse` values.
+
+The service reads the complete consent inventory through the intake owner's
+locked export, including superseded consent. Certified history selects the
+closure; the approved manifest selects terms and catalogs. During reference
+reveal, the service checks the complete certified request closure, suite commitment
+and every catalog reference before proposing the exact manifest. Independent
+reviewers check the same originals and finalized observation before signing.
+No scoring votes are produced in this phase. The certified reveal is retained in
+the owner's journal, and subsequent input assembly reads it there. A service
+starting after reference certification also accepts the original reveal in the
+object directory. Native
+replay checks every selected miner and all accepted service work before the
+package is retained. A first build after settlement has advanced still uses the
+original evidence-phase history. Missing sources stay pending; no missing work
+becomes a zero or an omitted participant.
+
+Assembly occurs only when no original package or reviewed-package marker exists
+for that stage. Each stage has a separate immutable file and digest pin.
+Restarts reuse the saved bytes, without requiring the upstream sources again.
+If a reviewed package is lost, restore that exact package from a replica; the
+service does not replace it with a new selection. Source directories, mutable
+stores and the signing key must be disjoint. Version 1 configurations retain
+their original canonical bytes and continue to accept delivered input packages.
+
+Initial history import independently verifies the original decision archives.
+The private local ledger retains subsequent certified phases and refuses forks.
+An older matching handoff prefix cannot roll that ledger back. A conflicting
+or unavailable handoff stops progress for retry; it never turns into a miner
+zero. Migration must transfer this ledger and the signer journals while fencing
+the previous writer.
+
+Reviewers also import certified history publications from their private exchange
+before producing result votes. Each publication must extend the independently
+selected handoff, carry exactly its original decisions and pass native history
+and original-finality replay. Imports are bounded to 128 publications and the
+configured package byte allowance. This lets reference certification reach the
+reviewer before the coordinator asks for scoring votes. A late reviewer need not
+add its own vote to a phase already closed by a valid quorum; existing local
+votes remain available for retransmission.
+
+Replicate fixed paths in each evaluator's exchange outbox into its peers' inboxes:
+`quality/`, `service/`, `requests/`, `votes/`, `objects/` and `history/`.
+Copy both coordinator `inputs/COHORT_SHA256-reference.json` and
+`inputs/COHORT_SHA256.json` publications into each reviewer's `inputs_directory`;
+reviewers independently replay them before voting. The reference package cannot
+stand in for the certified scoring package, and changing its schema does not
+change the history required by replay.
+Use private immutable delivery with retry after a lost acknowledgement.
+Replicate proof exports to the configured proof imports separately. Never copy
+live execution SQLite databases between evaluators. The service reconstructs
+lost vote deliveries from its own original journals. The coordinator writes
+the certified package to `settlement_directory/COHORT_SHA256.json`, which is
+the existing reward coordinator's input directory. Publication is idempotent;
+reward activation still requires the standing control and validator path.
+Promotion assets remain a separately verified input.
+
+The reward coordinator derives the next activation
+from that package and the approved manifest. Initial activation names the
+approved legacy handoff. A successor waits for the preceding allocation's
+retained completion certificate; the native reviewer checks every original
+opportunity interval before signing. No separately prepared activation file is
+needed. Missing results or proofs remain pending without a cohort deadline.
+
+The coordinator supervises coverage capture alongside decision publication.
+Both tasks drain before the provider closes; an unexpected component exit fails
+the invocation for supervised restart. Bounded proposal review keeps a fixed
+chain target while it catches up. Invalid unreviewed input cannot reserve a
+signing sequence. Its separate readback directory must be populated by the
+independently authenticated receiver;
+distinct local paths alone do not prove remote availability. Precreate input
+directories as the service user with mode `0700`, and deliver private regular
+files with mode `0600`. The systemd template in
+`deploy/standing-reward-coordinator/` owns provider startup, retries and orderly
+shutdown. It must select the qualified installed Python environment.
+
+These services remain uninstalled. Automatic upstream input/history publication,
+full later-cohort replay, deployed peer and artifact replication, key provisioning,
+migration ownership and combined Linux restart/effect qualification remain
+required before deployment. Configuration
+validation is not runtime qualification.
+
+The timer retries failed copies indefinitely. `copy --immutable --checksum`
+retains existing destination files and refuses conflicting bytes; it does not
+delete objects absent from the source. The filters copy only the named proof,
+reward-input and signed review-message directories, excluding lock and temporary
+files. Transfers can arrive out of order;
+missing referenced objects remain pending. Reading R2 uses the receiver's own
+credential, so already uploaded proofs remain available when the coordinator is
+offline. A copied file or successful transfer grants no reward authority.
+
+These templates are uninstalled. Scoped S3 credentials, complete remote
+publication/readback, model/promotion delivery, installed timer/restart
+qualification and the full series simulation remain required before deployment.
+Local archive checks do not establish remote durability or unattended readiness.
 
 The successor has separate signed v4 directives for `competition_replay` and
 `competition_weights`. The first v4 record extends the exact retained v3 record;
@@ -286,6 +1127,23 @@ and start. It takes `--config`, `--unit`, `--controls`, `--host-bundle`,
 contexts can be supplied through `--historical-context`. All artifacts and
 authorization controls must already be reviewed and signed. The command does
 not fetch or create missing launch inputs.
+
+An applied common-bootstrap journal requires its original signed manifest and
+lease in that historical context, even when later bridge writes supersede its
+weight row. The stopped observer requests the manifest commitment identified by
+the authenticated retained effects and includes its proof in the final owned
+chain observation. Missing context, absent or different commitments, and invalid
+historical signatures keep recovery held. A snapshot requiring more than one
+distinct historical manifest anchor is refused; the current observation format
+proves one anchor. Historical authority never becomes current write permission.
+
+Historical parsing can exceed the owned chain proof's freshness interval. The
+upgrade therefore parses each locked snapshot before collecting its fresh proof,
+once for archive preparation and again for verification. Within that snapshot
+scope it reuses the authenticated bridge audit, checking original byte hashes,
+file identities and parsed content before reuse. It still checks the current
+installed policy, chain row and proof expiry on every acceptance. No historical
+signature or current chain authority is inferred from a longer service timeout.
 
 <a id="legacy-version-1-drain"></a>
 
@@ -601,6 +1459,61 @@ Publish and verify separate `linux/amd64` and `linux/arm64` host artifacts and O
 images. Both architectures need the same contract and migration tests. UID 0 and
 UID 54 remain separate installations with separate hotkeys, state and service
 lifecycles. Upgrade and verify one without stopping or changing the other.
+
+### Worker mount visibility after host updates
+
+Before launching a worker, the host compares each bind source with the same path
+inside Podman's rootless namespace. A retained pause process can still see the
+previous systemd mount tree. If the namespace differs and Podman owns no containers,
+the host runs native `podman system migrate` and verifies the paths again. Any
+retained container, including a stopped one, prevents this automatic refresh.
+The supervisor must first reconcile and remove its own prior worker. Keep each
+validator on its dedicated service account.
+
+### Authenticated RPC providers
+
+Successor hosts can select an operational RPC route with the service environment
+variable `UMI_RPC_TRANSPORT_CONFIG`, pointing to an absolute `transport.json` file.
+This changes the connection destination without rewriting signed chain inputs or
+retained transaction bindings. Native finality and storage proofs still decide
+which returned values are accepted. The existing two backup providers remain in
+the chain configuration and receive no primary-provider credentials.
+
+```json
+{
+  "schema": "umi-rpc-transport/1",
+  "routes": [{
+    "source": "wss://archive.chain.opentensor.ai:443",
+    "endpoint": "wss://api.taostats.io/api/v1/rpc/ws/finney_archive",
+    "authorization_file": "taostats.key"
+  }]
+}
+```
+
+Store the key in the named file beside the configuration, with mode `0600` and
+ownership by the service account. Use a dedicated directory containing only the
+RPC configuration and its credentials. Neither URLs nor configuration JSON
+contain the key. Keep both files outside Git and signed artifact trees. The host
+mounts that directory read-only into each worker and passes only the configuration
+path in its environment. Both proof reads and the pinned transaction transport
+use the route; exact signed transaction bytes and recovery semantics are unchanged.
+
+Match the source URL exactly, including an explicit port if the installed
+configuration contains one. Add separate route entries for different source
+spellings when needed. Retain two independent backup providers.
+
+The provider receives an `Authorization` header. Authenticated connections do
+not follow redirects or emit WebSocket debug logs. Route logs identify source,
+destination and whether authentication is enabled, without credential contents.
+Small JSON-RPC error frames with code `429` trigger a 30-second provider cooldown,
+including gateway throttles with a sentinel request ID. Proof reads and SDK reads
+can use the existing backups during that cooldown. A transmitted transaction
+keeps the SDK's unknown-outcome recovery behavior and is never blindly resent.
+Other response frames retain their original validation and request-ID checks.
+An unavailable credential fails that provider's connection and permits the
+existing transport fallback. An invalid route configuration requires correction.
+Verify authenticated reads from the installed host and worker before claiming
+the operational switch is complete.
 
 <a id="successor-supervisor-upgrade--acceptance-checks"></a>
 

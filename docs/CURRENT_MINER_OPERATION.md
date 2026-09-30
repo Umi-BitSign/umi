@@ -75,8 +75,13 @@ endpoint participation and an optional reproducible-model contribution track.
 Public endpoint intake has been live since block `9,085,463`. It does not replace
 the bridge or activate competition weights by itself. Check
 [public status](https://api.umi.vision/v1/competition/status) for
-`next_intake_schedule`. Submit a new or replacement endpoint before that
-schedule's earliest cutoff; a later acceptance does not guarantee inclusion.
+`intake_schedule_hold` before interpreting `next_intake_schedule`. A hold names
+the cohort being prepared and means no closing block or evaluation start is
+announced; the next schedule is null. Intake can remain open during that hold,
+but acceptance does not guarantee selection under the future policy. Without
+a hold, submit before the published schedule's earliest cutoff; a later
+acceptance does not guarantee inclusion. Do not infer a launched cohort from
+elapsed block cadence.
 Admitted submissions must remain valid through evaluation close, and the hotkey
 must be registered on SN78 in the finalized roster-close snapshot. The
 [connection guide](miners/connection.md) identifies accepted predecessor
@@ -107,14 +112,18 @@ The open-competition endpoint path supports
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
-This cohort admits the endpoint track; model-artifact intake remains closed.
-The 30% model allocation remains burned and does not accrue for a
-later retroactive award. Before preparing a future model contribution, read the
-[provenance and rights checklist](contributors/models.md#model-contribution-review) and the approved
-[version 2 contribution terms and accepted licenses](MODEL_CONTRIBUTION_TERMS_V2.md).
-The live policy binds their exact version and hash.
-Published terms do not approve an individual model's rights or award it the
-contribution share. Endpoint service does not require contributing private weights.
+Public intake remains on C5 preparation; model enrollment under the new policy
+has not opened. C5 uses 50% service / 50% model rewards; C6 accepts only complete
+public-model entries and assigns that track 100%; C7-C10 return to 50/50. All use a
+baseline-or-better quality requirement for complete accepted model entries.
+Exact copies count once; eligible models then compete for one credit in each
+occupied fixed five-percentage-point quality band. Read the [model preparation
+checklist](contributors/models.md#model-contribution-review) and use the exact
+terms named by the eventual signed policy. C4's signed 70/30 allocation and
+[version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md) remain applicable to C4
+verification; its unallocated model share is burned and does not accrue. Terms
+alone do not approve an individual model's rights or award it a share. Endpoint
+service does not require contributing private weights.
 
 ## Reading payout dashboards
 

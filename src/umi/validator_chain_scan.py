@@ -17,6 +17,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from functools import partial
 from itertools import pairwise
 from typing import Any, Protocol, runtime_checkable
 
@@ -34,6 +35,7 @@ from .chain_evidence import (
     StorageProofVerifier,
     assert_shadow_no_weight_interval,
 )
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .validator_chain import FinalizedRuntimePin, PinnedRuntimeContext
 
@@ -520,8 +522,26 @@ class FinalizedBlockScanner:
     async def decode_block(self, identity: VerifiedFinalizedBlockIdentity) -> FinalizedBlockRecord:
         """Fetch, authenticate and completely decode one finalized block."""
 
-        block, _wire_bytes, _evidence = await self._decode_block_with_wire_bytes(identity)
+        block, _wire_bytes, _evidence, _commitments = await self._decode_block_with_wire_bytes(
+            identity
+        )
         return block
+
+    async def decode_block_commitments(
+        self, identity: VerifiedFinalizedBlockIdentity
+    ) -> tuple[FinalizedBlockRecord, tuple[FinalizedCommitmentCallBinding, ...]]:
+        """Decode the complete block and its direct commitment arguments.
+
+        As with ``decode_block``, the caller must independently authenticate the
+        supplied header and parent. No original observer attestation is invented
+        when a caller authenticates historical headers through ancestry.
+        Commitment bindings alone do not establish success or effective origin;
+        consumers must inspect the matching call in the returned block.
+        """
+        block, _wire_bytes, _evidence, commitments = await self._decode_block_with_wire_bytes(
+            identity
+        )
+        return block, commitments
 
     async def _decode_block_with_wire_bytes(
         self,
@@ -529,12 +549,45 @@ class FinalizedBlockScanner:
         *,
         finality_attestation: bytes | None = None,
         finality_replay_binding: FinalityAttestationReplayBinding | None = None,
-    ) -> tuple[FinalizedBlockRecord, int, FinalizedBlockScanEvidence | None]:
+    ) -> tuple[
+        FinalizedBlockRecord,
+        int,
+        FinalizedBlockScanEvidence | None,
+        tuple[FinalizedCommitmentCallBinding, ...],
+    ]:
         if not isinstance(identity, VerifiedFinalizedBlockIdentity):
             raise TypeError("identity must be a VerifiedFinalizedBlockIdentity")
         runtime = await self._required_runtime(identity)
         body = await self._required_body(identity, state_version=runtime.pin.state_version)
         events_raw = await self._required_events(identity, runtime)
+
+        # Runtime decoding and proof tools can take seconds. Keep the loop
+        # responsive, but drain each owned thread before releasing its caller's
+        # provider lock on cancellation or shutdown.
+        return await run_owned_thread(
+            self._decode_verified_block,
+            identity,
+            runtime,
+            body,
+            events_raw,
+            finality_attestation,
+            finality_replay_binding,
+        )
+
+    def _decode_verified_block(
+        self,
+        identity: VerifiedFinalizedBlockIdentity,
+        runtime: PinnedRuntimeContext,
+        body: RawFinalizedBlockBody,
+        events_raw: RawFinalizedEventStorage,
+        finality_attestation: bytes | None,
+        finality_replay_binding: FinalityAttestationReplayBinding | None,
+    ) -> tuple[
+        FinalizedBlockRecord,
+        int,
+        FinalizedBlockScanEvidence | None,
+        tuple[FinalizedCommitmentCallBinding, ...],
+    ]:
 
         decoded_extrinsics = tuple(
             self._decode_extrinsic(runtime, raw, index) for index, raw in enumerate(body.extrinsics)
@@ -597,7 +650,7 @@ class FinalizedBlockScanner:
                 decoded_block=block,
                 commitment_calls=commitment_calls,
             )
-        return block, wire_bytes, evidence
+        return block, wire_bytes, evidence, commitment_calls
 
     async def decode_blocks(
         self,
@@ -612,7 +665,9 @@ class FinalizedBlockScanner:
         blocks: list[FinalizedBlockRecord] = []
         total_bytes = 0
         for identity in ordered:
-            block, wire_bytes, _evidence = await self._decode_block_with_wire_bytes(identity)
+            block, wire_bytes, _evidence, _commitments = await self._decode_block_with_wire_bytes(
+                identity
+            )
             total_bytes += wire_bytes
             if total_bytes > self._limits.maximum_total_wire_bytes:
                 raise ValidatorChainScanError("scan_wire_bytes_limit")
@@ -747,7 +802,12 @@ class FinalizedBlockScanner:
         total_bytes = 0
         for identity, attestation, binding in zip(ordered, attestations, bindings, strict=True):
             try:
-                block, wire_bytes, captured = await self._decode_block_with_wire_bytes(
+                (
+                    block,
+                    wire_bytes,
+                    captured,
+                    _commitments,
+                ) = await self._decode_block_with_wire_bytes(
                     identity,
                     finality_attestation=attestation,
                     finality_replay_binding=binding,
@@ -824,10 +884,13 @@ class FinalizedBlockScanner:
             if total > self._limits.maximum_block_body_bytes:
                 raise ValidatorChainScanError("block_body_size_limit")
         try:
-            verified = self._extrinsics_root_verifier(
-                expected_root=bytes.fromhex(identity.extrinsics_root[2:]),
-                extrinsics=body.extrinsics,
-                state_version=state_version,
+            verified = await run_owned_thread(
+                partial(
+                    self._extrinsics_root_verifier,
+                    expected_root=bytes.fromhex(identity.extrinsics_root[2:]),
+                    extrinsics=body.extrinsics,
+                    state_version=state_version,
+                )
             )
         except ValidatorChainScanError:
             raise
@@ -884,12 +947,15 @@ class FinalizedBlockScanner:
         if len(set(raw.proof)) != len(raw.proof):
             raise ValidatorChainScanError("event_proof_duplicate_node")
         try:
-            StorageEvidence(
-                snapshot=identity.snapshot,
-                storage_key=storage_key,
-                value=raw.value,
-                proof=raw.proof,
-                verifier=self._event_proof_verifier,
+            await run_owned_thread(
+                partial(
+                    StorageEvidence,
+                    snapshot=identity.snapshot,
+                    storage_key=storage_key,
+                    value=raw.value,
+                    proof=raw.proof,
+                    verifier=self._event_proof_verifier,
+                )
             )
         except (TypeError, ValueError) as error:
             raise ValidatorChainScanError("event_proof_verification_failed") from error

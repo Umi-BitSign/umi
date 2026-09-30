@@ -48,7 +48,8 @@ async def test_controller_retires_unknown_attempt_even_if_marker_reply_is_lost(
     )
     collected = []
 
-    async def wait(hotkey, recipients):
+    async def wait(hotkey, recipients, *, manifest_anchor_sha256=None):
+        assert manifest_anchor_sha256 is None
         result = await item.provider.collect_weights(hotkey, recipients)
         collected.append(result)
         return result

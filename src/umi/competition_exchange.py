@@ -38,6 +38,12 @@ from .competition_evidence import (
     replay_independent_evaluation,
     verify_evaluator_run,
 )
+from .competition_exchange_migration import check_launch_fences, exchange_binding
+from .competition_exchange_rpc_migration import (
+    check_rpc_history,
+    migrate_rpc_binding,
+    validate_rpc_addition,
+)
 from .competition_execution import execution_boundary, execution_key
 from .competition_launch import PublicLaunchIdentity
 from .competition_observations import execution_observations
@@ -275,6 +281,7 @@ class ExchangeJournal:
         self.config = ExchangeConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.legacy = legacy
+        self._binding = exchange_binding(self.config)
         if (
             digest(policy) != config.policy_sha256
             or (legacy is None) != (config.legacy_policy_sha256 is None)
@@ -287,18 +294,18 @@ class ExchangeJournal:
         self._check_files()
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         os.close(fd)
-        with self.transaction() as db:
+        with self.transaction(allow_rpc_migration=True) as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (body BLOB NOT NULL)")
-            binding = canonical_json_bytes(
-                config.model_dump(
-                    mode="json",
-                    by_alias=True,
-                    exclude={"maximum_orders", "maximum_events", "maximum_bytes", "port", "host"},
-                )
-            )
+            binding = self._binding
             old = db.execute("SELECT body FROM binding").fetchall()
             if old and (len(old) != 1 or bytes(old[0][0]) != binding):
-                raise ValueError("exchange configuration changed")
+                if len(old) != 1:
+                    raise ValueError("exchange configuration changed")
+                if bytes(old[0][0]) in self._predecessor_bindings(config):
+                    # Preserve the existing independently authorized policy migration.
+                    db.execute("UPDATE binding SET body = ?", (binding,))
+                else:
+                    migrate_rpc_binding(db, bytes(old[0][0]), binding)
             if not old:
                 db.execute("INSERT INTO binding VALUES (?)", (binding,))
             db.execute(
@@ -317,6 +324,24 @@ class ExchangeJournal:
         self._cursor = ""
         self._collect_cursor = 0
 
+    @staticmethod
+    def _predecessor_bindings(config) -> set[bytes]:
+        """Bindings this journal would have carried under an honored predecessor policy."""
+        from .competition_policy_lineage import registered_admitted_sha256s
+
+        out = set()
+        for policy_sha256 in registered_admitted_sha256s(config.policy_sha256)[1:]:
+            body = config.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude={"maximum_orders", "maximum_events", "maximum_bytes", "port", "host"},
+            )
+            body["policy_sha256"] = policy_sha256
+            if isinstance(body.get("chain"), dict):
+                body["chain"]["policy_sha256"] = policy_sha256
+            out.add(canonical_json_bytes(body))
+        return out
+
     def _check_files(self):
         _private(self.path.parent)
         for suffix in ("", "-journal", "-wal", "-shm"):
@@ -334,15 +359,44 @@ class ExchangeJournal:
                     raise ValueError("exchange database must be private and owned")
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, *, allow_rpc_migration=False):
         self._check_files()
         db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
         try:
+            allowed = {self._binding, *self._predecessor_bindings(self.config)}
+            db.create_function("umi_exchange_launch_writer", 1, lambda body: body in allowed)
+            db.create_function("umi_exchange_rpc_writer", 1, lambda body: body in allowed)
             db.execute("PRAGMA synchronous=FULL")
             db.execute(
                 "PRAGMA max_page_count=" + str((self.config.maximum_bytes + 64 * 1024**2) // 4096)
             )
             db.execute("BEGIN IMMEDIATE")
+            migrated_rpc = check_rpc_history(db)
+            if (
+                allow_rpc_migration
+                and not migrated_rpc
+                and db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='binding' AND type='table'"
+                ).fetchone()
+            ):
+                old = db.execute("SELECT body FROM binding").fetchall()
+                if len(old) == 1 and old[0][0] not in allowed:
+                    try:
+                        validate_rpc_addition(bytes(old[0][0]), self._binding)
+                    except ValueError:
+                        # Preserve the launch-fence rejection for unrelated or
+                        # stale configs; the constructor also rejects them.
+                        pass
+                    else:
+                        allowed.add(bytes(old[0][0]))
+            if check_launch_fences(db) and db.execute(
+                "SELECT body FROM binding"
+            ).fetchall() not in ([(binding,)] for binding in allowed):
+                raise ValueError("stale exchange launch configuration")
+            if migrated_rpc and db.execute("SELECT body FROM binding").fetchall() not in (
+                [(binding,)] for binding in allowed
+            ):
+                raise ValueError("stale exchange RPC configuration")
             yield db
             db.commit()
         except BaseException:
@@ -565,11 +619,16 @@ class ExchangeJournal:
                 # The relay's earlier receipt is not the coordinator's receipt.
                 # Delayed collection must retain its actual owned arrival block.
                 if kind == "void":
+                    certificate = AttestedEvaluationVoid.model_validate_json(raw)
                     store.record_void_evaluation(
                         evidence=VoidEvaluationEvidence(
-                            schema="umi-competition-void-evidence/1",
+                            schema=(
+                                "umi-competition-void-evidence/2"
+                                if certificate.void.schema_ == "umi-competition-evaluation-void/2"
+                                else "umi-competition-void-evidence/1"
+                            ),
                             order=signed,
-                            certificate=AttestedEvaluationVoid.model_validate_json(raw),
+                            certificate=certificate,
                             legacy_policy=self.legacy,
                         ),
                         suite=suite,

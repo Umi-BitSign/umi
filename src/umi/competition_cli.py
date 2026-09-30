@@ -36,6 +36,7 @@ from .competition_commands.common import (
 from .competition_commands.common import (
     load_json as _load,
 )
+from .competition_policy_lineage import register_lineage
 from .open_competition import CompetitionPolicy
 from .protocol import canonical_json_bytes
 
@@ -45,7 +46,13 @@ def execute(args: argparse.Namespace) -> dict:
         handler = COMMAND_HANDLERS[args.command]
     except KeyError:
         raise ValueError("unsupported competition command") from None
-    return handler(args, _load(args.policy, CompetitionPolicy))
+    policy = _load(args.policy, CompetitionPolicy)
+    predecessors = tuple(
+        _load(path, CompetitionPolicy) for path in getattr(args, "predecessor_policy", ())
+    )
+    # Validates the chain and makes it visible to every policy-bound check downstream.
+    register_lineage(policy, predecessors)
+    return handler(args, policy)
 
 
 def main(argv: list[str] | None = None) -> None:
