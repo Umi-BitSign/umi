@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 
 
-async def run_supervised_server(
-    server, providers, *, liveness_tasks=lambda: (), poll_seconds=1.0
-):
+async def run_supervised_server(server, providers, *, liveness_tasks=lambda: (), poll_seconds=1.0):
     serving = asyncio.create_task(server.serve())
     try:
         while not serving.done():
