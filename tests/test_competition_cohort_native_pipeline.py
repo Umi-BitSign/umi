@@ -786,15 +786,13 @@ async def run_pipeline(
                             service
                             and service_reports
                             and service_reports[-1].get("work_complete") == 1
-                            and all(
-                                n.last_reports.get("endpoints", {}).get("assignments_complete") == 1
-                                for n in nodes.values()
-                            )
                         ):
                             # Endpoint benchmark leases can outlast the paid
-                            # service window. Keep finalized fixture time moving
-                            # after all responses complete so their immutable
-                            # exports can pass the native request-interval check.
+                            # service window. Real finalized time keeps moving
+                            # independently of evaluator progress, so advance
+                            # the fixture after paid service work completes.
+                            # An exact per-poll endpoint count is invalid once
+                            # these journals also retain prior cohorts.
                             h.block = max(h.block + 1, service.window_end)
                         if not service:
                             h.block += 1
