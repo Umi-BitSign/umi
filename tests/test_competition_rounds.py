@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -548,6 +550,30 @@ def test_round_journal_compound_lock_is_separate_from_sqlite(tmp_path):
     with journal.locked():
         journal.put("intent", "1", {"a": 1})
         assert journal.get("intent", "1") == {"a": 1}
+
+
+def test_round_journal_serializes_local_file_validation_with_transactions(tmp_path):
+    journal = rounds.RoundJournal(tmp_path / "journal", {"policy": "test"})
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_transaction():
+        with journal.transaction() as db:
+            db.execute("INSERT INTO highwater VALUES (1)")
+            sidecar = Path(str(journal.path) + "-journal")
+            assert sidecar.exists()
+            sidecar.chmod(0o644)
+            entered.set()
+            assert release.wait(timeout=5)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holding = pool.submit(hold_transaction)
+        assert entered.wait(timeout=5)
+        reading = pool.submit(journal.get, "intent", "missing")
+        assert not reading.done()
+        release.set()
+        holding.result(timeout=5)
+        assert reading.result(timeout=5) is None
 
 
 def test_round_journal_rejects_replaced_lock_file(tmp_path):

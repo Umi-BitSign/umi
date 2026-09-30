@@ -7,6 +7,7 @@ import os
 import secrets
 import sqlite3
 import stat
+import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -69,6 +70,10 @@ class RoundJournal:
         # Read/write envelope only. Existing reservation allowances, manifests,
         # bindings and total journal capacity are never enlarged by this value.
         self.maximum_record_bytes = maximum_record_bytes
+        # SQLite may create and remove rollback sidecars while a transaction is
+        # active. Keep this instance's file validation and connection lifetime
+        # together so another local caller cannot inspect a transitional file.
+        self._transaction_lock = threading.RLock()
         _private(root)
         self.path = root / "rounds.sqlite3"
         self.lock_path = root / "rounds.lock"
@@ -223,36 +228,37 @@ class RoundJournal:
 
         Callers must not commit, close or retain the supplied connection.
         """
-        self._check_files()
-        db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
-        try:
-            db.create_function("umi_round_writer_generation", 0, lambda: 2)
-            db.execute("PRAGMA synchronous=FULL")
-            db.execute(f"PRAGMA max_page_count={(self.maximum_bytes + 16 * 1024**2) // 4096}")
-            db.execute("BEGIN IMMEDIATE")
-            version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 2):
-                raise ValueError("unsupported round journal capability")
-            if (
-                version == 0
-                and db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name GLOB 'record_reservation*' "
-                    "OR name GLOB 'round_generation_*' LIMIT 1"
-                ).fetchone()
-            ):
-                raise ValueError("round reservation generation marker was downgraded")
-            initial_tables = self._table_names(db)
-            if version == 2:
-                self._fence_tables(db)
-            yield db
-            if db.execute("PRAGMA user_version").fetchone()[0] == 2:
-                self._fence_tables(db, new_tables=self._table_names(db) - initial_tables)
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        with self._transaction_lock:
+            self._check_files()
+            db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
+            try:
+                db.create_function("umi_round_writer_generation", 0, lambda: 2)
+                db.execute("PRAGMA synchronous=FULL")
+                db.execute(f"PRAGMA max_page_count={(self.maximum_bytes + 16 * 1024**2) // 4096}")
+                db.execute("BEGIN IMMEDIATE")
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version not in (0, 2):
+                    raise ValueError("unsupported round journal capability")
+                if (
+                    version == 0
+                    and db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name GLOB 'record_reservation*' "
+                        "OR name GLOB 'round_generation_*' LIMIT 1"
+                    ).fetchone()
+                ):
+                    raise ValueError("round reservation generation marker was downgraded")
+                initial_tables = self._table_names(db)
+                if version == 2:
+                    self._fence_tables(db)
+                yield db
+                if db.execute("PRAGMA user_version").fetchone()[0] == 2:
+                    self._fence_tables(db, new_tables=self._table_names(db) - initial_tables)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
 
     @staticmethod
     def _identifier(name):

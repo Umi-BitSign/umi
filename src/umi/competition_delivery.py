@@ -152,7 +152,7 @@ class HTTPSSuccessorDirectiveFetcher:
             received = 0
             while True:
                 if loop.time() >= deadline:
-                    raise TimeoutError("initial history collection timed out")
+                    raise asyncio.TimeoutError("initial history collection timed out")
                 body = await self.fetch_directive_page(
                     after_version=cursor[0],
                     after_sequence=cursor[1],
@@ -168,7 +168,7 @@ class HTTPSSuccessorDirectiveFetcher:
                     raise SuccessorDeliveryError("initial history exceeds record budget")
                 for signed in page.directives:
                     if loop.time() >= deadline:
-                        raise TimeoutError("initial history collection timed out")
+                        raise asyncio.TimeoutError("initial history collection timed out")
                     verify_signed_successor_supervisor_directive_history(
                         signed,
                         config=self.config,
@@ -181,15 +181,16 @@ class HTTPSSuccessorDirectiveFetcher:
                     if len(payload) > maximum_bytes:
                         raise SuccessorDeliveryError("initial history exceeds byte budget")
                     if loop.time() >= deadline:
-                        raise TimeoutError("initial history collection timed out")
+                        raise asyncio.TimeoutError("initial history collection timed out")
                     return payload
                 cursor = (4, page.head.directive.sequence, page.head.directive_sha256)
 
         try:
             return await asyncio.wait_for(collect(), timeout=max(0.0, deadline - loop.time()))
         except asyncio.TimeoutError as error:
-            # asyncio's timeout type became a built-in alias in Python 3.11.
-            raise TimeoutError("initial history collection timed out") from error
+            # Keep the public exception type stable on Python 3.10, where
+            # asyncio.TimeoutError is not yet an alias of the built-in type.
+            raise asyncio.TimeoutError("initial history collection timed out") from error
 
 
 def _directory(path: Path, modes=(0o700,)):
