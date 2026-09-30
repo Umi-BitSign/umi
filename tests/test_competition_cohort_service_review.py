@@ -98,16 +98,22 @@ async def reviewed(loop, tmp_path):
     chain.finality.verified_block_at = at
     chain.config = chain.config.model_copy(update={"state_directory": str(tmp_path / "proofs")})
 
-    def provider():
+    def provider(name):
+        # Independent reviewer hosts never share a registration cache. Give
+        # each in-process fixture the same isolation so concurrent replay does
+        # not turn SQLite writer contention into a missing quorum vote.
+        config = chain.config.model_copy(
+            update={"state_directory": str(tmp_path / ("proofs-" + name))}
+        )
         return HistoricalRegistrationProvider(
-            chain.config,
+            config,
             chain.policy,
             finality=chain.finality,
             proofs=chain.proofs,
             now_ms=lambda: chain.clock.now,
         )
 
-    chain.provider = provider()
+    chain.provider = provider("owner")
     observed = await chain.provider.collect()
     original = c.assignment
     c.cfg = c.cfg.model_copy(update={"directory": str(tmp_path / "native-queue")})
@@ -191,7 +197,7 @@ async def reviewed(loop, tmp_path):
             config,
             chain.policy,
             p.transport_policy,
-            provider(),
+            provider(name),
             p.finality,
             history,
             owner,
