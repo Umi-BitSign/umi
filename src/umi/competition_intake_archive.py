@@ -12,10 +12,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_client import AdmissionReceipt
+from .competition_policy_lineage import PolicyLineage
 from .competition_store import CompetitionStore
 from .competition_submission_checkpoint import (
     MAXIMUM_CHECKPOINT_SUBMISSIONS,
@@ -52,8 +53,11 @@ class IntakeArchiveRecordReference(StrictProtocolModel):
 
 
 class IntakeArchiveManifest(StrictProtocolModel):
-    schema_: Literal["umi-competition-intake-archive/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-competition-intake-archive/1", "umi-competition-intake-archive/2"
+    ] = Field(alias="schema")
     policy: CompetitionPolicy
+    predecessor_policies: Annotated[tuple[CompetitionPolicy, ...], Field(max_length=64)] = ()
     public_launch_sha256: Hex32
     submission_set_sha256: Hex32
     source_head_sha256: Hex32
@@ -63,8 +67,22 @@ class IntakeArchiveManifest(StrictProtocolModel):
         Field(min_length=1, max_length=MAXIMUM_CHECKPOINT_SUBMISSIONS),
     ]
 
+    @model_serializer(mode="wrap")
+    def preserve_v1_bytes(self, handler):
+        value = handler(self)
+        if not self.predecessor_policies:
+            value.pop("predecessor_policies", None)
+        return value
+
     @model_validator(mode="after")
     def canonical_records(self) -> Self:
+        if (self.schema_ == "umi-competition-intake-archive/2") != bool(
+            self.predecessor_policies
+        ):
+            raise ValueError("archive version differs from its policy lineage")
+        lineage = PolicyLineage(self.policy, self.predecessor_policies)
+        if len(lineage.admitted_policy_sha256s) != 1 + len(self.predecessor_policies):
+            raise ValueError("archive policy lineage changes submission terms")
         ordered = tuple(
             sorted(self.records, key=lambda item: (item.accepted_block, item.submission_sha256))
         )
@@ -176,10 +194,13 @@ def _checkpoint_record_sha256(record: ArchivedAdmissionRecord) -> str:
 
 
 def _validate_record(
-    record: ArchivedAdmissionRecord, policy: CompetitionPolicy
+    record: ArchivedAdmissionRecord, lineage: PolicyLineage
 ) -> ArchivedAdmissionRecord:
     record = ArchivedAdmissionRecord.model_validate_json(canonical_json_bytes(record))
     submission, receipt = record.signed_submission.submission, record.receipt
+    if not lineage.admits(submission.policy_sha256):
+        raise ValueError("archived admission names a policy outside its lineage")
+    policy = lineage.policy(submission.policy_sha256)
     policy_sha256 = digest(policy)
     if (
         submission.policy_sha256 != policy_sha256
@@ -221,6 +242,7 @@ def export_intake_archive(
         raise ValueError("archive export requires a public-launch-bound intake")
 
     head = store.retained_submission_head()
+    lineage = store.lineage
     records: list[tuple[str, bytes, ArchivedAdmissionRecord]] = []
     offset = 0
     while True:
@@ -230,7 +252,7 @@ def export_intake_archive(
         for raw in page:
             record = _validate_record(
                 ArchivedAdmissionRecord.model_validate_json(canonical_json_bytes(raw)),
-                store.policy,
+                lineage,
             )
             submission_sha256 = digest(record.signed_submission.submission)
             records.append((submission_sha256, canonical_json_bytes(record), record))
@@ -279,8 +301,16 @@ def export_intake_archive(
     ):
         raise ValueError("retained submission checkpoint differs from the export")
     manifest = IntakeArchiveManifest(
-        schema="umi-competition-intake-archive/1",
+        schema=(
+            "umi-competition-intake-archive/2"
+            if len(lineage.admitted_policy_sha256s) > 1
+            else "umi-competition-intake-archive/1"
+        ),
         policy=store.policy,
+        predecessor_policies=tuple(
+            lineage.policy(policy_sha256)
+            for policy_sha256 in lineage.admitted_policy_sha256s[1:]
+        ),
         public_launch_sha256=store.public_launch_id,
         submission_set_sha256=submission_set_sha256,
         source_head_sha256=head["head_sha256"],
@@ -331,6 +361,7 @@ def load_intake_archive(config: IntakeArchiveConfig) -> LoadedIntakeArchive:
 
     records_directory = directory / _RECORDS_NAME
     _check_private_directory(records_directory)
+    lineage = PolicyLineage(manifest.policy, manifest.predecessor_policies)
     ordered: list[ArchivedAdmissionRecord] = []
     by_digest: dict[str, ArchivedAdmissionRecord] = {}
     total_bytes = len(manifest_bytes)
@@ -346,7 +377,7 @@ def load_intake_archive(config: IntakeArchiveConfig) -> LoadedIntakeArchive:
         record = ArchivedAdmissionRecord.model_validate_json(payload)
         if canonical_json_bytes(record) != payload:
             raise ValueError("archived admission is not canonical")
-        record = _validate_record(record, manifest.policy)
+        record = _validate_record(record, lineage)
         submission_sha256 = digest(record.signed_submission.submission)
         if (
             submission_sha256 != reference.submission_sha256

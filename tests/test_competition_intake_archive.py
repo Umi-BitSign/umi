@@ -24,6 +24,8 @@ from umi.policy import umi_source_tree_sha256
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_chain import chain_config as chain_config
+from .test_competition_policy_lineage import policy as lineage_policy
+from .test_competition_policy_lineage import successor as lineage_successor
 from .test_competition_policy_transition import accepted_predecessor, deployment, policies, wallet
 from .test_competition_service import Provider
 from .test_open_competition import bundle_at
@@ -164,6 +166,73 @@ def test_archive_manifest_binding_is_restart_stable(tmp_path: Path):
                 binding.model_copy(update={"manifest_sha256": "ff" * 32}),
             ),
         )
+
+
+def test_archive_preserves_deal_preserving_predecessor_admissions(tmp_path: Path):
+    prior = lineage_policy()
+    live = lineage_successor(prior, maximum_inference_ms=2000)
+    public_deployment = deployment()
+    signed, receipt = accepted_predecessor(prior)
+    state, checkpoint = tmp_path / "state", tmp_path / "checkpoint"
+    store = CompetitionStore(
+        state,
+        prior,
+        public_launch=public_deployment.launch_identity(),
+    )
+    baseline_source = tmp_path / "baseline-source"
+    baseline_archive = tmp_path / "baseline-archive"
+    baseline = bundle_at(baseline_source).model_copy(update={"license_id": "CC-BY-SA-4.0"})
+    preserve_bundle(baseline, baseline_source, baseline_archive, prior)
+    store.initialize_baseline(baseline, baseline_archive)
+    saved = store.admit(
+        signed,
+        receipt.registration_snapshot,
+        receipt.accepted_block,
+        registration_source="verifier_attested_finality",
+    )
+    checkpoint.mkdir(mode=0o700)
+    store = CompetitionStore(
+        state,
+        prior,
+        public_launch=public_deployment.launch_identity(),
+        migrate_writer_generation=True,
+        submission_head_checkpoint_directory=checkpoint,
+        initial_checkpoint_submission_sha256s=(digest(signed.submission),),
+        initial_checkpoint_baseline_promotion_sha256=store.baseline_summary()[
+            "promotion_sha256"
+        ],
+        initialize_submission_checkpoint=True,
+    )
+    store = CompetitionStore(
+        state,
+        live,
+        public_launch=public_deployment.launch_identity(),
+        submission_head_checkpoint_directory=checkpoint,
+        predecessor_policies=(prior,),
+    )
+    destination = tmp_path / "archive"
+    result = export_intake_archive(store, destination, confirmed_quiesced=True)
+    manifest = IntakeArchiveManifest.model_validate_json(
+        (destination / "manifest.json").read_bytes()
+    )
+    assert manifest.schema_ == "umi-competition-intake-archive/2"
+    assert manifest.policy == live
+    assert manifest.predecessor_policies == (prior,)
+    changed_terms = lineage_successor(prior, contribution_terms_sha256="c" * 64)
+    rejected = manifest.model_copy(update={"policy": changed_terms})
+    with pytest.raises(ValueError, match="changes submission terms"):
+        IntakeArchiveManifest.model_validate_json(canonical_json_bytes(rejected))
+    loaded = load_intake_archive(
+        IntakeArchiveConfig(
+            schema="umi-competition-intake-archive-config/1",
+            directory=str(destination),
+            manifest_sha256=result["manifest_sha256"],
+        )
+    )
+    assert loaded.submission_by_digest(digest(signed.submission)) == {
+        "signed_submission": json.loads(canonical_json_bytes(signed)),
+        "receipt": saved,
+    }
 
 
 def test_public_archive_requires_the_ledger_bound_manifest(tmp_path: Path):
