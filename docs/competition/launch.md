@@ -11,6 +11,8 @@ current phase and admission availability.
 SN78 registration and a competition acceptance are separate. An intake receipt
 does not promise selection, a score or a reward. C4 keeps its signed allocation
 and remains the effective reward cohort until C5 has a certified successor row.
+The canonical [C5 policy and transport inputs](C5_INPUTS.md) are published with
+their exact digests.
 
 ## C5 reward policy
 

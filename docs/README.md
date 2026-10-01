@@ -6,6 +6,8 @@ rewards; competition reward activation requires certified settlement and verifie
 native weight effects. Check [public status](https://api.umi.vision/v1/competition/status)
 and [readiness](https://api.umi.vision/v1/competition/readiness) for the active
 policy, cohort, accepted tracks and admission state.
+The [C5 public inputs](competition/C5_INPUTS.md) contain the canonical policy
+files and exact runtime revision.
 
 | I want to... | Start here |
 | --- | --- |

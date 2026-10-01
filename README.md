@@ -43,7 +43,9 @@ Open-competition rewards have not replaced the bridge. An
 evaluation, settlement or payment. See the
 [live competition status](https://api.umi.vision/v1/competition/status) and the
 [launch configuration](docs/competition/launch.md) for the exact policy and
-current phase. The status also publishes an operator-declared repository revision and
+current phase. The [C5 public inputs](docs/competition/C5_INPUTS.md) publish the
+canonical competition and transport files with their digests. The status also
+publishes an operator-declared repository revision and
 the UMI source-tree digest. Intake startup recomputes and enforces the source-tree
 digest. Release verification must separately confirm that the declared revision
 is the commit from which that exact tree was deployed.
