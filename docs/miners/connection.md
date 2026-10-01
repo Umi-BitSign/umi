@@ -26,10 +26,11 @@ curl -fsSLo /tmp/umi-miner-upgrade.py \
 ```
 
 Use `yes` instead of `no` for public-model participation. C5 permitted either
-answer during intake; use the choice bound to the retained acceptance. The
-choice records intent; it does not assert model rights or upload a bundle. A
-model submission still needs its signed consent, rights decision and complete
-artifact.
+answer during intake. For either answer, the updater signs and retains the
+endpoint participation request with the running miner hotkey, submits it to C5,
+and checks its admission certificate. `yes` also records public-model intent; it
+does not assert model rights or upload a bundle. A model submission still needs
+its own signed consent, rights decision and complete artifact.
 
 The updater discovers the one running `umi.miner` systemd service and retains its
 hotkey, model revision, serving origin, wallet, model backend and public port. It
@@ -43,6 +44,15 @@ sidecar socket and capacity descriptor to the current transport policy before
 starting the miner. It verifies exact policy, transport, model, finality and
 sidecar health. If any check fails, it restores the prior systemd commands and
 restarts the previous miner and sidecar. Rerunning the updater is idempotent.
+
+Endpoint enrollment is a separate durable phase, so a temporary coordinator or
+finality outage does not roll back a healthy miner upgrade. Before its first
+send, the updater stores the exact signed participation request under the current
+private policy state. A systemd timer retries those same bytes every 15 minutes
+and after reboot until the quorum admission certificate is retained. The command
+may therefore finish with `endpoint_enrollment_retry_scheduled` or
+`endpoint_enrollment_pending_attestation`; neither requires a new signature or a
+manual renewal. `endpoint_enrollment_certified` is the completed state.
 
 The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
 same file for C6 and later cohorts; the current manifest supplies each cohort's

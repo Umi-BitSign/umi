@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -27,6 +28,8 @@ ROOT = Path("/var/lib/umi-miner-cohorts")
 RUNTIME_ROOT = Path("/opt/umi-miner-runtimes")
 LAUNCHER = Path("/usr/local/libexec/umi-miner-upgrade")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
+ENROLLMENT_SERVICE = "umi-miner-cohort-enrollment.service"
+ENROLLMENT_TIMER = "umi-miner-cohort-enrollment.timer"
 HEX32 = re.compile(r"^[0-9a-f]{64}$")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SYSTEMD_UNIT = re.compile(r"^[A-Za-z0-9_.:@-]+\.service$")
@@ -50,6 +53,57 @@ def fetch(url: str, maximum: int = 4 * 1024 * 1024) -> bytes:
         if response.status != 200 or not raw or len(raw) > maximum:
             raise ValueError("download size or status differs")
         return raw
+
+
+def worker_read(path: Path, *, maximum: int = 4 * 1024 * 1024) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or not 0 < info.st_size <= maximum
+        ):
+            raise ValueError(f"unsafe private enrollment file: {path.name}")
+        raw = stream.read(maximum + 1)
+    if len(raw) > maximum:
+        raise ValueError(f"private enrollment file is too large: {path.name}")
+    return raw
+
+
+def worker_write(path: Path, raw: bytes) -> None:
+    parent = path.parent
+    info = parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise ValueError("unsafe enrollment state directory")
+    pending = path.with_name(path.name + ".pending")
+    pending.unlink(missing_ok=True)
+    descriptor = os.open(
+        pending,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        pending.unlink(missing_ok=True)
+        raise
+    os.replace(pending, path)
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def document(raw: bytes, *, label: str) -> dict:
@@ -715,6 +769,363 @@ def activate_services(
         raise
 
 
+class EnrollmentRetry(RuntimeError):
+    """A durable endpoint enrollment should be retried without changing its bytes."""
+
+
+def endpoint_enrollment_config(
+    arguments: list[str],
+    manifest: dict,
+    hotkey: str,
+    model: str,
+    origin: str,
+    public_model_track: bool,
+) -> bytes:
+    wallet_name = option(arguments, "--wallet-name")
+    hotkey_name = option(arguments, "--hotkey")
+    wallet_path = option(arguments, "--wallet-path", required=False)
+    return canonical(
+        {
+            "cohort_sha256": manifest["cohort_sha256"],
+            "endpoint_url": origin,
+            "hotkey_name": hotkey_name,
+            "intake_origin": manifest["history_origin"].rstrip("/"),
+            "miner_hotkey": hotkey,
+            "model_revision": model,
+            "policy_sha256": manifest["policy"]["value_sha256"],
+            "public_model_track": public_model_track,
+            "schema": "umi-miner-cohort-enrollment/1",
+            "service_authority_sha256": manifest["service_authority_sha256"],
+            "wallet_name": wallet_name,
+            "wallet_path": wallet_path or None,
+        }
+    )
+
+
+def _worker_document(path: Path, *, label: str) -> dict:
+    raw = worker_read(path)
+    value = document(raw, label=label)
+    if raw != canonical(value):
+        raise ValueError(f"{label} is not canonical")
+    return value
+
+
+def _new_participation_request(config: dict, policy_raw: bytes, status: dict, history_raw: bytes):
+    import bittensor as bt
+
+    from umi.competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
+    from umi.competition_cohort_intake import history_tip
+    from umi.competition_cohort_participation import (
+        CohortParticipationConsent,
+        CohortParticipationRequest,
+        SignedCohortParticipationConsent,
+    )
+    from umi.open_competition import (
+        CompetitionPolicy,
+        SignedSubmission,
+        Submission,
+        digest,
+        identity,
+        sign_object,
+    )
+    from umi.protocol import canonical_json_bytes
+
+    policy = CompetitionPolicy.model_validate_json(policy_raw)
+    if digest(policy) != config["policy_sha256"]:
+        raise ValueError("enrollment policy digest differs")
+    current_block = status.get("admission_checked_block")
+    if (
+        status.get("schema") != "umi-competition-status/2"
+        or status.get("policy_sha256") != config["policy_sha256"]
+        or status.get("admission_phase") != "open"
+        or status.get("admission_accepting_new") is not True
+        or type(current_block) is not int
+        or not policy.valid_from_block <= current_block <= policy.valid_through_block
+    ):
+        raise EnrollmentRetry("public intake has no current open finalized observation")
+    history = CohortRecoveryHistory.model_validate_json(history_raw)
+    view = verify_cohort_history(
+        history,
+        policy,
+        expected_tip_sha256=history_tip(history),
+        current_block=current_block,
+    )
+    if (
+        view.state.phase != "intake"
+        or current_block < view.state.not_before_block
+        or view.state.cohort_sha256 != config["cohort_sha256"]
+        or view.state.authority_sha256 != config["service_authority_sha256"]
+    ):
+        raise EnrollmentRetry("recoverable cohort intake is not open")
+    # Finalized block numbers are monotonic across host rebuilds. The exact
+    # signed request is retained before its first send, so uncertain retries
+    # always reuse this sequence and these bytes.
+    sequence = current_block
+    if not 1 <= sequence <= 2**32 - 1:
+        raise ValueError("endpoint sequence is exhausted")
+    valid_through = min(
+        policy.valid_through_block,
+        current_block + policy.maximum_submission_lifetime_blocks,
+    )
+    if valid_through <= current_block:
+        raise EnrollmentRetry("competition policy has no remaining submission interval")
+    wallet = bt.Wallet(
+        name=config["wallet_name"],
+        hotkey=config["hotkey_name"],
+        path=config["wallet_path"],
+    )
+    signer = bt.resolve_signer(wallet, role="hotkey")
+    if identity(signer.ss58_address) != identity(config["miner_hotkey"]):
+        raise ValueError("configured wallet does not control the running miner hotkey")
+    submission = Submission(
+        schema="umi-competition-submission/1",
+        network=policy.network,
+        netuid=policy.netuid,
+        policy_sha256=digest(policy),
+        hotkey=config["miner_hotkey"],
+        track="endpoint",
+        sequence=sequence,
+        valid_from_block=current_block,
+        valid_through_block=valid_through,
+        model_revision=config["model_revision"],
+        endpoint_url=config["endpoint_url"],
+        model_bundle=None,
+        accepted_terms_sha256=policy.contribution_terms_sha256,
+    )
+    signed = SignedSubmission(submission=submission, signature=sign_object(submission, wallet))
+    consent = CohortParticipationConsent(
+        schema="umi-cohort-participation-consent/1",
+        cohort_sha256=config["cohort_sha256"],
+        authority_sha256=config["service_authority_sha256"],
+        submission_sha256=digest(submission),
+        hotkey=config["miner_hotkey"],
+        signed_at_block=current_block,
+        lifetime="until_cohort_completed_or_revoked",
+        timing_rule="quorum_recovery_history/1",
+        original_submission_expiry_does_not_end_participation=True,
+    )
+    request = CohortParticipationRequest(
+        signed_submission=signed,
+        consent=SignedCohortParticipationConsent(
+            consent=consent,
+            signature=sign_object(consent, wallet),
+        ),
+    )
+    return policy, request, canonical_json_bytes(request)
+
+
+def enrollment_step(enrollment: Path) -> dict:
+    from umi.competition_client import CompetitionSubmissionError
+    from umi.competition_cohort_client import (
+        fetch_cohort_admission,
+        submit_cohort_participation,
+    )
+    from umi.competition_cohort_participation import CohortParticipationRequest
+    from umi.open_competition import CompetitionPolicy, digest, identity
+    from umi.protocol import canonical_json_bytes
+
+    config = _worker_document(enrollment / "config.json", label="enrollment configuration")
+    required = {
+        "cohort_sha256",
+        "endpoint_url",
+        "hotkey_name",
+        "intake_origin",
+        "miner_hotkey",
+        "model_revision",
+        "policy_sha256",
+        "public_model_track",
+        "schema",
+        "service_authority_sha256",
+        "wallet_name",
+        "wallet_path",
+    }
+    if (
+        set(config) != required
+        or config.get("schema") != "umi-miner-cohort-enrollment/1"
+        or any(
+            HEX32.fullmatch(str(config.get(field))) is None
+            for field in (
+                "cohort_sha256",
+                "model_revision",
+                "policy_sha256",
+                "service_authority_sha256",
+            )
+        )
+        or not str(config.get("intake_origin", "")).startswith("https://")
+        or not str(config.get("endpoint_url", "")).startswith("https://")
+        or type(config.get("public_model_track")) is not bool
+        or not isinstance(config.get("wallet_name"), str)
+        or not isinstance(config.get("hotkey_name"), str)
+        or (
+            config.get("wallet_path") is not None and not isinstance(config.get("wallet_path"), str)
+        )
+    ):
+        raise ValueError("enrollment configuration differs")
+    policy_raw = worker_read(enrollment / "competition-policy.json")
+    policy = CompetitionPolicy.model_validate_json(policy_raw)
+    if digest(policy) != config["policy_sha256"]:
+        raise ValueError("enrollment policy differs")
+    request_path = enrollment / "participation-request.json"
+    if request_path.exists():
+        request = CohortParticipationRequest.model_validate_json(worker_read(request_path))
+        sub, consent = request.signed_submission.submission, request.consent.consent
+        if (
+            sub.policy_sha256 != config["policy_sha256"]
+            or sub.track != "endpoint"
+            or identity(sub.hotkey) != identity(config["miner_hotkey"])
+            or sub.model_revision != config["model_revision"]
+            or sub.endpoint_url != config["endpoint_url"]
+            or consent.cohort_sha256 != config["cohort_sha256"]
+            or consent.authority_sha256 != config["service_authority_sha256"]
+        ):
+            raise ValueError("retained participation request differs")
+    else:
+        origin = config["intake_origin"]
+        status = document(
+            fetch(origin + "/v1/competition/status"), label="public competition status"
+        )
+        history_raw = fetch(
+            origin + "/v1/competition/cohorts/" + config["cohort_sha256"] + "/history"
+        )
+        policy, request, request_raw = _new_participation_request(
+            config, policy_raw, status, history_raw
+        )
+        worker_write(request_path, request_raw)
+    receipt_path = enrollment / "participation-receipt.json"
+    if not receipt_path.exists():
+        try:
+            receipt = asyncio.run(
+                submit_cohort_participation(
+                    origin=config["intake_origin"], policy=policy, request=request
+                )
+            )
+        except CompetitionSubmissionError as error:
+            status_code = error.status_code
+            if status_code is None or status_code in {
+                404,
+                408,
+                409,
+                425,
+                429,
+                500,
+                502,
+                503,
+                504,
+            }:
+                raise EnrollmentRetry("cohort participation is temporarily unavailable") from error
+            raise
+        worker_write(receipt_path, canonical_json_bytes(receipt))
+    try:
+        observed = asyncio.run(
+            fetch_cohort_admission(origin=config["intake_origin"], policy=policy, request=request)
+        )
+    except CompetitionSubmissionError as error:
+        status_code = error.status_code
+        if status_code is None or status_code in {404, 408, 425, 429, 500, 502, 503, 504}:
+            return {
+                "cohort_sha256": config["cohort_sha256"],
+                "policy_sha256": config["policy_sha256"],
+                "status": "endpoint_enrollment_pending_attestation",
+            }
+        raise
+    worker_write(enrollment / "admission-status.json", canonical_json_bytes(observed))
+    if observed.status != "admission_certified":
+        return {
+            "cohort_sha256": config["cohort_sha256"],
+            "policy_sha256": config["policy_sha256"],
+            "status": "endpoint_enrollment_pending_attestation",
+        }
+    worker_write(enrollment / "admission-certificate.json", canonical_json_bytes(observed))
+    return {
+        "cohort_sha256": config["cohort_sha256"],
+        "policy_sha256": config["policy_sha256"],
+        "status": "endpoint_enrollment_certified",
+    }
+
+
+def run_enrollment(enrollment: Path) -> None:
+    try:
+        report = enrollment_step(enrollment)
+    except (EnrollmentRetry, urllib.error.URLError, TimeoutError) as error:
+        report = {
+            "error_type": type(error).__name__,
+            "retry_seconds": 900,
+            "status": "endpoint_enrollment_retry_scheduled",
+        }
+    except Exception as error:
+        report = {
+            "error_type": type(error).__name__,
+            "retry_seconds": 900,
+            "status": "endpoint_enrollment_held",
+        }
+    worker_write(enrollment / "last-status.json", canonical(report))
+    print(canonical(report).decode(), flush=True)
+
+
+def _root_file(path: Path, raw: bytes, mode: int) -> None:
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    pending = path.with_name(path.name + ".pending")
+    pending.unlink(missing_ok=True)
+    pending.write_bytes(raw)
+    os.chown(pending, 0, 0)
+    pending.chmod(mode)
+    os.replace(pending, path)
+
+
+def install_endpoint_enrollment(
+    *,
+    state: Path,
+    account: pwd.struct_passwd,
+    runtime_python: Path,
+    config_raw: bytes,
+    policy_raw: bytes,
+) -> dict:
+    enrollment = state / "enrollment"
+    service_directory(enrollment, account)
+    write_private(enrollment / "config.json", config_raw, account)
+    write_private(enrollment / "competition-policy.json", policy_raw, account)
+    service_path = SYSTEMD_ROOT / ENROLLMENT_SERVICE
+    timer_path = SYSTEMD_ROOT / ENROLLMENT_TIMER
+    service_raw = (
+        "[Unit]\n"
+        "Description=Durable UMI cohort endpoint enrollment\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        f"ConditionPathExists=!{enrollment / 'admission-certificate.json'}\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"User={account.pw_name}\n"
+        f"Environment=HOME={account.pw_dir}\n"
+        f"ExecStart={runtime_python} -I -B {LAUNCHER} --run-enrollment {enrollment}\n"
+        "NoNewPrivileges=yes\n"
+        "PrivateTmp=yes\n"
+        "ProtectHome=read-only\n"
+        "ProtectSystem=strict\n"
+        f"ReadWritePaths={enrollment}\n"
+    ).encode()
+    timer_raw = (
+        "[Unit]\n"
+        "Description=Retry UMI cohort endpoint enrollment\n\n"
+        "[Timer]\n"
+        "OnBootSec=2min\n"
+        "OnUnitInactiveSec=15min\n"
+        "AccuracySec=1min\n"
+        "Persistent=true\n"
+        f"Unit={ENROLLMENT_SERVICE}\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    ).encode()
+    _root_file(service_path, service_raw, 0o644)
+    _root_file(timer_path, timer_raw, 0o644)
+    run("systemctl", "daemon-reload")
+    run("systemctl", "enable", "--now", ENROLLMENT_TIMER)
+    run("systemctl", "start", ENROLLMENT_SERVICE, check=False, timeout=180)
+    status_path = enrollment / "last-status.json"
+    if status_path.exists():
+        return document(status_path.read_bytes(), label="endpoint enrollment status")
+    return {"retry_seconds": 900, "status": "endpoint_enrollment_retry_scheduled"}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--public-model-track", required=True, choices=("yes", "no"))
@@ -798,7 +1209,38 @@ def main() -> None:
                 model,
                 seconds=30,
             )
-            print(canonical({"health": observed, "status": "already_upgraded"}).decode())
+            policy_raw = (state / "inputs/competition-policy.json").read_bytes()
+            if sha256(policy_raw) != manifest["policy"]["sha256"]:
+                raise ValueError("retained competition policy digest differs")
+            install_launcher(Path(__file__))
+            enrollment = install_endpoint_enrollment(
+                state=state,
+                account=account,
+                runtime_python=Path(miner_python(miner.arguments)),
+                config_raw=endpoint_enrollment_config(
+                    miner.arguments,
+                    manifest,
+                    hotkey,
+                    model,
+                    origin,
+                    args.public_model_track == "yes",
+                ),
+                policy_raw=policy_raw,
+            )
+            write_private(
+                receipt,
+                canonical({**prior, "endpoint_enrollment": enrollment}),
+                account,
+            )
+            print(
+                canonical(
+                    {
+                        "endpoint_enrollment": enrollment,
+                        "health": observed,
+                        "status": "already_upgraded",
+                    }
+                ).decode()
+            )
             return
     secure_root(state)
     secure_root(state / "inputs")
@@ -809,11 +1251,14 @@ def main() -> None:
         ("policy", "competition-policy.json"),
         ("transport", "transport-policy.json"),
     )
+    retained_policy_raw = None
     for key, filename in policy_files:
         raw = fetch(manifest[key]["url"])
         if sha256(raw) != manifest[key]["sha256"]:
             raise ValueError(f"{key} file digest differs")
         write_private(inputs / filename, raw, account)
+        if key == "policy":
+            retained_policy_raw = raw
     write_private(inputs / "upgrade-manifest.json", manifest_raw, account)
     write_private(
         inputs / "miner-startup.json",
@@ -863,6 +1308,8 @@ def main() -> None:
         transport=manifest["transport"]["value_sha256"],
         model=model,
     )
+    if retained_policy_raw is None:
+        raise ValueError("competition policy was not retained")
     report = {
         **summary,
         "health": observed,
@@ -870,6 +1317,24 @@ def main() -> None:
         "state_root": str(state),
         "status": "miner_upgrade_verified",
     }
+    # Record the successful service cutover before enrollment invokes the
+    # network. A later rerun can finish enrollment without repeating cutover.
+    write_private(receipt, canonical(report), account)
+    enrollment = install_endpoint_enrollment(
+        state=state,
+        account=account,
+        runtime_python=runtime_python,
+        config_raw=endpoint_enrollment_config(
+            updated,
+            manifest,
+            hotkey,
+            model,
+            origin,
+            args.public_model_track == "yes",
+        ),
+        policy_raw=retained_policy_raw,
+    )
+    report["endpoint_enrollment"] = enrollment
     write_private(receipt, canonical(report), account)
     print(canonical(report).decode())
 
@@ -877,5 +1342,7 @@ def main() -> None:
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--run-command":
         launch_command(Path(sys.argv[2]), sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[1] == "--run-enrollment":
+        run_enrollment(Path(sys.argv[2]))
     else:
         main()
