@@ -99,14 +99,15 @@ class ServiceDispatchHost:
         source = await run_owned_thread(self.lifecycle._request_source, cohort)
         queue = self.service.queues[key]
         requests = ServiceWorkRequests(queue, source.transport)
+        finality = getattr(self.service, "finality", self.service.provider)
         authority = ServiceWorkAuthority(
             queue,
-            self.service.provider,
+            finality,
             self.service.history,
             self.origins,
             timeout_seconds=self.config.operation_timeout_seconds,
         )
-        blocks = CompetitionTransportFinality(self.service.provider, source.transport)
+        blocks = CompetitionTransportFinality(finality, source.transport)
 
         async def inputs(assignment: ServiceWorkAssignment) -> ServiceRequestInputs:
             # Verify live authority before publishing private media. Capturing

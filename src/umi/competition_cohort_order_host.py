@@ -99,9 +99,10 @@ class CohortOrderHost:
                     token=token,
                     timeout_seconds=peer.timeout_seconds,
                 )
+        finality = getattr(service, "finality", service.provider)
         self.worker = CohortOrderWorker(
             self.queue,
-            service.provider,
+            finality,
             service.history,
             _Reviewers(peers[0]),
             _Delivery(peers[1]),
@@ -191,7 +192,8 @@ class CohortOrderHost:
             return selected
         timeout = self.config.operation_timeout_seconds
         source = await wait_for_owned(self.service.history(cohort), timeout=timeout)
-        capture = await wait_for_owned(self.service.provider.collect(), timeout=timeout)
+        finality = getattr(self.service, "finality", self.service.provider)
+        capture = await wait_for_owned(finality.collect(), timeout=timeout)
         block = execution_boundary(capture).block
         view = verify_cohort_history(
             source.history,

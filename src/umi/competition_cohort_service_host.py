@@ -51,6 +51,22 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 logger = logging.getLogger(__name__)
 
 
+class _SharedFreshFinality:
+    """Delegate historical reads while coalescing every fresh capture."""
+
+    def __init__(self, provider, capture, policy):
+        if provider is None or not callable(capture):
+            raise ValueError("shared service finality is unavailable")
+        self._provider, self._capture = provider, capture
+        self.policy = policy
+
+    async def collect(self):
+        return await self._capture()
+
+    def __getattr__(self, name):
+        return getattr(self._provider, name)
+
+
 class ServiceAdmissionHostConfig(StrictProtocolModel):
     schema_: Literal[
         "umi-cohort-service-admission-host/1",
@@ -228,6 +244,9 @@ class ServiceAdmissionHost:
         self.runtime_tasks, self.request_readiness = (), None
         self.history_exporter = None
         self.provider = provider
+        self.finality = (
+            None if provider is None else _SharedFreshFinality(provider, capture, policy)
+        )
         if c.admission_owner is not None:
             c.admission_owner.check_policy(policy)
             if provider is None or provider.policy != policy:
