@@ -17,7 +17,9 @@ used by settlement replay. Optional settlement signing returns endorsements to
 the coordinator. The worker does not submit weights.
 
 The imported baseline still has no contributor attribution. C5 assigns 50% to
-service work and 50% to eligible public models; C6 is model-only. Running this
+service work and 50% to eligible public models. The selected C6-C10
+profile is model-only, but a successor plan may change any unopened cohort.
+Running this
 worker does not activate weights or satisfy the launch profile's evaluation and
 review requirements.
 

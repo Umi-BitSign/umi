@@ -1142,14 +1142,16 @@ reviewer service. It requires an explicitly authorized cohort and miner consent;
 enabling these components does not change a fixed round's signed deadlines. The
 complete recovery workflow is not deployed or qualified for unattended rewards.
 
-The selected C5 and C7-C10 allocation is 50% service and 50% model rewards. C6
-is model-only and assigns 100% within the public-model track. Set
-`ServiceTerms.service_pool_bps` to `5000` for mixed cohorts and `0` for C6. Bind
-the exact terms digest, eligible tracks and split in every cohort's standing plan
-and reward manifest before admission. The series-level policy retains both track
-capabilities and cannot widen a narrower cohort plan. These selections require
-new reviewed policy and authority artifacts; existing C4 artifacts retain their
-original allocation.
+The signed C5 allocation is 50% service and 50% model rewards. The currently
+selected C6-C10 profile is model-only and assigns 100% within the public-model
+track. Set `ServiceTerms.service_pool_bps` from each signed cohort plan: `5000`
+for C5 and `0` for the C6-C10 plans that implement the selected profile. A
+successor plan may change any unopened cohort, so derive this value from the live
+plan. Bind the exact terms digest, eligible tracks and split in every cohort's
+standing plan and reward manifest before admission. The series-level policy
+retains both track capabilities and cannot widen a narrower cohort plan. These
+selections require new reviewed policy and authority artifacts; existing C4
+artifacts retain their original allocation.
 Existing submissions retain their original policy; enrollment under the new
 split requires fresh miner consent.
 
@@ -1161,8 +1163,8 @@ highest exact score in each occupied band. The first complete certified
 acceptance fixes score and eligibility for exact-content aliases, so repeated
 submissions do not create additional benchmark trials. The raw weight total is
 65,535; deterministic rounding assigns mixed cohorts 32,767 units to service and
-32,768 to models, while C6 assigns all 65,535 to models. This is a weight-budget
-split, not a guarantee of exact emitted token amounts.
+32,768 to models, while a model-only plan assigns all 65,535 to models. This is a
+weight-budget split, not a guarantee of exact emitted token amounts.
 
 Phase authority `umi-cohort-recovery-authority/2` keeps a pending phase valid
 until certified completion or revocation. Passing a target does not require an

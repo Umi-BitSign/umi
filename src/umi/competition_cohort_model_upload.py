@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from .competition_artifacts import (
     _artifact,
@@ -25,6 +25,7 @@ from .competition_artifacts import (
     verify_preserved_bundle,
 )
 from .competition_cohort_intake import CohortIntake, history_tip
+from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
 from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
@@ -39,12 +40,18 @@ from .open_competition import (
     validate_bundle_policy,
     verify_signature,
 )
-from .private_files import Directory, ensure_private_directory, lock_private_file
+from .private_files import (
+    Directory,
+    ensure_private_directory,
+    lock_private_file,
+    read_private_model,
+)
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class ModelUploadConfig(StrictProtocolModel):
     directory: Directory
+    admission_reviews_directory: Directory | None = None
     maximum_models: Annotated[int, Field(ge=1, le=4096)] = 1024
     # Reserve space for staging and the verified native archive before delivery.
     maximum_reserved_bytes: Annotated[int, Field(ge=1, le=16 * 1024**4)]
@@ -52,9 +59,20 @@ class ModelUploadConfig(StrictProtocolModel):
     maximum_concurrent_uploads: Annotated[int, Field(ge=1, le=32)] = 2
     idle_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
 
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        value = handler(self)
+        if self.admission_reviews_directory is None:
+            value.pop("admission_reviews_directory", None)
+        return value
+
 
 class IncompleteModelUpload(OSError):
     """The signed model still needs all of its original files."""
+
+
+class PendingModelReview(OSError):
+    """The preserved model still needs its bounded pre-admission review."""
 
 
 CHUNK_BYTES = 8 * 1024**2
@@ -74,7 +92,12 @@ class CohortModelUploads:
         self.config = ModelUploadConfig.model_validate_json(canonical_json_bytes(config))
         self.intake, self.archive = intake, Path(archive)
         self.root = Path(config.directory)
-        roots = (self.root, self.archive, Path(intake.config.directory))
+        reviews = (
+            ()
+            if self.config.admission_reviews_directory is None
+            else (Path(self.config.admission_reviews_directory),)
+        )
+        roots = (self.root, self.archive, Path(intake.config.directory), *reviews)
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(roots)
@@ -83,6 +106,8 @@ class CohortModelUploads:
             raise ValueError("model upload, archive and intake stores must be disjoint")
         ensure_private_directory(self.root)
         ensure_private_directory(self.archive)
+        for review_root in reviews:
+            ensure_private_directory(review_root)
         self.journal = RoundJournal(
             self.root / "journal",
             {
@@ -380,3 +405,17 @@ class CohortModelUploads:
             raise IncompleteModelUpload(
                 "deliver and verify the complete model before enrollment"
             ) from error
+        if self.config.admission_reviews_directory is None:
+            return
+        try:
+            review = read_private_model(
+                Path(self.config.admission_reviews_directory) / (sub.model_revision + ".json"),
+                ModelArtifactReviewInputs,
+                maximum_bytes=33 * 1024**2,
+            )
+        except FileNotFoundError as error:
+            raise PendingModelReview(
+                "model enrollment awaits its bounded rights and reconstruction review"
+            ) from error
+        if review.model_sha256 != sub.model_revision:
+            raise ValueError("pre-admission review differs from the preserved model")

@@ -51,12 +51,14 @@ inputs and allowed tracks:
 sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
 ```
 
-C6 has no endpoint pathway: every C6 participant uses the public-model track.
-Its manifest therefore rejects `no`, records the model-track intent, and leaves
-the C5 endpoint service unchanged as a recoverable prior deployment. The C6 model
-submission still requires the operator's signed rights declaration and selected
-bundle. Future mixed or endpoint-only cohorts likewise enforce their advertised
-tracks. No cohort-specific replacement script is needed.
+C6's selected profile has no endpoint pathway: every participant uses the
+public-model track. A signed manifest implementing that profile rejects `no`,
+records the model-track intent, and leaves the C5 endpoint service unchanged as a
+recoverable prior deployment. The C6 model submission still requires the
+operator's signed rights declaration and selected bundle. Later cohorts use the
+same updater; their signed manifests, rather than cohort numbers baked into the
+script, enforce the profile published before intake. No cohort-specific
+replacement script is needed.
 
 The automatic path stops before mutation when it finds a custom or ambiguous
 deployment, including multiple miner services, a root-run miner, a non-systemd

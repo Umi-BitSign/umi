@@ -41,12 +41,14 @@ cohorts, run the same installed updater:
 sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
 ```
 
-The current manifest determines the allowed answer. C6 has no endpoint pathway,
-so every participant uses the public-model track. Its manifest rejects `no`,
-records the model-track intent, and leaves the previous endpoint service unchanged
-as a recoverable prior deployment. The operator then signs the ordinary rights
-declaration and submits the selected bundle. An endpoint-only cohort rejects
-`yes`.
+The current manifest determines the allowed answer; the updater never infers a
+track from the cohort number. The selected C6-C10 profile has no endpoint
+pathway. A manifest that publishes that profile rejects `no`, records public-model
+intent, and leaves the previous endpoint service unchanged as a recoverable prior
+deployment. The operator then signs the ordinary rights declaration and submits
+the selected bundle. A future successor manifest may replace any unopened
+cohort's selected profile. Once a cohort opens, the accepted manifest remains
+fixed for that cohort. An endpoint-only manifest rejects `yes`.
 
 The automatic path deliberately refuses ambiguous or custom deployments before
 stopping anything: multiple miner services, a root-run miner, a non-systemd

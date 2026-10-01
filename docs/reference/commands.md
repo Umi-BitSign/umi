@@ -209,8 +209,11 @@ sequence until its receipt is known.
 C5+ model enrollment requires publication of its selected runtime, immutable
 policy, contribution terms and submission route. Until that opening, prepare the
 bundle without signing against the existing endpoint-intake policy. C5 uses 50%
-service / 50% model rewards; C6 is model-only and assigns 100% of its competition
-allocation within the public-model track. A complete accepted model must match
+service / 50% model rewards. The selected C6-C10 profile is model-only
+and assigns 100% of each cohort's competition allocation within the public-model
+track. A successor plan may replace any unopened cohort's profile; use the live
+signed manifest rather than assuming rules from the cohort number. A complete
+accepted model must match
 or beat the frozen baseline. Exact copies count once, and the remaining eligible
 models receive one credit per occupied fixed five-percentage-point quality band.
 C4 retains its signed 70/30 allocation, including burning its unallocated model

@@ -60,6 +60,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         "umi-cohort-service-admission-host/5",
         "umi-cohort-service-admission-host/6",
         "umi-cohort-service-admission-host/7",
+        "umi-cohort-service-admission-host/8",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     manifest: RewardManifest
@@ -99,6 +100,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             "umi-cohort-service-admission-host/5",
             "umi-cohort-service-admission-host/6",
             "umi-cohort-service-admission-host/7",
+            "umi-cohort-service-admission-host/8",
         } and (
             (self.schema_ != "umi-cohort-service-admission-host/1") != bool(self.model_review_peers)
         ):
@@ -108,6 +110,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             "umi-cohort-service-admission-host/5",
             "umi-cohort-service-admission-host/6",
             "umi-cohort-service-admission-host/7",
+            "umi-cohort-service-admission-host/8",
         } and (
             (self.schema_ == "umi-cohort-service-admission-host/3")
             != (self.model_uploads is not None)
@@ -122,6 +125,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                 "umi-cohort-service-admission-host/5",
                 "umi-cohort-service-admission-host/6",
                 "umi-cohort-service-admission-host/7",
+                "umi-cohort-service-admission-host/8",
             }
         ) != (self.admission_owner is not None):
             raise ValueError("automatic admission requires service admission host version four")
@@ -131,20 +135,32 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                 "umi-cohort-service-admission-host/5",
                 "umi-cohort-service-admission-host/6",
                 "umi-cohort-service-admission-host/7",
+                "umi-cohort-service-admission-host/8",
             }
         ) != (self.lifecycle is not None):
             raise ValueError("automatic phase control requires service admission host version five")
         if (
             self.schema_
-            in {"umi-cohort-service-admission-host/6", "umi-cohort-service-admission-host/7"}
+            in {
+                "umi-cohort-service-admission-host/6",
+                "umi-cohort-service-admission-host/7",
+                "umi-cohort-service-admission-host/8",
+            }
         ) != (self.dispatch is not None):
             raise ValueError(
                 "automatic service dispatch requires service admission host version six"
             )
-        if (self.schema_ == "umi-cohort-service-admission-host/7") != (self.orders is not None):
+        if (
+            self.schema_
+            in {"umi-cohort-service-admission-host/7", "umi-cohort-service-admission-host/8"}
+        ) != (self.orders is not None):
             raise ValueError(
                 "automatic benchmark orders require service admission host version seven"
             )
+        if self.schema_ == "umi-cohort-service-admission-host/8" and (
+            self.model_uploads is None or self.model_uploads.admission_reviews_directory is None
+        ):
+            raise ValueError("version eight model intake requires pre-admission artifact reviews")
         if len({identity(p.signer) for p in self.model_review_peers}) != len(
             self.model_review_peers
         ):
@@ -172,6 +188,12 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             *(self.dispatch.stores() if self.dispatch else ()),
             *((Path(self.orders.queue.directory),) if self.orders else ()),
             *((Path(self.model_uploads.directory),) if self.model_uploads else ()),
+            *(
+                (Path(self.model_uploads.admission_reviews_directory),)
+                if self.model_uploads is not None
+                and self.model_uploads.admission_reviews_directory is not None
+                else ()
+            ),
             *(
                 (
                     Path(self.admission_owner.directory),

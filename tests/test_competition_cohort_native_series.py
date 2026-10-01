@@ -1,6 +1,6 @@
 """One configured C5-C10 series through native intake, rest and settlement.
 
-The series uses mixed C5/C7-C10 profiles and a model-only C6. It reuses original
+The selected series uses a mixed C5 profile and model-only C6-C10 profiles. It reuses original
 owner/evaluator journals across cohorts. Finality, inference, rights review and
 HTTP remain the explicit ports of the connected pipeline. This does not establish
 reward activation, coverage or installed chain effects.
@@ -67,8 +67,8 @@ def scenario(single_scenario, policy):  # noqa: F811
             update={
                 "schema_": "umi-recoverable-cohort-plan/2",
                 "sequence": n,
-                "eligible_tracks": ("model",) if n == 6 else ("endpoint", "model"),
-                "service_pool_bps": 0 if n == 6 else 5000,
+                "eligible_tracks": ("endpoint", "model") if n == 5 else ("model",),
+                "service_pool_bps": 5000 if n == 5 else 0,
             }
         )
         for n in range(5, 11)

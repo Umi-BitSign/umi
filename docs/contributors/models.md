@@ -11,9 +11,11 @@
 Public C5 model intake is open under the signed C5+ policy. This checklist
 describes artifact, rights and
 reconstruction requirements; it does not approve a model or grant a license.
-The selected C5 and C7-C10 split is 50% service and 50% model rewards. C6 is
-model-only and assigns 100% of its competition allocation within this public-model
-track. Use the runtime, immutable policy and upload route published by the live
+The signed C5 split is 50% service and 50% model rewards. The selected
+C6-C10 profile is public-model-only and assigns 100% of each cohort's competition
+allocation within this track. A successor plan may change any unopened cohort;
+only the plan published when intake opens governs that cohort. Use the runtime,
+immutable policy and upload route published by the live
 C5 status and cohort history.
 
 The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for C4
@@ -160,8 +162,10 @@ Both tracks use the same signed policy. Rewards begin only after the
 [activation gates](../competition/launch.md) pass and the competition row is
 confirmed on chain.
 
-For C5 and C7-C10, the selected split is 50% service and 50% model rewards. C6
-has no service pool and assigns 100% within the public-model track. The model
+For C5, the selected split is 50% service and 50% model rewards. The currently
+selected C6-C10 profile has no service pool and assigns 100% within the
+public-model track. Future track selection comes from the signed cohort plan and
+may change until that cohort's intake opens. The model
 quality floor is equality with the frozen baseline, and a sole eligible entrant
 receives the full model pool. Exact duplicate content is counted once. Eligible
 models then enter fixed five-percentage-point quality bands, each of which

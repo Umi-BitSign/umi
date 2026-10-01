@@ -53,8 +53,10 @@ def test_upgrader_is_a_single_file_distribution() -> None:
     assert 'with_name("launch.py")' not in source
 
 
-def test_model_only_cohort_requires_public_track() -> None:
+@pytest.mark.parametrize("cohort", ["C6", "C7", "C10"])
+def test_model_only_cohort_requires_public_track(cohort: str) -> None:
     manifest = _manifest()
+    manifest["cohort"] = cohort
     manifest["eligible_tracks"] = ["model"]
     manifest["public_model_track_required"] = True
     status = _status(manifest)
@@ -237,11 +239,15 @@ def test_activation_restores_previous_override_when_health_fails(
     assert ("systemctl", "start", "umi-miner.service") in calls
 
 
+@pytest.mark.parametrize("cohort", ["C6", "C7", "C10"])
 def test_model_only_dry_run_does_not_write_or_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    cohort: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     manifest = _manifest()
-    manifest["cohort"] = "C6"
+    manifest["cohort"] = cohort
     manifest["eligible_tracks"] = ["model"]
     manifest["public_model_track_required"] = True
     manifest_raw = upgrade.canonical(manifest)
@@ -287,17 +293,21 @@ def test_model_only_dry_run_does_not_write_or_install(
     )
     upgrade.main()
     report = json.loads(capsys.readouterr().out)
-    assert report["cohort"] == "C6"
+    assert report["cohort"] == cohort
     assert report["endpoint_service_unchanged"] is True
     assert report["status"] == "upgrade_preflight_passed"
     assert not (tmp_path / "state").exists()
 
 
+@pytest.mark.parametrize("cohort", ["C6", "C7", "C10"])
 def test_model_only_upgrade_records_intent_without_touching_endpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    cohort: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     manifest = _manifest()
-    manifest["cohort"] = "C6"
+    manifest["cohort"] = cohort
     manifest["eligible_tracks"] = ["model"]
     manifest["public_model_track_required"] = True
     manifest_raw = upgrade.canonical(manifest)
