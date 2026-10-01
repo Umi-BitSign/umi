@@ -12,7 +12,7 @@ function run(path, options = {}, fetch = async () => new Response('ok'), origin 
 
 test('unknown paths and methods never reach the private service', async () => {
   const denied = async () => assert.fail('private service called');
-  for (const path of ['/', '/metrics', '/docs', '/openapi.json', '/wallets', '/v1/translate/extra', '/healthz%2f..']) {
+  for (const path of ['/', '/metrics', '/docs', '/openapi.json', '/wallets', '/v1/translate/extra', '/healthz%2f..', '/v1/competition/cohorts/assignments/extra']) {
     assert.equal((await run(path, {}, denied)).status, 404);
   }
   assert.equal((await run('/healthz', { method: 'POST' }, denied)).status, 405);
@@ -61,6 +61,44 @@ test('forwards exact request/response bytes and authentication headers to a fixe
   assert.equal(response.headers.get('set-cookie'), null);
 });
 
+test('forwards exact C5 miner routes with route-specific request bounds', async () => {
+  const routes = [
+    '/v1/translate/response',
+    '/v1/competition/cohorts/assignments',
+    '/v1/competition/cohorts/assignments/retire',
+  ];
+  for (const path of routes) {
+    const body = '{"signed":"request"}\n';
+    const response = await run(path, { method: 'POST', body }, async request => {
+      assert.equal(request.url, `http://127.0.0.1:8787${path}`);
+      assert.equal(await request.text(), body);
+      return Response.json({ status: 'accepted' });
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: 'accepted' });
+  }
+
+  const grant = 'x'.repeat(65537);
+  const accepted = await run('/v1/competition/cohorts/assignments', {
+    method: 'POST', body: grant,
+  }, async request => {
+    assert.equal((await request.arrayBuffer()).byteLength, grant.length);
+    return Response.json({ status: 'accepted' });
+  });
+  assert.equal(accepted.status, 200);
+
+  const denied = async () => assert.fail('private service called');
+  assert.equal((await run('/v1/translate/response', {
+    method: 'POST', body: grant,
+  }, denied)).status, 413);
+  assert.equal((await run('/v1/competition/cohorts/assignments/retire', {
+    method: 'POST', body: grant,
+  }, denied)).status, 413);
+  assert.equal((await run('/v1/competition/cohorts/assignments', {
+    method: 'POST', body: '{}', headers: { 'content-length': '16777217' },
+  }, denied)).status, 413);
+});
+
 test('blocks oversized bodies with or without content-length', async () => {
   const denied = async () => assert.fail('private service called');
   for (const headers of [{}, { 'content-length': '65537' }, { 'content-length': '01' }]) {
@@ -90,6 +128,13 @@ test('preserves backend unavailability and authorization failures', async () => 
 test('rejects redirects and oversized upstream responses', async () => {
   assert.equal((await run('/healthz', {}, async () => Response.redirect('http://other-internal-host/'))).status, 502);
   assert.equal((await run('/healthz', {}, async () => new Response('x'.repeat(65537)))).status, 502);
+});
+
+test('keeps cohort-grant responses within the JSON response bound', async () => {
+  const response = await run('/v1/competition/cohorts/assignments', {
+    method: 'POST', body: '{}',
+  }, async () => new Response('x'.repeat(65537)));
+  assert.equal(response.status, 502);
 });
 
 test('reports disconnected backend without leaking exception details', async () => {

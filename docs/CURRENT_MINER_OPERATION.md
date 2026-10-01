@@ -70,27 +70,23 @@ See the [signed-policy specification and rollout evidence](operators/bridge.md).
 
 ## Open translation-competition intake
 
-The [version 0.2 successor design](../whitepaper/README.md) adds self-service
-endpoint participation and an optional reproducible-model contribution track.
-Public endpoint intake has been live since block `9,085,463`. It does not replace
-the bridge or activate competition weights by itself. Check
-[public status](https://api.umi.vision/v1/competition/status) for
-`intake_schedule_hold` before interpreting `next_intake_schedule`. A hold names
-the cohort being prepared and means no closing block or evaluation start is
-announced; the next schedule is null. Intake can remain open during that hold,
-but acceptance does not guarantee selection under the future policy. Without
-a hold, submit before the published schedule's earliest cutoff; a later
-acceptance does not guarantee inclusion. Do not infer a launched cohort from
-elapsed block cadence.
+The [version 0.2 successor design](../whitepaper/README.md) supports self-service
+endpoint participation and a reproducible-model contribution track. Public C5
+intake does not replace the bridge or activate competition weights by itself.
+Check [public status](https://api.umi.vision/v1/competition/status) and
+[readiness](https://api.umi.vision/v1/competition/readiness) for the active
+cohort, accepted tracks and current admission state. C5's published phase blocks
+are nominal progression targets, not non-extendable deadlines. Liveness delays
+retain and extend unfinished work and do not advance it to C6. Acceptance does
+not guarantee selection, a score or a reward.
 Admitted submissions must remain valid through evaluation close, and the hotkey
 must be registered on SN78 in the finalized roster-close snapshot. The
 [connection guide](miners/connection.md) identifies accepted predecessor
 policies and the configuration needed to serve current requests.
 
-Current intake uses version 2 contribution terms. If you submitted under version
-1, follow the [policy-transition instructions](reference/commands.md#required-version-1-to-version-2-acceptance)
-and receive a new acceptance before the current cutoff. Your archived version 1
-receipt does not accept the new terms.
+Current C5 intake uses version 3 contribution terms. Earlier receipts do not
+accept the new policy or terms; sign and retain a fresh C5 submission and cohort
+consent through the live submission path.
 
 Translation requests need the
 [protocol miner connected to a working model](miners/model.md#miner-model-integration).
@@ -112,14 +108,14 @@ The open-competition endpoint path supports
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
-Public intake remains on C5 preparation; model enrollment under the new policy
-has not opened. C5 uses 50% service / 50% model rewards; C6 accepts only complete
+Public C5 endpoint and model intake is open. C5 uses 50% service / 50% model
+rewards; C6 accepts only complete
 public-model entries and assigns that track 100%; C7-C10 return to 50/50. All use a
 baseline-or-better quality requirement for complete accepted model entries.
 Exact copies count once; eligible models then compete for one credit in each
 occupied fixed five-percentage-point quality band. Read the [model preparation
 checklist](contributors/models.md#model-contribution-review) and use the exact
-terms named by the eventual signed policy. C4's signed 70/30 allocation and
+terms named by the signed policy. C4's signed 70/30 allocation and
 [version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md) remain applicable to C4
 verification; its unallocated model share is burned and does not accrue. Terms
 alone do not approve an individual model's rights or award it a share. Endpoint

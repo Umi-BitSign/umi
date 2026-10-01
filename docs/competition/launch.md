@@ -2,15 +2,17 @@
 
 # Competition launch configuration
 
-C5 is the next cohort. Intake is held open while its signed policy, protected
-suite, installed services and recovery behavior are qualified. The hold has no
-submission deadline and does not advance automatically to C6. Public status
-must continue to show C5 as preparing until the launch owner installs and
-publishes the complete qualified configuration.
+C5 intake is open under its signed policy, protected suite, installed services
+and recoverable standing series. Its published phase blocks are nominal
+progression targets, not non-extendable deadlines, and it does not advance
+automatically to C6. Public status and readiness are the authority for the
+current phase and admission availability.
 
 SN78 registration and a competition acceptance are separate. An intake receipt
 does not promise selection, a score or a reward. C4 keeps its signed allocation
 and remains the effective reward cohort until C5 has a certified successor row.
+The canonical [C5 policy and transport inputs](C5_INPUTS.md) are published with
+their exact digests.
 
 ## C5 reward policy
 
@@ -44,14 +46,13 @@ and the exact signed C5 policy. Earlier acceptances do not imply version 3
 acceptance. See [model contributions](../contributors/models.md) for artifact,
 rights, provenance and reconstruction requirements.
 
-The planned frozen comparator is CPU-derived model bundle
+The frozen comparator is CPU-derived model bundle
 `6fe8df59ec11ba89f4dfe0474a673fe757e378cd9184449965861c5a7c59b641`
 with runtime
 `f025ceb38cacc5c71873d94b8f2010aae10a0193a0e410e410a202f4def3b7b0`.
 Its native parent already contains the Community v0.2 RGB crop correction. These
-digests remain preparatory until the signed C5 policy and launch are published;
-the original Community source archive is provenance, not the executable
-comparator identity.
+digests are bound by the signed C5 policy; the original Community source archive
+is provenance, not the executable comparator identity.
 
 ## Scoring and video-dependence diagnostics
 
@@ -98,16 +99,20 @@ checks.
 
 ## Trust and evaluator profile
 
-The initial C5 profile lists UID 0 and UID 54 as evaluators in the same
-`umi-operated` control group, with one required evaluator group. Either can
-continue the group's retained work after a state-preserving handoff, but their
-signatures do not count as independent operator votes. This remains a
-single-operator trust model. Adding another control group or increasing quorum
-requires a successor policy and qualification of that exact profile.
+The initial C5 profile lists UID 54 and UID 0 as evaluators in the same
+`umi-operated` control group, with one required evaluator group. UID 54 is the
+required transport signer, coordinator and reward-control validator. UID 0 is
+optional review redundancy: it may reproduce and sign the same work, but its
+availability is not required for intake, settlement or reward continuation.
+Retiring UID 0 therefore does not require miners to change configuration or
+replace the policy. The two signatures do not count as independent operator
+votes. This remains a single-operator trust model. Adding another control group
+or increasing quorum requires a successor policy and qualification of that exact
+profile.
 
 ## Protected inputs
 
-Before intake leaves its hold, fix and sign the exact:
+The signed launch fixes the exact:
 
 - C5 policy, version 3 terms digest and standing cohort authority;
 - protected suite, references, strata and case provenance;
@@ -141,16 +146,19 @@ configuration. Complete these checks in order:
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
    records without exposing private clips or credentials.
-6. **Validator path:** Verify UID 0 and UID 54 independently consume the certified
-   row, survive restart and RPC failover, and retain uncertain transaction state.
-7. **Studio enrollment:** Submit the Studio baseline artifact to the public-model
-   track under the exact C5 policy and confirm its complete acceptance and durable
-   R2 copy.
-8. **Selection:** Publish the canonical standing boot selector only after all
-   preceding evidence passes. Verify the selected services, public status and
-   retained C4 rollback boundary.
-9. **Chain proof:** After settlement, confirm each intended validator's fresh
-   finalized row and the resulting incentive before announcing reward activation.
+6. **Validator path:** Verify required validator UID 54 consumes the certified
+   row, survives restart and RPC failover, retains uncertain transaction state,
+   and receives the full verified reward opportunity. Verify UID 0 separately
+   when it is enabled; its absence or retirement must not hold the cohort.
+7. **Selection:** Publish the canonical standing boot selector only after all
+   preceding infrastructure evidence passes. Verify the selected services,
+   public status and retained C4 rollback boundary.
+8. **Studio enrollment:** Submit the Studio baseline artifact through the live
+   public-model track under the exact C5 policy and confirm its complete
+   acceptance and durable R2 copy.
+9. **Chain proof:** After settlement, confirm UID 54's fresh finalized row and
+   resulting incentive before announcing reward activation. Record any optional
+   validator rows separately.
 
 Source tests, a merged commit, staged files, a running service and a submitted
 transaction are intermediate evidence. None alone proves a live reward row.

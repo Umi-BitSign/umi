@@ -5,8 +5,9 @@ Public miner origin: https://studio-miner.sam-sn78.workers.dev
 Public assignment-feed route:
 https://api.umi.vision/v1/competition/assignments/query
 
-The Worker forwards `GET /healthz` and `POST /v1/translate` on the miner host
-to a fixed Workers VPC service for Studio's `127.0.0.1:8787`. A route on
+The Worker forwards the exact miner health, translation, response-recovery,
+cohort-grant, and cohort-retirement paths on the miner host to a fixed Workers
+VPC service for Studio's `127.0.0.1:8787`. A route on
 `api.umi.vision` forwards only `POST /v1/competition/assignments/query` to a
 separate fixed VPC service for `127.0.0.1:8129`. Host and path checks prevent
 either public origin from reaching the other service. Studio needs outbound
@@ -20,8 +21,10 @@ connectivity, with no static public IP or inbound router port.
   intercepted on `api.umi.vision`; all other API paths continue to the API
   origin.
 - Exact routes and methods, no query strings, redirects or protocol upgrades.
-- Request and response bodies limited to 64 KiB. These are JSON envelopes;
-  video is not uploaded through this route. Headers are limited to 16 KiB.
+- Translation, recovery, retirement and response bodies are limited to 64 KiB.
+  Signed cohort-grant requests alone may be as large as 16 MiB; their responses
+  remain limited to 64 KiB. These are JSON envelopes; video is not uploaded
+  through these routes. Headers are limited to 16 KiB.
 - 180-second proxy deadline and cancellation on client disconnect. Validator
   deadlines can be shorter; the 130-second probe is a transport check only.
 - Request body bytes and authentication headers are preserved. The actual

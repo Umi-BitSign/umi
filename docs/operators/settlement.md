@@ -10,12 +10,12 @@
 
 ## Recoverable cohort model awards
 
-The candidate recoverable cohort implementation separates model payout from
-reference-model promotion. It requires explicit pre-intake consent through
+The recoverable cohort implementation separates model payout from reference-model
+promotion. It requires explicit pre-intake consent through
 `umi-cohort-recovery-authority/3` and the rule
 `baseline_or_better_quality_bucket_best_score_first_complete/1`, with a signed
 500-basis-point bucket width. Existing authorities retain their original
-allocation behavior. This format is not a public launch notice.
+allocation behavior. Public status identifies the active authority and cohort.
 
 The complete sealed model roster must have independently certified quality,
 complete preserved bundles and signed rights/reconstruction acceptances. Model
@@ -330,8 +330,8 @@ The signer requires:
 - An exact registration snapshot re-proved through the evaluator's owned
   historical finality provider, and a fresh head inside the signing window.
 
-The existing publication replay verifies the complete roster, result signatures
-and deterministic 70/30 projection. A signer cannot be a roster submitter,
+The publication replay verifies the complete roster, result signatures and the
+deterministic allocation bound by the active authority. A signer cannot be a roster submitter,
 positive-weight recipient, promoted contributor, or a member of a policy
 control group containing any of those identities. Quorum still requires the
 configured number of distinct eligible groups. UID 0 and UID 54 operated by us
@@ -385,7 +385,7 @@ is silently removed to make the remaining roster settle.
 
 ### Verification scope and remaining work
 
-The tests exercise complete 70/30 publication signatures and signing-state
+The tests exercise complete allocation publication signatures and signing-state
 failure cases. Separate execution tests check model journals and the actual
 authenticated endpoint-response path against the local-evidence verifier.
 The combined service test additionally runs both tracks through scheduling,
@@ -395,12 +395,13 @@ It does not establish real-model quality or independent administration.
 The delivery tests additionally cover authenticated proposal discovery,
 certificate collection and immutable package publication. The integrated
 protected-data rehearsal, reviewed launch inputs, signed activation and finalized
-incentive evidence remain launch requirements. The approved initial evaluator
-cohort is UID 0 alone, with one disclosed operator group. Version 3 permits
-70% endpoint allocation and 30% verified burn before the first promotion;
-model-specific rights approval and a qualifying promotion are required before
-paying the contributor share. Importing Michael's baseline grants no contributor
-reward by itself. See the [allocation rule](../competition/launch.md).
+incentive evidence remain required for a new allocation. UID 54 and UID 0
+currently share one disclosed operator control group. UID 54 is required; UID 0
+is optional redundancy and cannot hold settlement. C5 uses separate 50% service
+and 50% public-model pools; C6 is model-only. Model-specific rights
+approval and a qualifying acceptance are required before paying a contributor.
+Importing the baseline grants no contributor reward by itself. See the
+[allocation rule](../competition/launch.md).
 
 
 <a id="open-competition-settlement-delivery"></a>
@@ -412,8 +413,9 @@ an immutable replay package. Evaluators discover proposals through authenticated
 HTTPS and sign only after the [local settlement checks](settlement.md#open-competition-settlement-signing).
 No separate upload key or manual certificate assembly is required.
 
-This path does not approve model rights, import a promotion head, activate the
-70/30 policy, or submit chain weights. It leaves the deployed bridge unchanged.
+This path does not approve model rights, import a promotion head, activate a
+reward allocation, or submit chain weights. It leaves the deployed bridge
+unchanged.
 
 <a id="open-competition-settlement-delivery--coordinator-configuration"></a>
 
@@ -495,7 +497,8 @@ hotkey and owned finality provider. Each endorsement still requires the worker's
 own cutoff reservation, completed local execution for every roster member,
 by-cutoff evidence receipts, and the exact locally reviewed promotion history.
 An empty review store blocks signing. Copying the coordinator database is not
-independent review. UID 0 and UID 54 under our administration count as one group.
+independent review. UID 54 and optional UID 0 under our administration count as
+one group.
 
 <a id="open-competition-settlement-delivery--delivery-and-recovery"></a>
 
@@ -536,7 +539,7 @@ and disk exhaustion. Preserve journals and certificates during recovery.
 ### Verification scope
 
 The delivery tests use synthetic keys and an in-process HTTP transport. They
-exercise coordinator polling, a complete 70/30 settlement, two endorsements,
+exercise coordinator polling, a complete legacy 70/30 settlement, two endorsements,
 package replay, restart recovery and rejection paths. Their local-execution
 fixture is isolated; they do not prove model quality or independent operators.
 The complete protected-data scheduling-to-execution rehearsal, agreed promotion

@@ -203,8 +203,8 @@ prove independently witnessed publication timing, model quality, rights approval
 or reward eligibility. The [round coordinator](rounds.md#open-competition-round-coordinator)
 and [independent work signers](rounds.md#open-competition-work-signing) can supply its
 cutoff and signed-order inputs. Settlement publication, production throughput,
-and the reviewed 70/30 activation remain launch work. Keep the live registration
-bridge unchanged until those gates pass.
+and reward activation remain separate work. Keep the live registration bridge
+unchanged until a certified successor row takes over.
 
 
 <a id="open-competition-review-history"></a>
@@ -322,4 +322,5 @@ The continuous poll loop retries using retained journals and a fresh request
 nonce. Authentication failures and malformed responses remain distinct errors;
 retry never changes a signed case or extends its deadline. The lifecycle test
 allows transport recovery but still requires every result, matching promotion
-heads, the exact 70/30 package, and unchanged inference counts on retries.
+heads, the exact signed allocation package, and unchanged inference counts on
+retries.

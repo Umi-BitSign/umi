@@ -2,21 +2,23 @@
 
 # Open competition
 
-The signed C4 allocation has two tracks. Qualifying translation endpoints share
+The current signed C4 allocation has two tracks. Qualifying translation endpoints share
 70% of the miner allocation, proportional to quality. A qualifying promoted
 model's contributor receives 30%. Until the first promotion, that 30% is burned.
-The imported baseline has no contributor award or founding-model exception.
+The imported baseline has no contributor award or founding-model exception. C4
+rewards remain effective until C5 produces a certified successor row.
 
-C5 is being prepared with a selected **50% service / 50% model** split. C6 is
+C5 uses a signed **50% service / 50% model** split. C6 is
 model-only and assigns **100%** of its competition allocation within the public-model
 track; C7-C10 return to 50/50. A
 complete accepted model entry must match or beat the frozen baseline; a sole
-eligible entrant receives the entire model pool. These future rules require
-their own reviewed policy and activation. They do not change C4's signed
-allocation. See the [recoverable cohort configuration](operators/rounds.md#participation-admission).
+eligible entrant receives the entire model pool. See the
+[recoverable cohort configuration](operators/rounds.md#participation-admission).
 
-Public endpoint intake is held on **C5 preparation**, with no announced closing
-block or evaluation start and no automatic advance to C6. Read the current
+Public C5 endpoint and model intake is open. The published phase blocks are
+nominal progression targets, not non-extendable deadlines; liveness delays retain
+and extend unfinished work and do not advance the cohort automatically to C6.
+Read the current
 [status](https://api.umi.vision/v1/competition/status) and
 [readiness](https://api.umi.vision/v1/competition/readiness) before submitting.
 `admission_accepting_new` reports whether intake accepts a request;
@@ -51,20 +53,20 @@ model weights or training data.
 Use the released policy and transport configuration for the cohort being
 served. Health checks alone do not prove that the translation route accepts
 requests. The [miner guide](miners/model.md) covers serving, grant admission and
-retained-response recovery. The recoverable-cohort startup option is part of the
-C5+ candidate and does not by itself open evaluation or activate rewards.
+retained-response recovery. The recoverable-cohort startup option does not by
+itself open evaluation or activate rewards.
 
 ## Model contributors
 
-Model contribution is separate from running an endpoint. C5+ model intake and its
-50% allocation require the new reviewed policy, runtime and enrollment opening.
-The public endpoint receipt does not enroll a model or preserve its weights.
+Model contribution is separate from running an endpoint. C5 model intake is open
+under the signed policy and frozen runtime. The public endpoint receipt does not
+enroll a model or preserve its weights.
 
 Prepare a complete, reproducible artifact: weights or base-plus-adapter files,
 configuration, tokenizer/processor, inference code, dependency inventory, hashes
-and notices. The candidate `submit-cohort-model` command resumes signed uploads
-and submits participation only after native preservation succeeds. It still
-requires the applicable published policy and a complete signed model request.
+and notices. The `submit-cohort-model` command resumes signed uploads and submits
+participation only after native preservation succeeds. It requires the applicable
+published policy and a complete signed model request.
 
 Read the [preparation and rights checklist](contributors/models.md) and the exact
 immutable terms named by the selected policy before spending compute. Original
@@ -87,9 +89,12 @@ model are separate decisions.
 
 ## Evaluation and trust
 
-The C4 policy uses UID 0 as one evaluator group. UID 54 shares its
-administration and is not an independent vote. This is a disclosed
-single-operator launch, not independent evaluator consensus.
+The C5 policy uses UID 54 and UID 0 in one evaluator control group. UID 54 is the
+required transport signer, coordinator and reward-control validator. UID 0 is
+optional review redundancy and may be retired without changing miner
+configuration or holding cohort progress. They share administration, so their
+signatures count as one independent group. This is a disclosed single-operator
+launch, not independent evaluator consensus.
 
 Automatic scoring compares one authentic reference per clip. Fingerspelling
 uses CER over graphemes with whitespace removed; continuous signing uses WER
