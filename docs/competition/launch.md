@@ -2,8 +2,8 @@
 
 # Competition launch configuration
 
-C5 intake is open under its signed policy, protected suite, installed services
-and recoverable standing series. Its published phase blocks are nominal
+C5 is active under its signed policy, protected suite, installed services and
+recoverable standing series. Its published phase blocks are nominal
 progression targets, not non-extendable deadlines, and it does not advance
 automatically to C6. Public status and readiness are the authority for the
 current phase and admission availability.

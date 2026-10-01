@@ -68,11 +68,11 @@ version1/2 policies retain their original cutoffs. A code update alone does not
 extend an old signed policy.
 See the [signed-policy specification and rollout evidence](operators/bridge.md).
 
-## Open translation-competition intake
+## Translation competition
 
 The [version 0.2 successor design](../whitepaper/README.md) supports self-service
-endpoint participation and a reproducible-model contribution track. Public C5
-intake does not replace the bridge or activate competition weights by itself.
+endpoint participation and a reproducible-model contribution track. C5 does not
+replace the bridge or activate competition weights by itself.
 Check [public status](https://api.umi.vision/v1/competition/status) and
 [readiness](https://api.umi.vision/v1/competition/readiness) for the active
 cohort, accepted tracks and current admission state. C5's published phase blocks
@@ -84,9 +84,10 @@ must be registered on SN78 in the finalized roster-close snapshot. The
 [connection guide](miners/connection.md) identifies accepted predecessor
 policies and the configuration needed to serve current requests.
 
-Current C5 intake uses version 3 contribution terms. Earlier receipts do not
-accept the new policy or terms; sign and retain a fresh C5 submission and cohort
-consent through the live submission path.
+C5 uses version 3 contribution terms. Earlier receipts do not accept the new
+policy or terms. Preserve the fresh C5 submission and cohort consent used for
+the live intake. Send a new submission only when public status reports
+`admission_accepting_new: true`.
 
 Translation requests need the
 [protocol miner connected to a working model](miners/model.md#miner-model-integration).
@@ -108,8 +109,9 @@ The open-competition endpoint path supports
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
-Public C5 endpoint and model intake is open. C5 uses 50% service / 50% model
-rewards. The selected C6-C10 profile accepts only complete public-model
+C5 uses 50% service / 50% model rewards. Public status reports its current phase
+and whether admission accepts new submissions. The selected C6-C10 profile
+accepts only complete public-model
 entries and assigns that track 100%. That is a planning selection, not a promise
 about an unopened cohort: UMI may publish successor terms and a different signed
 manifest before that cohort's intake opens. Once intake opens, that cohort keeps

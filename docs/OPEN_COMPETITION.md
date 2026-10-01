@@ -19,10 +19,9 @@ complete accepted model entry must match or beat the frozen baseline; a sole
 eligible entrant receives the entire model pool. See the
 [recoverable cohort configuration](operators/rounds.md#participation-admission).
 
-Public C5 endpoint and model intake is open. The published phase blocks are
-nominal progression targets, not non-extendable deadlines; liveness delays retain
-and extend unfinished work and do not advance the cohort automatically to C6.
-Read the current
+C5 is active. The published phase blocks are nominal progression targets, not
+non-extendable deadlines; liveness delays retain and extend unfinished work and
+do not advance the cohort automatically to C6. Read the current
 [status](https://api.umi.vision/v1/competition/status) and
 [readiness](https://api.umi.vision/v1/competition/readiness) before submitting.
 `admission_accepting_new` reports whether intake accepts a request;
@@ -62,9 +61,10 @@ itself open evaluation or activate rewards.
 
 ## Model contributors
 
-Model contribution is separate from running an endpoint. C5 model intake is open
-under the signed policy and frozen runtime. The public endpoint receipt does not
-enroll a model or preserve its weights.
+Model contribution is separate from running an endpoint. C5 uses a signed policy
+and frozen runtime. Public status reports whether model admission accepts new
+submissions. The public endpoint receipt does not enroll a model or preserve its
+weights.
 
 Prepare a complete, reproducible artifact: weights or base-plus-adapter files,
 configuration, tokenizer/processor, inference code, dependency inventory, hashes

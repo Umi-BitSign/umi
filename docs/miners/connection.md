@@ -2,17 +2,17 @@
 
 # Current miner connection guide
 
-Public C5 intake accepts endpoint-service and public-model submissions. C5 uses a
-recoverable cohort runtime: phase blocks are operating targets, and coordinator
-or validator downtime delays unfinished work instead of expiring the cohort.
-Check [live status](https://api.umi.vision/v1/competition/status) and
-[readiness](https://api.umi.vision/v1/competition/readiness) before signing or
-diagnosing a submission.
+C5 uses a recoverable cohort runtime: phase blocks are operating targets, and
+coordinator or validator downtime delays unfinished work instead of expiring the
+cohort. Check [live status](https://api.umi.vision/v1/competition/status) and
+[readiness](https://api.umi.vision/v1/competition/readiness) for the current
+phase and admission state before signing or diagnosing a submission. Send a new
+submission only when `admission_accepting_new` is true.
 
 C4 remains the effective reward cohort until C5 produces a certified successor
-row. A C4 acceptance does not accept C5's policy or version 3 terms. Submit and
-retain a fresh C5 acceptance. Registration, acceptance, selection, scoring and
-reward activation are separate events.
+row. A C4 acceptance does not accept C5's policy or version 3 terms. C5
+participants must retain their fresh C5 acceptance. Registration, acceptance,
+selection, scoring and reward activation are separate events.
 
 ## Upgrade an existing miner
 
@@ -25,10 +25,11 @@ curl -fsSLo /tmp/umi-miner-upgrade.py \
   && sudo python3 /tmp/umi-miner-upgrade.py --public-model-track no
 ```
 
-Use `yes` instead of `no` for public-model participation. C5 accepts either
-answer. The choice records intent; it does not assert model rights or upload a
-bundle. A model submission still needs its signed consent, rights decision and
-complete artifact.
+Use `yes` instead of `no` for public-model participation. C5 permitted either
+answer during intake; use the choice bound to the retained acceptance. The
+choice records intent; it does not assert model rights or upload a bundle. A
+model submission still needs its signed consent, rights decision and complete
+artifact.
 
 The updater discovers the one running `umi.miner` systemd service and retains its
 hotkey, model revision, serving origin, wallet, model backend and public port. It
