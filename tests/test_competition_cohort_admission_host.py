@@ -214,6 +214,28 @@ async def test_slow_first_reviewer_does_not_starve_second(owned):
     await asyncio.wait_for(task, timeout=10)
 
 
+async def test_service_owner_shares_its_capture_with_every_reviewer(owned):
+    o = owned
+
+    async def shared_capture():
+        return await o.h.archive.reviewer.collect()
+
+    service = SimpleNamespace(
+        preparation=o.preparation,
+        provider=o.h.archive.reviewer,
+        capture=shared_capture,
+        config=SimpleNamespace(lifecycle=None),
+    )
+    async with boot.admission_owner_app(
+        o.config,
+        o.preparation,
+        o.h.archive.reviewer,
+        service_host=service,
+    ) as app:
+        assert app.state.admission_workers
+        assert all(worker.capture is shared_capture for worker in app.state.admission_workers)
+
+
 async def test_unexpected_worker_failure_drains_other_workers_before_releasing_owner(
     owned, monkeypatch
 ):

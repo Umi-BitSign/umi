@@ -129,6 +129,11 @@ async def admission_owner_app(
                 ),
             )
         )
+        if service_host is not None and (
+            service_host.preparation is not preparation or service_host.provider is not provider
+        ):
+            raise ValueError("phase control requires the same owned admission and finality")
+        capture = provider.collect if service_host is None else service_host.capture
         workers = tuple(
             CohortAdmissionWorker(
                 queue,
@@ -142,14 +147,11 @@ async def admission_owner_app(
                     timeout_seconds=peer.timeout_seconds,
                 ),
                 provider=provider,
+                capture=capture,
                 batch_size=c.batch_size,
             )
             for peer, credential in zip(c.reviewers, credentials, strict=True)
         )
-        if service_host is not None and (
-            service_host.preparation is not preparation or service_host.provider is not provider
-        ):
-            raise ValueError("phase control requires the same owned admission and finality")
         lifecycle = (
             LifecycleHost(service_host, resources, client, credentials, sign)
             if service_host is not None and service_host.config.lifecycle is not None
