@@ -97,9 +97,11 @@ current policy. If that policy carries earlier submissions forward, also pass
 The miner checks every link and rejects changes to contribution terms or reward
 allocations. This preserves the original signed submission; it does not authorize
 an assignment without the current policy's signatures and finality checks.
-Keep the existing nonce database. Preserve prior assignment and response
-databases; a transport-policy change may require a new state namespace, as the
-current connection guide specifies.
+Keep the current nonce database only while the exact transport policy remains in
+use. A transport-policy change gets a fresh private state namespace containing
+its nonce, assignment and owned-finality databases. Preserve prior databases for
+rollback and evidence; do not copy, edit or delete them. The current connection
+guide supplies the cohort-specific paths.
 Up to eight predecessor files are supported. With none supplied, only submissions
 under the configured current policy are accepted.
 

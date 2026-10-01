@@ -67,15 +67,18 @@ C5's transport permits UID54
 `5FLKx6h7DwWRuqq1dcfQafsBw5i9cbchNEFAEHrqSRthGnDZ` to issue work. It is not
 interchangeable with C4's UID0 transport policy.
 
-## Create the recoverable C5 startup file
+## Prepare the C5 state and startup file
 
-After signing and receiving a C5 endpoint acceptance, create a dedicated private
-directory for C5 grants. The model revision and serving origin below must exactly
-match the accepted submission. Run this as the miner service account, supplying
-its hotkey, model revision, serving origin, and a new absolute grant directory:
+After signing and receiving a C5 endpoint acceptance, create one new private C5
+root. The command below creates separate grant and protocol-state directories so
+the C4 service remains available for rollback. The model revision and serving
+origin must exactly match the accepted submission. Run this as the miner service
+account, supplying its hotkey, model revision, serving origin, and a new absolute
+C5 root:
 
 ```sh
-python - YOUR_HOTKEY MODEL_REVISION https://YOUR_ORIGIN /ABSOLUTE/NEW/C5/GRANTS > cohort5-miner.json <<'PY'
+python - YOUR_HOTKEY MODEL_REVISION https://YOUR_ORIGIN /ABSOLUTE/NEW/C5 > cohort5-miner.json <<'PY'
+import os
 import sys
 from pathlib import Path
 
@@ -85,12 +88,17 @@ from umi.competition_cohort_miner_startup import CohortMinerStartupConfig
 from umi.protocol import canonical_json_bytes
 
 hotkey, model_revision, origin, directory = sys.argv[1:]
-path = Path(directory)
-assert path.is_absolute() and not path.exists()
-path.mkdir(mode=0o700, parents=True)
+os.umask(0o077)
+root = Path(directory)
+assert root.is_absolute() and not root.exists()
+root.mkdir(mode=0o700, parents=True)
+grants = root / 'grants'
+protocol = root / 'protocol'
+grants.mkdir(mode=0o700)
+protocol.mkdir(mode=0o700)
 authority = CohortServiceMinerConfig(
     schema='umi-cohort-service-miner-config/1',
-    directory=str(path),
+    directory=str(grants),
     cohorts=(CohortIntakeBinding(
         cohort_sha256='5dab3bfb836a91898f010bd229115e3e1c0406c3e17498d3b3b1975adab71428',
         authority_sha256='57d4bc831ba36a0bb45f690476f07df5cf12df923d403314fd03efbde22e6fad',
@@ -113,14 +121,17 @@ PY
 chmod 600 cohort5-miner.json
 ```
 
-The command refuses to reuse an existing grant directory. Preserve that
-directory with the assignment, response and nonce databases through upgrades and
-restarts.
+The command refuses to reuse an existing root. Preserve the complete root through
+restarts. A later cohort or transport policy gets a different root; never copy or
+delete an older cohort's databases during an upgrade.
 
 ## Update the running miner
 
-Keep the existing model backend, wallet, hotkey, nonce database and serving
-origin. Replace the competition-specific inputs with:
+Keep the existing model backend, wallet, hotkey and serving origin. Preserve the
+C4 nonce database for rollback, but do not give it to the C5 process: the C5
+transport policy authorizes a different validator key, so its nonce metadata is
+intentionally different. Replace the competition-specific inputs and state paths
+with:
 
 ```text
 --policy /absolute/path/C5_TRANSPORT_POLICY.json
@@ -128,15 +139,23 @@ origin. Replace the competition-specific inputs with:
 --competition-cohort-config /absolute/path/cohort5-miner.json
 --serving-origin https://YOUR_ORIGIN
 --model-revision YOUR_ACCEPTED_MODEL_REVISION
+--nonce-db /ABSOLUTE/NEW/C5/protocol/nonces.sqlite3
+--assignment-db /ABSOLUTE/NEW/C5/protocol/assignments.sqlite3
+--finality-state /ABSOLUTE/NEW/C5/protocol/finality.sqlite3
 --max-recovery-assignments 4096
 ```
 
-Do not also pass `--competition-feed` or `--competition-authorization`. Use a new
-C5 assignment database and a new policy-bound owned-finality state directory;
-do not edit C4 database metadata to force it to accept the new transport hash.
-Keep the old state intact for retained C4 evidence. Continue to use the finality
-and storage-proof binaries whose exact target digests are pinned in the C5
-transport policy.
+Do not also pass `--competition-feed` or `--competition-authorization`. If the
+service uses `--competition-chain-config`, create its C5 copy with a state
+directory under `/ABSOLUTE/NEW/C5/protocol/chain`; do not reuse the C4 chain state.
+Do not edit database metadata or remove an old database to force an upgrade. The
+new C5 databases initialize automatically on first startup. Continue to use the
+finality and storage-proof binaries whose exact target digests are pinned in the
+C5 transport policy.
+
+Start C5 as a successor service and check it directly before disabling C4. If C5
+does not reach the health state below, stop C5 and restart the unchanged C4
+service. No database migration or reset is required.
 
 The public TLS edge must proxy `POST /v1/translate`,
 `POST /v1/competition/cohorts/assignments`, the response-recovery route, and the
