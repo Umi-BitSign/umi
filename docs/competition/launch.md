@@ -2,26 +2,27 @@
 
 # Competition launch configuration
 
-C5 intake is open under its signed policy, protected suite, installed services
-and recoverable standing series. Its published phase blocks are nominal
-progression targets, not non-extendable deadlines, and it does not advance
-automatically to C6. Public status and readiness are the authority for the
-current phase and admission availability.
+The active cohort runs under its signed policy, protected suite, installed
+services and recoverable standing series. Published phase blocks are nominal
+progression targets, not non-extendable deadlines, and do not advance the series
+automatically. Public status, readiness and the current signed plan are the
+authority for phase, admission and track availability.
 
 SN78 registration and a competition acceptance are separate. An intake receipt
-does not promise selection, a score or a reward. C4 keeps its signed allocation
-and remains the effective reward cohort until C5 has a certified successor row.
-The canonical [C5 policy and transport inputs](C5_INPUTS.md) are published with
-their exact digests.
+does not promise selection, a score or a reward. The previous certified
+allocation remains effective until the active cohort has a certified and
+activated successor row. The public upgrade manifest and signed cohort plan
+publish the canonical policy, transport and terms digests.
 
-## C5 reward policy
+## Reward policy
 
-C5 uses separate service and public-model pools:
+When the signed plan enables both tracks, it records separate service and
+public-model shares:
 
-- **50% service:** distributed across certified service work. Each job's credit
+- **Service pool:** distributed across certified service work. Each job's credit
   is its certified work units multiplied by its normalized quality score.
-- **50% public models:** eligible artifacts that match or beat the frozen
-  baseline are placed in fixed 500-bps aggregate-quality bands. Each occupied
+- **Public-model pool:** eligible artifacts that match or beat the frozen
+  baseline are placed in the quality bands selected by the policy. Each occupied
   band receives one credit, and the pool is distributed across those credits in
   proportion to their exact benchmark scores.
 
@@ -33,48 +34,40 @@ all band-credit scores are zero, the pool is divided equally among occupied
 bands. If no model qualifies, the pool goes to the policy's proved burn
 destination. A participant may qualify independently for both pools.
 
-The selected C6-C10 profile is public-model-only. Signed successor terms and
-cohort plans that implement that profile disable endpoint/service participation
-and assign all 65,535 raw competition units within the eligible public-model
-population using the same baseline floor, deduplication and quality buckets.
-Track selection is read from each signed cohort plan rather than inferred from
-its number. A later cohort may use a different published profile before its
-intake opens and miners consent. No unopened cohort profile is permanent;
-successor terms and a replacement signed plan may change any of its settings. An
+Model-only plans disable endpoint/service participation and assign all 65,535 raw
+competition units within the eligible public-model population using the same
+baseline floor, deduplication and quality buckets. Read track selection and pool
+shares from each signed cohort plan rather than inferring them from its number.
+No unopened cohort profile is permanent; successor terms and a replacement
+signed plan may change any of its settings before intake and miner consent. An
 active cohort's plan is not changed retroactively.
 
-The governing C5 submission must bind
-[version 3 contribution terms](../MODEL_CONTRIBUTION_TERMS_V3.md), SHA-256
-`451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0`,
-and the exact signed C5 policy. Earlier acceptances do not imply version 3
-acceptance. C6 and later submissions must bind the exact successor terms and
-policy published for their cohort; C5 consent cannot be reused. See [model
+Every submission must bind the exact immutable contribution terms and signed
+policy advertised by its cohort plan. Earlier acceptance cannot be reused as
+acceptance of successor terms. See [model
 contributions](../contributors/models.md) for artifact, rights, provenance and
 reconstruction requirements.
 
-The frozen comparator is CPU-derived model bundle
-`6fe8df59ec11ba89f4dfe0474a673fe757e378cd9184449965861c5a7c59b641`
-with runtime
-`f025ceb38cacc5c71873d94b8f2010aae10a0193a0e410e410a202f4def3b7b0`.
-Its native parent already contains the Community v0.2 RGB crop correction. These
-digests are bound by the signed C5 policy; the original Community source archive
-is provenance, not the executable comparator identity.
+The signed plan identifies the frozen comparator bundle and execution runtime by
+digest. Public discovery supplies those exact artifacts and their provenance.
+Source archives do not replace the executable comparator identity.
 
 ## Scoring and video-dependence diagnostics
 
-The C5 scoring profile uses `umi-open-competition-policy/3` with
-`umi-competition-suite/2`. The frozen suite and runtime determine the automatic
-CER/WER benchmark scores.
-C5 may also compare a continuous-signing output for its correct video with the
-same model's output for a matched unrelated video. That comparison is diagnostic
-only. It cannot change a C5 score, rank, eligibility decision, reward, settlement
-or activation time. A missing or unreliable diagnostic cannot hold settlement.
+The active scoring profile, frozen suite and runtime determine the automatic
+CER/WER benchmark scores. A plan may also compare a continuous-signing output
+for its correct video with the same model's output for a matched unrelated
+video. That comparison is diagnostic
+unless its signed policy explicitly defines a qualified gate. A diagnostic-only
+comparison cannot change a score, rank, eligibility decision, reward, settlement
+or activation time, and a missing or unreliable diagnostic cannot hold
+settlement.
 
 Any future video-dependence payout gate requires published thresholds, a
 qualified positive control, a newly signed successor policy and fresh participant
-acceptance before its intake opens. The prospective policy version 4 procedure
-in [private holdout operation](../operators/private-holdout.md) is not the C5
-policy.
+acceptance before its intake opens. The prospective procedure in
+[private holdout operation](../operators/private-holdout.md) is not active merely
+because its implementation exists.
 
 ## Timing and recovery
 
@@ -105,22 +98,17 @@ checks.
 
 ## Trust and evaluator profile
 
-The initial C5 profile lists UID 54 and UID 0 as evaluators in the same
-`umi-operated` control group, with one required evaluator group. UID 54 is the
-required transport signer, coordinator and reward-control validator. UID 0 is
-optional review redundancy: it may reproduce and sign the same work, but its
-availability is not required for intake, settlement or reward continuation.
-Retiring UID 0 therefore does not require miners to change configuration or
-replace the policy. The two signatures do not count as independent operator
-votes. This remains a single-operator trust model. Adding another control group
-or increasing quorum requires a successor policy and qualification of that exact
-profile.
+The signed plan lists evaluator identities, control groups and required quorum.
+Public status distinguishes required evaluators from optional redundancy.
+Signatures from validators in one administration count as one independent group.
+Adding a control group, changing a required signer or increasing quorum requires
+a successor policy and qualification of that exact profile.
 
 ## Protected inputs
 
 The signed launch fixes the exact:
 
-- C5 policy, version 3 terms digest and standing cohort authority;
+- policy, immutable terms digest and standing cohort authority;
 - protected suite, references, strata and case provenance;
 - frozen baseline and execution runtime;
 - participant and model-artifact intake limits;
@@ -141,10 +129,11 @@ configuration. Complete these checks in order:
 1. **Policy and inputs:** Verify signatures, digests, baseline reconstruction,
    model-rights requirements, protected-suite integrity and available unused
    cases. Publish the miner-facing rules and tested commands.
-2. **Installed C4-to-C5 handoff:** Install C5 services beside C4 without selecting
-   them. Rehearse the signed handoff and prove a failed C5 boot leaves C4 active.
-3. **Six-cohort recovery:** Run C5 through C10 with the tracks selected by each
-   signed plan, alternating coordinator/evaluator outages, restart replay,
+2. **Installed predecessor handoff:** Install successor services beside the active
+   services without selecting them. Rehearse the signed handoff and prove a failed
+   successor boot leaves the predecessor active.
+3. **Multi-cohort recovery:** Run the standing series with the tracks selected by
+   each signed plan, alternating coordinator/evaluator outages, restart replay,
    five-hour rests, 24-hour validator opportunities and previous-row continuity.
 4. **Capacity:** Run the intended host and container runtime with production-size
    evidence and generous test watchdogs. Test watchdogs may detect harness stalls;
@@ -152,19 +141,19 @@ configuration. Complete these checks in order:
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
    records without exposing private clips or credentials.
-6. **Validator path:** Verify required validator UID 54 consumes the certified
-   row, survives restart and RPC failover, retains uncertain transaction state,
-   and receives the full verified reward opportunity. Verify UID 0 separately
-   when it is enabled; its absence or retirement must not hold the cohort.
+6. **Validator path:** Verify every required validator consumes the certified row,
+   survives restart and RPC failover, retains uncertain transaction state, and
+   receives the full verified reward opportunity. Verify optional validators
+   separately; their absence or retirement must not hold the cohort.
 7. **Selection:** Publish the canonical standing boot selector only after all
    preceding infrastructure evidence passes. Verify the selected services,
-   public status and retained C4 rollback boundary.
-8. **Studio enrollment:** Submit the Studio baseline artifact through the live
-   public-model track under the exact C5 policy and confirm its complete
-   acceptance and durable R2 copy.
-9. **Chain proof:** After settlement, confirm UID 54's fresh finalized row and
-   resulting incentive before announcing reward activation. Record any optional
-   validator rows separately.
+   public status and retained predecessor rollback boundary.
+8. **Operator test enrollment:** Submit an operator-controlled baseline artifact
+   through every enabled live track under the exact active policy and confirm its
+   complete acceptance and durable object-store copy.
+9. **Chain proof:** After settlement, confirm every required validator's fresh
+   finalized row and resulting incentive before announcing reward activation.
+   Record any optional validator rows separately.
 
 Source tests, a merged commit, staged files, a running service and a submitted
 transaction are intermediate evidence. None alone proves a live reward row.
@@ -178,6 +167,6 @@ transaction are intermediate evidence. None alone proves a live reward row.
 - [Validator successor handoff](../validators/successor-upgrade.md)
 - [Public results API](../reference/competition-results-api.md)
 
-Retain C4's signed artifacts and evidence for replay. Remove obsolete migration
-instructions after no installed service or recovery consumer depends on them;
-Git history is the record of superseded launch plans.
+Retain predecessor signed artifacts and evidence for replay. Remove obsolete
+migration instructions after no installed service or recovery consumer depends
+on them; Git history is the record of superseded launch plans.

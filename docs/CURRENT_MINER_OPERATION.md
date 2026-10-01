@@ -68,25 +68,27 @@ version1/2 policies retain their original cutoffs. A code update alone does not
 extend an old signed policy.
 See the [signed-policy specification and rollout evidence](operators/bridge.md).
 
-## Open translation-competition intake
+## Translation competition
 
 The [version 0.2 successor design](../whitepaper/README.md) supports self-service
-endpoint participation and a reproducible-model contribution track. Public C5
-intake does not replace the bridge or activate competition weights by itself.
+endpoint participation and a reproducible-model contribution track. Opening a
+competition cohort does not replace the bridge or activate competition weights
+by itself.
 Check [public status](https://api.umi.vision/v1/competition/status) and
 [readiness](https://api.umi.vision/v1/competition/readiness) for the active
-cohort, accepted tracks and current admission state. C5's published phase blocks
-are nominal progression targets, not non-extendable deadlines. Liveness delays
-retain and extend unfinished work and do not advance it to C6. Acceptance does
-not guarantee selection, a score or a reward.
+cohort, accepted tracks and current admission state. Published phase blocks are
+nominal progression targets, not non-extendable deadlines. Liveness delays
+retain and extend unfinished work and do not advance it to another cohort.
+Acceptance does not guarantee selection, a score or a reward.
 Admitted submissions must remain valid through evaluation close, and the hotkey
 must be registered on SN78 in the finalized roster-close snapshot. The
 [connection guide](miners/connection.md) identifies accepted predecessor
 policies and the configuration needed to serve current requests.
 
-Current C5 intake uses version 3 contribution terms. Earlier receipts do not
-accept the new policy or terms; sign and retain a fresh C5 submission and cohort
-consent through the live submission path.
+The active policy binds its contribution terms by digest. Earlier receipts do
+not accept a new policy or terms. Preserve the submission and cohort consent
+used for the live intake. Send a new submission only when public status reports
+`admission_accepting_new: true`.
 
 Translation requests need the
 [protocol miner connected to a working model](miners/model.md#miner-model-integration).
@@ -108,22 +110,19 @@ The open-competition endpoint path supports
 That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
-Public C5 endpoint and model intake is open. C5 uses 50% service / 50% model
-rewards. The selected C6-C10 profile accepts only complete public-model
-entries and assigns that track 100%. That is a planning selection, not a promise
-about an unopened cohort: UMI may publish successor terms and a different signed
-manifest before that cohort's intake opens. Once intake opens, that cohort keeps
-the rules participants accepted. Profiles come from signed cohort manifests
-rather than the cohort number. The selected profiles use a
-baseline-or-better quality requirement for complete accepted model entries.
-Exact copies count once; eligible models then compete for one credit in each
-occupied fixed five-percentage-point quality band. Read the [model preparation
-checklist](contributors/models.md#model-contribution-review) and use the exact
-terms named by the signed policy. C4's signed 70/30 allocation and
-[version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md) remain applicable to C4
-verification; its unallocated model share is burned and does not accrue. Terms
-alone do not approve an individual model's rights or award it a share. Endpoint
-service does not require contributing private weights.
+The active signed policy and cohort manifest publish the service and model
+reward shares, allowed tracks and applicable terms. A manifest may permit both
+tracks or require a complete public-model entry. UMI may publish successor terms
+and a different manifest before an unopened cohort begins; once intake opens,
+that cohort keeps the rules participants accepted. Do not infer a profile from
+the cohort number. Under the current model rules, complete entries must match or
+beat the frozen baseline, exact copies count once, and eligible models compete
+for one credit in each occupied fixed five-percentage-point quality band. Read
+the [model preparation checklist](contributors/models.md#model-contribution-review)
+and use the exact terms named by the signed policy. Historical allocations keep
+the terms and burn rules they originally bound. Terms alone do not approve an
+individual model's rights or award it a share. Endpoint service does not require
+contributing private weights.
 
 ## Reading payout dashboards
 

@@ -216,6 +216,30 @@ jobs:
       - name: Test and build Worker
         run: npm run check
 
+  public-model-artifacts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/public-model-artifacts
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: deploy/public-model-artifacts/package-lock.json
+
+      - name: Install locked Worker dependencies
+        run: npm ci
+
+      - name: Audit Worker dependencies
+        run: npm audit --audit-level=high
+
+      - name: Test and build Worker
+        run: npm run check
+
   competition-clip-delivery:
     runs-on: ubuntu-latest
     defaults:

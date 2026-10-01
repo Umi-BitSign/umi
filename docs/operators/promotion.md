@@ -75,12 +75,11 @@ different local promotion blocks before its predeclared evidence cutoff.
 These tests use synthetic model and rights inputs. Production decisions require
 protected-data execution, reviewed launch inputs and signed activation. A
 qualifying contributed model and its specific rights and provenance review are
-required before awarding a model share. The C5
-[evaluator profile](../competition/launch.md) uses required UID 54 and optional
-UID 0 in one disclosed operator control group with a quorum of one. UID 0's
-absence does not block approval, and their two signatures do not supply two
-independent votes. Additional evaluator groups require a later signed policy. No
-live reward policy changes through this API.
+required before awarding a model share. The signed
+[evaluator profile](../competition/launch.md) defines required and optional
+evaluators, control groups and quorum. Signatures under one administration do not
+supply independent votes. Additional evaluator groups require a successor signed
+policy. No live reward policy changes through this API.
 
 
 <a id="open-competition-promotion-delivery"></a>

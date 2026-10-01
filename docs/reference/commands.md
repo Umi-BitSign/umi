@@ -206,18 +206,16 @@ sequence until its receipt is known.
 
 ### Model-manifest preparation
 
-C5+ model enrollment requires publication of its selected runtime, immutable
-policy, contribution terms and submission route. Until that opening, prepare the
-bundle without signing against the existing endpoint-intake policy. C5 uses 50%
-service / 50% model rewards. The selected C6-C10 profile is model-only
-and assigns 100% of each cohort's competition allocation within the public-model
-track. A successor plan may replace any unopened cohort's profile; use the live
-signed manifest rather than assuming rules from the cohort number. A complete
-accepted model must match
-or beat the frozen baseline. Exact copies count once, and the remaining eligible
-models receive one credit per occupied fixed five-percentage-point quality band.
-C4 retains its signed 70/30 allocation, including burning its unallocated model
-share without a later retroactive award.
+Model enrollment requires publication of the selected runtime, immutable policy,
+contribution terms and submission route. Until that opening, prepare the bundle
+without signing against another intake policy. Read the active policy for the
+service and model reward shares and the cohort manifest for allowed tracks. A
+successor plan may replace any unopened cohort's profile; use the live signed
+manifest rather than assuming rules from the cohort number. Under the current
+model rules, a complete accepted model must match or beat the frozen baseline.
+Exact copies count once, and the remaining eligible models receive one credit per
+occupied fixed five-percentage-point quality band. Historical allocations keep
+their original split and burn rules without a later retroactive award.
 
 The manifest below is an advance-preparation aid only. Read the
 [model preparation and rights checklist](../contributors/models.md). Do not

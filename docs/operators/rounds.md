@@ -935,7 +935,8 @@ This selection still requires native replay of the referenced package, original
 series admission, prior reward opportunity and any legacy handoff before weight
 submission. The returned selection grants no transaction authority. Signer
 fencing, encoded mortality, nonce recovery and installed continuation belong
-to the execution consumer. Preserve C4's existing admission and renewal checks.
+to the execution consumer. Preserve the predecessor's admission and renewal
+checks.
 
 Registration projection preserves fixed integer amounts by hotkey. A departed
 hotkey's share goes to the currently proved burn destination; a returning hotkey
@@ -1058,7 +1059,7 @@ signed bytes remain intact; interrupted writes and lost replies cannot leave a
 half-linked successor. Stored lineage selects the current attempt but grants no
 transaction authority. The journal exposes no reset or deletion operation.
 
-For the first migration, `review_legacy_weight_expiry` consumes an original C4
+For the first migration, `review_legacy_weight_expiry` consumes an original legacy
 attempt, weight-state evidence and metadata. It authenticates the historical
 header, runtime and storage proofs, then checks the actual encoded call, signer,
 signature, nonce and mortality. Pinned and executed original runtimes are
@@ -1076,16 +1077,16 @@ capability.
 
 The first activation names a `LegacyRewardHandoffPlan` through
 `prior_opportunity_sha256`. The plan binds the series, first cohort and accepted
-C4 policy, round and package. Each designated validator reviews its own retained
-installation independently. The plan does not assert a C4 opportunity minimum
-or certify that another validator has stopped.
+predecessor policy, round and package. Each designated validator reviews its own
+retained installation independently. The plan does not assert a predecessor
+opportunity minimum or certify that another validator has stopped.
 
 `hold_legacy_reward_handoff` owns the original supervisor process lock, runtime
 mutex and complete weight-journal lock throughout migration and the caller's
 execution lifetime. It saves an installation-bound intent before stopping the
-C4 worker. Updated supervisor code honors that intent before contacting the
+predecessor worker. Updated supervisor code honors that intent before contacting the
 feed or RPC, including after restart. A retry must retain the same first
-activation. There is no automatic reset to C4 startup.
+activation. There is no automatic reset to predecessor startup.
 
 The consumer audits either selected journal format and replays the retained
 package authorities. Every signed attempt needs its exact native expiry result;
@@ -1101,7 +1102,7 @@ and unchanged writer ownership. Leaving the context invalidates it. Restart
 replays the inventory from retained bytes. The installed host must still select
 the approved new executable at boot and prevent an older binary from ignoring
 the new intent; this library does not install that transition. Installed signing,
-submission and outage qualification remain pending. Retain these C4 consumers
+submission and outage qualification remain pending. Retain these legacy consumers
 until no deployed migration or recovery path needs them.
 
 `StandingRewardExecutor` connects these consumers to recurring signing and exact
@@ -1142,15 +1143,13 @@ reviewer service. It requires an explicitly authorized cohort and miner consent;
 enabling these components does not change a fixed round's signed deadlines. The
 complete recovery workflow is not deployed or qualified for unattended rewards.
 
-The signed C5 allocation is 50% service and 50% model rewards. The currently
-selected C6-C10 profile is model-only and assigns 100% within the public-model
-track. Set `ServiceTerms.service_pool_bps` from each signed cohort plan: `5000`
-for C5 and `0` for the C6-C10 plans that implement the selected profile. A
+Set `ServiceTerms.service_pool_bps` from each signed cohort plan. A mixed-track
+plan records its service share explicitly; a model-only plan uses zero. A
 successor plan may change any unopened cohort, so derive this value from the live
-plan. Bind the exact terms digest, eligible tracks and split in every cohort's
-standing plan and reward manifest before admission. The series-level policy
+plan rather than a cohort number. Bind the exact terms digest, eligible tracks
+and split in every cohort's standing plan and reward manifest before admission. The series-level policy
 retains both track capabilities and cannot widen a narrower cohort plan. These
-selections require new reviewed policy and authority artifacts; existing C4
+selections require new reviewed policy and authority artifacts; existing signed
 artifacts retain their original allocation.
 Existing submissions retain their original policy; enrollment under the new
 split requires fresh miner consent.
@@ -1161,10 +1160,10 @@ quality band receives the full model pool. Exact content counts once; remaining
 eligible models enter fixed five-percentage-point bands, with one credit for the
 highest exact score in each occupied band. The first complete certified
 acceptance fixes score and eligibility for exact-content aliases, so repeated
-submissions do not create additional benchmark trials. The raw weight total is
-65,535; deterministic rounding assigns mixed cohorts 32,767 units to service and
-32,768 to models, while a model-only plan assigns all 65,535 to models. This is a
-weight-budget split, not a guarantee of exact emitted token amounts.
+submissions do not create additional benchmark trials. The allocator applies the
+plan's basis-point shares to the 65,535-unit raw weight budget with deterministic
+rounding. This is a weight-budget split, not a guarantee of exact emitted token
+amounts.
 
 Phase authority `umi-cohort-recovery-authority/2` keeps a pending phase valid
 until certified completion or revocation. Passing a target does not require an

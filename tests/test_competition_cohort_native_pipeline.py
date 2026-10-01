@@ -626,6 +626,11 @@ async def run_pipeline(
         assert len(signatures) == 3
         o.outages.clear()
         async with o.open() as app:
+            assert app.state.lifecycle.provider is o.service.finality
+            assert app.state.orders.worker.provider is o.service.finality
+            assert all(
+                worker.capture is o.service.capture for worker in app.state.admission_workers
+            )
             lifecycle = await app.state.lifecycle.node(h.cohort)
             for _ in range(15):
                 h.block += 5

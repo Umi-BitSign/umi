@@ -164,8 +164,9 @@ recovery does not establish timely original receipt or settlement eligibility.
 The current recovery route requires the original validator to remain in the
 runtime's allowlist and the original policy-bound assignment database to remain
 served. Cross-policy retrieval, replacement-key authorization, durable attempt
-selection and certified archive retirement still require C5 integration. Keep
-the database and its recovery records until that retirement is qualified.
+selection and certified archive retirement still require integration with the
+active recoverable cohort. Keep the database and its recovery records until that
+retirement is qualified.
 
 For a deployment using recoverable cohorts, select
 `--competition-cohort-config /absolute/path/cohort-miner.json` with

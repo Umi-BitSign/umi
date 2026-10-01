@@ -1,13 +1,14 @@
 # UMI documentation
 
-Start with the guide for your role. Public competition intake is live for C5
-endpoint and public-model submissions. The registration bridge supplies current
-rewards; competition reward activation requires certified settlement and verified
-native weight effects. Check [public status](https://api.umi.vision/v1/competition/status)
-and [readiness](https://api.umi.vision/v1/competition/readiness) for the active
-policy, cohort, accepted tracks and admission state.
-The [C5 public inputs](competition/C5_INPUTS.md) contain the canonical policy
-files and exact runtime revision.
+Start with the guide for your role. Public competition intake is live. The
+registration bridge supplies current rewards; competition reward activation
+requires certified settlement and verified native weight effects. Check [public
+status](https://api.umi.vision/v1/competition/status) and
+[readiness](https://api.umi.vision/v1/competition/readiness) for the active
+policy, cohort, phase, accepted tracks and admission state. Submit new
+participation only when `admission_accepting_new` is true.
+The [current connection guide](miners/connection.md) uses the active signed
+manifest for the canonical policy files, runtime revision and allowed tracks.
 
 | I want to... | Start here |
 | --- | --- |

@@ -117,6 +117,24 @@ async def test_two_automatic_reviewers_publish_native_certificate_visible_to_min
     assert len(h.calls) == 2
 
 
+async def test_reviewer_uses_supplied_shared_capture(relay, monkeypatch):
+    h = relay
+    await submit(h)
+    collect = h.archive.reviewer.collect
+    shared = AsyncMock(side_effect=collect)
+    worker = h.reviewer("Charlie", capture=shared)
+    monkeypatch.setattr(
+        h.archive.reviewer,
+        "collect",
+        AsyncMock(side_effect=AssertionError("reviewer bypassed shared finality capture")),
+    )
+
+    result = await worker.poll_once()
+
+    assert result["votes_published"] == 1
+    shared.assert_awaited_once_with()
+
+
 async def test_lost_queue_commit_ack_and_restart_do_not_resign(relay, monkeypatch):
     h = relay
     await submit(h)

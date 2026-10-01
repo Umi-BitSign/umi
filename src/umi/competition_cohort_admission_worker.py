@@ -125,6 +125,7 @@ class CohortAdmissionWorker:
         signer: CohortAdmissionSigner | AdmissionVotePort,
         *,
         provider=None,
+        capture=None,
         batch_size=16,
     ):
         votes = _LocalVotes(queue, signer) if isinstance(signer, CohortAdmissionSigner) else signer
@@ -140,8 +141,11 @@ class CohortAdmissionWorker:
             raise ValueError("admission queue and signer use different policies or authorities")
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("admission worker batch is outside bounds")
+        capture = provider.collect if capture is None else capture
+        if not callable(capture):
+            raise ValueError("admission worker capture port is unavailable")
         self.queue, self.signer, self.batch_size = queue, signer, batch_size
-        self.votes, self.provider = votes, provider
+        self.votes, self.provider, self.capture = votes, provider, capture
         self.cursors = {}
 
     async def poll_once(self):
@@ -165,7 +169,7 @@ class CohortAdmissionWorker:
                 try:
                     raw = await run_owned_thread(self.queue.record, cohort, consent)
                     vote = await self.votes.attest(raw)
-                    capture = await self.provider.collect()
+                    capture = await self.capture()
                     certificate = await run_owned_thread(self.queue.publish_vote, vote, capture)
                     published += 1
                     certified += certificate is not None

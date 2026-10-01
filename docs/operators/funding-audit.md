@@ -18,7 +18,7 @@ The watcher retains the legacy stop at finalized block `9,075,171` by default.
 For the explicitly authorized ongoing bridge, `--until-stopped` keeps its
 read-only queue running past that cutoff. Persistent API request budgets, rate
 limits and cached results are unchanged. Stop the watcher when replacing the
-bridge. C5+ competition eligibility does not depend on this audit.
+bridge. Competition eligibility does not depend on this audit.
 
 <a id="registration-funding-audit--api-key-and-cost"></a>
 

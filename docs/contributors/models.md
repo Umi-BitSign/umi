@@ -8,24 +8,24 @@
 
 ## Model contributions: prepare before spending compute
 
-Public C5 model intake is open under the signed C5+ policy. This checklist
-describes artifact, rights and
+Public status reports the active cohort, its allowed tracks and whether model
+admission accepts new submissions. This checklist describes artifact, rights and
 reconstruction requirements; it does not approve a model or grant a license.
-The signed C5 split is 50% service and 50% model rewards. The selected
-C6-C10 profile is public-model-only and assigns 100% of each cohort's competition
-allocation within this track. A successor plan may change any unopened cohort;
-only the plan published when intake opens governs that cohort. Use the runtime,
-immutable policy and upload route published by the live
-C5 status and cohort history.
+The active signed policy publishes the service and model reward shares. A
+successor plan may change any unopened cohort; only the plan published when
+intake opens governs that cohort. Use the runtime, immutable policy and upload
+route published by live status and cohort history. Do not upload a new artifact
+unless `admission_accepting_new` is true.
 
-The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for C4
-verification. Their 70/30 split and promotion rule do not define C5+'s new model
-award. Each submission must use the exact terms named by its signed policy.
+The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for
+records whose signed policy bound them. Their split and promotion rule do not
+define a successor model award. Each submission must use the exact terms named
+by its signed policy.
 
 The [version 3 terms](../MODEL_CONTRIBUTION_TERMS_V3.md) define the separate
-service and public-model pools. C5's continuous-video dependence comparison is
-diagnostic only and does not affect scores, eligibility, settlement or payouts.
-The C5 policy binds the terms file's published
+service and public-model pools. The active policy's continuous-video dependence
+comparison is diagnostic only and does not affect scores, eligibility,
+settlement or payouts. The policy binds the terms file's published
 [SHA-256](../MODEL_CONTRIBUTION_TERMS_V3.sha256).
 
 Keep original submissions and acceptance receipts. Enrollment under a different
@@ -56,6 +56,38 @@ The code checks `license_id` against `CompetitionPolicy.accepted_model_licenses`
 and binds `accepted_terms_sha256` to the policy. Those checks establish agreement
 with a published policy, not the truth of a rights claim. Promotion also requires
 a signed rights review with retained supporting evidence.
+
+### Runtime interface
+
+The offline entrypoint receives `/input/video.mp4` as its only argument. The
+evaluator does not pass the case ID, reference, task or stratum through an
+argument, environment variable or sidecar file. A bundle may inspect the video
+and route it among declared model components. The complete router, model paths,
+weights, configuration and dependencies must remain inside the bundle and run
+offline within the published resource limits. A router must not rely on hidden
+filenames, protected case metadata, network access or benchmark lookup data.
+
+Document every routed model and its training data in the same provenance and
+rights records. Include data-split attribution and an evaluation-overlap check.
+Routing does not create a separate submission or relax the baseline quality
+floor.
+
+### Comparator downloads
+
+The [current comparator index](https://artifacts.umi.vision/v1/index.json) publishes
+the exact archive lengths and SHA-256 values. The immutable artifacts are:
+
+- [Comparator model bundle](https://artifacts.umi.vision/v1/models/6fe8df59ec11ba89f4dfe0474a673fe757e378cd9184449965861c5a7c59b641/umi-model-bundle.tar):
+  model identity `6fe8df59ec11ba89f4dfe0474a673fe757e378cd9184449965861c5a7c59b641`,
+  archive SHA-256 `ea9e3e3e46cb95bb8177b2362050d0396da058868a37f6a89f43f783291d699a`,
+  2,935,470,080 bytes.
+- [Pinned offline CPU runtime](https://artifacts.umi.vision/v1/runtimes/f025ceb38cacc5c71873d94b8f2010aae10a0193a0e410e410a202f4def3b7b0/offline-cpu-runtime.oci.tar):
+  runtime identity `f025ceb38cacc5c71873d94b8f2010aae10a0193a0e410e410a202f4def3b7b0`,
+  archive SHA-256 `37e09eae8f862d75ddc25fe6b3eadc2fa8d9d7c6b03bfe5d7af4da6b3f97974a`,
+  2,215,539,200 bytes.
+
+Verify the archive SHA-256 before extraction, then verify the extracted model or
+runtime identity. A successful download does not enroll or approve a model.
 
 <a id="model-contribution-review--evidence-checklist"></a>
 
@@ -162,18 +194,16 @@ Both tracks use the same signed policy. Rewards begin only after the
 [activation gates](../competition/launch.md) pass and the competition row is
 confirmed on chain.
 
-For C5, the selected split is 50% service and 50% model rewards. The currently
-selected C6-C10 profile has no service pool and assigns 100% within the
-public-model track. Future track selection comes from the signed cohort plan and
-may change until that cohort's intake opens. The model
-quality floor is equality with the frozen baseline, and a sole eligible entrant
-receives the full model pool. Exact duplicate content is counted once. Eligible
-models then enter fixed five-percentage-point quality bands, each of which
-creates one credit for its highest exact score. The pool is divided among those
-credits in proportion to their exact scores. The first complete certified
-acceptance fixes score, eligibility and attribution for exact copies; later
-aliases do not create another trial. It also breaks an exact score tie.
-Complete submission, artifact preservation and rights checks remain required.
-The model award is separate from promotion of the reference model. C4's certified
-allocation retains its existing rules until the certified C5 successor row takes
-over.
+Read the active policy for the service and model reward shares and the cohort
+manifest for allowed tracks. Future track selection may change until that
+cohort's intake opens. Under the current model rules, the quality floor is
+equality with the frozen baseline, and a sole eligible entrant receives the full
+model pool. Exact duplicate content is counted once. Eligible models then enter
+fixed five-percentage-point quality bands, each of which creates one credit for
+its highest exact score. The pool is divided among those credits in proportion
+to their exact scores. The first complete certified acceptance fixes score,
+eligibility and attribution for exact copies; later aliases do not create
+another trial. It also breaks an exact score tie. Complete submission, artifact
+preservation and rights checks remain required. The model award is separate from
+promotion of the reference model. The previous certified allocation retains its
+existing rules until a certified successor row takes over.

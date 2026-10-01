@@ -3,6 +3,7 @@
 import asyncio
 import socket
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -111,6 +112,25 @@ async def test_host_waits_for_certified_preparation_then_recovers_original_queue
     assert (await host.poll_once())["catalogs_installed"] == 1
     assert await host.api.admit(key, claim) == receipt
     assert h.precommitted_bytes == tuple(canonical_json_bytes(v) for v in h.precommitted)
+
+
+async def test_host_coalesces_fresh_reads_and_delegates_historical_finality(lifecycle, tmp_path):
+    h = lifecycle
+    capture = AsyncMock(side_effect=h.provider.collect)
+    host = ServiceAdmissionHost(
+        host_config(h, tmp_path / "host"),
+        h.intake,
+        h.owner.promotion,
+        capture,
+        h.provider.retained_archive,
+        provider=h.provider,
+    )
+
+    observed = await host.finality.collect()
+
+    assert observed.snapshot.block == h.block
+    capture.assert_awaited_once_with()
+    assert host.finality.retained_archive.__self__ is h.provider
 
 
 @pytest.mark.parametrize("automatic_admission", [False, True])

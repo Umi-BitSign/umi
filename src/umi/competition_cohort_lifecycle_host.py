@@ -102,7 +102,8 @@ class LifecycleHost:
             raise ValueError("cohort lifecycle originals differ from its owned intake")
         if Path(c.sources.catalogs_directory) != Path(service.config.inputs_directory) / "catalogs":
             raise ValueError("cohort lifecycle catalogs differ from service admission")
-        self.provider, self.policy = service.provider, service.intake.policy
+        self.provider = getattr(service, "finality", service.provider)
+        self.policy = service.intake.policy
         self.credentials, self.sign = credentials, sign
         self.root = Path(c.directory) / digest(service.config.series)
         self.gate = SeriesRequestStart(

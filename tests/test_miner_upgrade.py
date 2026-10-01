@@ -11,6 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi.open_competition import digest
+from umi.protocol import canonical_json_bytes
+
+from .test_competition_cohort_consumers import scenario as scenario
+from .test_competition_cohort_recovery import recovery as recovery
+from .test_open_competition import policy as policy
+from .test_open_competition import wallet
+
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "deploy/miner-upgrade/upgrade.py"
 MANIFEST = ROOT / "deploy/miner-upgrade/current.json"
@@ -190,10 +198,160 @@ def test_secure_root_rejects_non_root_owned_directory(tmp_path: Path) -> None:
 
 
 def test_service_directory_is_private_to_service_account(tmp_path: Path) -> None:
-    account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="miner")
+    account = SimpleNamespace(
+        pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="miner", pw_dir="/home/miner"
+    )
     path = tmp_path / "protocol"
     upgrade.service_directory(path, account)
     assert path.stat().st_mode & 0o777 == 0o700
+
+
+def test_endpoint_enrollment_config_reuses_running_wallet_and_identity() -> None:
+    manifest = _manifest()
+    raw = upgrade.endpoint_enrollment_config(
+        [
+            "/runtime/bin/python",
+            "-m",
+            "umi.miner",
+            "--wallet-name",
+            "miner",
+            "--hotkey",
+            "default",
+            "--wallet-path",
+            "/var/lib/umi-wallets",
+        ],
+        manifest,
+        wallet("Alice").hotkey.ss58_address,
+        "10" * 32,
+        "https://miner.example",
+        True,
+    )
+    value = json.loads(raw)
+    assert value["cohort_sha256"] == manifest["cohort_sha256"]
+    assert value["wallet_name"] == "miner"
+    assert value["hotkey_name"] == "default"
+    assert value["wallet_path"] == "/var/lib/umi-wallets"
+    assert value["public_model_track"] is True
+    assert raw == upgrade.canonical(value)
+
+
+def test_endpoint_request_is_signed_once_for_the_open_recoverable_cohort(
+    scenario, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bittensor as bt
+
+    miner_wallet = wallet("Alice")
+    history = scenario["intake_history"]
+    policy = scenario["policy"]
+    config = {
+        "cohort_sha256": digest(history.plan),
+        "endpoint_url": "https://miner.example",
+        "hotkey_name": "default",
+        "intake_origin": "https://intake.example",
+        "miner_hotkey": miner_wallet.hotkey.ss58_address,
+        "model_revision": "10" * 32,
+        "policy_sha256": digest(policy),
+        "public_model_track": False,
+        "schema": "umi-miner-cohort-enrollment/1",
+        "service_authority_sha256": digest(history.authority.authority),
+        "wallet_name": "miner",
+        "wallet_path": "/unused",
+    }
+    status = {
+        "admission_accepting_new": True,
+        "admission_checked_block": 210,
+        "admission_phase": "open",
+        "policy_sha256": digest(policy),
+        "schema": "umi-competition-status/2",
+    }
+    used = []
+
+    def resolve_wallet(**kwargs):
+        used.append(kwargs)
+        return miner_wallet
+
+    monkeypatch.setattr(bt, "Wallet", resolve_wallet)
+    observed_policy, request, raw = upgrade._new_participation_request(
+        config,
+        canonical_json_bytes(policy),
+        status,
+        canonical_json_bytes(history),
+    )
+    assert observed_policy == policy
+    assert raw == canonical_json_bytes(request)
+    assert request.signed_submission.submission.sequence == 210
+    assert request.signed_submission.submission.endpoint_url == "https://miner.example"
+    assert request.consent.consent.original_submission_expiry_does_not_end_participation is True
+    assert used == [{"name": "miner", "hotkey": "default", "path": "/unused"}]
+
+
+def test_endpoint_request_waits_for_a_current_finalized_intake(scenario) -> None:
+    policy = scenario["policy"]
+    history = scenario["intake_history"]
+    config = {
+        "cohort_sha256": digest(history.plan),
+        "endpoint_url": "https://miner.example",
+        "hotkey_name": "default",
+        "intake_origin": "https://intake.example",
+        "miner_hotkey": wallet("Alice").hotkey.ss58_address,
+        "model_revision": "10" * 32,
+        "policy_sha256": digest(policy),
+        "public_model_track": False,
+        "schema": "umi-miner-cohort-enrollment/1",
+        "service_authority_sha256": digest(history.authority.authority),
+        "wallet_name": "miner",
+        "wallet_path": "/unused",
+    }
+    with pytest.raises(upgrade.EnrollmentRetry, match="current open finalized"):
+        upgrade._new_participation_request(
+            config,
+            canonical_json_bytes(policy),
+            {
+                "admission_accepting_new": False,
+                "admission_checked_block": None,
+                "admission_phase": "unverified",
+                "policy_sha256": digest(policy),
+                "schema": "umi-competition-status/2",
+            },
+            canonical_json_bytes(history),
+        )
+
+
+def test_endpoint_enrollment_timer_retries_every_fifteen_minutes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    systemd = tmp_path / "systemd"
+    state = tmp_path / "state"
+    state.mkdir()
+    account = SimpleNamespace(
+        pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="miner", pw_dir="/home/miner"
+    )
+    calls = []
+
+    def fake_run(*arguments: str, **_kwargs: object) -> subprocess.CompletedProcess:
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(upgrade, "SYSTEMD_ROOT", systemd)
+    monkeypatch.setattr(upgrade, "LAUNCHER", tmp_path / "umi-miner-upgrade")
+    monkeypatch.setattr(upgrade, "run", fake_run)
+    monkeypatch.setattr(upgrade.os, "chown", lambda *_args, **_kwargs: None)
+    report = upgrade.install_endpoint_enrollment(
+        state=state,
+        account=account,
+        runtime_python=Path(sys.executable),
+        config_raw=b"{}",
+        policy_raw=b"{}",
+    )
+    timer = (systemd / upgrade.ENROLLMENT_TIMER).read_text()
+    service = (systemd / upgrade.ENROLLMENT_SERVICE).read_text()
+    assert "OnUnitInactiveSec=15min" in timer
+    assert "Persistent=true" in timer
+    assert "ConditionPathExists=!" in service
+    assert "Environment=HOME=/home/miner" in service
+    assert "ProtectSystem=strict" in service
+    assert ("systemctl", "enable", "--now", upgrade.ENROLLMENT_TIMER) in calls
+    assert report == {"retry_seconds": 900, "status": "endpoint_enrollment_retry_scheduled"}
 
 
 def test_activation_restores_previous_override_when_health_fails(

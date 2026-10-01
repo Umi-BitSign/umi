@@ -2,27 +2,20 @@
 
 # Open competition
 
-The current signed C4 allocation has two tracks. Qualifying translation endpoints share
-70% of the miner allocation, proportional to quality. A qualifying promoted
-model's contributor receives 30%. Until the first promotion, that 30% is burned.
-The imported baseline has no contributor award or founding-model exception. C4
-rewards remain effective until C5 produces a certified successor row.
-
-C5 uses a signed **50% service / 50% model** split. The selected
-C6-C10 profile is public-model-only and assigns **100%** of each cohort's
-competition allocation within the public-model track. An unopened cohort has no
-permanent profile: successor terms and a new signed plan may replace that
-selection before intake opens. Every opened cohort is governed by the plan its
-participants accepted; a later cohort can use a different profile if
-that plan and its terms are published before intake. A
-complete accepted model entry must match or beat the frozen baseline; a sole
-eligible entrant receives the entire model pool. See the
+The active signed cohort plan defines its eligible tracks and allocation. Service
+work and public models can have separate pools; a model-only plan can assign the
+complete competition allocation to the public-model track. Never infer a split
+from a cohort number. Every opened cohort is governed by the exact plan its
+participants accepted, and an unopened cohort has no permanent profile. A
+complete accepted model entry must match or beat the plan's frozen baseline; a
+sole eligible entrant receives the entire model pool. See the
 [recoverable cohort configuration](operators/rounds.md#participation-admission).
 
-Public C5 endpoint and model intake is open. The published phase blocks are
-nominal progression targets, not non-extendable deadlines; liveness delays retain
-and extend unfinished work and do not advance the cohort automatically to C6.
-Read the current
+Published phase blocks are nominal progression targets, not non-extendable
+deadlines. Liveness delays retain and extend unfinished work and do not advance
+the cohort automatically. The previous certified allocation remains effective
+until the active cohort produces and activates a certified successor row. Read
+the current
 [status](https://api.umi.vision/v1/competition/status) and
 [readiness](https://api.umi.vision/v1/competition/readiness) before submitting.
 `admission_accepting_new` reports whether intake accepts a request;
@@ -31,7 +24,7 @@ An intake receipt or healthy endpoint alone does not establish a score or paymen
 
 Submissions bind the exact advertised policy and contribution terms. A changed
 reward policy requires fresh miner consent; old signatures cannot be reinterpreted
-as acceptance of C5+'s new split. Preserve original submissions and receipts.
+as acceptance of a successor split. Preserve original submissions and receipts.
 
 ## Endpoint miners
 
@@ -62,9 +55,10 @@ itself open evaluation or activate rewards.
 
 ## Model contributors
 
-Model contribution is separate from running an endpoint. C5 model intake is open
-under the signed policy and frozen runtime. The public endpoint receipt does not
-enroll a model or preserve its weights.
+Model contribution is separate from running an endpoint. Each cohort uses a
+signed policy and frozen runtime. Public status reports whether model admission
+accepts new submissions. The public endpoint receipt does not enroll a model or
+preserve its weights.
 
 Prepare a complete, reproducible artifact: weights or base-plus-adapter files,
 configuration, tokenizer/processor, inference code, dependency inventory, hashes
@@ -73,12 +67,12 @@ participation only after native preservation succeeds. It requires the applicabl
 published policy and a complete signed model request.
 
 Read the [preparation and rights checklist](contributors/models.md) and the exact
-immutable terms named by the selected policy before spending compute. Original
-C4 consumers still use the [version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md);
-keep those bytes available for verification while C4 remains in use. Ownership
-and upstream obligations remain with their respective holders.
+immutable terms named by the selected policy before spending compute. Retain every
+immutable terms version referenced by accepted submissions so its original bytes
+remain available for verification. Ownership and upstream obligations remain
+with their respective holders.
 
-For C5+, model reward eligibility requires preserved runnable artifacts,
+Model reward eligibility requires preserved runnable artifacts,
 permitted provenance/rights and quality at least equal to the frozen baseline.
 An unchanged baseline may qualify through a complete model submission. A sole
 eligible entrant receives the model pool; incomplete competitors cannot be
@@ -93,12 +87,11 @@ model are separate decisions.
 
 ## Evaluation and trust
 
-The C5 policy uses UID 54 and UID 0 in one evaluator control group. UID 54 is the
-required transport signer, coordinator and reward-control validator. UID 0 is
-optional review redundancy and may be retired without changing miner
-configuration or holding cohort progress. They share administration, so their
-signatures count as one independent group. This is a disclosed single-operator
-launch, not independent evaluator consensus.
+The signed policy defines evaluator identities, control groups and quorum. Public
+status identifies required and optional evaluators. Multiple validators under
+one administration count as one independent group; optional redundancy cannot
+hold cohort progress. Changing the required evaluator profile needs a successor
+policy and qualification of that exact profile.
 
 Automatic scoring compares one authentic reference per clip. Fingerspelling
 uses CER over graphemes with whitespace removed; continuous signing uses WER
@@ -112,10 +105,11 @@ Labels stay out of execution until reveal; exposed cases are retired. Text error
 rates do not establish human interpreter equivalence, clinical safety or
 unseen-training performance.
 
-The [version 3 terms](MODEL_CONTRIBUTION_TERMS_V3.md) permit a diagnostic C5
-comparison between outputs for correct videos and matched unrelated videos. It
-does not affect C5 scores, eligibility, settlement or payouts. Missing or failed
-diagnostics do not hold settlement. A future payout gate would require published
+The applicable signed terms may permit a diagnostic comparison between outputs
+for correct videos and matched unrelated videos. Unless the active policy
+explicitly defines a qualified payout gate, it does not affect scores,
+eligibility, settlement or payouts. Missing or failed diagnostics do not hold
+settlement. A future payout gate would require published
 thresholds and operating characteristics, a known-dependent positive control,
 advance notice, a successor policy and fresh participant acceptance.
 
@@ -125,14 +119,12 @@ infrastructure failure voids the affected evaluation instead of charging it to
 the miner. Every frozen roster entry needs scored evidence or a complete signed
 void; missing evidence holds the round.
 
-Under the signed C4 policy, the minimum aggregate quality score is 10%. Qualifying endpoint miners split
-the 70% endpoint allocation in proportion to their exact scores. Integer
-rounding uses largest remainders, with UID order breaking an exact tie. A model
-can be promoted only if it meets the minimum score, beats the incumbent by at
-least one percentage point, does not regress either scoring stratum, and passes
-preservation, reconstruction and rights review. Review conflicts or missing
-quorum hold settlement; operators cannot edit frozen labels or issue an ad hoc
-rescore after seeing answers.
+The signed policy defines the minimum aggregate score, enabled pools and exact
+allocation formula. Integer rounding uses largest remainders, with UID order
+breaking an exact tie. Promotion also follows the policy's improvement, stratum,
+preservation, reconstruction and rights requirements. Review conflicts or
+missing quorum hold settlement; operators cannot edit frozen labels or issue an
+ad hoc rescore after seeing answers.
 
 ## Incidents and score challenges
 
