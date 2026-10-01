@@ -14,14 +14,16 @@ from fastapi import FastAPI
 from umi.competition_artifacts import verify_preserved_bundle
 from umi.competition_cohort_api import cohort_routes
 from umi.competition_cohort_intake import CohortIntake, CohortIntakeBinding, CohortIntakeConfig
+from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
 from umi.competition_cohort_model_upload import (
     CohortModelUploads,
     ModelUploadChunk,
     ModelUploadConfig,
+    PendingModelReview,
 )
 from umi.competition_cohort_model_upload_http import model_upload_routes
 from umi.open_competition import digest, sign_object
-from umi.private_files import lock_private_file
+from umi.private_files import lock_private_file, publish_private_model
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_execution import setup_scenario
@@ -143,6 +145,41 @@ def test_delivery_resumes_original_prefix_and_is_not_enrollment(delivery):
         == sub.model_revision
     )
     put(reopened, key, 0, data)  # No archive rewrite.
+
+
+def test_configured_pre_admission_review_gates_model_enrollment(delivery, tmp_path):
+    h = delivery
+    key = h.owner.reserve(h.request, capture_at(210))
+    upload_all(h, h.owner, key)
+    sub = h.request.signed_submission.submission
+    reviews = tmp_path / "admission-reviews"
+    gated = CohortModelUploads(
+        h.owner.config.model_copy(
+            update={
+                "directory": str(tmp_path / "gated-delivery"),
+                "admission_reviews_directory": str(reviews),
+            }
+        ),
+        h.intake,
+        h.owner.archive,
+    )
+    with pytest.raises(PendingModelReview):
+        gated.require_payload(h.request)
+    publish_private_model(
+        reviews / (sub.model_revision + ".json"),
+        ModelArtifactReviewInputs(
+            model_sha256=sub.model_revision,
+            rights_evidence={"review": "passed"},
+            reconstruction_evidence={"review": "passed"},
+        ),
+    )
+    gated.require_payload(h.request)
+
+
+def test_historical_model_upload_config_omits_new_review_field(delivery, tmp_path):
+    del delivery
+    config = ModelUploadConfig(directory=str(tmp_path / "delivery"), maximum_reserved_bytes=1024**3)
+    assert "admission_reviews_directory" not in canonical_json_bytes(config).decode()
 
 
 @pytest.mark.parametrize("failure", ["length", "digest", "signer", "oversize", "gap", "prefix"])

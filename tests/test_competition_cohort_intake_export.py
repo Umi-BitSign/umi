@@ -455,6 +455,38 @@ async def test_remote_signer_uses_private_http_route_and_original_proofs(remote)
         assert vote.hotkey == wallet("Dave").hotkey.ss58_address
 
 
+async def test_owner_publishes_every_referenced_proof_before_signing(remote):
+    h = remote
+    published = []
+
+    async def publish(observation):
+        published.append(observation)
+
+    h.exporter.publish_archive = publish
+    request = IntakeReviewRequest(
+        schema="umi-intake-review-request/1",
+        challenge="ab" * 32,
+        progress=h.result.progress,
+    )
+    await h.exporter.respond(request)
+    expected = [d.observation for d in h.exported.decisions]
+    expected.append(h.exported.services[-1].observation)
+    if h.exported.seal is not None:
+        expected.append(h.exported.seal.observation)
+        expected.extend(r.observation for r in h.exported.records)
+    assert tuple(map(digest, published)) == tuple(dict.fromkeys(map(digest, expected)))
+
+    signed = len(h.calls)
+
+    async def unavailable(_observation):
+        raise FileNotFoundError("proof source unavailable")
+
+    h.exporter.publish_archive = unavailable
+    with pytest.raises(FileNotFoundError, match="proof source unavailable"):
+        await h.exporter.respond(request)
+    assert len(h.calls) == signed
+
+
 @pytest.mark.parametrize(
     "failure,status",
     [("unauthenticated", 401), ("body_limit", 413), ("invalid", 422), ("type", 415)],

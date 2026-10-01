@@ -33,18 +33,24 @@ all band-credit scores are zero, the pool is divided equally among occupied
 bands. If no model qualifies, the pool goes to the policy's proved burn
 destination. A participant may qualify independently for both pools.
 
-C6 is model-only. Its signed cohort plan disables endpoint/service participation
-and assigns all 65,535 raw competition units within the eligible public-model
+The selected C6-C10 profile is public-model-only. Signed successor terms and
+cohort plans that implement that profile disable endpoint/service participation
+and assign all 65,535 raw competition units within the eligible public-model
 population using the same baseline floor, deduplication and quality buckets.
-C7-C10 return to the C5 50/50 profile unless a different signed plan is published
-before their intake opens.
+Track selection is read from each signed cohort plan rather than inferred from
+its number. A later cohort may use a different published profile before its
+intake opens and miners consent. No unopened cohort profile is permanent;
+successor terms and a replacement signed plan may change any of its settings. An
+active cohort's plan is not changed retroactively.
 
-The governing submission must bind
+The governing C5 submission must bind
 [version 3 contribution terms](../MODEL_CONTRIBUTION_TERMS_V3.md), SHA-256
 `451b8ccf3c592fa4336bcf062594321a0e14f2443613a80f33dc6ee4acb5a0e0`,
 and the exact signed C5 policy. Earlier acceptances do not imply version 3
-acceptance. See [model contributions](../contributors/models.md) for artifact,
-rights, provenance and reconstruction requirements.
+acceptance. C6 and later submissions must bind the exact successor terms and
+policy published for their cohort; C5 consent cannot be reused. See [model
+contributions](../contributors/models.md) for artifact, rights, provenance and
+reconstruction requirements.
 
 The frozen comparator is CPU-derived model bundle
 `6fe8df59ec11ba89f4dfe0474a673fe757e378cd9184449965861c5a7c59b641`
@@ -137,9 +143,9 @@ configuration. Complete these checks in order:
    cases. Publish the miner-facing rules and tested commands.
 2. **Installed C4-to-C5 handoff:** Install C5 services beside C4 without selecting
    them. Rehearse the signed handoff and prove a failed C5 boot leaves C4 active.
-3. **Mixed six-cohort recovery:** Run C5 through C10 with service and model tracks,
-   alternating coordinator/evaluator outages, restart replay, five-hour rests,
-   24-hour validator opportunities and previous-row continuity.
+3. **Six-cohort recovery:** Run C5 through C10 with the tracks selected by each
+   signed plan, alternating coordinator/evaluator outages, restart replay,
+   five-hour rests, 24-hour validator opportunities and previous-row continuity.
 4. **Capacity:** Run the intended host and container runtime with production-size
    evidence and generous test watchdogs. Test watchdogs may detect harness stalls;
    they must not define cohort expiry.

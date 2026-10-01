@@ -118,11 +118,13 @@ class IntakeReviewExporter:
         owner: str,
         sign: Callable[[IntakeReviewResponse], Awaitable[Signature]],
         *,
+        publish_archive: Callable[[ExecutionBoundary], Awaitable[None]] | None = None,
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 30,
     ):
         _bounds(maximum_bytes, timeout_seconds)
         self.source, self.owner, self.sign = source, identity(owner), sign
+        self.publish_archive = publish_archive
         if self.owner not in {identity(e.hotkey) for e in source.intake.policy.evaluators}:
             raise ValueError("intake export owner is outside the configured evaluator set")
         self.maximum_bytes, self.timeout_seconds = maximum_bytes, timeout_seconds
@@ -184,6 +186,21 @@ class IntakeReviewExporter:
     async def respond(self, request: IntakeReviewRequest) -> bytes:
         request = IntakeReviewRequest.model_validate_json(canonical_json_bytes(request))
         evidence = await run_owned_thread(self.export, request.progress)
+        if self.publish_archive is not None:
+            observations = [d.observation for d in evidence.decisions]
+            observations.append(evidence.services[-1].observation)
+            if evidence.seal is not None:
+                observations.append(evidence.seal.observation)
+                observations.extend(r.observation for r in evidence.records)
+            published = set()
+            for observation in observations:
+                key = digest(observation)
+                if key in published:
+                    continue
+                await wait_for_owned(
+                    self.publish_archive(observation), timeout=self.timeout_seconds
+                )
+                published.add(key)
         response = IntakeReviewResponse(
             schema="umi-intake-review-response/1", challenge=request.challenge, evidence=evidence
         )

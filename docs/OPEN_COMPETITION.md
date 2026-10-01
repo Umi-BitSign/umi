@@ -8,9 +8,13 @@ model's contributor receives 30%. Until the first promotion, that 30% is burned.
 The imported baseline has no contributor award or founding-model exception. C4
 rewards remain effective until C5 produces a certified successor row.
 
-C5 uses a signed **50% service / 50% model** split. C6 is
-model-only and assigns **100%** of its competition allocation within the public-model
-track; C7-C10 return to 50/50. A
+C5 uses a signed **50% service / 50% model** split. The selected
+C6-C10 profile is public-model-only and assigns **100%** of each cohort's
+competition allocation within the public-model track. An unopened cohort has no
+permanent profile: successor terms and a new signed plan may replace that
+selection before intake opens. Every opened cohort is governed by the plan its
+participants accepted; a later cohort can use a different profile if
+that plan and its terms are published before intake. A
 complete accepted model entry must match or beat the frozen baseline; a sole
 eligible entrant receives the entire model pool. See the
 [recoverable cohort configuration](operators/rounds.md#participation-admission).

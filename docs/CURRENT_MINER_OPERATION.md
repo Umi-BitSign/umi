@@ -109,8 +109,12 @@ That support does not change the current bridge's IP-certificate requirement or
 make a hostname-only keepalive eligible for bridge rewards.
 
 Public C5 endpoint and model intake is open. C5 uses 50% service / 50% model
-rewards; C6 accepts only complete
-public-model entries and assigns that track 100%; C7-C10 return to 50/50. All use a
+rewards. The selected C6-C10 profile accepts only complete public-model
+entries and assigns that track 100%. That is a planning selection, not a promise
+about an unopened cohort: UMI may publish successor terms and a different signed
+manifest before that cohort's intake opens. Once intake opens, that cohort keeps
+the rules participants accepted. Profiles come from signed cohort manifests
+rather than the cohort number. The selected profiles use a
 baseline-or-better quality requirement for complete accepted model entries.
 Exact copies count once; eligible models then compete for one credit in each
 occupied fixed five-percentage-point quality band. Read the [model preparation

@@ -146,6 +146,15 @@ async def admission_owner_app(
             )
             for peer, credential in zip(c.reviewers, credentials, strict=True)
         )
+        if service_host is not None and (
+            service_host.preparation is not preparation or service_host.provider is not provider
+        ):
+            raise ValueError("phase control requires the same owned admission and finality")
+        lifecycle = (
+            LifecycleHost(service_host, resources, client, credentials, sign)
+            if service_host is not None and service_host.config.lifecycle is not None
+            else None
+        )
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
         app.include_router(
             admission_history_routes(
@@ -155,19 +164,16 @@ async def admission_owner_app(
         )
         app.state.history_exporter = CohortHistoryExporter(intake, c.owner_hotkey, sign)
         app.include_router(cohort_history_routes(app.state.history_exporter, token=token))
-        app.include_router(
-            intake_review_routes(
-                IntakeReviewExporter(
-                    NativeIntakeProgressSource(
-                        intake, maximum_sample_gap_blocks=c.maximum_sample_gap_blocks
-                    ),
-                    c.owner_hotkey,
-                    sign,
-                    maximum_bytes=c.maximum_export_bytes,
-                ),
-                token=token,
-            )
+        app.state.intake_review_exporter = IntakeReviewExporter(
+            NativeIntakeProgressSource(
+                intake, maximum_sample_gap_blocks=c.maximum_sample_gap_blocks
+            ),
+            c.owner_hotkey,
+            sign,
+            publish_archive=None if lifecycle is None else lifecycle.proofs.publish,
+            maximum_bytes=c.maximum_export_bytes,
         )
+        app.include_router(intake_review_routes(app.state.intake_review_exporter, token=token))
         app.include_router(
             preparation_review_routes(
                 PreparationReviewExporter(
@@ -182,16 +188,11 @@ async def admission_owner_app(
         app.state.admission_workers = workers
         app.state.admission_reports = {}
         app.state.finality_provider = provider
-        app.state.lifecycle = None
+        app.state.lifecycle = lifecycle
         app.state.dispatch = None
         app.state.orders = None
         app.state.request_readiness = None
-        if service_host is not None and (
-            service_host.preparation is not preparation or service_host.provider is not provider
-        ):
-            raise ValueError("phase control requires the same owned admission and finality")
-        if service_host is not None and service_host.config.lifecycle is not None:
-            app.state.lifecycle = LifecycleHost(service_host, resources, client, credentials, sign)
+        if app.state.lifecycle is not None:
             app.include_router(request_review_routes(app.state.lifecycle, token=token))
             if service_host.config.dispatch is not None:
                 clip_token = _token(service_host.config.dispatch.clips.upload_token_file)

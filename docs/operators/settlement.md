@@ -122,6 +122,14 @@ production selection. Current component tests use synthetic finality, inference
 and rights-review documents; the recurring vote service does not make those
 assessments for an operator.
 
+For new cohort deployments, use admission-host schema version 8 and set
+`model_uploads.admission_reviews_directory` to the owner's private
+`ModelArtifactReviewInputs` directory. Upload and preservation may finish before
+review, but public participation remains retryably pending until a bounded review
+for that exact bundle digest exists. An artifact that cannot pass review never
+enters the cohort roster and therefore cannot hold sealing or settlement open.
+Earlier host schemas retain their original behavior for recovery replay.
+
 ## Lost coordinator outcomes
 
 A dispatched claim without a durable response remains uncertain. Never resend it,
@@ -398,7 +406,8 @@ protected-data rehearsal, reviewed launch inputs, signed activation and finalize
 incentive evidence remain required for a new allocation. UID 54 and UID 0
 currently share one disclosed operator control group. UID 54 is required; UID 0
 is optional redundancy and cannot hold settlement. C5 uses separate 50% service
-and 50% public-model pools; C6 is model-only. Model-specific rights
+and 50% public-model pools. The selected C6-C10 profile is model-only;
+a successor plan may change an unopened cohort before intake. Model-specific rights
 approval and a qualifying acceptance are required before paying a contributor.
 Importing the baseline grants no contributor reward by itself. See the
 [allocation rule](../competition/launch.md).

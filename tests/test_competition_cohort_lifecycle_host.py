@@ -171,6 +171,7 @@ async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(ho
         await worker.poll_once()
     async with o.open() as app:
         control = app.state.lifecycle
+        assert app.state.intake_review_exporter.publish_archive == control.proofs.publish
         node = await control.node(h.cohort)
         driver = await node._driver("intake")
         assert await driver.observer.observe._ready(
