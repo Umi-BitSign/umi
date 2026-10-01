@@ -14,153 +14,62 @@ row. A C4 acceptance does not accept C5's policy or version 3 terms. Submit and
 retain a fresh C5 acceptance. Registration, acceptance, selection, scoring and
 reward activation are separate events.
 
-## Install the C5 runtime
+## Upgrade an existing miner
 
-Use runtime revision `ea32437d294bc0108c59812ff956477bd8f90d17` in the
-locked environment that runs the protocol service:
-
-```sh
-python -m pip install 'umi-subnet @ git+https://github.com/Umi-BitSign/umi.git@ea32437d294bc0108c59812ff956477bd8f90d17'
-```
-
-Linux uses CPython 3.12.14 and the dependency versions pinned by the transport
-policy. Preserve the working C4 environment and state until the C5 service has
-passed startup and health checks.
-
-## Download and verify the C5 policies
-
-Download the canonical [competition policy](../competition/C5_POLICY.json) and
-[transport policy](../competition/C5_TRANSPORT_POLICY.json) from the same
-repository revision as this guide. Their file SHA-256 values are:
-
-```text
-0d432e253ff8f3dd5bb08749b9452b7d0dde4139238c6b3b570cd5e1741fbd4d  C5_POLICY.json
-f182c1cbfa3985338944735cc55b52b46b12b0207436d79dd5978087483f01a8  C5_TRANSPORT_POLICY.json
-```
-
-Verify both file hashes, then verify their protocol digests with the installed
-runtime:
+Standard Linux miners managed by systemd use one updater. Choose only whether
+you intend to participate in the public-model track:
 
 ```sh
-python - C5_POLICY.json C5_TRANSPORT_POLICY.json <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-from umi.open_competition import CompetitionPolicy, digest
-from umi.policy import ScoringPolicy, scoring_policy_hash
-
-policy_path, transport_path = map(Path, sys.argv[1:])
-policy_raw = policy_path.read_bytes()
-transport_raw = transport_path.read_bytes()
-assert hashlib.sha256(policy_raw).hexdigest() == '0d432e253ff8f3dd5bb08749b9452b7d0dde4139238c6b3b570cd5e1741fbd4d'
-assert hashlib.sha256(transport_raw).hexdigest() == 'f182c1cbfa3985338944735cc55b52b46b12b0207436d79dd5978087483f01a8'
-policy = CompetitionPolicy.model_validate_json(policy_raw)
-transport = ScoringPolicy.model_validate_json(transport_raw)
-assert digest(policy) == '61f6c05143804c297aed524b6e067233567d30fe4eb50ab3289e7bfdad8e26fa'
-assert scoring_policy_hash(transport) == 'f182c1cbfa3985338944735cc55b52b46b12b0207436d79dd5978087483f01a8'
-print('C5 policies verified')
-PY
+curl -fsSLo /tmp/umi-miner-upgrade.py \
+  https://raw.githubusercontent.com/Umi-BitSign/umi/main/deploy/miner-upgrade/upgrade.py \
+  && sudo python3 /tmp/umi-miner-upgrade.py --public-model-track no
 ```
 
-C5's transport permits UID54
-`5FLKx6h7DwWRuqq1dcfQafsBw5i9cbchNEFAEHrqSRthGnDZ` to issue work. It is not
-interchangeable with C4's UID0 transport policy.
+Use `yes` instead of `no` for public-model participation. C5 accepts either
+answer. The choice records intent; it does not assert model rights or upload a
+bundle. A model submission still needs its signed consent, rights decision and
+complete artifact.
 
-## Prepare the C5 state and startup file
+The updater discovers the one running `umi.miner` systemd service and retains its
+hotkey, model revision, serving origin, wallet, model backend and public port. It
+fetches the current canonical manifest, checks it against the public competition
+status, installs the pinned runtime beside the old runtime, and creates a new
+private state namespace for the current transport policy. Nonce, assignment,
+finality, grant and model-sidecar state from earlier policies remain intact.
 
-After signing and receiving a C5 endpoint acceptance, create one new private C5
-root. The command below creates separate grant and protocol-state directories so
-the C4 service remains available for rollback. The model revision and serving
-origin must exactly match the accepted submission. Run this as the miner service
-account, supplying its hotkey, model revision, serving origin, and a new absolute
-C5 root:
+The updater also handles the standard Unix-socket model sidecar. It binds a new
+sidecar socket and capacity descriptor to the current transport policy before
+starting the miner. It verifies exact policy, transport, model, finality and
+sidecar health. If any check fails, it restores the prior systemd commands and
+restarts the previous miner and sidecar. Rerunning the updater is idempotent.
+
+The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
+same file for C6 and later cohorts; the current manifest supplies each cohort's
+inputs and allowed tracks:
 
 ```sh
-python - YOUR_HOTKEY MODEL_REVISION https://YOUR_ORIGIN /ABSOLUTE/NEW/C5 > cohort5-miner.json <<'PY'
-import os
-import sys
-from pathlib import Path
-
-from umi.competition_cohort_intake import CohortIntakeBinding
-from umi.competition_cohort_miner import CohortServiceMinerConfig
-from umi.competition_cohort_miner_startup import CohortMinerStartupConfig
-from umi.protocol import canonical_json_bytes
-
-hotkey, model_revision, origin, directory = sys.argv[1:]
-os.umask(0o077)
-root = Path(directory)
-assert root.is_absolute() and not root.exists()
-root.mkdir(mode=0o700, parents=True)
-grants = root / 'grants'
-protocol = root / 'protocol'
-grants.mkdir(mode=0o700)
-protocol.mkdir(mode=0o700)
-authority = CohortServiceMinerConfig(
-    schema='umi-cohort-service-miner-config/1',
-    directory=str(grants),
-    cohorts=(CohortIntakeBinding(
-        cohort_sha256='5dab3bfb836a91898f010bd229115e3e1c0406c3e17498d3b3b1975adab71428',
-        authority_sha256='57d4bc831ba36a0bb45f690476f07df5cf12df923d403314fd03efbde22e6fad',
-    ),),
-    policy_sha256='61f6c05143804c297aed524b6e067233567d30fe4eb50ab3289e7bfdad8e26fa',
-    transport_policy_sha256='f182c1cbfa3985338944735cc55b52b46b12b0207436d79dd5978087483f01a8',
-    miner_hotkey=hotkey,
-    model_revision=model_revision,
-    serving_origin=origin,
-    service_terms_sha256='5364a993a30a7e06defcc117d1447fbb000aa2894eae6224b57af7ae43dcb479',
-)
-startup = CohortMinerStartupConfig(
-    schema='umi-cohort-miner-startup/1',
-    authority=authority,
-    history_origin='https://api.umi.vision',
-    history_owner_hotkey='5FLKx6h7DwWRuqq1dcfQafsBw5i9cbchNEFAEHrqSRthGnDZ',
-)
-sys.stdout.buffer.write(canonical_json_bytes(startup))
-PY
-chmod 600 cohort5-miner.json
+sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
 ```
 
-The command refuses to reuse an existing root. Preserve the complete root through
-restarts. A later cohort or transport policy gets a different root; never copy or
-delete an older cohort's databases during an upgrade.
+C6 has no endpoint pathway: every C6 participant uses the public-model track.
+Its manifest therefore rejects `no`, records the model-track intent, and leaves
+the C5 endpoint service unchanged as a recoverable prior deployment. The C6 model
+submission still requires the operator's signed rights declaration and selected
+bundle. Future mixed or endpoint-only cohorts likewise enforce their advertised
+tracks. No cohort-specific replacement script is needed.
 
-## Update the running miner
-
-Keep the existing model backend, wallet, hotkey and serving origin. Preserve the
-C4 nonce database for rollback, but do not give it to the C5 process: the C5
-transport policy authorizes a different validator key, so its nonce metadata is
-intentionally different. Replace the competition-specific inputs and state paths
-with:
-
-```text
---policy /absolute/path/C5_TRANSPORT_POLICY.json
---competition-policy /absolute/path/C5_POLICY.json
---competition-cohort-config /absolute/path/cohort5-miner.json
---serving-origin https://YOUR_ORIGIN
---model-revision YOUR_ACCEPTED_MODEL_REVISION
---nonce-db /ABSOLUTE/NEW/C5/protocol/nonces.sqlite3
---assignment-db /ABSOLUTE/NEW/C5/protocol/assignments.sqlite3
---finality-state /ABSOLUTE/NEW/C5/protocol/finality.sqlite3
---max-recovery-assignments 4096
-```
-
-Do not also pass `--competition-feed` or `--competition-authorization`. If the
-service uses `--competition-chain-config`, create its C5 copy with a state
-directory under `/ABSOLUTE/NEW/C5/protocol/chain`; do not reuse the C4 chain state.
-Do not edit database metadata or remove an old database to force an upgrade. The
-new C5 databases initialize automatically on first startup. Continue to use the
-finality and storage-proof binaries whose exact target digests are pinned in the
-C5 transport policy.
-
-Start C5 as a successor service and check it directly before disabling C4. If C5
-does not reach the health state below, stop C5 and restart the unchanged C4
-service. No database migration or reset is required.
+The automatic path stops before mutation when it finds a custom or ambiguous
+deployment, including multiple miner services, a root-run miner, a non-systemd
+sidecar or an unrecognized entry point. Container and custom service operators
+should apply the same [current upgrade manifest](../../deploy/miner-upgrade/current.json):
+use its exact runtime and policy inputs, create fresh policy-bound protocol state,
+preserve the previous deployment for rollback, and require the health contract
+below before switching traffic.
 
 The public TLS edge must proxy `POST /v1/translate`,
 `POST /v1/competition/cohorts/assignments`, the response-recovery route, and the
-retirement route to the miner without changing paths, bodies or authentication
-headers. A static edge `/healthz` response does not prove those routes work.
+retirement route without changing paths, bodies or authentication headers. A
+static edge `/healthz` response does not prove those routes work.
 
 ## Check the running miner
 
