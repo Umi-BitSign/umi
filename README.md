@@ -31,12 +31,12 @@ The temporary registration bridge uses live HTTPS health checks and shared
 coldkey/IP/funding groups. It does not score translations. The ongoing bridge policy has no scheduled calendar sunset;
 historical finite policies retain their original expiry.
 
-The C5 competition is active. Use the [current connection
+Public competition intake is live. Use the [current connection
 guide](docs/miners/connection.md) for the exact miner release, policy files,
 binary downloads and service configuration. Check public status and readiness
 for the active phase, accepted tracks and whether admission accepts new
-submissions. C5's
-published phase blocks are nominal progression targets, not non-extendable
+submissions. The active cohort's published phase blocks are nominal progression
+targets, not non-extendable
 deadlines; liveness delays retain and extend unfinished work. Accepted submissions remain subject to the signed terms,
 registration, validity and selection rules.
 Open-competition rewards have not replaced the bridge. An
@@ -44,9 +44,9 @@ Open-competition rewards have not replaced the bridge. An
 evaluation, settlement or payment. See the
 [live competition status](https://api.umi.vision/v1/competition/status) and the
 [launch configuration](docs/competition/launch.md) for the exact policy and
-current phase. The [C5 public inputs](docs/competition/C5_INPUTS.md) publish the
-canonical competition and transport files with their digests. The status also
-publishes an operator-declared repository revision and
+current phase. The [current upgrade manifest](deploy/miner-upgrade/current.json)
+binds the canonical competition and transport files, runtime revision and
+allowed participation tracks. The status also publishes an operator-declared repository revision and
 the UMI source-tree digest. Intake startup recomputes and enforces the source-tree
 digest. Release verification must separately confirm that the declared revision
 is the commit from which that exact tree was deployed.

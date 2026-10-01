@@ -2,17 +2,18 @@
 
 # Current miner connection guide
 
-C5 uses a recoverable cohort runtime: phase blocks are operating targets, and
+The competition uses a recoverable cohort runtime: phase blocks are operating targets, and
 coordinator or validator downtime delays unfinished work instead of expiring the
 cohort. Check [live status](https://api.umi.vision/v1/competition/status) and
 [readiness](https://api.umi.vision/v1/competition/readiness) for the current
 phase and admission state before signing or diagnosing a submission. Send a new
 submission only when `admission_accepting_new` is true.
 
-C4 remains the effective reward cohort until C5 produces a certified successor
-row. A C4 acceptance does not accept C5's policy or version 3 terms. C5
-participants must retain their fresh C5 acceptance. Registration, acceptance,
-selection, scoring and reward activation are separate events.
+The previous certified allocation remains effective until the active cohort
+produces a certified successor row. Acceptance under an earlier policy does not
+accept the current policy or terms. Participants must retain the acceptance
+receipt for the active policy. Registration, acceptance, selection, scoring and
+reward activation are separate events.
 
 ## Upgrade an existing miner
 
@@ -25,12 +26,14 @@ curl -fsSLo /tmp/umi-miner-upgrade.py \
   && sudo python3 /tmp/umi-miner-upgrade.py --public-model-track no
 ```
 
-Use `yes` instead of `no` for public-model participation. C5 permitted either
-answer during intake. For either answer, the updater signs and retains the
-endpoint participation request with the running miner hotkey, submits it to C5,
-and checks its admission certificate. `yes` also records public-model intent; it
-does not assert model rights or upload a bundle. A model submission still needs
-its own signed consent, rights decision and complete artifact.
+Use `yes` instead of `no` for public-model participation. The active signed
+manifest decides which answers are allowed, and the updater stops before changing
+the service if the selected track is unavailable. When endpoint participation is
+allowed, the updater signs and retains the endpoint request with the running
+miner hotkey, submits it to the active cohort, and checks its admission
+certificate. `yes` also records public-model intent; it does not assert model
+rights or upload a bundle. A model submission still needs its own signed consent,
+rights decision and complete artifact.
 
 The updater discovers the one running `umi.miner` systemd service and retains its
 hotkey, model revision, serving origin, wallet, model backend and public port. It
@@ -55,21 +58,19 @@ may therefore finish with `endpoint_enrollment_retry_scheduled` or
 manual renewal. `endpoint_enrollment_certified` is the completed state.
 
 The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
-same file for C6 and later cohorts; the current manifest supplies each cohort's
-inputs and allowed tracks:
+same installed file for later cohorts; the current manifest supplies the active
+cohort's inputs and allowed tracks:
 
 ```sh
 sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
 ```
 
-C6's selected profile has no endpoint pathway: every participant uses the
-public-model track. A signed manifest implementing that profile rejects `no`,
-records the model-track intent, and leaves the C5 endpoint service unchanged as a
-recoverable prior deployment. The C6 model submission still requires the
-operator's signed rights declaration and selected bundle. Later cohorts use the
-same updater; their signed manifests, rather than cohort numbers baked into the
-script, enforce the profile published before intake. No cohort-specific
-replacement script is needed.
+If a signed manifest offers only public-model participation, the updater rejects
+`no`, records model-track intent, and leaves the existing endpoint service
+unchanged as a recoverable prior deployment. The model submission still requires
+the operator's signed rights declaration and selected bundle. Signed manifests,
+rather than cohort numbers baked into the script, enforce the profile published
+before intake. No cohort-specific replacement script is needed.
 
 The automatic path stops before mutation when it finds a custom or ambiguous
 deployment, including multiple miner services, a root-run miner, a non-systemd
@@ -90,14 +91,13 @@ Read `/healthz` directly from the protocol process. Expect:
 
 - `ok: true`, `runtime_mode: competition_no_weight`, and
   `finality_service: running`;
-- competition policy
-  `61f6c05143804c297aed524b6e067233567d30fe4eb50ab3289e7bfdad8e26fa`;
-- transport policy
-  `f182c1cbfa3985338944735cc55b52b46b12b0207436d79dd5978087483f01a8`;
-- the same model revision and serving origin as the accepted C5 submission.
+- competition and transport policy digests matching the
+  [current upgrade manifest](../../deploy/miner-upgrade/current.json) and live
+  status;
+- the same model revision and serving origin as the accepted active submission.
 
 No assignments are expected during intake. After roster and request phases open,
 the miner retrieves signed cohort history from the public API and durably stores
 each grant before inference. An unavailable coordinator or validator causes a
-retry; it does not become a miner failure or terminate C5. Preserve signed
+retry; it does not become a miner failure or terminate the cohort. Preserve signed
 responses and grant state until certified retirement.

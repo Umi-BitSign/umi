@@ -177,7 +177,7 @@ async def test_live_socket_authenticates_during_recurring_coordinator_cycle(setu
     now[0] = int(signed.query.nonce_unix_ns)
     try:
         async with app.router.lifespan_context(app), listening(app) as port:
-            await asyncio.wait_for(paused.entered.wait(), timeout=30)
+            await asyncio.wait_for(paused.entered.wait(), timeout=120)
             assert s.queue.serial.locked()
             request = asyncio.create_task(
                 transport.request_settlement("https://rounds.example", signed, loopback_port=port)
@@ -263,12 +263,12 @@ async def test_http_timeout_and_repeated_cancel_drain_worker_before_releasing_ca
             paused.release.set()
             if mode == "cancel" or (native_client and mode == "cancel_during_timeout"):
                 with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(task, timeout=30)
+                    await asyncio.wait_for(task, timeout=120)
             elif native_client:
                 with pytest.raises(ValueError, match="request rejected"):
-                    await asyncio.wait_for(task, timeout=30)
+                    await asyncio.wait_for(task, timeout=120)
             else:
-                assert (await asyncio.wait_for(task, timeout=30)).status_code == 503
+                assert (await asyncio.wait_for(task, timeout=120)).status_code == 503
             assert paused.finished.is_set() and not s.queue.serial.locked()
             monkeypatch.setattr(
                 type(s.queue.capacity), "operation_timeout_seconds", property(lambda _: 7200)

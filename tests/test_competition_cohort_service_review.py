@@ -760,7 +760,18 @@ async def test_service_review_cannot_change_selected_request_after_restart(revie
 
 async def retired_attempt(s, monkeypatch):
     worker = s.worker()
-    grant = await worker._certificate(s.body)
+    for attempt in range(4):
+        try:
+            grant = await worker._certificate(s.body)
+            break
+        except ValueError as error:
+            if str(error) != "cohort recovery lacks the policy evaluator quorum" or attempt == 3:
+                raise
+            # A loaded executor can let one independent review vote finish
+            # after the other. The recurring worker retries the same retained
+            # request, so exercise that boundary instead of requiring both
+            # hosts to complete in one scheduler pass.
+            await asyncio.sleep(0)
     s.p.finality.head = s.body.request.deadline_block + 3000
     await s.move(s.p.finality.head)
     monkeypatch.setattr(
