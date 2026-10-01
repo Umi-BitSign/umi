@@ -403,11 +403,11 @@ It does not establish real-model quality or independent administration.
 The delivery tests additionally cover authenticated proposal discovery,
 certificate collection and immutable package publication. The integrated
 protected-data rehearsal, reviewed launch inputs, signed activation and finalized
-incentive evidence remain required for a new allocation. UID 54 and UID 0
-currently share one disclosed operator control group. UID 54 is required; UID 0
-is optional redundancy and cannot hold settlement. C5 uses separate 50% service
-and 50% public-model pools. The selected C6-C10 profile is model-only;
-a successor plan may change an unopened cohort before intake. Model-specific rights
+incentive evidence remain required for a new allocation. Read required and
+optional evaluators, control groups, enabled tracks and pool shares from the
+signed cohort plan. Optional redundancy cannot hold settlement, and validators
+under one administration do not supply independent votes. A successor plan may
+change an unopened cohort before intake. Model-specific rights
 approval and a qualifying acceptance are required before paying a contributor.
 Importing the baseline grants no contributor reward by itself. See the
 [allocation rule](../competition/launch.md).

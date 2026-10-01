@@ -16,12 +16,10 @@ independent evaluators. It produces the existing `IndependentEvaluationEvidence`
 used by settlement replay. Optional settlement signing returns endorsements to
 the coordinator. The worker does not submit weights.
 
-The imported baseline still has no contributor attribution. C5 assigns 50% to
-service work and 50% to eligible public models. The selected C6-C10
-profile is model-only, but a successor plan may change any unopened cohort.
-Running this
-worker does not activate weights or satisfy the launch profile's evaluation and
-review requirements.
+The imported baseline has no contributor attribution. Read enabled tracks and
+pool shares from the signed cohort plan. A successor plan may change any unopened
+cohort. Running this worker does not activate weights or satisfy the launch
+profile's evaluation and review requirements.
 
 Scoring is automatic; no human ASL judge is part of the work-order path.
 The [private holdout](private-holdout.md#open-competition-private-holdout) supplies committed

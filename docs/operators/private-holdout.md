@@ -8,11 +8,12 @@
 
 ## Private holdout for automatic launch evaluation
 
-C5 uses automatic CER/WER scoring against fixed English references. It does not
-require a new human ASL grading panel, a person reviewing every miner output, or
-human approval of each score. Existing labeled ASL data can supply the
-references. C5's separate video-dependence comparison is diagnostic only and
-cannot change its score, eligibility, reward or settlement. These data-handling
+The active policy uses automatic CER/WER scoring against fixed English
+references. It does not require a new human ASL grading panel, a person reviewing
+every miner output, or human approval of each score. Existing labeled ASL data can supply the
+references. A separate video-dependence comparison is diagnostic only unless the
+signed policy explicitly activates a qualified gate. A diagnostic cannot change
+a score, eligibility, reward or settlement. These data-handling
 instructions do not activate the competition or change a signed policy, scoring
 formula or evaluator quorum.
 
@@ -76,19 +77,15 @@ contributor supplies it, disclose that access and any influence on selection.
 
 ### Approved launch input contract
 
-The C5 scoring profile uses `umi-open-competition-policy/3` and
-`umi-competition-suite/2`. It uses one reference, the fingerspelling and
-continuous strata, and the 3/13 and 10/13 weights. The signed standing reward
-authority applies C5's separate 50% service and 50% public-model pools. The
-C6-C10 plans that implement the selected profile permit only the public-model
-track and assign it 100%. A successor plan may change an unopened cohort before
-intake. C4's signed policy keeps its original allocation and meaning.
+The signed policy and suite define the reference count, required strata, stratum
+weights, enabled tracks and allocation. A successor plan may change an unopened
+cohort before intake. An active plan retains its original allocation and meaning.
 
 ### Prospective dependence-gated input contract
 
-This section describes a possible successor to C5. It is not the C5 payout
-policy. C5 can collect the comparison diagnostically where feasible, but a
-missing or failed diagnostic cannot hold settlement. Activating this gate in a
+This section describes a possible successor policy. It is not active payout
+policy. An active plan can collect the comparison diagnostically where feasible,
+but a missing or failed diagnostic cannot hold settlement. Activating this gate in a
 future cohort requires published thresholds, qualification, a newly signed
 policy and fresh participant acceptance before intake.
 
@@ -263,8 +260,8 @@ valid paraphrases can lose points, and small text edits can change meaning.
 Human semantic evaluation can be added later under a prospective published
 policy without being a dependency for this automatic-scoring launch.
 
-C5's 50/50 allocation, the selected C6-C10 model-only profile, model preservation
-and contribution-rights checks are defined by its signed policy and version 3
-terms. The [execution plan](../competition/launch.md) tracks the remaining
-operational activation gates. A future dependence-gated policy defines its own
-allocation prospectively; this document does not reinterpret C5.
+Track allocation, model preservation and contribution-rights checks are defined
+by the signed cohort policy and immutable terms it names. The [execution
+plan](../competition/launch.md) tracks operational activation gates. A future
+dependence-gated policy defines its own allocation prospectively; this document
+does not reinterpret an active policy.

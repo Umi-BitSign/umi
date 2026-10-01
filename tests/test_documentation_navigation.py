@@ -102,6 +102,23 @@ class DocumentationNavigationTests(unittest.TestCase):
             "Open-competition intake and rewards are not active yet", contributor_guide
         )
 
+    def test_durable_guides_do_not_bake_in_cohort_numbers(self):
+        guides = (
+            "OPEN_COMPETITION.md",
+            "competition/launch.md",
+            "operators/evaluation.md",
+            "operators/funding-audit.md",
+            "operators/private-holdout.md",
+            "operators/promotion.md",
+            "operators/rounds.md",
+            "operators/settlement.md",
+            "validators/successor-upgrade.md",
+        )
+        for relative in guides:
+            with self.subTest(path=relative):
+                text = (ROOT / "docs" / relative).read_text()
+                self.assertIsNone(re.search(r"\bC\d+(?:\b|[-+])", prose(text)))
+
     def test_operator_store_consumers_show_the_exact_public_launch(self):
         publisher = fenced_json_after(
             ROOT / "docs/operators/settlement.md", "these config fields are:"

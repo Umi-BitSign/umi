@@ -240,13 +240,14 @@ remains unperformed.
 
 Standing reward execution requires a separate local approval binding the exact
 installation receipt, host manifest, validator, series, policy, replay manifest,
-chain configuration and C4 handoff plan. `competition_reward_host` reads this
-root-owned approval before stopping C4 and binds the transaction journal to the
-original supervisor database. Startup must reopen that journal; missing state
-cannot become an empty replacement. Capacity increases preserve its identity.
+chain configuration and predecessor handoff plan. `competition_reward_host`
+reads this root-owned approval before stopping the predecessor and binds the
+transaction journal to the original supervisor database. Startup must reopen
+that journal; missing state cannot become an empty replacement. Capacity
+increases preserve its identity.
 
-`competition_reward_service` owns proof providers and holds the original C4
-handoff through executor shutdown. Transient failures retry with retained state;
+`competition_reward_service` owns proof providers and holds the original
+predecessor handoff through executor shutdown. Transient failures retry with retained state;
 an exited finality observer ends the service invocation so boot supervision can
 construct a new provider. Startup reconstructs the first activation from complete
 retained control history and replays its original reward package. A successor or
@@ -264,15 +265,15 @@ root-owned mode-0444
 the startup stop. The configuration selects the series, replay and opportunity
 manifest, current and legacy chain configurations, eligibility runtime, handoff
 plan, private input directories and resource capacities. It supplies no callbacks
-or executable plugins. An absent default file keeps the existing C4 path. A
+or executable plugins. An absent default file keeps the existing predecessor path. A
 missing explicit file, dangling link, unreadable file or invalid approval rejects
 startup before stopping the existing worker. Install the approval and all inputs
 before publishing the default file; remove no original journals during selection.
 
-During initial history/package replay, the original supervisor continues C4
-reconciliation. The durable handoff intent stops that continuation before C5
-signing, including after restart. A failed old feed does not prevent independent
-C5 recovery. Status logs identify bootstrap progress, holds and transaction
+During initial history/package replay, the original supervisor continues
+predecessor reconciliation. The durable handoff intent stops that continuation
+before successor signing, including after restart. A failed old feed does not
+prevent independent successor recovery. Status logs identify bootstrap progress, holds and transaction
 progress without enabling HTTP-client logging.
 `standing_service_stage` reports entry into initial control collection, replay,
 legacy handoff, journal binding and signer/executor startup. A
@@ -572,7 +573,7 @@ For a standing series, the configured lifecycle host supplies `SeriesRequestStar
 through the lifecycle's `request_start` argument before enabling dispatch. Its private
 `umi-cohort-request-start-config/1` selects a journal directory and
 `first_cohort_not_before_unix_ms`. The deployment must derive that first floor
-from the qualified preceding C4 closure and the announced launch notice. The
+from the qualified predecessor closure and the announced launch notice. The
 gate cannot infer a legacy closure from a current score or weight row.
 
 Later cohorts remain in preparation until the preceding cohort has a verified
