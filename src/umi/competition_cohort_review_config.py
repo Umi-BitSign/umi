@@ -9,11 +9,13 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_benchmark_host import BenchmarkHostConfig
+from .competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from .competition_cohort_endpoint_host import EndpointHostConfig
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_model_review import ModelReviewConfig
+from .competition_cohort_model_static_review import verify_standing_review_policy
 from .competition_cohort_progress_signer import CohortProgressSignerConfig
-from .competition_cohort_recovery import verify_recovery_authority
+from .competition_cohort_recovery import cohort_model_delivery, verify_recovery_authority
 from .competition_cohort_service_review import ServiceReviewConfig
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import _disjoint
@@ -32,6 +34,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         "umi-cohort-phase-review-service/4",
         "umi-cohort-phase-review-service/5",
         "umi-cohort-phase-review-service/6",
+        "umi-cohort-phase-review-service/7",
     ] = Field(alias="schema")
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -58,6 +61,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     model_signing: ModelReviewConfig | None = None
     benchmark: BenchmarkHostConfig | None = None
     endpoint: EndpointHostConfig | None = None
+    direct_model_review: DirectModelReviewSourceConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -72,6 +76,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("benchmark", None)
         if self.endpoint is None:
             value.pop("endpoint", None)
+        if self.direct_model_review is None:
+            value.pop("direct_model_review", None)
         return value
 
     def stores(self) -> tuple[Path, ...]:
@@ -138,6 +144,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 "umi-cohort-phase-review-service/4",
                 "umi-cohort-phase-review-service/5",
                 "umi-cohort-phase-review-service/6",
+                "umi-cohort-phase-review-service/7",
             )
         ) != (self.admission_signing is not None):
             raise ValueError("admission signing requires version three host configuration")
@@ -147,16 +154,29 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 "umi-cohort-phase-review-service/4",
                 "umi-cohort-phase-review-service/5",
                 "umi-cohort-phase-review-service/6",
+                "umi-cohort-phase-review-service/7",
             )
         ) != (self.model_signing is not None):
             raise ValueError("model signing requires version four host configuration")
         if (
             self.schema_
-            in ("umi-cohort-phase-review-service/5", "umi-cohort-phase-review-service/6")
+            in (
+                "umi-cohort-phase-review-service/5",
+                "umi-cohort-phase-review-service/6",
+                "umi-cohort-phase-review-service/7",
+            )
         ) != (self.benchmark is not None):
             raise ValueError("benchmark execution requires version five host configuration")
-        if (self.schema_ == "umi-cohort-phase-review-service/6") != (self.endpoint is not None):
-            raise ValueError("endpoint execution requires version six host configuration")
+        endpoint_selected = self.schema_ == "umi-cohort-phase-review-service/6" or (
+            self.schema_ == "umi-cohort-phase-review-service/7"
+            and "endpoint" in self.eligible_tracks
+        )
+        if endpoint_selected != (self.endpoint is not None):
+            raise ValueError("endpoint execution differs from the selected host tracks")
+        if (self.schema_ == "umi-cohort-phase-review-service/7") != (
+            self.direct_model_review is not None
+        ):
+            raise ValueError("direct model review requires version seven host configuration")
         if self.endpoint is not None:
             if self.service_signing is None:
                 raise ValueError("complete evaluator startup requires service review signing")
@@ -185,6 +205,18 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             or "model" not in self.eligible_tracks
         ):
             raise ValueError("model review changes host signer, tracks or scope")
+        direct = self.direct_model_review
+        direct_selected = any(
+            cohort_model_delivery(plan).mechanism == "direct_r2_multipart_v1"
+            for plan in self.series.cohorts
+            if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+        )
+        if direct_selected and direct is None and model is not None:
+            raise ValueError("direct model cohort requires the independent R2 review source")
+        if direct is not None:
+            if model is None:
+                raise ValueError("direct model review requires model signing")
+            verify_standing_review_policy(direct.standing_review_policy, self.policy)
         admission = self.admission_signing
         if admission is not None and (
             admission.cohorts != expected
@@ -221,7 +253,17 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         ):
             raise ValueError("phase review owner must be an explicit HTTPS origin")
         secrets = tuple(
-            Path(p) for p in (self.signer_key_file, self.owner_token_file, self.vote_token_file)
+            Path(p)
+            for p in (
+                self.signer_key_file,
+                self.owner_token_file,
+                self.vote_token_file,
+                *(
+                    (self.direct_model_review.r2_credentials_file,)
+                    if self.direct_model_review
+                    else ()
+                ),
+            )
         )
         _disjoint((*self.stores(), *secrets))
         return self

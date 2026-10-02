@@ -14,19 +14,26 @@ from umi import competition_cohort_review_cli as cli
 from umi.competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from umi.competition_cohort_benchmark_host import BenchmarkHostConfig
 from umi.competition_cohort_clip_delivery import ClipDeliveryConfig
+from umi.competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from umi.competition_cohort_endpoint_decision_signer import CohortEndpointDecisionConfig
 from umi.competition_cohort_endpoint_host import EndpointHostConfig
 from umi.competition_cohort_execution_journal import CohortExecutionConfig
 from umi.competition_cohort_intake import CohortIntakeBinding
 from umi.competition_cohort_model_review import ModelReviewConfig
+from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 from umi.competition_cohort_order_inbox import CohortOrderInboxConfig
 from umi.competition_cohort_order_signer import CohortOrderSignerConfig
 from umi.competition_cohort_progress_signer import CohortProgressSignerConfig
+from umi.competition_cohort_recovery import (
+    ModelDeliveryProfile,
+    SignedCohortRecoveryAuthority,
+)
 from umi.competition_cohort_request_signer import EndpointRequestSignerConfig
 from umi.competition_cohort_review_config import PhaseReviewServiceConfig, load_phase_review_config
 from umi.competition_cohort_review_http import CohortReviewPeerConfig
+from umi.competition_cohort_sandbox import DirectCohortCpuSandbox
 from umi.competition_cohort_service_review import ServiceReviewConfig
-from umi.open_competition import digest, identity
+from umi.open_competition import digest, identity, sign_object
 from umi.private_files import lock_private_file
 from umi.protocol import canonical_json_bytes
 
@@ -737,6 +744,165 @@ def with_endpoint(config):
     return PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
 
 
+def with_direct_series(config):
+    plans = list(config.series.cohorts)
+    plans[-1] = plans[-1].model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/3",
+            "eligible_tracks": ("model",),
+            "service_pool_bps": 0,
+            "model_delivery": ModelDeliveryProfile(
+                schema="umi-model-delivery-profile/1",
+                mechanism="direct_r2_multipart_v1",
+                part_size_bytes=64 * 1024**2,
+                maximum_concurrent_parts=4,
+                capability_ttl_seconds=3600,
+            ),
+        }
+    )
+    plans = tuple(plans)
+    authority = config.series.recovery.authority.model_copy(
+        update={"cohort_sha256s": tuple(sorted(digest(plan) for plan in plans))}
+    )
+    signatures = tuple(
+        sorted(
+            (sign_object(authority, wallet(name)) for name in ("Charlie", "Dave")),
+            key=lambda value: identity(value.hotkey),
+        )
+    )
+    recovery = SignedCohortRecoveryAuthority(authority=authority, signatures=signatures)
+    manifest = config.manifest.model_copy(
+        update={
+            "cohorts": tuple(
+                requirement.model_copy(update={"cohort_sha256": digest(plan)})
+                for requirement, plan in zip(config.manifest.cohorts, plans, strict=True)
+            )
+        }
+    )
+    series = config.series.model_copy(
+        update={
+            "cohorts": plans,
+            "recovery": recovery,
+            "manifest_sha256": digest(manifest),
+        }
+    )
+    cohorts = tuple(
+        CohortIntakeBinding(cohort_sha256=digest(plan), authority_sha256=digest(authority))
+        for plan in sorted(plans, key=digest)
+    )
+
+    def rebound(value):
+        return None if value is None else value.model_copy(update={"cohorts": cohorts})
+
+    benchmark = config.benchmark
+    if benchmark is not None:
+        benchmark = benchmark.model_copy(
+            update={
+                "orders": rebound(benchmark.orders),
+                "inbox": rebound(benchmark.inbox),
+                "execution": rebound(benchmark.execution),
+            }
+        )
+    endpoint = config.endpoint
+    if endpoint is not None:
+        endpoint = endpoint.model_copy(
+            update={
+                "requests": rebound(endpoint.requests),
+                "decisions": rebound(endpoint.decisions),
+            }
+        )
+    return config.model_copy(
+        update={
+            "series": series,
+            "manifest": manifest,
+            "signing": rebound(config.signing),
+            "service_signing": rebound(config.service_signing),
+            "admission_signing": rebound(config.admission_signing),
+            "model_signing": rebound(config.model_signing),
+            "benchmark": benchmark,
+            "endpoint": endpoint,
+        }
+    )
+
+
+def with_direct_model_review(config):
+    c = with_endpoint(config)
+    source = DirectModelReviewSourceConfig(
+        schema="umi-direct-model-review-source/1",
+        r2_credentials_file=c.signing.directory + "-r2-read-credentials",
+        r2_bucket="umi-model-artifacts",
+        standing_review_policy=StandingModelReviewPolicy(
+            schema="umi-standing-model-artifact-review-policy/1",
+            competition_policy_sha256=digest(c.policy),
+            contribution_terms_sha256=c.policy.contribution_terms_sha256,
+            standing_approval_record_sha256="ab" * 32,
+            approved_by="operator@example.test",
+            approved_at_utc="2026-10-02T12:00:00Z",
+            complete_declared_bundle_rights_approved=True,
+            licenses_and_notices_reviewed=True,
+            public_redistribution_and_evaluation_approved=True,
+        ),
+    )
+    c = with_direct_series(c).model_copy(
+        update={
+            "schema_": "umi-cohort-phase-review-service/7",
+            "direct_model_review": source,
+        }
+    )
+    return PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+def with_direct_model_only_review(config):
+    c = with_direct_model_review(config).model_copy(
+        update={"eligible_tracks": ("model",), "endpoint": None}
+    )
+    return PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+@pytest.mark.parametrize("fault", ["missing", "old_version", "policy", "overlap"])
+def test_direct_model_review_configuration_is_explicit_and_disjoint(selected, fault):
+    c = with_direct_model_review(selected.config)
+    source = c.direct_model_review
+    if fault == "missing":
+        c = c.model_copy(update={"direct_model_review": None})
+    elif fault == "old_version":
+        c = c.model_copy(update={"schema_": "umi-cohort-phase-review-service/6"})
+    elif fault == "policy":
+        source = source.model_copy(
+            update={
+                "standing_review_policy": source.standing_review_policy.model_copy(
+                    update={"competition_policy_sha256": "ff" * 32}
+                )
+            }
+        )
+        c = c.model_copy(update={"direct_model_review": source})
+    else:
+        source = source.model_copy(update={"r2_credentials_file": c.signing.directory})
+        c = c.model_copy(update={"direct_model_review": source})
+    with pytest.raises(ValueError):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+def test_direct_model_only_review_does_not_require_endpoint_execution(selected):
+    retained = with_direct_model_only_review(selected.config)
+    assert retained.schema_ == "umi-cohort-phase-review-service/7"
+    assert retained.eligible_tracks == ("model",)
+    assert retained.endpoint is None
+    assert retained.direct_model_review is not None
+
+
+def test_direct_review_requires_endpoint_config_only_when_endpoint_track_is_selected(selected):
+    c = with_direct_model_review(selected.config).model_copy(update={"endpoint": None})
+    with pytest.raises(ValueError, match="endpoint execution differs"):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
+def test_direct_model_series_rejects_an_older_reviewer_without_r2_source(selected):
+    c = with_direct_series(with_endpoint(selected.config))
+    with pytest.raises(ValueError, match="independent R2 review source"):
+        PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(c))
+
+
 @pytest.mark.parametrize(
     "fault",
     [
@@ -788,6 +954,43 @@ def endpoint_credentials(c):
     ]:
         Path(path).write_text(token + "\n")
         Path(path).chmod(0o440)
+
+
+def direct_r2_credentials(c):
+    path = Path(c.direct_model_review.r2_credentials_file)
+    path.write_text(
+        "TOKEN_VALUE=unused-account-token\n"
+        "ACCESS_KEY_ID=0123456789ABCDEF\n"
+        "SECRET_ACCESS_KEY=secret-access-key-value\n"
+        "DEFAULT_ENDPOINT=https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com\n"
+    )
+    path.chmod(0o600)
+
+
+async def test_direct_review_boot_uses_independent_r2_reader_and_bounded_sandbox(
+    selected, providers, monkeypatch
+):
+    c = with_direct_model_review(selected.config)
+    endpoint_credentials(c)
+    direct_r2_credentials(c)
+    monkeypatch.setattr(boot, "CohortEndpointFinalityProvider", providers.provider)
+
+    async with boot.phase_review_app(c) as app:
+        assert isinstance(app.state.benchmark.sandbox, DirectCohortCpuSandbox)
+        artifacts = app.state.benchmark.sandbox.artifacts
+        assert artifacts.owner_hotkey == c.owner_hotkey
+        assert artifacts.config.r2_bucket == "umi-model-artifacts"
+        assert app.state.benchmark.sandbox.cache.parent == Path(c.benchmark.workspace_directory)
+
+
+async def test_direct_model_only_review_boot_omits_endpoint_path(selected, providers):
+    c = with_direct_model_only_review(selected.config)
+    direct_r2_credentials(c)
+
+    async with boot.phase_review_app(c) as app:
+        assert app.state.endpoint is None
+        assert isinstance(app.state.benchmark.sandbox, DirectCohortCpuSandbox)
+        assert app.state.benchmark.sandbox.artifacts.config.r2_bucket == "umi-model-artifacts"
 
 
 async def test_endpoint_boot_owns_origin_provider_and_native_workers(

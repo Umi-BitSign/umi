@@ -2,8 +2,9 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, model_serializer, model_validator
 
+from .competition_cohort_direct_model_upload import SignedDirectModelUploadReservation
 from .competition_cohort_intake_records import RetainedCohortParticipation
 from .competition_cohort_participation import AttestedCohortParticipantAdmission
 from .competition_cohort_recovery import Block, ModelRewardCohortAuthority, verify_recovery_quorum
@@ -121,10 +122,28 @@ def verify_model_acceptance(certificate, record, history, policy, *, maximum_blo
 
 
 class ModelReviewRequest(StrictProtocolModel):
-    schema_: Literal["umi-cohort-model-review-request/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-model-review-request/1", "umi-cohort-model-review-request/2"] = (
+        Field(alias="schema")
+    )
     acceptance: ModelArtifactAcceptance
     record: RetainedCohortParticipation
     admission: AttestedCohortParticipantAdmission
+    direct_artifact: SignedDirectModelUploadReservation | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_artifact(self, handler):
+        value = handler(self)
+        if self.direct_artifact is None:
+            value.pop("direct_artifact", None)
+        return value
+
+    @model_validator(mode="after")
+    def exact_artifact_source(self):
+        if (self.schema_ == "umi-cohort-model-review-request/2") != (
+            self.direct_artifact is not None
+        ):
+            raise ValueError("model review request artifact source differs")
+        return self
 
 
 class ModelArtifactVote(StrictProtocolModel):

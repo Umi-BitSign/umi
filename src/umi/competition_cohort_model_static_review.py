@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -85,43 +86,54 @@ def _read_document(root_fd: int, record, standing: StandingModelReviewPolicy) ->
     return text
 
 
-def build_standing_model_review(
+def _review_from_documents(
     bundle: ModelBundle,
-    archive: Path,
     policy: CompetitionPolicy,
     standing: StandingModelReviewPolicy,
+    raw_documents: Mapping[str, bytes],
 ) -> ModelArtifactReviewInputs:
-    """Build stable review inputs from one exact preserved model bundle."""
+    """Build the same decision from authenticated local or remote document bytes."""
 
-    bundle = ModelBundle.model_validate_json(canonical_json_bytes(bundle))
-    standing = StandingModelReviewPolicy.model_validate_json(canonical_json_bytes(standing))
-    verify_standing_review_policy(standing, policy)
-    model_sha256 = verify_preserved_bundle(bundle, archive, policy)
     review_policy_sha256 = digest(standing)
     documents = []
     encoded_document_bytes = 0
-    with _directory(archive / model_sha256 / "model") as root_fd:
-        for record in bundle.files:
-            if record.role not in {"license", "provenance"}:
-                continue
-            text = _read_document(root_fd, record, standing)
-            encoded_document_bytes += len(canonical_json_bytes(text))
-            if encoded_document_bytes > standing.maximum_total_document_bytes:
-                raise StaticModelReviewHeld("review_documents_exceed_total_policy")
-            documents.append(
-                {
-                    "path": record.path,
-                    "role": record.role,
-                    "sha256": record.sha256,
-                    "size_bytes": record.size_bytes,
-                    "text": text,
-                }
-            )
+    expected_paths = {
+        record.path for record in bundle.files if record.role in {"license", "provenance"}
+    }
+    if set(raw_documents) != expected_paths:
+        raise ValueError("review documents differ from the model manifest")
+    for record in bundle.files:
+        if record.role not in {"license", "provenance"}:
+            continue
+        raw = raw_documents[record.path]
+        if not 1 <= record.size_bytes <= standing.maximum_document_bytes:
+            raise StaticModelReviewHeld("review_document_size_outside_policy")
+        if len(raw) != record.size_bytes or hashlib.sha256(raw).hexdigest() != record.sha256:
+            raise ValueError("review document differs from its manifest")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise StaticModelReviewHeld("review_document_not_utf8") from error
+        if not text.strip() or "\x00" in text:
+            raise StaticModelReviewHeld("review_document_not_plain_text")
+        encoded_document_bytes += len(canonical_json_bytes(text))
+        if encoded_document_bytes > standing.maximum_total_document_bytes:
+            raise StaticModelReviewHeld("review_documents_exceed_total_policy")
+        documents.append(
+            {
+                "path": record.path,
+                "role": record.role,
+                "sha256": record.sha256,
+                "size_bytes": record.size_bytes,
+                "text": text,
+            }
+        )
     if not any(item["role"] == "license" for item in documents):
         raise StaticModelReviewHeld("declared_license_document_missing")
     if not any(item["role"] == "provenance" for item in documents):
         raise StaticModelReviewHeld("declared_provenance_document_missing")
 
+    model_sha256 = digest(bundle)
     decision = {
         "schema": "umi-standing-model-artifact-rights-decision/1",
         "review_policy_sha256": review_policy_sha256,
@@ -159,3 +171,41 @@ def build_standing_model_review(
             },
         },
     )
+
+
+def build_standing_model_review_from_documents(
+    bundle: ModelBundle,
+    policy: CompetitionPolicy,
+    standing: StandingModelReviewPolicy,
+    raw_documents: Mapping[str, bytes],
+) -> ModelArtifactReviewInputs:
+    """Review exact authenticated document bytes without a local model archive."""
+
+    bundle = ModelBundle.model_validate_json(canonical_json_bytes(bundle))
+    standing = StandingModelReviewPolicy.model_validate_json(canonical_json_bytes(standing))
+    verify_standing_review_policy(standing, policy)
+    return _review_from_documents(bundle, policy, standing, raw_documents)
+
+
+def build_standing_model_review(
+    bundle: ModelBundle,
+    archive: Path,
+    policy: CompetitionPolicy,
+    standing: StandingModelReviewPolicy,
+) -> ModelArtifactReviewInputs:
+    """Build stable review inputs from one exact preserved model bundle."""
+
+    bundle = ModelBundle.model_validate_json(canonical_json_bytes(bundle))
+    standing = StandingModelReviewPolicy.model_validate_json(canonical_json_bytes(standing))
+    verify_standing_review_policy(standing, policy)
+    model_sha256 = verify_preserved_bundle(bundle, archive, policy)
+    raw_documents = {}
+    with _directory(archive / model_sha256 / "model") as root_fd:
+        for record in bundle.files:
+            if record.role not in {"license", "provenance"}:
+                continue
+            # The local reader applies the same bounds and encoding checks; retain
+            # exact bytes so the common builder also authenticates their digest.
+            text = _read_document(root_fd, record, standing)
+            raw_documents[record.path] = text.encode("utf-8")
+    return _review_from_documents(bundle, policy, standing, raw_documents)

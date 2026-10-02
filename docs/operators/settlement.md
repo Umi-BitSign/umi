@@ -1068,7 +1068,67 @@ replace native recovery qualification.
 
 ## Model delivery before recoverable enrollment
 
-`umi-cohort-service-admission-host/8` carries `model_uploads` alongside the
+`umi-cohort-service-admission-host/9` selects `direct_model_uploads` for cohorts
+whose signed plan uses `direct_r2_multipart_v1`. The host reads one private R2
+credential export, issues short-lived capabilities for exact multipart part
+numbers and sizes, and retains only signed declarations, provider identifiers,
+ETags and verification receipts. Model bytes travel from the miner to private
+R2 without passing through coordinator request bodies or accumulating in an
+intake staging directory. The owner reads bounded R2 ranges to authenticate the
+entire stream, every declared file, and the license/provenance documents. A
+model cannot enter participation or artifact acceptance before those checks and
+the standing review complete.
+
+The direct host reuses the admission owner's hotkey and key file. Configure a
+separate private metadata `directory`, the R2 credential file and bucket, plus
+the standing review policy. The credential export must be an absolute,
+non-linked owner-private file containing exactly `TOKEN_VALUE`, `ACCESS_KEY_ID`,
+`SECRET_ACCESS_KEY` and `DEFAULT_ENDPOINT`; the account token is ignored by this
+runtime. The endpoint must be the account's HTTPS R2 S3 origin. Keep the direct
+metadata journal, R2 objects and review records across restart or migration.
+Only the signed cohort plan selects direct delivery parameters, so later cohort
+changes do not require a new miner command.
+
+A standing series can contain both an older `coordinator_chunked_v1` cohort and
+a successor direct-R2 cohort. In that case version nine carries both
+`model_uploads` and `direct_model_uploads`. The immutable plan digest routes each
+request to exactly one mechanism; the legacy journal and archive remain
+available for unfinished older delivery while successor bytes bypass the host.
+If every model-enabled plan in the installed series is direct, omit
+`model_uploads`.
+
+Each independent `umi-cohort-phase-review-service/7` receives a read-only R2
+credential and the same standing review policy. It authenticates the owner's
+signed object reservation, then reads the complete object itself and checks the
+stream digest, every manifest file and the declared rights documents. It does
+not trust the owner's byte-verification result and does not retain another model
+archive. The R2 reader credential must not allow writes, multipart creation,
+completion, listing outside its selected bucket, or deletion.
+When the signed host selects only the model track, version seven omits the
+endpoint host entirely. A mixed-track selection still configures the endpoint
+host and preserves its ordinary independent request and decision paths.
+
+Benchmark execution necessarily needs the candidate bytes while its offline
+runtime runs. A version-seven reviewer therefore keeps one bounded candidate
+cache under the benchmark workspace. It streams and verifies the selected
+object into that cache, reuses it across that candidate's cases, and removes the
+old candidate before materializing another one. Materialization is serialized
+and capped by `maximum_materialized_bytes`. It also requires the complete payload
+plus `materialization_free_space_reserve_bytes` to be free before writing; the
+baseline remains in the pinned local archive. Put the benchmark workspace on its
+quota-controlled scratch filesystem. It may delay work when capacity is
+unavailable, but must not share the validator, coordinator state, evidence or
+journal filesystem.
+
+Configure a bucket lifecycle rule that aborts incomplete multipart uploads after
+the selected recovery interval. Retain completed incoming objects until a
+content-addressed preservation package and its acceptance or rejection evidence
+are durable. Lifecycle cleanup is storage management and never closes intake,
+expires a retained participation request or makes an otherwise eligible model
+late.
+
+`umi-cohort-service-admission-host/8` is the retained legacy path. It carries
+`model_uploads` alongside the
 service admission host and independent model-review peers. Configure a private
 `directory` disjoint from intake and the model archive, and an explicit
 `maximum_reserved_bytes`. Reservations account for two copies of each declared
@@ -1087,7 +1147,7 @@ keeps incomplete prefixes and the durable archive. This disk reclamation does
 not expand the conservative logical reservation. Accepted original bytes remain
 unchanged. An unfinished model delivery is not admitted to the cohort roster.
 
-Keep the upload journal, retained file prefixes and model archive across service
+Keep a legacy upload journal, retained file prefixes and model archive across service
 restart or host migration. Configure durable replication of original model
 artifacts and provenance before production launch. A local preservation receipt
 does not establish an R2 copy, independent backup, rights approval or reward

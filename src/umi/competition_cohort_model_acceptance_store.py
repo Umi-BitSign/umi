@@ -7,12 +7,14 @@ ordinal and block; missing files or reviewers do not consume a new position.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import RootModel
 
 from .competition_artifacts import verify_preserved_bundle
+from .competition_cohort_direct_model_upload import SignedDirectModelUploadReservation
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake_records import read_participation, replay_participation
 from .competition_cohort_model_acceptance import (
@@ -26,7 +28,10 @@ from .competition_cohort_model_acceptance import (
     check_model_vote,
     verify_model_acceptance,
 )
-from .competition_cohort_participation import AttestedCohortParticipantAdmission
+from .competition_cohort_participation import (
+    AttestedCohortParticipantAdmission,
+    CohortParticipationRequest,
+)
 from .competition_cohort_recovery import ModelRewardCohortAuthority, verify_recovery_quorum
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacityError
@@ -120,10 +125,35 @@ def verify_sealed_model_acceptances(certificates, seal, history, policy, records
 
 
 class CohortModelAcceptances:
-    def __init__(self, intake: CohortIntake, archive: Path):
+    def __init__(
+        self,
+        intake: CohortIntake,
+        archive: Path,
+        *,
+        verify_request: Callable[[CohortParticipationRequest], None] | None = None,
+        review_artifact: (
+            Callable[[CohortParticipationRequest], SignedDirectModelUploadReservation | None] | None
+        ) = None,
+    ):
         self.intake, self.archive = intake, archive
+        if verify_request is not None and not callable(verify_request):
+            raise ValueError("model acceptance artifact verifier is not callable")
+        self.verify_request = verify_request
+        if review_artifact is not None and not callable(review_artifact):
+            raise ValueError("model acceptance review artifact source is not callable")
+        self.review_artifact = review_artifact
         with intake._connection() as (db, _):
             acceptance_tables(db)
+
+    def _verify_artifacts(self, record) -> None:
+        if self.verify_request is not None:
+            self.verify_request(record.request)
+            return
+        verify_preserved_bundle(
+            record.request.signed_submission.submission.model_bundle,
+            self.archive,
+            self.intake.policy,
+        )
 
     def _record(self, db, history, submission):
         for _, raw in self.intake._records(db, history):
@@ -195,11 +225,19 @@ class CohortModelAcceptances:
             ).fetchone()
             if row is None:
                 raise PendingModelArtifacts("model participant admission is not certified")
+            artifact = (
+                None if self.review_artifact is None else self.review_artifact(record.request)
+            )
             return ModelReviewRequest(
-                schema="umi-cohort-model-review-request/1",
+                schema=(
+                    "umi-cohort-model-review-request/1"
+                    if artifact is None
+                    else "umi-cohort-model-review-request/2"
+                ),
                 acceptance=intent.acceptance,
                 record=record,
                 admission=AttestedCohortParticipantAdmission.model_validate_json(row[0]),
+                direct_artifact=artifact,
             )
 
     def votes(self, cohort, submission):
@@ -309,7 +347,7 @@ class CohortModelAcceptances:
             ):
                 raise ValueError("model proposal retry changes its original review")
             return body
-        verify_preserved_bundle(sub.model_bundle, self.archive, self.intake.policy)
+        self._verify_artifacts(record)
         observation = execution_boundary(capture)
         with self.intake._connection() as (db, store):
             current = store.published_history(cohort)
@@ -396,11 +434,7 @@ class CohortModelAcceptances:
             if prior != canonical_json_bytes(publication):
                 raise ValueError("model acceptance retry changes its certified original")
             return publication
-        verify_preserved_bundle(
-            record.request.signed_submission.submission.model_bundle,
-            self.archive,
-            self.intake.policy,
-        )
+        self._verify_artifacts(record)
         block = execution_boundary(capture).block
         tip = digest(history.transitions[-1].transition if history.transitions else history.genesis)
         view = verify_cohort_history(

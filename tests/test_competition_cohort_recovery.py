@@ -13,12 +13,14 @@ from pydantic import ValidationError
 from umi.competition_cohort_recovery import (
     PHASES,
     CohortRecoveryAuthority,
+    ModelDeliveryProfile,
     PhaseTarget,
     RecoverableCohortPlan,
     SignedCohortRecoveryAuthority,
     SignedCohortRecoveryTransition,
     admit_recoverable_cohort,
     apply_recovery_transition,
+    cohort_model_delivery,
     cohort_tracks,
     propose_recovery_transition,
     verify_cohort_service_pool,
@@ -105,6 +107,67 @@ def test_version_two_plan_binds_tracks_and_reward_split(recovery):
         verify_cohort_service_pool(plan, 5000)
     with pytest.raises(ValueError, match="unavailable"):
         cohort_tracks(plan, ("endpoint",))
+    assert cohort_model_delivery(plan).mechanism == "coordinator_chunked_v1"
+
+
+def test_version_three_plan_binds_direct_model_delivery(recovery):
+    legacy, _, _ = recovery
+    delivery = ModelDeliveryProfile(
+        schema="umi-model-delivery-profile/1",
+        mechanism="direct_r2_multipart_v1",
+        part_size_bytes=64 * 1024**2,
+        maximum_concurrent_parts=4,
+        capability_ttl_seconds=3600,
+    )
+    plan = RecoverableCohortPlan.model_validate(
+        legacy.model_dump(by_alias=True)
+        | {
+            "schema": "umi-recoverable-cohort-plan/3",
+            "eligible_tracks": ("model",),
+            "service_pool_bps": 0,
+            "model_delivery": delivery.model_dump(by_alias=True),
+        }
+    )
+    assert cohort_model_delivery(plan) == delivery
+    assert RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan)) == plan
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {
+            "schema": "umi-model-delivery-profile/1",
+            "mechanism": "direct_r2_multipart_v1",
+        },
+        {
+            "schema": "umi-model-delivery-profile/1",
+            "mechanism": "coordinator_chunked_v1",
+            "part_size_bytes": 64 * 1024**2,
+            "maximum_concurrent_parts": 4,
+            "capability_ttl_seconds": 3600,
+        },
+    ],
+)
+def test_model_delivery_profile_requires_exact_mechanism_parameters(profile):
+    with pytest.raises(ValidationError):
+        ModelDeliveryProfile.model_validate(profile)
+
+
+def test_version_three_model_delivery_requires_model_track(recovery):
+    legacy, _, _ = recovery
+    with pytest.raises(ValidationError, match="model delivery requires the model track"):
+        RecoverableCohortPlan.model_validate(
+            legacy.model_dump(by_alias=True)
+            | {
+                "schema": "umi-recoverable-cohort-plan/3",
+                "eligible_tracks": ("endpoint",),
+                "service_pool_bps": 10_000,
+                "model_delivery": {
+                    "schema": "umi-model-delivery-profile/1",
+                    "mechanism": "coordinator_chunked_v1",
+                },
+            }
+        )
 
 
 @pytest.mark.parametrize(

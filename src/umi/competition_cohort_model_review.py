@@ -7,6 +7,7 @@ decision; this vote supplies only artifact acceptance, never reward authority.
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -64,7 +65,17 @@ class ModelReviewConfig(StrictProtocolModel):
 
 
 class ModelArtifactReviewer:
-    def __init__(self, config: ModelReviewConfig, policy, capture, history, sign):
+    def __init__(
+        self,
+        config: ModelReviewConfig,
+        policy,
+        capture,
+        history,
+        sign,
+        *,
+        direct_review: Callable[[ModelReviewRequest], Awaitable[ModelArtifactReviewInputs]]
+        | None = None,
+    ):
         self.config = ModelReviewConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         c = self.config
@@ -74,6 +85,9 @@ class ModelArtifactReviewer:
             raise ValueError("model reviewer is outside policy")
         self.cohorts = {b.cohort_sha256: b.authority_sha256 for b in c.cohorts}
         self.capture, self.history, self.sign = capture, history, sign
+        if direct_review is not None and not callable(direct_review):
+            raise ValueError("direct model reviewer is not callable")
+        self.direct_review = direct_review
         # Capacity and file placement may change on recovery; identity may not.
         self.journal = RoundJournal(
             Path(c.directory),
@@ -183,21 +197,28 @@ class ModelArtifactReviewer:
                     sub = request.record.request.signed_submission.submission
                     if sub.track != "model" or sub.model_bundle is None:
                         raise ValueError("artifact review requires a complete model submission")
-                    inputs = await run_owned_thread(
-                        partial(
-                            read_private_model,
-                            Path(self.config.approvals_directory) / (a.model_sha256 + ".json"),
-                            ModelArtifactReviewInputs,
-                            maximum_bytes=33 * 1024**2,
+                    if request.direct_artifact is not None:
+                        if self.direct_review is None:
+                            raise ValueError("direct model review source is unavailable")
+                        inputs = await self.direct_review(request)
+                    else:
+                        inputs = await run_owned_thread(
+                            partial(
+                                read_private_model,
+                                Path(self.config.approvals_directory) / (a.model_sha256 + ".json"),
+                                ModelArtifactReviewInputs,
+                                maximum_bytes=33 * 1024**2,
+                            )
                         )
-                    )
+                        await run_owned_thread(
+                            verify_preserved_bundle,
+                            request.record.request.signed_submission.submission.model_bundle,
+                            Path(self.config.archive_directory),
+                            self.policy,
+                        )
+                    if inputs.model_sha256 != a.model_sha256:
+                        raise ValueError("model review documents differ from the artifact")
                     intent = ModelAcceptanceIntent(acceptance=a, inputs=inputs)
-                    await run_owned_thread(
-                        verify_preserved_bundle,
-                        request.record.request.signed_submission.submission.model_bundle,
-                        Path(self.config.archive_directory),
-                        self.policy,
-                    )
                 source = await self.history(a.cohort_sha256)
                 block = execution_boundary(await self.capture()).block
                 self._validate(request, source.history, block)

@@ -49,6 +49,15 @@ public status are linked from the
 runtime, immutable environment and route published for the live cohort. The
 intake service applies the standing artifact-review policy after complete upload.
 
+The signed cohort plan also selects the payload transport. A direct-R2 cohort
+uses short-lived, part-specific capabilities so the model bytes go from the
+contributor to private object storage without passing through the coordinator or
+reviewer HTTP service. The standard `submit-cohort-model` command discovers that
+selection; contributors do not need a cohort-specific uploader. Direct storage
+completion alone is not acceptance. The owner and each independent reviewer
+read the exact object, verify its full stream and declared files, and retain the
+ordinary signed artifact decision before the entry can qualify.
+
 The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its
 weights and portable bundle. The separate
 [community candidate](https://github.com/Umi-BitSign/umi-reference-model/blob/main/community/README.md)
@@ -161,12 +170,14 @@ summary without exposing confidential or personal material.
 
 ### Automatic artifact review and holds
 
-Routine complete bundles enter artifact review automatically. The intake worker
-rehashes every declared file, reads only bounded UTF-8 license and provenance
-records, applies the standing policy bound to the governing competition policy
-and retains the exact review inputs. It does not import or execute submitted
-model code and does not use the network. Independent evaluators still verify the
-evidence and sign the artifact acceptance.
+Routine complete bundles enter artifact review automatically. For legacy
+delivery, the intake worker rehashes the retained files. For direct delivery,
+the owner and independent evaluators stream the owner-bound object from private
+R2. Both paths verify every declared file, read only bounded UTF-8 license and
+provenance records, apply the standing policy bound to the governing competition
+policy and retain the exact review inputs. Static review does not import or
+execute submitted model code. Independent evaluators still sign the artifact
+acceptance, and benchmark execution remains a separate offline step.
 
 Contributors do not need to contact Sam for this step. A missing, unreadable or
 out-of-bounds declared record leaves that exact bundle pending with a

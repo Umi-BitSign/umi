@@ -18,9 +18,8 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import Lifespan
 
 from .competition_chain import RegistrationCapture
-from .competition_cohort_api import cohort_routes
+from .competition_cohort_api import CohortModelPayloads, cohort_routes
 from .competition_cohort_intake import CohortIntake
-from .competition_cohort_model_upload import CohortModelUploads
 from .competition_execution import ExecutionBoundary
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
@@ -72,7 +71,7 @@ def create_app(
     cohort_capture_provider: Callable[[], Awaitable[RegistrationCapture]] | None = None,
     cohort_archive_provider: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]]
     | None = None,
-    cohort_model_uploads: CohortModelUploads | None = None,
+    cohort_model_uploads: CohortModelPayloads | None = None,
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")

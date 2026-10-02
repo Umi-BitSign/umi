@@ -16,6 +16,7 @@ from pydantic import Field, model_validator
 from .competition_cohort_execution_journal import CohortExecutionConfig, CohortExecutionJournal
 from .competition_cohort_executor import CohortExecutionWorker, CohortExecutor
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
+from .competition_cohort_model_acceptance import ModelReviewRequest
 from .competition_cohort_order_http import order_routes
 from .competition_cohort_order_inbox import CohortOrderInbox, CohortOrderInboxConfig
 from .competition_cohort_order_signer import (
@@ -25,7 +26,7 @@ from .competition_cohort_order_signer import (
 )
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
-from .competition_cohort_sandbox import CohortCpuSandbox
+from .competition_cohort_sandbox import CohortCpuSandbox, DirectCohortCpuSandbox
 from .competition_reward_boot import _disjoint
 from .competition_round_journal import RoundJournal
 from .concurrency import await_owned_task
@@ -80,7 +81,18 @@ class BenchmarkHostConfig(StrictProtocolModel):
 
 
 class BenchmarkHost:
-    def __init__(self, config, provider, client, owner_token, vote_token, sign):
+    def __init__(
+        self,
+        config,
+        provider,
+        client,
+        owner_token,
+        vote_token,
+        sign,
+        *,
+        model_reviewer=None,
+        direct_artifacts=None,
+    ):
         self.config = c = BenchmarkHostConfig.model_validate_json(
             canonical_json_bytes(config.benchmark)
         )
@@ -101,12 +113,31 @@ class BenchmarkHost:
         )
         self.inbox = CohortOrderInbox(c.inbox, config.policy, provider, self.history, sign)
         self.execution = CohortExecutionJournal(c.execution, config.policy)
-        self.sandbox = CohortCpuSandbox(
-            config.policy,
+        sandbox = dict(
+            policy=config.policy,
             archive=Path(c.archive_directory),
             videos=Path(c.videos_directory),
             workspace=Path(c.workspace_directory),
         )
+        if direct_artifacts is not None and model_reviewer is None:
+            raise ValueError("direct benchmark artifact review requires the review journal")
+        if direct_artifacts is None:
+            self.sandbox = CohortCpuSandbox(**sandbox)
+        else:
+
+            def request(job):
+                slot = job.round.cohort_sha256 + ":" + digest(job.submission.submission)
+                raw = model_reviewer.journal.get("model_request", slot)
+                if raw is None:
+                    raise OSError("direct model review request is unavailable")
+                value = ModelReviewRequest.model_validate_json(canonical_json_bytes(raw))
+                if value.record.request.signed_submission != job.submission:
+                    raise ValueError("direct model review request differs from execution")
+                return value
+
+            self.sandbox = DirectCohortCpuSandbox(
+                **sandbox, artifacts=direct_artifacts, request=request
+            )
         self.worker = CohortExecutionWorker(
             self.inbox,
             CohortExecutor(self.execution, provider, self.history, self.sandbox),

@@ -19,6 +19,7 @@ from typing_extensions import Self
 
 from .competition_api import CompetitionApiLimits, PublicIntakeDeployment, create_app
 from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProvider
+from .competition_cohort_direct_model_upload_http import direct_model_upload_routes
 from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
 from .competition_cohort_model_upload_http import model_upload_routes
 from .competition_cohort_request_readiness_host import request_readiness_routes
@@ -352,7 +353,7 @@ def create_intake_app(
         public_results_sources=config.public_results_sources,
         public_results_directory=config.public_results_directory,
         cohort_intake=cohort_intake,
-        cohort_model_uploads=None if service_host is None else service_host.uploads,
+        cohort_model_uploads=None if service_host is None else service_host.payloads,
         cohort_capture_provider=(
             finality_cache.collect_for_cohort_recovery if cohort_intake is not None else None
         ),
@@ -376,6 +377,8 @@ def create_intake_app(
                     service_host.uploads, finality_cache.collect_for_cohort_recovery
                 )
             )
+        if service_host.direct_uploads is not None:
+            app.include_router(direct_model_upload_routes(service_host.direct_uploads.owners))
     app.state.finality_providers = (provider,)
     app.state.registration_snapshot_cache = finality_cache
     app.state.historical_intake_archives = historical_archives

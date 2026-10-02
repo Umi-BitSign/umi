@@ -62,9 +62,10 @@ preserve its weights.
 
 Prepare a complete, reproducible artifact: weights or base-plus-adapter files,
 configuration, tokenizer/processor, inference code, dependency inventory, hashes
-and notices. The `submit-cohort-model` command resumes signed uploads and submits
-participation only after native preservation succeeds. It requires the applicable
-published policy and a complete signed model request.
+and notices. The `submit-cohort-model` command verifies the signed cohort plan,
+uses its selected legacy or direct-to-R2 delivery mechanism, and submits
+participation only after complete payload verification succeeds. It requires
+the applicable published policy and a complete signed model request.
 
 Read the [preparation and rights checklist](contributors/models.md) and the exact
 immutable terms named by the selected policy before spending compute. Retain every

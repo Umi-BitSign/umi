@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -113,6 +114,243 @@ def test_workspace_cannot_overlap_archive_or_follow_symlink(cpu, tmp_path):
             videos=port.videos,
             workspace=tmp_path / "scratch2",
         )
+
+
+async def test_direct_candidate_cache_materializes_once_and_remains_bounded(
+    cpu, tmp_path, monkeypatch
+):
+    job, attempt, original = cpu
+    bundle = job.submission.submission.model_bundle
+    if bundle is None:
+        pytest.skip("endpoint jobs have no direct candidate")
+    calls, checks = [], []
+
+    class Artifacts:
+        config = SimpleNamespace(materialization_concurrency=1)
+
+        async def materialized(self, request, archive):
+            checks.append((request, archive))
+            return (archive / digest(bundle) / "model").is_dir()
+
+        async def materialize(self, request, archive):
+            calls.append((request, archive))
+            (archive / digest(bundle) / "model").mkdir(parents=True)
+
+    request = SimpleNamespace(
+        direct_artifact=SimpleNamespace(),
+        record=SimpleNamespace(
+            request=SimpleNamespace(
+                signed_submission=SimpleNamespace(submission=SimpleNamespace(model_bundle=bundle))
+            )
+        ),
+    )
+    artifacts = Artifacts()
+    port = sandbox.DirectCohortCpuSandbox(
+        original.policy,
+        archive=original.archive,
+        videos=original.videos,
+        workspace=tmp_path / "direct-scratch",
+        artifacts=artifacts,
+        request=lambda _: request,
+    )
+
+    async def invoke(selected_job, selected_attempt, archive):
+        assert selected_job == job
+        assert (archive / digest(bundle) / "model").is_dir()
+        return SimpleNamespace(attempt=selected_attempt)
+
+    monkeypatch.setattr(port, "_invoke", invoke)
+    first_path = port.workspace / digest(attempt)
+    first = await port.invoke(job, attempt)
+    second_attempt = attempt.model_copy(update={"number": 2})
+    second_path = port.workspace / digest(second_attempt)
+    second = await port.invoke(job, second_attempt)
+    restarted = sandbox.DirectCohortCpuSandbox(
+        original.policy,
+        archive=original.archive,
+        videos=original.videos,
+        workspace=port.workspace,
+        artifacts=artifacts,
+        request=lambda _: request,
+    )
+    monkeypatch.setattr(restarted, "_invoke", invoke)
+    third_attempt = attempt.model_copy(update={"number": 3})
+    third_path = port.workspace / digest(third_attempt)
+    third = await restarted.invoke(job, third_attempt)
+
+    assert (
+        first.attempt == attempt
+        and second.attempt == second_attempt
+        and third.attempt == third_attempt
+    )
+    assert len(calls) == 1
+    assert len(checks) == 1
+    assert tuple(path.name for path in port.cache.iterdir()) == ("archive",)
+    assert not first_path.exists() and not second_path.exists() and not third_path.exists()
+
+
+async def test_direct_candidate_cache_allows_same_model_cases_to_run_concurrently(
+    cpu, tmp_path, monkeypatch
+):
+    job, attempt, original = cpu
+    bundle = job.submission.submission.model_bundle
+    if bundle is None:
+        pytest.skip("endpoint jobs have no direct candidate")
+    materializations = []
+
+    class Artifacts:
+        config = SimpleNamespace(materialization_concurrency=1)
+
+        async def materialized(self, request, archive):
+            return False
+
+        async def materialize(self, request, archive):
+            materializations.append(archive)
+            (archive / digest(bundle) / "model").mkdir(parents=True)
+
+    request = SimpleNamespace(
+        direct_artifact=SimpleNamespace(),
+        record=SimpleNamespace(
+            request=SimpleNamespace(
+                signed_submission=SimpleNamespace(submission=SimpleNamespace(model_bundle=bundle))
+            )
+        ),
+    )
+    port = sandbox.DirectCohortCpuSandbox(
+        original.policy,
+        archive=original.archive,
+        videos=original.videos,
+        workspace=tmp_path / "concurrent-direct-scratch",
+        artifacts=Artifacts(),
+        request=lambda _: request,
+    )
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    maximum_active = 0
+
+    async def invoke(selected_job, selected_attempt, archive):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if active == 2:
+            both_entered.set()
+        await release.wait()
+        active -= 1
+        return SimpleNamespace(attempt=selected_attempt)
+
+    monkeypatch.setattr(port, "_invoke", invoke)
+    second_attempt = attempt.model_copy(update={"number": 2})
+    tasks = (
+        asyncio.create_task(port.invoke(job, attempt)),
+        asyncio.create_task(port.invoke(job, second_attempt)),
+    )
+    try:
+        await asyncio.wait_for(both_entered.wait(), 2)
+        release.set()
+        results = await asyncio.gather(*tasks)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert [result.attempt for result in results] == [attempt, second_attempt]
+    assert maximum_active == 2
+    assert len(materializations) == 1
+    assert port.active_candidate_invocations == 0
+
+
+async def test_direct_candidate_cancellation_releases_cache_ownership(cpu, tmp_path, monkeypatch):
+    job, attempt, original = cpu
+    bundle = job.submission.submission.model_bundle
+    if bundle is None:
+        pytest.skip("endpoint jobs have no direct candidate")
+
+    class Artifacts:
+        config = SimpleNamespace(materialization_concurrency=1)
+
+        async def materialized(self, request, archive):
+            return False
+
+        async def materialize(self, request, archive):
+            (archive / digest(bundle) / "model").mkdir(parents=True)
+
+    request = SimpleNamespace(
+        direct_artifact=SimpleNamespace(),
+        record=SimpleNamespace(
+            request=SimpleNamespace(
+                signed_submission=SimpleNamespace(submission=SimpleNamespace(model_bundle=bundle))
+            )
+        ),
+    )
+    port = sandbox.DirectCohortCpuSandbox(
+        original.policy,
+        archive=original.archive,
+        videos=original.videos,
+        workspace=tmp_path / "cancelled-direct-scratch",
+        artifacts=Artifacts(),
+        request=lambda _: request,
+    )
+    entered = asyncio.Event()
+
+    async def invoke(*_):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(port, "_invoke", invoke)
+    task = asyncio.create_task(port.invoke(job, attempt))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert port.active_candidate_invocations == 0
+
+
+async def test_direct_sandbox_routes_legacy_candidate_to_retained_archive(
+    cpu, tmp_path, monkeypatch
+):
+    job, attempt, original = cpu
+    bundle = job.submission.submission.model_bundle
+    if bundle is None:
+        pytest.skip("endpoint jobs have no direct candidate")
+
+    class Artifacts:
+        config = SimpleNamespace(materialization_concurrency=1)
+
+        async def materialized(self, request, archive):
+            pytest.fail("legacy candidate checked the direct object cache")
+
+        async def materialize(self, request, archive):
+            pytest.fail("legacy candidate used the direct object cache")
+
+    request = SimpleNamespace(
+        direct_artifact=None,
+        record=SimpleNamespace(
+            request=SimpleNamespace(
+                signed_submission=SimpleNamespace(submission=SimpleNamespace(model_bundle=bundle))
+            )
+        ),
+    )
+    port = sandbox.DirectCohortCpuSandbox(
+        original.policy,
+        archive=original.archive,
+        videos=original.videos,
+        workspace=tmp_path / "mixed-series-scratch",
+        artifacts=Artifacts(),
+        request=lambda _: request,
+    )
+
+    async def invoke(selected_job, selected_attempt, archive):
+        assert selected_job == job
+        assert selected_attempt == attempt
+        assert archive == original.archive
+        return SimpleNamespace(attempt=selected_attempt)
+
+    monkeypatch.setattr(port, "_invoke", invoke)
+    result = await port.invoke(job, attempt)
+
+    assert result.attempt == attempt
+    assert tuple(port.cache.iterdir()) == ()
 
 
 @pytest.mark.skipif(
