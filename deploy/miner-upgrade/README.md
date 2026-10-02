@@ -5,6 +5,12 @@ The operator supplies one policy choice: whether the miner intends to enter the
 public-model track. The current canonical manifest supplies the cohort, runtime,
 policies, eligible tracks, authority bindings and new state namespace.
 
+The updater requires the live public status to match the manifest's policy and
+track profile. It selects the runtime revision from that matching deployment
+record, so a cached static manifest cannot strand enrollment after a compatible
+runtime rollout. A policy or track change still requires a new manifest and is
+rejected until both public records agree.
+
 Run the current updater as one shell command:
 
 ```sh

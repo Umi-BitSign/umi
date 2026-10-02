@@ -3,7 +3,10 @@ import canonicalize from "canonicalize";
 const MiB = 1024 * 1024;
 const HEX = /^[0-9a-f]{64}$/;
 const CURSOR = /^(3|4)\/([1-9][0-9]{0,15})\/([0-9a-f]{64})$/;
+const RELEASE_PATH =
+  /^\/validator-supervisor\/successor-releases\/[0-9a-f]{40}\/(linux-amd64|linux-arm64)\/weight\/([0-9a-f]{64})\/release\.bundle$/;
 const PAGE = "umi-validator-supervisor-directive-page/4";
+const REASON = /^successor_relay_(validation_failed|source_unavailable|length_mismatch|upload_failed)$/;
 const encoder = new TextEncoder();
 const payloadLimits = {
   "cutoff-certificate.json": 512 * MiB,
@@ -19,8 +22,10 @@ type RecordValue = Record<string, unknown>;
 type Cursor = { version: number; sequence: number; hash: string };
 type Signed = { raw: RecordValue; directive: RecordValue; cursor: Cursor };
 type Config = {
+  origin: string;
   prefix: string;
   source: string;
+  releaseOrigin: string;
   initial: Cursor;
   binding: string;
 };
@@ -87,6 +92,7 @@ function parse(body: Uint8Array): unknown {
 
 async function configuration(env: Env): Promise<Config> {
   const origin = new URL(env.SOURCE_ORIGIN);
+  const releaseOrigin = new URL(env.DESTINATION_ORIGIN);
   requireValue(
     origin.protocol === "https:" &&
       origin.origin === env.SOURCE_ORIGIN &&
@@ -94,24 +100,48 @@ async function configuration(env: Env): Promise<Config> {
       !origin.password,
   );
   requireValue(
+    releaseOrigin.protocol === "https:" &&
+      releaseOrigin.origin === env.DESTINATION_ORIGIN &&
+      !releaseOrigin.username &&
+      !releaseOrigin.password,
+  );
+  requireValue(
     env.PLATFORM === "linux-amd64" || env.PLATFORM === "linux-arm64",
   );
   const prefix = `validator-supervisor/channels/${hash(env.CHANNEL_ID)}/${env.PLATFORM}/successor/`;
   const initial = cursor(env.INITIAL_CURSOR);
-  requireValue(initial.version === 3);
+  requireValue(initial.version === 3 || initial.version === 4);
   const source = `${origin.origin}/${prefix}`;
   const binding = await sha(
-    encoder.encode(JSON.stringify([source, prefix, cursorText(initial)])),
+    encoder.encode(
+      JSON.stringify([
+        source,
+        releaseOrigin.origin,
+        prefix,
+        cursorText(initial),
+      ]),
+    ),
   );
-  return { prefix, source, initial, binding };
+  return {
+    origin: origin.origin,
+    prefix,
+    source,
+    releaseOrigin: releaseOrigin.origin,
+    initial,
+    binding,
+  };
 }
 
-async function response(config: Config, route: string): Promise<Response> {
+async function response(
+  url: string,
+  accept = "application/json",
+  timeout = 60_000,
+): Promise<Response> {
   // All routes are constructed below from parsed hashes and fixed filenames.
-  const result = await fetch(config.source + route, {
+  const result = await fetch(url, {
     redirect: "manual",
-    signal: AbortSignal.timeout(60_000),
-    headers: { Accept: "application/json", "Accept-Encoding": "identity" },
+    signal: AbortSignal.timeout(timeout),
+    headers: { Accept: accept, "Accept-Encoding": "identity" },
   });
   if (result.status !== 200 || result.headers.has("Content-Encoding")) {
     await result.body?.cancel();
@@ -155,7 +185,7 @@ async function document(
   route: string,
   maximum = MiB,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const result = await response(config, route);
+  const result = await response(config.source + route);
   return bounded(result.body, maximum);
 }
 
@@ -264,32 +294,39 @@ async function putBytes(
 ): Promise<void> {
   const digest = await sha(body);
   const existing = await env.FEED.head(key);
-  if (!existing) {
-    await env.FEED.put(key, body, {
-      sha256: digest,
-      onlyIf: new Headers({ "If-None-Match": "*" }),
-      httpMetadata: {
-        contentType: "application/json",
-        cacheControl: "public, max-age=31536000, immutable",
-      },
-    });
+  if (existing?.checksums.sha256) {
+    verifiedObject(existing, body.byteLength, digest);
+    return;
   }
+  requireValue(!existing || existing.size === body.byteLength);
+  await env.FEED.put(key, body, {
+    sha256: digest,
+    onlyIf: new Headers(
+      existing ? { "If-Match": existing.httpEtag } : { "If-None-Match": "*" },
+    ),
+    httpMetadata: {
+      contentType: "application/json",
+      cacheControl: "public, max-age=31536000, immutable",
+    },
+  });
   verifiedObject(await env.FEED.head(key), body.byteLength, digest);
 }
 async function copyFile(
   env: Env,
-  config: Config,
-  route: string,
+  sourceUrl: string,
+  key: string,
   size: number,
   digest: string,
+  contentType = "application/json",
+  timeout = 60_000,
 ): Promise<void> {
-  const key = config.prefix + route;
   const existing = await env.FEED.head(key);
-  if (existing) {
+  if (existing?.checksums.sha256) {
     verifiedObject(existing, size, digest);
     return;
   }
-  const upstream = await response(config, route);
+  requireValue(!existing || existing.size === size);
+  const upstream = await response(sourceUrl, contentType, timeout);
   if (
     upstream.headers.get("Content-Length") !== String(size) ||
     !upstream.body
@@ -304,9 +341,11 @@ async function copyFile(
   const pipe = upstream.body.pipeTo(stream.writable, { signal: stop.signal });
   const put = env.FEED.put(key, stream.readable, {
     sha256: digest,
-    onlyIf: new Headers({ "If-None-Match": "*" }),
+    onlyIf: new Headers(
+      existing ? { "If-Match": existing.httpEtag } : { "If-None-Match": "*" },
+    ),
     httpMetadata: {
-      contentType: "application/json",
+      contentType,
       cacheControl: "public, max-age=31536000, immutable",
     },
   }).then(
@@ -325,6 +364,38 @@ async function copyFile(
   verifiedObject(await env.FEED.head(key), size, digest);
 }
 
+async function release(
+  env: Env,
+  config: Config,
+  directive: RecordValue,
+): Promise<void> {
+  const target = record(directive.release);
+  requireValue(typeof target.release_bundle_url === "string");
+  const url = new URL(target.release_bundle_url);
+  const match = RELEASE_PATH.exec(url.pathname);
+  const digest = hash(target.release_bundle_sha256);
+  requireValue(
+    url.origin === config.releaseOrigin &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      match &&
+      match[1] === env.PLATFORM &&
+      match[2] === digest,
+  );
+  const key = url.pathname.slice(1);
+  await copyFile(
+    env,
+    config.origin + url.pathname,
+    key,
+    integer(target.release_bundle_size_bytes, 8 * 1024 * MiB),
+    digest,
+    "application/octet-stream",
+    10 * 60_000,
+  );
+}
+
 async function dependencies(
   env: Env,
   config: Config,
@@ -332,6 +403,7 @@ async function dependencies(
 ): Promise<void> {
   const directive = item.directive;
   if (directive.mode === "hold") return;
+  await release(env, config, directive);
   const target = record(directive.replay_package),
     limits = record(target.limits);
   const root = `packages/${hash(target.package_sha256)}/`;
@@ -368,8 +440,8 @@ async function dependencies(
   for (const file of files)
     await copyFile(
       env,
-      config,
-      root + String(file.name),
+      config.source + root + String(file.name),
+      config.prefix + root + String(file.name),
       integer(file.size_bytes),
       hash(file.sha256),
     );
@@ -378,8 +450,10 @@ async function dependencies(
     const auth = record(directive.chain_authorization);
     await copyFile(
       env,
-      config,
-      `authorizations/${hash(auth.signed_authorization_sha256)}.json`,
+      config.source +
+        `authorizations/${hash(auth.signed_authorization_sha256)}.json`,
+      config.prefix +
+        `authorizations/${hash(auth.signed_authorization_sha256)}.json`,
       integer(auth.authorization_size_bytes, 4 * MiB),
       hash(auth.signed_authorization_sha256),
     );
@@ -496,9 +570,17 @@ export default {
           status: await tick(env),
         }),
       );
-    } catch {
+    } catch (error) {
+      const reason =
+        error instanceof Error && REASON.test(error.message)
+          ? error.message
+          : "successor_relay_unexpected";
       console.error(
-        JSON.stringify({ event: "successor_feed_relay", status: "failed" }),
+        JSON.stringify({
+          event: "successor_feed_relay",
+          reason_code: reason,
+          status: "failed",
+        }),
       );
       throw new Error("successor_feed_relay_failed");
     }

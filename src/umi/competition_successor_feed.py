@@ -98,6 +98,7 @@ class SuccessorPublicationFeed:
             maximum_rounds=self.config.maximum_rounds,
             maximum_bytes=self.config.maximum_journal_bytes,
         )
+        self._history_cache = ()
 
     @contextmanager
     def _locked(self):
@@ -136,11 +137,15 @@ class SuccessorPublicationFeed:
         )
 
     def _history(self):
-        cursor, records = self._initial(), []
-        keys = self.journal.keys("delivery")
+        keys = sorted(self.journal.keys("delivery"), key=int)
         if len(keys) > self.config.maximum_rounds:
             raise ValueError("successor feed round capacity exceeded")
-        for key in sorted(keys, key=int):
+        records = list(self._history_cache)
+        cached_keys = [str(record.publication.intent.sequence) for record in records]
+        if keys[: len(cached_keys)] != cached_keys:
+            raise ValueError("successor feed retained history changed")
+        cursor = self._cursor(records[-1]) if records else self._initial()
+        for key in keys[len(records) :]:
             record = _Record.model_validate_json(
                 canonical_json_bytes(self.journal.get("delivery", key))
             )
@@ -158,6 +163,7 @@ class SuccessorPublicationFeed:
                 raise ValueError("successor feed history is discontinuous")
             cursor = self._cursor(record)
             records.append(record)
+        self._history_cache = tuple(records)
         return records
 
     def retain(self, publication, prepared):

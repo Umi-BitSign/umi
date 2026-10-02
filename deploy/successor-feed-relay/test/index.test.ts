@@ -21,6 +21,7 @@ const config: Env = {
   ...env,
   ENABLED: "true",
   SOURCE_ORIGIN: "https://source.example",
+  DESTINATION_ORIGIN: "https://destination.example",
   CHANNEL_ID: channel,
   PLATFORM: "linux-amd64",
   INITIAL_CURSOR: initial,
@@ -71,6 +72,11 @@ async function fixture(mode = "competition_weights") {
     signature: "fixture-only",
   });
   const authHash = await sha(auth);
+  const releaseBytes = encoder.encode("synthetic immutable release bundle");
+  const releaseHash = await sha(releaseBytes);
+  const releaseRoute =
+    `validator-supervisor/successor-releases/${"de".repeat(20)}/` +
+    `linux-amd64/weight/${releaseHash}/release.bundle`;
   const directive = {
     schema: "umi-validator-supervisor-directive/4",
     channel_id: channel,
@@ -78,6 +84,11 @@ async function fixture(mode = "competition_weights") {
     predecessor_version: 3,
     previous_directive_sha256: "ab".repeat(32),
     mode,
+    release: {
+      release_bundle_url: `https://destination.example/${releaseRoute}`,
+      release_bundle_sha256: releaseHash,
+      release_bundle_size_bytes: releaseBytes.length,
+    },
     replay_package: {
       package_sha256: packageHash,
       manifest_sha256: manifestHash,
@@ -111,6 +122,7 @@ async function fixture(mode = "competition_weights") {
   const afterRoute = `after/${initial}.json`;
   const nextCursor = `4/20/${signed.directive_sha256}`;
   const objects = new Map<string, Uint8Array>([
+    [releaseRoute, releaseBytes],
     [afterRoute, bytes(page)],
     [exactRoute, bytes(page)],
     [`packages/${packageHash}/manifest.json`, manifest],
@@ -141,6 +153,7 @@ async function fixture(mode = "competition_weights") {
     exactRoute,
     afterRoute,
     nextCursor,
+    releaseRoute,
     packageHash,
     payloads,
   };
@@ -154,10 +167,14 @@ function source(
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init: RequestInit) => {
-      expect(url.startsWith(base)).toBe(true);
       expect(init.redirect).toBe("manual");
       expect(init.signal).toBeDefined();
-      const route = url.slice(base.length);
+      const route = url.startsWith(base)
+        ? url.slice(base.length)
+        : url.slice("https://source.example/".length);
+      expect(
+        url.startsWith(base) || url.startsWith("https://source.example/"),
+      ).toBe(true);
       requests.push(route);
       const value = objects.get(route);
       if (!value) return new Response(null, { status: 404 });
@@ -224,10 +241,29 @@ afterEach(() => {
 });
 
 describe("successor R2 relay", () => {
-  it("defaults to disabled and has no public upload or trigger route", async () => {
-    expect(await tick(env)).toBe("disabled");
+  it("honors the disable switch and has no public upload route", async () => {
+    expect(await tick({ ...env, ENABLED: "false" })).toBe("disabled");
     expect((await worker.fetch()).status).toBe(404);
     expect((await env.FEED.list()).objects).toHaveLength(0);
+  });
+
+  it("can bootstrap from an independently verified v4 cursor", async () => {
+    const f = await fixture();
+    const initialV4 = `4/20/${f.signed.directive_sha256}`;
+    f.objects.set(
+      `after/${initialV4}.json`,
+      bytes({
+        ...f.page,
+        after_version: 4,
+        after_sequence: 20,
+        after_directive_sha256: f.signed.directive_sha256,
+        directives: [],
+      }),
+    );
+    source(f.objects);
+    expect(await tick({ ...config, INITIAL_CURSOR: initialV4 })).toBe(
+      "caught_up",
+    );
   });
 
   it("copies all referenced bytes before publishing a cursor and survives restart", async () => {
@@ -243,10 +279,11 @@ describe("successor R2 relay", () => {
     );
     expect(await tick(config)).toBe("advanced");
     const cursorIndex = writes.indexOf(prefix + f.afterRoute);
-    expect(cursorIndex).toBe(13);
+    expect(cursorIndex).toBe(14);
     expect(writes.at(-1)).toBe(prefix + "relay/checkpoint.json");
     for (const [route, expected] of f.objects) {
-      const stored = await env.FEED.get(prefix + route);
+      const key = route === f.releaseRoute ? route : prefix + route;
+      const stored = await env.FEED.get(key);
       expect(stored).not.toBeNull();
       expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(
         route === f.afterRoute ? bytes({ ...f.page, more: true }) : expected,
@@ -278,6 +315,28 @@ describe("successor R2 relay", () => {
     expect(await tick(config)).toBe("advanced");
     expect(requests).not.toContain(`packages/${f.packageHash}/evidence.json`);
     expect((await env.FEED.head(old!.key))?.version).toBe(old?.version);
+  });
+
+  it("repairs exact-size legacy objects that lack SHA-256 metadata", async () => {
+    const f = await fixture();
+    source(f.objects);
+    const evidenceKey =
+      prefix + `packages/${f.packageHash}/evidence.json`;
+    const evidence = f.objects.get(`packages/${f.packageHash}/evidence.json`)!;
+    const release = f.objects.get(f.releaseRoute)!;
+    await env.FEED.put(evidenceKey, evidence);
+    await env.FEED.put(f.releaseRoute, release);
+    const oldEvidence = await env.FEED.head(evidenceKey);
+    const oldRelease = await env.FEED.head(f.releaseRoute);
+    expect(oldEvidence?.checksums.sha256).toBeUndefined();
+    expect(oldRelease?.checksums.sha256).toBeUndefined();
+    expect(await tick(config)).toBe("advanced");
+    const repairedEvidence = await env.FEED.head(evidenceKey);
+    const repairedRelease = await env.FEED.head(f.releaseRoute);
+    expect(repairedEvidence?.checksums.sha256).toBeDefined();
+    expect(repairedRelease?.checksums.sha256).toBeDefined();
+    expect(repairedEvidence?.version).not.toBe(oldEvidence?.version);
+    expect(repairedRelease?.version).not.toBe(oldRelease?.version);
   });
 
   it("recovers a lost checkpoint write after cursor publication", async () => {
@@ -509,6 +568,9 @@ describe("successor R2 relay", () => {
       tick({ ...config, SOURCE_ORIGIN: "https://different.example" }),
     ).rejects.toThrow();
     await expect(
+      tick({ ...config, DESTINATION_ORIGIN: "https://different.example" }),
+    ).rejects.toThrow();
+    await expect(
       tick({ ...config, INITIAL_CURSOR: "3/18/" + "ff".repeat(32) }),
     ).rejects.toThrow();
   });
@@ -521,6 +583,19 @@ describe("successor R2 relay", () => {
   ])("rejects source origin %s", async (origin) => {
     await expect(tick({ ...config, SOURCE_ORIGIN: origin })).rejects.toThrow();
     expect((await env.FEED.list()).objects).toHaveLength(0);
+  });
+
+  it("requires the release bundle before publishing a cursor", async () => {
+    const f = await fixture();
+    const release = f.objects.get(f.releaseRoute)!;
+    f.objects.delete(f.releaseRoute);
+    source(f.objects);
+    await expect(tick(config)).rejects.toThrow();
+    expect(await env.FEED.head(prefix + f.afterRoute)).toBeNull();
+    f.objects.set(f.releaseRoute, release);
+    source(f.objects);
+    expect(await tick(config)).toBe("advanced");
+    expect(await env.FEED.head(f.releaseRoute)).not.toBeNull();
   });
 
   it("fails on an oversized control page even without Content-Length", async () => {
