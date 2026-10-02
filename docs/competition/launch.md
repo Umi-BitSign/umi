@@ -8,6 +8,10 @@ progression targets, not non-extendable deadlines, and do not advance the series
 automatically. Public status, readiness and the current signed plan are the
 authority for phase, admission and track availability.
 
+The current scoring contract is `umi-open-competition-policy/3` with
+`umi-competition-suite/2`. Public status and the signed plan bind the exact
+policy and suite hashes used by the active cohort.
+
 SN78 registration and a competition acceptance are separate. An intake receipt
 does not promise selection, a score or a reward. The previous certified
 allocation remains effective until the active cohort has a certified and

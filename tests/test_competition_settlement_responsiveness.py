@@ -221,10 +221,11 @@ async def test_http_timeout_and_repeated_cancel_drain_worker_before_releasing_ca
     paused = PausedCall(s.queue._prepared)
     monkeypatch.setattr(s.queue, "_prepared", paused)
     # Exercise the actual timeout/cancellation path without a two-hour test.
+    timeout_seconds = 1.0
     monkeypatch.setattr(
         type(s.queue.capacity),
         "operation_timeout_seconds",
-        property(lambda _: 7200 if mode == "cancel" else 0.01),
+        property(lambda _: 7200 if mode == "cancel" else timeout_seconds),
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://rounds.example"
@@ -250,7 +251,7 @@ async def test_http_timeout_and_repeated_cancel_drain_worker_before_releasing_ca
             task = asyncio.create_task(query())
         try:
             await asyncio.wait_for(paused.entered.wait(), timeout=30)
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.03 if mode == "cancel" else timeout_seconds + 0.05)
             assert s.queue.serial.locked() and not task.done()
             if mode != "timeout":
                 for _ in range(2):

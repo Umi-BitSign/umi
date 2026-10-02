@@ -8,14 +8,15 @@
 
 ## Private holdout for automatic launch evaluation
 
-The active policy uses automatic CER/WER scoring against fixed English
+The current automatic profile is `umi-open-competition-policy/3` with
+`umi-competition-suite/2`. It uses CER/WER scoring against fixed English
 references. It does not require a new human ASL grading panel, a person reviewing
-every miner output, or human approval of each score. Existing labeled ASL data can supply the
-references. A separate video-dependence comparison is diagnostic only unless the
-signed policy explicitly activates a qualified gate. A diagnostic cannot change
-a score, eligibility, reward or settlement. These data-handling
-instructions do not activate the competition or change a signed policy, scoring
-formula or evaluator quorum.
+every miner output, or human approval of each score. Existing labeled ASL data
+can supply the references. A separate video-dependence comparison is diagnostic
+only unless the signed policy explicitly activates a qualified gate. A
+diagnostic cannot change a score, eligibility, reward or settlement. These
+data-handling instructions do not activate the competition or change a signed
+policy, scoring formula or evaluator quorum.
 
 <a id="open-competition-private-holdout--private-storage-and-evaluator-setup"></a>
 
