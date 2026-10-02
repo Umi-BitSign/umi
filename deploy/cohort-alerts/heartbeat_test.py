@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from heartbeat import heartbeat, read_journal, standing_progress
+from heartbeat import heartbeat, read_journal, standing_progress, successor_healthy
 
 
 class HeartbeatTests(unittest.TestCase):
@@ -90,6 +90,75 @@ class HeartbeatTests(unittest.TestCase):
         self.assertEqual(result["schema"], "umi-service-heartbeat/2")
         self.assertEqual(result["services"]["vali.service"], "running")
         self.assertEqual(set(result["progress"].values()), {None})
+
+    @patch("heartbeat.read_successor_journal")
+    def test_successor_health_uses_only_latest_bounded_status(self, read):
+        read.return_value = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "MESSAGE": json.dumps(
+                            {
+                                "schema": "umi-successor-host-status/1",
+                                "status": "holding",
+                                "reason": "successor_reconcile_failed",
+                            }
+                        )
+                    }
+                ),
+                json.dumps(
+                    {
+                        "MESSAGE": json.dumps(
+                            {
+                                "schema": "umi-successor-host-status/1",
+                                "status": "worker_healthy",
+                                "extraneous": "private must not leave host",
+                            }
+                        )
+                    }
+                ),
+            ]
+        )
+        self.assertFalse(successor_healthy("vali.service"))
+        read.return_value = json.dumps(
+            {
+                "MESSAGE": json.dumps(
+                    {
+                        "schema": "umi-successor-host-status/1",
+                        "status": "worker_healthy",
+                        "extraneous": "private must not leave host",
+                    }
+                )
+            }
+        )
+        self.assertTrue(successor_healthy("vali.service"))
+
+    @patch("heartbeat.subprocess.run")
+    @patch("heartbeat.read_successor_journal")
+    def test_running_successor_without_a_recent_healthy_report_is_failed(self, read, run):
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, "ActiveState=active\nSubState=running\n", ""
+        )
+        read.return_value = json.dumps(
+            {
+                "MESSAGE": json.dumps(
+                    {
+                        "schema": "umi-successor-host-status/1",
+                        "status": "holding",
+                    }
+                )
+            }
+        )
+        result = heartbeat(["vali.service"], successor_services=["vali.service"])
+        self.assertEqual(result["services"]["vali.service"], "failed")
+        read.return_value = ""
+        result = heartbeat(["vali.service"], successor_services=["vali.service"])
+        self.assertEqual(result["services"]["vali.service"], "failed")
+
+    def test_successor_services_must_be_unique_service_subsets(self):
+        for successor in [["other.service"], ["vali.service", "vali.service"]]:
+            with self.assertRaisesRegex(ValueError, "invalid successor services"):
+                heartbeat(["vali.service"], successor_services=successor)
 
 
 class JournalProcessTests(unittest.IsolatedAsyncioTestCase):
