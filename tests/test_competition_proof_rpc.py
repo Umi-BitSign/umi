@@ -342,6 +342,63 @@ async def test_real_tls_primary_archive_is_tried_first_and_no_new_block_selected
     assert state.reads[-2][1:] == state.reads[-1][1:]
 
 
+@pytest.mark.parametrize("method", ["chain_getBlock", "chain_getBlockHash", "chain_getHeader"])
+async def test_null_block_identity_result_falls_back_without_changing_request(method):
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self, result):
+            self.result = result
+            self.calls = []
+
+        async def request(self, called_method, params):
+            self.calls.append((called_method, params))
+            return self.result
+
+    expected = {"number": "0x2a"}
+    transports = (Transport(None), Transport(expected), Transport(None))
+    router = FailoverProofRpc(transports, timeout_seconds=15)
+    params = ("0x" + "ab" * 32,)
+    assert await router.request(method, params) == expected
+    assert transports[0].calls == transports[1].calls == [(method, params)]
+    assert transports[2].calls == []
+
+
+async def test_null_storage_result_is_valid_and_does_not_fail_over():
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self):
+            self.calls = 0
+
+        async def request(self, *_args):
+            self.calls += 1
+            return None
+
+    transports = (Transport(), Transport(), Transport())
+    router = FailoverProofRpc(transports, timeout_seconds=15)
+    assert await router.request("state_getStorageAt", ("0x12", "0x" + "ab" * 32)) is None
+    assert [transport.calls for transport in transports] == [1, 0, 0]
+
+
+async def test_null_block_identity_result_from_every_endpoint_is_unavailable():
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self):
+            self.calls = 0
+
+        async def request(self, *_args):
+            self.calls += 1
+            return None
+
+    transports = (Transport(), Transport(), Transport())
+    router = FailoverProofRpc(transports, timeout_seconds=15)
+    with pytest.raises(ValidatorChainError, match="proof_rpc_error"):
+        await router.request("chain_getHeader", ("0x" + "ab" * 32,))
+    assert [transport.calls for transport in transports] == [1, 1, 1]
+
+
 async def test_real_tls_malformed_protocol_is_terminal_without_endpoint_retry(chain, wire):
     state, router = wire
     state.primary_status = 0
