@@ -24,7 +24,7 @@ async def _read_journal(service, *, pattern, since, maximum_entries):
         "--no-pager",
         "-o",
         "json",
-        "--output-fields=MESSAGE",
+        "--output-fields=MESSAGE,_SYSTEMD_INVOCATION_ID",
         f"--grep={pattern}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
@@ -100,7 +100,7 @@ def standing_progress(service):
     return missing
 
 
-def successor_healthy(service):
+def successor_healthy(service, invocation_id):
     try:
         lines = asyncio.run(read_successor_journal(service)).splitlines()
         for line in lines:
@@ -109,6 +109,7 @@ def successor_healthy(service):
             if (
                 not isinstance(message, dict)
                 or message.get("schema") != "umi-successor-host-status/1"
+                or entry.get("_SYSTEMD_INVOCATION_ID") != invocation_id
             ):
                 continue
             return message.get("status") in {"worker_started", "worker_healthy"}
@@ -138,20 +139,33 @@ def heartbeat(services, standing_services=(), successor_services=()):
             raise ValueError("invalid service name")
         try:
             result = subprocess.run(
-                ["systemctl", "show", service, "-p", "ActiveState", "-p", "SubState"],
+                [
+                    "systemctl",
+                    "show",
+                    service,
+                    "-p",
+                    "ActiveState",
+                    "-p",
+                    "SubState",
+                    "-p",
+                    "InvocationID",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,
                 check=False,
             )
             fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-            if result.returncode or not {"ActiveState", "SubState"} <= fields.keys():
+            if result.returncode or not {"ActiveState", "SubState", "InvocationID"} <= fields.keys():
                 raise RuntimeError("service_status_unavailable")
             ok = fields["ActiveState"] == "active" and fields["SubState"] == "running"
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeError("service_status_unavailable") from error
         if ok and service in successor_services:
-            ok = successor_healthy(service)
+            invocation = fields["InvocationID"]
+            if re.fullmatch(r"[0-9a-f]{32}", invocation) is None:
+                raise RuntimeError("service_status_unavailable")
+            ok = successor_healthy(service, invocation)
         states[service] = "running" if ok else "failed"
     result = {"schema": "umi-service-heartbeat/1", "services": states}
     if standing_services:

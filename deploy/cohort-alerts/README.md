@@ -62,7 +62,8 @@ service override containing `SupplementaryGroups=systemd-journal`. The sender
 then requires the latest bounded `umi-successor-host-status/1` report from each
 selected unit to be `worker_started` or `worker_healthy`. A running process with
 a held, failed, malformed, missing or older-than-45-minutes report is exported
-as a failed service. The sender never exports the report text or reason.
+as a failed service. Reports from an earlier systemd invocation cannot satisfy a
+restarted service. The sender never exports the report text or reason.
 
 The window allows a healthy successor to verify retained history. This check
 detects a supervisor that is alive but cannot reconcile or launch its worker;

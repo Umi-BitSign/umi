@@ -11,6 +11,11 @@ from heartbeat import heartbeat, read_journal, standing_progress, successor_heal
 
 
 class HeartbeatTests(unittest.TestCase):
+    systemd_running = (
+        "ActiveState=active\nSubState=running\n"
+        "InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+    )
+
     @patch("heartbeat.subprocess.run")
     def test_systemd_permission_failure_is_not_a_service_failure(self, run):
         run.return_value = subprocess.CompletedProcess([], 1, "", "bus unavailable")
@@ -20,8 +25,13 @@ class HeartbeatTests(unittest.TestCase):
     @patch("heartbeat.subprocess.run")
     def test_running_and_failed_services_are_distinguished(self, run):
         run.side_effect = [
-            subprocess.CompletedProcess([], 0, "ActiveState=active\nSubState=running\n", ""),
-            subprocess.CompletedProcess([], 0, "ActiveState=failed\nSubState=failed\n", ""),
+            subprocess.CompletedProcess([], 0, self.systemd_running, ""),
+            subprocess.CompletedProcess(
+                [], 0,
+                "ActiveState=failed\nSubState=failed\n"
+                "InvocationID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+                "",
+            ),
         ]
         self.assertEqual(
             heartbeat(["first.service", "second.service"])["services"],
@@ -84,7 +94,7 @@ class HeartbeatTests(unittest.TestCase):
     def test_running_service_without_progress_does_not_claim_native_health(self, read, run):
         read.return_value = ""
         run.return_value = subprocess.CompletedProcess(
-            [], 0, "ActiveState=active\nSubState=running\n", ""
+            [], 0, self.systemd_running, ""
         )
         result = heartbeat(["vali.service"], ["vali.service"])
         self.assertEqual(result["schema"], "umi-service-heartbeat/2")
@@ -103,7 +113,8 @@ class HeartbeatTests(unittest.TestCase):
                                 "status": "holding",
                                 "reason": "successor_reconcile_failed",
                             }
-                        )
+                        ),
+                        "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     }
                 ),
                 json.dumps(
@@ -114,12 +125,15 @@ class HeartbeatTests(unittest.TestCase):
                                 "status": "worker_healthy",
                                 "extraneous": "private must not leave host",
                             }
-                        )
+                        ),
+                        "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     }
                 ),
             ]
         )
-        self.assertFalse(successor_healthy("vali.service"))
+        self.assertFalse(
+            successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        )
         read.return_value = json.dumps(
             {
                 "MESSAGE": json.dumps(
@@ -128,16 +142,22 @@ class HeartbeatTests(unittest.TestCase):
                         "status": "worker_healthy",
                         "extraneous": "private must not leave host",
                     }
-                )
+                ),
+                "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             }
         )
-        self.assertTrue(successor_healthy("vali.service"))
+        self.assertTrue(
+            successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        )
+        self.assertFalse(
+            successor_healthy("vali.service", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        )
 
     @patch("heartbeat.subprocess.run")
     @patch("heartbeat.read_successor_journal")
     def test_running_successor_without_a_recent_healthy_report_is_failed(self, read, run):
         run.return_value = subprocess.CompletedProcess(
-            [], 0, "ActiveState=active\nSubState=running\n", ""
+            [], 0, self.systemd_running, ""
         )
         read.return_value = json.dumps(
             {
@@ -146,7 +166,8 @@ class HeartbeatTests(unittest.TestCase):
                         "schema": "umi-successor-host-status/1",
                         "status": "holding",
                     }
-                )
+                ),
+                "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             }
         )
         result = heartbeat(["vali.service"], successor_services=["vali.service"])
