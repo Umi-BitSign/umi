@@ -858,7 +858,24 @@ class PodmanSuccessorContainer:
             raise SuccessorContainerError("successor container PID state is uncertain")
         if status == "running" and state.get("Running") is True and pid > 0:
             phase, code = "running", None
-        elif status in {"created", "configured"} and state.get("Running") is False and pid == 0:
+        elif status in {"created", "configured"} and state.get("Running") is False:
+            # Podman can retain the last attempted PID when start fails before
+            # the OCI process exists. Accept that stopped metadata only after
+            # the kernel confirms the reported PID is absent. An existing or
+            # inaccessible PID remains uncertain and cannot be removed.
+            if pid > 0:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    pass
+                except OSError as error:
+                    raise SuccessorContainerError(
+                        "successor container PID state is uncertain"
+                    ) from error
+                else:
+                    raise SuccessorContainerError(
+                        "successor container PID state is uncertain"
+                    )
             phase, code = "created", None
         elif (
             status == "exited"
