@@ -149,6 +149,42 @@ class HeartbeatTests(unittest.TestCase):
         self.assertTrue(
             successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         )
+        for status, reason in (
+            ("started", "successor_worker_started"),
+            ("healthy", "successor_worker_healthy"),
+        ):
+            read.return_value = json.dumps(
+                {
+                    "MESSAGE": json.dumps(
+                        {
+                            "schema": "umi-successor-host-status/1",
+                            "status": status,
+                            "reason": reason,
+                        }
+                    ),
+                    "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }
+            )
+            self.assertTrue(
+                successor_healthy(
+                    "vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
+            )
+        read.return_value = json.dumps(
+            {
+                "MESSAGE": json.dumps(
+                    {
+                        "schema": "umi-successor-host-status/1",
+                        "status": "started",
+                        "reason": "successor_reconcile_failed",
+                    }
+                ),
+                "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }
+        )
+        self.assertFalse(
+            successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        )
         self.assertFalse(
             successor_healthy("vali.service", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         )

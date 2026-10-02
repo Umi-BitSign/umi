@@ -112,7 +112,16 @@ def successor_healthy(service, invocation_id):
                 or entry.get("_SYSTEMD_INVOCATION_ID") != invocation_id
             ):
                 continue
-            return message.get("status") in {"worker_started", "worker_healthy"}
+            status = message.get("status")
+            reason = message.get("reason")
+            return (
+                status in {"worker_started", "worker_healthy"}
+                or (status, reason)
+                in {
+                    ("started", "successor_worker_started"),
+                    ("healthy", "successor_worker_healthy"),
+                }
+            )
     except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
         pass
     return False
