@@ -521,9 +521,7 @@ class CohortModelUploads:
             reason = ""
             standing = self.config.standing_review_policy
             if standing is not None:
-                hold = self.journal.get(
-                    "review_hold", sub.model_revision + "-" + digest(standing)
-                )
+                hold = self.journal.get("review_hold", sub.model_revision + "-" + digest(standing))
                 if isinstance(hold, dict) and isinstance(hold.get("reason_code"), str):
                     reason = ": " + hold["reason_code"]
             raise PendingModelReview(

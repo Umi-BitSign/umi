@@ -34,9 +34,7 @@ class StandingModelReviewPolicy(StrictProtocolModel):
         Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"),
     ]
     maximum_document_bytes: Annotated[int, Field(ge=1, le=4 * 1024**2)] = 2 * 1024**2
-    maximum_total_document_bytes: Annotated[int, Field(ge=1, le=12 * 1024**2)] = (
-        8 * 1024**2
-    )
+    maximum_total_document_bytes: Annotated[int, Field(ge=1, le=12 * 1024**2)] = 8 * 1024**2
     complete_declared_bundle_rights_approved: Literal[True]
     licenses_and_notices_reviewed: Literal[True]
     public_redistribution_and_evaluation_approved: Literal[True]
