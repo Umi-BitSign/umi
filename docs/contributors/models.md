@@ -28,6 +28,12 @@ comparison is diagnostic only and does not affect scores, eligibility,
 settlement or payouts. The policy binds the terms file's published
 [SHA-256](../MODEL_CONTRIBUTION_TERMS_V3.sha256).
 
+The [version 4 terms](../MODEL_CONTRIBUTION_TERMS_V4.md) govern successor
+policies that use automatic standing artifact review. Their published
+[SHA-256](../MODEL_CONTRIBUTION_TERMS_V4.sha256) must be bound by the signed
+policy before a participant can accept them. The live status and policy remain
+authoritative for the current cohort.
+
 Keep original submissions and acceptance receipts. Enrollment under a different
 reward policy requires fresh miner consent; an operator cannot carry old
 signatures into the new rules.
@@ -40,8 +46,8 @@ The signed launch policy names the accepted model-license identifiers and binds
 the exact contribution terms by SHA-256. The current policy, endpoint cutoffs and
 public status are linked from the
 [launch configuration](../competition/launch.md). Submit only against the exact
-runtime, immutable environment and route published for the live cohort. Sam's
-preliminary review route is published below.
+runtime, immutable environment and route published for the live cohort. The
+intake service applies the standing artifact-review policy after complete upload.
 
 The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its
 weights and portable bundle. The separate
@@ -55,7 +61,7 @@ a new bundle license overrides upstream restrictions.
 The code checks `license_id` against `CompetitionPolicy.accepted_model_licenses`
 and binds `accepted_terms_sha256` to the policy. Those checks establish agreement
 with a published policy, not the truth of a rights claim. Promotion also requires
-a signed rights review with retained supporting evidence.
+a certified artifact review with retained supporting evidence.
 
 ### Runtime interface
 
@@ -153,25 +159,21 @@ summary without exposing confidential or personal material.
 
 <a id="model-contribution-review--preliminary-review"></a>
 
-### Preliminary review
+### Automatic artifact review and holds
 
-Contributors should be able to ask about a proposed source stack before training.
-Include the source inventory above, intended use and outstanding questions.
-Sam (`sam0x17`) is the project approval contact. Contact him in the UMI community
-channel to request a preliminary or final contribution review. Sam will refer
-review requests to an expert and arrange a restricted channel for confidential
-evidence when needed. Do not include that evidence in the initial public message.
-Being the contact does not mean an expert has reviewed or approved any model.
-An unanswered request is not approval, and no turnaround time is promised by
-this document.
+Routine complete bundles enter artifact review automatically. The intake worker
+rehashes every declared file, reads only bounded UTF-8 license and provenance
+records, applies the standing policy bound to the governing competition policy
+and retains the exact review inputs. It does not import or execute submitted
+model code and does not use the network. Independent evaluators still verify the
+evidence and sign the artifact acceptance.
 
-A preliminary response should distinguish accepted points, missing evidence and
-restrictions needing resolution. Bind it to the disclosed source versions, uses,
-policy and terms. If those facts are unchanged, carry the reviewed evidence into
-the final review rather than asking for the same material again. Explain any
-reopened question. New facts, omissions or changed restrictions can require
-reassessment, and the final artifact still needs reconstruction and rights
-review. Preliminary feedback cannot guarantee promotion, rewards or legal immunity.
+Contributors do not need to contact Sam for this step. A missing, unreadable or
+out-of-bounds declared record leaves that exact bundle pending with a
+machine-readable reason. Correct the bundle and submit its new digest, or use
+the community channel to appeal a hold. Preliminary policy questions are
+optional and do not reserve a place or replace final certification. Do not post
+confidential or personal evidence in a public channel.
 
 <a id="model-contribution-review--endpoint-service-is-a-different-track"></a>
 

@@ -116,19 +116,22 @@ reviewers or original delivery inputs are consulted.
 Host version 1 retains the private certificate-delivery path:
 `model-acceptance-publications/<cohort>/<submission>.json` contains a complete
 `ModelAcceptancePublication`. Both paths perform the same quorum checks.
-Complete artifact ingestion, independent rights/reconstruction assessment,
-replication and installed coordinator qualification remain required before
-production selection. Current component tests use synthetic finality, inference
-and rights-review documents; the recurring vote service does not make those
-assessments for an operator.
+Complete artifact ingestion, independent artifact-acceptance votes, replication
+and installed coordinator qualification remain required before production
+selection. Configure one standing review policy before intake. The delivery
+worker applies it mechanically to complete bundles and retains the exact source
+documents; the recurring vote service verifies those inputs independently.
 
 For new cohort deployments, use admission-host schema version 8 and set
 `model_uploads.admission_reviews_directory` to the owner's private
-`ModelArtifactReviewInputs` directory. Upload and preservation may finish before
-review, but public participation remains retryably pending until a bounded review
-for that exact bundle digest exists. An artifact that cannot pass review never
-enters the cohort roster and therefore cannot hold sealing or settlement open.
-Earlier host schemas retain their original behavior for recovery replay.
+`ModelArtifactReviewInputs` directory. Also set
+`model_uploads.standing_review_policy` to a policy that binds the exact
+competition policy, contribution terms and retained operator approval. Upload
+and preservation may finish before review. The worker publishes deterministic
+review inputs once the complete bundle passes; missing, unreadable or oversized
+documents produce a retained hold reason. An artifact that cannot pass review
+never enters the cohort roster and therefore cannot hold sealing or settlement
+open. Earlier host schemas retain their original behavior for recovery replay.
 
 ## Lost coordinator outcomes
 
@@ -1065,7 +1068,7 @@ replace native recovery qualification.
 
 ## Model delivery before recoverable enrollment
 
-`umi-cohort-service-admission-host/3` adds `model_uploads` to the existing
+`umi-cohort-service-admission-host/8` carries `model_uploads` alongside the
 service admission host and independent model-review peers. Configure a private
 `directory` disjoint from intake and the model archive, and an explicit
 `maximum_reserved_bytes`. Reservations account for two copies of each declared
@@ -1078,12 +1081,14 @@ The public routes described in the [model guide](../miners/model.md#model-files-
 retain signed chunks. The recurring host finalizes complete files and archives;
 its `model_delivery` report gives preserved/pending counts and a bounded error
 type. Verification retries after process exit, and the archive copy reuses one
-per-manifest scratch directory. Accepted original bytes remain unchanged.
-An unfinished model delivery is not admitted to the cohort roster.
+per-manifest scratch directory. After the canonical archive fully verifies, the
+worker removes the redundant completed staging tree under its upload lock. It
+keeps incomplete prefixes and the durable archive. This disk reclamation does
+not expand the conservative logical reservation. Accepted original bytes remain
+unchanged. An unfinished model delivery is not admitted to the cohort roster.
 
 Keep the upload journal, retained file prefixes and model archive across service
 restart or host migration. Configure durable replication of original model
 artifacts and provenance before production launch. A local preservation receipt
 does not establish an R2 copy, independent backup, rights approval or reward
-certification. Older host configuration versions retain their existing bytes
-and behavior; version 3 enables this delivery requirement explicitly.
+certification.

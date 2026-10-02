@@ -20,7 +20,7 @@ manifest for the canonical policy files, runtime revision and allowed tracks.
 | Install or troubleshoot a validator | [Validator supervisor](PERMANENT_VALIDATOR_SUPERVISOR.md) |
 | Upgrade an existing validator host | [State-preserving upgrade](validators/successor-upgrade.md) |
 | Understand the competition and rewards | [Competition overview](OPEN_COMPETITION.md) |
-| Prepare a reproducible model for a contribution round | [Contributor checklist](contributors/models.md), [current version 3 terms](MODEL_CONTRIBUTION_TERMS_V3.md), [version 2 terms](MODEL_CONTRIBUTION_TERMS_V2.md), and [historical version 1 terms](MODEL_CONTRIBUTION_TERMS.md) |
+| Prepare a reproducible model for a contribution round | [Contributor checklist](contributors/models.md), [version 4 terms](MODEL_CONTRIBUTION_TERMS_V4.md), [version 3 terms](MODEL_CONTRIBUTION_TERMS_V3.md), and the exact terms named by live policy |
 
 ## Service operators
 
