@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import sqlite3
 import stat
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_serializer
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_artifacts import (
     _artifact,
@@ -26,6 +27,12 @@ from .competition_artifacts import (
 )
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from .competition_cohort_model_static_review import (
+    StandingModelReviewPolicy,
+    StaticModelReviewHeld,
+    build_standing_model_review,
+    verify_standing_review_policy,
+)
 from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
@@ -44,6 +51,7 @@ from .private_files import (
     Directory,
     ensure_private_directory,
     lock_private_file,
+    publish_private_model,
     read_private_model,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -52,6 +60,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 class ModelUploadConfig(StrictProtocolModel):
     directory: Directory
     admission_reviews_directory: Directory | None = None
+    standing_review_policy: StandingModelReviewPolicy | None = None
     maximum_models: Annotated[int, Field(ge=1, le=4096)] = 1024
     # Reserve space for staging and the verified native archive before delivery.
     maximum_reserved_bytes: Annotated[int, Field(ge=1, le=16 * 1024**4)]
@@ -64,7 +73,15 @@ class ModelUploadConfig(StrictProtocolModel):
         value = handler(self)
         if self.admission_reviews_directory is None:
             value.pop("admission_reviews_directory", None)
+        if self.standing_review_policy is None:
+            value.pop("standing_review_policy", None)
         return value
+
+    @model_validator(mode="after")
+    def automatic_review_store(self):
+        if self.standing_review_policy is not None and self.admission_reviews_directory is None:
+            raise ValueError("standing model review requires an admission review directory")
+        return self
 
 
 class IncompleteModelUpload(OSError):
@@ -108,6 +125,8 @@ class CohortModelUploads:
         ensure_private_directory(self.archive)
         for review_root in reviews:
             ensure_private_directory(review_root)
+        if self.config.standing_review_policy is not None:
+            verify_standing_review_policy(self.config.standing_review_policy, intake.policy)
         self.journal = RoundJournal(
             self.root / "journal",
             {
@@ -202,6 +221,24 @@ class CohortModelUploads:
         ensure_private_directory(staging / "model")
         return bundle, staging
 
+    def _release_preserved_staging(self, bundle: ModelBundle, staging: Path) -> None:
+        """Remove the redundant upload tree only after its archive fully verifies."""
+
+        verify_preserved_bundle(bundle, self.archive, self.intake.policy)
+        model = staging / "model"
+        info = model.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise ValueError("unsafe completed model staging directory")
+        shutil.rmtree(model)
+        ensure_private_directory(model)
+        with _directory(staging) as descriptor:
+            os.fsync(descriptor)
+
     def put_chunk(self, chunk: ModelUploadChunk, signature: Signature, data: bytes):
         chunk = ModelUploadChunk.model_validate_json(canonical_json_bytes(chunk))
         request = self.retained(chunk.upload_sha256)
@@ -262,7 +299,7 @@ class CohortModelUploads:
         lease = lock_private_file(staging / "upload.lock")
         try:
             if (self.archive / digest(bundle)).exists():
-                verify_preserved_bundle(bundle, self.archive, self.intake.policy)
+                self._release_preserved_staging(bundle, staging)
                 return True
             for index, record in enumerate(bundle.files):
                 destination = staging / "model" / record.path
@@ -310,6 +347,7 @@ class CohortModelUploads:
                     with _directory(staging) as descriptor:
                         os.fsync(descriptor)
             preserve_bundle(bundle, staging / "model", self.archive, self.intake.policy)
+            self._release_preserved_staging(bundle, staging)
             return True
         finally:
             os.close(lease)
@@ -317,45 +355,111 @@ class CohortModelUploads:
     def poll_once(self):
         """Finalize delivery in the service worker, outside HTTP request deadlines."""
         ready = pending = 0
+        reviews_ready = reviews_pending = reviews_held = 0
+        review_hold_reason = ""
         error_type = ""
         seen = set()
         for key in self.journal.keys("upload"):
             try:
-                bundle, _ = self._paths(key)
+                bundle, staging = self._paths(key)
                 model = digest(bundle)
                 if model in seen:
                     continue
                 seen.add(model)
                 receipt = self.journal.get("preserved", model)
                 if receipt is not None and (self.archive / model).is_dir():
+                    if any((staging / "model").iterdir()):
+                        self.complete(key)
                     ready += 1
-                    continue
-                if not self.complete(key):
-                    pending += 1
-                    continue
-                with self.journal.locked():
-                    self.journal.put_many(
-                        (
+                else:
+                    if not self.complete(key):
+                        pending += 1
+                        continue
+                    with self.journal.locked():
+                        self.journal.put_many(
                             (
-                                "preserved",
-                                model,
-                                {
-                                    "schema": "umi-cohort-model-delivery-preserved/1",
-                                    "model_sha256": model,
-                                },
-                            ),
+                                (
+                                    "preserved",
+                                    model,
+                                    {
+                                        "schema": "umi-cohort-model-delivery-preserved/1",
+                                        "model_sha256": model,
+                                    },
+                                ),
+                            )
                         )
-                    )
-                ready += 1
+                    ready += 1
+                review_status, reason = self._ensure_review(bundle)
+                if review_status == "ready":
+                    reviews_ready += 1
+                elif review_status == "held":
+                    reviews_held += 1
+                    review_hold_reason = reason
+                elif review_status == "pending":
+                    reviews_pending += 1
             except (OSError, ValueError, sqlite3.Error) as error:
                 pending += 1
                 error_type = type(error).__name__
         return {
             "models_preserved": ready,
             "models_pending": pending,
+            "model_reviews_ready": reviews_ready,
+            "model_reviews_pending": reviews_pending,
+            "model_reviews_held": reviews_held,
+            "last_review_hold_reason": review_hold_reason,
             "last_error_type": error_type,
             "artifact_review_certified": False,
         }
+
+    def _ensure_review(self, bundle: ModelBundle) -> tuple[str, str]:
+        """Retain one stable review or one stable hold for an exact model."""
+
+        if self.config.admission_reviews_directory is None:
+            return "disabled", ""
+        model = digest(bundle)
+        target = Path(self.config.admission_reviews_directory) / (model + ".json")
+        try:
+            retained = read_private_model(
+                target,
+                ModelArtifactReviewInputs,
+                maximum_bytes=33 * 1024**2,
+            )
+        except FileNotFoundError:
+            retained = None
+        if retained is not None:
+            if retained.model_sha256 != model:
+                raise ValueError("pre-admission review differs from the preserved model")
+            return "ready", ""
+        standing = self.config.standing_review_policy
+        if standing is None:
+            return "pending", ""
+        review_policy_sha256 = digest(standing)
+        hold_key = model + "-" + review_policy_sha256
+        hold = self.journal.get("review_hold", hold_key)
+        if hold is not None:
+            if (
+                not isinstance(hold, dict)
+                or hold.get("schema") != "umi-standing-model-artifact-review-hold/1"
+                or hold.get("model_sha256") != model
+                or hold.get("review_policy_sha256") != review_policy_sha256
+                or not isinstance(hold.get("reason_code"), str)
+            ):
+                raise ValueError("retained model review hold differs")
+            return "held", hold["reason_code"]
+        try:
+            review = build_standing_model_review(bundle, self.archive, self.intake.policy, standing)
+        except StaticModelReviewHeld as error:
+            hold = {
+                "schema": "umi-standing-model-artifact-review-hold/1",
+                "model_sha256": model,
+                "review_policy_sha256": review_policy_sha256,
+                "reason_code": error.reason_code,
+            }
+            with self.journal.locked():
+                self.journal.put_many((("review_hold", hold_key, hold),))
+            return "held", error.reason_code
+        publish_private_model(target, review, maximum_bytes=33 * 1024**2)
+        return "ready", ""
 
     def status(self, key: str):
         bundle, staging = self._paths(key)
@@ -414,8 +518,14 @@ class CohortModelUploads:
                 maximum_bytes=33 * 1024**2,
             )
         except FileNotFoundError as error:
+            reason = ""
+            standing = self.config.standing_review_policy
+            if standing is not None:
+                hold = self.journal.get("review_hold", sub.model_revision + "-" + digest(standing))
+                if isinstance(hold, dict) and isinstance(hold.get("reason_code"), str):
+                    reason = ": " + hold["reason_code"]
             raise PendingModelReview(
-                "model enrollment awaits its bounded rights and reconstruction review"
+                "model enrollment awaits its bounded rights and reconstruction review" + reason
             ) from error
         if review.model_sha256 != sub.model_revision:
             raise ValueError("pre-admission review differs from the preserved model")

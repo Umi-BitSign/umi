@@ -15,6 +15,7 @@ from umi.competition_artifacts import verify_preserved_bundle
 from umi.competition_cohort_api import cohort_routes
 from umi.competition_cohort_intake import CohortIntake, CohortIntakeBinding, CohortIntakeConfig
 from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 from umi.competition_cohort_model_upload import (
     CohortModelUploads,
     ModelUploadChunk,
@@ -119,6 +120,26 @@ def upload_all(h, owner, key):
     assert owner.poll_once()["models_preserved"] == 1
 
 
+def assert_staging_released(owner, key):
+    _, staging = owner._paths(key)
+    assert list((staging / "model").iterdir()) == []
+
+
+def standing_review_policy(h, **changes):
+    value = StandingModelReviewPolicy(
+        schema="umi-standing-model-artifact-review-policy/1",
+        competition_policy_sha256=digest(h.intake.policy),
+        contribution_terms_sha256=h.intake.policy.contribution_terms_sha256,
+        standing_approval_record_sha256="ab" * 32,
+        approved_by="operator@example.test",
+        approved_at_utc="2026-10-02T12:00:00Z",
+        complete_declared_bundle_rights_approved=True,
+        licenses_and_notices_reviewed=True,
+        public_redistribution_and_evaluation_approved=True,
+    )
+    return value.model_copy(update=changes)
+
+
 def test_delivery_resumes_original_prefix_and_is_not_enrollment(delivery):
     h = delivery
     key = h.owner.reserve(h.request, capture_at(210))
@@ -144,7 +165,9 @@ def test_delivery_resumes_original_prefix_and_is_not_enrollment(delivery):
         verify_preserved_bundle(sub.model_bundle, h.owner.archive, h.intake.policy)
         == sub.model_revision
     )
+    assert_staging_released(reopened, key)
     put(reopened, key, 0, data)  # No archive rewrite.
+    assert_staging_released(reopened, key)
 
 
 def test_configured_pre_admission_review_gates_model_enrollment(delivery, tmp_path):
@@ -176,10 +199,97 @@ def test_configured_pre_admission_review_gates_model_enrollment(delivery, tmp_pa
     gated.require_payload(h.request)
 
 
+def test_standing_policy_automatically_reviews_complete_bundle_once(delivery, tmp_path):
+    h = delivery
+    reviews = tmp_path / "automatic-reviews"
+    owner = CohortModelUploads(
+        ModelUploadConfig(
+            directory=str(tmp_path / "automatic-delivery"),
+            admission_reviews_directory=str(reviews),
+            standing_review_policy=standing_review_policy(h),
+            maximum_reserved_bytes=1024**3,
+        ),
+        h.intake,
+        h.owner.archive,
+    )
+    key = owner.reserve(h.request, capture_at(210))
+    upload_all(h, owner, key)
+    sub = h.request.signed_submission.submission
+    target = reviews / (sub.model_revision + ".json")
+    first = target.read_bytes()
+    review = ModelArtifactReviewInputs.model_validate_json(first)
+    assert review.model_sha256 == sub.model_revision
+    assert review.rights_evidence["decision"]["approval_basis"] == (
+        "standing_operator_policy_for_complete_declared_bundles"
+    )
+    assert review.reconstruction_evidence["complete_bundle_hash_verification"] == {
+        "status": "complete_bundle_verified",
+        "file_count": len(sub.model_bundle.files),
+        "total_bytes": sum(record.size_bytes for record in sub.model_bundle.files),
+        "model_code_executed": False,
+        "network_used": False,
+    }
+    owner.require_payload(h.request)
+    reopened = CohortModelUploads(owner.config, h.intake, owner.archive)
+    report = reopened.poll_once()
+    assert report["model_reviews_ready"] == 1
+    assert target.read_bytes() == first
+
+
+def test_standing_policy_retains_machine_readable_document_hold(delivery, tmp_path):
+    h = delivery
+    reviews = tmp_path / "held-reviews"
+    owner = CohortModelUploads(
+        ModelUploadConfig(
+            directory=str(tmp_path / "held-delivery"),
+            admission_reviews_directory=str(reviews),
+            standing_review_policy=standing_review_policy(
+                h, maximum_document_bytes=1, maximum_total_document_bytes=1
+            ),
+            maximum_reserved_bytes=1024**3,
+        ),
+        h.intake,
+        h.owner.archive,
+    )
+    key = owner.reserve(h.request, capture_at(210))
+    upload_all(h, owner, key)
+    report = owner.poll_once()
+    assert report["model_reviews_held"] == 1
+    assert report["last_review_hold_reason"] == "review_document_size_outside_policy"
+    assert len(owner.journal.keys("review_hold")) == 1
+    with pytest.raises(PendingModelReview, match="review_document_size_outside_policy"):
+        owner.require_payload(h.request)
+
+
+def test_standing_policy_must_bind_live_policy_and_review_store(delivery, tmp_path):
+    h = delivery
+    standing = standing_review_policy(h)
+    with pytest.raises(ValueError, match="review directory"):
+        ModelUploadConfig(
+            directory=str(tmp_path / "delivery-without-review-store"),
+            standing_review_policy=standing,
+            maximum_reserved_bytes=1024**3,
+        )
+    with pytest.raises(ValueError, match="another competition policy"):
+        CohortModelUploads(
+            ModelUploadConfig(
+                directory=str(tmp_path / "wrong-policy-delivery"),
+                admission_reviews_directory=str(tmp_path / "wrong-policy-reviews"),
+                standing_review_policy=standing.model_copy(
+                    update={"competition_policy_sha256": "cd" * 32}
+                ),
+                maximum_reserved_bytes=1024**3,
+            ),
+            h.intake,
+            h.owner.archive,
+        )
+
+
 def test_historical_model_upload_config_omits_new_review_field(delivery, tmp_path):
     del delivery
     config = ModelUploadConfig(directory=str(tmp_path / "delivery"), maximum_reserved_bytes=1024**3)
     assert "admission_reviews_directory" not in canonical_json_bytes(config).decode()
+    assert "standing_review_policy" not in canonical_json_bytes(config).decode()
 
 
 @pytest.mark.parametrize("failure", ["length", "digest", "signer", "oversize", "gap", "prefix"])
@@ -255,9 +365,13 @@ def test_links_and_concurrent_writers_cannot_replace_originals(delivery, tmp_pat
     (stage / "partial-0").unlink()
     upload_all(h, h.owner, key)
     path = stage / "model" / bundle.files[0].path
-    path.chmod(0o600)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.write_bytes(b"x" * len(data))
+    path.chmod(0o600)
     put(h.owner, key, 0, data)  # Original archive wins over local staging.
+    assert path.exists()
+    assert h.owner.poll_once()["models_preserved"] == 1
+    assert_staging_released(h.owner, key)
     h.owner.require_payload(h.request)
 
 
@@ -271,7 +385,7 @@ def test_restart_after_verified_file_rename_before_permissions(delivery):
     reopened = CohortModelUploads(h.owner.config, h.intake, h.owner.archive)
     assert reopened.status(key)["file_offsets"][0] == len(data)
     upload_all(h, reopened, key)
-    assert not (stage / "model" / bundle.files[0].path).stat().st_mode & 0o222
+    assert_staging_released(reopened, key)
 
 
 def test_killed_archive_copy_is_retried_without_orphan_accumulation(delivery):
