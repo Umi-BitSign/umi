@@ -60,10 +60,13 @@ For validator units managed by the successor supervisor, add
 of `services`. Give the monitor user read access to systemd journals with a
 service override containing `SupplementaryGroups=systemd-journal`. The sender
 then requires the latest bounded `umi-successor-host-status/1` report from each
-selected unit to be `worker_started` or `worker_healthy`. A running process with
-a held, failed, malformed, missing or older-than-45-minutes report is exported
-as a failed service. Reports from an earlier systemd invocation cannot satisfy a
-restarted service. The sender never exports the report text or reason.
+selected unit to use the current `started` / `successor_worker_started` or
+`healthy` / `successor_worker_healthy` status/reason pair. It also accepts the
+retained legacy `worker_started` and `worker_healthy` status values. A running
+process with a held, failed, malformed, missing or older-than-45-minutes report
+is exported as a failed service. Reports from an earlier systemd invocation
+cannot satisfy a restarted service. The sender never exports the report text or
+reason.
 
 The window allows a healthy successor to verify retained history. This check
 detects a supervisor that is alive but cannot reconcile or launch its worker;
