@@ -873,9 +873,7 @@ class PodmanSuccessorContainer:
                         "successor container PID state is uncertain"
                     ) from error
                 else:
-                    raise SuccessorContainerError(
-                        "successor container PID state is uncertain"
-                    )
+                    raise SuccessorContainerError("successor container PID state is uncertain")
             phase, code = "created", None
         elif (
             status == "exited"
