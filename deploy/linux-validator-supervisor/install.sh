@@ -468,7 +468,7 @@ env UV_PYTHON_INSTALL_DIR="$supervisor_root/.uv-python" \
   UV_PROJECT_ENVIRONMENT="$supervisor_root/.venv" \
   "$supervisor_root/.uv-bootstrap-0.12.9" sync --project "$supervisor_root" \
     --locked --no-dev --no-editable --python 3.12.14
-[ "$("$supervisor_root/.venv/bin/python" --version)" = 'Python 3.12.14' ] \
+[ "$(env PYTHONDONTWRITEBYTECODE=1 "$supervisor_root/.venv/bin/python" -B --version)" = 'Python 3.12.14' ] \
   || fail "the locked Python runtime was not installed"
 [ -x "$supervisor_executable" ] || fail "the supervisor executable was not installed"
 

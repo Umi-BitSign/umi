@@ -11,21 +11,21 @@ import urllib.request
 from pathlib import Path
 
 
-async def read_journal(service):
+async def _read_journal(service, *, pattern, since, maximum_entries):
     """Bound both journal output and runtime; never forward journal text."""
     process = await asyncio.create_subprocess_exec(
         "journalctl",
         "-u",
         service,
-        "--since=-10min",
+        f"--since=-{since}",
         "-n",
-        "100",
+        str(maximum_entries),
         "-r",
         "--no-pager",
         "-o",
         "json",
-        "--output-fields=MESSAGE",
-        "--grep=umi-standing-chain-observation/1",
+        "--output-fields=MESSAGE,_SYSTEMD_INVOCATION_ID",
+        f"--grep={pattern}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -54,6 +54,27 @@ async def read_journal(service):
         await process.communicate()
 
 
+async def read_journal(service):
+    return await _read_journal(
+        service,
+        pattern="umi-standing-chain-observation/1",
+        since="10min",
+        maximum_entries=100,
+    )
+
+
+async def read_successor_journal(service):
+    # A healthy successor can spend many minutes verifying retained history.
+    # Keep the freshness window above that expected reconciliation time while
+    # still detecting a prolonged hold well before chain activity expires.
+    return await _read_journal(
+        service,
+        pattern="umi-successor-host-status/1",
+        since="45min",
+        maximum_entries=1000,
+    )
+
+
 def standing_progress(service):
     missing = {service + "/finalized_block": None, service + "/weight_update_block": None}
     try:
@@ -79,7 +100,25 @@ def standing_progress(service):
     return missing
 
 
-def heartbeat(services, standing_services=()):
+def successor_healthy(service, invocation_id):
+    try:
+        lines = asyncio.run(read_successor_journal(service)).splitlines()
+        for line in lines:
+            entry = json.loads(line)
+            message = json.loads(entry.get("MESSAGE", ""))
+            if (
+                not isinstance(message, dict)
+                or message.get("schema") != "umi-successor-host-status/1"
+                or entry.get("_SYSTEMD_INVOCATION_ID") != invocation_id
+            ):
+                continue
+            return message.get("status") in {"worker_started", "worker_healthy"}
+    except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
+        pass
+    return False
+
+
+def heartbeat(services, standing_services=(), successor_services=()):
     if not services or len(services) > 20 or len(set(services)) != len(services):
         raise ValueError("invalid services")
     if (
@@ -88,24 +127,45 @@ def heartbeat(services, standing_services=()):
         or not set(standing_services) <= set(services)
     ):
         raise ValueError("invalid standing services")
+    if (
+        len(successor_services) > 10
+        or len(set(successor_services)) != len(successor_services)
+        or not set(successor_services) <= set(services)
+    ):
+        raise ValueError("invalid successor services")
     states = {}
     for service in services:
         if not re.fullmatch(r"[A-Za-z0-9@_.-]{1,100}\.service", service):
             raise ValueError("invalid service name")
         try:
             result = subprocess.run(
-                ["systemctl", "show", service, "-p", "ActiveState", "-p", "SubState"],
+                [
+                    "systemctl",
+                    "show",
+                    service,
+                    "-p",
+                    "ActiveState",
+                    "-p",
+                    "SubState",
+                    "-p",
+                    "InvocationID",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,
                 check=False,
             )
             fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-            if result.returncode or not {"ActiveState", "SubState"} <= fields.keys():
+            if result.returncode or not {"ActiveState", "SubState", "InvocationID"} <= fields.keys():
                 raise RuntimeError("service_status_unavailable")
             ok = fields["ActiveState"] == "active" and fields["SubState"] == "running"
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeError("service_status_unavailable") from error
+        if ok and service in successor_services:
+            invocation = fields["InvocationID"]
+            if re.fullmatch(r"[0-9a-f]{32}", invocation) is None:
+                raise RuntimeError("service_status_unavailable")
+            ok = successor_healthy(service, invocation)
         states[service] = "running" if ok else "failed"
     result = {"schema": "umi-service-heartbeat/1", "services": states}
     if standing_services:
@@ -135,7 +195,11 @@ def main():
     request = urllib.request.Request(
         config["url"],
         data=json.dumps(
-            heartbeat(config["services"], config.get("standing_services", []))
+            heartbeat(
+                config["services"],
+                config.get("standing_services", []),
+                config.get("successor_services", []),
+            )
         ).encode(),
         headers={
             "Authorization": "Bearer " + config["token"],

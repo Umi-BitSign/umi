@@ -166,6 +166,25 @@ def test_two_rounds_restart_exact_artifacts_and_no_private_descriptor(
     assert c.feed.read(prefix + "/execution.json")[0] == canonical_json_bytes(c.config.execution)
 
 
+def test_repeated_reads_reuse_verified_history(feed_case, package_case, next_package, monkeypatch):
+    c = feed_case
+    first = _retain(c, package_case)
+    second = _retain(c, next_package, 245)
+    c.feed = SuccessorPublicationFeed(c.config)
+    verified = []
+    original = c.feed._verify_record
+
+    def verify(record):
+        verified.append(record.publication.intent.sequence)
+        return original(record)
+
+    monkeypatch.setattr(c.feed, "_verify_record", verify)
+    assert c.feed.read(_after(c, second))[0]
+    assert verified == [first.intent.sequence, second.intent.sequence]
+    assert c.feed.read(_after(c, second))[0]
+    assert verified == [first.intent.sequence, second.intent.sequence]
+
+
 @pytest.mark.asyncio
 async def test_relay_one_hop_links_and_empty_tail_collect_complete_initial_history(
     feed_case, package_case, next_package, v3_predecessor

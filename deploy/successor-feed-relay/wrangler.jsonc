@@ -14,12 +14,12 @@
   },
   "r2_buckets": [{ "binding": "FEED", "bucket_name": "umi-public-evidence" }],
   "vars": {
-    "ENABLED": "false",
-    "SOURCE_ORIGIN": "https://api.umi.vision",
+    "ENABLED": "true",
+    "SOURCE_ORIGIN": "https://successor-source.umi.vision",
+    "DESTINATION_ORIGIN": "https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev",
     "CHANNEL_ID": "a3ca19a108fe7d1a8e53a2db76f480ebe237b7942595f23135d6e11889ed40c0",
     "PLATFORM": "linux-amd64",
-    "INITIAL_CURSOR": "3/19/3a44f887902b07e05cd9db2c217bd98af56990f911b1508bf6d1507488020dc0",
+    "INITIAL_CURSOR": "4/459/bdf306b7999f4473ce6fa0983eefe8341c6feaaec6b9e23dd1c8231927c61590",
   },
-  // Enable only after the source feed, artifacts and operator handoff are ready.
-  "triggers": { "crons": [] },
+  "triggers": { "crons": ["* * * * *"] },
 }

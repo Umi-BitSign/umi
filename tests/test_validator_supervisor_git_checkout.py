@@ -9,6 +9,15 @@ import pytest
 INSTALLER = Path(__file__).resolve().parents[1] / "deploy/linux-validator-supervisor/install.sh"
 
 
+def test_installer_python_probe_cannot_mutate_the_signed_host() -> None:
+    installer = INSTALLER.read_text()
+    assert (
+        'env PYTHONDONTWRITEBYTECODE=1 "$supervisor_root/.venv/bin/python" -B --version'
+        in installer
+    )
+    assert '"$supervisor_root/.venv/bin/python" --version' not in installer
+
+
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(root), *args],

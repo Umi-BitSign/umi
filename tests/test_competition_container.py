@@ -523,6 +523,57 @@ async def test_exited_container_with_unconfirmed_pid_cannot_be_removed(launch_se
 
 
 @pytest.mark.asyncio
+async def test_created_container_with_absent_stale_pid_can_be_removed(launch_setup, monkeypatch):
+    value = launch_setup
+    await value.adapter.prepare_image(value.release)
+    value.runner.exit_after_start = 0
+    await value.adapter.launch(value.cap, value.release)
+    value.runner.container["State"] = {
+        "Status": "created",
+        "Running": False,
+        "ExitCode": 0,
+        "Pid": 900,
+    }
+
+    def absent(pid, signal):
+        assert (pid, signal) == (900, 0)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(containers.os, "kill", absent)
+    assert (await value.adapter.status()).phase == "created"
+    await value.adapter.remove_stopped()
+    assert (await value.adapter.status()).phase == "absent"
+
+
+@pytest.mark.parametrize("error", [None, PermissionError()])
+@pytest.mark.asyncio
+async def test_created_container_with_live_or_inaccessible_pid_is_retained(
+    launch_setup, monkeypatch, error
+):
+    value = launch_setup
+    await value.adapter.prepare_image(value.release)
+    value.runner.exit_after_start = 0
+    await value.adapter.launch(value.cap, value.release)
+    value.runner.container["State"] = {
+        "Status": "created",
+        "Running": False,
+        "ExitCode": 0,
+        "Pid": 900,
+    }
+
+    def present(pid, signal):
+        assert (pid, signal) == (900, 0)
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(containers.os, "kill", present)
+    before = len(value.runner.calls)
+    with pytest.raises(containers.SuccessorContainerError, match="PID state is uncertain"):
+        await value.adapter.remove_stopped()
+    assert not any(call[2] == "rm" for call in value.runner.calls[before:])
+
+
+@pytest.mark.asyncio
 async def test_forged_activation_rejected(setup):
     with pytest.raises(containers.SuccessorContainerError, match="authenticated successor"):
         await setup.adapter.launch(

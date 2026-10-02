@@ -54,6 +54,26 @@ def test_current_manifest_accepts_either_c5_track() -> None:
     upgrade.validate_manifest(manifest, _status(manifest), "yes")
 
 
+def test_matching_live_deployment_supersedes_a_stale_static_runtime_pointer() -> None:
+    manifest = _manifest()
+    status = _status(manifest)
+    status["deployment"]["repository"] = "https://github.com/Umi-BitSign/umi"
+    manifest["runtime"]["revision"] = "00" * 20
+    selected = upgrade.deployed_manifest(manifest, status)
+    assert selected["runtime"]["revision"] == status["deployment"]["umi_git_revision"]
+    upgrade.validate_manifest(selected, status, "no")
+
+
+def test_live_runtime_cannot_cross_a_policy_or_track_profile() -> None:
+    manifest = _manifest()
+    status = _status(manifest)
+    status["deployment"]["repository"] = "https://github.com/Umi-BitSign/umi"
+    status["policy_sha256"] = "ff" * 32
+    assert upgrade.deployed_manifest(manifest, status) is manifest
+    with pytest.raises(ValueError, match="public status differs"):
+        upgrade.validate_manifest(manifest, status, "no")
+
+
 def test_upgrader_is_a_single_file_distribution() -> None:
     source = SCRIPT.read_text()
     ast.parse(source, feature_version=(3, 8))

@@ -113,6 +113,33 @@ def document(raw: bytes, *, label: str) -> dict:
     return value
 
 
+def deployed_manifest(manifest: dict, status: dict) -> dict:
+    """Select the exact runtime reported by the matching live deployment.
+
+    The static manifest cannot name the commit that changes its own runtime
+    pointer. The public status is already required to match its policy and track
+    profile, so use that same deployment record for the runtime revision.
+    """
+    deployed = status.get("deployment") if isinstance(status, dict) else None
+    policy = manifest.get("policy") if isinstance(manifest, dict) else None
+    if (
+        status.get("schema") == "umi-competition-status/2"
+        and isinstance(deployed, dict)
+        and deployed.get("repository") == "https://github.com/Umi-BitSign/umi"
+        and deployed.get("eligible_tracks") == manifest.get("eligible_tracks")
+        and isinstance(policy, dict)
+        and status.get("policy_sha256")
+        == policy.get("value_sha256")
+        and GIT_REVISION.fullmatch(str(deployed.get("umi_git_revision")))
+    ):
+        selected = document(canonical(manifest), label="upgrade manifest")
+        runtime = selected.get("runtime")
+        if isinstance(runtime, dict):
+            runtime["revision"] = deployed["umi_git_revision"]
+        return selected
+    return manifest
+
+
 def validate_manifest(manifest: dict, status: dict, public_track: str) -> None:
     required = {
         "schema",
@@ -1138,6 +1165,8 @@ def main() -> None:
     if manifest_raw not in {canonical(manifest), canonical(manifest) + b"\n"}:
         raise ValueError("upgrade manifest is not canonical")
     status = document(fetch(args.status_url), label="public status")
+    manifest = deployed_manifest(manifest, status)
+    manifest_raw = canonical(manifest)
     validate_manifest(manifest, status, args.public_model_track)
     if sys.platform != "linux" or shutil.which("systemctl") is None:
         raise ValueError("the automatic upgrader requires a Linux systemd miner")

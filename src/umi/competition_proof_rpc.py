@@ -19,6 +19,7 @@ from .concurrency import await_owned_task, wait_for_owned
 from .validator_chain import _RPC_RESPONSE_LIMITS, ValidatorChainError
 
 _RETRYABLE = {"proof_rpc_rate_limited", "proof_rpc_failed", "proof_rpc_error"}
+_NULL_MEANS_UNAVAILABLE = {"chain_getBlock", "chain_getBlockHash", "chain_getHeader"}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -70,9 +71,21 @@ class FailoverProofRpc:
                 if self._cooldown_until[index] > self._now():
                     continue
                 try:
-                    return await wait_for_owned(
+                    result = await wait_for_owned(
                         getattr(self.transports[index], operation)(*arguments), timeout=timeout
                     )
+                    # A null result for a block identity method means this
+                    # endpoint cannot serve the exact caller-selected block.
+                    # Trying another explicit endpoint is safe: every endpoint
+                    # receives the same parameters and the native collector
+                    # still checks the returned header against owned finality.
+                    if (
+                        operation == "request"
+                        and arguments[0] in _NULL_MEANS_UNAVAILABLE
+                        and result is None
+                    ):
+                        raise ValidatorChainError("proof_rpc_error")
+                    return result
                 except asyncio.TimeoutError as error:
                     last_error = ValidatorChainError("proof_rpc_failed")
                     last_error.__cause__ = error

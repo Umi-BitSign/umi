@@ -53,6 +53,23 @@ an alert. Cloudflare or email-provider failure can delay notifications.
    and check incident/recovery notification receipts. Confirm inbox delivery
    separately. Never stop validators to test the monitor.
 
+## Successor validator health
+
+For validator units managed by the successor supervisor, add
+`successor_services` to the private heartbeat configuration, listing a subset
+of `services`. Give the monitor user read access to systemd journals with a
+service override containing `SupplementaryGroups=systemd-journal`. The sender
+then requires the latest bounded `umi-successor-host-status/1` report from each
+selected unit to be `worker_started` or `worker_healthy`. A running process with
+a held, failed, malformed, missing or older-than-45-minutes report is exported
+as a failed service. Reports from an earlier systemd invocation cannot satisfy a
+restarted service. The sender never exports the report text or reason.
+
+The window allows a healthy successor to verify retained history. This check
+detects a supervisor that is alive but cannot reconcile or launch its worker;
+it does not prove that a finalized weight update occurred. Use standing
+validator progress below once the standing reward executor is active.
+
 ## Standing validator progress
 
 Enable this only for units running the standing reward executor, which emits
