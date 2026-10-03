@@ -128,8 +128,15 @@ def review_reward_decision(
     if decision.kind == "revoke":
         raise ValueError("automatic reward signing cannot infer revocation")
     if not prefix:
-        if history.unresolved_blocks or history.writes or control.control_sha256 is not None:
-            raise ValueError("series admission requires the reserved empty control history")
+        predecessor = (
+            None if series.predecessor is None else series.predecessor.decision_sha256
+        )
+        if (
+            history.unresolved_blocks
+            or history.writes
+            or control.control_sha256 != predecessor
+        ):
+            raise ValueError("series admission requires its exact predecessor control history")
     else:
         objects = {digest(v.decision): canonical_json_bytes(v) for v in prefix}
         selected = reader.review_history(control, objects.__getitem__, history)

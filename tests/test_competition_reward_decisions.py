@@ -20,6 +20,7 @@ from umi.competition_reward_decisions import (
     SignedRewardControlDecision,
     StandingRewardControlReader,
     StandingRewardSeries,
+    StandingRewardSeriesPredecessor,
     verify_reward_decisions,
 )
 from umi.grandpa_finality import FINNEY_GENESIS_HASH
@@ -42,6 +43,49 @@ def signatures(body, names=("Charlie", "Dave")):
 
 def signed(body, names=("Charlie", "Dave")):
     return SignedRewardControlDecision(decision=body, signatures=signatures(body, names))
+
+
+def successor_series(series):
+    plans = tuple(
+        series.cohorts[-1].model_copy(
+            update={"sequence": sequence, "suite_sha256": f"{sequence:02x}" * 32}
+        )
+        for sequence in (11, 12)
+    )
+    authority = StandingCohortRecoveryAuthority(
+        schema="umi-cohort-recovery-authority/2",
+        policy_sha256=series.policy_sha256,
+        cohort_sha256s=tuple(sorted(digest(plan) for plan in plans)),
+        issued_at_block=150,
+        lifetime="until_completed_or_revoked",
+        closure_rule="quorum_certified_phase_completion",
+        timing_rule="targets_without_extension_signatures",
+    )
+    recovery = SignedCohortRecoveryAuthority(
+        authority=authority, signatures=signatures(authority)
+    )
+    predecessor = StandingRewardSeriesPredecessor(
+        schema="umi-standing-reward-series-predecessor/1",
+        series_sha256=digest(series),
+        policy_sha256=series.policy_sha256,
+        manifest_sha256=series.manifest_sha256,
+        recovery_sha256=digest(series.recovery),
+        cohort_sha256=digest(series.cohorts[-1]),
+        cohort_sequence=series.cohorts[-1].sequence,
+        control_hotkey=series.control_hotkey,
+        decision_sha256="d1" * 32,
+        activation_sha256="d2" * 32,
+        decision_committed_at_block=149,
+    )
+    candidate = series.model_copy(
+        update={
+            "schema_": "umi-standing-reward-series/2",
+            "recovery": recovery,
+            "cohorts": plans,
+            "predecessor": predecessor,
+        }
+    )
+    return StandingRewardSeries.model_validate_json(canonical_json_bytes(candidate))
 
 
 @pytest.fixture
@@ -438,6 +482,65 @@ def test_signature_verification_alone_never_claims_chain_or_reward_admission(ser
     assert verify_reward_decisions(c.series, c.control.policy, (c.genesis,)) == (c.genesis,)
     with pytest.raises(ValueError):
         verify_reward_decisions(c.series, c.control.policy, ())
+
+
+def test_initial_series_serialization_does_not_gain_a_successor_field(series_case):
+    raw = canonical_json_bytes(series_case.series)
+    assert b'"predecessor"' not in raw
+    assert StandingRewardSeries.model_validate_json(raw) == series_case.series
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"schema_": "umi-standing-reward-series/1"},
+        {"predecessor": None},
+        {"control_hotkey": wallet("Alice").hotkey.ss58_address},
+    ],
+)
+def test_successor_series_requires_its_complete_exact_boundary(series_case, change):
+    successor = successor_series(series_case.series)
+    with pytest.raises(ValueError):
+        StandingRewardSeries.model_validate_json(
+            canonical_json_bytes(successor.model_copy(update=change))
+        )
+
+
+async def test_successor_reader_stops_at_signed_predecessor_boundary(series_case, tmp_path):
+    c = series_case
+    successor = successor_series(c.series)
+    reader = StandingRewardControlReader(
+        tmp_path / "successor-reader",
+        successor,
+        c.control.policy,
+        expected_series_sha256=digest(successor),
+        expected_chain_config_sha256=digest(c.control.config),
+        maximum_bytes=8 * 1024**2,
+    )
+    body = RewardControlDecision(
+        schema="umi-reward-control-decision/2",
+        series_sha256=digest(successor),
+        sequence=0,
+        predecessor_sha256=successor.predecessor.decision_sha256,
+        kind="admit_series",
+        observed_at_block=160,
+        activation=None,
+    )
+    item = signed(body)
+    source_calls = []
+
+    def source(key):
+        source_calls.append(key)
+        if key == successor.predecessor.decision_sha256:
+            raise AssertionError("successor reader fetched across its signed boundary")
+        return canonical_json_bytes(item)
+
+    c.control.rpc.values[c.control.spec] = commitment(digest(body), 160)
+    observation = await c.control.provider.collect_control(c.control.hotkey)
+    selected = reader.select(observation, source)
+    assert selected.state == "admitted"
+    assert source_calls == [digest(body)]
+    assert reader.journal.keys("reward_control_decision") == ["0000"]
 
 
 @pytest.mark.parametrize("failure", ["capacity", "locked"])

@@ -172,11 +172,16 @@ class StandingControlPublisher:
             control_hotkey=self.hotkey,
             chain_config_sha256=self.config_sha256,
         )
-        if control.control_sha256 is None:
+        predecessor = (
+            None if self.series.predecessor is None else self.series.predecessor.decision_sha256
+        )
+        if control.control_sha256 == predecessor:
             if history.writes or history.unresolved_blocks:
-                raise ValueError("reserved control slot has prior or unresolved writes")
+                raise ValueError("reserved control slot has prior or unresolved successor writes")
             selected = -1
         else:
+            if control.control_sha256 is None:
+                raise ValueError("current control is outside the proposed certified prefix")
             selected = next(
                 (
                     i

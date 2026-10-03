@@ -261,7 +261,15 @@ class StandingRewardCoordinator:
                 )
         self.phase = "select_decision"
         body = await run_owned_thread(self._pending, sequence)
-        predecessor = None if not prefix else digest(prefix[-1].decision)
+        predecessor = (
+            (
+                None
+                if p.series.predecessor is None
+                else p.series.predecessor.decision_sha256
+            )
+            if not prefix
+            else digest(prefix[-1].decision)
+        )
         candidate = self._unreviewed
         if body is None and candidate is not None:
             if candidate.sequence == sequence and candidate.predecessor_sha256 == predecessor:
@@ -280,7 +288,11 @@ class StandingRewardCoordinator:
                     raise ValueError("reward offer skips the next admitted cohort")
             observation = await p.provider.collect_control(p.hotkey)
             body = RewardControlDecision(
-                schema="umi-reward-control-decision/1",
+                schema=(
+                    "umi-reward-control-decision/1"
+                    if p.series.predecessor is None
+                    else "umi-reward-control-decision/2"
+                ),
                 series_sha256=digest(p.series),
                 sequence=sequence,
                 predecessor_sha256=predecessor,

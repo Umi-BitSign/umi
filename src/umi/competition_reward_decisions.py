@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_recovery import (
     Block,
@@ -47,10 +47,28 @@ MAX_DECISIONS = 514
 DecisionSource = Callable[[str], bytes]
 
 
+class StandingRewardSeriesPredecessor(StrictProtocolModel):
+    """Exact prior standing selection replaced by a successor series."""
+
+    schema_: Literal["umi-standing-reward-series-predecessor/1"] = Field(alias="schema")
+    series_sha256: Hex32
+    policy_sha256: Hex32
+    manifest_sha256: Hex32
+    recovery_sha256: Hex32
+    cohort_sha256: Hex32
+    cohort_sequence: Annotated[int, Field(ge=1, le=2**32 - 2)]
+    control_hotkey: Hotkey
+    decision_sha256: Hex32
+    activation_sha256: Hex32
+    decision_committed_at_block: Block
+
+
 class StandingRewardSeries(StrictProtocolModel):
     """Selected by the host's approved configuration, never by a remote object."""
 
-    schema_: Literal["umi-standing-reward-series/1"] = Field(alias="schema")
+    schema_: Literal["umi-standing-reward-series/1", "umi-standing-reward-series/2"] = Field(
+        alias="schema"
+    )
     genesis_hash: Literal[FINNEY_GENESIS_HASH]
     netuid: Literal[78]
     policy_sha256: Hex32
@@ -63,11 +81,20 @@ class StandingRewardSeries(StrictProtocolModel):
     maximum_proof_lag_blocks: Annotated[int, Field(ge=1, le=7200)]
     maximum_transaction_lifetime_blocks: Annotated[int, Field(ge=1, le=65536)]
     lifetime: Literal["until_superseded_or_revoked"]
+    predecessor: StandingRewardSeriesPredecessor | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_initial_series_bytes(self, handler):
+        value = handler(self)
+        if self.predecessor is None:
+            value.pop("predecessor", None)
+        return value
 
     @model_validator(mode="after")
     def ordered(self):
         numbers = [p.sequence for p in self.cohorts]
         keys = [identity(k) for k in self.validators]
+        successor = self.schema_ == "umi-standing-reward-series/2"
         if (
             numbers != list(range(numbers[0], numbers[0] + len(numbers)))
             or len({digest(p) for p in self.cohorts}) != len(self.cohorts)
@@ -77,8 +104,17 @@ class StandingRewardSeries(StrictProtocolModel):
             != self.recovery.authority.cohort_sha256s
             or any(p.policy_sha256 != self.policy_sha256 for p in self.cohorts)
             or self.recovery.authority.policy_sha256 != self.policy_sha256
+            or successor != (self.predecessor is not None)
         ):
             raise ValueError("standing series must bind ordered cohorts and standing authority")
+        if self.predecessor is not None and (
+            self.predecessor.policy_sha256 != self.policy_sha256
+            or identity(self.predecessor.control_hotkey) != identity(self.control_hotkey)
+            or numbers[0] != self.predecessor.cohort_sequence + 1
+            or self.recovery.authority.issued_at_block
+            < self.predecessor.decision_committed_at_block
+        ):
+            raise ValueError("successor series differs from its signed predecessor boundary")
         return self
 
 
@@ -93,7 +129,9 @@ class RewardActivation(StrictProtocolModel):
 
 
 class RewardControlDecision(StrictProtocolModel):
-    schema_: Literal["umi-reward-control-decision/1"] = Field(alias="schema")
+    schema_: Literal["umi-reward-control-decision/1", "umi-reward-control-decision/2"] = Field(
+        alias="schema"
+    )
     series_sha256: Hex32
     sequence: Annotated[int, Field(ge=0, le=MAX_DECISIONS - 1)]
     predecessor_sha256: Hex32 | None
@@ -103,9 +141,11 @@ class RewardControlDecision(StrictProtocolModel):
 
     @model_validator(mode="after")
     def shape(self):
+        successor = self.schema_ == "umi-reward-control-decision/2"
         if (
             (self.sequence == 0) != (self.kind == "admit_series")
-            or (self.sequence == 0) != (self.predecessor_sha256 is None)
+            or (self.sequence == 0 and successor != (self.predecessor_sha256 is not None))
+            or (self.sequence != 0 and self.predecessor_sha256 is None)
             or (self.kind == "activate") != (self.activation is not None)
         ):
             raise ValueError("reward decision fields do not match its transition")
@@ -200,10 +240,17 @@ def verify_reward_decisions(
 
 
 def _decision_body(series, policy, index, previous, activated, body):
+    predecessor = None if series.predecessor is None else series.predecessor.decision_sha256
+    expected_schema = (
+        "umi-reward-control-decision/1"
+        if series.predecessor is None
+        else "umi-reward-control-decision/2"
+    )
     if (
-        body.series_sha256 != digest(series)
+        body.schema_ != expected_schema
+        or body.series_sha256 != digest(series)
         or body.sequence != index
-        or body.predecessor_sha256 != (digest(previous) if previous else None)
+        or body.predecessor_sha256 != (digest(previous) if previous else predecessor)
         or (previous is not None and body.observed_at_block < previous.observed_at_block)
         or (previous is not None and previous.kind == "revoke")
         or body.sequence >= len(series.cohorts) + 2
@@ -211,7 +258,12 @@ def _decision_body(series, policy, index, previous, activated, body):
         raise ValueError("reward history changed authority, order, parent or a revoked series")
     if previous is None:
         if not (
-            series.recovery.authority.issued_at_block
+            max(
+                series.recovery.authority.issued_at_block,
+                0
+                if series.predecessor is None
+                else series.predecessor.decision_committed_at_block,
+            )
             <= body.observed_at_block
             <= policy.valid_through_block
         ):
@@ -503,8 +555,15 @@ class StandingRewardControlReader:
                     raise ValueError("retained reward decision is in a different sequence slot")
                 retained[digest(item.decision)] = item
 
+            boundary = (
+                None if self.series.predecessor is None else self.series.predecessor.decision_sha256
+            )
             reversed_chain, key = [], observation.control_sha256
-            while key is not None:
+            while key != boundary:
+                if key is None:
+                    raise ValueError(
+                        "current reward history does not reach its predecessor boundary"
+                    )
                 if len(reversed_chain) >= len(self.series.cohorts) + 2:
                     raise ValueError("current reward history exceeds the admitted series")
                 item = retained.get(key)
