@@ -8,6 +8,12 @@ import pytest
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_cohort_admission_journal import CohortAdmissionVote
 from umi.competition_cohort_admission_queue import CohortAdmissionQueue
+from umi.competition_cohort_direct_model_upload import (
+    DirectModelPayload,
+    DirectModelUploadReservation,
+    SignedDirectModelUploadReservation,
+    direct_model_object_key,
+)
 from umi.competition_cohort_intake import (
     CohortIntake,
     CohortIntakeBinding,
@@ -27,9 +33,9 @@ from umi.competition_cohort_model_acceptance_store import (
     PendingModelArtifacts,
 )
 from umi.competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
-from umi.open_competition import digest
+from umi.open_competition import digest, sign_object
 from umi.private_files import publish_private_model, read_private_model
-from umi.protocol import canonical_json_bytes
+from umi.protocol import canonical_json_bytes, sha256_hex
 
 from .test_competition_cohort_execution import setup_scenario
 from .test_competition_cohort_intake import capture_at
@@ -237,12 +243,114 @@ async def test_recurring_worker_recovers_lost_export_ack_without_rpc_or_inputs(
             ).read_bytes() == canonical_json_bytes(body)
 
 
+async def test_worker_promotes_before_publication_and_retries_retained_acceptances(
+    prepared, tmp_path
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    publications = {digest(sub): certify(owner, cohort, sub, inputs) for sub in subs}
+    for key, value in publications.items():
+        publish_private_model(
+            root / "model-acceptance-publications" / cohort / (key + ".json"), value
+        )
+    publish_private_model(root / "model-reviews" / (inputs.model_sha256 + ".json"), inputs)
+    failed = digest(subs[0])
+    calls = []
+
+    async def capture():
+        return capture_at(220)
+
+    async def promote(publication):
+        key = publication.certificate.acceptance.submission_sha256
+        calls.append(key)
+        if key == failed or calls.count(key) == 1:
+            with pytest.raises(PendingModelArtifacts):
+                owner.retained(cohort, key)
+        else:
+            owner.retained(cohort, key)
+        if key == failed and calls.count(key) == 1:
+            raise OSError("promotion acknowledgement lost")
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out, promote=promote)
+    first = await worker.poll_once()
+    assert first["entries_exported"] == 1
+    assert first["entries_pending"] == 1
+    with pytest.raises(PendingModelArtifacts):
+        owner.retained(cohort, failed)
+
+    second = await worker.poll_once()
+    assert second["entries_exported"] == 2
+    assert second["entries_pending"] == 0
+    assert calls.count(failed) == 2
+    assert calls.count(digest(subs[1])) == 2
+
+
 def test_missing_payload_cannot_reserve_a_model_position(prepared):
     owner, cohort, subs, inputs = prepared
     owner.archive.rename(owner.archive.with_name("payload-offline"))
     with pytest.raises(FileNotFoundError):
         owner.prepare(cohort, digest(subs[0]), inputs, capture_at(220))
     assert owner.intent(cohort, digest(subs[0])) is None
+
+
+def test_direct_acceptance_retains_exact_owner_reservation_without_local_archive(
+    prepared, tmp_path
+):
+    owner, cohort, subs, inputs = prepared
+    retained = {}
+    verified = []
+
+    def artifact(request):
+        key = digest(request)
+        if key not in retained:
+            submission = request.signed_submission.submission
+            bundle = submission.model_bundle
+            total = sum(record.size_bytes for record in bundle.files)
+            attempt = "a1" * 32
+            object_key = direct_model_object_key(cohort, key, attempt)
+            payload = DirectModelPayload(
+                schema="umi-direct-model-payload/1",
+                upload_sha256=key,
+                model_sha256=digest(bundle),
+                payload_sha256="b2" * 32,
+                total_bytes=total,
+                file_count=len(bundle.files),
+                part_size_bytes=5 * 1024**2,
+                total_parts=1,
+            )
+            reservation = DirectModelUploadReservation(
+                schema="umi-direct-model-upload-reservation/1",
+                cohort_sha256=cohort,
+                hotkey=submission.hotkey,
+                payload=payload,
+                attempt_id=attempt,
+                generation=1,
+                object_key_sha256=sha256_hex(object_key.encode()),
+                provider_upload_id_sha256="c3" * 32,
+                created_at_unix_ms=1_800_000_000_000,
+            )
+            retained[key] = SignedDirectModelUploadReservation(
+                schema="umi-signed-direct-model-upload-reservation/1",
+                reservation=reservation,
+                signature=sign_object(reservation, wallet("Charlie")),
+            )
+        return retained[key]
+
+    direct = CohortModelAcceptances(
+        owner.intake,
+        tmp_path / "no-local-candidate-archive",
+        verify_request=lambda request: verified.append(digest(request)),
+        review_artifact=artifact,
+    )
+    publication = certify(direct, cohort, subs[0], inputs)
+    acceptance = publication.certificate.acceptance
+    assert acceptance.schema_ == "umi-cohort-model-artifact-acceptance/2"
+    assert acceptance.direct_artifact == artifact(
+        direct.review_request(cohort, digest(subs[0])).record.request
+    )
+    direct.publish(publication, capture_at(220))
+    assert direct.retained(cohort, digest(subs[0])).certificate == publication.certificate
+    assert verified == [acceptance.direct_artifact.reservation.payload.upload_sha256] * 2
 
 
 def test_concurrent_identical_proposals_keep_one_position(prepared, monkeypatch):

@@ -21,8 +21,11 @@ from .competition_client import (
     validate_intake_origin,
 )
 from .competition_cohort_client import submit_cohort_participation
+from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
+from .competition_cohort_intake import history_tip
 from .competition_cohort_model_upload import CHUNK_BYTES, ModelUploadChunk
 from .competition_cohort_participation import CohortParticipationReceipt, CohortParticipationRequest
+from .competition_cohort_recovery import ModelDeliveryProfile, cohort_model_delivery
 from .concurrency import run_owned_thread
 from .open_competition import (
     BundleFile,
@@ -165,6 +168,53 @@ async def _exchange(
         raise CompetitionSubmissionError("model_upload_transport_unavailable") from error
 
 
+async def fetch_model_delivery_profile(
+    *,
+    origin: str,
+    policy: CompetitionPolicy,
+    cohort_sha256: str,
+    transport: httpx.AsyncBaseTransport | None,
+    retry_seconds: float,
+    report: _Report,
+) -> ModelDeliveryProfile:
+    async with httpx.AsyncClient(
+        base_url=origin,
+        transport=transport,
+        timeout=httpx.Timeout(60, connect=10),
+        follow_redirects=False,
+        trust_env=False,
+        headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+    ) as client:
+        raw = await _retry(
+            lambda: _exchange(
+                client,
+                "GET",
+                f"/v1/competition/cohorts/{cohort_sha256}/history",
+            ),
+            retry_seconds,
+            report,
+        )
+    try:
+        history = CohortRecoveryHistory.model_validate_json(raw)
+        current = max(
+            (
+                history.genesis.admitted_at_block,
+                *(transition.transition.observed_at_block for transition in history.transitions),
+            )
+        )
+        verify_cohort_history(
+            history,
+            policy,
+            expected_tip_sha256=history_tip(history),
+            current_block=current,
+        )
+        if digest(history.plan) != cohort_sha256:
+            raise ValueError("cohort history identity differs")
+        return cohort_model_delivery(history.plan)
+    except ValueError as error:
+        raise CompetitionSubmissionError("invalid_model_upload_status") from error
+
+
 async def submit_cohort_model(
     *,
     origin: str,
@@ -172,15 +222,18 @@ async def submit_cohort_model(
     request: CohortParticipationRequest,
     source: Path,
     wallet: Any,
+    delivery: ModelDeliveryProfile | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    object_transport: httpx.AsyncBaseTransport | None = None,
     retry_seconds: float = 2,
     report: _Report = lambda _: None,
 ) -> CohortParticipationReceipt:
-    """Resume bounded signed chunks; enroll only after native byte preservation.
+    """Use the signed cohort transport; enroll only after native byte verification.
 
-    Transient failures retry without a cohort deadline. Cancellation leaves server
-    offsets intact; rerun with the same request and source. No request is renewed
-    or re-signed, and this intake receipt is not certification or reward activation.
+    Transient failures retry without a cohort deadline. Cancellation leaves the
+    retained server reservation intact; rerun with the same request and source.
+    No request is renewed or re-signed, and this intake receipt is not
+    certification or reward activation.
     """
     import bittensor as bt
 
@@ -203,6 +256,33 @@ async def submit_cohort_model(
     bundle = sub.model_bundle
     source = Path(os.path.abspath(source))  # Preserve symlinks for the no-follow reader.
     fingerprints = await run_owned_thread(_verify_source, source, bundle, policy)
+    if delivery is None:
+        delivery = await fetch_model_delivery_profile(
+            origin=origin,
+            policy=policy,
+            cohort_sha256=request.consent.consent.cohort_sha256,
+            transport=transport,
+            retry_seconds=retry_seconds,
+            report=report,
+        )
+    else:
+        delivery = ModelDeliveryProfile.model_validate_json(canonical_json_bytes(delivery))
+    if delivery.mechanism == "direct_r2_multipart_v1":
+        from .competition_cohort_direct_model_client import submit_direct_cohort_model
+
+        return await submit_direct_cohort_model(
+            origin=origin,
+            policy=policy,
+            request=request,
+            source=source,
+            wallet=wallet,
+            delivery=delivery,
+            fingerprints=fingerprints,
+            transport=transport,
+            object_transport=object_transport,
+            retry_seconds=retry_seconds,
+            report=report,
+        )
     key = digest(request)
     path = f"/v1/competition/model-uploads/{key}"
 

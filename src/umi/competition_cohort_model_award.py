@@ -7,6 +7,7 @@ their original review evidence and verify permission to distribute the bundle.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
@@ -24,6 +25,7 @@ from .competition_cohort_orders import SignedRecoverableEvaluationOrder
 from .competition_cohort_quality import ClosedQualityReview, ExactQuality
 from .competition_cohort_quality_signing import CohortQualityManifest, review_quality_manifest
 from .competition_cohort_recovery import ModelRewardCohortAuthority
+from .competition_cohort_roster import RecoverableRosterParticipant
 from .open_competition import Hotkey, digest, model_content_digest
 from .private_files import read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -226,6 +228,9 @@ ModelAward = Annotated[
     Field(discriminator="schema_"),
 ]
 MODEL_AWARD_ADAPTER = TypeAdapter(ModelAward)
+ModelArtifactVerifier = Callable[
+    [CertifiedModelArtifactAcceptance, RecoverableRosterParticipant], None
+]
 
 
 class PendingModelAward(ValueError):
@@ -252,6 +257,8 @@ def build_model_award(
     review: ClosedQualityReview,
     acceptances: tuple[CertifiedModelArtifactAcceptance, ...],
     archive: Path,
+    *,
+    verify_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortModelAward | ProportionalModelAward | QualityBucketModelAward:
     """Replay every model and apply the rule selected before intake.
 
@@ -312,7 +319,10 @@ def build_model_award(
         # A signed digest without its evidence is insufficient for recovery.
         read_endpoint_object(review.objects, a.rights_evidence_sha256)
         read_endpoint_object(review.objects, a.reconstruction_evidence_sha256)
-        verify_preserved_bundle(bundle, archive, review.policy)
+        if verify_artifact is None:
+            verify_preserved_bundle(bundle, archive, review.policy)
+        else:
+            verify_artifact(certificate, p)
         order = SignedRecoverableEvaluationOrder.model_validate_json(
             read_endpoint_object(review.objects, result.order_sha256)
         ).order

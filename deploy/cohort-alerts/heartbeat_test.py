@@ -4,7 +4,10 @@ import asyncio
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from heartbeat import heartbeat, read_journal, standing_progress, successor_healthy
@@ -37,6 +40,54 @@ class HeartbeatTests(unittest.TestCase):
             heartbeat(["first.service", "second.service"])["services"],
             {"first.service": "running", "second.service": "failed"},
         )
+
+    @patch("heartbeat.shutil.disk_usage")
+    @patch("heartbeat.subprocess.run")
+    def test_storage_heartbeat_exports_only_named_available_bytes(self, run, disk_usage):
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
+        disk_usage.return_value = SimpleNamespace(free=12 * 1024**3)
+        result = heartbeat(
+            ["vali.service"],
+            storage_paths={"coordinator-root/available_bytes": "/"},
+        )
+        self.assertEqual(result["schema"], "umi-service-heartbeat/3")
+        self.assertEqual(
+            result["resources"],
+            {"coordinator-root/available_bytes": 12 * 1024**3},
+        )
+        disk_usage.assert_called_once_with(Path("/"))
+
+    @patch("heartbeat.subprocess.run")
+    def test_invalid_or_unavailable_storage_does_not_refresh_heartbeat(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
+        for paths in (
+            [],
+            {"bad": "/"},
+            {"root/available_bytes": "relative"},
+            {f"disk-{n}/available_bytes": "/" for n in range(11)},
+        ):
+            with self.assertRaises((ValueError, RuntimeError)):
+                heartbeat(["vali.service"], storage_paths=paths)
+        with self.assertRaisesRegex(RuntimeError, "storage_status_unavailable"):
+            heartbeat(
+                ["vali.service"],
+                storage_paths={"missing/available_bytes": "/definitely/missing"},
+            )
+
+    @patch("heartbeat.subprocess.run")
+    def test_storage_path_rejects_symlinked_parent(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "storage_status_unavailable"):
+                heartbeat(
+                    ["vali.service"],
+                    storage_paths={"scratch/available_bytes": str(alias)},
+                )
 
     @patch("heartbeat.subprocess.run", side_effect=subprocess.TimeoutExpired("systemctl", 5))
     def test_query_timeout_does_not_refresh_the_heartbeat(self, run):

@@ -498,6 +498,8 @@ class PinnedHTTPSClient:
                 raise ValidatorSupervisorAdapterError("https_header_limit")
             if response.status_code == 404:
                 raise ValidatorSupervisorAdapterError("https_not_found")
+            if response.status_code in {408, 425, 429} or 500 <= response.status_code <= 599:
+                raise ValidatorSupervisorAdapterError("https_status_retryable")
             if response.status_code != 200:
                 raise ValidatorSupervisorAdapterError("https_status_invalid")
             if response.headers.get("content-encoding", "").lower() not in {"", "identity"}:
@@ -562,6 +564,18 @@ class PinnedHTTPSClient:
 class HTTPSDirectiveFetcher:
     """Fetch cursor-bound pages beneath one exact locally configured HTTPS base."""
 
+    _RETRY_DELAYS_SECONDS = (1.0, 2.0)
+    _RETRYABLE_REASONS = frozenset(
+        {
+            "https_dns_failed",
+            "https_not_found",
+            "https_partial_body",
+            "https_status_retryable",
+            "https_timeout",
+            "https_transport_failed",
+        }
+    )
+
     def __init__(
         self, config: ValidatorSupervisorConfig, *, client: PinnedHTTPSClient | None = None
     ):
@@ -587,14 +601,20 @@ class HTTPSDirectiveFetcher:
             raise ValidatorSupervisorAdapterError("directive_cursor_invalid")
         digest = "initial" if after_directive_sha256 is None else after_directive_sha256
         page_url = f"{self._url}/after/{after_sequence}/{digest}.json"
-        try:
-            return await self._client.fetch_bytes(
-                page_url, maximum_bytes=MAX_SUPERVISOR_DOCUMENT_BYTES
-            )
-        except ValidatorSupervisorAdapterError as error:
-            if error.reason_code == "https_not_found":
-                return None
-            raise
+        for attempt in range(len(self._RETRY_DELAYS_SECONDS) + 1):
+            try:
+                return await self._client.fetch_bytes(
+                    page_url, maximum_bytes=MAX_SUPERVISOR_DOCUMENT_BYTES
+                )
+            except ValidatorSupervisorAdapterError as error:
+                if error.reason_code not in self._RETRYABLE_REASONS:
+                    raise
+                if attempt == len(self._RETRY_DELAYS_SECONDS):
+                    if error.reason_code == "https_not_found":
+                        return None
+                    raise
+                await asyncio.sleep(self._RETRY_DELAYS_SECONDS[attempt])
+        raise AssertionError("unreachable directive fetch retry state")
 
 
 class FinneyFinalizedBlockReader:

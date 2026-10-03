@@ -20,6 +20,7 @@ from umi.competition_cohort_participation import (
     CohortParticipationRequest,
     SignedCohortParticipationConsent,
 )
+from umi.competition_cohort_recovery import ModelDeliveryProfile
 from umi.competition_commands import COMMAND_HANDLERS
 from umi.competition_commands.arguments import build_parser
 from umi.concurrency import run_owned_thread
@@ -59,6 +60,10 @@ def options(h, transport=None):
         request=h.request,
         source=h.source,
         wallet=wallet("Alice"),
+        delivery=ModelDeliveryProfile(
+            schema="umi-model-delivery-profile/1",
+            mechanism="coordinator_chunked_v1",
+        ),
         retry_seconds=0.001,
         transport=transport or httpx.ASGITransport(h.app),
     )
@@ -88,6 +93,31 @@ def restart(h):
         cohort_routes(h.intake, h.capture, maximum_body_bytes=4 * 1024**2, models=h.owner)
     )
     h.app.include_router(model_upload_routes(h.owner, h.capture))
+
+
+async def test_signed_history_selects_legacy_delivery(delivery, monkeypatch):
+    h = delivery
+    args = options(h)
+    args.pop("delivery")
+    discovered = []
+    native_discovery = client.fetch_model_delivery_profile
+
+    async def discover(**values):
+        result = await native_discovery(**values)
+        discovered.append(result)
+        return result
+
+    monkeypatch.setattr(client, "fetch_model_delivery_profile", discover)
+    async with preservation(h):
+        receipt = await asyncio.wait_for(client.submit_cohort_model(**args), 15)
+
+    assert receipt.status == "pending_attestation"
+    assert discovered == [
+        ModelDeliveryProfile(
+            schema="umi-model-delivery-profile/1",
+            mechanism="coordinator_chunked_v1",
+        )
+    ]
 
 
 async def test_public_upload_recovers_outage_throttle_lost_ack_and_restart(delivery, monkeypatch):

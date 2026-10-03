@@ -4,11 +4,15 @@ import argparse
 import asyncio
 import json
 import re
+import shutil
+import stat
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+_STORAGE_METRIC = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}/available_bytes")
 
 
 async def _read_journal(service, *, pattern, since, maximum_entries):
@@ -127,7 +131,7 @@ def successor_healthy(service, invocation_id):
     return False
 
 
-def heartbeat(services, standing_services=(), successor_services=()):
+def heartbeat(services, standing_services=(), successor_services=(), storage_paths=None):
     if not services or len(services) > 20 or len(set(services)) != len(services):
         raise ValueError("invalid services")
     if (
@@ -142,6 +146,20 @@ def heartbeat(services, standing_services=(), successor_services=()):
         or not set(successor_services) <= set(services)
     ):
         raise ValueError("invalid successor services")
+    storage_paths = {} if storage_paths is None else storage_paths
+    if (
+        not isinstance(storage_paths, dict)
+        or len(storage_paths) > 10
+        or any(
+            not isinstance(name, str)
+            or _STORAGE_METRIC.fullmatch(name) is None
+            or not isinstance(raw_path, str)
+            or not 1 <= len(raw_path) <= 4096
+            or not Path(raw_path).is_absolute()
+            for name, raw_path in storage_paths.items()
+        )
+    ):
+        raise ValueError("invalid storage paths")
     states = {}
     for service in services:
         if not re.fullmatch(r"[A-Za-z0-9@_.-]{1,100}\.service", service):
@@ -165,7 +183,10 @@ def heartbeat(services, standing_services=(), successor_services=()):
                 check=False,
             )
             fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-            if result.returncode or not {"ActiveState", "SubState", "InvocationID"} <= fields.keys():
+            if (
+                result.returncode
+                or not {"ActiveState", "SubState", "InvocationID"} <= fields.keys()
+            ):
                 raise RuntimeError("service_status_unavailable")
             ok = fields["ActiveState"] == "active" and fields["SubState"] == "running"
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -184,6 +205,24 @@ def heartbeat(services, standing_services=(), successor_services=()):
             for service in standing_services
             for name, value in standing_progress(service).items()
         }
+    if storage_paths:
+        resources = {}
+        for name, raw_path in storage_paths.items():
+            path = Path(raw_path)
+            try:
+                metadata = path.lstat()
+                if not stat.S_ISDIR(metadata.st_mode) or any(
+                    candidate.is_symlink() for candidate in (path, *path.parents)
+                ):
+                    raise OSError("storage path is not a direct directory")
+                available = shutil.disk_usage(path).free
+                if type(available) is not int or not 0 <= available < 2**53:
+                    raise OSError("storage value is outside protocol bounds")
+            except OSError as error:
+                raise RuntimeError("storage_status_unavailable") from error
+            resources[name] = available
+        result["schema"] = "umi-service-heartbeat/3"
+        result["resources"] = resources
     return result
 
 
@@ -208,6 +247,7 @@ def main():
                 config["services"],
                 config.get("standing_services", []),
                 config.get("successor_services", []),
+                config.get("storage_paths", {}),
             )
         ).encode(),
         headers={

@@ -19,6 +19,7 @@ from .competition_cohort_admission_journal import CohortAdmissionJournal
 from .competition_cohort_admission_signer import CohortAdmissionSigner
 from .competition_cohort_benchmark_host import BenchmarkHost
 from .competition_cohort_clip_delivery import CohortClipDelivery
+from .competition_cohort_direct_model_review import DirectModelArtifactReviewer
 from .competition_cohort_endpoint_host import EndpointHost
 from .competition_cohort_endpoint_vote_http import endpoint_vote_routes
 from .competition_cohort_model_review import ModelArtifactReviewer
@@ -111,6 +112,8 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             },
         )
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+        models = None
+        direct_artifacts = None
         for phase in ("intake", "preparation", "requests"):
             app.include_router(
                 phase_vote_routes(
@@ -154,8 +157,22 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
             )
             if config.model_signing is not None:
+                direct_artifacts = (
+                    None
+                    if config.direct_model_review is None
+                    else DirectModelArtifactReviewer(
+                        config.direct_model_review,
+                        config.policy,
+                        config.owner_hotkey,
+                    )
+                )
                 models = ModelArtifactReviewer(
-                    config.model_signing, config.policy, provider.collect, history, sign
+                    config.model_signing,
+                    config.policy,
+                    provider.collect,
+                    history,
+                    sign,
+                    direct_review=(None if direct_artifacts is None else direct_artifacts.review),
                 )
                 await run_owned_thread(
                     models.journal.put,
@@ -179,7 +196,16 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             resources.callback(
                 os.close, lock_private_file(Path(config.benchmark.directory) / "service.lock")
             )
-            benchmark = BenchmarkHost(config, provider, client, owner_token, vote_token, sign)
+            benchmark = BenchmarkHost(
+                config,
+                provider,
+                client,
+                owner_token,
+                vote_token,
+                sign,
+                model_reviewer=models,
+                direct_artifacts=direct_artifacts,
+            )
             app.include_router(benchmark.routes)
             app.state.benchmark = benchmark
             if config.endpoint is not None:

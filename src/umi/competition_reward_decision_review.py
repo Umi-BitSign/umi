@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from .competition_cohort_model_award import ModelArtifactVerifier
 from .competition_cohort_reward_package import (
     DEFAULT_PACKAGE_BYTES,
     CohortRewardPackage,
@@ -94,6 +95,7 @@ def review_reward_decision(
     previous_opportunity: VerifiedRewardOpportunity | None = None,
     maximum_promotion_bytes: int,
     maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> ReviewedRewardDecision:
     """Replay at the proposal's original finalized block; elapsed time is irrelevant.
 
@@ -180,6 +182,7 @@ def review_reward_decision(
             expected_catalog_sha256s=requirement.catalog_sha256s,
             maximum_promotion_bytes=maximum_promotion_bytes,
             maximum_bytes=maximum_package_bytes,
+            verify_model_artifact=verify_model_artifact,
         )
         if digest(allocation) != activation.allocation_sha256:
             raise ValueError("reward proposal allocation differs from native package replay")

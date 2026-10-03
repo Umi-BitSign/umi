@@ -4,6 +4,7 @@ import { Monitor } from "./monitor.mjs";
 
 export class CohortMonitor extends DurableObject {
   monitor() {
+    const resourceMinimums = JSON.parse(this.env.RESOURCE_MINIMUMS || "{}");
     return new Monitor(this.ctx.storage, notice => this.env.EMAIL.send({
       to: this.env.ALERT_TO,
       from: this.env.ALERT_FROM,
@@ -15,12 +16,15 @@ export class CohortMonitor extends DurableObject {
         `Last heartbeat (UTC): ${new Date(notice.received_at).toISOString()}`,
         `Failed services: ${notice.failed.join(", ") || "none reported"}`,
         `Stalled or missing progress: ${notice.stalled?.join(", ") || "none reported"}`,
+        `Low resources: ${notice.low?.map(name =>
+          `${name}=${notice.resources[name]} bytes (minimum ${resourceMinimums[name]})`
+        ).join(", ") || "none reported"}`,
         "",
         "Observations come from the configured host. A weight update does not",
         "by itself establish correct allocation or received reward payments.",
       ].join("\n"),
     }), this.env.EXPECTED_SERVICES.split(","), Date.now,
-    JSON.parse(this.env.PROGRESS_LIMITS || "{}"));
+    JSON.parse(this.env.PROGRESS_LIMITS || "{}"), resourceMinimums);
   }
   async heartbeat(value) { return this.monitor().heartbeat(value); }
   async status() { return this.monitor().status(); }

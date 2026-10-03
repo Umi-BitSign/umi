@@ -16,10 +16,12 @@ from .competition_cohort_coordinator import (
     CohortRecoveryCoordinator,
     replay_cohort_decisions,
 )
+from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from .competition_cohort_endpoint_archive import JournalEndpointObjects
 from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
+from .competition_cohort_model_award import read_model_acceptances
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery import RecoverableCohortPlan
 from .competition_cohort_recovery_store import CohortRecoveryStore
@@ -67,6 +69,7 @@ class CohortSettlementService:
         promotion: CompetitionStore,
         executions: tuple[CohortExecutionJournal, ...],
         sign: Callable[..., Awaitable[Signature]],
+        model_artifacts: DirectModelSettlementVerifier | None = None,
     ):
         if plan not in config.series.cohorts or provider.policy != config.policy:
             raise ValueError("settlement service differs from its selected series or provider")
@@ -80,6 +83,7 @@ class CohortSettlementService:
             executions,
             sign,
         )
+        self.model_artifacts = model_artifacts
         root = Path(config.state_directory) / digest(config.series) / self.cohort
         binding = {
             "schema": "umi-cohort-settlement-owner/1",
@@ -334,6 +338,9 @@ class CohortSettlementService:
             output_directory=Path(self.config.settlement_directory),
             maximum_promotion_bytes=self.config.maximum_promotion_bytes,
             maximum_package_bytes=self.config.maximum_package_bytes,
+            verify_model_artifact=(
+                None if self.model_artifacts is None else self.model_artifacts.verify_candidate
+            ),
         )
         self.votes = (
             None
@@ -399,6 +406,25 @@ class CohortSettlementService:
             *self.batch_votes,
         )
 
+    async def _ensure_model_artifacts(self) -> None:
+        if self.model_artifacts is None:
+            return
+        review = self.data.quality
+        if review is None:
+            raise OSError("direct model settlement awaits closed quality inputs")
+        certificates = await run_owned_thread(
+            read_model_acceptances,
+            self.promotion.directory / "model-reward-acceptances",
+            review,
+        )
+        participants = tuple(
+            participant
+            for participant in review.roster.participants
+            if participant.record.request.signed_submission.submission.track == "model"
+        )
+        for participant, certificate in zip(participants, certificates, strict=True):
+            await self.model_artifacts.ensure(participant, certificate)
+
     async def _publish_history(self, history):
         sources = tuple(
             self._decisions(t.transition.evidence_sha256)
@@ -427,6 +453,8 @@ class CohortSettlementService:
             return "package_published"
         if self.phases is None or self.reference != (state.phase == "reference_reveal"):
             await self._start(history)
+        if state.phase in {"certification", "first_admission", "complete"}:
+            await self._ensure_model_artifacts()
         if self.config.role == "coordinator":
             await run_owned_thread(
                 partial(

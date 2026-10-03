@@ -265,6 +265,39 @@ def test_missing_local_artifact_blocks_award_and_restores_without_new_quality(mo
     assert canonical_json_bytes(award(model_case, review=late)) == canonical_json_bytes(result)
 
 
+def test_settlement_verifier_allows_direct_candidate_without_local_archive(model_case):
+    import shutil
+
+    b, review, manifest, accepted, archive = model_case
+    participant = b["roster"].participants[0]
+    submission = participant.record.request.signed_submission.submission
+    candidate_path = archive / digest(submission.model_bundle)
+    baseline_paths = tuple(
+        path for path in archive.iterdir() if path.is_dir() and path != candidate_path
+    )
+    assert len(baseline_paths) == 1
+    baseline_path = baseline_paths[0]
+    shutil.rmtree(candidate_path)
+
+    verified = []
+
+    def verify_artifact(certificate, selected):
+        assert certificate == accepted[0]
+        assert selected == participant
+        verified.append(certificate.acceptance.submission_sha256)
+
+    result = build_model_award(
+        manifest,
+        review,
+        accepted,
+        archive,
+        verify_artifact=verify_artifact,
+    )
+    assert verified == [accepted[0].acceptance.submission_sha256]
+    assert baseline_path.is_dir()
+    assert result.candidates[0].model_sha256 == digest(submission.model_bundle)
+
+
 def test_quality_object_cannot_be_replaced_by_a_signed_score_only(model_case):
     b, _, manifest, _, _ = model_case
     b["objects"].pop(manifest.participants[0].certificate_sha256)

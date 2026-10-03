@@ -15,6 +15,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 
+from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_publisher import StandingControlPublisher
 from .competition_reward_decision_review import ReviewedRewardDecision, review_reward_decision
@@ -66,6 +67,7 @@ class StandingRewardDecisionReviewer:
         opportunity: Callable[[RewardActivation], Awaitable[VerifiedRewardOpportunity]],
         maximum_promotion_bytes: int,
         maximum_history_blocks: int = 64,
+        model_artifacts: DirectModelSettlementVerifier | None = None,
     ):
         if (
             type(reader) is not StandingRewardControlReader
@@ -99,6 +101,7 @@ class StandingRewardDecisionReviewer:
         self.store, self.handoff = promotion_store, handoff
         self.maximum_history_blocks = maximum_history_blocks
         self.opportunity, self.maximum_promotion_bytes = opportunity, maximum_promotion_bytes
+        self.model_artifacts = model_artifacts
 
     async def review(self, body: RewardControlDecision, prefix: Prefix) -> ReviewedRewardDecision:
         p = self
@@ -117,6 +120,15 @@ class StandingRewardDecisionReviewer:
         package, opportunity = None, None
         if body.activation is not None:
             package = await run_owned_thread(p.files.package, body.activation.package_sha256)
+            if p.model_artifacts is not None and package.allocation.model_award is not None:
+                participants = tuple(
+                    participant
+                    for participant in package.inputs.roster.participants
+                    if participant.record.request.signed_submission.submission.track == "model"
+                )
+                await p.model_artifacts.ensure_all(
+                    participants, package.allocation.model_award.acceptances
+                )
             if body.sequence > 1:
                 # A peer can first join at a later cohort. Recover its selected
                 # predecessor before the opportunity reader looks it up locally.
@@ -142,6 +154,9 @@ class StandingRewardDecisionReviewer:
                 previous_opportunity=opportunity,
                 maximum_promotion_bytes=self.maximum_promotion_bytes,
                 maximum_package_bytes=p.files.maximum_package_bytes,
+                verify_model_artifact=(
+                    None if p.model_artifacts is None else p.model_artifacts.verify_candidate
+                ),
             )
         )
 

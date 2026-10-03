@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Awaitable, Callable
 from functools import partial
+from typing import Protocol
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import ValidationError
@@ -15,7 +16,6 @@ from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_intake_records import read_participation
-from .competition_cohort_model_upload import CohortModelUploads
 from .competition_cohort_participation import CohortAdmissionStatus, CohortParticipationRequest
 from .competition_cohort_readiness import intake_readiness
 from .competition_execution import ExecutionBoundary
@@ -24,13 +24,19 @@ from .concurrency import run_owned_thread
 from .open_competition import digest
 
 
+class CohortModelPayloads(Protocol):
+    def require_payload(self, request: CohortParticipationRequest) -> None: ...
+
+    def delivery_route(self, cohort: str) -> dict[str, str]: ...
+
+
 def cohort_routes(
     intake: CohortIntake,
     capture: Callable[[], Awaitable[RegistrationCapture]],
     *,
     maximum_body_bytes: int,
     archive: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]] | None = None,
-    models: CohortModelUploads | None = None,
+    models: CohortModelPayloads | None = None,
 ) -> APIRouter:
     router = APIRouter()
     queue = CohortAdmissionQueue(intake)
@@ -48,6 +54,22 @@ def cohort_routes(
                 history = await run_owned_thread(intake.history, cohort)
             except (ValueError, OSError, sqlite3.Error) as error:
                 raise HTTPException(503, "cohort history unavailable; retry later") from error
+            model_route = {}
+            if models is not None:
+                route = getattr(models, "delivery_route", None)
+                owners = getattr(models, "owners", None)
+                if callable(route):
+                    model_route = route(cohort)
+                elif owners is not None and cohort in owners:
+                    model_route = {
+                        "direct_model_upload_url": (
+                            f"/v1/competition/cohorts/{cohort}/direct-model-uploads"
+                        )
+                    }
+                elif owners is None:
+                    model_route = {
+                        "model_upload_url": f"/v1/competition/cohorts/{cohort}/model-uploads"
+                    }
             entries.append(
                 {
                     "cohort_sha256": cohort,
@@ -56,11 +78,7 @@ def cohort_routes(
                     "history_url": f"/v1/competition/cohorts/{cohort}/history",
                     "participation_url": f"/v1/competition/cohorts/{cohort}/participation",
                     "admissions_url": f"/v1/competition/cohorts/{cohort}/admissions",
-                    **(
-                        {"model_upload_url": f"/v1/competition/cohorts/{cohort}/model-uploads"}
-                        if models is not None
-                        else {}
-                    ),
+                    **model_route,
                 }
             )
         return {"schema": "umi-public-cohorts/1", "cohorts": entries}

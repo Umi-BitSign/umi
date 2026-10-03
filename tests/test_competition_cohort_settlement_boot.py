@@ -8,12 +8,19 @@ import pytest
 
 from umi import competition_cohort_settlement_boot as boot
 from umi import competition_cohort_settlement_cli as cli
+from umi.competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from umi.competition_cohort_execution_journal import CohortExecutionConfig
+from umi.competition_cohort_intake import CohortIntakeBinding
+from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
+from umi.competition_cohort_recovery import (
+    ModelDeliveryProfile,
+    SignedCohortRecoveryAuthority,
+)
 from umi.competition_cohort_settlement_config import (
     SettlementServiceConfig,
     load_settlement_service_config,
 )
-from umi.open_competition import digest, verify_signature
+from umi.open_competition import digest, identity, sign_object, verify_signature
 from umi.private_files import lock_private_file
 from umi.protocol import canonical_json_bytes
 
@@ -278,6 +285,103 @@ def test_request_export_is_explicit_private_configuration(selected, tmp_path, fa
         value = SettlementServiceConfig.model_validate_json(canonical_json_bytes(data))
         selected.save(selected.path, canonical_json_bytes(value))
         assert load_settlement_service_config(selected.path) == value
+
+
+def test_direct_series_requires_read_only_settlement_source(selected, tmp_path):
+    c = selected.config
+    plans = list(c.series.cohorts)
+    plans[-1] = plans[-1].model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/3",
+            "eligible_tracks": ("model",),
+            "service_pool_bps": 0,
+            "model_delivery": ModelDeliveryProfile(
+                schema="umi-model-delivery-profile/1",
+                mechanism="direct_r2_multipart_v1",
+                part_size_bytes=64 * 1024**2,
+                maximum_concurrent_parts=4,
+                capability_ttl_seconds=3600,
+            ),
+        }
+    )
+    plans = tuple(plans)
+    authority = c.series.recovery.authority.model_copy(
+        update={"cohort_sha256s": tuple(sorted(digest(plan) for plan in plans))}
+    )
+    recovery = SignedCohortRecoveryAuthority(
+        authority=authority,
+        signatures=tuple(
+            sorted(
+                (sign_object(authority, wallet(name)) for name in ("Charlie", "Dave")),
+                key=lambda signature: identity(signature.hotkey),
+            )
+        ),
+    )
+    manifest = c.manifest.model_copy(
+        update={
+            "cohorts": tuple(
+                requirement.model_copy(update={"cohort_sha256": digest(plan)})
+                for requirement, plan in zip(c.manifest.cohorts, plans, strict=True)
+            )
+        }
+    )
+    series = c.series.model_copy(
+        update={
+            "cohorts": plans,
+            "recovery": recovery,
+            "manifest_sha256": digest(manifest),
+        }
+    )
+    cohorts = tuple(
+        CohortIntakeBinding(cohort_sha256=digest(plan), authority_sha256=digest(authority))
+        for plan in sorted(plans, key=digest)
+    )
+    execution = c.executions[0].model_copy(update={"cohorts": cohorts})
+    standing = StandingModelReviewPolicy(
+        schema="umi-standing-model-artifact-review-policy/1",
+        competition_policy_sha256=digest(c.policy),
+        contribution_terms_sha256=c.policy.contribution_terms_sha256,
+        standing_approval_record_sha256="ab" * 32,
+        approved_by="operator@example.test",
+        approved_at_utc="2026-10-02T12:00:00Z",
+        complete_declared_bundle_rights_approved=True,
+        licenses_and_notices_reviewed=True,
+        public_redistribution_and_evaluation_approved=True,
+    )
+    source = DirectModelReviewSourceConfig(
+        schema="umi-direct-model-review-source/2",
+        r2_credentials_file=str(tmp_path / "r2-reader.env"),
+        r2_bucket="umi-model-artifacts",
+        materialization_protected_roots=(str(tmp_path / "protected-state"),),
+        standing_review_policy=standing,
+    )
+    direct = c.model_copy(
+        update={
+            "schema_": "umi-cohort-settlement-config/4",
+            "series": series,
+            "manifest": manifest,
+            "executions": (execution,),
+            "request_export_directory": str(tmp_path / "request-exports"),
+            "direct_model_review": source,
+        }
+    )
+    assert SettlementServiceConfig.model_validate_json(canonical_json_bytes(direct)) == direct
+    with pytest.raises(ValueError, match="version four"):
+        SettlementServiceConfig.model_validate_json(
+            canonical_json_bytes(direct.model_copy(update={"direct_model_review": None}))
+        )
+    with pytest.raises(ValueError, match="version four"):
+        SettlementServiceConfig.model_validate_json(
+            canonical_json_bytes(
+                c.model_copy(
+                    update={
+                        "schema_": "umi-cohort-settlement-config/4",
+                        "request_export_directory": str(tmp_path / "legacy-exports"),
+                        "direct_model_review": source,
+                    }
+                )
+            )
+        )
 
 
 @pytest.mark.parametrize("failure", [None, "construction", "runtime"])

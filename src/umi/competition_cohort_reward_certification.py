@@ -8,7 +8,7 @@ from .competition_cohort_coordinator import (
     replay_cohort_decisions,
 )
 from .competition_cohort_history import verify_cohort_history
-from .competition_cohort_model_award import build_model_award
+from .competition_cohort_model_award import ModelArtifactVerifier, build_model_award
 from .competition_cohort_reward_allocation import (
     CohortRewardAllocation,
     build_reward_allocation,
@@ -26,6 +26,7 @@ def replay_reward_allocation(
     benchmark_review,
     *,
     maximum_promotion_bytes,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortRewardAllocation:
     """Replay fixed historical attribution and full native score certificates.
 
@@ -42,6 +43,7 @@ def replay_reward_allocation(
             benchmark_review,
             allocation.model_award.acceptances,
             promotion_store.directory / "model-reward-artifacts",
+            verify_artifact=verify_model_artifact,
         )
         promotion = None
     else:
@@ -71,6 +73,7 @@ def reward_certification_progress(
     expected_tip_sha256,
     current_block,
     maximum_promotion_bytes,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortPhaseProgress:
     """Review the owner's immutable allocation before requesting progress votes.
 
@@ -101,6 +104,7 @@ def reward_certification_progress(
         benchmark,
         benchmark_review,
         maximum_promotion_bytes=maximum_promotion_bytes,
+        verify_model_artifact=verify_model_artifact,
     )
     return CohortPhaseProgress(
         schema="umi-cohort-phase-progress/1",
@@ -128,6 +132,7 @@ def verify_certified_reward_allocation(
     expected_tip_sha256,
     current_block,
     maximum_promotion_bytes,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortRewardAllocation:
     """Consume original certification arbitrarily late under selected authority.
 
@@ -155,6 +160,7 @@ def verify_certified_reward_allocation(
         benchmark,
         benchmark_review,
         maximum_promotion_bytes=maximum_promotion_bytes,
+        verify_model_artifact=verify_model_artifact,
     )
     closed = view.closure("certification")
     decision = CohortDecisionInput.model_validate_json(

@@ -22,6 +22,7 @@ from .competition_cohort_endpoint_archive import (
     read_endpoint_object,
 )
 from .competition_cohort_history import CohortRecoveryHistory
+from .competition_cohort_model_award import ModelArtifactVerifier
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_quality_signing import CohortQualityManifest
 from .competition_cohort_reward_allocation import CohortRewardAllocation
@@ -154,6 +155,7 @@ def _replay(
     expected_terms: str,
     expected_catalogs: tuple[str, ...],
     maximum_promotion_bytes: int,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortRewardAllocation:
     if (
         history.plan != inputs.history.plan
@@ -209,6 +211,7 @@ def _replay(
         expected_tip_sha256=expected_tip,
         current_block=current_block,
         maximum_promotion_bytes=maximum_promotion_bytes,
+        verify_model_artifact=verify_model_artifact,
     )
 
 
@@ -230,6 +233,7 @@ def prepare_reward_package(
     expected_catalog_sha256s: tuple[str, ...],
     maximum_promotion_bytes: int,
     maximum_bytes: int = DEFAULT_PACKAGE_BYTES,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortRewardPackage:
     """Replay native evidence and retain exactly the objects it actually reads.
 
@@ -285,6 +289,7 @@ def prepare_reward_package(
         expected_terms_sha256,
         expected_catalog_sha256s,
         maximum_promotion_bytes,
+        verify_model_artifact,
     )
     package = CohortRewardPackage(
         schema="umi-cohort-reward-package/1",
@@ -322,6 +327,7 @@ def replay_reward_package(
     maximum_promotion_bytes: int,
     maximum_bytes: int = DEFAULT_PACKAGE_BYTES,
     current_decision_source: DecisionSource | None = None,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortRewardAllocation:
     """Reconstruct native reviews even when original settlement targets passed.
 
@@ -392,6 +398,7 @@ def replay_reward_package(
         expected_terms_sha256,
         expected_catalog_sha256s,
         maximum_promotion_bytes,
+        verify_model_artifact,
     )
     if set(source.values) != set(inventory) or used_pulses != pulse_refs.keys():
         raise ValueError("reward package contains unreferenced evidence")

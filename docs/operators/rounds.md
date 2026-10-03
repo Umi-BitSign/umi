@@ -1598,7 +1598,7 @@ Wrangler session.
 | `settlement` | Settlement `exchange_outbox` | Other reviewers' `exchange_inbox` |
 | `documents` | Coordinator settlement `exchange_outbox/inputs` | Reviewers' `inputs_directory` |
 | `documents` | Certified request handoff `history_directory` | Settlement reviewers' `history_directory` |
-| `models` | Native preserved model archive | Evaluator model-review/benchmark archive and settlement `promotion_directory/model-reward-artifacts` |
+| `models` | Native preserved model archive | Legacy evaluator model-review/benchmark archive and settlement `promotion_directory/model-reward-artifacts` |
 | `model-evidence` | Model acceptance worker outbox | Settlement `promotion_directory` and other configured acceptance readers |
 | `videos` | Content-addressed video directory | Configured benchmark/clip video directory |
 | `documents` | One selected immutable policy, catalog or approved model-review document directory | Its corresponding configured input directory |
@@ -1618,6 +1618,16 @@ documents; they use no settlement wrapper. Settlement checks their private file
 modes, size and digest before including them in the reward package. Missing
 documents or preserved model files keep the award pending. A corrupt delivered
 object fails verification; a second source cannot replace it.
+
+For a signed direct R2 model-delivery profile, do not create a `models`
+replication job for candidate bundles. Acceptance version 2 carries the signed
+R2 reservation, from which consumers derive the verified content-addressed
+preservation key. Each evaluator and settlement signer uses its own read-only R2
+credential to stream and verify that preserved candidate; only the frozen
+baseline remains in the local native archive. Incoming upload objects are not
+replicated and are removed automatically after promotion. Keep the
+`model-evidence` job so the original review documents and certified acceptances
+still reach every settlement owner.
 
 The request publisher first verifies the complete certified request closure and
 publishes its handoff. Settlement replays that history before assembling the

@@ -42,6 +42,7 @@ from .competition_round_journal import RoundJournal
 from .open_competition import (
     ModelBundle,
     Signature,
+    Submission,
     digest,
     identity,
     validate_bundle_policy,
@@ -104,6 +105,37 @@ class ModelUploadChunk(StrictProtocolModel):
     sha256: Hex32
 
 
+def authorize_model_delivery(
+    intake: CohortIntake,
+    request: CohortParticipationRequest,
+    capture,
+) -> tuple[CohortParticipationRequest, str, Submission]:
+    """Authorize one model request without selecting a payload transport."""
+
+    request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
+    key, sub = digest(request), request.signed_submission.submission
+    if sub.track != "model" or sub.model_bundle is None or "model" not in intake.tracks:
+        raise ValueError("model delivery requires the model track")
+    cohort = request.consent.consent.cohort_sha256
+    intake._allowed(cohort)
+    validate_bundle_policy(sub.model_bundle, intake.policy)
+    # Validation alone: do not add an incomplete model to the roster.
+    with intake._connection() as (db, store):
+        history = store.published_history(cohort)
+        if intake._seal(db, history, history_tip(history)) is not None:
+            raise ValueError("model delivery cannot start after intake is sealed")
+        admit_recovery_participant(
+            request.signed_submission,
+            request.consent,
+            history,
+            intake.policy,
+            capture.snapshot,
+            expected_tip_sha256=history_tip(history),
+            current_block=execution_boundary(capture).block,
+        )
+    return request, key, sub
+
+
 class CohortModelUploads:
     def __init__(self, config: ModelUploadConfig, intake: CohortIntake, archive: Path):
         self.config = ModelUploadConfig.model_validate_json(canonical_json_bytes(config))
@@ -140,33 +172,13 @@ class CohortModelUploads:
         ensure_private_directory(self.root / "files")
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
-        request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
-        key, sub = digest(request), request.signed_submission.submission
-        if sub.track != "model" or sub.model_bundle is None or "model" not in self.intake.tracks:
-            raise ValueError("model delivery requires the model track")
-        cohort = request.consent.consent.cohort_sha256
-        self.intake._allowed(cohort)
-        validate_bundle_policy(sub.model_bundle, self.intake.policy)
+        request, key, sub = authorize_model_delivery(self.intake, request, capture)
         with self.journal.locked():
             prior = self.journal.get("upload", key)
             if prior is not None:
                 if prior != request.model_dump(mode="json", by_alias=True):
                     raise ValueError("model delivery retry changes its signed request")
                 return key
-            # Validation alone: do not add an incomplete model to the roster.
-            with self.intake._connection() as (db, store):
-                history = store.published_history(cohort)
-                if self.intake._seal(db, history, history_tip(history)) is not None:
-                    raise ValueError("model delivery cannot start after intake is sealed")
-                admit_recovery_participant(
-                    request.signed_submission,
-                    request.consent,
-                    history,
-                    self.intake.policy,
-                    capture.snapshot,
-                    expected_tip_sha256=history_tip(history),
-                    current_block=execution_boundary(capture).block,
-                )
             models = self.journal.keys("bundle")
             if sub.model_revision not in models:
                 reserved = sum(

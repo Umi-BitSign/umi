@@ -220,6 +220,100 @@ async def test_directive_fetcher_uses_only_the_canonical_cursor_path(tmp_path: P
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transient_status", [404, 408, 425, 429, 500, 503, 599])
+async def test_directive_fetcher_retries_transient_status_without_changing_cursor(
+    tmp_path: Path, monkeypatch, transient_status: int
+) -> None:
+    config = _config(tmp_path)
+    requests: list[httpx.Request] = []
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(transient_status)
+        return httpx.Response(200, stream=_AsyncBytes(b"page"))
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    fetcher = HTTPSDirectiveFetcher(
+        config, client=PinnedHTTPSClient(transport=httpx.MockTransport(handler))
+    )
+    digest = "ab" * 32
+
+    assert (
+        await fetcher.fetch_directive_page(
+            after_sequence=7,
+            after_directive_sha256=digest,
+        )
+        == b"page"
+    )
+    expected = httpx.URL(f"{config.directive_url}/after/7/{digest}.json")
+    assert [request.url for request in requests] == [expected, expected, expected]
+    assert delays == [1.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_directive_fetcher_persistent_transient_status_still_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(503)
+
+    async def sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    fetcher = HTTPSDirectiveFetcher(
+        config, client=PinnedHTTPSClient(transport=httpx.MockTransport(handler))
+    )
+
+    with pytest.raises(ValidatorSupervisorAdapterError, match="https_status_retryable"):
+        await fetcher.fetch_directive_page(
+            after_sequence=7,
+            after_directive_sha256="ab" * 32,
+        )
+    assert requests == 3
+
+
+@pytest.mark.asyncio
+async def test_directive_fetcher_persistent_not_found_returns_unavailable_after_retries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(404)
+
+    async def sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    fetcher = HTTPSDirectiveFetcher(
+        config, client=PinnedHTTPSClient(transport=httpx.MockTransport(handler))
+    )
+
+    assert (
+        await fetcher.fetch_directive_page(
+            after_sequence=7,
+            after_directive_sha256="ab" * 32,
+        )
+        is None
+    )
+    assert requests == 3
+
+
+@pytest.mark.asyncio
 async def test_https_client_rejects_redirect_and_oversize_body() -> None:
     async def redirect(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"location": "https://example.com/elsewhere"})

@@ -7,6 +7,10 @@ import stat
 from contextlib import AsyncExitStack, contextmanager
 from pathlib import Path
 
+from .competition_cohort_direct_model_review import (
+    DirectModelArtifactReviewer,
+    DirectModelSettlementVerifier,
+)
 from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_export_worker import RequestExportWorker
@@ -106,6 +110,15 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
             outbox=Path(config.proof_export_directory),
         )
         promotion = CompetitionStore(Path(config.promotion_directory), config.policy)
+        direct_artifacts = (
+            None
+            if config.direct_model_review is None
+            else DirectModelArtifactReviewer(
+                config.direct_model_review,
+                config.policy,
+                config.proposer_hotkey,
+            )
+        )
         nodes = []
         for plan in config.series.cohorts:
             store = resources.enter_context(
@@ -121,6 +134,15 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     promotion=promotion,
                     executions=executions,
                     sign=sign,
+                    model_artifacts=(
+                        None
+                        if direct_artifacts is None
+                        else DirectModelSettlementVerifier(
+                            direct_artifacts,
+                            promotion.directory / "model-reward-artifacts",
+                            root / digest(plan) / "direct-model-settlement-receipts",
+                        )
+                    ),
                 )
             )
         exports = None

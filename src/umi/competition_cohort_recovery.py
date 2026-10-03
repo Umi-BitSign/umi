@@ -23,6 +23,7 @@ from .open_competition import (
     verify_signature,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .r2_limits import R2_MAXIMUM_PART_BYTES, R2_MINIMUM_PART_BYTES
 
 Block = Annotated[int, Field(ge=0, le=2**53 - 1)]
 Phase = Literal[
@@ -56,6 +57,40 @@ class PhaseTarget(StrictProtocolModel):
 Targets = Annotated[tuple[PhaseTarget, ...], Field(min_length=8, max_length=8)]
 
 
+class ModelDeliveryProfile(StrictProtocolModel):
+    """Cohort-selected model payload transport, independent of track selection."""
+
+    schema_: Literal["umi-model-delivery-profile/1"] = Field(alias="schema")
+    mechanism: Literal["coordinator_chunked_v1", "direct_r2_multipart_v1"]
+    part_size_bytes: (
+        Annotated[int, Field(ge=R2_MINIMUM_PART_BYTES, le=R2_MAXIMUM_PART_BYTES)] | None
+    ) = None
+    maximum_concurrent_parts: Annotated[int, Field(ge=1, le=16)] | None = None
+    capability_ttl_seconds: Annotated[int, Field(ge=60, le=7 * 24 * 60 * 60)] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_chunked_bytes(self, handler):
+        value = handler(self)
+        for field in ("part_size_bytes", "maximum_concurrent_parts", "capability_ttl_seconds"):
+            if value[field] is None:
+                value.pop(field)
+        return value
+
+    @model_validator(mode="after")
+    def mechanism_parameters(self) -> Self:
+        multipart = (
+            self.part_size_bytes,
+            self.maximum_concurrent_parts,
+            self.capability_ttl_seconds,
+        )
+        if self.mechanism == "direct_r2_multipart_v1":
+            if any(value is None for value in multipart):
+                raise ValueError("direct R2 model delivery requires complete multipart limits")
+        elif any(value is not None for value in multipart):
+            raise ValueError("chunked model delivery cannot carry multipart limits")
+        return self
+
+
 def _targets(values: tuple[PhaseTarget, ...]) -> None:
     if tuple(v.phase for v in values) != PHASES or any(
         a.target_block >= b.target_block for a, b in pairwise(values)
@@ -66,9 +101,11 @@ def _targets(values: tuple[PhaseTarget, ...]) -> None:
 class RecoverableCohortPlan(StrictProtocolModel):
     """Stable identity created before intake; target revisions keep this digest."""
 
-    schema_: Literal["umi-recoverable-cohort-plan/1", "umi-recoverable-cohort-plan/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-recoverable-cohort-plan/1",
+        "umi-recoverable-cohort-plan/2",
+        "umi-recoverable-cohort-plan/3",
+    ] = Field(alias="schema")
     policy_sha256: Hex32
     launch_sha256: Hex32
     sequence: Annotated[int, Field(ge=1, le=2**32 - 1)]
@@ -77,6 +114,7 @@ class RecoverableCohortPlan(StrictProtocolModel):
     initial_targets: Targets
     eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)] | None = None
     service_pool_bps: Bps | None = None
+    model_delivery: ModelDeliveryProfile | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
@@ -85,6 +123,8 @@ class RecoverableCohortPlan(StrictProtocolModel):
             value.pop("eligible_tracks", None)
         if self.service_pool_bps is None:
             value.pop("service_pool_bps", None)
+        if self.model_delivery is None:
+            value.pop("model_delivery", None)
         return value
 
     @model_validator(mode="after")
@@ -97,8 +137,8 @@ class RecoverableCohortPlan(StrictProtocolModel):
         if has_tracks != has_pool:
             raise ValueError("cohort-specific tracks and reward split must be selected together")
         selected = has_tracks and has_pool
-        if (self.schema_ == "umi-recoverable-cohort-plan/2") != selected:
-            raise ValueError("cohort-specific tracks and reward split require plan version 2")
+        if (self.schema_ != "umi-recoverable-cohort-plan/1") != selected:
+            raise ValueError("cohort-specific tracks and reward split require plan version 2 or 3")
         if selected:
             expected = tuple(
                 track
@@ -110,7 +150,25 @@ class RecoverableCohortPlan(StrictProtocolModel):
             )
             if self.eligible_tracks != expected:
                 raise ValueError("cohort tracks differ from its nonzero reward pools")
+        explicit_delivery = self.schema_ == "umi-recoverable-cohort-plan/3"
+        model_enabled = selected and "model" in self.eligible_tracks
+        if explicit_delivery != (self.model_delivery is not None):
+            raise ValueError("plan version 3 requires an explicit model delivery profile")
+        if explicit_delivery and not model_enabled:
+            raise ValueError("model delivery requires the model track")
         return self
+
+
+def cohort_model_delivery(plan: RecoverableCohortPlan) -> ModelDeliveryProfile:
+    """Resolve legacy plans to their published coordinator upload behavior."""
+
+    plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
+    if plan.eligible_tracks is not None and "model" not in plan.eligible_tracks:
+        raise ValueError("cohort does not enable model delivery")
+    return plan.model_delivery or ModelDeliveryProfile(
+        schema="umi-model-delivery-profile/1",
+        mechanism="coordinator_chunked_v1",
+    )
 
 
 def verify_cohort_tracks(plan: RecoverableCohortPlan, tracks: tuple[Track, ...]) -> None:

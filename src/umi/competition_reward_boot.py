@@ -12,10 +12,16 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_resources import CompetitionChainResources
+from .competition_cohort_direct_model_review import (
+    DirectModelArtifactReviewer,
+    DirectModelReviewSourceConfig,
+    DirectModelSettlementVerifier,
+)
+from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
 from .competition_reward_control_archive import HistoricalRewardControlProvider
@@ -67,7 +73,9 @@ def _disjoint(paths: tuple[Path, ...]) -> None:
 
 
 class StandingRewardBootConfig(StrictProtocolModel):
-    schema_: Literal["umi-standing-reward-boot/1"] = Field(alias="schema")
+    schema_: Literal["umi-standing-reward-boot/1", "umi-standing-reward-boot/2"] = Field(
+        alias="schema"
+    )
     approval_path: Directory
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -90,12 +98,27 @@ class StandingRewardBootConfig(StrictProtocolModel):
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
+    direct_model_review: DirectModelReviewSourceConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_direct_model_review(self, handler):
+        value = handler(self)
+        if self.direct_model_review is None:
+            value.pop("direct_model_review", None)
+        return value
 
     @model_validator(mode="after")
     def bindings(self):
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
+        direct_selected = any(
+            cohort_model_delivery(plan).mechanism == "direct_r2_multipart_v1"
+            for plan in self.series.cohorts
+            if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+        )
         if (
-            self.handoff.series_sha256 != digest(self.series)
+            (self.schema_ == "umi-standing-reward-boot/2") != direct_selected
+            or direct_selected != (self.direct_model_review is not None)
+            or self.handoff.series_sha256 != digest(self.series)
             or self.handoff.cohort_sha256 != digest(self.series.cohorts[0])
             or self.handoff.legacy_policy_sha256 != digest(self.legacy_policy)
             or self.manifest.opportunity.runtime_profile_sha256 != digest(self.eligibility)
@@ -120,6 +143,11 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 self.proof_import_directory,
                 self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
+                *(
+                    (self.direct_model_review.r2_credentials_file,)
+                    if self.direct_model_review
+                    else ()
+                ),
             )
         )
 
@@ -202,12 +230,22 @@ async def run_installed_standing_rewards(
         maximum_bytes=config.maximum_reader_bytes,
     )
     store = CompetitionStore(Path(config.promotion_directory), config.policy)
+    model_artifacts = (
+        None
+        if config.direct_model_review is None
+        else DirectModelSettlementVerifier(
+            DirectModelArtifactReviewer(config.direct_model_review, config.policy, None),
+            store.directory / "model-reward-artifacts",
+            root / "direct-model-reward-receipts",
+        )
+    )
     preparation = StandingRewardPreparation(
         reader,
         store,
         config.manifest,
         maximum_promotion_bytes=config.maximum_promotion_bytes,
         maximum_package_bytes=config.maximum_package_bytes,
+        model_artifacts=model_artifacts,
     )
     imported = RewardProofArchive(Path(config.proof_import_directory))
     exported = RewardProofArchive(Path(config.proof_export_directory))

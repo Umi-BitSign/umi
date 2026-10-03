@@ -28,19 +28,43 @@ umi-competition --policy competition-policy.json submit-cohort-model \
   --wallet-name miner --hotkey-name hotkey --wallet-path /absolute/path/to/wallets
 ```
 
-The command checks local hashes, uploads bounded signed chunks, waits for the
-server to preserve the complete bundle, then submits the original consent.
+The command checks local hashes, verifies the cohort history, selects the model
+delivery mechanism from that signed cohort plan, waits for complete byte
+verification, then submits the original consent. Older plans upload bounded
+signed chunks through intake. A plan using `direct_r2_multipart_v1` obtains
+short-lived, exact-part R2 capabilities from intake and sends model bytes
+directly to the cohort's private object store; intake receives signed metadata,
+part ETags and the original consent rather than the payload bytes.
 Progress goes to stderr; stdout contains the pending-attestation receipt.
 Interrupted connections, throttling and temporary server failures retry
 automatically. After stopping the command or restarting the machine, rerun it
-with the same request, source files and hotkey to resume retained offsets.
+with the same request, source files and hotkey. Legacy delivery resumes retained
+offsets; direct delivery reuses its retained reservation and may safely resend
+idempotent parts. If the object store has expired an old unfinished multipart
+generation, the command obtains a signed replacement generation and restarts
+the parts automatically. The original signed model request and local source do
+not change.
 Keep the source unchanged while uploading. Permanent rejection or a changed
 source stops the command; it does not silently replace your submission.
+
+Presigned R2 URLs are temporary bearer credentials. The command does not print
+or retain them. Do not copy them into logs, support messages or state files.
+The object is not eligible merely because R2 accepted every part: the owner
+checks the full stream digest and every manifest file, then performs the same
+bounded license and provenance review before participation can be admitted.
+After the independent acceptance quorum, the owner copies the verified object
+inside R2 to the cohort's content-addressed preservation key, reads it back and
+verifies the complete payload again. Admission is published only after that
+receipt is durable. The temporary upload object is then deleted automatically;
+the miner does not run a cleanup command. A terminally rejected completed
+object remains available for the cohort's configured evidence-review interval,
+then its exact incoming key is deleted automatically while the signed request,
+rejection reason and cleanup receipt remain retained.
 
 Upload completion is not admission certification, artifact acceptance or reward
 activation. Use `query-cohort-admission` with the same request to check admission.
 
-When the public cohort index advertises `model_upload_url`, deliver a model
+When the public cohort index advertises the legacy `model_upload_url`, deliver a model
 bundle before submitting model-track participation. POST the same signed
 `CohortParticipationRequest` to that URL to reserve delivery. A reservation
 alone does not enroll the miner, certify rights or award rewards.

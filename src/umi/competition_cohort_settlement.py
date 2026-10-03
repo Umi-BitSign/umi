@@ -19,6 +19,7 @@ from .competition_cohort_endpoint_archive import (
     read_endpoint_object,
 )
 from .competition_cohort_history import RecoveryHistoryView, verify_cohort_history
+from .competition_cohort_model_award import ModelArtifactVerifier
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_quality_signing import (
     CohortQualityManifest,
@@ -91,6 +92,7 @@ class CohortSettlement:
         output_directory: Path,
         maximum_promotion_bytes: int,
         maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
+        verify_model_artifact: ModelArtifactVerifier | None = None,
     ):
         self.plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
         self.authority = SignedCohortRecoveryAuthority.model_validate_json(
@@ -111,6 +113,7 @@ class CohortSettlement:
         self.decisions, self.pulses = decisions, pulses
         self.output = Path(private_path(str(output_directory))) / (digest(self.plan) + ".json")
         self.promotion_bytes, self.package_bytes = maximum_promotion_bytes, maximum_package_bytes
+        self.verify_model_artifact = verify_model_artifact
 
     def _object(self, key: str) -> bytes:
         try:
@@ -297,6 +300,7 @@ class CohortSettlement:
                 benchmark,
                 benchmark_review,
                 maximum_promotion_bytes=self.promotion_bytes,
+                verify_model_artifact=self.verify_model_artifact,
             )
         else:
             replay_reward_allocation(
@@ -307,6 +311,7 @@ class CohortSettlement:
                 benchmark,
                 benchmark_review,
                 maximum_promotion_bytes=self.promotion_bytes,
+                verify_model_artifact=self.verify_model_artifact,
             )
         self.archive.put(allocation)
         if phase == "certification":
@@ -324,6 +329,7 @@ class CohortSettlement:
                 expected_tip_sha256=expected_tip_sha256,
                 current_block=current_block,
                 maximum_promotion_bytes=self.promotion_bytes,
+                verify_model_artifact=self.verify_model_artifact,
             )
             return NativeSettlementResult("phase_ready", progress=progress)
         self._closed(view, "certification", allocation)
@@ -349,6 +355,7 @@ class CohortSettlement:
             expected_catalog_sha256s=requirement.catalog_sha256s,
             maximum_promotion_bytes=self.promotion_bytes,
             maximum_bytes=self.package_bytes,
+            verify_model_artifact=self.verify_model_artifact,
         )
         publish_reward_package(self.output, package, maximum_bytes=self.package_bytes)
         return NativeSettlementResult("package_published", package=package)
