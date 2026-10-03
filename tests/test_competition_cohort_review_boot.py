@@ -999,9 +999,7 @@ async def test_direct_review_boot_uses_independent_r2_reader_and_bounded_sandbox
         assert app.state.benchmark.sandbox.cache.parent == Path(c.benchmark.workspace_directory)
 
 
-async def test_direct_model_only_review_boot_omits_endpoint_path(
-    selected, providers, monkeypatch
-):
+async def test_direct_model_only_review_boot_omits_endpoint_path(selected, providers, monkeypatch):
     c = with_direct_model_only_review(selected.config)
     direct_r2_credentials(c)
     qualify_test_scratch(monkeypatch)
