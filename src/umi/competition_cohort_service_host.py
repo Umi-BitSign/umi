@@ -100,6 +100,10 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
     maximum_metadata_bytes_per_cohort: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     attempt_lease_seconds: Annotated[int, Field(ge=30, le=900)] = 120
     verification_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
+    rejected_object_retention_seconds: Annotated[int, Field(ge=300, le=30 * 24 * 60 * 60)] = (
+        7 * 24 * 60 * 60
+    )
+    cleanup_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
 
     def stores(self) -> tuple[Path, ...]:
@@ -419,6 +423,10 @@ class ServiceAdmissionHost:
                         maximum_metadata_bytes=direct.maximum_metadata_bytes_per_cohort,
                         attempt_lease_seconds=direct.attempt_lease_seconds,
                         verification_batch_size=direct.verification_batch_size,
+                        rejected_object_retention_seconds=(
+                            direct.rejected_object_retention_seconds
+                        ),
+                        cleanup_batch_size=direct.cleanup_batch_size,
                         admission_reviews_directory=str(Path(c.inputs_directory) / "model-reviews"),
                         standing_review_policy=direct.standing_review_policy,
                     ),

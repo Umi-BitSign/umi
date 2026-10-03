@@ -19,6 +19,7 @@ from .competition_cohort_direct_model_upload import (
     DirectModelUploadReservationRequest,
     SignedDirectModelUploadCompletion,
     SignedDirectModelUploadPartRequest,
+    SignedDirectModelUploadRestartRequest,
 )
 from .concurrency import run_owned_thread
 from .open_competition import digest
@@ -127,6 +128,25 @@ def direct_model_upload_routes(
             raise HTTPException(422, "invalid direct model upload completion") from error
         except (FileNotFoundError, OSError, RuntimeError, sqlite3.Error) as error:
             raise HTTPException(503, "direct model upload completion unavailable") from error
+
+    @router.post("/v1/competition/cohorts/{cohort}/direct-model-uploads/{reservation}/restart")
+    async def restart(cohort: str, reservation: str, request: Request):
+        owner = owner_for(cohort)
+        try:
+            if not _hex32(reservation):
+                raise ValueError("direct model upload reservation identity differs")
+            value = SignedDirectModelUploadRestartRequest.model_validate_json(
+                await _json_body(request, maximum_bytes=16 * 1024)
+            )
+            if value.request.reservation_sha256 != reservation:
+                raise ValueError("direct model upload restart path differs")
+            return await owner.restart(value, now_unix_ms=now_unix_ms())
+        except DirectModelUploadPending as error:
+            raise HTTPException(503, "direct model upload restart pending") from error
+        except (ValidationError, ValueError) as error:
+            raise HTTPException(422, "invalid direct model upload restart") from error
+        except (FileNotFoundError, OSError, RuntimeError, sqlite3.Error) as error:
+            raise HTTPException(503, "direct model upload restart unavailable") from error
 
     @router.get("/v1/competition/cohorts/{cohort}/direct-model-uploads/{reservation}")
     async def status(cohort: str, reservation: str):

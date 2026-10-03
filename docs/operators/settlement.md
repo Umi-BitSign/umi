@@ -1144,13 +1144,21 @@ unavailable, but must not share the validator, coordinator state, evidence or
 journal filesystem.
 
 Configure a bucket lifecycle rule that aborts incomplete multipart uploads after
-the selected recovery interval. Retain completed incoming objects until a
+the selected recovery interval. A part-level provider `404` causes the miner to
+sign a restart request. The owner checks that the exact provider upload is
+absent, fences the old generation and issues the next retained generation; the
+miner then resumes from its unchanged local bundle without operator action.
+Retain completed incoming objects until a
 content-addressed preserved object and its acceptance or rejection evidence are
 durable. Accepted objects are copied entirely inside R2, fully read back, and
 their incoming source is deleted only after a private promotion receipt is
-durable. Lifecycle cleanup is storage management and never closes intake,
-expires a retained participation request or makes an otherwise eligible model
-late.
+durable. Terminally rejected objects receive a durable cleanup intent and stay
+available for the configured rejection-review interval. The owner then deletes
+only the exact bound incoming key, verifies absence and retains the signed
+request, hold and cleanup receipt. Cleanup is bounded per poll and retries after
+lost acknowledgements. Lifecycle cleanup is storage management and never closes
+intake, expires a retained participation request or makes an otherwise eligible
+model late.
 
 `umi-cohort-service-admission-host/8` is the retained legacy path. It carries
 `model_uploads` alongside the

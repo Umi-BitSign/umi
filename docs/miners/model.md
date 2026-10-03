@@ -40,7 +40,10 @@ Interrupted connections, throttling and temporary server failures retry
 automatically. After stopping the command or restarting the machine, rerun it
 with the same request, source files and hotkey. Legacy delivery resumes retained
 offsets; direct delivery reuses its retained reservation and may safely resend
-idempotent parts.
+idempotent parts. If the object store has expired an old unfinished multipart
+generation, the command obtains a signed replacement generation and restarts
+the parts automatically. The original signed model request and local source do
+not change.
 Keep the source unchanged while uploading. Permanent rejection or a changed
 source stops the command; it does not silently replace your submission.
 
@@ -53,7 +56,10 @@ After the independent acceptance quorum, the owner copies the verified object
 inside R2 to the cohort's content-addressed preservation key, reads it back and
 verifies the complete payload again. Admission is published only after that
 receipt is durable. The temporary upload object is then deleted automatically;
-the miner does not run a cleanup command.
+the miner does not run a cleanup command. A terminally rejected completed
+object remains available for the cohort's configured evidence-review interval,
+then its exact incoming key is deleted automatically while the signed request,
+rejection reason and cleanup receipt remain retained.
 
 Upload completion is not admission certification, artifact acceptance or reward
 activation. Use `query-cohort-admission` with the same request to check admission.

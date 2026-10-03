@@ -19,10 +19,12 @@ from umi.competition_cohort_direct_model_upload import (
     DirectModelUploadPartCapabilities,
     DirectModelUploadPartRequest,
     DirectModelUploadReservationRequest,
+    DirectModelUploadRestartRequest,
     SignedDirectModelPayload,
     SignedDirectModelUploadCompletion,
     SignedDirectModelUploadPartRequest,
     SignedDirectModelUploadReservation,
+    SignedDirectModelUploadRestartRequest,
     preserved_model_object_key,
 )
 from umi.competition_cohort_direct_model_upload_http import direct_model_upload_routes
@@ -67,6 +69,7 @@ class Multipart:
         self.abort_calls = []
         self.read_calls = 0
         self.objects = {}
+        self.multipart_uploads = set()
         self.fail_creates = 0
         self.fail_after_complete = False
         self.fail_deletes = 0
@@ -76,7 +79,9 @@ class Multipart:
         if self.fail_creates:
             self.fail_creates -= 1
             raise OSError("provider offline")
-        return f"provider-id-{len(self.create_calls)}"
+        provider = f"provider-id-{len(self.create_calls)}"
+        self.multipart_uploads.add((key, provider))
+        return provider
 
     async def head(self, key, *, at=None):
         value = self.objects.get(key)
@@ -119,6 +124,10 @@ class Multipart:
 
     async def abort(self, key, *, upload_id, at=None):
         self.abort_calls.append((key, upload_id, at))
+        self.multipart_uploads.discard((key, upload_id))
+
+    async def multipart_exists(self, key, *, upload_id, at=None):
+        return (key, upload_id) in self.multipart_uploads
 
     async def read_range(self, key, *, offset, size_bytes, at=None):
         assert key in self.objects
@@ -310,6 +319,138 @@ async def test_failed_creation_waits_for_lease_then_advances_generation(direct):
 
 
 @pytest.mark.asyncio
+async def test_expired_provider_generation_is_signed_fenced_and_replaced(direct):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    first_sha256 = digest(first.reservation)
+    attempt = direct.owner.journal.get("direct-intent", first.reservation.attempt_id)
+    provider = direct.owner.journal.get("direct-provider", first.reservation.attempt_id)
+    direct.multipart.multipart_uploads.remove(
+        (attempt["object_key"], provider["provider_upload_id"])
+    )
+    restart = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=first_sha256,
+        generation=first.reservation.generation,
+        reason_code="provider_upload_unavailable",
+    )
+    signed = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=restart,
+        signature=sign_object(restart, wallet("Alice")),
+    )
+
+    second = await direct.owner.restart(signed, now_unix_ms=1_800_000_121_000)
+
+    assert second.reservation.generation == 2
+    assert second.reservation.payload == first.reservation.payload
+    assert direct.owner.journal.get("direct-superseded", first_sha256)["reason_code"] == (
+        "provider_upload_unavailable"
+    )
+    assert len(direct.multipart.create_calls) == 2
+    assert len(direct.multipart.abort_calls) == 1
+    assert await direct.owner.restart(signed, now_unix_ms=1_800_000_122_000) == second
+    assert len(direct.multipart.create_calls) == 2
+    with pytest.raises(ValueError, match="superseded"):
+        direct.owner.capabilities(first, (1,), now_unix_ms=1_800_000_123_000)
+
+
+@pytest.mark.asyncio
+async def test_expired_generation_recovery_survives_replacement_creation_failure(direct):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    first_sha256 = digest(first.reservation)
+    attempt = direct.owner.journal.get("direct-intent", first.reservation.attempt_id)
+    provider = direct.owner.journal.get("direct-provider", first.reservation.attempt_id)
+    direct.multipart.multipart_uploads.remove(
+        (attempt["object_key"], provider["provider_upload_id"])
+    )
+    request = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=first_sha256,
+        generation=first.reservation.generation,
+        reason_code="provider_upload_unavailable",
+    )
+    signed = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=request,
+        signature=sign_object(request, wallet("Alice")),
+    )
+    direct.multipart.fail_creates = 1
+
+    with pytest.raises(OSError, match="provider offline"):
+        await direct.owner.restart(signed, now_unix_ms=1_800_000_121_000)
+
+    assert direct.owner.journal.get("direct-restart-request", first_sha256)
+    assert direct.owner.journal.get("direct-superseded", first_sha256)
+    with pytest.raises(ValueError, match="superseded"):
+        direct.owner.capabilities(first, (1,), now_unix_ms=1_800_000_122_000)
+    with pytest.raises(DirectModelUploadPending):
+        await direct.owner.restart(signed, now_unix_ms=1_800_000_150_000)
+
+    replacement = await direct.owner.restart(signed, now_unix_ms=1_800_000_242_000)
+    assert replacement.reservation.generation == 3
+    assert len(direct.multipart.create_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_restart_requires_original_signer_expired_lease_and_absent_provider(direct):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    request = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=digest(first.reservation),
+        generation=first.reservation.generation,
+        reason_code="provider_upload_unavailable",
+    )
+    wrong = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=request,
+        signature=sign_object(request, wallet("Bob")),
+    )
+    signed = wrong.model_copy(update={"signature": sign_object(request, wallet("Alice"))})
+
+    with pytest.raises(ValueError, match="signer"):
+        await direct.owner.restart(wrong, now_unix_ms=1_800_000_121_000)
+    with pytest.raises(DirectModelUploadPending, match="lease"):
+        await direct.owner.restart(signed, now_unix_ms=1_800_000_030_000)
+    with pytest.raises(DirectModelUploadPending, match="remains available"):
+        await direct.owner.restart(signed, now_unix_ms=1_800_000_121_000)
+
+    assert direct.owner.journal.get("direct-superseded", digest(first.reservation)) is None
+    assert len(direct.multipart.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fenced_generation_rejects_capabilities_and_completion_before_replacement(direct):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    first_sha256 = digest(first.reservation)
+    direct.owner.journal.put(
+        "direct-superseded",
+        first_sha256,
+        {
+            "reason_code": "provider_upload_unavailable",
+            "superseded_at_unix_ms": 1_800_000_121_000,
+        },
+    )
+
+    with pytest.raises(ValueError, match="superseded"):
+        direct.owner.capabilities(first, (1,), now_unix_ms=1_800_000_122_000)
+    with pytest.raises(ValueError, match="superseded"):
+        await direct.owner.complete(
+            signed_completion(first, direct.payload.payload),
+            now_unix_ms=1_800_000_122_000,
+        )
+
+    assert direct.owner.journal.get("direct-object", first_sha256) is None
+
+
+@pytest.mark.asyncio
 async def test_completion_reconciles_lost_provider_response_and_is_idempotent(direct):
     reservation = await direct.owner.reserve(
         direct.request, direct.payload, now_unix_ms=1_800_000_000_000
@@ -396,12 +537,65 @@ async def test_poll_retains_terminal_verification_hold_without_rereading(direct)
     assert second["last_error_type"] == "direct_model_verification_failed"
     assert reads_after_failure > 0
     assert direct.multipart.read_calls == reads_after_failure
+    assert (
+        direct.owner.journal.get("direct-rejected-cleanup-intent", completed.reservation_sha256)[
+            "reason_code"
+        ]
+        == "direct_model_verification_failed"
+    )
     status = direct.owner.status(completed.reservation_sha256)
     assert status.hold_reason_code == "direct_model_verification_failed"
     assert status.payload_verified is False
     assert status.model_dump(mode="json", by_alias=True)["hold_reason_code"] == (
         "direct_model_verification_failed"
     )
+
+
+@pytest.mark.asyncio
+async def test_terminal_rejection_cleanup_retries_and_preserves_evidence(direct):
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    source_key = direct.owner.journal.get("direct-intent", reservation.reservation.attempt_id)[
+        "object_key"
+    ]
+    changed = bytearray(direct.multipart.payload_bytes)
+    changed[0] ^= 1
+    direct.multipart.payload_bytes = bytes(changed)
+    held_at = 1_800_000_011_000
+
+    first = await direct.owner.poll_once(now_unix_ms=held_at)
+    before_expiry = await direct.owner.poll_once(
+        now_unix_ms=held_at + direct.owner.config.rejected_object_retention_seconds * 1000 - 1
+    )
+    direct.multipart.fail_deletes = 1
+    failed_cleanup = await direct.owner.poll_once(
+        now_unix_ms=held_at + direct.owner.config.rejected_object_retention_seconds * 1000
+    )
+    after_expiry = await direct.owner.poll_once(
+        now_unix_ms=held_at + direct.owner.config.rejected_object_retention_seconds * 1000 + 1
+    )
+    settled = await direct.owner.poll_once(
+        now_unix_ms=held_at + direct.owner.config.rejected_object_retention_seconds * 1000 + 2
+    )
+
+    assert first["objects_retained_for_cleanup"] == 1
+    assert before_expiry["objects_retained_for_cleanup"] == 1
+    assert failed_cleanup["objects_retained_for_cleanup"] == 1
+    assert failed_cleanup["last_error_type"] == "OSError"
+    assert source_key not in direct.multipart.objects
+    assert after_expiry["objects_cleaned"] == 1
+    assert settled["objects_cleaned"] == 0
+    assert settled["objects_retained_for_cleanup"] == 0
+    receipt = direct.owner.journal.get(
+        "direct-rejected-cleanup-receipt", completed.reservation_sha256
+    )
+    assert receipt["reservation_sha256"] == completed.reservation_sha256
+    assert direct.owner.journal.get("direct-verification-hold", completed.reservation_sha256)
 
 
 def promotion_publication(direct, reservation):

@@ -24,11 +24,13 @@ from .competition_cohort_direct_model_upload import (
     DirectModelUploadPartCapabilities,
     DirectModelUploadPartRequest,
     DirectModelUploadReservationRequest,
+    DirectModelUploadRestartRequest,
     DirectModelUploadStatus,
     SignedDirectModelPayload,
     SignedDirectModelUploadCompletion,
     SignedDirectModelUploadPartRequest,
     SignedDirectModelUploadReservation,
+    SignedDirectModelUploadRestartRequest,
 )
 from .competition_cohort_model_client import (
     _Fingerprint,
@@ -346,6 +348,56 @@ async def submit_direct_cohort_model(
                 raise CompetitionSubmissionError(status.hold_reason_code)
             return status
 
+        async def restart_expired_generation() -> None:
+            nonlocal reservation, body, reservation_sha256
+            restart_request = DirectModelUploadRestartRequest(
+                schema="umi-direct-model-upload-restart-request/1",
+                reservation_sha256=reservation_sha256,
+                generation=body.generation,
+                reason_code="provider_upload_unavailable",
+            )
+            signed_restart = SignedDirectModelUploadRestartRequest(
+                schema="umi-signed-direct-model-upload-restart-request/1",
+                request=restart_request,
+                signature=sign_object(restart_request, wallet),
+            )
+            previous_generation = body.generation
+            raw_restart = await _retry(
+                lambda: _json_exchange(
+                    intake,
+                    "POST",
+                    f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
+                    f"{reservation_sha256}/restart",
+                    body=canonical_json_bytes(signed_restart),
+                ),
+                retry_seconds,
+                report,
+            )
+            try:
+                replacement = SignedDirectModelUploadReservation.model_validate_json(raw_restart)
+                replacement_body = replacement.reservation
+                if (
+                    replacement_body.cohort_sha256 != cohort
+                    or replacement_body.payload != payload
+                    or replacement_body.generation <= previous_generation
+                    or identity(replacement_body.hotkey) != identity(submission.hotkey)
+                    or identity(replacement.signature.hotkey)
+                    not in {identity(e.hotkey) for e in policy.evaluators}
+                ):
+                    raise ValueError("direct upload restart reservation differs")
+            except ValueError:
+                raise CompetitionSubmissionError("invalid_model_upload_status") from None
+            reservation = replacement
+            body = replacement_body
+            reservation_sha256 = digest(body)
+            report(
+                {
+                    "status": "model_upload_generation_restarted",
+                    "upload_sha256": payload.upload_sha256,
+                    "generation": body.generation,
+                }
+            )
+
         status = await current_status()
         if status.object_complete:
             while not status.payload_verified:
@@ -437,9 +489,12 @@ async def submit_direct_cohort_model(
                 return_exceptions=True,
             )
             retry = False
+            restart = False
             for result in results:
                 if isinstance(result, DirectModelUploadPart):
                     completed[result.part_number] = result
+                elif isinstance(result, CompetitionSubmissionError) and result.status_code == 404:
+                    restart = True
                 elif isinstance(result, CompetitionSubmissionError) and (
                     result.reason_code == "model_upload_transport_unavailable"
                     or result.status_code in {403, 408, 429, 500, 502, 503, 504}
@@ -449,6 +504,12 @@ async def submit_direct_cohort_model(
                     raise result
                 else:
                     raise RuntimeError("direct upload part returned an invalid result")
+            if restart:
+                await restart_expired_generation()
+                completed.clear()
+                pending = list(range(1, payload.total_parts + 1))
+                wait = retry_seconds
+                continue
             pending = [number for number in pending if number not in completed]
             report(
                 {

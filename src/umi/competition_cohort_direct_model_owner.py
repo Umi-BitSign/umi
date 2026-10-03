@@ -37,9 +37,11 @@ from .competition_cohort_direct_model_upload import (
     SignedDirectModelUploadCompletion,
     SignedDirectModelUploadPartRequest,
     SignedDirectModelUploadReservation,
+    SignedDirectModelUploadRestartRequest,
     direct_model_object_key,
     preserved_model_object_key,
     require_part_request_signer,
+    require_restart_request_signer,
 )
 from .competition_cohort_model_acceptance import (
     ModelAcceptancePublication,
@@ -81,6 +83,10 @@ class DirectModelUploadOwnerConfig(StrictProtocolModel):
     maximum_metadata_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     attempt_lease_seconds: Annotated[int, Field(ge=30, le=900)] = 120
     verification_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
+    rejected_object_retention_seconds: Annotated[int, Field(ge=300, le=30 * 24 * 60 * 60)] = (
+        7 * 24 * 60 * 60
+    )
+    cleanup_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
     admission_reviews_directory: Directory | None = None
     standing_review_policy: StandingModelReviewPolicy | None = None
 
@@ -152,6 +158,33 @@ class DirectModelPromotion(StrictProtocolModel):
     total_bytes: Annotated[int, Field(ge=1)]
     provider_etag: Annotated[str, Field(min_length=1, max_length=256)]
     promoted_at_unix_ms: Annotated[int, Field(ge=0, le=2**63 - 1)]
+
+
+class _DirectModelRejectedCleanupIntent(StrictProtocolModel):
+    schema_: Literal["umi-direct-model-rejected-cleanup-intent/1"] = Field(alias="schema")
+    reservation_sha256: Hex32
+    object_key_sha256: Hex32
+    provider_etag: Annotated[str, Field(min_length=1, max_length=256)]
+    total_bytes: Annotated[int, Field(ge=1)]
+    reason_code: Annotated[
+        str, Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9_]*$")
+    ]
+    created_at_unix_ms: Annotated[int, Field(ge=0, le=2**63 - 1)]
+    retain_until_unix_ms: Annotated[int, Field(ge=0, le=2**63 - 1)]
+
+    @model_validator(mode="after")
+    def ordered(self) -> Self:
+        if self.retain_until_unix_ms <= self.created_at_unix_ms:
+            raise ValueError("rejected object retention interval differs")
+        return self
+
+
+class _DirectModelRejectedCleanupReceipt(StrictProtocolModel):
+    schema_: Literal["umi-direct-model-rejected-cleanup-receipt/1"] = Field(alias="schema")
+    intent_sha256: Hex32
+    reservation_sha256: Hex32
+    object_key_sha256: Hex32
+    deleted_at_unix_ms: Annotated[int, Field(ge=0, le=2**63 - 1)]
 
 
 Authorize = Callable[[CohortParticipationRequest], Awaitable[None]]
@@ -410,7 +443,12 @@ class DirectModelUploadOwner:
             if attempts:
                 current = attempts[-1]
                 signed = self._signed_reservation(current)
-                if signed is not None:
+                superseded = (
+                    signed is not None
+                    and self.journal.get("direct-superseded", digest(signed.reservation))
+                    is not None
+                )
+                if signed is not None and not superseded:
                     reservation_sha256 = digest(signed.reservation)
                     completion_raw = self.journal.get("direct-completion", reservation_sha256)
                     if (
@@ -441,9 +479,9 @@ class DirectModelUploadOwner:
                             )
                     return signed
                 provider = self._provider(current)
-                if provider is not None:
+                if provider is not None and not superseded:
                     return await self._finish_reservation(current, signed_payload, provider)
-                if now_unix_ms < current.retry_after_unix_ms:
+                if signed is None and now_unix_ms < current.retry_after_unix_ms:
                     raise DirectModelUploadPending("direct upload creation is pending")
             if len(attempts) >= self.config.maximum_attempts_per_upload:
                 raise OSError("direct upload attempt capacity exhausted")
@@ -497,6 +535,89 @@ class DirectModelUploadOwner:
             self.journal.put("direct-provider", attempt_id, provider)
             return await self._finish_reservation(attempt, signed_payload, provider)
 
+    async def restart(
+        self,
+        signed_restart: SignedDirectModelUploadRestartRequest,
+        *,
+        now_unix_ms: int,
+    ) -> SignedDirectModelUploadReservation:
+        """Fence one provider-expired generation and return its durable successor."""
+
+        at = _at(now_unix_ms)
+        signed_restart = SignedDirectModelUploadRestartRequest.model_validate_json(
+            canonical_json_bytes(signed_restart)
+        )
+        request = signed_restart.request
+        async with self._mutex:
+            reservation = self._reservation_by_digest(request.reservation_sha256)
+            require_restart_request_signer(signed_restart, reservation.reservation)
+            body = reservation.reservation
+            attempts = self._attempts(body.payload.upload_sha256)
+            attempt_raw = self.journal.get("direct-intent", body.attempt_id)
+            if attempt_raw is None:
+                raise ValueError("direct upload restart attempt is unavailable")
+            attempt = _DirectModelUploadIntent.model_validate_json(
+                canonical_json_bytes(attempt_raw)
+            )
+            retained_restart = self.journal.get(
+                "direct-restart-request", request.reservation_sha256
+            )
+            if retained_restart is not None and retained_restart != signed_restart.model_dump(
+                mode="json", by_alias=True
+            ):
+                raise ValueError("direct upload restart retry differs")
+            superseded = self.journal.get("direct-superseded", request.reservation_sha256)
+            if superseded is None:
+                if not attempts or attempts[-1] != attempt:
+                    raise ValueError("direct upload restart reservation was superseded")
+                if (
+                    self.journal.get("direct-object", request.reservation_sha256) is not None
+                    or self.journal.get("direct-completion", request.reservation_sha256) is not None
+                ):
+                    raise ValueError("completed direct upload cannot be restarted")
+                if now_unix_ms < attempt.retry_after_unix_ms:
+                    raise DirectModelUploadPending("direct upload restart lease is pending")
+                provider = self._provider(attempt)
+                if provider is None:
+                    raise DirectModelUploadPending("direct upload provider is pending")
+                if await self.multipart.multipart_exists(
+                    attempt.object_key, upload_id=provider.provider_upload_id, at=at
+                ):
+                    raise DirectModelUploadPending(
+                        "direct upload provider generation remains available"
+                    )
+                self.journal.put(
+                    "direct-restart-request", request.reservation_sha256, signed_restart
+                )
+                await self.multipart.abort(
+                    attempt.object_key, upload_id=provider.provider_upload_id, at=at
+                )
+                self.journal.put(
+                    "direct-superseded",
+                    request.reservation_sha256,
+                    {
+                        "reason_code": request.reason_code,
+                        "superseded_at_unix_ms": now_unix_ms,
+                    },
+                )
+            elif retained_restart is None:
+                raise ValueError("direct upload supersession lacks its signed request")
+            retained_request = self.journal.get("direct-request", body.payload.upload_sha256)
+            retained_payload = self.journal.get("direct-payload", body.payload.upload_sha256)
+            if retained_request is None or retained_payload is None:
+                raise ValueError("direct upload restart inputs are unavailable")
+            participation = CohortParticipationRequest.model_validate_json(
+                canonical_json_bytes(retained_request)
+            )
+            payload = SignedDirectModelPayload.model_validate_json(
+                canonical_json_bytes(retained_payload)
+            )
+
+        replacement = await self.reserve(participation, payload, now_unix_ms=now_unix_ms)
+        if replacement.reservation.generation <= request.generation:
+            raise ValueError("direct upload restart did not advance generation")
+        return replacement
+
     def capabilities(
         self,
         signed: SignedDirectModelUploadReservation,
@@ -517,6 +638,8 @@ class DirectModelUploadOwner:
         attempt = _DirectModelUploadIntent.model_validate_json(canonical_json_bytes(attempt_raw))
         if self._signed_reservation(attempt) != signed:
             raise ValueError("direct upload reservation retry differs")
+        if self.journal.get("direct-superseded", digest(reservation)) is not None:
+            raise ValueError("direct upload reservation was superseded")
         attempts = self._attempts(payload.upload_sha256)
         if not attempts or attempts[-1] != attempt:
             raise ValueError("direct upload reservation was superseded")
@@ -769,6 +892,8 @@ class DirectModelUploadOwner:
             )
         ):
             raise ValueError("direct upload completion differs from its reservation")
+        if self.journal.get("direct-superseded", completion.reservation_sha256) is not None:
+            raise ValueError("direct upload completion reservation was superseded")
         attempt_raw = self.journal.get("direct-intent", body.attempt_id)
         if attempt_raw is None:
             raise ValueError("direct upload completion attempt is unavailable")
@@ -1147,11 +1272,105 @@ class DirectModelUploadOwner:
                 raise OSError("direct model staging cleanup is incomplete")
             return receipt
 
+    async def _cleanup_rejected_object(
+        self,
+        reservation_sha256: str,
+        reason_code: str,
+        *,
+        now_unix_ms: int,
+        execute: bool,
+    ) -> str:
+        """Retain a terminal rejection, then delete only its exact staging object."""
+
+        receipt_raw = self.journal.get("direct-rejected-cleanup-receipt", reservation_sha256)
+        if receipt_raw is not None:
+            receipt = _DirectModelRejectedCleanupReceipt.model_validate_json(
+                canonical_json_bytes(receipt_raw)
+            )
+            if receipt.reservation_sha256 != reservation_sha256:
+                raise ValueError("rejected object cleanup receipt changed")
+            return "complete"
+        reservation = self._reservation_by_digest(reservation_sha256)
+        body = reservation.reservation
+        completed_raw = self.journal.get("direct-object", reservation_sha256)
+        attempt_raw = self.journal.get("direct-intent", body.attempt_id)
+        if completed_raw is None or attempt_raw is None:
+            raise ValueError("rejected object cleanup source is incomplete")
+        completed = DirectModelUploadObject.model_validate_json(canonical_json_bytes(completed_raw))
+        attempt = _DirectModelUploadIntent.model_validate_json(canonical_json_bytes(attempt_raw))
+        expected_key_sha256 = sha256_hex(attempt.object_key.encode())
+        if (
+            completed.reservation_sha256 != reservation_sha256
+            or completed.generation != body.generation
+            or completed.object_key_sha256 != expected_key_sha256
+        ):
+            raise ValueError("rejected object cleanup source changed")
+        intent_raw = self.journal.get("direct-rejected-cleanup-intent", reservation_sha256)
+        if intent_raw is None:
+            intent = _DirectModelRejectedCleanupIntent(
+                schema="umi-direct-model-rejected-cleanup-intent/1",
+                reservation_sha256=reservation_sha256,
+                object_key_sha256=expected_key_sha256,
+                provider_etag=completed.provider_etag,
+                total_bytes=body.payload.total_bytes,
+                reason_code=reason_code,
+                created_at_unix_ms=now_unix_ms,
+                retain_until_unix_ms=(
+                    now_unix_ms + self.config.rejected_object_retention_seconds * 1000
+                ),
+            )
+            self.journal.put("direct-rejected-cleanup-intent", reservation_sha256, intent)
+        else:
+            intent = _DirectModelRejectedCleanupIntent.model_validate_json(
+                canonical_json_bytes(intent_raw)
+            )
+            expected = intent.model_copy(
+                update={
+                    "reservation_sha256": reservation_sha256,
+                    "object_key_sha256": expected_key_sha256,
+                    "provider_etag": completed.provider_etag,
+                    "total_bytes": body.payload.total_bytes,
+                    "reason_code": reason_code,
+                }
+            )
+            if intent != expected:
+                raise ValueError("rejected object cleanup intent changed")
+        if now_unix_ms < intent.retain_until_unix_ms or not execute:
+            return "retained"
+        head = await self.multipart.head(attempt.object_key, at=_at(now_unix_ms))
+        if head is not None:
+            if (head.size_bytes, head.etag) != (intent.total_bytes, intent.provider_etag):
+                raise ValueError("rejected object changed before cleanup")
+            await self.multipart.delete_object(attempt.object_key, at=_at(now_unix_ms))
+            if await self.multipart.head(attempt.object_key, at=_at(now_unix_ms)) is not None:
+                raise OSError("rejected object cleanup is incomplete")
+        receipt = _DirectModelRejectedCleanupReceipt(
+            schema="umi-direct-model-rejected-cleanup-receipt/1",
+            intent_sha256=digest(intent),
+            reservation_sha256=reservation_sha256,
+            object_key_sha256=intent.object_key_sha256,
+            deleted_at_unix_ms=now_unix_ms,
+        )
+        self.journal.put("direct-rejected-cleanup-receipt", reservation_sha256, receipt)
+        return "cleaned"
+
+    def _rejected_cleanup_due(self, reservation_sha256: str, now_unix_ms: int) -> bool:
+        if self.journal.get("direct-rejected-cleanup-receipt", reservation_sha256) is not None:
+            return False
+        raw = self.journal.get("direct-rejected-cleanup-intent", reservation_sha256)
+        if raw is None:
+            return False
+        intent = _DirectModelRejectedCleanupIntent.model_validate_json(canonical_json_bytes(raw))
+        if intent.reservation_sha256 != reservation_sha256:
+            raise ValueError("rejected object cleanup intent changed")
+        return now_unix_ms >= intent.retain_until_unix_ms
+
     async def poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
         """Advance bounded object verification without holding up public requests."""
 
         _at(now_unix_ms)
         ready = pending = failed = reviews_ready = reviews_held = 0
+        cleaned = retained_for_cleanup = cleanup_examined = 0
         last_error = ""
         examined = 0
         for reservation_sha256 in self.journal.keys("direct-object"):
@@ -1181,10 +1400,56 @@ class DirectModelUploadOwner:
             if verification_hold is not None:
                 failed += 1
                 last_error = verification_hold["reason_code"]
+                try:
+                    execute = self._rejected_cleanup_due(reservation_sha256, now_unix_ms) and (
+                        cleanup_examined < self.config.cleanup_batch_size
+                    )
+                    if execute:
+                        cleanup_examined += 1
+                    state = await self._cleanup_rejected_object(
+                        reservation_sha256,
+                        last_error,
+                        now_unix_ms=now_unix_ms,
+                        execute=execute,
+                    )
+                    if state == "cleaned":
+                        cleaned += 1
+                    elif state == "retained":
+                        retained_for_cleanup += 1
+                except (OSError, ValueError) as error:
+                    retained_for_cleanup += 1
+                    last_error = (
+                        "direct_model_rejected_cleanup_failed"
+                        if isinstance(error, ValueError)
+                        else type(error).__name__
+                    )
                 continue
             if review_hold is not None:
                 reviews_held += 1
                 last_error = review_hold["reason_code"]
+                try:
+                    execute = self._rejected_cleanup_due(reservation_sha256, now_unix_ms) and (
+                        cleanup_examined < self.config.cleanup_batch_size
+                    )
+                    if execute:
+                        cleanup_examined += 1
+                    state = await self._cleanup_rejected_object(
+                        reservation_sha256,
+                        last_error,
+                        now_unix_ms=now_unix_ms,
+                        execute=execute,
+                    )
+                    if state == "cleaned":
+                        cleaned += 1
+                    elif state == "retained":
+                        retained_for_cleanup += 1
+                except (OSError, ValueError) as error:
+                    retained_for_cleanup += 1
+                    last_error = (
+                        "direct_model_rejected_cleanup_failed"
+                        if isinstance(error, ValueError)
+                        else type(error).__name__
+                    )
                 continue
             if examined >= self.config.verification_batch_size:
                 pending += 1
@@ -1203,6 +1468,20 @@ class DirectModelUploadOwner:
                     )
                     failed += 1
                     last_error = reason_code
+                    try:
+                        await self._cleanup_rejected_object(
+                            reservation_sha256,
+                            reason_code,
+                            now_unix_ms=now_unix_ms,
+                            execute=False,
+                        )
+                    except (OSError, ValueError) as error:
+                        last_error = (
+                            "direct_model_rejected_cleanup_failed"
+                            if isinstance(error, ValueError)
+                            else type(error).__name__
+                        )
+                    retained_for_cleanup += 1
                     continue
                 except OSError as error:
                     failed += 1
@@ -1214,6 +1493,20 @@ class DirectModelUploadOwner:
             except StaticModelReviewHeld as error:
                 reviews_held += 1
                 last_error = error.reason_code
+                try:
+                    await self._cleanup_rejected_object(
+                        reservation_sha256,
+                        error.reason_code,
+                        now_unix_ms=now_unix_ms,
+                        execute=False,
+                    )
+                except (OSError, ValueError) as cleanup_error:
+                    last_error = (
+                        "direct_model_rejected_cleanup_failed"
+                        if isinstance(cleanup_error, ValueError)
+                        else type(cleanup_error).__name__
+                    )
+                retained_for_cleanup += 1
             except ValueError:
                 reason_code = "direct_model_review_failed"
                 self.journal.put(
@@ -1223,6 +1516,20 @@ class DirectModelUploadOwner:
                 )
                 reviews_held += 1
                 last_error = reason_code
+                try:
+                    await self._cleanup_rejected_object(
+                        reservation_sha256,
+                        reason_code,
+                        now_unix_ms=now_unix_ms,
+                        execute=False,
+                    )
+                except (OSError, ValueError) as cleanup_error:
+                    last_error = (
+                        "direct_model_rejected_cleanup_failed"
+                        if isinstance(cleanup_error, ValueError)
+                        else type(cleanup_error).__name__
+                    )
+                retained_for_cleanup += 1
             except OSError as error:
                 failed += 1
                 last_error = type(error).__name__
@@ -1233,6 +1540,8 @@ class DirectModelUploadOwner:
             "objects_failed": failed,
             "reviews_ready": reviews_ready,
             "reviews_held": reviews_held,
+            "objects_cleaned": cleaned,
+            "objects_retained_for_cleanup": retained_for_cleanup,
             "last_error_type": last_error,
         }
 

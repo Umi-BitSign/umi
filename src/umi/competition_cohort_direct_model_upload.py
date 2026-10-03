@@ -173,6 +173,26 @@ class SignedDirectModelUploadPartRequest(StrictProtocolModel):
         return self
 
 
+class DirectModelUploadRestartRequest(StrictProtocolModel):
+    """Miner request to replace one provider-expired multipart generation."""
+
+    schema_: Literal["umi-direct-model-upload-restart-request/1"] = Field(alias="schema")
+    reservation_sha256: Hex32
+    generation: Annotated[int, Field(ge=1, le=2**32 - 1)]
+    reason_code: Literal["provider_upload_unavailable"]
+
+
+class SignedDirectModelUploadRestartRequest(StrictProtocolModel):
+    schema_: Literal["umi-signed-direct-model-upload-restart-request/1"] = Field(alias="schema")
+    request: DirectModelUploadRestartRequest
+    signature: Signature
+
+    @model_validator(mode="after")
+    def signature_matches(self) -> Self:
+        verify_signature(self.request, self.signature)
+        return self
+
+
 class DirectModelUploadPartCapabilities(StrictProtocolModel):
     schema_: Literal["umi-direct-model-upload-part-capabilities/1"] = Field(alias="schema")
     reservation_sha256: Hex32
@@ -305,3 +325,16 @@ def require_part_request_signer(
         or identity(value.signature.hotkey) != identity(reservation.hotkey)
     ):
         raise ValueError("direct upload capability signer or reservation differs")
+
+
+def require_restart_request_signer(
+    value: SignedDirectModelUploadRestartRequest, reservation: DirectModelUploadReservation
+) -> None:
+    """Bind provider-expiry recovery to the original submitting hotkey."""
+
+    if (
+        value.request.reservation_sha256 != digest_reservation(reservation)
+        or value.request.generation != reservation.generation
+        or identity(value.signature.hotkey) != identity(reservation.hotkey)
+    ):
+        raise ValueError("direct upload restart signer or reservation differs")

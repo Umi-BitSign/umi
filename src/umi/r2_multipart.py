@@ -223,9 +223,24 @@ class R2MultipartClient:
             "DELETE",
             key,
             query=(("uploadId", upload_id),),
-            expected_status=(204,),
+            expected_status=(204, 404),
             at=at,
         )
+
+    async def multipart_exists(
+        self, key: str, *, upload_id: str, at: datetime | None = None
+    ) -> bool:
+        """Probe one exact multipart generation without listing other uploads."""
+
+        response = await self._exchange(
+            "GET",
+            key,
+            query=(("uploadId", upload_id),),
+            expected_status=(200, 404),
+            maximum_response_bytes=8 * 1024**2,
+            at=at,
+        )
+        return response.status_code == 200
 
     async def head(self, key: str, *, at: datetime | None = None) -> R2ObjectHead | None:
         response = await self._exchange("HEAD", key, expected_status=(200, 404), at=at)

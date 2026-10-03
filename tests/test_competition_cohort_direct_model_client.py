@@ -48,9 +48,20 @@ class Multipart:
         )
         self.parts: dict[int, bytes] = {}
         self.complete_bytes: bytes | None = None
+        self.creates = 0
+        self.uploads = set()
 
     async def create(self, key, *, at=None):
-        return "provider-upload-1"
+        self.creates += 1
+        provider = f"provider-upload-{self.creates}"
+        self.uploads.add((key, provider))
+        return provider
+
+    async def abort(self, key, *, upload_id, at=None):
+        self.uploads.discard((key, upload_id))
+
+    async def multipart_exists(self, key, *, upload_id, at=None):
+        return (key, upload_id) in self.uploads
 
     async def head(self, key, *, at=None):
         if self.complete_bytes is None:
@@ -58,7 +69,7 @@ class Multipart:
         return SimpleNamespace(size_bytes=len(self.complete_bytes), etag="object-etag-1")
 
     async def complete(self, key, *, upload_id, parts, at=None):
-        assert upload_id == "provider-upload-1"
+        assert upload_id == f"provider-upload-{self.creates}"
         assert tuple(part.part_number for part in parts) == tuple(range(1, len(parts) + 1))
         for part in parts:
             data = self.parts[part.part_number]
@@ -138,6 +149,8 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
     async def sign(value):
         return sign_object(value, wallet("Charlie"))
 
+    current_time = [1_800_000_000_000]
+    attempt_ids = iter(("a1" * 32, "b2" * 32))
     owner = DirectModelUploadOwner(
         DirectModelUploadOwnerConfig(
             schema="umi-direct-model-upload-owner-config/1",
@@ -146,6 +159,7 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
             owner_hotkey=wallet("Charlie").hotkey.ss58_address,
             delivery=profile,
             maximum_uploads=8,
+            attempt_lease_seconds=30,
             admission_reviews_directory=str(reviews),
             standing_review_policy=review_policy,
         ),
@@ -153,13 +167,13 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
         authorize=authorize,
         sign=sign,
         policy=h.intake.policy,
-        new_attempt_id=lambda: "a1" * 32,
+        new_attempt_id=lambda: next(attempt_ids),
     )
     app = FastAPI()
     app.include_router(
         cohort_routes(h.intake, h.capture, maximum_body_bytes=4 * 1024**2, models=owner)
     )
-    app.include_router(direct_model_upload_routes(owner, now_unix_ms=lambda: 1_800_000_000_000))
+    app.include_router(direct_model_upload_routes(owner, now_unix_ms=lambda: current_time[0]))
 
     discovered = []
 
@@ -171,9 +185,20 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
 
     put_requests = 0
 
+    expired_once = False
+
     async def put_part(request):
+        nonlocal expired_once
         nonlocal put_requests
         put_requests += 1
+        if not expired_once:
+            expired_once = True
+            provider = request.url.params["uploadId"]
+            matching = [entry for entry in multipart.uploads if entry[1] == provider]
+            assert len(matching) == 1
+            multipart.uploads.remove(matching[0])
+            current_time[0] += 31_000
+            return httpx.Response(404)
         number = int(request.url.params["partNumber"])
         data = await request.aread()
         multipart.parts[number] = data
@@ -223,6 +248,7 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
 
     assert receipt.status == "pending_attestation"
     assert retry_receipt == receipt
+    assert multipart.creates == 2
     assert discovered == [h.cohort, h.cohort]
     assert put_requests == uploaded_parts
     assert multipart.complete_bytes == b"".join(

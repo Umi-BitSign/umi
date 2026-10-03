@@ -77,6 +77,29 @@ async def test_head_404_is_absent_without_parsing_error_body():
 
 
 @pytest.mark.asyncio
+async def test_exact_multipart_probe_and_absent_abort_are_idempotent():
+    responses = iter((httpx.Response(200, content=b"<ListPartsResult/>"), httpx.Response(404)))
+    requests = []
+
+    async def send(request):
+        requests.append(request)
+        if request.method == "GET":
+            return next(responses)
+        assert request.method == "DELETE"
+        return httpx.Response(404)
+
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    assert await client.multipart_exists(KEY, upload_id="provider+/id=", at=AT) is True
+    assert await client.multipart_exists(KEY, upload_id="provider+/id=", at=AT) is False
+    await client.abort(KEY, upload_id="provider+/id=", at=AT)
+    assert [request.url.params["uploadId"] for request in requests] == [
+        "provider+/id=",
+        "provider+/id=",
+        "provider+/id=",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_provider_errors_are_bounded_and_do_not_echo_body():
     client = R2MultipartClient(
         signer(),
