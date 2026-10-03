@@ -244,7 +244,12 @@ chain configuration and predecessor handoff plan. `competition_reward_host`
 reads this root-owned approval before stopping the predecessor and binds the
 transaction journal to the original supervisor database. Startup must reopen
 that journal; missing state cannot become an empty replacement. Capacity
-increases preserve its identity.
+increases preserve its identity. Execution retains the series-local writer lock
+for compatibility and also holds a lock at the shared `standing-rewards` root,
+so two different standing series cannot submit concurrently for the same
+validator once all candidate hosts run the shared-lock-capable release. Upgrade
+the incumbent host before installing a successor series; an older host knows
+only its series-local lock and cannot observe the new shared lock.
 
 `competition_reward_service` owns proof providers and holds the original
 predecessor handoff through executor shutdown. Transient failures retry with retained state;

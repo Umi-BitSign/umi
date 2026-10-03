@@ -11,6 +11,7 @@ import hashlib
 import os
 import secrets
 import stat
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -78,12 +79,13 @@ def _retained_binding(runtime):
     return value
 
 
-def _identities(journal):
+def _identities(journal, writer_path):
     paths = (
         journal.journal.root,
         journal.journal.path,
         journal.journal.lock_path,
         journal.journal.root / "standing-writer.lock",
+        writer_path,
     )
     result = []
     for path in paths:
@@ -108,6 +110,7 @@ class BoundStandingRewardHost:
     """Process-local ownership; never reconstruct this from serialized flags."""
 
     journal: StandingWeightJournal
+    writer_path: Path
     _runtime: SuccessorSupervisorRuntime = field(repr=False)
     _preparation: StandingRewardPreparation = field(repr=False)
     _first: PreparedStandingReward = field(repr=False)
@@ -122,6 +125,7 @@ class BoundStandingRewardHost:
     def _selection(self):
         return (
             id(self.journal),
+            str(self.writer_path),
             id(self._runtime),
             id(self._preparation),
             id(self._first),
@@ -149,7 +153,7 @@ class BoundStandingRewardHost:
             or digest(journal.binding) != self._retained.journal_binding_sha256
             or journal.journal.get("standing_host_identity", "original")
             != self._retained.journal_id
-            or _identities(journal) != self._identities
+            or _identities(journal, self.writer_path) != self._identities
         ):
             raise ValueError("standing execution approval or retained journal changed")
 
@@ -243,6 +247,10 @@ def bind_standing_reward_host(
     root = (
         Path(runtime.config.state_root) / "standing-rewards" / preparation.series_sha256 / "weights"
     )
+    # The journal is series-specific, but a validator can submit for only one
+    # standing series at a time. This host-wide lock fences a successor series
+    # even though it has a different journal and series digest.
+    writer_path = Path(runtime.config.state_root) / "standing-rewards" / "standing-writer.lock"
     prior = _retained_binding(runtime)
     if prior is not None:
         if prior.approval_sha256 != hashlib.sha256(raw).hexdigest():
@@ -259,8 +267,11 @@ def bind_standing_reward_host(
         chain_config_sha256=approval.chain_config_sha256,
         maximum_bytes=maximum_journal_bytes,
     )
-    fd = lock_private_file(root / "standing-writer.lock")
-    try:
+    with ExitStack() as locks:
+        global_fd = lock_private_file(writer_path)
+        locks.callback(os.close, global_fd)
+        fd = lock_private_file(root / "standing-writer.lock")
+        locks.callback(os.close, fd)
         identity = journal.journal.get("standing_host_identity", "original")
         if prior is not None:
             if (
@@ -293,6 +304,7 @@ def bind_standing_reward_host(
             prior = candidate
         bound = BoundStandingRewardHost(
             journal,
+            writer_path,
             runtime,
             preparation,
             first,
@@ -300,11 +312,9 @@ def bind_standing_reward_host(
             approval_path,
             approval,
             prior,
-            _identities(journal),
+            _identities(journal, writer_path),
             _issuer=_ISSUER,
         )
         object.__setattr__(bound, "_seal", bound._selection())
         bound.recheck(journal=journal, preparation=preparation, first=first, handoff=handoff)
         return bound
-    finally:
-        os.close(fd)

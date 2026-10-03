@@ -39,8 +39,9 @@ def executing(retained, monkeypatch):
     e.hotkey = t.chain.validator_hotkey
     e.period, e.maximum_history_blocks, e.timeout = 128, 64, 0.2
     e._prepared = {digest(e.first.activation): e.first}
-    e._lock, e._descriptor = asyncio.Lock(), None
-    e._writer_path = t.journal.journal.root / "standing-writer.lock"
+    e._lock, e._descriptor, e._series_descriptor = asyncio.Lock(), None, None
+    e._writer_path = t.journal.journal.root.parent.parent / "standing-writer.lock"
+    e._series_writer_path = t.journal.journal.root / "standing-writer.lock"
     e.decisions = t.options["source"]
     t.signed, t.sent, t.captures, t.recoveries = [], [], [], []
     t.end, t.fenced, t.mutate = None, True, lambda _: None
@@ -52,7 +53,7 @@ def executing(retained, monkeypatch):
             raise ValueError("original writer ownership ended")
 
     monkeypatch.setattr(execution, "validate_legacy_handoff", fence)
-    e.host = SimpleNamespace(recheck=fence)
+    e.host = SimpleNamespace(recheck=fence, writer_path=e._writer_path)
 
     async def control(_):
         return SimpleNamespace(
@@ -277,6 +278,8 @@ async def test_drain_does_not_sign_and_later_selection_resumes(executing):
 
 async def test_writes_require_lock_and_cannot_compete(executing):
     t, e = executing, executing.executor
+    assert e._writer_path.parent == e.journal.journal.root.parent.parent
+    assert e._series_writer_path.parent == e.journal.journal.root
     with pytest.raises(ValueError, match="does not own"):
         await e.step()
     other = copy.copy(e)
@@ -288,6 +291,16 @@ async def test_writes_require_lock_and_cannot_compete(executing):
         with pytest.raises(ValueError, match="lock changed"):
             await e.step()
     assert not t.signed
+
+    descriptor = execution.lock_private_file(e._series_writer_path)
+    try:
+        with pytest.raises(PrivateStateBusyError), e.hold_writer():
+            pass
+        assert e._descriptor is e._series_descriptor is None
+        replacement = execution.lock_private_file(e._writer_path)
+        os.close(replacement)
+    finally:
+        os.close(descriptor)
 
 
 async def test_slow_signing_cancellation_drains_before_releasing_writer(executing):
@@ -310,11 +323,11 @@ async def test_slow_signing_cancellation_drains_before_releasing_writer(executin
     assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     await asyncio.sleep(0.01)
-    assert not task.done() and e._descriptor is not None
+    assert not task.done() and e._descriptor is not None and e._series_descriptor is not None
     finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert e._descriptor is None and not t.sent
+    assert e._descriptor is e._series_descriptor is None and not t.sent
     assert t.journal.pending().signed is None
     with e.hold_writer():
         assert (await e.step()).status == "transaction_pending"

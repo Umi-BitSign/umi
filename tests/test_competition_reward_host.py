@@ -28,7 +28,7 @@ from umi.competition_reward_service import StandingRewardServiceLimits, run_stan
 from umi.competition_reward_transactions import StandingWeightJournal
 from umi.competition_round_journal import RoundJournal
 from umi.open_competition import digest
-from umi.private_files import lock_private_file
+from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
 
 from .reward_service_execution_fixture import connect_executor
@@ -147,11 +147,27 @@ async def test_binding_reopens_original_journal_after_restart(installed):
                 bound.journal.journal.root
                 == Path(c.config.state_root) / "standing-rewards" / digest(c.series) / "weights"
             )
+            assert bound.writer_path == (
+                Path(c.config.state_root) / "standing-rewards" / "standing-writer.lock"
+            )
             bound.journal.journal.put("test-preserved", "one", {"retained": True})
             assert bound.journal.journal.get("test-preserved", "one") == {"retained": True}
         with pytest.raises(ValueError):
             c.check(bound)
     assert identities[0] == identities[1]
+
+
+async def test_host_writer_lock_fences_binding_independently_of_series_journal(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        bound = c.bind(runtime, handoff)
+        assert bound.writer_path.parent == bound.journal.journal.root.parent.parent
+        descriptor = lock_private_file(bound.writer_path)
+        try:
+            with pytest.raises(PrivateStateBusyError):
+                c.bind(runtime, handoff)
+        finally:
+            os.close(descriptor)
 
 
 @pytest.mark.parametrize("name", ["rounds.sqlite3", "rounds.lock", "standing-writer.lock"])

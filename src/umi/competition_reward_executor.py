@@ -12,7 +12,7 @@ import logging
 import math
 import os
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from functools import partial
 
@@ -119,7 +119,9 @@ class StandingRewardExecutor:
         self._prepared = {digest(first.activation): first}
         self._lock = asyncio.Lock()
         self._descriptor = None
-        self._writer_path = journal.journal.root / "standing-writer.lock"
+        self._series_descriptor = None
+        self._writer_path = host.writer_path
+        self._series_writer_path = journal.journal.root / "standing-writer.lock"
         self._fence(handoff.through_block, require_writer=False)
 
     def _fence(self, block: int, *, require_writer: bool = True) -> None:
@@ -139,25 +141,32 @@ class StandingRewardExecutor:
             block=block,
         )
         if require_writer:
-            if self._descriptor is None:
+            if self._descriptor is None or self._series_descriptor is None:
                 raise ValueError("standing executor does not own its writer lock")
-            held, named = os.fstat(self._descriptor), self._writer_path.lstat()
-            if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or held.st_nlink != 1:
-                raise ValueError("standing executor writer lock changed")
+            for descriptor, path in (
+                (self._descriptor, self._writer_path),
+                (self._series_descriptor, self._series_writer_path),
+            ):
+                held, named = os.fstat(descriptor), path.lstat()
+                if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or held.st_nlink != 1:
+                    raise ValueError("standing executor writer lock changed")
 
     @contextmanager
     def hold_writer(self) -> Iterator[None]:
         """Exclude another executor even within the same legacy handoff scope."""
-        if self._descriptor is not None:
+        if self._descriptor is not None or self._series_descriptor is not None:
             raise ValueError("standing executor already owns its writer lock")
-        descriptor = lock_private_file(self._writer_path)
-        self._descriptor = descriptor
-        try:
-            self._fence(self.handoff.through_block)
-            yield
-        finally:
-            self._descriptor = None
-            os.close(descriptor)
+        with ExitStack() as locks:
+            descriptor = lock_private_file(self._writer_path)
+            locks.callback(os.close, descriptor)
+            series_descriptor = lock_private_file(self._series_writer_path)
+            locks.callback(os.close, series_descriptor)
+            self._descriptor, self._series_descriptor = descriptor, series_descriptor
+            try:
+                self._fence(self.handoff.through_block)
+                yield
+            finally:
+                self._descriptor = self._series_descriptor = None
 
     async def _selection(self):
         control = await self.provider.collect_control(self.history.hotkey)

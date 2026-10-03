@@ -185,6 +185,11 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
     descriptor = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, descriptor)
+        if config.role == "coordinator":
+            # Series journals are disjoint, but the control hotkey has one
+            # mutable chain slot. Keep one host-wide publisher across series.
+            control_writer = lock_private_file(Path(config.state_directory) / "control-writer.lock")
+            resources.callback(os.close, control_writer)
         files = StandingRewardFiles(
             Path(config.files_directory),
             maximum_package_bytes=config.maximum_package_bytes,

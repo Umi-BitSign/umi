@@ -16,7 +16,7 @@ import pytest
 from umi import competition_reward_coordinator_boot as boot
 from umi import competition_reward_coordinator_cli as cli
 from umi.open_competition import digest, verify_signature
-from umi.private_files import lock_private_file
+from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_reward_boot import chain as chain
@@ -181,6 +181,8 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
 
         async def run(self, stop, *, poll_seconds):
             assert self.kw["publisher"].provider is self.kw["reviewer"].provider
+            with pytest.raises(PrivateStateBusyError):
+                lock_private_file(Path(config.state_directory) / "control-writer.lock")
             await running(self.kw["signer"], self.kw["reviewer"].provider)
             if failure in {"coverage", "coverage_exit"}:
                 await asyncio.Event().wait()
@@ -220,6 +222,9 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         Path(config.state_directory) / digest(config.series) / "service.lock"
     )
     os.close(descriptor)
+    if role == "coordinator":
+        descriptor = lock_private_file(Path(config.state_directory) / "control-writer.lock")
+        os.close(descriptor)
 
 
 def test_cli_failure_omits_exception_values(monkeypatch, capsys):

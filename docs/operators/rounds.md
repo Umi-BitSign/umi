@@ -1113,8 +1113,15 @@ supply content; the native readers verify it. A later activation also requires
 the native predecessor-opportunity result. Submission uses the configured primary
 RPC and two explicit backups.
 
-`run` holds a separate private writer lock and serializes iterations. Each
-iteration reconciles an existing transaction before reserving another. It never
+`run` holds both the legacy series-local writer lock and a writer lock shared by
+every standing series under the validator state root. The local lock preserves
+same-series exclusion during a rolling host upgrade; the shared lock prevents
+two upgraded series from acquiring validator writers concurrently. Every host
+must therefore run a shared-lock-capable release before a successor series is
+installed. Series journals remain disjoint. The configured reward coordinator
+similarly holds one control-writer lock shared by all upgraded series under its
+state root. Each iteration reconciles an existing transaction before reserving
+another. It never
 re-signs or retransmits a recovered attempt, including an unsigned intent or a
 lost commit acknowledgement. Missing inclusion evidence leaves it pending until
 native receipt or expiry review permits a successor. No cumulative timer or
