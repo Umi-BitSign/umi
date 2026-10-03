@@ -1250,6 +1250,11 @@ and durable runtime. Startup takes the original process lock before repairing an
 interrupted input switch and passes that same descriptor to the runtime. The
 runtime journal lives in `successor-v4/runtime`, separately from download and
 input caches. It will not reinterpret a journal left at an older unshipped path.
+Directive delivery retries the same exact cursor twice after a bounded transport,
+timeout, partial-body, missing-object or retryable HTTP failure. A recovered
+response continues the running worker without changing authority. Exhausted
+retries retain the existing fail-closed stop and transaction-recovery behavior;
+redirects and other nonretryable responses fail immediately.
 
 `competition_host_service` renders the exact systemd override. The separate
 `competition_host_switch` publisher writes it without replacement and reloads
