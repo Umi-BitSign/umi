@@ -1,9 +1,10 @@
 """Service lifecycle for standing rewards under the original supervisor lease.
 
 The installed bootstrap supplies native, already verified inputs. This owner
-starts proof providers, holds the C4 handoff through executor shutdown, and
-closes providers before returning to the supervisor. It never creates approval
-or substitutes serialized flags for preparation, handoff or opportunity proofs.
+starts proof providers, holds the predecessor handoff through executor shutdown,
+and closes providers before returning to the supervisor. It never creates
+approval or substitutes serialized flags for preparation, handoff or opportunity
+proofs.
 """
 
 from __future__ import annotations
@@ -23,7 +24,11 @@ from .competition_reward_coverage_service import StandingRewardCoverageService
 from .competition_reward_decisions import DecisionSource, RewardActivation
 from .competition_reward_executor import StandingHistoryPending, StandingRewardExecutor
 from .competition_reward_handoff import hold_legacy_reward_handoff
-from .competition_reward_handoff_models import LegacyRewardHandoffPlan
+from .competition_reward_handoff_models import (
+    LegacyRewardHandoffPlan,
+    RewardHandoffPlan,
+    StandingRewardHandoffPlan,
+)
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_host import (
     bind_standing_reward_host,
@@ -31,6 +36,8 @@ from .competition_reward_host import (
 )
 from .competition_reward_opportunity import VerifiedRewardOpportunity
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
+from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
+from .competition_reward_standing_handoff import hold_standing_reward_handoff
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime
 from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import digest
@@ -66,7 +73,7 @@ async def _close_provider(provider):
 
 
 async def _continue_predecessor(runtime, stop, poll_seconds):
-    """Keep the existing supervisor reconciling while initial C5 replay waits.
+    """Keep the existing supervisor reconciling while initial reward replay waits.
 
     The native runtime checks its durable handoff intent under the same mutex
     as the handoff itself. A loop already awaiting that mutex cannot resurrect
@@ -77,7 +84,7 @@ async def _continue_predecessor(runtime, stop, poll_seconds):
             result = await runtime.reconcile()
             logger.info("standing_predecessor status=%s reason=%s", result.status, result.reason)
         except Exception as error:
-            # Legacy feed/RPC failure cannot prevent independent C5 recovery.
+            # Predecessor feed/RPC failure cannot prevent independent recovery.
             logger.warning("standing_predecessor_retry reason=%s", type(error).__name__)
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
@@ -97,14 +104,15 @@ def _check_coverage(task, stop):
 
 
 async def _run_executor(executor, stop, limits, coverage):
-    if coverage is None:
+    if not coverage:
         await executor.run(stop, poll_seconds=limits.poll_seconds)
         return
     async with AsyncExitStack() as tasks:
         execution = asyncio.create_task(executor.run(stop, poll_seconds=limits.poll_seconds))
         tasks.push_async_callback(_stop_task, execution)
-        await asyncio.wait((execution, coverage), return_when=asyncio.FIRST_COMPLETED)
-        _check_coverage(coverage, stop)
+        await asyncio.wait((execution, *coverage), return_when=asyncio.FIRST_COMPLETED)
+        for collector in coverage:
+            _check_coverage(collector, stop)
         if execution.done():
             execution.result()
 
@@ -145,7 +153,7 @@ async def run_standing_reward_service(
     approval_path: Path,
     preparation: StandingRewardPreparation,
     first: PreparedStandingReward | None = None,
-    plan: LegacyRewardHandoffPlan,
+    plan: RewardHandoffPlan,
     provider: HistoricalRewardControlProvider,
     legacy_providers: Mapping[str, HistoricalRewardControlProvider],
     history: RewardControlHistoryReader,
@@ -156,6 +164,10 @@ async def run_standing_reward_service(
     stop: asyncio.Event,
     limits: StandingRewardServiceLimits,
     coverage: StandingRewardCoverageService | None = None,
+    predecessor_series=None,
+    predecessor: StandingRewardPredecessorOpportunity | None = None,
+    predecessor_coverage: StandingRewardCoverageService | None = None,
+    predecessor_approval_sha256: str | None = None,
 ) -> None:
     """Own the passed providers until stopped; preserve journals on every retry.
 
@@ -174,6 +186,17 @@ async def run_standing_reward_service(
         for value in owners.values():
             resources.push_async_callback(_close_provider, value)
         limits = StandingRewardServiceLimits.model_validate(limits.model_dump())
+        successor = type(plan) is StandingRewardHandoffPlan
+        if successor != all(
+            value is not None
+            for value in (
+                predecessor_series,
+                predecessor,
+                predecessor_coverage,
+                predecessor_approval_sha256,
+            )
+        ):
+            raise ValueError("standing service predecessor ownership is incomplete")
         check_standing_reward_host_selection(
             runtime, approval_path=approval_path, preparation=preparation, first=first, plan=plan
         )
@@ -196,14 +219,14 @@ async def run_standing_reward_service(
         ):
             raise ValueError("standing service differs from approved chain execution")
         if first is None:
-            predecessor = asyncio.create_task(
+            continuation = asyncio.create_task(
                 _continue_predecessor(runtime, stop, float(runtime.config.poll_seconds)),
                 name="standing-predecessor-continuation",
             )
-            resources.push_async_callback(_stop_task, predecessor)
+            resources.push_async_callback(_stop_task, continuation)
         for value in owners.values():
             await value.start()
-        collection = None
+        collections = []
         if coverage is not None:
             if (
                 type(coverage) is not StandingRewardCoverageService
@@ -217,9 +240,31 @@ async def run_standing_reward_service(
                 coverage.run(stop, poll_seconds=limits.poll_seconds), name="standing-coverage"
             )
             resources.push_async_callback(_stop_task, collection)
+            collections.append(collection)
+        if predecessor_coverage is not None:
+            assert isinstance(plan, StandingRewardHandoffPlan)
+            assert predecessor_series is not None
+            if (
+                type(predecessor_coverage) is not StandingRewardCoverageService
+                or predecessor_coverage.provider is not provider
+                or predecessor is None
+                or predecessor.coverage is not predecessor_coverage
+                or predecessor.successor != preparation.reader.series
+                or predecessor.plan != plan
+                or predecessor_coverage.preparation.reader.series != predecessor_series
+            ):
+                raise ValueError("standing predecessor coverage lost its native owners")
+            predecessor._check()
+            prior_collection = asyncio.create_task(
+                predecessor_coverage.run(stop, poll_seconds=limits.poll_seconds),
+                name="standing-predecessor-coverage",
+            )
+            resources.push_async_callback(_stop_task, prior_collection)
+            collections.append(prior_collection)
         bootstrap_height = None
         while not stop.is_set():
-            _check_coverage(collection, stop)
+            for collection in collections:
+                _check_coverage(collection, stop)
             for value in owners.values():
                 value.ensure_observer_running()
             stage = "approval"
@@ -262,14 +307,37 @@ async def run_standing_reward_service(
                     first=first,
                     plan=plan,
                 )
-                stage = _stage("legacy_handoff")
-                async with hold_legacy_reward_handoff(
-                    runtime,
-                    preparation=preparation,
-                    prepared=first,
-                    plan=plan,
-                    providers=legacy_providers,
-                ) as handoff:
+                if successor:
+                    assert isinstance(plan, StandingRewardHandoffPlan)
+                    assert predecessor is not None and predecessor_series is not None
+                    assert predecessor_approval_sha256 is not None
+                    stage = _stage("predecessor_opportunity")
+                    prior = await predecessor.review(
+                        first.activation, observed_at_block=first.reviewed_at_block
+                    )
+                    stage = _stage("standing_handoff")
+                    handoff_context = hold_standing_reward_handoff(
+                        runtime,
+                        successor=preparation.reader.series,
+                        predecessor=predecessor_series,
+                        plan=plan,
+                        activation=first.activation,
+                        opportunity=prior,
+                        predecessor_approval_sha256=predecessor_approval_sha256,
+                        provider=provider,
+                        maximum_journal_bytes=limits.maximum_journal_bytes,
+                    )
+                else:
+                    assert isinstance(plan, LegacyRewardHandoffPlan)
+                    stage = _stage("legacy_handoff")
+                    handoff_context = hold_legacy_reward_handoff(
+                        runtime,
+                        preparation=preparation,
+                        prepared=first,
+                        plan=plan,
+                        providers=legacy_providers,
+                    )
+                async with handoff_context as handoff:
                     stage = _stage("journal_binding")
                     host = bind_standing_reward_host(
                         runtime,
@@ -304,7 +372,7 @@ async def run_standing_reward_service(
                         "standing_service_running series_sha256=%s", preparation.series_sha256
                     )
                     stage = "execution"
-                    await _run_executor(executor, stop, limits, collection)
+                    await _run_executor(executor, stop, limits, tuple(collections))
                     stage = "handoff_release"
             except StandingHistoryPending:
                 if bootstrap_height is not None:

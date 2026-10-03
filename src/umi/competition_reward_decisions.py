@@ -260,9 +260,7 @@ def _decision_body(series, policy, index, previous, activated, body):
         if not (
             max(
                 series.recovery.authority.issued_at_block,
-                0
-                if series.predecessor is None
-                else series.predecessor.decision_committed_at_block,
+                0 if series.predecessor is None else series.predecessor.decision_committed_at_block,
             )
             <= body.observed_at_block
             <= policy.valid_through_block

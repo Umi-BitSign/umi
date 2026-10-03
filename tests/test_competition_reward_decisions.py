@@ -46,11 +46,12 @@ def signed(body, names=("Charlie", "Dave")):
 
 
 def successor_series(series):
+    first = series.cohorts[-1].sequence + 1
     plans = tuple(
         series.cohorts[-1].model_copy(
             update={"sequence": sequence, "suite_sha256": f"{sequence:02x}" * 32}
         )
-        for sequence in (11, 12)
+        for sequence in (first, first + 1)
     )
     authority = StandingCohortRecoveryAuthority(
         schema="umi-cohort-recovery-authority/2",
@@ -61,9 +62,7 @@ def successor_series(series):
         closure_rule="quorum_certified_phase_completion",
         timing_rule="targets_without_extension_signatures",
     )
-    recovery = SignedCohortRecoveryAuthority(
-        authority=authority, signatures=signatures(authority)
-    )
+    recovery = SignedCohortRecoveryAuthority(authority=authority, signatures=signatures(authority))
     predecessor = StandingRewardSeriesPredecessor(
         schema="umi-standing-reward-series-predecessor/1",
         series_sha256=digest(series),

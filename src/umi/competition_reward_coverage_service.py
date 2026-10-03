@@ -257,9 +257,11 @@ class StandingRewardCoverageService:
             index = tuple(digest(c) for c in reader.series.cohorts).index(activation.cohort_sha256)
             if index == 0:
                 raise ValueError("initial opportunity requires the native legacy handoff")
-            prior = SignedRewardControlDecision.model_validate(
-                await run_owned_thread(
-                    reader.journal.get, "reward_control_decision", f"{index:04d}"
+            prior = SignedRewardControlDecision.model_validate_json(
+                canonical_json_bytes(
+                    await run_owned_thread(
+                        reader.journal.get, "reward_control_decision", f"{index:04d}"
+                    )
                 )
             ).decision
             if prior.activation is None:
@@ -293,9 +295,13 @@ class StandingRewardCoverageService:
                 index = cohorts.index(activation.cohort_sha256)
             except ValueError:
                 raise ValueError("completed opportunity is outside the selected series") from None
-            selected = SignedRewardControlDecision.model_validate(
-                await run_owned_thread(
-                    reader.journal.get, "reward_control_decision", f"{index + 1:04d}"
+            selected = SignedRewardControlDecision.model_validate_json(
+                canonical_json_bytes(
+                    await run_owned_thread(
+                        reader.journal.get,
+                        "reward_control_decision",
+                        f"{index + 1:04d}",
+                    )
                 )
             ).decision
             if selected.kind != "activate" or selected.activation != activation:

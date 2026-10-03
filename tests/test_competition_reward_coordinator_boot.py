@@ -89,16 +89,12 @@ def test_successor_configuration_binds_complete_predecessor_context(config_case)
         update={
             "cohorts": tuple(
                 requirement.model_copy(update={"cohort_sha256": digest(plan)})
-                for requirement, plan in zip(
-                    old.manifest.cohorts, successor.cohorts, strict=False
-                )
+                for requirement, plan in zip(old.manifest.cohorts, successor.cohorts, strict=False)
             )
         }
     )
     successor = StandingRewardSeries.model_validate_json(
-        canonical_json_bytes(
-            successor.model_copy(update={"manifest_sha256": digest(manifest)})
-        )
+        canonical_json_bytes(successor.model_copy(update={"manifest_sha256": digest(manifest)}))
     )
     handoff = StandingRewardHandoffPlan(
         schema="umi-standing-reward-handoff-plan/1",
@@ -117,18 +113,12 @@ def test_successor_configuration_binds_complete_predecessor_context(config_case)
             "predecessor_eligibility": old.eligibility,
         }
     )
-    checked = boot.RewardCoordinatorConfig.model_validate_json(
-        canonical_json_bytes(candidate)
-    )
+    checked = boot.RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(candidate))
     assert checked == candidate
     assert b'"predecessor_series"' not in canonical_json_bytes(old)
     for change in (
         {"predecessor_series": None},
-        {
-            "predecessor_manifest": old.manifest.model_copy(
-                update={"policy_sha256": "ff" * 32}
-            )
-        },
+        {"predecessor_manifest": old.manifest.model_copy(update={"policy_sha256": "ff" * 32})},
         {"schema_": "umi-reward-coordinator-config/1"},
     ):
         with pytest.raises(ValueError):

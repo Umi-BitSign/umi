@@ -36,9 +36,9 @@ Timestamp = Annotated[int, Field(ge=1, le=2**53 - 1)]
 
 
 class RequestStartConfig(StrictProtocolModel):
-    schema_: Literal[
-        "umi-cohort-request-start-config/1", "umi-cohort-request-start-config/2"
-    ] = Field(alias="schema")
+    schema_: Literal["umi-cohort-request-start-config/1", "umi-cohort-request-start-config/2"] = (
+        Field(alias="schema")
+    )
     directory: Directory
     first_cohort_not_before_unix_ms: Timestamp
     predecessor_plan: RecoverableCohortPlan | None = None

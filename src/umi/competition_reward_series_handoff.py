@@ -18,9 +18,11 @@ from .competition_reward_opportunity import (
     RewardOpportunityCertificate,
     VerifiedRewardOpportunity,
     check_opportunity_claim,
+    opportunity_rule,
     validate_opportunity,
 )
 from .open_competition import digest, identity
+from .protocol import canonical_json_bytes
 
 _ISSUER = object()
 
@@ -66,6 +68,7 @@ def validate_standing_predecessor_opportunity(
         or value.plan_sha256 != digest(plan)
         or value.predecessor_activation_sha256 != plan.predecessor.activation_sha256
         or value.successor_activation_sha256 != digest(activation)
+        or activation.cohort_sha256 != plan.cohort_sha256
         or digest(value.certificate) != activation.prior_opportunity_sha256
         or type(block) is not int
         or block < value.through_block
@@ -80,9 +83,18 @@ class StandingRewardPredecessorOpportunity:
     def __init__(self, *, successor, plan, coverage: StandingRewardCoverageService):
         if type(coverage) is not StandingRewardCoverageService:
             raise TypeError("standing predecessor requires the native coverage owner")
-        plan = verify_handoff_plan(plan, successor)
-        if type(plan) is not StandingRewardHandoffPlan:
+        self.successor = successor
+        self.plan = verify_handoff_plan(plan, successor)
+        self.coverage = coverage
+        self._check()
+
+    def _check(self) -> None:
+        plan = verify_handoff_plan(self.plan, self.successor)
+        if type(plan) is not StandingRewardHandoffPlan or self.plan != plan:
             raise ValueError("standing predecessor requires a successor handoff")
+        if type(self.coverage) is not StandingRewardCoverageService:
+            raise TypeError("standing predecessor requires the native coverage owner")
+        coverage = self.coverage
         reader = coverage.preparation.reader
         prior = plan.predecessor
         if (
@@ -92,17 +104,25 @@ class StandingRewardPredecessorOpportunity:
             or digest(reader.series.recovery) != prior.recovery_sha256
             or identity(reader.series.control_hotkey) != identity(prior.control_hotkey)
             or prior.cohort_sha256 not in {digest(c) for c in reader.series.cohorts}
+            or coverage.history.hotkey != reader.series.control_hotkey
+            or coverage.history.config_sha256 != digest(coverage.provider.config)
+            or digest(coverage.provider.policy) != digest(reader.policy)
+            or coverage.journal.rule
+            != opportunity_rule(coverage.preparation.manifest, reader.series, reader.policy)
+            or coverage.journal.rule.runtime_profile_sha256 != digest(coverage.profile)
         ):
             raise ValueError("standing predecessor owner differs from the signed boundary")
-        self.successor, self.plan, self.coverage = successor, plan, coverage
 
     def _activation(self) -> RewardActivation:
+        self._check()
         reader, prior = self.coverage.preparation.reader, self.plan.predecessor
         index = tuple(digest(c) for c in reader.series.cohorts).index(prior.cohort_sha256)
         retained = reader.journal.get("reward_control_decision", f"{index + 1:04d}")
         if retained is None:
             raise ValueError("predecessor reward selection is not retained")
-        decision = SignedRewardControlDecision.model_validate(retained).decision
+        decision = SignedRewardControlDecision.model_validate_json(
+            canonical_json_bytes(retained)
+        ).decision
         activation = decision.activation
         if (
             decision.kind != "activate"
@@ -140,10 +160,9 @@ class StandingRewardPredecessorOpportunity:
     async def review(
         self, activation: RewardActivation, *, observed_at_block: int
     ) -> VerifiedStandingPredecessorOpportunity:
+        self._check()
         predecessor = self._activation()
-        verified: VerifiedRewardOpportunity = await self.coverage.completed_opportunity(
-            predecessor
-        )
+        verified: VerifiedRewardOpportunity = await self.coverage.completed_opportunity(predecessor)
         certificate = validate_opportunity(verified)
         check_opportunity_claim(
             certificate,

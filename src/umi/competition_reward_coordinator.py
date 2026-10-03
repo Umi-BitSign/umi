@@ -276,11 +276,7 @@ class StandingRewardCoordinator:
         self.phase = "select_decision"
         body = await run_owned_thread(self._pending, sequence)
         predecessor = (
-            (
-                None
-                if p.series.predecessor is None
-                else p.series.predecessor.decision_sha256
-            )
+            (None if p.series.predecessor is None else p.series.predecessor.decision_sha256)
             if not prefix
             else digest(prefix[-1].decision)
         )

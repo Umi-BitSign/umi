@@ -63,9 +63,8 @@ def verify_handoff_plan(plan: RewardHandoffPlan, series: StandingRewardSeries):
         checked = StandingRewardHandoffPlan.model_validate_json(canonical_json_bytes(plan))
         if checked.predecessor != expected:
             raise ValueError("standing handoff differs from the signed predecessor boundary")
-    if (
-        checked.series_sha256 != digest(series)
-        or checked.cohort_sha256 != digest(series.cohorts[0])
+    if checked.series_sha256 != digest(series) or checked.cohort_sha256 != digest(
+        series.cohorts[0]
     ):
         raise ValueError("reward handoff differs from the selected successor series")
     return checked

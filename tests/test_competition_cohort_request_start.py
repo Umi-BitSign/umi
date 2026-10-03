@@ -334,9 +334,7 @@ def successor_gate(rest, root):
         closure_rule="quorum_certified_phase_completion",
         timing_rule="targets_without_extension_signatures",
     )
-    recovery = SignedCohortRecoveryAuthority(
-        authority=authority, signatures=signatures(authority)
-    )
+    recovery = SignedCohortRecoveryAuthority(authority=authority, signatures=signatures(authority))
     predecessor = StandingRewardSeriesPredecessor(
         schema="umi-standing-reward-series-predecessor/1",
         series_sha256=digest(previous),

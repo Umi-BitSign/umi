@@ -1529,7 +1529,7 @@ async def test_native_pending_activation_signs_recovers_and_delivers_after_resta
 
     with pytest.raises(ValueError, match="original finalized"):
         review(body.model_copy(update={"observed_at_block": observed + 1}))
-    with pytest.raises(ValueError, match="approved legacy handoff"):
+    with pytest.raises(ValueError, match="approved handoff"):
         review(approved_handoff=None)
     with pytest.raises(ValueError, match="native package"):
         review(package=None)
@@ -2457,12 +2457,23 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
         validate_standing_predecessor_opportunity,
     )
 
-    plans = c.series.cohorts[1:]
+    prior_plan = c.series.cohorts[-1]
+    plans = (
+        prior_plan.model_copy(
+            update={
+                "sequence": prior_plan.sequence + 1,
+                "suite_sha256": "fe" * 32,
+            }
+        ),
+    )
     authority_body = StandingCohortRecoveryAuthority(
         schema="umi-cohort-recovery-authority/2",
         policy_sha256=c.series.policy_sha256,
         cohort_sha256s=tuple(sorted(digest(plan) for plan in plans)),
-        issued_at_block=c.active.decision.observed_at_block,
+        issued_at_block=max(
+            c.active.decision.observed_at_block,
+            c.series.recovery.authority.issued_at_block,
+        ),
         lifetime="until_completed_or_revoked",
         closure_rule="quorum_certified_phase_completion",
         timing_rule="targets_without_extension_signatures",
@@ -2476,8 +2487,8 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
         policy_sha256=c.series.policy_sha256,
         manifest_sha256=digest(p.manifest),
         recovery_sha256=digest(c.series.recovery),
-        cohort_sha256=c.active.decision.activation.cohort_sha256,
-        cohort_sequence=c.series.cohorts[0].sequence,
+        cohort_sha256=digest(prior_plan),
+        cohort_sequence=prior_plan.sequence,
         control_hotkey=c.series.control_hotkey,
         decision_sha256=digest(c.active.decision),
         activation_sha256=digest(c.active.decision.activation),
@@ -2501,9 +2512,7 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
         cohort_sha256=digest(successor.cohorts[0]),
         predecessor=predecessor,
     )
-    handoff = StandingRewardPredecessorOpportunity(
-        successor=successor, plan=plan, coverage=service
-    )
+    handoff = StandingRewardPredecessorOpportunity(successor=successor, plan=plan, coverage=service)
     assert handoff.certificate_sha256() == digest(verified.certificate)
     successor_activation = c.active.decision.activation.model_copy(
         update={
@@ -2539,6 +2548,11 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
     assert "coverage_complete" in caplog.text
     await service.step()
     assert await journal.interval_keys() == interval_keys
+    original_config_sha256 = service.history.config_sha256
+    service.history.config_sha256 = "ff" * 32
+    with pytest.raises(ValueError, match="signed boundary"):
+        handoff.certificate_sha256()
+    service.history.config_sha256 = original_config_sha256
 
 
 @pytest.mark.parametrize(

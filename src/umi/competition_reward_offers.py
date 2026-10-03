@@ -51,9 +51,8 @@ class StandingRewardOffers:
         verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
         handoff = verify_handoff_plan(handoff, series)
         standing = type(handoff) is StandingRewardHandoffPlan
-        if (
-            coverage.rule != opportunity_rule(manifest, series, policy)
-            or standing != (predecessor is not None)
+        if coverage.rule != opportunity_rule(manifest, series, policy) or standing != (
+            predecessor is not None
         ):
             raise ValueError("reward offer sources differ from the approved series")
         self.series, self.policy, self.manifest = series, policy, manifest

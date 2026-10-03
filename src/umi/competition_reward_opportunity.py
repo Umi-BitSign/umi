@@ -173,13 +173,10 @@ def require_previous_opportunity(
         selection.activation.cohort_sha256
     )
     if index == 0:
-        if (
-            reader.series.predecessor is None
-            and (type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None)
+        if reader.series.predecessor is None and (
+            type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None
         ):
-            raise ValueError(
-                "first standing activation requires qualified legacy handoff evidence"
-            )
+            raise ValueError("first standing activation requires qualified legacy handoff evidence")
         first = SignedRewardControlDecision.model_validate_json(
             canonical_json_bytes(reader.journal.get("reward_control_decision", "0001"))
         ).decision

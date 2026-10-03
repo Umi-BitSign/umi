@@ -33,13 +33,18 @@ from .competition_reward_decisions import (
 )
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_files import StandingRewardFiles
-from .competition_reward_handoff_models import LegacyRewardHandoffPlan
+from .competition_reward_handoff_models import (
+    LegacyRewardHandoffPlan,
+    RewardHandoffPlan,
+    verify_handoff_plan,
+)
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_host import StandingRewardHostApproval
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_proof_archive import RewardProofArchive
+from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
 from .competition_store import CompetitionStore
 from .competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
@@ -47,7 +52,7 @@ from .competition_supervisor_runtime import SuccessorSupervisorRuntime
 from .concurrency import await_owned_task
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, Directory
-from .protocol import StrictProtocolModel, canonical_json_bytes
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_BOOT_BYTES = 8 * 1024**2
 BOOT_FILENAME = "standing-reward-boot.json"
@@ -73,9 +78,12 @@ def _disjoint(paths: tuple[Path, ...]) -> None:
 
 
 class StandingRewardBootConfig(StrictProtocolModel):
-    schema_: Literal["umi-standing-reward-boot/1", "umi-standing-reward-boot/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-standing-reward-boot/1",
+        "umi-standing-reward-boot/2",
+        "umi-standing-reward-boot/3",
+        "umi-standing-reward-boot/4",
+    ] = Field(alias="schema")
     approval_path: Directory
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -83,7 +91,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
     chain: CompetitionChainConfig
     legacy_chains: Annotated[tuple[StandingLegacyChain, ...], Field(min_length=1, max_length=64)]
     legacy_policy: CompetitionPolicy
-    handoff: LegacyRewardHandoffPlan
+    handoff: RewardHandoffPlan
     eligibility: RewardEligibilityRuntime
     delivery_directory: Directory
     promotion_directory: Directory
@@ -99,12 +107,23 @@ class StandingRewardBootConfig(StrictProtocolModel):
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
     direct_model_review: DirectModelReviewSourceConfig | None = None
+    predecessor_series: StandingRewardSeries | None = None
+    predecessor_manifest: StandingRewardOpportunityManifest | None = None
+    predecessor_eligibility: RewardEligibilityRuntime | None = None
+    predecessor_approval_sha256: Hex32 | None = None
 
     @model_serializer(mode="wrap")
-    def omit_direct_model_review(self, handler):
+    def omit_successor_inputs(self, handler):
         value = handler(self)
-        if self.direct_model_review is None:
-            value.pop("direct_model_review", None)
+        for name in (
+            "direct_model_review",
+            "predecessor_series",
+            "predecessor_manifest",
+            "predecessor_eligibility",
+            "predecessor_approval_sha256",
+        ):
+            if getattr(self, name) is None:
+                value.pop(name, None)
         return value
 
     @model_validator(mode="after")
@@ -115,12 +134,20 @@ class StandingRewardBootConfig(StrictProtocolModel):
             for plan in self.series.cohorts
             if plan.eligible_tracks is None or "model" in plan.eligible_tracks
         )
+        successor = self.series.predecessor is not None
+        predecessor_inputs = (
+            self.predecessor_series,
+            self.predecessor_manifest,
+            self.predecessor_eligibility,
+        )
         if (
-            (self.schema_ == "umi-standing-reward-boot/2") != direct_selected
+            (self.schema_ in {"umi-standing-reward-boot/2", "umi-standing-reward-boot/4"})
+            != direct_selected
+            or (self.schema_ in {"umi-standing-reward-boot/3", "umi-standing-reward-boot/4"})
+            != successor
             or direct_selected != (self.direct_model_review is not None)
-            or self.handoff.series_sha256 != digest(self.series)
-            or self.handoff.cohort_sha256 != digest(self.series.cohorts[0])
-            or self.handoff.legacy_policy_sha256 != digest(self.legacy_policy)
+            or successor != all(value is not None for value in predecessor_inputs)
+            or successor != (self.predecessor_approval_sha256 is not None)
             or self.manifest.opportunity.runtime_profile_sha256 != digest(self.eligibility)
             or len(self.chain.proof_rpc_fallback_urls) != 2
             or self.service.mortality_period > self.series.maximum_transaction_lifetime_blocks
@@ -130,6 +157,31 @@ class StandingRewardBootConfig(StrictProtocolModel):
             or digest(self.chain) in {digest(c.chain) for c in self.legacy_chains}
         ):
             raise ValueError("standing boot inputs disagree with selected authority")
+        verify_handoff_plan(self.handoff, self.series)
+        if not successor and (
+            type(self.handoff) is not LegacyRewardHandoffPlan
+            or self.handoff.legacy_policy_sha256 != digest(self.legacy_policy)
+        ):
+            raise ValueError("standing boot legacy handoff changes its policy")
+        if successor:
+            prior = self.series.predecessor
+            old, manifest, eligibility = predecessor_inputs
+            assert prior is not None and old is not None and manifest is not None
+            assert eligibility is not None
+            verify_reward_manifest(canonical_json_bytes(manifest), old, self.policy)
+            if (
+                digest(old) != prior.series_sha256
+                or old.policy_sha256 != prior.policy_sha256
+                or old.manifest_sha256 != prior.manifest_sha256
+                or digest(old.recovery) != prior.recovery_sha256
+                or identity(old.control_hotkey) != identity(prior.control_hotkey)
+                or not any(
+                    digest(plan) == prior.cohort_sha256 and plan.sequence == prior.cohort_sequence
+                    for plan in old.cohorts
+                )
+                or manifest.opportunity.runtime_profile_sha256 != digest(eligibility)
+            ):
+                raise ValueError("standing boot predecessor differs from its series boundary")
         _disjoint(self.mutable_stores())
         return self
 
@@ -160,8 +212,13 @@ def load_standing_boot(path: Path, anchor: MaterializedSuccessorAnchor) -> Stand
         raise ValueError("standing boot configuration is not canonical")
     approval_raw = _read_root_control_path(Path(value.approval_path), 8192, modes={0o444})
     approval = StandingRewardHostApproval.model_validate_json(approval_raw)
+    successor = value.series.predecessor is not None
     expected = StandingRewardHostApproval(
-        schema="umi-standing-reward-host-approval/1",
+        schema=(
+            "umi-standing-reward-host-approval/2"
+            if successor
+            else "umi-standing-reward-host-approval/1"
+        ),
         source_config_sha256=digest(anchor.config),
         installation_receipt_sha256=anchor.receipt_sha256,
         host_manifest_sha256=anchor.receipt.host_manifest_sha256,
@@ -170,7 +227,9 @@ def load_standing_boot(path: Path, anchor: MaterializedSuccessorAnchor) -> Stand
         policy_sha256=digest(value.policy),
         manifest_sha256=digest(value.manifest),
         chain_config_sha256=digest(value.chain),
-        legacy_handoff_plan_sha256=digest(value.handoff),
+        legacy_handoff_plan_sha256=None if successor else digest(value.handoff),
+        standing_handoff_plan_sha256=digest(value.handoff) if successor else None,
+        predecessor_approval_sha256=value.predecessor_approval_sha256,
     )
     if canonical_json_bytes(approval) != approval_raw or approval != expected:
         raise ValueError("standing boot inputs differ from approved installation")
@@ -178,6 +237,14 @@ def load_standing_boot(path: Path, anchor: MaterializedSuccessorAnchor) -> Stand
         identity(k) for k in value.series.validators
     }:
         raise ValueError("standing boot validator is absent from the approved series")
+    if successor:
+        old = value.predecessor_series
+        assert old is not None
+        was_predecessor = identity(anchor.config.validator_hotkey) in {
+            identity(k) for k in old.validators
+        }
+        if not was_predecessor or value.predecessor_approval_sha256 is None:
+            raise ValueError("standing boot local predecessor authority is incomplete")
     _disjoint((*value.mutable_stores(), Path(anchor.config.state_root) / "standing-rewards"))
     return value
 
@@ -297,6 +364,57 @@ async def run_installed_standing_rewards(
             profile=config.eligibility,
             maximum_history_blocks=config.service.maximum_history_blocks,
         )
+        predecessor = None
+        predecessor_coverage = None
+        if config.predecessor_series is not None:
+            old = config.predecessor_series
+            old_root = Path(runtime.config.state_root) / "standing-rewards" / digest(old)
+            old_reader = StandingRewardControlReader(
+                old_root / "control",
+                old,
+                config.policy,
+                expected_series_sha256=digest(old),
+                expected_chain_config_sha256=digest(config.chain),
+                maximum_bytes=config.maximum_reader_bytes,
+            )
+            old_history = RewardControlHistoryReader(
+                old_root / "history",
+                control_hotkey=old.control_hotkey,
+                chain_config_sha256=digest(config.chain),
+                first_block=old.recovery.authority.issued_at_block,
+                maximum_bytes=config.maximum_history_bytes,
+                archive=imported,
+                export_archive=exported,
+            )
+            old_preparation = StandingRewardPreparation(
+                old_reader,
+                store,
+                config.predecessor_manifest,
+                maximum_promotion_bytes=config.maximum_promotion_bytes,
+                maximum_package_bytes=config.maximum_package_bytes,
+            )
+            old_rule = opportunity_rule(config.predecessor_manifest, old, config.policy)
+            predecessor_coverage = StandingRewardCoverageService(
+                provider=current,
+                journal=RewardCoverageJournal(
+                    old_root / "coverage",
+                    old_rule,
+                    expected_rule_sha256=digest(old_rule),
+                    maximum_bytes=config.maximum_coverage_bytes,
+                    archive=imported,
+                    export_archive=exported,
+                ),
+                history=old_history,
+                preparation=old_preparation,
+                files=files,
+                profile=config.predecessor_eligibility,
+                maximum_history_blocks=config.service.maximum_history_blocks,
+            )
+            predecessor = StandingRewardPredecessorOpportunity(
+                successor=config.series,
+                plan=config.handoff,
+                coverage=predecessor_coverage,
+            )
 
         def signer():
             from .named_hotkey import load_named_hotkey
@@ -326,4 +444,8 @@ async def run_installed_standing_rewards(
             load_signer=signer,
             stop=stop,
             limits=config.service,
+            predecessor_series=config.predecessor_series,
+            predecessor=predecessor,
+            predecessor_coverage=predecessor_coverage,
+            predecessor_approval_sha256=config.predecessor_approval_sha256,
         )

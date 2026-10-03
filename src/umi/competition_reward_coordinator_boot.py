@@ -175,8 +175,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 or digest(old.recovery) != prior.recovery_sha256
                 or identity(old.control_hotkey) != identity(prior.control_hotkey)
                 or not any(
-                    digest(plan) == prior.cohort_sha256
-                    and plan.sequence == prior.cohort_sequence
+                    digest(plan) == prior.cohort_sha256 and plan.sequence == prior.cohort_sequence
                     for plan in old.cohorts
                 )
                 or manifest.opportunity.runtime_profile_sha256 != digest(eligibility)
@@ -461,16 +460,12 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             if predecessor_coverage is not None:
                 collectors.append(
                     asyncio.create_task(
-                        predecessor_coverage.run(
-                            stop, poll_seconds=config.service.poll_seconds
-                        )
+                        predecessor_coverage.run(stop, poll_seconds=config.service.poll_seconds)
                     )
                 )
             for collector in collectors:
                 resources.push_async_callback(_stop_task, collector)
-            done, _ = await asyncio.wait(
-                (work, *collectors), return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait((work, *collectors), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
             if not stop.is_set():
