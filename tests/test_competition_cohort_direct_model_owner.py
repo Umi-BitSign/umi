@@ -23,11 +23,18 @@ from umi.competition_cohort_direct_model_upload import (
     SignedDirectModelUploadCompletion,
     SignedDirectModelUploadPartRequest,
     SignedDirectModelUploadReservation,
+    preserved_model_object_key,
 )
 from umi.competition_cohort_direct_model_upload_http import direct_model_upload_routes
+from umi.competition_cohort_model_acceptance import (
+    CertifiedModelArtifactAcceptance,
+    ModelAcceptancePublication,
+    ModelArtifactAcceptance,
+    ModelArtifactReviewInputs,
+)
 from umi.competition_cohort_recovery import ModelDeliveryProfile
 from umi.competition_cohort_service_host import CohortModelPayloadRouter
-from umi.open_competition import digest, sign_object
+from umi.open_competition import digest, model_content_digest, sign_object
 from umi.protocol import canonical_json_bytes
 from umi.r2_sigv4 import R2Credentials, R2SigV4
 
@@ -55,10 +62,14 @@ class Multipart:
         self.total_bytes = len(payload_bytes)
         self.create_calls = []
         self.complete_calls = []
+        self.copy_calls = []
+        self.delete_calls = []
+        self.abort_calls = []
         self.read_calls = 0
         self.objects = {}
         self.fail_creates = 0
         self.fail_after_complete = False
+        self.fail_deletes = 0
 
     async def create(self, key, *, at=None):
         self.create_calls.append((key, at))
@@ -77,6 +88,37 @@ class Multipart:
         if self.fail_after_complete:
             raise OSError("response lost after completion")
         return "completed-etag-1"
+
+    async def copy_part(
+        self,
+        key,
+        *,
+        source_key,
+        upload_id,
+        part_number,
+        offset,
+        size_bytes,
+        source_size_bytes,
+        at=None,
+    ):
+        assert source_key in self.objects
+        assert source_size_bytes == self.total_bytes
+        self.copy_calls.append((key, source_key, upload_id, part_number, offset, size_bytes, at))
+        return DirectModelUploadPart(
+            part_number=part_number,
+            size_bytes=size_bytes,
+            etag=f"{part_number:032x}",
+        )
+
+    async def delete_object(self, key, *, at=None):
+        self.delete_calls.append((key, at))
+        if self.fail_deletes:
+            self.fail_deletes -= 1
+            raise OSError("delete response lost")
+        self.objects.pop(key, None)
+
+    async def abort(self, key, *, upload_id, at=None):
+        self.abort_calls.append((key, upload_id, at))
 
     async def read_range(self, key, *, offset, size_bytes, at=None):
         assert key in self.objects
@@ -360,6 +402,115 @@ async def test_poll_retains_terminal_verification_hold_without_rereading(direct)
     assert status.model_dump(mode="json", by_alias=True)["hold_reason_code"] == (
         "direct_model_verification_failed"
     )
+
+
+def promotion_publication(direct, reservation):
+    submission = direct.request.signed_submission.submission
+    bundle = submission.model_bundle
+    inputs = ModelArtifactReviewInputs(
+        model_sha256=digest(bundle),
+        rights_evidence={"license": "reviewed"},
+        reconstruction_evidence={"reconstruction": "verified"},
+    )
+    acceptance = ModelArtifactAcceptance(
+        schema="umi-cohort-model-artifact-acceptance/2",
+        policy_sha256="11" * 32,
+        cohort_sha256=direct.request.consent.consent.cohort_sha256,
+        authority_sha256="22" * 32,
+        submission_sha256=digest(submission),
+        model_sha256=digest(bundle),
+        content_sha256=model_content_digest(bundle),
+        recipient_hotkey=submission.hotkey,
+        rights_evidence_sha256=digest(inputs.rights_evidence),
+        reconstruction_evidence_sha256=digest(inputs.reconstruction_evidence),
+        accepted_at_block=220,
+        accepted_ordinal=1,
+        rights_and_reconstruction_passed=True,
+        direct_artifact=reservation,
+    )
+    return ModelAcceptancePublication(
+        certificate=CertifiedModelArtifactAcceptance(
+            acceptance=acceptance,
+            signatures=(sign_object(acceptance, wallet("Charlie")),),
+        ),
+        inputs=inputs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_promotion_verifies_canonical_copy_before_resumable_staging_cleanup(direct):
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    publication = promotion_publication(direct, reservation)
+    payload = reservation.reservation.payload
+    source_key = direct.owner.journal.get("direct-intent", reservation.reservation.attempt_id)[
+        "object_key"
+    ]
+    preserved_key = preserved_model_object_key(
+        reservation.reservation.cohort_sha256,
+        payload.model_sha256,
+        payload.payload_sha256,
+    )
+    direct.multipart.fail_deletes = 1
+
+    with pytest.raises(OSError, match="delete response lost"):
+        await direct.owner.promote(publication, now_unix_ms=1_800_000_012_000)
+
+    assert source_key in direct.multipart.objects
+    assert preserved_key in direct.multipart.objects
+    assert (
+        direct.owner.journal.get("direct-promotion", digest(publication.certificate.acceptance))
+        is not None
+    )
+    copies = tuple(direct.multipart.copy_calls)
+
+    receipt = await direct.owner.promote(publication, now_unix_ms=1_800_000_013_000)
+
+    assert receipt.model_sha256 == payload.model_sha256
+    assert tuple(direct.multipart.copy_calls) == copies
+    assert source_key not in direct.multipart.objects
+    assert preserved_key in direct.multipart.objects
+    assert await direct.owner.promote(publication, now_unix_ms=1_800_000_014_000) == receipt
+
+    direct.multipart.objects[preserved_key] = (payload.total_bytes, "replacement-etag")
+    with pytest.raises(ValueError, match="changed after promotion"):
+        await direct.owner.promote(publication, now_unix_ms=1_800_000_015_000)
+
+
+@pytest.mark.asyncio
+async def test_promotion_refuses_to_overwrite_an_existing_unverified_object(direct):
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    publication = promotion_publication(direct, reservation)
+    payload = reservation.reservation.payload
+    preserved_key = preserved_model_object_key(
+        reservation.reservation.cohort_sha256,
+        payload.model_sha256,
+        payload.payload_sha256,
+    )
+    direct.multipart.objects[preserved_key] = (payload.total_bytes + 1, "unexpected-object")
+
+    with pytest.raises(ValueError, match="metadata changed"):
+        await direct.owner.promote(publication, now_unix_ms=1_800_000_012_000)
+
+    assert len(direct.multipart.create_calls) == 1
+    assert direct.multipart.copy_calls == []
+    source_key = direct.owner.journal.get("direct-intent", reservation.reservation.attempt_id)[
+        "object_key"
+    ]
+    assert source_key in direct.multipart.objects
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ from umi.protocol import canonical_json_bytes
 from .test_competition_reward_boot import chain as chain
 from .test_competition_reward_boot import chain_config as chain_config
 from .test_competition_reward_boot import control as control
+from .test_competition_reward_boot import direct_reward_config
 from .test_competition_reward_boot import inputs as inputs
 from .test_competition_reward_boot import policy as policy
 from .test_competition_reward_boot import series_case as series_case
@@ -67,6 +68,15 @@ def test_root_selection_and_cli_check_report_no_credentials(config_case, capsys)
     h.save(h.path, b" " + canonical_json_bytes(h.config))
     with pytest.raises(ValueError, match="canonical"):
         boot.load_reward_coordinator_config(h.path)
+
+
+def test_direct_series_requires_read_only_coordinator_source(config_case, tmp_path):
+    direct = direct_reward_config(config_case.config, tmp_path, "umi-reward-coordinator-config/2")
+    assert boot.RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(direct)) == direct
+    with pytest.raises(ValueError, match="approved role or authority"):
+        boot.RewardCoordinatorConfig.model_validate_json(
+            canonical_json_bytes(direct.model_copy(update={"direct_model_review": None}))
+        )
 
 
 @pytest.mark.parametrize(

@@ -49,6 +49,11 @@ or retain them. Do not copy them into logs, support messages or state files.
 The object is not eligible merely because R2 accepted every part: the owner
 checks the full stream digest and every manifest file, then performs the same
 bounded license and provenance review before participation can be admitted.
+After the independent acceptance quorum, the owner copies the verified object
+inside R2 to the cohort's content-addressed preservation key, reads it back and
+verifies the complete payload again. Admission is published only after that
+receipt is durable. The temporary upload object is then deleted automatically;
+the miner does not run a cleanup command.
 
 Upload completion is not admission certification, artifact acceptance or reward
 activation. Use `query-cohort-admission` with the same request to check admission.

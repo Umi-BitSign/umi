@@ -6,9 +6,10 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
+from .competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from .competition_cohort_execution_journal import CohortExecutionConfig
 from .competition_cohort_intake import CohortIntakeConfig
-from .competition_cohort_recovery import verify_recovery_authority
+from .competition_cohort_recovery import cohort_model_delivery, verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import ObjectCapacity, _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -50,6 +51,7 @@ class SettlementServiceConfig(StrictProtocolModel):
         "umi-cohort-settlement-config/1",
         "umi-cohort-settlement-config/2",
         "umi-cohort-settlement-config/3",
+        "umi-cohort-settlement-config/4",
     ] = Field(alias="schema")
     role: Literal["coordinator", "reviewer"]
     series: StandingRewardSeries
@@ -76,6 +78,7 @@ class SettlementServiceConfig(StrictProtocolModel):
     signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
     original_sources: SettlementOriginalSources | None = None
     request_export_directory: Directory | None = None
+    direct_model_review: DirectModelReviewSourceConfig | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -84,6 +87,8 @@ class SettlementServiceConfig(StrictProtocolModel):
             value.pop("original_sources", None)
         if self.request_export_directory is None:
             value.pop("request_export_directory", None)
+        if self.direct_model_review is None:
+            value.pop("direct_model_review", None)
         return value
 
     def stores(self):
@@ -103,6 +108,11 @@ class SettlementServiceConfig(StrictProtocolModel):
                 *(e.directory for e in self.executions),
                 *(self.original_sources.stores() if self.original_sources else ()),
                 *((self.request_export_directory,) if self.request_export_directory else ()),
+                *(
+                    (self.direct_model_review.r2_credentials_file,)
+                    if self.direct_model_review
+                    else ()
+                ),
             )
         )
 
@@ -114,14 +124,28 @@ class SettlementServiceConfig(StrictProtocolModel):
         who, proposer = identity(self.signer_hotkey), identity(self.proposer_hotkey)
         cohorts = {digest(p) for p in self.series.cohorts}
         sources = self.original_sources
-        if self.schema_ != "umi-cohort-settlement-config/3" and (
-            self.schema_ == "umi-cohort-settlement-config/2"
-        ) != (sources is not None):
+        if self.schema_ in {
+            "umi-cohort-settlement-config/1",
+            "umi-cohort-settlement-config/2",
+        } and (self.schema_ == "umi-cohort-settlement-config/2") != (sources is not None):
             raise ValueError("automatic settlement sources require configuration version 2")
-        if (self.schema_ == "umi-cohort-settlement-config/3") != (
-            self.request_export_directory is not None
-        ):
+        if (
+            self.schema_
+            in {
+                "umi-cohort-settlement-config/3",
+                "umi-cohort-settlement-config/4",
+            }
+        ) != (self.request_export_directory is not None):
             raise ValueError("automatic request exports require configuration version 3")
+        direct_selected = any(
+            cohort_model_delivery(plan).mechanism == "direct_r2_multipart_v1"
+            for plan in self.series.cohorts
+            if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+        )
+        if (self.schema_ == "umi-cohort-settlement-config/4") != direct_selected or (
+            direct_selected != (self.direct_model_review is not None)
+        ):
+            raise ValueError("direct model settlement requires configuration version four")
         if sources is not None and (
             self.role != "coordinator"
             or len(set(sources.eligible_tracks)) != len(sources.eligible_tracks)

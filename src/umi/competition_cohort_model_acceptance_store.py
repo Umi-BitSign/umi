@@ -335,12 +335,14 @@ class CohortModelAcceptances:
         sub = record.request.signed_submission.submission
         if sub.track != "model" or inputs.model_sha256 != sub.model_revision:
             raise ValueError("model review inputs differ from the selected submission")
+        artifact = None if self.review_artifact is None else self.review_artifact(record.request)
         if prior is not None:
             intent = ModelAcceptanceIntent.model_validate_json(prior)
             body = intent.acceptance
             if (
                 canonical_json_bytes(intent) != prior
                 or intent.inputs != inputs
+                or body.direct_artifact != artifact
                 or body.model_sha256 != inputs.model_sha256
                 or body.rights_evidence_sha256 != digest(inputs.rights_evidence)
                 or body.reconstruction_evidence_sha256 != digest(inputs.reconstruction_evidence)
@@ -357,7 +359,11 @@ class CohortModelAcceptances:
             prior = _read(db, "cohort_model_acceptance_intents", cohort, submission)
             if prior is not None:
                 intent = ModelAcceptanceIntent.model_validate_json(prior)
-                if canonical_json_bytes(intent) != prior or intent.inputs != inputs:
+                if (
+                    canonical_json_bytes(intent) != prior
+                    or intent.inputs != inputs
+                    or intent.acceptance.direct_artifact != artifact
+                ):
                     raise ValueError("concurrent model proposal changes its original review")
                 return intent.acceptance
             tip = digest(
@@ -396,7 +402,11 @@ class CohortModelAcceptances:
             if latest is not None and latest > observation.block:
                 raise ValueError("model acceptance observation regressed")
             body = ModelArtifactAcceptance(
-                schema="umi-cohort-model-artifact-acceptance/1",
+                schema=(
+                    "umi-cohort-model-artifact-acceptance/1"
+                    if artifact is None
+                    else "umi-cohort-model-artifact-acceptance/2"
+                ),
                 policy_sha256=digest(self.intake.policy),
                 cohort_sha256=cohort,
                 authority_sha256=digest(history.authority.authority),
@@ -409,6 +419,7 @@ class CohortModelAcceptances:
                 accepted_at_block=observation.block,
                 accepted_ordinal=(ordinal or 0) + 1,
                 rights_and_reconstruction_passed=True,
+                direct_artifact=artifact,
             )
             self._put(
                 db,

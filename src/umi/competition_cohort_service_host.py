@@ -447,6 +447,7 @@ class ServiceAdmissionHost:
                 capture,
                 Path(c.inputs_directory),
                 promotion.directory,
+                promote=(None if self.direct_uploads is None else self.direct_uploads.promote),
             )
             if model_authority
             else None

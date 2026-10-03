@@ -9,6 +9,7 @@ from datetime import datetime
 import httpx
 
 from .competition_cohort_direct_model_upload import DirectModelUploadPart
+from .r2_limits import R2_MAXIMUM_PART_BYTES, R2_MAXIMUM_PARTS, R2_MINIMUM_PART_BYTES
 from .r2_sigv4 import R2SigV4
 
 _MAXIMUM_RESPONSE_BYTES = 64 * 1024
@@ -60,12 +61,20 @@ class R2MultipartClient:
         body: bytes = b"",
         expected_status: tuple[int, ...] = (200,),
         extra_headers: dict[str, str] | None = None,
+        signed_headers: dict[str, str] | None = None,
         maximum_response_bytes: int = _MAXIMUM_RESPONSE_BYTES,
         at: datetime | None = None,
     ) -> httpx.Response:
         if not 0 <= maximum_response_bytes <= MAXIMUM_RANGE_BYTES:
             raise ValueError("R2 response byte bound differs")
-        headers = self.signer.authorized_headers(method, key, query=query, body=body, at=at) | {
+        headers = self.signer.authorized_headers(
+            method,
+            key,
+            query=query,
+            body=body,
+            additional_headers=signed_headers,
+            at=at,
+        ) | {
             "Accept-Encoding": "identity",
             "Content-Length": str(len(body)),
         }
@@ -73,6 +82,7 @@ class R2MultipartClient:
             if any(
                 not name
                 or name.lower() in {"authorization", "host", "x-amz-content-sha256", "x-amz-date"}
+                or name.lower().startswith("x-amz-")
                 or "\r" in value
                 or "\n" in value
                 for name, value in extra_headers.items()
@@ -114,6 +124,61 @@ class R2MultipartClient:
         except httpx.HTTPError as error:
             raise OSError("R2 multipart transport unavailable") from error
         return response
+
+    async def copy_part(
+        self,
+        destination_key: str,
+        *,
+        source_key: str,
+        upload_id: str,
+        part_number: int,
+        offset: int,
+        size_bytes: int,
+        source_size_bytes: int,
+        at: datetime | None = None,
+    ) -> DirectModelUploadPart:
+        """Copy one exact source range into a destination multipart upload."""
+
+        if (
+            not upload_id
+            or len(upload_id) > 2048
+            or any(ord(character) < 33 for character in upload_id)
+            or isinstance(part_number, bool)
+            or not 1 <= part_number <= R2_MAXIMUM_PARTS
+            or isinstance(offset, bool)
+            or type(offset) is not int
+            or offset < 0
+            or isinstance(size_bytes, bool)
+            or type(size_bytes) is not int
+            or not 1 <= size_bytes <= R2_MAXIMUM_PART_BYTES
+            or isinstance(source_size_bytes, bool)
+            or type(source_size_bytes) is not int
+            or source_size_bytes < size_bytes
+            or offset + size_bytes > source_size_bytes
+            or (offset + size_bytes < source_size_bytes and size_bytes < R2_MINIMUM_PART_BYTES)
+            or (
+                (offset or size_bytes != source_size_bytes)
+                and source_size_bytes <= R2_MINIMUM_PART_BYTES
+            )
+        ):
+            raise ValueError("R2 multipart copy part differs")
+        signed = {"x-amz-copy-source": self.signer.copy_source_header(source_key)}
+        if offset or size_bytes != source_size_bytes:
+            signed["x-amz-copy-source-range"] = f"bytes={offset}-{offset + size_bytes - 1}"
+        response = await self._exchange(
+            "PUT",
+            destination_key,
+            query=(("partNumber", str(part_number)), ("uploadId", upload_id)),
+            signed_headers=signed,
+            at=at,
+        )
+        etag = _element(_xml(response.content), "ETag").strip('"')
+        return DirectModelUploadPart(part_number=part_number, size_bytes=size_bytes, etag=etag)
+
+    async def delete_object(self, key: str, *, at: datetime | None = None) -> None:
+        """Delete one exact object; an already absent source is an idempotent success."""
+
+        await self._exchange("DELETE", key, expected_status=(204, 404), at=at)
 
     async def create(self, key: str, *, at: datetime | None = None) -> str:
         response = await self._exchange("POST", key, query=(("uploads", ""),), at=at)

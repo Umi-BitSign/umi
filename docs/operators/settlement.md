@@ -43,14 +43,35 @@ cross a published band boundary, so this is not complete Sybil resistance.
 
 Under the configured `CompetitionStore` directory, the reward owner reads
 `model-reward-acceptances/<cohort-sha256>/<submission-sha256>.json` as private
-`CertifiedModelArtifactAcceptance` records. The artifact archive is
+`CertifiedModelArtifactAcceptance` records. Legacy delivery keeps candidate and
+baseline bytes at
 `model-reward-artifacts/<model-sha256>/{manifest.json,model/}`. Each consumer
-verifies all candidate and baseline bytes with the native preserved-bundle
-reader. The acceptance binds policy, authority, submission, recipient, content,
-rights/reconstruction evidence, acceptance block and ordinal. Reviewers must
-retain the original review documents in the content-addressed evidence source.
-The signatures attest review; a file hash does not establish permission to use
-or redistribute a model.
+verifies those bytes with the native preserved-bundle reader.
+
+For a cohort whose signed model-delivery profile selects direct R2 multipart
+delivery, acceptance version 2 also carries the owner's signed immutable R2
+reservation. Before publishing acceptance, the owner uses server-side multipart
+copy to place the verified payload at
+`preservation/v1/<cohort>/<model>/<payload>/payload`, rereads and verifies every
+byte, retains a promotion receipt, and deletes the exact incoming object. A
+lost cleanup acknowledgement retries from that receipt without recopying.
+Settlement config version 4 requires `direct_model_review` with a
+read-only credential for the selected bucket and the same standing review
+policy used at intake. Every settlement signer independently streams and
+verifies the complete preserved object once before signing. Standing reward
+coordinators, reviewers and validators repeat that check from their own
+read-only credentials before activation review or package replay. Each retains
+a small private receipt under its own state and checks the current object length
+and ETag on replay. Candidate archives are not copied into a
+`promotion_directory`; the frozen baseline remains in the native local archive.
+A missing or changed preserved R2 object keeps settlement or activation pending
+or held. No consumer falls back to another object, URL or local candidate.
+
+Both acceptance versions bind policy, authority, submission, recipient,
+content, rights/reconstruction evidence, acceptance block and ordinal.
+Reviewers must retain the original review documents in the content-addressed
+evidence source. The signatures attest review; a file hash does not establish
+permission to use or redistribute a model.
 
 Allocation version 4 carries the bucketed model decision and its signed
 acceptances. Portable package replay includes the original review documents,
@@ -108,10 +129,12 @@ and model bytes need only read access.
 The worker checks the original proposal, quorum, submission and model bytes
 before retaining acceptance. It exports review documents under `objects/` before
 publishing the certificate under `model-reward-acceptances/`. Replication must
-deliver those objects to each settlement consumer's evidence source and full
-bundles to its model archive. Pending entries do not prevent siblings from
-being processed. Completed entries replay from retained state before RPC,
-reviewers or original delivery inputs are consulted.
+deliver those documents and certificates to each settlement consumer. Legacy
+delivery also replicates full bundles into each model archive. Direct R2
+delivery uses the signed reservation carried by acceptance version 2 and each
+consumer's read-only R2 credential instead. Pending entries do not prevent
+siblings from being processed. Completed entries replay from retained state
+before RPC, reviewers or original delivery inputs are consulted.
 
 Host version 1 retains the private certificate-delivery path:
 `model-acceptance-publications/<cohort>/<submission>.json` contains a complete
@@ -1122,8 +1145,10 @@ journal filesystem.
 
 Configure a bucket lifecycle rule that aborts incomplete multipart uploads after
 the selected recovery interval. Retain completed incoming objects until a
-content-addressed preservation package and its acceptance or rejection evidence
-are durable. Lifecycle cleanup is storage management and never closes intake,
+content-addressed preserved object and its acceptance or rejection evidence are
+durable. Accepted objects are copied entirely inside R2, fully read back, and
+their incoming source is deleted only after a private promotion receipt is
+durable. Lifecycle cleanup is storage management and never closes intake,
 expires a retained participation request or makes an otherwise eligible model
 late.
 

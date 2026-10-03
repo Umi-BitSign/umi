@@ -2,7 +2,7 @@
 
 Config, signatures, journals and files are real. The assembly tests replace
 providers/service execution; CLI tests replace the installed seal/container.
-These do not establish live chain effects or a deployed C5 migration.
+These do not establish live chain effects or a deployed production migration.
 """
 
 import asyncio
@@ -15,6 +15,12 @@ import pytest
 from umi import competition_host_activation as activation
 from umi import competition_reward_boot as boot
 from umi.competition_chain_resources import CompetitionChainResources
+from umi.competition_cohort_direct_model_review import DirectModelReviewSourceConfig
+from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
+from umi.competition_cohort_recovery import (
+    ModelDeliveryProfile,
+    SignedCohortRecoveryAuthority,
+)
 from umi.competition_reward_eligibility import RewardEligibilityRuntime
 from umi.competition_reward_files import StandingRewardFiles
 from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
@@ -27,7 +33,7 @@ from umi.competition_reward_manifest import (
 from umi.competition_reward_service import StandingRewardServiceLimits
 from umi.competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
 from umi.grandpa_finality import FINNEY_GENESIS_HASH
-from umi.open_competition import digest
+from umi.open_competition import digest, identity, sign_object
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_reward_decisions import chain as chain
@@ -35,7 +41,78 @@ from .test_competition_reward_decisions import chain_config as chain_config
 from .test_competition_reward_decisions import control as control
 from .test_competition_reward_decisions import policy as policy
 from .test_competition_reward_decisions import series_case as series_case
+from .test_open_competition import wallet
 from .test_validator_supervisor import _config
+
+
+def direct_reward_config(value, tmp_path, schema):
+    plans = list(value.series.cohorts)
+    plans[-1] = plans[-1].model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/3",
+            "eligible_tracks": ("model",),
+            "service_pool_bps": 0,
+            "model_delivery": ModelDeliveryProfile(
+                schema="umi-model-delivery-profile/1",
+                mechanism="direct_r2_multipart_v1",
+                part_size_bytes=64 * 1024**2,
+                maximum_concurrent_parts=4,
+                capability_ttl_seconds=3600,
+            ),
+        }
+    )
+    plans = tuple(plans)
+    authority = value.series.recovery.authority.model_copy(
+        update={"cohort_sha256s": tuple(sorted(digest(plan) for plan in plans))}
+    )
+    recovery = SignedCohortRecoveryAuthority(
+        authority=authority,
+        signatures=tuple(
+            sorted(
+                (sign_object(authority, wallet(name)) for name in ("Charlie", "Dave")),
+                key=lambda signature: identity(signature.hotkey),
+            )
+        ),
+    )
+    manifest = value.manifest.model_copy(
+        update={
+            "cohorts": tuple(
+                requirement.model_copy(update={"cohort_sha256": digest(plan)})
+                for requirement, plan in zip(value.manifest.cohorts, plans, strict=True)
+            )
+        }
+    )
+    series = value.series.model_copy(
+        update={"cohorts": plans, "recovery": recovery, "manifest_sha256": digest(manifest)}
+    )
+    handoff = value.handoff.model_copy(
+        update={"series_sha256": digest(series), "cohort_sha256": digest(plans[0])}
+    )
+    source = DirectModelReviewSourceConfig(
+        schema="umi-direct-model-review-source/1",
+        r2_credentials_file=str(tmp_path / "direct-model-reader.env"),
+        r2_bucket="umi-model-artifacts",
+        standing_review_policy=StandingModelReviewPolicy(
+            schema="umi-standing-model-artifact-review-policy/1",
+            competition_policy_sha256=digest(value.policy),
+            contribution_terms_sha256=value.policy.contribution_terms_sha256,
+            standing_approval_record_sha256="ab" * 32,
+            approved_by="operator@example.test",
+            approved_at_utc="2026-10-02T12:00:00Z",
+            complete_declared_bundle_rights_approved=True,
+            licenses_and_notices_reviewed=True,
+            public_redistribution_and_evaluation_approved=True,
+        ),
+    )
+    return value.model_copy(
+        update={
+            "schema_": schema,
+            "series": series,
+            "manifest": manifest,
+            "handoff": handoff,
+            "direct_model_review": source,
+        }
+    )
 
 
 @pytest.fixture
@@ -161,6 +238,26 @@ def test_boot_reads_original_root_approval_and_accepts_capacity_increase(inputs)
     raised = i.value.model_copy(update={"maximum_history_bytes": 16 * 1024**2})
     i.save(i.path, canonical_json_bytes(raised))
     assert boot.load_standing_boot(i.path, i.anchor) == raised
+
+
+def test_direct_series_requires_read_only_reward_source(inputs, tmp_path):
+    direct = direct_reward_config(inputs.value, tmp_path, "umi-standing-reward-boot/2")
+    assert boot.StandingRewardBootConfig.model_validate_json(canonical_json_bytes(direct)) == direct
+    with pytest.raises(ValueError, match="selected authority"):
+        boot.StandingRewardBootConfig.model_validate_json(
+            canonical_json_bytes(direct.model_copy(update={"direct_model_review": None}))
+        )
+    with pytest.raises(ValueError, match="selected authority"):
+        boot.StandingRewardBootConfig.model_validate_json(
+            canonical_json_bytes(
+                inputs.value.model_copy(
+                    update={
+                        "schema_": "umi-standing-reward-boot/2",
+                        "direct_model_review": direct.direct_model_review,
+                    }
+                )
+            )
+        )
 
 
 def test_default_selection_uses_existing_command_and_original_approval(inputs):

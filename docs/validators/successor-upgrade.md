@@ -259,16 +259,26 @@ Cancellation drains owned signing work before releasing the writer locks.
 The supervisor selects `standing-reward-boot.json` beside its existing supervisor
 configuration when that file is present. This works with the installed service
 command and its original process lock; no second service or command override is
-needed. `--standing-config` selects an explicit path instead. It reads a canonical
-root-owned mode-0444
-`umi-standing-reward-boot/1` configuration and its separate host approval before
-the startup stop. The configuration selects the series, replay and opportunity
+needed. `--standing-config` selects an explicit path instead. It reads a
+canonical root-owned mode-0444 standing-reward configuration and its separate
+host approval before the startup stop. The configuration selects the series,
+replay and opportunity
 manifest, current and legacy chain configurations, eligibility runtime, handoff
 plan, private input directories and resource capacities. It supplies no callbacks
 or executable plugins. An absent default file keeps the existing predecessor path. A
 missing explicit file, dangling link, unreadable file or invalid approval rejects
 startup before stopping the existing worker. Install the approval and all inputs
 before publishing the default file; remove no original journals during selection.
+
+Schema `umi-standing-reward-boot/1` remains the legacy local-artifact form. A
+series containing a direct R2 model-delivery cohort requires schema version 2
+and `direct_model_review`. Configure a read-only R2 credential, the selected
+bucket and the standing review policy. The validator streams and verifies every
+accepted direct candidate from its content-addressed preservation key once,
+retains a private receipt and checks object metadata on replay. It does not copy
+candidate bundles into its promotion directory. Keep the frozen baseline in the
+local native archive. The credential file must remain outside every mutable or
+replicated store.
 
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
@@ -386,12 +396,19 @@ can be delivered after migration without inventing new ancestor votes.
 
 `umi-reward-coordinator check --config /etc/umi/reward-coordinator/NAME.json`
 validates the root-owned, mode `0444`, canonical
-`umi-reward-coordinator-config/1` document without loading keys or starting a
+reward-coordinator document without loading keys or starting a
 provider. `run` assembles native proof readers, durable journals and the selected
 `coordinator` or `reviewer` role. Configuration binds the approved series, policy,
 opportunity terms, handoff and chain context, explicit storage capacities and
 the primary RPC plus two fallbacks. Each mutable store must have a distinct
 private directory; named hotkey files must remain outside those stores.
+
+Schema `umi-reward-coordinator-config/1` remains valid for series that use only
+legacy local candidate archives. A series containing direct R2 model delivery
+requires version 2 and the same `direct_model_review` source on every coordinator
+and reviewer. Each process performs its own complete byte verification of the
+preserved R2 object before reviewing or signing an activation and retains only
+its private receipt.
 
 The coordinator loads its evaluator key and the reserved control key. Reviewers
 load only their evaluator key and independently replay the original proposal

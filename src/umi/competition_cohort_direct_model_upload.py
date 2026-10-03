@@ -42,6 +42,19 @@ def direct_model_object_key(cohort_sha256: str, upload_sha256: str, attempt_id: 
     return f"incoming/v2/{cohort_sha256}/{upload_sha256}/{attempt_id}/payload"
 
 
+def preserved_model_object_key(cohort_sha256: str, model_sha256: str, payload_sha256: str) -> str:
+    """Derive the immutable content-addressed key used after acceptance."""
+
+    for value in (cohort_sha256, model_sha256, payload_sha256):
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError("preserved model object identity differs")
+    return f"preservation/v1/{cohort_sha256}/{model_sha256}/{payload_sha256}/payload"
+
+
 class DirectModelPayload(StrictProtocolModel):
     """The exact concatenation of model files in signed manifest order."""
 

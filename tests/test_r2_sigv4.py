@@ -106,6 +106,42 @@ def test_authorized_headers_bind_method_query_and_body_without_exposing_secret()
     assert changed["Authorization"] != headers["Authorization"]
 
 
+def test_authorized_headers_bind_copy_source_and_range():
+    at = datetime(2026, 10, 2, 20, 0, tzinfo=timezone.utc)
+    additional = {
+        "x-amz-copy-source": signer().copy_source_header("incoming/v2/aa/payload"),
+        "x-amz-copy-source-range": "bytes=7-10",
+    }
+    headers = signer().authorized_headers(
+        "PUT",
+        "preservation/v1/bb/payload",
+        query=(("partNumber", "2"), ("uploadId", "provider-id")),
+        additional_headers=additional,
+        at=at,
+    )
+    assert headers["x-amz-copy-source"] == "/umi-model-artifacts/incoming/v2/aa/payload"
+    assert headers["x-amz-copy-source-range"] == "bytes=7-10"
+    assert (
+        "SignedHeaders=host;x-amz-content-sha256;x-amz-copy-source;"
+        "x-amz-copy-source-range;x-amz-date"
+    ) in headers["Authorization"]
+    changed = signer().authorized_headers(
+        "PUT",
+        "preservation/v1/bb/payload",
+        query=(("partNumber", "2"), ("uploadId", "provider-id")),
+        additional_headers=additional | {"x-amz-copy-source-range": "bytes=8-10"},
+        at=at,
+    )
+    assert changed["Authorization"] != headers["Authorization"]
+    with pytest.raises(ValueError, match="additional header"):
+        signer().authorized_headers(
+            "PUT",
+            "preservation/v1/bb/payload",
+            additional_headers={"x-amz-copy-source": "bad\nsource"},
+            at=at,
+        )
+
+
 @pytest.mark.parametrize(
     "change",
     [

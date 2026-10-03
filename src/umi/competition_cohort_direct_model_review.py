@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import shutil
@@ -12,20 +13,34 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .competition_artifacts import verify_preserved_bundle
-from .competition_cohort_direct_model_upload import direct_model_object_key
-from .competition_cohort_model_acceptance import ModelArtifactReviewInputs, ModelReviewRequest
+from .competition_cohort_direct_model_upload import (
+    direct_model_object_key,
+    preserved_model_object_key,
+)
+from .competition_cohort_model_acceptance import (
+    CertifiedModelArtifactAcceptance,
+    ModelArtifactReviewInputs,
+    ModelReviewRequest,
+)
 from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
     build_standing_model_review_from_documents,
     verify_standing_review_policy,
 )
+from .competition_cohort_roster import RecoverableRosterParticipant
 from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity, validate_bundle_policy
-from .private_files import Directory, publish_private_model, read_private_model
+from .private_files import (
+    Directory,
+    ensure_private_directory,
+    private_path,
+    publish_private_model,
+    read_private_model,
+)
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
 from .r2_limits import R2_MAXIMUM_MULTIPART_BYTES
-from .r2_multipart import MAXIMUM_RANGE_BYTES, R2MultipartClient
+from .r2_multipart import MAXIMUM_RANGE_BYTES, R2MultipartClient, R2ObjectHead
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 
@@ -52,11 +67,25 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
 class DirectModelMaterialization(StrictProtocolModel):
     """Private completion marker written only after full local verification."""
 
-    schema_: Literal["umi-direct-model-materialization/1"] = Field(alias="schema")
+    schema_: Literal["umi-direct-model-materialization/2"] = Field(alias="schema")
     review_request_sha256: Hex32
+    source_object_key_sha256: Hex32
     model_sha256: Hex32
     payload_sha256: Hex32
     total_bytes: Annotated[int, Field(ge=1, le=R2_MAXIMUM_MULTIPART_BYTES)]
+
+
+class DirectModelSettlementVerification(StrictProtocolModel):
+    """Private proof that one settlement signer reread the accepted R2 object."""
+
+    schema_: Literal["umi-direct-model-settlement-verification/2"] = Field(alias="schema")
+    review_request_sha256: Hex32
+    acceptance_sha256: Hex32
+    source_object_key_sha256: Hex32
+    model_sha256: Hex32
+    payload_sha256: Hex32
+    total_bytes: Annotated[int, Field(ge=1, le=R2_MAXIMUM_MULTIPART_BYTES)]
+    provider_etag: Annotated[str, Field(min_length=1, max_length=256)]
 
 
 class DirectModelArtifactReviewer:
@@ -66,7 +95,7 @@ class DirectModelArtifactReviewer:
         self,
         config: DirectModelReviewSourceConfig,
         policy: CompetitionPolicy,
-        owner_hotkey: Hotkey,
+        owner_hotkey: Hotkey | None,
         *,
         multipart: R2MultipartClient | None = None,
     ) -> None:
@@ -75,7 +104,9 @@ class DirectModelArtifactReviewer:
         )
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.owner_hotkey = owner_hotkey
-        if identity(owner_hotkey) not in {identity(e.hotkey) for e in self.policy.evaluators}:
+        if owner_hotkey is not None and identity(owner_hotkey) not in {
+            identity(e.hotkey) for e in self.policy.evaluators
+        }:
             raise ValueError("direct model owner is outside policy")
         verify_standing_review_policy(self.config.standing_review_policy, self.policy)
         if multipart is None:
@@ -86,7 +117,7 @@ class DirectModelArtifactReviewer:
             )
         self.multipart = multipart
 
-    def _source(self, request: ModelReviewRequest):
+    def _source(self, request: ModelReviewRequest, *, preserved: bool = False):
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
         signed = request.direct_artifact
         if signed is None:
@@ -96,8 +127,17 @@ class DirectModelArtifactReviewer:
         if bundle is None or submission.track != "model":
             raise ValueError("direct model review requires a complete model bundle")
         payload = body.payload
+        signer = identity(signed.signature.hotkey)
+        expected_owner = None if self.owner_hotkey is None else identity(self.owner_hotkey)
         if (
-            identity(signed.signature.hotkey) != identity(self.owner_hotkey)
+            (expected_owner is not None and signer != expected_owner)
+            or (
+                expected_owner is None
+                and (
+                    signer not in {identity(e.hotkey) for e in self.policy.evaluators}
+                    or signer == identity(submission.hotkey)
+                )
+            )
             or body.cohort_sha256 != request.acceptance.cohort_sha256
             or body.cohort_sha256 != request.record.request.consent.consent.cohort_sha256
             or identity(body.hotkey) != identity(submission.hotkey)
@@ -114,10 +154,18 @@ class DirectModelArtifactReviewer:
         )
         if body.object_key_sha256 != sha256_hex(object_key.encode()):
             raise ValueError("direct model review object binding differs")
+        if preserved:
+            object_key = preserved_model_object_key(
+                body.cohort_sha256, payload.model_sha256, payload.payload_sha256
+            )
         return bundle, payload, object_key
 
-    async def review(self, request: ModelReviewRequest) -> ModelArtifactReviewInputs:
-        bundle, payload, object_key = self._source(request)
+    async def verify(
+        self, request: ModelReviewRequest, *, preserved: bool = False
+    ) -> tuple[ModelArtifactReviewInputs, R2ObjectHead]:
+        """Reread and authenticate one exact artifact without retaining its payload."""
+
+        bundle, payload, object_key = self._source(request, preserved=preserved)
         head = await self.multipart.head(object_key)
         if head is None or head.size_bytes != payload.total_bytes:
             raise OSError("direct model review object is unavailable")
@@ -154,13 +202,20 @@ class DirectModelArtifactReviewer:
             raise ValueError("direct model review payload digest differs")
         if await self.multipart.head(object_key) != head:
             raise ValueError("direct model review object changed while reading")
-        return build_standing_model_review_from_documents(bundle, self.policy, standing, documents)
+        return (
+            build_standing_model_review_from_documents(bundle, self.policy, standing, documents),
+            head,
+        )
+
+    async def review(self, request: ModelReviewRequest) -> ModelArtifactReviewInputs:
+        inputs, _ = await self.verify(request)
+        return inputs
 
     async def materialize(self, request: ModelReviewRequest, archive: Path) -> Path:
         """Create one verified bounded cache archive and never reuse partial bytes."""
 
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
-        bundle, payload, object_key = self._source(request)
+        bundle, payload, object_key = self._source(request, preserved=True)
         if payload.total_bytes > self.config.maximum_materialized_bytes:
             raise ValueError("direct model exceeds evaluator materialization capacity")
         head = await self.multipart.head(object_key)
@@ -217,8 +272,9 @@ class DirectModelArtifactReviewer:
                 raise ValueError("direct model object changed during materialization")
             await run_owned_thread(verify_preserved_bundle, bundle, archive, self.policy)
             marker = DirectModelMaterialization(
-                schema="umi-direct-model-materialization/1",
+                schema="umi-direct-model-materialization/2",
                 review_request_sha256=digest(request),
+                source_object_key_sha256=sha256_hex(object_key.encode()),
                 model_sha256=digest(bundle),
                 payload_sha256=payload.payload_sha256,
                 total_bytes=payload.total_bytes,
@@ -233,10 +289,11 @@ class DirectModelArtifactReviewer:
         """Authenticate a retained cache once after restart before reusing it."""
 
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
-        bundle, payload, _ = self._source(request)
+        bundle, payload, object_key = self._source(request, preserved=True)
         expected = DirectModelMaterialization(
-            schema="umi-direct-model-materialization/1",
+            schema="umi-direct-model-materialization/2",
             review_request_sha256=digest(request),
+            source_object_key_sha256=sha256_hex(object_key.encode()),
             model_sha256=digest(bundle),
             payload_sha256=payload.payload_sha256,
             total_bytes=payload.total_bytes,
@@ -253,3 +310,160 @@ class DirectModelArtifactReviewer:
             return True
         except (FileNotFoundError, OSError, ValueError):
             return False
+
+
+class DirectModelSettlementVerifier:
+    """Verify direct artifacts once per settlement signer and replay bounded receipts."""
+
+    def __init__(
+        self,
+        artifacts: DirectModelArtifactReviewer,
+        archive: Path,
+        receipts: Path,
+    ) -> None:
+        self.artifacts = artifacts
+        self.archive, self.receipts = Path(archive), Path(receipts)
+        self.serial = asyncio.Lock()
+        private_path(str(self.archive))
+        ensure_private_directory(self.receipts)
+        if (
+            self.archive == self.receipts
+            or self.archive in self.receipts.parents
+            or self.receipts in self.archive.parents
+        ):
+            raise ValueError("direct settlement receipts and legacy archive must be disjoint")
+
+    @staticmethod
+    def _request(
+        participant: RecoverableRosterParticipant,
+        certificate: CertifiedModelArtifactAcceptance,
+    ) -> ModelReviewRequest | None:
+        acceptance = certificate.acceptance
+        artifact = acceptance.direct_artifact
+        if artifact is None:
+            return None
+        return ModelReviewRequest(
+            schema="umi-cohort-model-review-request/2",
+            acceptance=acceptance,
+            record=participant.record,
+            admission=participant.admission,
+            direct_artifact=artifact,
+        )
+
+    def _path(self, certificate: CertifiedModelArtifactAcceptance) -> Path:
+        acceptance = certificate.acceptance
+        return self.receipts / acceptance.cohort_sha256 / (acceptance.submission_sha256 + ".json")
+
+    def _receipt(
+        self,
+        request: ModelReviewRequest,
+        certificate: CertifiedModelArtifactAcceptance,
+        head: R2ObjectHead,
+    ) -> DirectModelSettlementVerification:
+        payload = request.direct_artifact.reservation.payload
+        _, _, object_key = self.artifacts._source(request, preserved=True)
+        return DirectModelSettlementVerification(
+            schema="umi-direct-model-settlement-verification/2",
+            review_request_sha256=digest(request),
+            acceptance_sha256=digest(certificate),
+            source_object_key_sha256=sha256_hex(object_key.encode()),
+            model_sha256=payload.model_sha256,
+            payload_sha256=payload.payload_sha256,
+            total_bytes=payload.total_bytes,
+            provider_etag=head.etag,
+        )
+
+    async def ensure(
+        self,
+        participant: RecoverableRosterParticipant,
+        certificate: CertifiedModelArtifactAcceptance,
+    ) -> None:
+        async with self.serial:
+            await self._ensure(participant, certificate)
+
+    async def _ensure(
+        self,
+        participant: RecoverableRosterParticipant,
+        certificate: CertifiedModelArtifactAcceptance,
+    ) -> None:
+        request = self._request(participant, certificate)
+        if request is None:
+            await run_owned_thread(
+                verify_preserved_bundle,
+                participant.record.request.signed_submission.submission.model_bundle,
+                self.archive,
+                self.artifacts.policy,
+            )
+            return
+        bundle, payload, object_key = self.artifacts._source(request, preserved=True)
+        path = self._path(certificate)
+        try:
+            retained = await run_owned_thread(
+                read_private_model,
+                path,
+                DirectModelSettlementVerification,
+            )
+            head = await self.artifacts.multipart.head(object_key)
+            if head is None or retained != self._receipt(request, certificate, head):
+                raise ValueError("direct settlement artifact changed after verification")
+            return
+        except FileNotFoundError:
+            pass
+        inputs, head = await self.artifacts.verify(request, preserved=True)
+        acceptance = certificate.acceptance
+        if (
+            digest(bundle) != acceptance.model_sha256
+            or payload.model_sha256 != acceptance.model_sha256
+            or digest(inputs.rights_evidence) != acceptance.rights_evidence_sha256
+            or digest(inputs.reconstruction_evidence) != acceptance.reconstruction_evidence_sha256
+        ):
+            raise ValueError("direct settlement review differs from certified acceptance")
+        await run_owned_thread(
+            publish_private_model,
+            path,
+            self._receipt(request, certificate, head),
+        )
+
+    async def ensure_all(
+        self,
+        participants: tuple[RecoverableRosterParticipant, ...],
+        certificates: tuple[CertifiedModelArtifactAcceptance, ...],
+    ) -> None:
+        async with self.serial:
+            submissions = tuple(
+                digest(participant.record.request.signed_submission.submission)
+                for participant in participants
+            )
+            if submissions != tuple(
+                certificate.acceptance.submission_sha256 for certificate in certificates
+            ):
+                raise ValueError("direct settlement acceptances differ from the model roster")
+            for participant, certificate in zip(participants, certificates, strict=True):
+                await self._ensure(participant, certificate)
+
+    def verify_candidate(
+        self,
+        certificate: CertifiedModelArtifactAcceptance,
+        participant: RecoverableRosterParticipant,
+    ) -> None:
+        request = self._request(participant, certificate)
+        if request is None:
+            verify_preserved_bundle(
+                participant.record.request.signed_submission.submission.model_bundle,
+                self.archive,
+                self.artifacts.policy,
+            )
+            return
+        receipt = read_private_model(
+            self._path(certificate),
+            DirectModelSettlementVerification,
+        )
+        payload = request.direct_artifact.reservation.payload
+        if (
+            receipt.review_request_sha256 != digest(request)
+            or receipt.acceptance_sha256 != digest(certificate)
+            or receipt.model_sha256 != payload.model_sha256
+            or receipt.payload_sha256 != payload.payload_sha256
+            or receipt.total_bytes != payload.total_bytes
+        ):
+            raise ValueError("direct settlement receipt differs from accepted artifact")

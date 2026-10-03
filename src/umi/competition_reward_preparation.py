@@ -16,6 +16,7 @@ from typing import Literal
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_state import OwnedCompetitionChainObservation
+from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from .competition_cohort_reward_allocation import (
     CohortRewardAllocation,
     CohortRewardProjection,
@@ -115,6 +116,7 @@ class StandingRewardPreparation:
         *,
         maximum_promotion_bytes: int,
         maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
+        model_artifacts: DirectModelSettlementVerifier | None = None,
     ):
         for bound in (maximum_promotion_bytes, maximum_package_bytes):
             if type(bound) is not int or not 1024 <= bound <= MAX_CONFIGURED_PRIVATE_BYTES:
@@ -126,6 +128,7 @@ class StandingRewardPreparation:
         self.series_sha256, self.policy_sha256 = digest(reader.series), digest(reader.policy)
         self.maximum_promotion_bytes = maximum_promotion_bytes
         self.maximum_package_bytes = maximum_package_bytes
+        self.model_artifacts = model_artifacts
         self._lock = asyncio.Lock()
         self._owner = object()
         self._prepared: dict[str, PreparedStandingReward] = {}
@@ -160,6 +163,7 @@ class StandingRewardPreparation:
         source: DecisionSource,
     ) -> PreparedStandingReward:
         async with self._lock:
+            await self._ensure_model_artifacts(package)
             return await run_owned_thread(partial(self._prepare, package, control, history, source))
 
     def _prepare(
@@ -188,6 +192,7 @@ class StandingRewardPreparation:
         project a row, credit an interval or grant authority to submit today.
         """
         async with self._lock:
+            await self._ensure_model_artifacts(package)
             return await run_owned_thread(
                 partial(self._prepare_historical, package, control, history, source)
             )
@@ -214,6 +219,7 @@ class StandingRewardPreparation:
         Projection still requires fresh control and the current activation.
         """
         async with self._lock:
+            await self._ensure_model_artifacts(package)
             return await run_owned_thread(
                 partial(self._prepare_initial, package, control, history, source)
             )
@@ -269,6 +275,9 @@ class StandingRewardPreparation:
             expected_catalog_sha256s=requirement.catalog_sha256s,
             maximum_promotion_bytes=self.maximum_promotion_bytes,
             maximum_bytes=self.maximum_package_bytes,
+            verify_model_artifact=(
+                None if self.model_artifacts is None else self.model_artifacts.verify_candidate
+            ),
         )
         prepared = PreparedStandingReward(
             self.series_sha256,
@@ -283,6 +292,17 @@ class StandingRewardPreparation:
         # cancelled. Proof expiry during replay never discards immutable work.
         self._prepared[activation.cohort_sha256] = prepared
         return prepared
+
+    async def _ensure_model_artifacts(self, package: CohortRewardPackage) -> None:
+        award = package.allocation.model_award
+        if self.model_artifacts is None or award is None:
+            return
+        participants = tuple(
+            participant
+            for participant in package.inputs.roster.participants
+            if participant.record.request.signed_submission.submission.track == "model"
+        )
+        await self.model_artifacts.ensure_all(participants, award.acceptances)
 
     def _check_prepared(self, prepared: PreparedStandingReward) -> None:
         if (

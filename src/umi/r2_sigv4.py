@@ -7,6 +7,7 @@ import hmac
 import os
 import re
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -218,6 +219,7 @@ class R2SigV4:
         *,
         query: tuple[tuple[str, str], ...] = (),
         body: bytes = b"",
+        additional_headers: Mapping[str, str] | None = None,
         at: datetime | None = None,
     ) -> dict[str, str]:
         """Sign one trusted issuer request without placing credentials in its URL."""
@@ -230,10 +232,28 @@ class R2SigV4:
         scope = f"{date}/auto/s3/aws4_request"
         host = urlsplit(self.endpoint).hostname
         payload_sha256 = _digest(body)
-        signed_headers = "host;x-amz-content-sha256;x-amz-date"
-        canonical_headers = (
-            f"host:{host}\nx-amz-content-sha256:{payload_sha256}\nx-amz-date:{timestamp}\n"
-        )
+        headers = {
+            "host": host,
+            "x-amz-content-sha256": payload_sha256,
+            "x-amz-date": timestamp,
+        }
+        for name, value in (additional_headers or {}).items():
+            if type(name) is not str or type(value) is not str:
+                raise ValueError("R2 signed additional header differs")
+            canonical_name = name.lower()
+            canonical_value = " ".join(value.strip().split())
+            if (
+                canonical_name not in {"x-amz-copy-source", "x-amz-copy-source-range"}
+                or canonical_name in headers
+                or not canonical_value
+                or len(canonical_value) > 4096
+                or "\r" in value
+                or "\n" in value
+            ):
+                raise ValueError("R2 signed additional header differs")
+            headers[canonical_name] = canonical_value
+        signed_headers = ";".join(sorted(headers))
+        canonical_headers = "".join(f"{name}:{headers[name]}\n" for name in sorted(headers))
         canonical_request = "\n".join(
             (
                 method,
@@ -261,7 +281,12 @@ class R2SigV4:
             "Host": host,
             "X-Amz-Content-SHA256": payload_sha256,
             "X-Amz-Date": timestamp,
-        }
+        } | {name: value for name, value in headers.items() if name.startswith("x-amz-copy-")}
+
+    def copy_source_header(self, key: str) -> str:
+        """Return the encoded bucket/key value required by UploadPartCopy."""
+
+        return self._path(key)
 
     def object_url(self, key: str, *, query: tuple[tuple[str, str], ...] = ()) -> str:
         suffix = "" if not query else "?" + _canonical_query(query)

@@ -11,19 +11,25 @@ import pytest
 from umi.competition_cohort_direct_model_review import (
     DirectModelArtifactReviewer,
     DirectModelReviewSourceConfig,
+    DirectModelSettlementVerification,
+    DirectModelSettlementVerifier,
 )
 from umi.competition_cohort_direct_model_upload import (
     DirectModelPayload,
     DirectModelUploadReservation,
     SignedDirectModelUploadReservation,
     direct_model_object_key,
+    preserved_model_object_key,
 )
+from umi.competition_cohort_model_acceptance import CertifiedModelArtifactAcceptance
 from umi.competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
 )
+from umi.competition_cohort_roster import RecoverableRosterParticipant
 from umi.open_competition import digest, sign_object
-from umi.protocol import sha256_hex
+from umi.private_files import read_private_model
+from umi.protocol import canonical_json_bytes, sha256_hex
 
 from .test_competition_cohort_model_acceptance import base_policy as base_policy
 from .test_competition_cohort_model_acceptance import legacy_scenario as legacy_scenario
@@ -43,6 +49,7 @@ class ReadOnlyObject:
         self.key, self.payload = key, payload
         self.etag = "read-only-object"
         self.replace_on_read = False
+        self.ranges_read = 0
 
     async def head(self, key, *, at=None):
         assert key == self.key
@@ -50,6 +57,7 @@ class ReadOnlyObject:
 
     async def read_range(self, key, *, offset, size_bytes, at=None):
         assert key == self.key
+        self.ranges_read += 1
         result = self.payload[offset : offset + size_bytes]
         if self.replace_on_read:
             self.etag = "replacement-object"
@@ -91,14 +99,21 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
         provider_upload_id_sha256="b2" * 32,
         created_at_unix_ms=1_800_000_000_000,
     )
+    artifact = SignedDirectModelUploadReservation(
+        schema="umi-signed-direct-model-upload-reservation/1",
+        reservation=reservation,
+        signature=sign_object(reservation, wallet("Charlie")),
+    )
     direct_request = request.model_copy(
         update={
             "schema_": "umi-cohort-model-review-request/2",
-            "direct_artifact": SignedDirectModelUploadReservation(
-                schema="umi-signed-direct-model-upload-reservation/1",
-                reservation=reservation,
-                signature=sign_object(reservation, wallet("Charlie")),
+            "acceptance": request.acceptance.model_copy(
+                update={
+                    "schema_": "umi-cohort-model-artifact-acceptance/2",
+                    "direct_artifact": artifact,
+                }
             ),
+            "direct_artifact": artifact,
         }
     )
     standing = StandingModelReviewPolicy(
@@ -127,6 +142,14 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
     )
 
     result = await verifier.review(direct_request)
+
+    portable = DirectModelArtifactReviewer(
+        verifier.config,
+        reviews.owner.intake.policy,
+        None,
+        multipart=source,
+    )
+    assert await portable.review(direct_request) == result
 
     assert result.model_sha256 == digest(bundle)
     documents = result.rights_evidence["original_documents"]
@@ -158,6 +181,9 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
     with pytest.raises(ValueError, match="changed while reading"):
         await verifier.review(direct_request)
     source.etag = "read-only-object"
+    source.key = preserved_model_object_key(
+        reservation.cohort_sha256, payload.model_sha256, payload.payload_sha256
+    )
     materialized = reviews.root / "materialized"
     await verifier.materialize(direct_request, materialized)
     assert (materialized / digest(bundle) / "manifest.json").is_file()
@@ -197,6 +223,43 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
         }
     )
     direct_request = direct_request.model_copy(update={"acceptance": acceptance})
+    certificate = CertifiedModelArtifactAcceptance(
+        acceptance=acceptance,
+        signatures=(sign_object(acceptance, wallet("Bob")),),
+    )
+    settlement = DirectModelSettlementVerifier(
+        verifier,
+        reviews.owner.archive,
+        reviews.root / "settlement-receipts",
+    )
+    participant = RecoverableRosterParticipant(
+        record=direct_request.record,
+        admission=direct_request.admission,
+    )
+    before = source.ranges_read
+    await settlement.ensure(participant, certificate)
+    assert source.ranges_read > before
+    settlement.verify_candidate(certificate, participant)
+    retained_reads = source.ranges_read
+    await settlement.ensure(participant, certificate)
+    assert source.ranges_read == retained_reads
+    receipt_path = settlement._path(certificate)
+    receipt = read_private_model(receipt_path, DirectModelSettlementVerification)
+    receipt_path.chmod(0o600)
+    receipt_path.write_bytes(
+        canonical_json_bytes(receipt.model_copy(update={"model_sha256": "ee" * 32}))
+    )
+    receipt_path.chmod(0o400)
+    with pytest.raises(ValueError, match="differs from accepted artifact"):
+        settlement.verify_candidate(certificate, participant)
+    receipt_path.chmod(0o600)
+    receipt_path.write_bytes(canonical_json_bytes(receipt))
+    receipt_path.chmod(0o400)
+    source.etag = "changed-after-settlement-verification"
+    with pytest.raises(ValueError, match="changed after verification"):
+        await settlement.ensure(participant, certificate)
+    source.etag = "read-only-object"
+    source.key = object_key
     reviewer = reviews.create("Charlie")
     reviewer.direct_review = verifier.review
     (reviews.root / "Charlie/approvals").rename(reviews.root / "Charlie/approvals-offline")

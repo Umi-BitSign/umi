@@ -13,9 +13,15 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
+from .competition_cohort_direct_model_review import (
+    DirectModelArtifactReviewer,
+    DirectModelReviewSourceConfig,
+    DirectModelSettlementVerifier,
+)
+from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import Capacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
@@ -58,7 +64,9 @@ MAX_CONFIG_BYTES = 8 * 1024**2
 
 
 class RewardCoordinatorConfig(StrictProtocolModel):
-    schema_: Literal["umi-reward-coordinator-config/1"] = Field(alias="schema")
+    schema_: Literal["umi-reward-coordinator-config/1", "umi-reward-coordinator-config/2"] = Field(
+        alias="schema"
+    )
     role: Literal["coordinator", "reviewer"]
     series: StandingRewardSeries
     policy: CompetitionPolicy
@@ -88,15 +96,30 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
+    direct_model_review: DirectModelReviewSourceConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_direct_model_review(self, handler):
+        value = handler(self)
+        if self.direct_model_review is None:
+            value.pop("direct_model_review", None)
+        return value
 
     @model_validator(mode="after")
     def bindings(self):
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
+        direct_selected = any(
+            cohort_model_delivery(plan).mechanism == "direct_r2_multipart_v1"
+            for plan in self.series.cohorts
+            if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+        )
         evaluators = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
         signer, proposer = identity(self.signer_hotkey), identity(self.proposer_hotkey)
         coordinator = self.role == "coordinator"
         if (
-            signer not in evaluators
+            (self.schema_ == "umi-reward-coordinator-config/2") != direct_selected
+            or direct_selected != (self.direct_model_review is not None)
+            or signer not in evaluators
             or proposer not in evaluators
             or (signer == proposer) != coordinator
             or len(set(evaluators.values())) < self.policy.required_evaluator_groups
@@ -137,6 +160,11 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 self.proof_export_directory,
                 self.exchange_inbox,
                 self.exchange_outbox,
+                *(
+                    (self.direct_model_review.r2_credentials_file,)
+                    if self.direct_model_review
+                    else ()
+                ),
             )
             if value is not None
         )
@@ -184,12 +212,22 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             export_archive=exported,
         )
         store = CompetitionStore(Path(config.promotion_directory), config.policy)
+        model_artifacts = (
+            None
+            if config.direct_model_review is None
+            else DirectModelSettlementVerifier(
+                DirectModelArtifactReviewer(config.direct_model_review, config.policy, None),
+                store.directory / "model-reward-artifacts",
+                root / "direct-model-reward-receipts",
+            )
+        )
         preparation = StandingRewardPreparation(
             reader,
             store,
             config.manifest,
             maximum_promotion_bytes=config.maximum_promotion_bytes,
             maximum_package_bytes=config.maximum_package_bytes,
+            model_artifacts=model_artifacts,
         )
         provider = HistoricalRewardControlProvider(
             config.chain,
@@ -245,6 +283,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             opportunity=coverage.opportunity,
             maximum_promotion_bytes=config.maximum_promotion_bytes,
             maximum_history_blocks=config.service.maximum_history_blocks,
+            model_artifacts=model_artifacts,
         )
         exchange = RewardReviewExchange(
             signer=signer,

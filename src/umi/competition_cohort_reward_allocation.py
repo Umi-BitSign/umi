@@ -20,6 +20,7 @@ from .competition_chain_state import (
 )
 from .competition_cohort_model_award import (
     MODEL_AWARD_ADAPTER,
+    ModelArtifactVerifier,
     ModelAward,
     ProportionalModelAward,
     QualityBucketModelAward,
@@ -213,6 +214,7 @@ def retain_reward_allocation(
     benchmark_review: ClosedQualityReview,
     *,
     maximum_promotion_bytes: int,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
 ) -> CohortRewardAllocation:
     """Retain the first complete allocation, replay it unchanged on restart.
 
@@ -247,6 +249,7 @@ def retain_reward_allocation(
                 benchmark_review,
                 acceptances,
                 promotion_store.directory / "model-reward-artifacts",
+                verify_artifact=verify_model_artifact,
             )
             promotion = None
         else:

@@ -33,6 +33,7 @@ class ModelAcceptanceWorker:
         *,
         batch_size=16,
         reviewers=(),
+        promote=None,
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("model acceptance batch is outside bounds")
@@ -40,6 +41,7 @@ class ModelAcceptanceWorker:
         self.inputs, self.output, self.batch_size = inputs, output, batch_size
         self.cursors = {}
         self.reviewers = tuple(reviewers)
+        self.promote = promote
         if (
             len(self.reviewers) > 64
             or any(
@@ -47,6 +49,7 @@ class ModelAcceptanceWorker:
                 for p in self.reviewers
             )
             or len({identity(p.signer) for p in self.reviewers}) != len(self.reviewers)
+            or (self.promote is not None and not callable(self.promote))
         ):
             raise ValueError("model reviewers change policy, cohorts or repeat a signer")
 
@@ -72,9 +75,11 @@ class ModelAcceptanceWorker:
 
     async def _one(self, cohort, sub):
         key = digest(sub)
+        retained = True
         try:
-            await run_owned_thread(self.owner.retained, cohort, key)
+            approved = await run_owned_thread(self.owner.retained, cohort, key)
         except PendingModelArtifacts:
+            retained = False
             intent = await run_owned_thread(self.owner.intent, cohort, key)
             if intent is None:
                 selected = await run_owned_thread(
@@ -115,6 +120,9 @@ class ModelAcceptanceWorker:
                 raise ValueError(
                     "delivered model acceptance differs from the selected original proposal"
                 ) from None
+        if self.promote is not None:
+            await self.promote(approved)
+        if not retained:
             await run_owned_thread(self.owner.publish, approved, await self.capture())
         await run_owned_thread(self.owner.export, cohort, key, self.output)
 

@@ -139,3 +139,66 @@ async def test_read_range_rejects_partial_or_reencoded_response():
         )
         with pytest.raises(ValueError):
             await client.read_range(KEY, offset=7, size_bytes=4, at=AT)
+
+
+@pytest.mark.asyncio
+async def test_copy_part_signs_exact_source_range_and_object_delete_is_idempotent():
+    requests = []
+
+    async def send(request):
+        requests.append(request)
+        if request.method == "PUT":
+            assert dict(request.url.params) == {
+                "partNumber": "2",
+                "uploadId": "provider-id",
+            }
+            assert request.headers["x-amz-copy-source"] == (
+                "/umi-model-artifacts/incoming/v2/source/payload"
+            )
+            assert request.headers["x-amz-copy-source-range"] == "bytes=0-5242879"
+            assert "x-amz-copy-source-range" in request.headers["authorization"]
+            return httpx.Response(
+                200,
+                content=b'<CopyPartResult><ETag>"ab' + b"ab" * 15 + b'"</ETag></CopyPartResult>',
+            )
+        if len([value for value in requests if value.method == "DELETE"]) == 1:
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    part = await client.copy_part(
+        "preservation/v1/model/payload",
+        source_key="incoming/v2/source/payload",
+        upload_id="provider-id",
+        part_number=2,
+        offset=0,
+        size_bytes=5 * 1024**2,
+        source_size_bytes=6 * 1024**2,
+        at=AT,
+    )
+    assert part == DirectModelUploadPart(part_number=2, size_bytes=5 * 1024**2, etag="ab" * 16)
+    await client.delete_object("incoming/v2/source/payload", at=AT)
+    await client.delete_object("incoming/v2/source/payload", at=AT)
+
+
+@pytest.mark.asyncio
+async def test_whole_object_copy_omits_range_header():
+    async def send(request):
+        assert "x-amz-copy-source-range" not in request.headers
+        return httpx.Response(
+            200,
+            content=b'<CopyPartResult><ETag>"' + b"cd" * 16 + b'"</ETag></CopyPartResult>',
+        )
+
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    part = await client.copy_part(
+        "preservation/v1/model/payload",
+        source_key="incoming/v2/source/payload",
+        upload_id="provider-id",
+        part_number=1,
+        offset=0,
+        size_bytes=20,
+        source_size_bytes=20,
+        at=AT,
+    )
+    assert part.size_bytes == 20

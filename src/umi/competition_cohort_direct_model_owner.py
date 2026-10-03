@@ -15,6 +15,7 @@ import hashlib
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from datetime import datetime, timezone
 from itertools import pairwise
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing_extensions import Self
 from .competition_cohort_direct_model_upload import (
     DirectModelPayload,
     DirectModelUploadObject,
+    DirectModelUploadPart,
     DirectModelUploadPartCapabilities,
     DirectModelUploadPartCapability,
     DirectModelUploadReservation,
@@ -36,9 +38,13 @@ from .competition_cohort_direct_model_upload import (
     SignedDirectModelUploadPartRequest,
     SignedDirectModelUploadReservation,
     direct_model_object_key,
+    preserved_model_object_key,
     require_part_request_signer,
 )
-from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from .competition_cohort_model_acceptance import (
+    ModelAcceptancePublication,
+    ModelArtifactReviewInputs,
+)
 from .competition_cohort_model_acceptance_store import MAX_PUBLICATION_BYTES
 from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
@@ -57,7 +63,7 @@ from .private_files import (
     read_private_model,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
-from .r2_multipart import MAXIMUM_RANGE_BYTES, R2MultipartClient
+from .r2_multipart import MAXIMUM_RANGE_BYTES, R2MultipartClient, R2ObjectHead
 
 
 class DirectModelUploadPending(OSError):
@@ -133,6 +139,21 @@ class _DirectModelAttemptIndex(StrictProtocolModel):
     attempt_id: Hex32
 
 
+class DirectModelPromotion(StrictProtocolModel):
+    """Private proof that an accepted object reached immutable R2 storage."""
+
+    schema_: Literal["umi-direct-model-promotion/1"] = Field(alias="schema")
+    acceptance_sha256: Hex32
+    reservation_sha256: Hex32
+    source_object_key_sha256: Hex32
+    preserved_object_key_sha256: Hex32
+    model_sha256: Hex32
+    payload_sha256: Hex32
+    total_bytes: Annotated[int, Field(ge=1)]
+    provider_etag: Annotated[str, Field(min_length=1, max_length=256)]
+    promoted_at_unix_ms: Annotated[int, Field(ge=0, le=2**63 - 1)]
+
+
 Authorize = Callable[[CohortParticipationRequest], Awaitable[None]]
 Sign = Callable[[StrictProtocolModel], Awaitable[Signature]]
 AttemptId = Callable[[], str]
@@ -169,6 +190,7 @@ class DirectModelUploadOwner:
         self.new_attempt_id = new_attempt_id or (lambda: secrets.token_hex(32))
         self._mutex = asyncio.Lock()
         self._verification_mutex = asyncio.Lock()
+        self._promotion_mutex = asyncio.Lock()
         c = self.config
         roots = [Path(c.directory)]
         if c.admission_reviews_directory is not None:
@@ -837,6 +859,46 @@ class DirectModelUploadOwner:
             self.journal.put("direct-object", key, result)
             return result
 
+    async def _verify_object(
+        self,
+        object_key: str,
+        bundle,
+        payload: DirectModelPayload,
+        *,
+        expected_head: R2ObjectHead | None = None,
+    ) -> R2ObjectHead:
+        observed = await self.multipart.head(object_key)
+        if observed is None:
+            raise DirectModelUploadPending("direct upload object is unavailable")
+        head = R2ObjectHead(size_bytes=observed.size_bytes, etag=observed.etag)
+        if head.size_bytes != payload.total_bytes or (
+            expected_head is not None
+            and (head.size_bytes, head.etag) != (expected_head.size_bytes, expected_head.etag)
+        ):
+            raise ValueError("direct upload object metadata changed")
+        stream_hash = hashlib.sha256()
+        offset = 0
+        for record in bundle.files:
+            file_hash = hashlib.sha256()
+            remaining = record.size_bytes
+            while remaining:
+                size = min(remaining, MAXIMUM_RANGE_BYTES)
+                data = await self.multipart.read_range(object_key, offset=offset, size_bytes=size)
+                if len(data) != size:
+                    raise ValueError("direct upload verification range differs")
+                stream_hash.update(data)
+                file_hash.update(data)
+                offset += size
+                remaining -= size
+            if file_hash.hexdigest() != record.sha256:
+                raise ValueError("direct upload file differs from its manifest")
+        if offset != payload.total_bytes or stream_hash.hexdigest() != payload.payload_sha256:
+            raise ValueError("direct upload payload digest differs")
+        final = await self.multipart.head(object_key)
+        if final is None or (final.size_bytes, final.etag) != (head.size_bytes, head.etag):
+            raise ValueError("direct upload object changed while verifying")
+        return head
+
     async def verify(
         self,
         reservation_sha256: str,
@@ -880,34 +942,8 @@ class DirectModelUploadOwner:
             bundle = submission.model_bundle
             if bundle is None or digest(bundle) != payload.model_sha256:
                 raise ValueError("direct upload verification bundle changed")
-            head = await self.multipart.head(attempt.object_key)
-            if head is None:
-                raise DirectModelUploadPending("direct upload object is unavailable")
-            if head.size_bytes != payload.total_bytes or head.etag != completed.provider_etag:
-                raise ValueError("direct upload object metadata changed")
-
-            stream_hash = hashlib.sha256()
-            offset = 0
-            for record in bundle.files:
-                file_hash = hashlib.sha256()
-                remaining = record.size_bytes
-                while remaining:
-                    size = min(remaining, MAXIMUM_RANGE_BYTES)
-                    data = await self.multipart.read_range(
-                        attempt.object_key, offset=offset, size_bytes=size
-                    )
-                    if len(data) != size:
-                        raise ValueError("direct upload verification range differs")
-                    stream_hash.update(data)
-                    file_hash.update(data)
-                    offset += size
-                    remaining -= size
-                if file_hash.hexdigest() != record.sha256:
-                    raise ValueError("direct upload file differs from its manifest")
-            if offset != payload.total_bytes or stream_hash.hexdigest() != payload.payload_sha256:
-                raise ValueError("direct upload payload digest differs")
-            if await self.multipart.head(attempt.object_key) != head:
-                raise ValueError("direct upload object changed while verifying")
+            head = R2ObjectHead(size_bytes=payload.total_bytes, etag=completed.provider_etag)
+            await self._verify_object(attempt.object_key, bundle, payload, expected_head=head)
             result = DirectModelUploadVerification(
                 schema="umi-direct-model-upload-verification/1",
                 reservation_sha256=reservation_sha256,
@@ -922,6 +958,194 @@ class DirectModelUploadOwner:
             )
             self.journal.put("direct-verification", reservation_sha256, result)
             return result
+
+    def _promotion_source(self, publication: ModelAcceptancePublication):
+        publication = ModelAcceptancePublication.model_validate_json(
+            canonical_json_bytes(publication)
+        )
+        acceptance = publication.certificate.acceptance
+        artifact = acceptance.direct_artifact
+        if artifact is None or artifact.reservation.cohort_sha256 != self.config.cohort_sha256:
+            raise ValueError("direct model promotion acceptance differs")
+        body, payload = artifact.reservation, artifact.reservation.payload
+        reservation_sha256 = digest(body)
+        if self._reservation_by_digest(reservation_sha256) != artifact:
+            raise ValueError("direct model promotion reservation differs")
+        request_raw = self.journal.get("direct-request", payload.upload_sha256)
+        if request_raw is None:
+            raise ValueError("direct model promotion request is unavailable")
+        request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request_raw))
+        upload_sha256, submission = self._request(request)
+        bundle = submission.model_bundle
+        if (
+            bundle is None
+            or upload_sha256 != payload.upload_sha256
+            or digest(submission) != acceptance.submission_sha256
+            or digest(bundle) != acceptance.model_sha256
+            or payload.model_sha256 != acceptance.model_sha256
+            or identity(submission.hotkey) != identity(acceptance.recipient_hotkey)
+        ):
+            raise ValueError("direct model promotion model differs")
+        if (
+            publication.inputs.model_sha256 != payload.model_sha256
+            or digest(publication.inputs.rights_evidence) != acceptance.rights_evidence_sha256
+            or digest(publication.inputs.reconstruction_evidence)
+            != acceptance.reconstruction_evidence_sha256
+        ):
+            raise ValueError("direct model promotion evidence differs")
+        self.require_payload(request)
+        if self.config.admission_reviews_directory is not None:
+            retained = read_private_model(
+                Path(self.config.admission_reviews_directory) / (payload.model_sha256 + ".json"),
+                ModelArtifactReviewInputs,
+                maximum_bytes=MAX_PUBLICATION_BYTES,
+            )
+            if (
+                publication.inputs != retained
+                or digest(retained.rights_evidence) != acceptance.rights_evidence_sha256
+                or digest(retained.reconstruction_evidence)
+                != acceptance.reconstruction_evidence_sha256
+            ):
+                raise ValueError("direct model promotion review differs")
+        attempt_raw = self.journal.get("direct-intent", body.attempt_id)
+        completed_raw = self.journal.get("direct-object", reservation_sha256)
+        verification_raw = self.journal.get("direct-verification", reservation_sha256)
+        if attempt_raw is None or completed_raw is None or verification_raw is None:
+            raise DirectModelUploadPending("direct model promotion source is incomplete")
+        attempt = _DirectModelUploadIntent.model_validate_json(canonical_json_bytes(attempt_raw))
+        completed = DirectModelUploadObject.model_validate_json(canonical_json_bytes(completed_raw))
+        verification = DirectModelUploadVerification.model_validate_json(
+            canonical_json_bytes(verification_raw)
+        )
+        source_key = direct_model_object_key(
+            body.cohort_sha256, payload.upload_sha256, body.attempt_id
+        )
+        if (
+            attempt.object_key != source_key
+            or body.object_key_sha256 != sha256_hex(source_key.encode())
+            or completed.object_key_sha256 != body.object_key_sha256
+            or verification.reservation_sha256 != reservation_sha256
+            or verification.payload_sha256 != payload.payload_sha256
+            or verification.total_bytes != payload.total_bytes
+        ):
+            raise ValueError("direct model promotion source binding differs")
+        return acceptance, bundle, payload, reservation_sha256, source_key, completed
+
+    async def promote(
+        self,
+        publication: ModelAcceptancePublication,
+        *,
+        now_unix_ms: int,
+    ) -> DirectModelPromotion:
+        """Promote one certified artifact by server-side copy before admission publication."""
+
+        _at(now_unix_ms)
+        async with self._promotion_mutex:
+            acceptance, bundle, payload, reservation_sha256, source_key, completed = (
+                self._promotion_source(publication)
+            )
+            acceptance_sha256 = digest(acceptance)
+            preserved_key = preserved_model_object_key(
+                acceptance.cohort_sha256,
+                payload.model_sha256,
+                payload.payload_sha256,
+            )
+            expected_source = R2ObjectHead(
+                size_bytes=payload.total_bytes, etag=completed.provider_etag
+            )
+            raw = self.journal.get("direct-promotion", acceptance_sha256)
+            if raw is not None:
+                retained = DirectModelPromotion.model_validate_json(canonical_json_bytes(raw))
+                expected = retained.model_copy(
+                    update={
+                        "acceptance_sha256": acceptance_sha256,
+                        "reservation_sha256": reservation_sha256,
+                        "source_object_key_sha256": sha256_hex(source_key.encode()),
+                        "preserved_object_key_sha256": sha256_hex(preserved_key.encode()),
+                        "model_sha256": payload.model_sha256,
+                        "payload_sha256": payload.payload_sha256,
+                        "total_bytes": payload.total_bytes,
+                    }
+                )
+                if retained != expected:
+                    raise ValueError("direct model promotion receipt differs")
+                head = await self.multipart.head(preserved_key)
+                if head is None or (head.size_bytes, head.etag) != (
+                    payload.total_bytes,
+                    retained.provider_etag,
+                ):
+                    raise ValueError("preserved direct model changed after promotion")
+                source_head = await self.multipart.head(source_key)
+                if source_head is not None:
+                    if (source_head.size_bytes, source_head.etag) != (
+                        expected_source.size_bytes,
+                        expected_source.etag,
+                    ):
+                        raise ValueError("direct model staging source changed after promotion")
+                    await self.multipart.delete_object(source_key)
+                if await self.multipart.head(source_key) is not None:
+                    raise OSError("direct model staging cleanup is incomplete")
+                return retained
+
+            source_head = await self.multipart.head(source_key)
+            if source_head is None or (source_head.size_bytes, source_head.etag) != (
+                expected_source.size_bytes,
+                expected_source.etag,
+            ):
+                raise ValueError("direct model staging source changed before promotion")
+            preserved_head = await self.multipart.head(preserved_key)
+            if preserved_head is None:
+                upload_id = await self.multipart.create(preserved_key)
+                try:
+                    parts: list[DirectModelUploadPart] = []
+                    offset = 0
+                    for part_number in range(1, payload.total_parts + 1):
+                        size = min(payload.part_size_bytes, payload.total_bytes - offset)
+                        parts.append(
+                            await self.multipart.copy_part(
+                                preserved_key,
+                                source_key=source_key,
+                                upload_id=upload_id,
+                                part_number=part_number,
+                                offset=offset,
+                                size_bytes=size,
+                                source_size_bytes=payload.total_bytes,
+                            )
+                        )
+                        offset += size
+                    if offset != payload.total_bytes:
+                        raise ValueError("direct model promotion part geometry differs")
+                    provider_etag = await self.multipart.complete(
+                        preserved_key, upload_id=upload_id, parts=tuple(parts)
+                    )
+                except BaseException:
+                    with suppress(OSError, ValueError):
+                        await self.multipart.abort(preserved_key, upload_id=upload_id)
+                    raise
+                preserved_head = R2ObjectHead(size_bytes=payload.total_bytes, etag=provider_etag)
+            verified_head = await self._verify_object(
+                preserved_key,
+                bundle,
+                payload,
+                expected_head=preserved_head,
+            )
+            receipt = DirectModelPromotion(
+                schema="umi-direct-model-promotion/1",
+                acceptance_sha256=acceptance_sha256,
+                reservation_sha256=reservation_sha256,
+                source_object_key_sha256=sha256_hex(source_key.encode()),
+                preserved_object_key_sha256=sha256_hex(preserved_key.encode()),
+                model_sha256=payload.model_sha256,
+                payload_sha256=payload.payload_sha256,
+                total_bytes=payload.total_bytes,
+                provider_etag=verified_head.etag,
+                promoted_at_unix_ms=now_unix_ms,
+            )
+            self.journal.put("direct-promotion", acceptance_sha256, receipt)
+            await self.multipart.delete_object(source_key)
+            if await self.multipart.head(source_key) is not None:
+                raise OSError("direct model staging cleanup is incomplete")
+            return receipt
 
     async def poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
         """Advance bounded object verification without holding up public requests."""
@@ -1042,6 +1266,23 @@ class DirectModelUploadOwners:
         except KeyError as error:
             raise DirectModelUploadPending("direct model cohort is unavailable") from error
         return owner.review_artifact(request)
+
+    async def promote(self, publication: ModelAcceptancePublication) -> DirectModelPromotion | None:
+        """Route one independently certified acceptance to its bound R2 owner."""
+
+        publication = ModelAcceptancePublication.model_validate_json(
+            canonical_json_bytes(publication)
+        )
+        artifact = publication.certificate.acceptance.direct_artifact
+        if artifact is None:
+            return None
+        try:
+            owner = self.owners[artifact.reservation.cohort_sha256]
+        except KeyError as error:
+            raise DirectModelUploadPending(
+                "direct model promotion cohort is unavailable"
+            ) from error
+        return await owner.promote(publication, now_unix_ms=time.time_ns() // 1_000_000)
 
     async def poll_once(self, *, now_unix_ms: int | None = None) -> dict:
         current = time.time_ns() // 1_000_000 if now_unix_ms is None else now_unix_ms

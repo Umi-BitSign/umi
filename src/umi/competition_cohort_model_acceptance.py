@@ -26,7 +26,10 @@ class ModelArtifactAcceptance(StrictProtocolModel):
     ready, before intake closes. It is not a miner-supplied upload timestamp.
     """
 
-    schema_: Literal["umi-cohort-model-artifact-acceptance/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-cohort-model-artifact-acceptance/1",
+        "umi-cohort-model-artifact-acceptance/2",
+    ] = Field(alias="schema")
     policy_sha256: Hex32
     cohort_sha256: Hex32
     authority_sha256: Hex32
@@ -39,6 +42,30 @@ class ModelArtifactAcceptance(StrictProtocolModel):
     accepted_at_block: Block
     accepted_ordinal: Annotated[int, Field(ge=1, le=2**53 - 1)]
     rights_and_reconstruction_passed: Literal[True]
+    direct_artifact: SignedDirectModelUploadReservation | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_artifact(self, handler):
+        value = handler(self)
+        if self.direct_artifact is None:
+            value.pop("direct_artifact", None)
+        return value
+
+    @model_validator(mode="after")
+    def exact_artifact_source(self):
+        if (self.schema_ == "umi-cohort-model-artifact-acceptance/2") != (
+            self.direct_artifact is not None
+        ):
+            raise ValueError("model acceptance artifact source differs")
+        if self.direct_artifact is not None:
+            body = self.direct_artifact.reservation
+            if (
+                body.cohort_sha256 != self.cohort_sha256
+                or body.payload.model_sha256 != self.model_sha256
+                or identity(body.hotkey) != identity(self.recipient_hotkey)
+            ):
+                raise ValueError("direct model acceptance source differs")
+        return self
 
 
 class CertifiedModelArtifactAcceptance(StrictProtocolModel):
@@ -96,6 +123,7 @@ class ModelAcceptanceIntent(StrictProtocolModel):
 def verify_model_acceptance_body(a, record, history, policy, *, maximum_block):
     sub, admission = record.request.signed_submission.submission, record.proposed_admission
     authority = history.authority.authority
+    direct = a.direct_artifact
     if (
         not isinstance(authority, ModelRewardCohortAuthority)
         or sub.track != "model"
@@ -109,6 +137,16 @@ def verify_model_acceptance_body(a, record, history, policy, *, maximum_block):
         or identity(a.recipient_hotkey) != identity(sub.hotkey)
         or not admission.admitted_at_block <= a.accepted_at_block <= maximum_block
         or "0" * 64 in (a.rights_evidence_sha256, a.reconstruction_evidence_sha256)
+        or (
+            direct is not None
+            and (
+                direct.reservation.payload.upload_sha256 != digest(record.request)
+                or direct.reservation.payload.model_sha256 != digest(sub.model_bundle)
+                or identity(direct.signature.hotkey)
+                not in {identity(e.hotkey) for e in policy.evaluators}
+                or identity(direct.signature.hotkey) == identity(sub.hotkey)
+            )
+        )
     ):
         raise ValueError("model artifact acceptance differs from the original complete entry")
 
@@ -141,7 +179,7 @@ class ModelReviewRequest(StrictProtocolModel):
     def exact_artifact_source(self):
         if (self.schema_ == "umi-cohort-model-review-request/2") != (
             self.direct_artifact is not None
-        ):
+        ) or self.acceptance.direct_artifact != self.direct_artifact:
             raise ValueError("model review request artifact source differs")
         return self
 
