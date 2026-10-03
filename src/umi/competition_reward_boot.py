@@ -147,6 +147,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
             != successor
             or direct_selected != (self.direct_model_review is not None)
             or successor != all(value is not None for value in predecessor_inputs)
+            or (not successor and any(value is not None for value in predecessor_inputs))
             or successor != (self.predecessor_approval_sha256 is not None)
             or self.manifest.opportunity.runtime_profile_sha256 != digest(self.eligibility)
             or len(self.chain.proof_rpc_fallback_urls) != 2

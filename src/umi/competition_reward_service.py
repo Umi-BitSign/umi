@@ -187,14 +187,14 @@ async def run_standing_reward_service(
             resources.push_async_callback(_close_provider, value)
         limits = StandingRewardServiceLimits.model_validate(limits.model_dump())
         successor = type(plan) is StandingRewardHandoffPlan
-        if successor != all(
-            value is not None
-            for value in (
-                predecessor_series,
-                predecessor,
-                predecessor_coverage,
-                predecessor_approval_sha256,
-            )
+        predecessor_inputs = (
+            predecessor_series,
+            predecessor,
+            predecessor_coverage,
+            predecessor_approval_sha256,
+        )
+        if successor != all(value is not None for value in predecessor_inputs) or (
+            not successor and any(value is not None for value in predecessor_inputs)
         ):
             raise ValueError("standing service predecessor ownership is incomplete")
         check_standing_reward_host_selection(

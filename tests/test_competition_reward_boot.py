@@ -339,6 +339,11 @@ def test_successor_boot_binds_predecessor_and_local_host_approval(inputs):
     with pytest.raises(ValueError, match="incomplete handoff"):
         StandingRewardHostApproval.model_validate_json(canonical_json_bytes(unbound_approval))
 
+    with pytest.raises(ValueError, match="selected authority"):
+        boot.StandingRewardBootConfig.model_validate_json(
+            canonical_json_bytes(old.model_copy(update={"predecessor_series": old.series}))
+        )
+
 
 def test_default_selection_uses_existing_command_and_original_approval(inputs):
     i = inputs

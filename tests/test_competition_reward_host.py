@@ -844,6 +844,15 @@ async def test_service_boot_preserves_successor_predecessor_owner(service_case, 
         assert migrated.predecessor_binding_sha256 in {digest(value) for value in history}
 
 
+async def test_initial_service_rejects_partial_successor_ownership(service_case):
+    c = service_case
+    async with c.reopen() as runtime:
+        with pytest.raises(ValueError, match="predecessor ownership is incomplete"):
+            await run_standing_reward_service(
+                runtime, **(c.service_options | {"predecessor_series": c.series})
+            )
+
+
 async def test_service_restarts_with_original_binding_and_orders_shutdown(service_case):
     c = service_case
     original = None
