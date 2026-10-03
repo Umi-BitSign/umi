@@ -2,7 +2,8 @@
 
 This monitor sends service-availability alerts from Cloudflare even when the
 coordinator is offline. It observes selected long-running systemd services and,
-when configured, the standing validator's native finalized-chain observations.
+when configured, the standing validator's native finalized-chain observations
+and selected filesystem free-space counters.
 It detects missing observations and stalled block height or weight updates even
 when systemd still reports a running process. These host observations do not
 independently certify correct reward allocation or received payments. Intake,
@@ -13,11 +14,13 @@ requires a private bearer token and exactly the configured service names. A
 Durable Object retains the server-side receipt time and notification state.
 After the first heartbeat, its independent alarm checks every minute. Five
 minutes without a heartbeat raises an incident. Failed services also raise an
-incident. Unresolved incidents repeat hourly; recovery and new incidents have
-a five-minute notification cooldown to limit flapping. Failed email sends do
-not record success and leave another check scheduled. Delivery is at least once:
-a crash after email acceptance but before recording its receipt can duplicate
-an alert. Cloudflare or email-provider failure can delay notifications.
+incident. A configured filesystem below its minimum free-space threshold raises
+an incident before services fail. Unresolved incidents repeat hourly; recovery
+and new incidents have a five-minute notification cooldown to limit flapping.
+Failed email sends do not record success and leave another check scheduled.
+Delivery is at least once: a crash after email acceptance but before recording
+its receipt can duplicate an alert. Cloudflare or email-provider failure can
+delay notifications.
 
 ## Configure and install
 
@@ -37,7 +40,10 @@ an alert. Cloudflare or email-provider failure can delay notifications.
    {
      "url": "https://YOUR-WORKER.workers.dev/heartbeat",
      "token": "PRIVATE_TOKEN",
-     "services": ["umi-validator@0.service", "umi-validator@54.service"]
+     "services": ["umi-validator@0.service", "umi-validator@54.service"],
+     "storage_paths": {
+       "coordinator-root/available_bytes": "/"
+     }
    }
    ```
 
@@ -52,6 +58,29 @@ an alert. Cloudflare or email-provider failure can delay notifications.
    Test a missing heartbeat by stopping only this new timer, then restart it
    and check incident/recovery notification receipts. Confirm inbox delivery
    separately. Never stop validators to test the monitor.
+
+## Filesystem capacity
+
+`storage_paths` maps bounded public metric names to absolute local directories.
+The sender resolves each directory with `disk_usage` and exports only available
+bytes. It rejects relative paths, symlinks, non-directories and more than ten
+metrics. A query failure aborts the heartbeat so it cannot report a fabricated
+healthy capacity value.
+
+Configure the same metric names in the Worker's `RESOURCE_MINIMUMS` variable as
+a JSON string. Values are minimum available bytes, between 64 MiB and 1 PiB:
+
+```json
+{
+  "coordinator-root/available_bytes": 34359738368
+}
+```
+
+Deploy the sender and Worker configuration together. Once resource monitoring
+is configured, the Worker accepts only schema-three heartbeats containing every
+selected metric. Crossing below a threshold sends `resource_low`; a sustained
+recovery sends the ordinary recovery notice after the notification cooldown.
+The monitor does not delete files, stop services or change cohort state.
 
 ## Successor validator health
 

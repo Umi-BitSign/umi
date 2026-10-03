@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Monitor, STALE_AFTER_MS, REMINDER_MS, NOTICE_COOLDOWN_MS } from "./monitor.mjs";
 
-function fixture(limits = {}) {
+function fixture(limits = {}, resourceMinimums = {}) {
   let now = 1_000_000;
   let alarm = null;
   const data = new Map();
@@ -17,7 +17,8 @@ function fixture(limits = {}) {
     messages.push(message);
     return { messageId: `id-${messages.length}` };
   };
-  const make = (send = notify) => new Monitor(storage, send, ["vali.service"], () => now, limits);
+  const make = (send = notify) => new Monitor(storage, send, ["vali.service"], () => now,
+    limits, resourceMinimums);
   return { data, storage, messages, make, advance: n => { now += n; } };
 }
 const healthy = { schema: "umi-service-heartbeat/1", services: { "vali.service": "running" } };
@@ -110,6 +111,42 @@ const progressLimits = { "vali.service/finalized_block": STALE_AFTER_MS,
 const native = (head, update) => ({ ...healthy, schema: "umi-service-heartbeat/2", progress: {
   "vali.service/finalized_block": head, "vali.service/weight_update_block": update,
 } });
+
+const resourceMinimums = { "coordinator-root/available_bytes": 8 * 1024 ** 3 };
+const resourceHeartbeat = available => ({ ...healthy, schema: "umi-service-heartbeat/3",
+  resources: { "coordinator-root/available_bytes": available } });
+
+test("low storage alerts and a sustained recovery clears the incident", async () => {
+  const f = fixture({}, resourceMinimums);
+  await f.make().heartbeat(resourceHeartbeat(7 * 1024 ** 3));
+  await f.make().alarm();
+  assert.equal(f.messages[0].state, "resource_low");
+  assert.deepEqual(f.messages[0].low, ["coordinator-root/available_bytes"]);
+  assert.equal(f.messages[0].resources["coordinator-root/available_bytes"], 7 * 1024 ** 3);
+  await f.make().heartbeat(resourceHeartbeat(9 * 1024 ** 3));
+  await f.make().alarm();
+  assert.equal(f.messages.length, 1);
+  f.advance(NOTICE_COOLDOWN_MS);
+  await f.make().heartbeat(resourceHeartbeat(9 * 1024 ** 3));
+  await f.make().alarm();
+  assert.equal(f.messages[1].state, "healthy");
+});
+
+test("resource monitoring rejects malformed configuration and heartbeats", async () => {
+  for (const minimums of [null, 42, [], { bad: 8 * 1024 ** 3 },
+    { "root/available_bytes": 1 },
+    Object.fromEntries(Array.from({ length: 11 }, (_, n) =>
+      [`disk-${n}/available_bytes`, 8 * 1024 ** 3]))]) {
+    assert.throws(() => fixture({}, minimums).make(), /invalid_resource_minimums/);
+  }
+  const f = fixture({}, resourceMinimums);
+  for (const value of [healthy, { ...resourceHeartbeat(1), resources: {} },
+    resourceHeartbeat(-1), resourceHeartbeat("secret"),
+    resourceHeartbeat(Number.MAX_SAFE_INTEGER + 1)]) {
+    await assert.rejects(f.make().heartbeat(value));
+  }
+  assert.equal((await f.make().status()).state, "unarmed");
+});
 
 test("running validators with moving heads but stuck weights alert across monitor restart", async () => {
   const f = fixture(progressLimits);

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import umi.competition_cohort_direct_model_review as direct_review
 from umi.competition_cohort_direct_model_review import (
     DirectModelArtifactReviewer,
     DirectModelReviewSourceConfig,
@@ -66,7 +67,7 @@ class ReadOnlyObject:
 
 
 @pytest.mark.asyncio
-async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
+async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews, monkeypatch):
     request = reviews.request
     submission = request.record.request.signed_submission.submission
     bundle = submission.model_bundle
@@ -128,11 +129,14 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
         public_redistribution_and_evaluation_approved=True,
     )
     source = ReadOnlyObject(object_key, body)
+    protected = reviews.root / "protected-state"
+    protected.mkdir(mode=0o700)
     verifier = DirectModelArtifactReviewer(
         DirectModelReviewSourceConfig(
-            schema="umi-direct-model-review-source/1",
+            schema="umi-direct-model-review-source/2",
             r2_credentials_file=str(reviews.root / "unused-read-credentials"),
             r2_bucket="umi-model-artifacts",
+            materialization_protected_roots=(str(protected),),
             standing_review_policy=standing,
             materialization_free_space_reserve_bytes=64 * 1024**2,
         ),
@@ -163,9 +167,10 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
     )
     held_verifier = DirectModelArtifactReviewer(
         DirectModelReviewSourceConfig(
-            schema="umi-direct-model-review-source/1",
+            schema="umi-direct-model-review-source/2",
             r2_credentials_file=str(reviews.root / "unused-read-credentials"),
             r2_bucket="umi-model-artifacts",
+            materialization_protected_roots=(str(protected),),
             standing_review_policy=standing.model_copy(
                 update={"maximum_document_bytes": 1, "maximum_total_document_bytes": 1}
             ),
@@ -184,7 +189,19 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
     source.key = preserved_model_object_key(
         reservation.cohort_sha256, payload.model_sha256, payload.payload_sha256
     )
-    materialized = reviews.root / "materialized"
+    scratch = reviews.root / "bounded-scratch"
+    scratch.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        direct_review,
+        "_filesystem_device",
+        lambda path: 2 if path == scratch else 1,
+    )
+    monkeypatch.setattr(
+        direct_review,
+        "_filesystem_usage",
+        lambda path: SimpleNamespace(total=80 * 1024**3, free=70 * 1024**3),
+    )
+    materialized = scratch / "materialized"
     await verifier.materialize(direct_request, materialized)
     assert (materialized / digest(bundle) / "manifest.json").is_file()
     assert (materialized / "materialization.json").is_file()
@@ -210,11 +227,27 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews):
     assert not materialized.exists()
     verifier.multipart.payload = body
     source.replace_on_read = True
-    replaced = reviews.root / "replacement-race"
+    replaced = scratch / "replacement-race"
     with pytest.raises(ValueError, match="changed during materialization"):
         await verifier.materialize(direct_request, replaced)
     assert not replaced.exists()
     source.etag = "read-only-object"
+
+    monkeypatch.setattr(direct_review, "_filesystem_device", lambda path: 1)
+    with pytest.raises(OSError, match="shares a protected filesystem"):
+        await verifier.materialize(direct_request, scratch / "shared-filesystem")
+    monkeypatch.setattr(
+        direct_review,
+        "_filesystem_device",
+        lambda path: 2 if path == scratch else 1,
+    )
+    monkeypatch.setattr(
+        direct_review,
+        "_filesystem_usage",
+        lambda path: SimpleNamespace(total=97 * 1024**3, free=70 * 1024**3),
+    )
+    with pytest.raises(OSError, match="exceeds its configured quota"):
+        await verifier.materialize(direct_request, scratch / "oversized-filesystem")
 
     acceptance = direct_request.acceptance.model_copy(
         update={

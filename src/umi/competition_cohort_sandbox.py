@@ -110,6 +110,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         self.cached_model_sha256: str | None = None
         self.active_candidate_invocations = 0
         ensure_private_directory(self.cache)
+        self.artifacts.verify_materialization_filesystem(self.cache)
 
     async def _candidate_archive(self, request: ModelReviewRequest, bundle) -> Path:
         archive = self.cache / "archive"

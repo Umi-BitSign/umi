@@ -123,10 +123,13 @@ async def test_direct_candidate_cache_materializes_once_and_remains_bounded(
     bundle = job.submission.submission.model_bundle
     if bundle is None:
         pytest.skip("endpoint jobs have no direct candidate")
-    calls, checks = [], []
+    calls, checks, filesystems = [], [], []
 
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
+
+        def verify_materialization_filesystem(self, root):
+            filesystems.append(root)
 
         async def materialized(self, request, archive):
             checks.append((request, archive))
@@ -185,6 +188,7 @@ async def test_direct_candidate_cache_materializes_once_and_remains_bounded(
     )
     assert len(calls) == 1
     assert len(checks) == 1
+    assert filesystems == [port.cache, restarted.cache]
     assert tuple(path.name for path in port.cache.iterdir()) == ("archive",)
     assert not first_path.exists() and not second_path.exists() and not third_path.exists()
 
@@ -200,6 +204,9 @@ async def test_direct_candidate_cache_allows_same_model_cases_to_run_concurrentl
 
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
+
+        def verify_materialization_filesystem(self, root):
+            return None
 
         async def materialized(self, request, archive):
             return False
@@ -268,6 +275,9 @@ async def test_direct_candidate_cancellation_releases_cache_ownership(cpu, tmp_p
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
 
+        def verify_materialization_filesystem(self, root):
+            return None
+
         async def materialized(self, request, archive):
             return False
 
@@ -316,6 +326,9 @@ async def test_direct_sandbox_routes_legacy_candidate_to_retained_archive(
 
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
+
+        def verify_materialization_filesystem(self, root):
+            return None
 
         async def materialized(self, request, archive):
             pytest.fail("legacy candidate checked the direct object cache")

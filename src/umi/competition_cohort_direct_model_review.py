@@ -10,7 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_direct_model_upload import (
@@ -47,7 +47,7 @@ from .r2_sigv4 import R2SigV4, load_r2_credentials
 class DirectModelReviewSourceConfig(StrictProtocolModel):
     """Read-only R2 source and the exact standing review selected before intake."""
 
-    schema_: Literal["umi-direct-model-review-source/1"] = Field(alias="schema")
+    schema_: Literal["umi-direct-model-review-source/2"] = Field(alias="schema")
     r2_credentials_file: Directory
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
@@ -58,7 +58,24 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     materialization_free_space_reserve_bytes: Annotated[int, Field(ge=64 * 1024**2, le=1024**4)] = (
         2 * 1024**3
     )
+    materialization_filesystem_maximum_bytes: Annotated[int, Field(ge=1024**3, le=1024**4)] = (
+        96 * 1024**3
+    )
+    materialization_protected_roots: Annotated[
+        tuple[Directory, ...], Field(min_length=1, max_length=16)
+    ]
     materialization_concurrency: Literal[1] = 1
+
+    @model_validator(mode="after")
+    def bounded_materialization_filesystem(self):
+        if (
+            self.maximum_materialized_bytes + self.materialization_free_space_reserve_bytes
+            > self.materialization_filesystem_maximum_bytes
+            or len(set(self.materialization_protected_roots))
+            != len(self.materialization_protected_roots)
+        ):
+            raise ValueError("direct model materialization filesystem bounds differ")
+        return self
 
     def stores(self) -> tuple[Path, ...]:
         return (Path(self.r2_credentials_file),)
@@ -86,6 +103,14 @@ class DirectModelSettlementVerification(StrictProtocolModel):
     payload_sha256: Hex32
     total_bytes: Annotated[int, Field(ge=1, le=R2_MAXIMUM_MULTIPART_BYTES)]
     provider_etag: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+def _filesystem_device(path: Path) -> int:
+    return path.stat().st_dev
+
+
+def _filesystem_usage(path: Path):
+    return shutil.disk_usage(path)
 
 
 class DirectModelArtifactReviewer:
@@ -211,6 +236,24 @@ class DirectModelArtifactReviewer:
         inputs, _ = await self.verify(request)
         return inputs
 
+    def verify_materialization_filesystem(self, root: Path):
+        """Fail closed unless scratch is private, bounded and filesystem-isolated."""
+
+        root = Path(root)
+        ensure_private_directory(root)
+        scratch_device = _filesystem_device(root)
+        for raw_path in self.config.materialization_protected_roots:
+            protected = Path(raw_path)
+            try:
+                if _filesystem_device(protected) == scratch_device:
+                    raise OSError("direct model scratch shares a protected filesystem")
+            except FileNotFoundError as error:
+                raise OSError("direct model protected filesystem is unavailable") from error
+        usage = _filesystem_usage(root)
+        if usage.total > self.config.materialization_filesystem_maximum_bytes:
+            raise OSError("direct model scratch filesystem exceeds its configured quota")
+        return usage
+
     async def materialize(self, request: ModelReviewRequest, archive: Path) -> Path:
         """Create one verified bounded cache archive and never reuse partial bytes."""
 
@@ -224,9 +267,9 @@ class DirectModelArtifactReviewer:
         archive = Path(archive)
         if not archive.is_absolute() or archive.exists() or archive.is_symlink():
             raise ValueError("direct model scratch archive differs")
-        archive.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        usage = self.verify_materialization_filesystem(archive.parent)
         required = payload.total_bytes + self.config.materialization_free_space_reserve_bytes
-        if shutil.disk_usage(archive.parent).free < required:
+        if usage.free < required:
             raise OSError("direct model scratch capacity is unavailable")
         archive.mkdir(mode=0o700, parents=True)
         target = archive / digest(bundle)

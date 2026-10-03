@@ -272,13 +272,14 @@ before publishing the default file; remove no original journals during selection
 
 Schema `umi-standing-reward-boot/1` remains the legacy local-artifact form. A
 series containing a direct R2 model-delivery cohort requires schema version 2
-and `direct_model_review`. Configure a read-only R2 credential, the selected
-bucket and the standing review policy. The validator streams and verifies every
-accepted direct candidate from its content-addressed preservation key once,
-retains a private receipt and checks object metadata on replay. It does not copy
-candidate bundles into its promotion directory. Keep the frozen baseline in the
-local native archive. The credential file must remain outside every mutable or
-replicated store.
+and `direct_model_review` source schema 2. Configure a read-only R2 credential,
+the selected bucket, the standing review policy, a maximum scratch-filesystem
+capacity and every protected state/evidence/journal root. The validator streams
+and verifies every accepted direct candidate from its content-addressed
+preservation key once, retains a private receipt and checks object metadata on
+replay. It does not copy candidate bundles into its promotion directory. Keep
+the frozen baseline in the local native archive. The credential file must remain
+outside every mutable or replicated store.
 
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
@@ -408,7 +409,9 @@ legacy local candidate archives. A series containing direct R2 model delivery
 requires version 2 and the same `direct_model_review` source on every coordinator
 and reviewer. Each process performs its own complete byte verification of the
 preserved R2 object before reviewing or signing an activation and retains only
-its private receipt.
+its private receipt. Source schema 2 also requires benchmark materialization on
+a bounded filesystem whose device differs from every configured protected root;
+put that workspace on a dedicated mounted volume before starting the service.
 
 The coordinator loads its evaluator key and the reserved control key. Reviewers
 load only their evaluator key and independently replay the original proposal

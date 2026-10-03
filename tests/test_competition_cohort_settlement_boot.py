@@ -349,9 +349,10 @@ def test_direct_series_requires_read_only_settlement_source(selected, tmp_path):
         public_redistribution_and_evaluation_approved=True,
     )
     source = DirectModelReviewSourceConfig(
-        schema="umi-direct-model-review-source/1",
+        schema="umi-direct-model-review-source/2",
         r2_credentials_file=str(tmp_path / "r2-reader.env"),
         r2_bucket="umi-model-artifacts",
+        materialization_protected_roots=(str(tmp_path / "protected-state"),),
         standing_review_policy=standing,
     )
     direct = c.model_copy(

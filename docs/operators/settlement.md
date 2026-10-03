@@ -55,7 +55,7 @@ copy to place the verified payload at
 `preservation/v1/<cohort>/<model>/<payload>/payload`, rereads and verifies every
 byte, retains a promotion receipt, and deletes the exact incoming object. A
 lost cleanup acknowledgement retries from that receipt without recopying.
-Settlement config version 4 requires `direct_model_review` with a
+Settlement config version 4 requires `direct_model_review` source schema 2 with a
 read-only credential for the selected bucket and the same standing review
 policy used at intake. Every settlement signer independently streams and
 verifies the complete preserved object once before signing. Standing reward
@@ -1138,10 +1138,15 @@ object into that cache, reuses it across that candidate's cases, and removes the
 old candidate before materializing another one. Materialization is serialized
 and capped by `maximum_materialized_bytes`. It also requires the complete payload
 plus `materialization_free_space_reserve_bytes` to be free before writing; the
-baseline remains in the pinned local archive. Put the benchmark workspace on its
-quota-controlled scratch filesystem. It may delay work when capacity is
-unavailable, but must not share the validator, coordinator state, evidence or
-journal filesystem.
+baseline remains in the pinned local archive. Put the benchmark workspace on a
+dedicated quota-controlled scratch filesystem. Source schema 2 binds
+`materialization_filesystem_maximum_bytes` and at least one
+`materialization_protected_roots` entry. List every validator/coordinator state,
+evidence and journal filesystem in that tuple. Before writing, the reviewer
+requires the scratch device to differ from every listed device and requires the
+filesystem's total capacity to fit the configured maximum. This makes a bounded
+volume or filesystem quota a runtime prerequisite. Capacity exhaustion delays
+work; it never sends candidate bytes to a protected filesystem.
 
 Configure a bucket lifecycle rule that aborts incomplete multipart uploads after
 the selected recovery interval. A part-level provider `404` causes the miner to

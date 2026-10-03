@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from umi import competition_cohort_direct_model_review as direct_review
 from umi import competition_cohort_review_boot as boot
 from umi import competition_cohort_review_cli as cli
 from umi.competition_cohort_admission_journal import CohortAdmissionSignerConfig
@@ -828,9 +829,10 @@ def with_direct_series(config):
 def with_direct_model_review(config):
     c = with_endpoint(config)
     source = DirectModelReviewSourceConfig(
-        schema="umi-direct-model-review-source/1",
+        schema="umi-direct-model-review-source/2",
         r2_credentials_file=c.signing.directory + "-r2-read-credentials",
         r2_bucket="umi-model-artifacts",
+        materialization_protected_roots=(c.signing.directory,),
         standing_review_policy=StandingModelReviewPolicy(
             schema="umi-standing-model-artifact-review-policy/1",
             competition_policy_sha256=digest(c.policy),
@@ -967,12 +969,26 @@ def direct_r2_credentials(c):
     path.chmod(0o600)
 
 
+def qualify_test_scratch(monkeypatch):
+    monkeypatch.setattr(
+        direct_review,
+        "_filesystem_device",
+        lambda path: 2 if path.name == "direct-model-cache" else 1,
+    )
+    monkeypatch.setattr(
+        direct_review,
+        "_filesystem_usage",
+        lambda path: SimpleNamespace(total=80 * 1024**3, free=70 * 1024**3),
+    )
+
+
 async def test_direct_review_boot_uses_independent_r2_reader_and_bounded_sandbox(
     selected, providers, monkeypatch
 ):
     c = with_direct_model_review(selected.config)
     endpoint_credentials(c)
     direct_r2_credentials(c)
+    qualify_test_scratch(monkeypatch)
     monkeypatch.setattr(boot, "CohortEndpointFinalityProvider", providers.provider)
 
     async with boot.phase_review_app(c) as app:
@@ -983,9 +999,12 @@ async def test_direct_review_boot_uses_independent_r2_reader_and_bounded_sandbox
         assert app.state.benchmark.sandbox.cache.parent == Path(c.benchmark.workspace_directory)
 
 
-async def test_direct_model_only_review_boot_omits_endpoint_path(selected, providers):
+async def test_direct_model_only_review_boot_omits_endpoint_path(
+    selected, providers, monkeypatch
+):
     c = with_direct_model_only_review(selected.config)
     direct_r2_credentials(c)
+    qualify_test_scratch(monkeypatch)
 
     async with boot.phase_review_app(c) as app:
         assert app.state.endpoint is None
