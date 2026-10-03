@@ -72,7 +72,7 @@ from .test_competition_cohort_service_grants import shared_control_group as shar
 from .test_competition_model_burn import burn_policy
 from .test_competition_reward_control import commitment
 from .test_competition_reward_control_archive import make_historical
-from .test_competition_reward_decisions import signed
+from .test_competition_reward_decisions import signatures, signed
 from .test_competition_reward_eligibility import configure_eligibility
 from .test_competition_reward_history import make_history_case
 from .test_competition_reward_history_selection import current as current_state
@@ -2438,6 +2438,89 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
             pytest.fail("retained native coverage failed to recover: " + caplog.text)
     verified = service._completed[key]
     assert digest(verified.certificate) == completion["certificate_sha256"]
+    assert await service.completed_opportunity(c.active.decision.activation) == verified
+    with pytest.raises(ValueError, match="differs from signed reward selection"):
+        await service.completed_opportunity(
+            c.active.decision.activation.model_copy(update={"allocation_sha256": "ff" * 32})
+        )
+    from umi.competition_cohort_recovery import (
+        SignedCohortRecoveryAuthority,
+        StandingCohortRecoveryAuthority,
+    )
+    from umi.competition_reward_decisions import (
+        StandingRewardSeries,
+        StandingRewardSeriesPredecessor,
+    )
+    from umi.competition_reward_handoff_models import StandingRewardHandoffPlan
+    from umi.competition_reward_series_handoff import (
+        StandingRewardPredecessorOpportunity,
+        validate_standing_predecessor_opportunity,
+    )
+
+    plans = c.series.cohorts[1:]
+    authority_body = StandingCohortRecoveryAuthority(
+        schema="umi-cohort-recovery-authority/2",
+        policy_sha256=c.series.policy_sha256,
+        cohort_sha256s=tuple(sorted(digest(plan) for plan in plans)),
+        issued_at_block=c.active.decision.observed_at_block,
+        lifetime="until_completed_or_revoked",
+        closure_rule="quorum_certified_phase_completion",
+        timing_rule="targets_without_extension_signatures",
+    )
+    authority = SignedCohortRecoveryAuthority(
+        authority=authority_body, signatures=signatures(authority_body)
+    )
+    predecessor = StandingRewardSeriesPredecessor(
+        schema="umi-standing-reward-series-predecessor/1",
+        series_sha256=digest(c.series),
+        policy_sha256=c.series.policy_sha256,
+        manifest_sha256=digest(p.manifest),
+        recovery_sha256=digest(c.series.recovery),
+        cohort_sha256=c.active.decision.activation.cohort_sha256,
+        cohort_sequence=c.series.cohorts[0].sequence,
+        control_hotkey=c.series.control_hotkey,
+        decision_sha256=digest(c.active.decision),
+        activation_sha256=digest(c.active.decision.activation),
+        decision_committed_at_block=c.active.decision.observed_at_block,
+    )
+    successor = StandingRewardSeries.model_validate_json(
+        canonical_json_bytes(
+            c.series.model_copy(
+                update={
+                    "schema_": "umi-standing-reward-series/2",
+                    "recovery": authority,
+                    "cohorts": plans,
+                    "predecessor": predecessor,
+                }
+            )
+        )
+    )
+    plan = StandingRewardHandoffPlan(
+        schema="umi-standing-reward-handoff-plan/1",
+        series_sha256=digest(successor),
+        cohort_sha256=digest(successor.cohorts[0]),
+        predecessor=predecessor,
+    )
+    handoff = StandingRewardPredecessorOpportunity(
+        successor=successor, plan=plan, coverage=service
+    )
+    assert handoff.certificate_sha256() == digest(verified.certificate)
+    successor_activation = c.active.decision.activation.model_copy(
+        update={
+            "cohort_sha256": digest(successor.cohorts[0]),
+            "prior_opportunity_sha256": digest(verified.certificate),
+        }
+    )
+    reviewed = await handoff.review(successor_activation, observed_at_block=h.end + 1)
+    assert (
+        validate_standing_predecessor_opportunity(
+            reviewed,
+            plan=plan,
+            activation=successor_activation,
+            block=h.end + 1,
+        )
+        == verified.certificate
+    )
     assert verified.certificate.contributions[0].credited_ms == 12000
     assert (
         await journal.verified_ms(

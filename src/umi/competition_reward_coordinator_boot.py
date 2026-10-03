@@ -40,13 +40,14 @@ from .competition_reward_decisions import (
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_exchange import RewardReviewExchange
 from .competition_reward_files import StandingRewardFiles
-from .competition_reward_handoff_models import LegacyRewardHandoffPlan
+from .competition_reward_handoff_models import RewardHandoffPlan, verify_handoff_plan
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_offers import StandingRewardOffers
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_proof_archive import RewardProofArchive
+from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, _close_provider, _stop_task
 from .competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
 from .competition_store import CompetitionStore
@@ -64,15 +65,18 @@ MAX_CONFIG_BYTES = 8 * 1024**2
 
 
 class RewardCoordinatorConfig(StrictProtocolModel):
-    schema_: Literal["umi-reward-coordinator-config/1", "umi-reward-coordinator-config/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-reward-coordinator-config/1",
+        "umi-reward-coordinator-config/2",
+        "umi-reward-coordinator-config/3",
+        "umi-reward-coordinator-config/4",
+    ] = Field(alias="schema")
     role: Literal["coordinator", "reviewer"]
     series: StandingRewardSeries
     policy: CompetitionPolicy
     manifest: StandingRewardOpportunityManifest
     chain: CompetitionChainConfig
-    handoff: LegacyRewardHandoffPlan
+    handoff: RewardHandoffPlan
     eligibility: RewardEligibilityRuntime
     signer_hotkey: Hotkey
     proposer_hotkey: Hotkey
@@ -97,12 +101,21 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
     direct_model_review: DirectModelReviewSourceConfig | None = None
+    predecessor_series: StandingRewardSeries | None = None
+    predecessor_manifest: StandingRewardOpportunityManifest | None = None
+    predecessor_eligibility: RewardEligibilityRuntime | None = None
 
     @model_serializer(mode="wrap")
     def omit_direct_model_review(self, handler):
         value = handler(self)
-        if self.direct_model_review is None:
-            value.pop("direct_model_review", None)
+        for name in (
+            "direct_model_review",
+            "predecessor_series",
+            "predecessor_manifest",
+            "predecessor_eligibility",
+        ):
+            if getattr(self, name) is None:
+                value.pop(name, None)
         return value
 
     @model_validator(mode="after")
@@ -116,9 +129,23 @@ class RewardCoordinatorConfig(StrictProtocolModel):
         evaluators = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
         signer, proposer = identity(self.signer_hotkey), identity(self.proposer_hotkey)
         coordinator = self.role == "coordinator"
+        successor = self.series.predecessor is not None
+        predecessor_inputs = (
+            self.predecessor_series,
+            self.predecessor_manifest,
+            self.predecessor_eligibility,
+        )
         if (
-            (self.schema_ == "umi-reward-coordinator-config/2") != direct_selected
+            (self.schema_ in {"umi-reward-coordinator-config/2", "umi-reward-coordinator-config/4"})
+            != direct_selected
+            or (
+                self.schema_
+                in {"umi-reward-coordinator-config/3", "umi-reward-coordinator-config/4"}
+            )
+            != successor
             or direct_selected != (self.direct_model_review is not None)
+            or successor != all(value is not None for value in predecessor_inputs)
+            or (not successor and any(value is not None for value in predecessor_inputs))
             or signer not in evaluators
             or proposer not in evaluators
             or (signer == proposer) != coordinator
@@ -128,14 +155,33 @@ class RewardCoordinatorConfig(StrictProtocolModel):
             or (self.settlement_directory is not None) != coordinator
             or self.chain.policy_sha256 != digest(self.policy)
             or len(self.chain.proof_rpc_fallback_urls) != 2
-            or self.handoff.series_sha256 != digest(self.series)
-            or self.handoff.cohort_sha256 != digest(self.series.cohorts[0])
             or self.manifest.opportunity.runtime_profile_sha256 != digest(self.eligibility)
             or self.service.mortality_period > self.series.maximum_transaction_lifetime_blocks
         ):
             raise ValueError(
                 "reward coordinator configuration changes its approved role or authority"
             )
+        verify_handoff_plan(self.handoff, self.series)
+        if successor:
+            prior = self.series.predecessor
+            old, manifest, eligibility = predecessor_inputs
+            assert prior is not None and old is not None and manifest is not None
+            assert eligibility is not None
+            verify_reward_manifest(canonical_json_bytes(manifest), old, self.policy)
+            if (
+                digest(old) != prior.series_sha256
+                or old.policy_sha256 != prior.policy_sha256
+                or old.manifest_sha256 != prior.manifest_sha256
+                or digest(old.recovery) != prior.recovery_sha256
+                or identity(old.control_hotkey) != identity(prior.control_hotkey)
+                or not any(
+                    digest(plan) == prior.cohort_sha256
+                    and plan.sequence == prior.cohort_sequence
+                    for plan in old.cohorts
+                )
+                or manifest.opportunity.runtime_profile_sha256 != digest(eligibility)
+            ):
+                raise ValueError("reward coordinator predecessor differs from its series boundary")
         _disjoint(self.stores())
         for value in (self.signer_key_file, self.control_key_file):
             if value is not None:
@@ -259,6 +305,57 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 export_archive=exported,
             ),
         )
+        predecessor = None
+        predecessor_coverage = None
+        if config.predecessor_series is not None:
+            old = config.predecessor_series
+            old_root = Path(config.state_directory) / digest(old)
+            old_reader = StandingRewardControlReader(
+                old_root / "control",
+                old,
+                config.policy,
+                expected_series_sha256=digest(old),
+                expected_chain_config_sha256=digest(config.chain),
+                maximum_bytes=config.maximum_reader_bytes,
+            )
+            old_history = RewardControlHistoryReader(
+                old_root / "history",
+                control_hotkey=old.control_hotkey,
+                chain_config_sha256=digest(config.chain),
+                first_block=old.recovery.authority.issued_at_block,
+                maximum_bytes=config.maximum_history_bytes,
+                archive=imported,
+                export_archive=exported,
+            )
+            old_preparation = StandingRewardPreparation(
+                old_reader,
+                store,
+                config.predecessor_manifest,
+                maximum_promotion_bytes=config.maximum_promotion_bytes,
+                maximum_package_bytes=config.maximum_package_bytes,
+            )
+            old_rule = opportunity_rule(config.predecessor_manifest, old, config.policy)
+            predecessor_coverage = StandingRewardCoverageService(
+                provider=provider,
+                history=old_history,
+                preparation=old_preparation,
+                files=files,
+                profile=config.predecessor_eligibility,
+                maximum_history_blocks=config.service.maximum_history_blocks,
+                journal=RewardCoverageJournal(
+                    old_root / "coverage",
+                    old_rule,
+                    expected_rule_sha256=digest(old_rule),
+                    maximum_bytes=config.maximum_coverage_bytes,
+                    archive=imported,
+                    export_archive=exported,
+                ),
+            )
+            predecessor = StandingRewardPredecessorOpportunity(
+                successor=config.series,
+                plan=config.handoff,
+                coverage=predecessor_coverage,
+            )
         key = await run_owned_thread(
             load_named_hotkey, Path(config.signer_key_file), config.signer_hotkey
         )
@@ -289,6 +386,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             maximum_promotion_bytes=config.maximum_promotion_bytes,
             maximum_history_blocks=config.service.maximum_history_blocks,
             model_artifacts=model_artifacts,
+            predecessor=predecessor,
         )
         exchange = RewardReviewExchange(
             signer=signer,
@@ -331,6 +429,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                     settlements=Path(config.settlement_directory),
                     files=files,
                     coverage=coverage.journal,
+                    predecessor=predecessor,
                 ),
                 readback=StandingRewardFiles(
                     Path(config.readback_directory),
@@ -356,11 +455,22 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             # Capture and recover minimum opportunity automatically, including
             # while the next cohort is being evaluated. Validators also export
             # original proofs; no periodic coordinator renewal is involved.
-            collector = asyncio.create_task(
-                coverage.run(stop, poll_seconds=config.service.poll_seconds)
+            collectors = [
+                asyncio.create_task(coverage.run(stop, poll_seconds=config.service.poll_seconds))
+            ]
+            if predecessor_coverage is not None:
+                collectors.append(
+                    asyncio.create_task(
+                        predecessor_coverage.run(
+                            stop, poll_seconds=config.service.poll_seconds
+                        )
+                    )
+                )
+            for collector in collectors:
+                resources.push_async_callback(_stop_task, collector)
+            done, _ = await asyncio.wait(
+                (work, *collectors), return_when=asyncio.FIRST_COMPLETED
             )
-            resources.push_async_callback(_stop_task, collector)
-            done, _ = await asyncio.wait((work, collector), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
             if not stop.is_set():

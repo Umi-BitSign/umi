@@ -277,6 +277,47 @@ class StandingRewardCoverageService:
             self._opportunities[key] = verified
             return verified
 
+    async def completed_opportunity(
+        self, activation: RewardActivation
+    ) -> VerifiedRewardOpportunity:
+        """Replay one selected activation's own completed coverage.
+
+        A successor series uses this path for its predecessor boundary. The
+        completion may be discovered after an arbitrarily long outage; absence
+        remains pending and never becomes inferred credit.
+        """
+        async with self._lock:
+            reader = self.preparation.reader
+            cohorts = tuple(digest(c) for c in reader.series.cohorts)
+            try:
+                index = cohorts.index(activation.cohort_sha256)
+            except ValueError:
+                raise ValueError("completed opportunity is outside the selected series") from None
+            selected = SignedRewardControlDecision.model_validate(
+                await run_owned_thread(
+                    reader.journal.get, "reward_control_decision", f"{index + 1:04d}"
+                )
+            ).decision
+            if selected.kind != "activate" or selected.activation != activation:
+                raise ValueError("completed opportunity differs from signed reward selection")
+            verified = self._completed.get(activation.cohort_sha256)
+            if verified is None:
+                retained = await run_owned_thread(
+                    self.journal.journal.get,
+                    "coverage_completion",
+                    activation.cohort_sha256,
+                )
+                if retained is None:
+                    raise ValueError("predecessor reward opportunity is incomplete")
+                completion = CoverageCompletion.model_validate(retained)
+                verified = await self._review(
+                    completion.certificate_sha256,
+                    activation,
+                    await self._source(activation),
+                )
+                self._completed[activation.cohort_sha256] = verified
+            return verified
+
     async def run(self, stop: asyncio.Event, *, poll_seconds: float):
         if not math.isfinite(poll_seconds) or not 0 < poll_seconds <= 3600:
             raise ValueError("coverage poll interval is outside its host bound")

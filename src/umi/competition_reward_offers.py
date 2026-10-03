@@ -16,13 +16,18 @@ from .competition_reward_decisions import (
     verify_reward_decisions,
 )
 from .competition_reward_files import StandingRewardFiles
-from .competition_reward_handoff_models import LegacyRewardHandoffPlan
+from .competition_reward_handoff_models import (
+    RewardHandoffPlan,
+    StandingRewardHandoffPlan,
+    verify_handoff_plan,
+)
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import (
     RewardOpportunityCertificate,
     check_opportunity_claim,
     opportunity_rule,
 )
+from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path, read_private_model
 from .protocol import canonical_json_bytes
@@ -37,20 +42,23 @@ class StandingRewardOffers:
         series: StandingRewardSeries,
         policy: CompetitionPolicy,
         manifest: StandingRewardOpportunityManifest,
-        handoff: LegacyRewardHandoffPlan,
+        handoff: RewardHandoffPlan,
         settlements: Path,
         files: StandingRewardFiles,
         coverage: RewardCoverageJournal,
+        predecessor: StandingRewardPredecessorOpportunity | None = None,
     ):
         verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
+        handoff = verify_handoff_plan(handoff, series)
+        standing = type(handoff) is StandingRewardHandoffPlan
         if (
-            handoff.series_sha256 != digest(series)
-            or handoff.cohort_sha256 != digest(series.cohorts[0])
-            or coverage.rule != opportunity_rule(manifest, series, policy)
+            coverage.rule != opportunity_rule(manifest, series, policy)
+            or standing != (predecessor is not None)
         ):
             raise ValueError("reward offer sources differ from the approved series")
         self.series, self.policy, self.manifest = series, policy, manifest
         self.handoff, self.files, self.coverage = handoff, files, coverage
+        self.predecessor = predecessor
         self.settlements = Path(private_path(str(settlements)))
 
     def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
@@ -65,6 +73,10 @@ class StandingRewardOffers:
         # Completion is small and may take hours. Check it before reparsing a
         # potentially large settlement package on each pending poll.
         prior = digest(self.handoff)
+        if not index and type(self.handoff) is StandingRewardHandoffPlan:
+            prior = self.predecessor.certificate_sha256()
+            if prior is None:
+                return None
         if index:
             predecessor = prefix[-1].decision.activation
             assert predecessor is not None

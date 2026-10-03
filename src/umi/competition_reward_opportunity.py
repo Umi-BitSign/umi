@@ -151,7 +151,7 @@ def check_opportunity_claim(
 
 
 def require_previous_opportunity(
-    value: VerifiedRewardOpportunity | VerifiedLegacyRewardHandoff | None,
+    value: object | None,
     *,
     reader: StandingRewardControlReader,
     manifest: RewardManifest,
@@ -173,8 +173,13 @@ def require_previous_opportunity(
         selection.activation.cohort_sha256
     )
     if index == 0:
-        if type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None:
-            raise ValueError("first standing activation requires qualified legacy handoff evidence")
+        if (
+            reader.series.predecessor is None
+            and (type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None)
+        ):
+            raise ValueError(
+                "first standing activation requires qualified legacy handoff evidence"
+            )
         first = SignedRewardControlDecision.model_validate_json(
             canonical_json_bytes(reader.journal.get("reward_control_decision", "0001"))
         ).decision
@@ -184,14 +189,35 @@ def require_previous_opportunity(
             or digest(first) != selection.decision_sha256
             or first.activation != selection.activation
         ):
-            raise ValueError("legacy handoff changes the selected first activation")
-        validate_legacy_handoff(
-            value,
-            series=reader.series,
-            activation=selection.activation,
-            validator_hotkey=validator_hotkey,
-            block=current_block,
-        )
+            raise ValueError("first handoff changes the selected first activation")
+        if reader.series.predecessor is None:
+            validate_legacy_handoff(
+                value,
+                series=reader.series,
+                activation=selection.activation,
+                validator_hotkey=validator_hotkey,
+                block=current_block,
+            )
+        else:
+            # Local import keeps the opportunity primitives independent of the
+            # native predecessor coverage owner that issues this process result.
+            from .competition_reward_handoff_models import StandingRewardHandoffPlan
+            from .competition_reward_series_handoff import (
+                validate_standing_predecessor_opportunity,
+            )
+
+            plan = StandingRewardHandoffPlan(
+                schema="umi-standing-reward-handoff-plan/1",
+                series_sha256=digest(reader.series),
+                cohort_sha256=digest(reader.series.cohorts[0]),
+                predecessor=reader.series.predecessor,
+            )
+            validate_standing_predecessor_opportunity(
+                value,
+                plan=plan,
+                activation=selection.activation,
+                block=current_block,
+            )
         return
     validate_opportunity(value)
     prior = SignedRewardControlDecision.model_validate_json(

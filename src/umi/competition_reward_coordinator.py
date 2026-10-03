@@ -27,10 +27,15 @@ from .competition_reward_decisions import (
     verify_reward_decision_proposal,
 )
 from .competition_reward_files import StandingRewardFiles
-from .competition_reward_handoff_models import LegacyRewardHandoffPlan
+from .competition_reward_handoff_models import (
+    RewardHandoffPlan,
+    StandingRewardHandoffPlan,
+    verify_handoff_plan,
+)
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import VerifiedRewardOpportunity
+from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_signing import RewardDecisionSigner, RewardQuorumPending
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
@@ -63,11 +68,12 @@ class StandingRewardDecisionReviewer:
         files: StandingRewardFiles,
         manifest: StandingRewardOpportunityManifest,
         promotion_store: CompetitionStore,
-        handoff: LegacyRewardHandoffPlan,
+        handoff: RewardHandoffPlan,
         opportunity: Callable[[RewardActivation], Awaitable[VerifiedRewardOpportunity]],
         maximum_promotion_bytes: int,
         maximum_history_blocks: int = 64,
         model_artifacts: DirectModelSettlementVerifier | None = None,
+        predecessor: StandingRewardPredecessorOpportunity | None = None,
     ):
         if (
             type(reader) is not StandingRewardControlReader
@@ -97,8 +103,12 @@ class StandingRewardDecisionReviewer:
             or not 1024 <= maximum_promotion_bytes <= 16 * 1024**3
         ):
             raise ValueError("reward review requires explicit model replay capacity")
+        handoff = verify_handoff_plan(handoff, reader.series)
+        standing = type(handoff) is StandingRewardHandoffPlan
+        if standing != (predecessor is not None):
+            raise ValueError("reward review requires its selected predecessor owner")
         self.reader, self.provider, self.history, self.files = reader, provider, history, files
-        self.store, self.handoff = promotion_store, handoff
+        self.store, self.handoff, self.predecessor = promotion_store, handoff, predecessor
         self.maximum_history_blocks = maximum_history_blocks
         self.opportunity, self.maximum_promotion_bytes = opportunity, maximum_promotion_bytes
         self.model_artifacts = model_artifacts
@@ -129,7 +139,11 @@ class StandingRewardDecisionReviewer:
                 await p.model_artifacts.ensure_all(
                     participants, package.allocation.model_award.acceptances
                 )
-            if body.sequence > 1:
+            if body.sequence == 1 and type(p.handoff) is StandingRewardHandoffPlan:
+                opportunity = await p.predecessor.review(
+                    body.activation, observed_at_block=body.observed_at_block
+                )
+            elif body.sequence > 1:
                 # A peer can first join at a later cohort. Recover its selected
                 # predecessor before the opportunity reader looks it up locally.
                 objects = {digest(item.decision): canonical_json_bytes(item) for item in prefix}
